@@ -19,6 +19,9 @@ on:
       - "admin/**"
       - ".github/workflows/release.yml"
       - ".github/scripts/release-notes.mjs"
+  # Manual re-run (available once this file is on the default branch): re-runs are safe — publish/release
+  # skip when the version is already on npm / the tag exists.
+  workflow_dispatch: {}
 
 permissions:
   contents: write # create tags + releases
