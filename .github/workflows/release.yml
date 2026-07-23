@@ -1,0 +1,99 @@
+# Publish @edgehero/pi-dispatch-admin and cut a GitHub Release when its version changes on main.
+#
+# main is branch-protected (PR + 1 approving review required), so a push here is an already-approved merge —
+# the human gate is the merge, not this workflow (consistent with CONST-MERGE-NEVER-AUTOMATIC: nothing here
+# merges anything). Publishing is idempotent: it fires only when admin/package.json's version is not already
+# on npm, so re-runs, reverts, and unrelated pushes are no-ops. Bump the version in your PR to ship a release.
+#
+# Required repo secret: NPM_TOKEN — an npm *automation* (or granular, "bypass 2FA") token that can publish to
+#   the @edgehero scope. Interactive 2FA cannot run in CI; the token is how publishing works here.
+# Optional repo secret: ANTHROPIC_API_KEY — enables AI-written release notes; without it, the release falls
+#   back to a plain commit list. Optional repo variable: RELEASE_MODEL (default: claude-sonnet-5).
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "admin/**"
+      - ".github/workflows/release.yml"
+      - ".github/scripts/release-notes.mjs"
+
+permissions:
+  contents: write # create tags + releases
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the release-notes commit range
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: npm ci
+
+      - name: Test the package being shipped
+        run: npm run test --workspace admin
+
+      - name: Resolve version + decide publish/release
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./admin/package.json').version")
+          NAME=$(node -p "require('./admin/package.json').name")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$V" version >/dev/null 2>&1; then
+            echo "publish=no" >> "$GITHUB_OUTPUT"; echo "$NAME@$V already on npm — skip publish"
+          else
+            echo "publish=yes" >> "$GITHUB_OUTPUT"
+          fi
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "release=no" >> "$GITHUB_OUTPUT"; echo "release v$V already exists — skip release"
+          else
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.v.outputs.publish == 'yes'
+        run: npm publish --workspace admin --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build release notes
+        if: steps.v.outputs.release == 'yes'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RELEASE_MODEL: ${{ vars.RELEASE_MODEL }}
+        run: |
+          PREV=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          RANGE=${PREV:+$PREV..HEAD}
+          COMMITS=$(git log $RANGE --no-merges --pretty=format:'- %s' -- admin/ | head -n 60)
+          if [ -n "$ANTHROPIC_API_KEY" ] && COMMITS="$COMMITS" VERSION="v${{ steps.v.outputs.version }}" \
+               node .github/scripts/release-notes.mjs > /tmp/notes.md 2>/tmp/notes.err; then
+            echo "release notes: AI-written"
+          else
+            echo "release notes: AI unavailable ($(head -n1 /tmp/notes.err 2>/dev/null)) — using commit list"
+            { echo "### Changes"; echo; printf '%s\n' "$COMMITS"; } > /tmp/notes.md
+          fi
+
+      - name: Create GitHub Release
+        if: steps.v.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --title "v${{ steps.v.outputs.version }} — pi-dispatch operator extension" \
+            --notes-file /tmp/notes.md
