@@ -806,6 +806,76 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   swept. Given a run whose window has closed, the refusal names the window. Given a job that persisted a
   session, no transcript exists anywhere under the retention root.
 
+## REQ-REPLICA-RUNS
+
+- **Statement**: A github webhook trigger may set `run.replicas: <int 2..3>`, and one matching delivery
+  shall then produce exactly that many **independent** jobs — distinct job ids, distinct semantic dedup
+  keys, distinct sandboxes, distinct branches, and for a development flow distinct pull requests — each
+  carrying its own 1-based replica index. Absent, a delivery's behaviour is **byte-identical** to before
+  the field existed.
+- **Scope**: `label`, `comment` and `pull_request` triggers on `run.kind: "github"` only. Refused at
+  config load on `cron`/`local` and on `gitlab`/`forgejo`/`azure`, and refused beside `run.resume: true`.
+  Set from the reviewed triggers file only — never a model tool, never a settings-overlay key.
+- **Why**: Some work is urgent enough that token cost stops mattering, and the useful thing to buy with it
+  is not a longer run but a **second opinion**: two agents solving one issue independently, two pull
+  requests, one human picking. Every layer of this system is built to prevent that, correctly, by default
+  — the delivery-GUID job id, the 10-minute semantic window, the deterministic `pi/issue-<n>` branch, and
+  the derived session key each collapse N attempts into one. So the requirement is not "add parallelism";
+  it is **punch a replica discriminator through exactly those four layers, on purpose, without loosening
+  any of them for an unflagged run**.
+- **The four layers, and what each is given.** The BullMQ job id becomes `gh-<guid>-r<i>`, which makes the
+  container name, `PI_JOB_ID`, and the `.log`/`.json` sidecars replica-distinct for free. The semantic
+  dedup key gains `:r<i>` **only when a replica is set**, so re-deliveries of *each* replica still coalesce
+  inside the window while replicas never coalesce against each other. The branch becomes
+  `pi/issue-<n>-r<i>`, minted by the same `issueBranch` the session key derives from. The session key is
+  left **unchanged**, which is safe only because of the refusal below.
+- **`resume` and `replicas` are refused together, and that refusal is load-bearing.** A resumed run
+  continues one lineage; replicas exist to fork it. Without the refusal, every replica of one issue would
+  derive the **same** session key, share one transcript, and contend for the store's one-writer lock —
+  and the resumed prompt envelope says *"Do not open a second pull request"*, which is the exact opposite
+  of what a replica is for. The coupling is stated in `triggers.mjs`, `branch.mjs` and `session-key.mjs`,
+  because it is invisible from any one of them.
+- **Local and cron are out of scope for a hazard, not for tidiness.** A local job's `/workspace` *is* the
+  operator's folder, bind-mounted read-write and edited in place, so two replicas would edit one working
+  tree with no gate and no undo. A forge job gets its own `mkdtemp`'d clone, which is the whole reason it
+  is safe there. Cron additionally must not overlap itself (`DES-CRON-VIA-BULLMQ-SCHEDULER`).
+- **Chain fanout is already bounded, and was checked rather than newly closed.** `outbox.mjs` returns
+  early for any non-`local` job and a forge job has no `/outbox` mount at all, so a replica — always a
+  github job — can never chain. No new bound was needed; the existing guard covers it.
+- **Budget is deliberately untouched, and that is the feature.** N replicas make N honest reservations,
+  each before its own tokens in its own processor (`CONST-BUDGET-BEFORE-TOKENS`). The daily, weekly and
+  monthly caps remain the ceiling and simply divide by N. Softening them for replicas would have turned a
+  cost multiplier into a cap bypass.
+- **A stale image is refused pre-spend.** The feature is half prompt and half **safety floor**: a
+  replica's user prompt names `pi/issue-<n>-r2`, while an image built before this change bakes a
+  `HARD_RULES.md` whose rule 3 hard-codes `pi/issue-<n>` as a **system** rule — authoritative over the
+  user prompt. Both replicas would converge on one branch, nothing would error, and the operator would
+  pay twice for one pull request. So an image must declare `dev.pi-dispatch.capabilities: replicas`, and
+  a replica job on one that does not is a policy refusal (`job-image-replicas-unsupported`) before any
+  credential is minted or any slot reserved.
+- **What is NOT delivered, by design.** No sibling cancellation — half a cancelled run still costs tokens
+  and destroys the comparison the feature exists for. No auto-judging of the resulting pull requests: two
+  pull requests, one human, done. And on a **pull_request-typed** target the two replicas share the PR's
+  head branch, which the harness cannot bound; only the prompt asks them not to collide (`OQ-017`). The
+  PR title marker `[r<i>/<n>]` is likewise agent-honored prompt text — **the branch name is the only
+  host-enforced replica identity**, and this requirement says so rather than implying otherwise.
+- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `REQ-DEDUP-BY-DELIVERY-GUID`, `REQ-RESUMABLE-SESSION`, `REQ-DURABLE-RUN-HISTORY`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-OUTBOX-CONTRACT`, `DES-REPLICA-INDEX-REACHES-THE-BRANCH`, `OQ-017`
+- **Acceptance**: Given a github label trigger with `"replicas": 2` and one matching delivery, then two
+  containers run (`pi-job-gh-<guid>-r1` and `-r2`), two branches `pi/issue-<n>-r1`/`-r2` exist, two pull
+  requests are opened, **two** budget slots are reserved, and two run records carry `replica`/`replicas`.
+  Given a redelivery of that same webhook inside the 10-minute window, then **nothing further is
+  enqueued** — both job ids are taken and both dedup ids are in-window. Given the same trigger without
+  `replicas`, then exactly one container runs on `pi/issue-<n>`, and the enqueued `data` keys **and** the
+  semantic dedup id byte-match a pre-feature run. Given `replicas` on a cron trigger, on a gitlab trigger,
+  or beside `resume: true`, then config load fails in both services naming the field and the reason, and
+  the receiver keeps its previously loaded rules. Given a replica job whose image does not declare
+  `replicas`, then it refuses pre-spend with `job-image-replicas-unsupported`, comments on the issue, and
+  spends nothing. Given a failure enqueueing replica *k*, then the receiver answers 503 with replicas
+  `1..k-1` queued, and the redelivery converges on exactly *n* jobs rather than *n + k − 1*.
+
 ## Notes (not requirements)
 
 **Capacity and cost.** ~1.5–2.5 GB RAM per job (pi + dev server + headless Chromium) and roughly
@@ -824,6 +894,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-01 | Added **`REQ-REPLICA-RUNS`** (issue #56): an opt-in `run.replicas: 2..3` on github webhook triggers turns one delivery into that many independent jobs, branches and pull requests. The entry is framed as **punching a replica discriminator through four layers that each correctly collapse N into 1** — the delivery-GUID job id, the 10-minute semantic window, the deterministic `pi/issue-<n>` branch, and the derived session key — rather than as "adding parallelism", because the layers are not obstacles and none of them is loosened for an unflagged run. Three things went on the record because a later reader would get them wrong. The **`resume` refusal is load-bearing, not tidiness**: it is the only reason `session-key.mjs` may keep deriving from the unsuffixed branch, and without it every replica of one issue resolves the SAME key, shares a transcript and contends for the one-writer lock — the resumed envelope even says *"Do not open a second pull request"*. The **semantic key gains `:r<i>` only when a replica is set**, which is what keeps re-deliveries of each replica coalescing while replicas never coalesce against each other; distinct job ids alone would not have sufficed, since a duplicate `queue.add` under a taken id is *silently ignored* and the second replica would simply vanish. And the **branch is the only host-enforced replica identity** — the PR title marker is agent-honored prompt text, and on a pull_request-typed target there is no second branch to hand out at all (`OQ-017`). `CONST-BUDGET-BEFORE-TOKENS` **UNCHANGED, and checked**: N replicas are N honest reservations, each before its own tokens in its own processor, so the caps stay the ceiling and simply divide by N — softening them would have turned a cost multiplier into a cap bypass. `REQ-RESUMABLE-SESSION` **UNCHANGED, checked**: refused in combination, so nothing about what resumes moved. `REQ-DEDUP-BY-DELIVERY-GUID` **UNCHANGED, checked**: the GUID is still the exact-per-delivery key; the suffix extends its id space rather than weakening the guarantee. `REQ-DURABLE-RUN-HISTORY` **UNCHANGED, checked**: the two new record fields are host-assigned integers, so the PII-free-by-construction property is untouched, and the branch name they imply is deliberately not stored. |
 | 2026-08-01 | Added **`REQ-RESURRECTABLE-SANDBOX`** (issue #55): a finished run's per-job directory is retained for a bounded window and `pi-dispatch sandbox <jobId>` re-opens it as a credential-free operator shell. The job container is **UNCHANGED and was checked rather than assumed** — `--rm`, no TTY, no published port, and with `PI_SANDBOX_RETENTION_HOURS=0` the argv and the teardown are byte-identical to pre-feature. Three things went on the record because they are the ones a later reader would get wrong: retention covers **every job kind**, not just forge jobs, which is why the unit is the per-job *directory* rather than a workspace; `0` means **off** here, the inverse of `PI_LOG_RETENTION_DAYS`/`PI_SESSIONS_TTL_DAYS`, and there is deliberately no keep-forever value; and the per-job `/session` copy is **deleted before** retention, because `--pin` can extend this window and cannot extend `PI_SESSIONS_TTL_DAYS`, so carrying a transcript across would end-run that policy rather than merely weaken it. `REQ-RESUMABLE-SESSION` **UNCHANGED, and checked** — the retained directory holds no transcript, so nothing about what resumes moved. |
 | 2026-07-28 | **The pi-normal discovery posture, and operator-staged code on by default** (`CONST-NO-CONTEXT-FILES-MANDATORY` amended in the same change). `REQ-UPSTREAM-CONTRACT-TESTS`: the `AGENTS.md` bullet is **inverted** — it asserted the sentinel appears **nowhere** in the assembled prompt (`-nc` holds) and now asserts it appears in `getAgentsFiles()` and **nowhere in the append block**, because the shipped loader sets `noContextFiles: false`. Two bullets added, both pinned on **outcome** rather than on a flag: a repo `.pi/extensions` factory ran while an admin-named or `dispatch_*`-registering one is absent (project-resource discovery hangs on pi's `isProjectTrusted()` default, which would take the path down silently if it flipped), and a repo skill resolves **once** from `/job/pi/skills`. The silent failure this REQ exists for did not vanish, it **moved**, and the entry says so. `REQ-GLOBAL-PI-OVERLAY`: overlay extensions are **staged and loaded by default** — `import-pi` copies `extensions/` unless `--no-extensions` and **prints every extension it staged by name** (the vetting step is a list, not a flag), the admin extension is still hard-blocked, and `PI_GLOBAL_ALLOW_EXTENSIONS` survives only as an **opt-OUT** where unset/`""`/legacy `"1"` load, exactly `"0"` disables, and **any other value is a loud `configError` at all three enforcement points** — the strict parse is unchanged but the damaging misreading flipped, since `=false` used to degrade safely to "dormant" and would now silently mean "on". A new `Why` paragraph records the reasoning: the operator vetted the code twice (running it in `~/.pi/agent`, staging it with a printed list), so a third gate is friction, and a present-but-dormant overlay is a deployment silently missing the setup its flows were written against. `run.packages` inverted to an **opt-OUT** on all four trigger kinds (absent or `true` load; only `false` withholds), with `parseTriggers`' load-time boolean validation now the only place that strictness lives; the four-gate framing restated honestly as three gates that refuse by default plus one withdrawal, and `Scope`'s "inert until a trigger arms them" corrected. Acceptance updated throughout for both inversions. |
 | 2026-07-15 | Initial. Extracted from `DESIGN.md` v0.1 §1, §5.1–5.2, §5.6, §7, §8. `REQ-RUNNER-TURN-BUDGET` and `REQ-UPSTREAM-CONTRACT-TESTS` are **new** — both exist because source-verification refuted design assumptions the doc had marked "verify". §8's failure-mode table was the richest source; one of its rows ("verify: pi max-turns option") was wrong. |

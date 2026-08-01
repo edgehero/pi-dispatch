@@ -816,3 +816,39 @@ test("makeLogReaper skips a directory entry: an aged name whose isFile() is fals
 	assert.equal(fs.unlinked.length, 0); // ...but the isFile() guard skipped the unlink
 	assert.ok(!logs.some((l) => l.event === "reaped_log"), "a directory is never reaped");
 });
+
+test("buildRecord carries the replica index and set size from job.data, and nulls them when absent", () => {
+	// Additive and nullable, exactly like the chain fields beside them (INT-RUN-HISTORY-FILE-CONTRACT).
+	// Without these the runs list shows two rows that look like an accidental double-run rather than the
+	// pair an operator asked for.
+	const rec = buildRecord({
+		job: { id: "gh-guid-r2", name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", replica: 2, replicas: 2 } },
+		result: { outcome: "completed" },
+		startedAt: "2026-08-01T00:00:00.000Z",
+		endedAt: "2026-08-01T00:01:00.000Z",
+	});
+	assert.equal(rec.replica, 2);
+	assert.equal(rec.replicas, 2);
+
+	const plain = buildRecord({
+		job: { id: "gh-guid", name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix" } },
+		result: { outcome: "completed" },
+	});
+	assert.equal(plain.replica, null, "an unreplicated run reads null, never 0 -- the record shape stays stable");
+	assert.equal(plain.replicas, null);
+});
+
+test("the replica fields keep the record PII-free by construction -- integers only", () => {
+	// The record's whole PII-free property rests on it holding no attacker-chosen string. A replica index is
+	// a host-assigned integer, which is why it may be here at all; the BRANCH NAME it implies is not, and is
+	// deliberately absent for the same reason `session` omits it.
+	const rec = buildRecord({
+		job: { id: "gh-guid-r1", name: "github", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7, title: "SECRET TITLE", body: "SECRET BODY" }, flow: "fix", replica: 1, replicas: 2 } },
+		result: { outcome: "completed" },
+	});
+	const json = JSON.stringify(rec);
+	assert.equal(json.includes("SECRET"), false);
+	assert.equal(json.includes("pi/issue-"), false, "the record names no branch, replica or not");
+	assert.equal(typeof rec.replica, "number");
+	assert.equal(typeof rec.replicas, "number");
+});

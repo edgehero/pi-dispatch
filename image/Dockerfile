@@ -209,6 +209,23 @@ LABEL dev.pi-dispatch.pi-version="${PI_VERSION}"
 # `verify-image.sh` asserts this list matches the CLIs actually installed, so the label cannot lie.
 LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 
+# Which OPTIONAL harness features this image's baked contents can actually honour -- read by the same
+# pre-spend preflight, on the same `docker image inspect`.
+#
+# `replicas` (REQ-REPLICA-RUNS) is here because the feature is half prompt and half safety floor. A replica's
+# user prompt names `pi/issue-<n>-r2`, while an image built before this commit bakes a HARD_RULES.md whose
+# rule 3 hard-codes `pi/issue-<n>` -- and that is the SYSTEM prompt, which the model treats as authoritative
+# over the user one. Both replicas would converge on one branch and the feature would silently become a push
+# race. The label is how the worker refuses that image pre-spend instead of discovering it afterwards.
+#
+# ITS POLARITY IS THE OPPOSITE OF `forges` ABOVE, deliberately, and stating that here is the point: `forges`
+# is an EXCLUSION list, so no claim excludes nothing and an unlabelled image is allowed every forge;
+# `capabilities` is an INCLUSION list, so no claim includes nothing and an unlabelled image is refused every
+# replica job. Both follow one rule -- an image that declares nothing gets no benefit of the doubt about what
+# it contains -- and both leave an UNFLAGGED job reading no label at all. `verify-image.sh` asserts this list
+# against the baked guardrails, so it cannot lie any more than `forges` can.
+LABEL dev.pi-dispatch.capabilities="replicas"
+
 USER pi
 WORKDIR /workspace
 

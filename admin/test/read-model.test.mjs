@@ -384,9 +384,9 @@ test("readTriggers normalizes each on.type into its discriminated display record
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
   assert.deepEqual(res.triggers, [
     { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, resume: false },
-    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, resume: false, forge: "github" },
-    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, resume: false, forge: "github" },
-    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, resume: false, forge: "github" },
+    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, resume: false, replicas: null, forge: "github" },
+    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, resume: false, replicas: null, forge: "github" },
+    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, resume: false, replicas: null, forge: "github" },
   ]);
 });
 
@@ -451,7 +451,7 @@ test("readTriggers skips an entry that is not a usable { on, run } object (viewe
     }),
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
-  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, resume: false, forge: "github" }]);
+  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, resume: false, replicas: null, forge: "github" }]);
 });
 
 test("readTriggers returns { invalid } when there is no triggers array", () => {
@@ -1006,4 +1006,28 @@ test("normalizeTriggerForDisplay carries run.resume, and only an explicit true a
     assert.equal(t.resume, false, `resume ${JSON.stringify(value)} must not arm the badge`);
     assert.equal(t.packages, true, "packages is an opt-OUT and stays true here -- the polarities are deliberately opposite");
   }
+});
+
+test("normalizeTriggerForDisplay surfaces replicas on the webhook kinds, and null is the one-run default", () => {
+  // `> 1` rather than `!== undefined`: the only thing worth rendering is a trigger that MULTIPLIES SPEND.
+  // `null` is the same "resolves the deployment behaviour" sentinel flow/model/image use.
+  const label = normalizeTriggerForDisplay({ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", replicas: 2 } });
+  assert.equal(label.replicas, 2);
+  const comment = normalizeTriggerForDisplay({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", replicas: 3 } });
+  assert.equal(comment.replicas, 3);
+  const pr = normalizeTriggerForDisplay({ on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "review", replicas: 2 } });
+  assert.equal(pr.replicas, 2);
+
+  const plain = normalizeTriggerForDisplay({ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix" } });
+  assert.equal(plain.replicas, null, "an unflagged trigger renders as one run per delivery");
+
+  // Fail-soft, like the rest of this normalizer: a value the loader would have refused renders as the
+  // default rather than throwing inside a viewer.
+  for (const bad of [1, 0, "2", 2.5, null, {}]) {
+    assert.equal(normalizeTriggerForDisplay({ on: { type: "label", any: ["b"] }, run: { kind: "github", flow: "f", replicas: bad } }).replicas, null, `replicas=${JSON.stringify(bad)}`);
+  }
+
+  // A cron entry can never carry one, so it has no key -- the same absence `forge` has there.
+  const cron = normalizeTriggerForDisplay({ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "f", task: "t" } });
+  assert.equal("replicas" in cron, false);
 });

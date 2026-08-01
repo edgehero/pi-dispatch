@@ -90,6 +90,11 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level like the rest, never
+		// inside `trigger`, and for the sharpest version of that reason: this is the caller's fanout count --
+		// receiver.mjs reads it to decide how many times to enqueue -- and a descriptive context object copied
+		// into /job/event.json is no place for the number of jobs to create.
+		...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
 		trigger: {
 			event: eventName,
 			action,
@@ -115,6 +120,7 @@ function routeIssueLabel(subset, triggers) {
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
 		resume: rule.resume,
+		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
 	};
@@ -158,6 +164,7 @@ function routeComment(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		resume: triggers.comment.resume,
+		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// The invoking comment rides on the trigger: body and author_association are both named by
 		// INT-WEBHOOK-PAYLOAD-SUBSET, and the body stays DATA all the way down (CONST-ISSUE-TEXT-IS-DATA).
@@ -195,6 +202,7 @@ function routePullRequest(subset, triggers, action) {
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image,
 			resume: rule.resume,
+			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: buildPrTarget(pr),
 		};

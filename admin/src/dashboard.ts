@@ -651,7 +651,10 @@ function triggerRow(t: any, sel: boolean, inner: number, styler: any): string {
   // contents, tool output, its own reasoning -- is a disclosure, not a preference. Same class as
   // [packages], which is the badge whose inverted polarity 0.1.4 had to fix.
   const res = t?.resume === true ? " " + styler.fg("warning", "[resume]") : "";
-  return fitLine(`${cursor} ${badge} ${matchColored(t, styler)} ${targetColored(t, styler)}${pkgs}${img}${res}`, inner, styler);
+  // `warning` for the same reason [resume] is: a spend multiplier is a risk badge, not a preference. A
+  // trigger without it renders byte-identically -- the badge is purely additive, appended last.
+  const rep = t?.replicas > 1 ? " " + styler.fg("warning", `[x${t.replicas}]`) : "";
+  return fitLine(`${cursor} ${badge} ${matchColored(t, styler)} ${targetColored(t, styler)}${pkgs}${img}${res}${rep}`, inner, styler);
 }
 
 function matchColored(t: any, styler: any): string {
@@ -725,6 +728,10 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   }
   const r = row.record ?? {};
   const tree = r.chainDepth > 0 ? styler.fg("dim", "└ ") : "";
+  // The replica badge sits beside the chain glyph because it answers the same question the glyph does --
+  // "is this run one of a set, and which one" -- and a row that is silently one of two racing jobs is the
+  // one misreading this list can produce. Absent on an unreplicated run, so today's rows are unchanged.
+  const rep = r.replica > 0 ? styler.fg("warning", `r${r.replica}/${r.replicas ?? "?"} `) : "";
   const sep = styler.fg("dim", " · ");
   const cells = [
     styler.fg("text", r.jobId ?? "-"),
@@ -734,7 +741,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     styler.fg("dim", `${r.turns ?? "-"}t`),
     styler.fg("dim", Number.isFinite(r.tokens?.total) ? fmtTokens(r.tokens.total) : "-"),
   ];
-  return fitLine(`${cursor} ${tree}${cells.join(sep)}`, inner, styler);
+  return fitLine(`${cursor} ${tree}${rep}${cells.join(sep)}`, inner, styler);
 }
 
 function outcomeColored(outcome: any, reason: any, styler: any): string {
@@ -828,6 +835,10 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // `warning` when armed, because this is the one row on this pane that describes something LEAVING the
   // job: everything above says what the job runs, this says what it writes down and hands to the next one.
   out.push(kv("resume", t.resume === true ? "continues the previous session" : "cold start", t.resume === true ? "warning" : "dim"));
+  // The same "I checked" dim default, for the one field on this pane that changes what a delivery COSTS
+  // (REQ-REPLICA-RUNS). `warning` when armed: this row is a multiplier, and a multiplier that renders like
+  // a preference is the polarity mistake 0.1.4 shipped a fix for on [packages].
+  out.push(kv("replicas", t.replicas > 1 ? `${t.replicas} sandboxes race this flow` : "one run per delivery", t.replicas > 1 ? "warning" : "dim"));
 
   // TRUST MODEL — who authorizes it, how it dedups, which service owns it.
   blank();
@@ -850,6 +861,15 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     keeps("persists the agent transcript to PI_SESSIONS_DIR");
     keeps("issue text, file contents, tool output, the agent's own reasoning");
     keeps("replayed into the next job on the same branch; forks never resume");
+  }
+  // Stated beside the trust model rather than only in docs/replicas.md, because the multiplier is the whole
+  // of what an operator needs to weigh: N replicas is N HONEST budget reservations, not a bypass, so the
+  // daily/weekly/monthly caps stay the ceiling and simply divide by N (CONST-BUDGET-BEFORE-TOKENS).
+  if (t.replicas > 1) {
+    const races = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    races(`each delivery starts ${t.replicas} independent jobs`);
+    races(`${t.replicas} budget slots reserved, ${t.replicas}× the tokens, ${t.replicas} pull requests`);
+    races("nothing cancels a sibling; a human picks the better result");
   }
   return out;
 }
@@ -983,10 +1003,13 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     const cursor = i === selected ? "›" : " ";
     if (row.kind === "active") return clip(`${cursor} * ACTIVE ${row.jobId} running`, w);
     const run = row.record;
+    // The plain twin of the colored badge in `runRow`. It has to be here too: this is the renderer a
+    // non-TTY/no-color panel uses, and "one of two racing runs" must not be a fact only the pretty one tells.
+    const rep = run?.replica > 0 ? `r${run.replica}/${run.replicas ?? "?"} ` : "";
     const cells = [run?.jobId, run?.target, run?.flow, run?.outcome, run?.turns, run?.tokens?.total]
       .map((f) => (f === null || f === undefined ? "-" : String(f)))
       .join(" · ");
-    return clip(`${cursor} ${cells}`, w);
+    return clip(`${cursor} ${rep}${cells}`, w);
   });
 }
 
@@ -1078,6 +1101,20 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   if (children.length > 0) chainBits.push(`spawned ${children.length} → ${children.map((c) => c.jobId).join(", ")}`);
   if (r.chainRefused) chainBits.push(`${r.chainRefused} refused`);
   out.push(kv("chain", chainBits.join(" · ")));
+
+  // replica: which member of a racing set this run is, and which siblings the scan `chain` already does can
+  // see. Matched on target + flow + a DIFFERENT index -- the same fields the semantic dedup key uses, so
+  // "same subject, same flow, other sandbox" is exactly what it finds. Best-effort like `chain`: the window
+  // is the runs already in the snapshot, so a sibling that aged out is simply not named. The line appears
+  // only for a replica run, so an ordinary post-mortem is unchanged.
+  if (r.replica > 0) {
+    const sibs = (Array.isArray(allRuns) ? allRuns : []).filter(
+      (x) => x?.replica > 0 && x.replica !== r.replica && x.target === r.target && x.flow === r.flow,
+    );
+    const repBits = [`r${r.replica}/${r.replicas ?? "?"}`];
+    repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${s.replica} ${s.jobId}`).join(", ")}` : "no sibling in this window");
+    out.push(kv("replica", repBits.join(" · "), "warning"));
+  }
 
   // REQ-RESURRECTABLE-SANDBOX. A retention state, never a path: the manifest holds a host path (which on
   // Windows embeds the operator's account name) and this view is the one that renders beside PII-free

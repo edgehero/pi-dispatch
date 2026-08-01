@@ -412,6 +412,18 @@ this host does not have is refused before the job costs anything, and `pi-dispat
 Like `packages`, it is deliberately **not** settable from the panel or by an AI tool — naming an image is an
 edit to the reviewed `triggers.json`. See [`docs/job-image.md`](docs/job-image.md).
 
+`"replicas"` on a **GitHub** `label`/`comment`/`pull_request` trigger's `run` (an integer `2` or `3`) races
+that many sandboxes on the same event, independently, and lets you pick the better result. One labelled issue
+becomes two containers, two branches (`pi/issue-7-r1`, `pi/issue-7-r2`) and **two pull requests**, each titled
+`[r1/2]` / `[r2/2]`. Neither replica knows what the other did; that is the point. It is for the task that is
+urgent enough that token cost has stopped mattering — **each replica reserves its own budget slot and spends
+its own tokens**, so a `replicas: 2` trigger burns your daily cap twice as fast. Absent means what it always
+meant: one delivery, one run. It is refused at load on cron/local triggers (a local job's workspace *is* your
+folder — two replicas would edit one working tree), on GitLab/Forgejo/Azure for now, and alongside
+`"resume": true`. Rebuild your job image before using it: an image that does not declare
+`dev.pi-dispatch.capabilities=replicas` refuses replica jobs before they cost anything. Like `image` and
+`packages`, it is a file edit only — no panel key, no AI tool. See [`docs/replicas.md`](docs/replicas.md).
+
 ### Add a trigger from the panel
 
 You can edit `triggers.json` by hand, or add one from `/dispatch` without touching the file: press **`a`** and
@@ -419,8 +431,9 @@ answer the **kind-first** prompts. The panel writes a validated entry and both s
 
 - **cron** → `id` · `pattern` (5–6 field cron) · `folder` (absolute host path) · `flow` · `task`, then the
   optional `model` / `provider` / `maxTurns` (blank = the deployment default). Neither the panel nor
-  `dispatch_trigger_*` can set `image` or `packages` — both stay file edits; the panel shows them and edits
-  the flow only.
+  `dispatch_trigger_*` can set `image`, `packages` or `replicas` — all three stay file edits; the panel shows
+  them and edits the flow only. `replicas` is the sharpest case: a spend multiplier is exactly the kind of
+  capability an AI assistant should not be able to grant itself.
 - **label** → `labels` (space-separated, any-of) · `flow`. The issue text is the task.
 - **comment** → trigger `phrase` (e.g. `@pi`) · `flow`. The comment/issue text is the task.
 - **pull_request** → `action`s (`labeled opened synchronize reopened`) · `labels` (for `labeled`) · `flow`.

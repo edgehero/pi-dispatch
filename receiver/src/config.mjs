@@ -184,7 +184,9 @@ function loadAzureConfig(env) {
  * the RULE, not on the group, because the filter resolves them from the rule that actually matched -- two
  * rules in one file may name different images, and picking the group's would run the wrong toolchain for
  * whichever rule lost. Absent stays undefined so the filter can omit it entirely and leave an unflagged job
- * byte-identical to today's.
+ * byte-identical to today's. `replicas` (REQ-REPLICA-RUNS) rides the rule for the same reason and one
+ * sharper: it multiplies spend, so reading it off any rule other than the one that matched would bill an
+ * operator for a decision they made about a different trigger.
  *
  * Each grouped rule carries `index`: its 0-based position in the RAW `triggers` array, cron entries
  * counted. The raw file index is the rule's identity -- the filter reports it on the job as
@@ -215,11 +217,11 @@ function loadTriggers(env, readFile, fileExists) {
 		knownFlows.add(run.flow);
 		const group = groups[run.kind];
 		if (on.type === "label") {
-			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume, repository: run.repository });
+			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas, repository: run.repository });
 		} else if (on.type === "comment") {
-			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, packages: run.packages, image: run.image, resume: run.resume, repository: run.repository }; // parseTriggers guarantees at most one per forge
+			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
-			group.pullRequest.push({ index, actions: new Set(on.action), predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume });
+			group.pullRequest.push({ index, actions: new Set(on.action), predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas });
 		}
 	}
 

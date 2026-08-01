@@ -114,3 +114,24 @@ test("a kind that is neither a forge nor local resolves no key, which is the saf
 		assert.equal(keyParts({ kind, repo: "o/r", target: { type: "issue", number: 7 } }), null, `kind ${JSON.stringify(kind)} has no trigger entry that could have armed run.resume`);
 	}
 });
+
+// --- replica runs: a LOCK, not a feature (REQ-REPLICA-RUNS) ---
+
+test("a replica-carrying job keys IDENTICALLY to an unreplicated one -- and that is only safe because triggers.mjs refuses replicas+resume", () => {
+	// This test exists to fail loudly if that refusal is ever relaxed. `keyParts` calls `issueBranch` with
+	// ONE argument, so replica 1 and replica 2 of issue #7 resolve the SAME key: one transcript, N writers,
+	// fighting the store's one-writer lock. Today that is unreachable -- a replica job can never carry
+	// `resume: true`, so no replica ever reads or writes a session at all.
+	//
+	// If you are here because this assertion broke: you did not break the session key. You removed the
+	// refusal in worker/src/triggers.mjs (validateReplicas) that made the key's blindness harmless, and the
+	// replica index now has to reach keyParts as well.
+	const r1 = { ...ghIssue, replica: 1, replicas: 2 };
+	const r2 = { ...ghIssue, replica: 2, replicas: 2 };
+	assert.deepEqual(keyParts(r1), ["github", "o/r", "pi/issue-7"]);
+	assert.equal(sessionKeyFor(r1), sessionKeyFor(r2));
+	assert.equal(sessionKeyFor(r1), sessionKeyFor(ghIssue));
+	// The branch the two jobs are actually told to push to, by contrast, differs -- which is the whole
+	// point, and the exact reason the key above must never be read by one of them.
+	assert.notEqual(issueBranch(7, 1), issueBranch(7, 2));
+});

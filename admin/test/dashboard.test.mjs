@@ -801,3 +801,73 @@ test("escape still backs out of RUN_DETAIL and drops the sandbox state it read o
   await comp.dispose();
   assert.match(out, /TRIGGERS|PAUSED/, "back on the list");
 });
+
+// --- replica runs in the panel (REQ-REPLICA-RUNS) ---
+
+/** A snapshot holding a replica PAIR on one target, plus one ordinary run. */
+const REPLICA_SNAPSHOT = {
+  ...SNAPSHOT,
+  activeJobId: null,
+  runs: [
+    { jobId: "gh-g1-r1", target: "o/r#5", flow: "fix", outcome: "completed", turns: 4, replica: 1, replicas: 2, endedAt: "2026-08-01T00:00:00.000Z" },
+    { jobId: "gh-g1-r2", target: "o/r#5", flow: "fix", outcome: "completed", turns: 6, replica: 2, replicas: 2, endedAt: "2026-08-01T00:01:00.000Z" },
+    { jobId: "gh-g2", target: "o/r#6", flow: "fix", outcome: "completed", turns: 3, endedAt: "2026-08-01T00:02:00.000Z" },
+  ],
+};
+
+test("the runs list badges each replica, and leaves an unreplicated row unmarked", async () => {
+  // A row that is silently one of two racing jobs is the misreading this list can produce: two rows on one
+  // target look like an accidental double-run rather than the pair the operator asked for.
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => REPLICA_SNAPSHOT }) });
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(out, /r1\/2 gh-g1-r1/);
+  assert.match(out, /r2\/2 gh-g1-r2/);
+  assert.doesNotMatch(out, /r\d\/\d gh-g2/, "the unreplicated run carries no badge at all");
+});
+
+test("RUN_DETAIL names the sibling replica, reusing the scan the chain line already does", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => REPLICA_SNAPSHOT }) });
+  await flush();
+  comp.handleInput("\r"); // selected 0 is the first replica
+  await flush();
+  const detail = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(detail, /replica\s+r1\/2/);
+  assert.match(detail, /sibling r2 gh-g1-r2/, "matched on same target + flow, different index");
+});
+
+test("RUN_DETAIL shows no replica line for an ordinary run", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  comp.handleInput("\x1b[B");
+  comp.handleInput("\r");
+  await flush();
+  const detail = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.doesNotMatch(detail, /replica/, "an ordinary post-mortem is byte-identical to before the feature");
+});
+
+test("TRIGGER_DETAIL states the multiplier for a replicating trigger, and 'one run per delivery' otherwise", async () => {
+  const open = async (replicas) => {
+    const snap = triggerSnap([{ type: "label", any: ["bug"], all: [], none: [], flow: "fix", forge: "github", replicas }]);
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const out = stripAnsi(comp.render(80).join("\n"));
+    await comp.dispose();
+    return out;
+  };
+
+  const racing = await open(2);
+  assert.match(racing, /replicas\s+2 sandboxes race this flow/);
+  assert.match(racing, /2 budget slots reserved/, "the arithmetic is stated where the trust model is read, not only in the docs");
+  assert.match(racing, /nothing cancels a sibling/);
+
+  // The "I checked" dim default, not an omitted row: a missing row reads as "I don't know".
+  const plain = await open(null);
+  assert.match(plain, /replicas\s+one run per delivery/);
+  assert.doesNotMatch(plain, /budget slots reserved/);
+});

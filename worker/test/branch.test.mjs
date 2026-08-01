@@ -34,3 +34,42 @@ test("both envelopes name the branch branch.mjs mints -- the drift this module e
 	assert.ok(buildGithubPrompt({ flow: "fix", target }).includes(`\`${branch}\``));
 	assert.ok(buildGitLabPrompt({ flow: "fix", target }).includes(`\`${branch}\``));
 });
+
+// --- replica runs (REQ-REPLICA-RUNS) ---
+
+test("a replica index suffixes the branch, and its absence leaves the string byte-identical", () => {
+	// Symmetric on purpose: neither `-r1` nor `-r2` is "the original". Two replicas exist to produce two
+	// independent pull requests, and a naming scheme where one of them is the plain branch would make the
+	// other read as a copy.
+	assert.equal(issueBranch(7), "pi/issue-7", "an unreplicated run must mint exactly what it always did");
+	assert.equal(issueBranch(7, 1), "pi/issue-7-r1");
+	assert.equal(issueBranch(7, 2), "pi/issue-7-r2");
+	assert.equal(issueBranch("7", 3), "pi/issue-7-r3", "the number still coerces; the replica does not, and rides on top");
+});
+
+test("a replica that is not a positive integer refuses rather than minting a garbage suffix", () => {
+	// `undefined` is the ONLY value that means "no replica". Everything else is a caller bug, and a branch
+	// name is a path segment, a host filesystem key and a `git push` argument. STRICTER than the number
+	// check above, which coerces: `"2"` is refused here so this and job-id.mjs -- which also refuses it --
+	// can never disagree about whether a run is a replica.
+	for (const replica of [0, -1, 1.5, "2", "abc", null, "", {}]) {
+		assert.throws(
+			() => issueBranch(7, replica),
+			(e) => e.piDispatchConfig === true,
+			`replica ${JSON.stringify(replica)} must refuse`,
+		);
+	}
+});
+
+test("every replica of one issue gets a DISTINCT branch -- the push race the feature exists to avoid", () => {
+	const branches = [1, 2, 3].map((i) => issueBranch(42, i));
+	assert.equal(new Set(branches).size, 3);
+	for (const b of branches) assert.ok(b.startsWith("pi/issue-42-"), `${b} must stay under the pi/issue-* namespace HARD_RULES rule 3 bounds`);
+});
+
+test("the github envelope names the replica branch branch.mjs mints, not the plain one", () => {
+	const target = { type: "issue", number: 42, title: "T", body: "B" };
+	const prompt = buildGithubPrompt({ flow: "fix", target, replica: 2, replicas: 2 });
+	assert.ok(prompt.includes(`\`${issueBranch(42, 2)}\``), "the prompt and the minted branch cannot be allowed to drift");
+	assert.equal(prompt.includes("`pi/issue-42`"), false, "the unsuffixed branch must not appear -- it is the sibling's namespace, not this job's");
+});

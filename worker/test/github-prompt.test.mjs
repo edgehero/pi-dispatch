@@ -195,3 +195,54 @@ test("resumed defaults to false, so every existing caller gets the shape it alwa
 	const target = { type: "issue", number: 7, title: "T", body: "B" };
 	assert.equal(buildGithubPrompt({ flow: "fix", target }), buildGithubPrompt({ flow: "fix", target, resumed: false }));
 });
+
+// --- replica runs (REQ-REPLICA-RUNS) ---
+
+test("a replica issue prompt names its own suffixed branch and never the sibling's", () => {
+	const p = buildGithubPrompt({ ...issue, replica: 2, replicas: 2 });
+	assert.match(p, /pi\/issue-42-r2\b/);
+	// The sibling branch is NAMED, once, inside the do-not-touch paragraph. What must not happen is the
+	// UNSUFFIXED `pi/issue-42` appearing as an instruction: that is the push race the feature avoids.
+	assert.equal(/`pi\/issue-42`/.test(p), false, "the unsuffixed branch is nobody's branch here");
+	assert.match(p, /pi\/issue-42-r1/, "the sibling is named so 'do not touch it' has a subject");
+});
+
+test("the replica paragraph sits ABOVE the data heading -- it is instruction, not quoted data", () => {
+	const { above, below } = halves(buildGithubPrompt({ ...issue, replica: 1, replicas: 2 }), ISSUE_HEADING);
+	assert.match(above, /You are replica 1 of 2/);
+	assert.equal(/You are replica/.test(below), false);
+	assert.match(above, /Do not read that branch/);
+});
+
+test("step 3 carries the [rN/M] title marker, and it is honestly a request", () => {
+	// The branch name is the only host-ENFORCED replica identity; the title marker is prompt text an agent
+	// may or may not honour. Asserted because the pair is meant to read side by side in a PR list.
+	assert.match(buildGithubPrompt({ ...issue, replica: 2, replicas: 2 }), /gh pr create --title "\[r2\/2\] /);
+	assert.match(buildGithubPrompt({ ...issue, replica: 1, replicas: 3 }), /\[r1\/3\]/);
+});
+
+test("an unflagged prompt contains no replica text at all, on either shape", () => {
+	for (const p of [buildGithubPrompt(issue), buildGithubPrompt(pr)]) {
+		assert.equal(/replica/i.test(p), false, "an unreplicated run's prompt must be byte-identical to before the feature");
+		assert.equal(/-r\d/.test(p), false);
+	}
+});
+
+test("a replica PR prompt names the index and the shared head branch, and asks for --force-with-lease", () => {
+	// No branch is minted for a PR target, so this paragraph is ALL there is (OQ-017). It has to be honest
+	// about that rather than implying the harness bounds anything.
+	const { above, below } = halves(buildGithubPrompt({ ...pr, replica: 1, replicas: 2 }), PR_HEADING);
+	assert.match(above, /You are replica 1 of 2 for this pull request/);
+	assert.match(above, /--force-with-lease/);
+	assert.match(above, /never `git push --force`/);
+	assert.equal(/pi\/issue-/.test(above), false, "a PR job mints no branch, replica or not");
+	assert.equal(/You are replica/.test(below), false);
+});
+
+test("a resumed envelope never sees a replica -- triggers.mjs refuses the combination", () => {
+	// Belt-and-braces on a coupling stated in three files. The resumed envelope says "Do not open a second
+	// pull request", which is the exact opposite of what a replica exists to do.
+	const p = buildGithubPrompt({ ...issue, resumed: true, replica: 2, replicas: 2 });
+	assert.match(p, /Do not open a second pull request/);
+	assert.equal(/replica/i.test(p), false);
+});

@@ -563,10 +563,38 @@ adversarial passes did.
   terminal we have not tried.
 - **Related risks**: `OQ-012` (a conformance list this repo cannot enforce), `OQ-004`.
 
+## OQ-017 — Two replicas on a pull_request-typed target share one head branch, and only the prompt asks them not to collide
+
+- **Status**: `WATCH`
+- **Position**: `run.replicas` (`REQ-REPLICA-RUNS`) is allowed on `pull_request` triggers as well as
+  `label` and `comment` ones, per issue #56. On an **issue**-typed target that is fully bounded: the host
+  mints `pi/issue-<n>-r1` and `-r2` and each replica is told to push only to its own. On a
+  **pull_request**-typed target there is no branch to mint — the flow decides whether to review, comment
+  or push, and if it pushes, it pushes to the PR's own head branch, which belongs to a human and which
+  every replica sees identically. The harness bounds nothing here; the prompt asks.
+- **Why it is allowed rather than refused**: the common and useful case is a **review** flow, where two
+  independent reviews of one pull request are exactly the second opinion the feature exists to buy and
+  nothing is written at all. Refusing the whole target type to bound a pushing flow would remove the
+  safest use of the feature to guard against its least common one.
+- **What bounds it meanwhile**: three things, none of them a boundary and all of them stated as such. The
+  replica paragraph in the prompt names the index and says plainly that a sibling is running the same flow
+  on the same branch. `HARD_RULES` rule 3 permits only `--force-with-lease`, never `--force`, and a lease
+  is genuinely mechanical: it **refuses** when a sibling has pushed since the ref was read, so the
+  collision surfaces as a failed push rather than as lost work. And the replicas share `PI_CONCURRENCY`
+  with every other job, so on a busy worker they often serialise anyway — which is luck, not a control,
+  and is recorded here as such.
+- **What would reopen it**: the first report of a replica pair overwriting each other's commits on a PR
+  head; a flow that force-pushes as a matter of course; or any move to per-replica branches for
+  pull_request targets, which would need a name the harness can mint without owning the human's branch.
+- **Related risks**: `OQ-014` (a session key is a name the base repo's push population can choose),
+  `OQ-012` (an operator-built image is outside every gate this repo has — and it is the gate that would
+  otherwise catch a stale safety floor here).
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-01 | Added **`OQ-017`** (`WATCH`, issue #56 / `REQ-REPLICA-RUNS`): two replicas on a **pull_request**-typed target share the pull request's head branch, and the harness bounds nothing — only the prompt asks. The asymmetry is the row's point: an **issue**-typed target is fully bounded, because the host mints `pi/issue-<n>-r1`/`-r2` and each replica is told to push only to its own; a pull_request target has no branch to mint, since the head branch belongs to a human and every replica sees the same one. It is allowed rather than refused because the common case is a **review** flow that writes nothing at all, and refusing the whole target type would remove the safest use of the feature to guard against its least common one. What bounds it meanwhile is stated honestly as three things that are not boundaries: the replica paragraph in the prompt, `--force-with-lease` (which genuinely **refuses** when a sibling has pushed, so a collision surfaces as a failed push rather than as lost work), and the fact that replicas share `PI_CONCURRENCY` with every other job and so often serialise — which is luck, not a control, and is recorded as such. |
 | 2026-08-01 | Added **`OQ-016`** (`WATCH`) — the admin panel's `tui.stop()` → spawn → `tui.start()` handoff for `REQ-RESURRECTABLE-SANDBOX` is verified by reading the pinned pi and by pi's own `$EDITOR` use of the same pair, **not** by having been run. Recorded rather than left implicit because the mechanism reaches past the extension API (which has no terminal handoff) into the `TUI` object the `custom` factory happens to hand over, so it is exactly the class of assumption `REQ-UPSTREAM-CONTRACT-TESTS` exists to catch — with the difference, stated in the row, that this one fails cosmetically and recoverably rather than silently. |
 | 2026-07-15 | Initial. Replaces `DESIGN.md` v0.1 §10. Collapsed from ~10 checklist items to 5 rows: source-verification at `earendil-works/pi @ 5e336cf` answered most of them. The register's value inverted in the process — from "holds ten unknowns" to "holds one known-incoming breaking change" (`OQ-005`). |
 | 2026-07-16 | `OQ-005` **retracted and re-corrected** to `WATCH — NOT IN THE PIN`. The 2026-07-15 "correction" below was itself wrong: it read `sdk.ts` at `5e336cf` (**HEAD**) to describe npm `0.80.7` (**the pin**), concluded `modelRuntime` had already landed, and declared the changelog unreliable. `ModelRuntime` does not exist in `0.80.7` — no `model-runtime` in its `dist/`, not exported from `dist/index.js`. The changelog said `[Unreleased]` and was exactly right. The runner was written against the phantom API, the image built cleanly, and every job would have died on a missing export; CI caught it on the first real container run. `constitution.md`'s evidence convention now requires verification against the **published artifact**, and `pinned-api.test.mjs` asserts `ModelRuntime` is absent so the real migration fails a test instead of a job. |

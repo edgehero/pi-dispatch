@@ -325,3 +325,79 @@ test("NONE-author comment is dropped 204, nothing enqueued", async () => {
 	assert.equal(calls.length, 0);
 	assert.equal(res.statusCode, 204);
 });
+
+// --- replica fanout: one delivery, N jobs (REQ-REPLICA-RUNS) ---
+
+/** The label config above, with `replicas` on the matched rule. */
+const replicaCfg = {
+	webhookSecret: SECRET,
+	triggers: forgeTriggers({
+		label: [{ index: 0, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", replicas: 2 }],
+		comment: { index: 1, phrase: "@pi", defaultFlow: null },
+		pullRequest: [],
+		knownFlows: new Set(["frontend-fix"]),
+	}),
+};
+
+const LABELED_PAYLOAD = {
+	action: "labeled",
+	sender: { id: 1 },
+	repository: { full_name: "octo/repo" },
+	issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] },
+};
+
+test("a replicas: 2 trigger enqueues TWICE from one delivery, with distinct ids, and still answers 202", async () => {
+	const delivery = "d-replicas";
+	const raw = JSON.stringify(LABELED_PAYLOAD);
+	const logs = [];
+	const { calls, queue } = recordingQueue();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicaCfg, log: (e) => logs.push(e) });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(calls.length, 2);
+	assert.deepEqual(calls.map((c) => c.opts.jobId), [`gh-${delivery}-r1`, `gh-${delivery}-r2`]);
+	assert.deepEqual(calls.map((c) => c.data.replica), [1, 2]);
+	assert.deepEqual(calls.map((c) => c.data.replicas), [2, 2]);
+	// Both dedup layers diverge, not just the id: an identical semantic key would coalesce the second job
+	// into the first's 10-minute window and it would never run.
+	assert.equal(new Set(calls.map((c) => c.opts.deduplication.id)).size, 2);
+	assert.equal(res.statusCode, 202);
+	assert.equal(logs.find((l) => l.event === "enqueued")?.replicas, 2, "the log says how many, so a pair is explainable from the receiver's own output");
+});
+
+test("a throw on the SECOND replica answers 503 and leaves the first enqueued -- the retry is idempotent by construction", async () => {
+	// No compensating logic exists and none is needed: GitHub redelivers, replica 1 dedups on its own
+	// now-taken jobId, and replica 2 enqueues. The retry converges on exactly two jobs, never three.
+	const delivery = "d-replicas-fail";
+	const raw = JSON.stringify(LABELED_PAYLOAD);
+	const calls = [];
+	const queue = {
+		add: async (name, data, opts) => {
+			if (data.replica === 2) throw new Error("valkey down");
+			calls.push(opts.jobId);
+			return { id: opts.jobId };
+		},
+	};
+	const res = mockRes();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicaCfg, log: () => {} });
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 503, "retryable, so GitHub redelivers");
+	assert.deepEqual(calls, [`gh-${delivery}-r1`], "replica 1 is already in the queue and stays there");
+});
+
+test("an unflagged trigger still enqueues EXACTLY once, with no replica key and today's jobId", async () => {
+	const delivery = "d-noreplicas";
+	const raw = JSON.stringify(LABELED_PAYLOAD);
+	const { calls, queue } = recordingQueue();
+	const res = mockRes();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: () => {} });
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].opts.jobId, `gh-${delivery}`);
+	assert.equal("replica" in calls[0].data, false);
+	assert.equal("replicas" in calls[0].data, false);
+	assert.equal(res.statusCode, 202);
+});

@@ -124,7 +124,7 @@ test("cron missing folder / flow / task is a config error", () => {
 
 test("a valid label trigger normalizes", () => {
 	const [t] = parse([LABEL]);
-	assert.deepEqual(t, { on: { type: "label", any: ["pi:frontend"], all: undefined, none: undefined }, run: { kind: "github", flow: "frontend-fix", packages: undefined, image: undefined, resume: undefined } });
+	assert.deepEqual(t, { on: { type: "label", any: ["pi:frontend"], all: undefined, none: undefined }, run: { kind: "github", flow: "frontend-fix", packages: undefined, image: undefined, resume: undefined, replicas: undefined } });
 });
 
 test("label trigger with no positive selector (none-only) is a config error", () => {
@@ -144,7 +144,7 @@ test("label trigger missing run.flow is a config error", () => {
 
 test("a valid comment trigger normalizes", () => {
 	const [t] = parse([COMMENT]);
-	assert.deepEqual(t, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", packages: undefined, image: undefined, resume: undefined } });
+	assert.deepEqual(t, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", packages: undefined, image: undefined, resume: undefined, replicas: undefined } });
 });
 
 test("comment trigger missing phrase or flow is a config error", () => {
@@ -160,7 +160,7 @@ test("a second comment trigger is a config error (at most one)", () => {
 
 test("a valid labeled PR trigger normalizes with its predicate", () => {
 	const [t] = parse([PR_LABELED]);
-	assert.deepEqual(t, { on: { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: undefined, none: undefined }, run: { kind: "github", flow: "review", packages: undefined, image: undefined, resume: undefined } });
+	assert.deepEqual(t, { on: { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: undefined, none: undefined }, run: { kind: "github", flow: "review", packages: undefined, image: undefined, resume: undefined, replicas: undefined } });
 });
 
 test("a labeled PR trigger with no positive selector is a config error", () => {
@@ -445,6 +445,81 @@ test("a non-boolean run.resume is refused at load, on every kind", () => {
 			{ on: { type: "pull_request", action: ["synchronize"] }, run: { kind: "github", flow: "f", resume: bad } },
 		]) {
 			assert.throws(() => parse([entry]), /run\.resume must be true or false/, `${entry.on.type} with resume=${JSON.stringify(bad)} must refuse at load`);
+		}
+	}
+});
+
+// --- run.replicas: the per-trigger fanout count (INT-TRIGGERS-FILE-CONTRACT, REQ-REPLICA-RUNS) ---
+
+test("run.replicas accepts 2 and 3 on every github webhook kind", () => {
+	// The three kinds a webhook can fire. Asserted on all of them because one shared validator serves all
+	// four normalizers, and a normalizer that forgot to call it would pass two and fail exactly one.
+	for (const entry of [LABEL, COMMENT, PR_LABELED]) {
+		for (const n of [2, 3]) {
+			const [t] = parse([withRun(entry, { replicas: n })]);
+			assert.equal(t.run.replicas, n, `${entry.on.type} must carry replicas: ${n}`);
+		}
+	}
+});
+
+test("an unflagged trigger normalizes with replicas absent -- byte-identical to before the feature", () => {
+	const [t] = parse([LABEL]);
+	assert.equal(t.run.replicas, undefined);
+	assert.equal("replicas" in t.run, true, "present-and-undefined like packages/image/resume, so a consumer reads one shape");
+	// A cron entry can never carry one, so it does not get the key at all -- the one place the convention
+	// deliberately does not apply.
+	const [c] = parse([CRON]);
+	assert.equal("replicas" in c.run, false, "a cron trigger has no replicas key to read");
+});
+
+test("run.replicas on a cron trigger refuses, naming the shared working tree", () => {
+	// Not a coverage gap: a local job's /workspace IS the operator's folder, bind-mounted rw. Two replicas
+	// would edit one tree with no gate and no undo, which is a different fact from "not yet covered" and
+	// must not be reported as one.
+	assert.throws(
+		() => parse([withRun(CRON, { replicas: 2 })]),
+		(e) => isConfigError(e) && /cron trigger/.test(e.message) && /working tree/.test(e.message) && e.message.includes("nightly-tidy"),
+	);
+});
+
+test("run.replicas on a non-github forge refuses as NOT YET COVERED, not as impossible", () => {
+	// Every forge mints its branch through the same issueBranch, so this is a gap to close. The message has
+	// to say so: an operator planning work needs "not yet" rather than "never".
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		const entry = kind === "azure" ? withRun(LABEL, { kind, replicas: 2, repository: "repo" }) : withRun(LABEL, { kind, replicas: 2 });
+		assert.throws(
+			() => parse([entry]),
+			(e) => isConfigError(e) && e.message.includes(kind) && /not yet covered/.test(e.message),
+			`${kind} must refuse and name itself`,
+		);
+	}
+});
+
+test("run.replicas beside run.resume refuses, naming BOTH fields", () => {
+	// The refusal session-key.mjs depends on to keep calling issueBranch with one argument. Relaxing it
+	// makes every replica of an issue resolve the same key, share one transcript and fight the writer lock.
+	for (const entry of [LABEL, COMMENT, PR_LABELED]) {
+		assert.throws(
+			() => parse([withRun(entry, { replicas: 2, resume: true })]),
+			(e) => isConfigError(e) && /run\.replicas/.test(e.message) && /run\.resume/.test(e.message),
+			`${entry.on.type} must refuse the combination`,
+		);
+	}
+	// resume:false is not the combination and must still load.
+	const [ok] = parse([withRun(LABEL, { replicas: 2, resume: false })]);
+	assert.equal(ok.run.replicas, 2);
+});
+
+test("run.replicas outside 2..3, or not an integer, refuses at load", () => {
+	// `1` is refused rather than accepted-and-ignored: a one-member replica set is a field that does
+	// nothing, and a field that does nothing is one an operator sets and then trusts.
+	for (const bad of [1, 0, -1, 4, 10, "2", 2.5, null, true, {}, []]) {
+		for (const entry of [LABEL, COMMENT, PR_LABELED]) {
+			assert.throws(
+				() => parse([withRun(entry, { replicas: bad })]),
+				/run\.replicas must be an integer between 2 and 3/,
+				`${entry.on.type} with replicas=${JSON.stringify(bad)} must refuse at load`,
+			);
 		}
 	}
 });

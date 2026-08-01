@@ -580,3 +580,29 @@ test("a job with no session records session:null and never calls the store", asy
 	assert.equal(r.session, null, "an unarmed job's record must look exactly as it did before this feature");
 	assert.equal(promoted, 0);
 });
+
+test("a replica job on an image that does not declare replica support refuses pre-spend, pre-reserve", async () => {
+	// The stale-image gate (REQ-REPLICA-RUNS). The image is PRESENT and its baked guardrails predate the
+	// feature, so rule 3 still hard-codes `pi/issue-<n>` as a SYSTEM rule and would override the user prompt
+	// naming `-r2`. Both replicas converge on one branch: nothing errors, and the operator pays twice for
+	// one pull request. Determinate, so a refusal and not a retry.
+	const redis = fakeRedis();
+	const posted = [];
+	const { deps: d, calls } = deps({
+		redis,
+		comment: async (_j, t) => posted.push(t),
+		imagePreflight: async () => ({ replicaUnsupported: "pi-job:stale", declared: [] }),
+	});
+	const r = await runJob({ ...ghJob, replica: 2, replicas: 2 }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "job-image-replicas-unsupported");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(r.exitCode, null);
+	assert.equal(r.turns, null);
+	assert.equal(r.tokens, null);
+	assert.equal(redis.incrCalls, 0, "a stale image must not burn a cap slot to find out");
+	assert.ok(!calls.some((c) => c.startsWith("mint:")), "no credential is minted for a job that cannot run correctly");
+	assert.ok(!calls.includes("run-container"), "no container -- this is the whole point of a pre-spend gate");
+	assert.ok(posted[0]?.includes("dev.pi-dispatch.capabilities"), "the message names the label so it can be grepped for");
+	assert.ok(posted[0]?.includes("Rebuild"), "and names the fix, not merely the symptom");
+});

@@ -110,6 +110,23 @@ export async function runJob(job, deps) {
 			log("refused_image_forge_unsupported", { image: img.forgeUnsupported, kind: img.kind, declared: img.declared });
 			return { outcome: "policy", reason: "job-image-forge-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false }; // return => not retried
 		}
+		if (img.replicaUnsupported) {
+			// The image is present and does not declare replica support (REQ-REPLICA-RUNS), so its baked
+			// HARD_RULES.md predates the amendment and still hard-codes `pi/issue-<n>` as a SYSTEM rule --
+			// which the model treats as authoritative over the user prompt naming `pi/issue-<n>-r2`. Both
+			// replicas would push to one branch: not an error, just the push race the feature exists to
+			// avoid, with two runs billed and one pull request to show for it.
+			//
+			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this gets
+			// better by running. Like the forge branch above, the message names the FIX rather than the label
+			// that noticed it -- an operator reading "rebuild the image" is already where they need to be.
+			await comment(
+				job,
+				`Refused: the job image "${img.replicaUnsupported}" does not declare replica support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its baked guardrails would name the wrong branch. Rebuild the image from a version that has this feature. Not run.`,
+			);
+			log("refused_image_replicas_unsupported", { image: img.replicaUnsupported, declared: img.declared });
+			return { outcome: "policy", reason: "job-image-replicas-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false }; // return => not retried
+		}
 		if (img.unavailable) {
 			// docker itself did not answer -- transient infra, NOT a determinate refusal. THROWN so BullMQ
 			// retries (CONST-RETRY-INFRA-ONLY). `container-never-started` is literally true here, and it reuses

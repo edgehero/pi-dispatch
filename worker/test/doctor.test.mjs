@@ -499,3 +499,33 @@ test("doctor: GITHUB_AUTH_SOURCE=app skips the in-image probe (mints per-job)", 
 	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args[0] === "run"), "app mints per-job — nothing to preflight");
 	assert.doesNotMatch(text(), /forwards your full gh login/, "no scope warning for source app");
 });
+
+// -- replica runs (REQ-REPLICA-RUNS): the multiplier is worth stating, not worth failing on ------------
+
+/** A triggers file with one github label trigger, optionally carrying `run.replicas`. */
+function replicaTriggersFile(replicas) {
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-rep-")), "triggers.json");
+	const run = { kind: "github", flow: "fix", ...(replicas === undefined ? {} : { replicas }) };
+	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run }] }));
+	return path;
+}
+
+test("doctor: a replicating trigger warns with the budget arithmetic, and never fails", async () => {
+	// An opt-in an operator chose in a reviewed file, so the harness is doing exactly what was asked. What
+	// is worth saying is that each replica reserves its OWN slot before its own tokens, so the daily cap
+	// simply divides -- the caps stay the ceiling and that IS the feature.
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), imgDeps(out, green));
+	assert.match(text(), /1 trigger\(s\) set run\.replicas/);
+	assert.match(text(), /budget slot PER replica/);
+	// In the LABEL, not the fix: an `ok: true` check never prints its fix line, and "they queue instead of
+	// racing" is the half an operator most often has wrong.
+	assert.match(text(), /PI_CONCURRENCY bounds how many actually race/);
+	assert.notEqual(code, 1, "a chosen opt-in is a warning, never a hard failure");
+});
+
+test("doctor: a deployment with no run.replicas anywhere prints no replica line at all", async () => {
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile() }), imgDeps(out, green));
+	assert.doesNotMatch(text(), /run\.replicas/, "a deployment that does not use the feature is not told about it");
+});

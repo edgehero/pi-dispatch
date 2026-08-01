@@ -74,8 +74,16 @@ export function gitlabDeliveryJobId(id) {
  *
  * An unknown kind throws for a different reason than an empty id, and says so: reaching here with one
  * means a forge was added to the trigger schema and not to the table.
+ *
+ * `replica` is the ONE seam that lets a single delivery become more than one job (REQ-REPLICA-RUNS). It is
+ * appended, so `gh-<guid>` becomes `gh-<guid>-r2`, and the dedup guarantee above survives intact: a
+ * REDELIVERY of that same GUID still resolves `-r2` for replica 2 and is still rejected, while replica 1
+ * and replica 2 can never suppress each other. Everything the harness keys off the jobId -- the container
+ * name, `PI_JOB_ID`, the `.log` and `.json` sidecars -- becomes replica-distinct for free. `-` is inside
+ * `sanitizeJobId`'s `[A-Za-z0-9._-]` allowlist (run-history.mjs) and inside docker's container-name
+ * grammar, so the longer id needs no new escaping anywhere. Absent leaves the id byte-identical.
  */
-export function forgeDeliveryJobId(kind, id) {
+export function forgeDeliveryJobId(kind, id, replica) {
 	const spec = forgeSpec(kind);
 	if (!spec) {
 		throw configError(`forgeDeliveryJobId: ${JSON.stringify(kind)} is not a known forge -- add it to FORGES in worker/src/forges.mjs`);
@@ -83,5 +91,10 @@ export function forgeDeliveryJobId(kind, id) {
 	if (typeof id !== "string" || id === "") {
 		throw configError(`forgeDeliveryJobId requires a non-empty ${spec.deliveryIdName} for a ${kind} delivery`);
 	}
-	return `${spec.jobIdPrefix}${id}`;
+	const base = `${spec.jobIdPrefix}${id}`;
+	if (replica === undefined) return base;
+	if (!Number.isInteger(replica) || replica <= 0) {
+		throw configError(`forgeDeliveryJobId: replica must be a positive integer when present (got ${JSON.stringify(replica)})`);
+	}
+	return `${base}-r${replica}`;
 }

@@ -102,9 +102,16 @@ export async function enqueueGitLabJob(queue, fields) {
  * Forge-specific data fields are listed EXPLICITLY rather than collected with a rest spread. A spread
  * would persist whatever a caller happened to pass into durable job data, and this object is copied
  * verbatim into `/job/event.json` -- a place where an unreviewed field has no business.
+ *
+ * REPLICAS (REQ-REPLICA-RUNS) are the one case where one delivery becomes more than one job, and BOTH dedup
+ * layers have to be told, not just the id. The caller loops and passes `replica` 1..N; each pass is an
+ * ordinary enqueue with a distinct id and a distinct semantic key. The `replica` suffix on the dedup id is
+ * added ONLY when a replica is set, so re-deliveries of each replica still coalesce within the 10-minute
+ * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
+ * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, resume }) {
-	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId);
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, resume, replica, replicas }) {
+	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
 	// only when the filter resolved one, exactly like chainDepth/parentJobId above, so an unflagged trigger's
@@ -127,10 +134,15 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		...(resume !== undefined && { resume }),
+		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
+		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;
+		// both are integers, so the run record they land in stays PII-free by construction.
+		...(replica !== undefined && { replica }),
+		...(replicas !== undefined && { replicas }),
 	};
 	await queue.add(kind, data, {
 		jobId,
-		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flow}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
+		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flow}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 		attempts: 2,
 		backoff: { type: "exponential", delay: 60_000 },
 		removeOnComplete: { age: 31 * 24 * 3600 }, // age in seconds -- do not cross units with the ms ttl above

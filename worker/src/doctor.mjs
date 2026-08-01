@@ -84,7 +84,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, images, forges } = readTriggerFacts(env, fileExists);
+	const { requiring, optingOut, resuming, replicating, images, forges } = readTriggerFacts(env, fileExists);
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -408,6 +408,24 @@ export async function runDoctor(env = process.env, deps = {}) {
 		}
 	}
 
+	// REQ-REPLICA-RUNS. A warning, never a failure -- replicas are an opt-in an operator chose in a reviewed
+	// file, and the harness is doing exactly what was asked. What is worth saying is the arithmetic: each
+	// replica reserves its OWN budget slot before its own tokens (CONST-BUDGET-BEFORE-TOKENS), so a delivery
+	// on a `replicas: 2` trigger consumes two, and the daily cap divides accordingly. Only reported when a
+	// trigger actually asked for it.
+	if (replicating > 0) {
+		checks.push({
+			ok: true,
+			warn: true,
+			// Both facts live in the LABEL rather than the fix, because an `ok: true` check never prints its
+			// fix line (the loop below) -- and the concurrency half is the one an operator most often has
+			// wrong: replicas above PI_CONCURRENCY queue instead of racing, which looks like the feature
+			// silently not working.
+			label: `${replicating} trigger(s) set run.replicas -- one delivery reserves one budget slot PER replica; PI_CONCURRENCY bounds how many actually race`,
+			fix: "confirm the daily/weekly/monthly caps account for the multiplier, and that PI_CONCURRENCY is at least the largest run.replicas",
+		});
+	}
+
 	// REQ-RESURRECTABLE-SANDBOX. A warning, never a failure: retention is a convenience, and the only thing
 	// worth surfacing is that finished runs' directories -- a repository clone plus the run's prompt.md and
 	// event.json, so issue text -- are sitting on disk, and how many. An operator who never opens a sandbox
@@ -492,7 +510,7 @@ function nodeCheck(version) {
  * own findings under a second copy of a diagnosis the operator already gets.
  */
 function readTriggerFacts(env, fileExists) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, images: [], forges: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, images: [], forges: [] };
 	try {
 		const path = env.PI_TRIGGERS_FILE; // config.mjs's own default is null -- unset means no triggers at all
 		if (!path || !fileExists(path)) return none;
@@ -500,6 +518,9 @@ function readTriggerFacts(env, fileExists) {
 		return {
 			requiring: triggers.filter((t) => t.run.packages === true).length,
 			resuming: triggers.filter((t) => t.run.resume === true).length,
+			// REQ-REPLICA-RUNS. `> 1` rather than `!== undefined` because the loader already refuses anything
+			// else -- this counts triggers that will actually multiply spend, which is the only reason to say so.
+			replicating: triggers.filter((t) => t.run.replicas > 1).length,
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
 			// The forges this file actually needs credentials for. Read from the triggers rather than from

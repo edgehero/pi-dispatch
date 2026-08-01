@@ -97,6 +97,30 @@ else
 	ok "dev.pi-dispatch.forges ($declared) matches the CLIs actually installed"
 fi
 
+# THE CAPABILITIES LABEL MUST NOT LIE EITHER, and this one guards a quieter failure than the forge check
+# does. `replicas` (REQ-REPLICA-RUNS) tells the worker that this image's baked safety floor knows a replica
+# commits to `pi/issue-<n>-r<i>`. An image whose HARD_RULES.md still hard-codes `pi/issue-<n>` would
+# contradict the replica prompt from the SYSTEM side -- which the model treats as authoritative -- so both
+# replicas would converge on one branch. Nothing errors: you pay for two runs and get one pull request.
+#
+# Its polarity is the opposite of `forges` above: declaring nothing means "no claim", and the worker then
+# refuses replica jobs on this image rather than admitting them.
+capabilities=$(docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" 2>/dev/null)
+if [ -z "$capabilities" ] || [ "$capabilities" = "<no value>" ]; then
+	ok "no dev.pi-dispatch.capabilities label -- the image claims no optional feature, and the worker refuses replica jobs on it"
+else
+	for capability in $(echo "$capabilities" | tr ',' ' '); do
+		case "$capability" in
+			replicas)
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "the branch your prompt names" /opt/pi-dispatch/HARD_RULES.md 2>/dev/null \
+					|| fail "the image declares 'replicas' but its baked HARD_RULES.md still hard-codes a single branch name -- the system prompt would contradict the replica prompt and both replicas would push to one branch"
+				;;
+			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
+		esac
+	done
+	ok "dev.pi-dispatch.capabilities ($capabilities) matches what the image actually bakes"
+fi
+
 # --cap-drop=ALL is CONST-ISOLATION-CONTAINER-PER-JOB's enforcement surface. Read the effective capability
 # set directly rather than install libcap just to ask.
 caps=$(docker run --rm --cap-drop=ALL --security-opt no-new-privileges \

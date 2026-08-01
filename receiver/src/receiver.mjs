@@ -1,9 +1,10 @@
 /**
  * The webhook receiver: a thin producer that turns a verified GitHub webhook into (at most) one queued
- * job. It composes the three pieces that own the hard parts -- `makeVerifiedHandler` (the HMAC trust
- * boundary), `filter` (the trigger/author gate), and the SHARED `enqueueGitHubJob` -- and adds only the
- * glue: parse the verified body, project the payload subset, route on the filter's verdict, and map the
- * outcome to a status code.
+ * job -- or, when the matched trigger opted into `run.replicas`, into exactly that many independent ones
+ * (REQ-REPLICA-RUNS). It composes the three pieces that own the hard parts -- `makeVerifiedHandler` (the
+ * HMAC trust boundary), `filter` (the trigger/author gate), and the SHARED `enqueueGitHubJob` -- and adds
+ * only the glue: parse the verified body, project the payload subset, route on the filter's verdict, and
+ * map the outcome to a status code.
  *
  * DES-TRIGGER-OUTSIDE-PI: the trigger lives outside pi. This module imports the shared `enqueueGitHubJob`
  * and never re-implements `queue.add` -- the queue's jobId/dedup/retention policy has exactly one owner,
@@ -145,15 +146,26 @@ function makeGitHubHandler({ queue, selfId, cfg, log }) {
 			return respond(res, 204);
 		}
 
+		// REPLICA FANOUT (REQ-REPLICA-RUNS). The one place a single delivery becomes more than one job, and it
+		// belongs here because this is where the 202/503 decision already lives. Absent `replicas` is `1` and
+		// the call below is byte-identical to the single enqueue it replaced -- no `replica` key on the job,
+		// so the jobId, the dedup id and `data` are all exactly what they were.
+		//
+		// PARTIAL FAILURE IS IDEMPOTENT BY CONSTRUCTION, which is why there is no compensating logic here: if
+		// replica k throws, the catch below answers 503, GitHub redelivers, replicas 1..k-1 dedup on their own
+		// now-taken jobIds and k..n enqueue. The retry converges on exactly n jobs rather than n + (k-1).
+		const replicas = result.job.replicas ?? 1;
 		try {
-			await enqueueGitHubJob(queue, result.job);
+			for (let i = 1; i <= replicas; i++) {
+				await enqueueGitHubJob(queue, replicas > 1 ? { ...result.job, replica: i } : result.job);
+			}
 		} catch (err) {
 			// Own try/catch so a Valkey-down enqueue is a 503 (retryable), not verify's outer 500.
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitHub redelivers; dedup by GUID coalesces
 		}
 
-		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow });
+		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas });
 		return respond(res, 202, { status: "queued" });
 	});
 }

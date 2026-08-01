@@ -171,6 +171,13 @@ export function buildRecord({ job, result, error, startedAt, endedAt }) {
 		parentJobId: data.parentJobId ?? null,
 		chainDepth: data.chainDepth ?? null,
 		chainRefused: source.chainRefused ?? null,
+		// Replica telemetry (INT-RUN-HISTORY-FILE-CONTRACT, REQ-REPLICA-RUNS): additive and nullable, explicit
+		// literals beside the chain fields they mirror, no spread. Both come from this job's own `job.data`
+		// and both are INTEGERS -- which is why they can be here at all: the record is PII-free by
+		// construction and a replica index carries nothing attacker-chosen. The branch name they imply is
+		// deliberately not stored, for the reason `session` states one group below.
+		replica: data.replica ?? null,
+		replicas: data.replicas ?? null,
 		// Session telemetry (INT-RUN-HISTORY-FILE-CONTRACT): additive, nullable, an explicit literal, no
 		// spread. `{ resumed, reason, bytes }` -- a boolean, a fixed enum and an integer. THE KEY AND THE
 		// BRANCH NAME ARE DELIBERATELY ABSENT: this record's PII-free-by-construction property rests on it

@@ -35,6 +35,10 @@ const RUN_COLUMNS = [
   // Derived: a `d<n>` chain-depth marker for an outbox-chained child, "-" for a root run. A custom
   // derive is needed because `cell()` would render depth 0 as "0"; here depth 0/null/absent all read "-".
   { key: "chain", header: "CHAIN", derive: (r) => (r?.chainDepth > 0 ? `d${r.chainDepth}` : "-") },
+  // Derived like CHAIN, and for the same reason: an unreplicated run must read "-" rather than "0". The
+  // set size is shown alongside the index because `r2` alone does not say whether the sibling exists --
+  // `r2/2` is what makes the pair legible in a list where the two rows need not be adjacent.
+  { key: "replica", header: "REPLICA", derive: (r) => (r?.replica > 0 ? `r${r.replica}/${r?.replicas ?? "?"}` : "-") },
   { key: "endedAt", header: "ENDED" },
 ];
 
@@ -167,17 +171,21 @@ function triggerLine(t) {
   // identically to one that does not, which is the defect 0.1.4 fixed for [packages] arriving in a new
   // field -- and a transcript is a bigger disclosure than staged packages are.
   const res = t?.resume === true ? "  [resume]" : "";
+  // A trigger that turns one delivery into N paid runs says so (REQ-REPLICA-RUNS). Same class of badge as
+  // [resume]: not a preference an operator can skim past, but the field that multiplies the bill. Absent on
+  // an unreplicated trigger, appended last, so every existing line is byte-identical.
+  const rep = t?.replicas > 1 ? `  [x${t.replicas}]` : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${res}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${res}${rep}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${res}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${res}${rep}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${res}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${res}${rep}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
-      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${res}`;
+      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${res}${rep}`;
     }
     default:
       return "(unknown trigger)";

@@ -314,3 +314,67 @@ test("two different GUIDs, same repo#issue:flow within the window -> one active 
 		await q.close();
 	}
 });
+
+// --- replica runs: two distinct ids on BOTH dedup layers (REQ-REPLICA-RUNS) ---
+
+test("two replicas of one delivery get two jobIds and two dedup ids, and neither suppresses the other", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const seen = [];
+	const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "frontend-fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-rep", sender: { id: 42 } },
+		replicas: 2,
+	};
+
+	await enqueueGitHubJob(fakeQueue, { ...base, replica: 1 });
+	await enqueueGitHubJob(fakeQueue, { ...base, replica: 2 });
+
+	// Layer one: BullMQ's `EXISTS jobId`. Identical ids would make the second enqueue vanish SILENTLY --
+	// duplicate `queue.add` is ignored, not rejected -- so the whole feature would fail with no error.
+	assert.deepEqual(seen.map((s) => s.opts.jobId), ["gh-guid-rep-r1", "gh-guid-rep-r2"]);
+	// Layer two: the semantic window. Distinct jobIds alone are not enough -- `repo#7:flow` is identical for
+	// both replicas, so within the 10-minute TTL the second would coalesce into the first regardless.
+	assert.deepEqual(seen.map((s) => s.opts.deduplication.id), ["owner/repo#7:frontend-fix:r1", "owner/repo#7:frontend-fix:r2"]);
+	assert.deepEqual(seen.map((s) => s.data.replica), [1, 2]);
+	assert.deepEqual(seen.map((s) => s.data.replicas), [2, 2]);
+	assert.equal("replica" in seen[0].data.trigger, false, "an execution knob must not leak into the descriptive trigger");
+});
+
+test("a REDELIVERY of one replica still coalesces -- the window dedups re-deliveries, never the replicas", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const seen = [];
+	const fakeQueue = { add: (name, data, opts) => (seen.push(opts), { id: opts.jobId }) };
+	const job = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7 },
+		flow: "fix",
+		trigger: { deliveryId: "guid-x" },
+		replica: 2,
+		replicas: 2,
+	};
+	await enqueueGitHubJob(fakeQueue, job);
+	await enqueueGitHubJob(fakeQueue, job);
+	assert.equal(seen[0].jobId, seen[1].jobId, "the same delivery, same replica, resolves the same id -- BullMQ rejects the second");
+	assert.equal(seen[0].deduplication.id, seen[1].deduplication.id);
+});
+
+test("an unflagged job's data keys and dedup id are byte-identical to before the feature", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { data, opts }), { id: opts.jobId }) };
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "frontend-fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-plain", sender: { id: 42 } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	});
+	assert.deepEqual(Object.keys(captured.data), ["kind", "repo", "target", "flow", "trigger", "provider", "model", "maxTurns"]);
+	assert.equal(captured.opts.jobId, "gh-guid-plain", "no -r suffix on a job that carries no replica");
+	assert.equal(captured.opts.deduplication.id, "owner/repo#7:frontend-fix", "no :r suffix either");
+});

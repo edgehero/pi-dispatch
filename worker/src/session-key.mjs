@@ -77,6 +77,14 @@ export function keyParts(job, resolved = {}) {
 		// An issue-triggered job's branch is the one its own envelope names, minted by the same function
 		// (branch.mjs) so the two cannot drift. issueBranch throws on a non-positive-integer number; this
 		// function is total, so that becomes "no key" rather than a failed job.
+		//
+		// ONE ARGUMENT, DELIBERATELY, and it must stay that way (REQ-REPLICA-RUNS). `issueBranch` takes an
+		// optional replica index and a replica job's envelope names `pi/issue-<n>-r<i>`, so this call is
+		// knowingly resolving a key for a branch that job was not told to push to. That is safe only because
+		// `triggers.mjs` refuses `run.replicas` together with `run.resume`: a replica job never resumes, so
+		// the key it would resolve is never read. Relax that refusal and every replica of one issue resolves
+		// the SAME key -- one transcript, N writers, fighting the store's one-writer lock. If the refusal
+		// ever goes, the replica index has to arrive here too. The coupling is stated in branch.mjs as well.
 		try {
 			return [kind, repo, issueBranch(job?.target?.number)];
 		} catch {

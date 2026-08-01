@@ -63,6 +63,15 @@ const PR_ACTIONS = {
 // parse; the charset also excludes `:` and the dedicated check names the reason.
 const ID_CHARSET = /^[A-Za-z0-9._-]+$/;
 
+/**
+ * The ceiling on `run.replicas` (REQ-REPLICA-RUNS). Three, because `PI_CONCURRENCY` defaults to 3
+ * (config.mjs) and replicas above the default concurrency would queue rather than race -- a cap that
+ * promised a comparison the deployment could not deliver. A literal here rather than a read of the
+ * concurrency setting: this validator is pure and fs-free, and the operator who raises concurrency to 10
+ * is the operator who can raise this line too, in a reviewed commit.
+ */
+const REPLICAS_MAX = 3;
+
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
 }
@@ -175,6 +184,9 @@ function normalizeCron(on, run, index, path, state) {
 	const packages = validatePackagesFlag(run, `cron trigger "${id}"`, path);
 	const image = validateImageRef(run, `cron trigger "${id}"`, path);
 	const resume = validateResumeFlag(run, `cron trigger "${id}"`, path);
+	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
+	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
+	validateReplicas(run, `cron trigger "${id}"`, path);
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -338,6 +350,54 @@ function validateRepository(run, onType, at, path) {
 	return raw;
 }
 
+/**
+ * `run.replicas` -- how many independent sandboxes race this trigger's flow (REQ-REPLICA-RUNS).
+ *
+ * The one field in this file that MULTIPLIES SPEND, so every refusal below is deliberate and none of them
+ * is accepted-and-ignored. It is the second kind-conditional field, after `run.repository`, and it takes
+ * that one's posture: a field that is silently unused is a field an operator will set and then trust.
+ *
+ * WHY EACH REFUSAL:
+ *   - a LOCAL (cron) trigger: its `/workspace` IS the operator's folder, bind-mounted read-write and edited
+ *     in place, so two replicas would stomp each other's working tree with no gate and no undo. A github
+ *     job gets its own `mkdtemp`'d clone, which is the entire reason this is safe there and not here.
+ *     Checked FIRST so a cron trigger gets that reason rather than the forge-coverage one below.
+ *   - a non-github forge: every forge mints its branch through the same `issueBranch`, so extending this is
+ *     mechanical -- but it is not done, and the message says "not yet covered" rather than "impossible"
+ *     because those are different facts and an operator planning work needs the right one.
+ *   - a non-integer, `< 2`, or `> REPLICAS_MAX`. `1` is REFUSED rather than accepted: a one-member replica
+ *     set is a field that does nothing, and this validator's whole job is to make sure nothing does nothing.
+ *   - `run.resume: true`. A resumed run continues ONE lineage; replicas exist to fork it. This is the
+ *     refusal `session-key.mjs` depends on to keep calling `issueBranch` with a single argument -- without
+ *     it every replica of an issue resolves the same session key, shares one transcript, and fights the
+ *     store's one-writer lock. Stated in all three files, because the coupling is invisible from any one.
+ *
+ * Called from ALL FOUR normalizers -- including `normalizeCron`, which discards the result because there it
+ * can only ever refuse. That is `validateRepository`'s idiom and it exists for the same reason: a field
+ * accepted where it does nothing is how an operator comes to trust one that does nothing. Deliberately NOT
+ * `run.github`'s by-placement asymmetry, which lets a webhook trigger drop the field in silence.
+ *
+ * `at` is the caller's message prefix. Returns the count, undefined when absent, so an unflagged trigger
+ * normalizes byte-identically to today's.
+ */
+function validateReplicas(run, at, path) {
+	const replicas = run.replicas;
+	if (replicas === undefined) return undefined;
+	if (run.kind === "local") {
+		throw configError(`${at}: run.replicas is not available on a cron trigger -- a local job's /workspace IS the operator's folder, bind-mounted read-write, so two replicas would edit one working tree with no gate and no undo: ${path}`);
+	}
+	if (run.kind !== "github") {
+		throw configError(`${at}: run.replicas is not yet covered for ${run.kind} triggers (github only in this version); every forge mints its branch the same way, so this is a gap to close, not a limit: ${path}`);
+	}
+	if (!Number.isInteger(replicas) || replicas < 2 || replicas > REPLICAS_MAX) {
+		throw configError(`${at}: run.replicas must be an integer between 2 and ${REPLICAS_MAX} when present -- ${REPLICAS_MAX} is the ceiling because PI_CONCURRENCY defaults to 3, so a further replica would queue instead of racing, and 1 is refused because a one-member replica set is a flag that does nothing (got ${JSON.stringify(replicas)}): ${path}`);
+	}
+	if (run.resume === true) {
+		throw configError(`${at}: run.replicas and run.resume cannot be combined -- a resumed run continues one lineage and replicas exist to fork it, so every replica would resolve the same session key and share one transcript: ${path}`);
+	}
+	return replicas;
+}
+
 function normalizeLabel(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 	const predicate = validatePredicate(on, index, path, true);
@@ -348,9 +408,10 @@ function normalizeLabel(on, run, index, path) {
 	const image = validateImageRef(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
+	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -373,9 +434,10 @@ function normalizeComment(on, run, index, path, state) {
 	const image = validateImageRef(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
+	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -421,8 +483,9 @@ function normalizePullRequest(on, run, index, path) {
 	const image = validateImageRef(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
+	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "pull_request", action: [...actions], any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas },
 	};
 }

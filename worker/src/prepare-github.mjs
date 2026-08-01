@@ -184,12 +184,22 @@ export async function prepareGithubWorkspace(
 		// Issue text is DATA: it enters the USER prompt (buildGithubPrompt), never a system prompt.
 		writeFile(
 			join(jobDir, "prompt.md"),
-			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true }),
+			// `replica`/`replicas` (REQ-REPLICA-RUNS) are host-assigned integers off job.data, so they are safe
+			// to interpolate, and they are what makes this job's branch differ from its sibling's. This is the
+			// SHARED forge preparer, so the gitlab/forgejo/azure builders receive the two keys and destructure
+			// them away -- harmless, and always undefined while replicas are github-only.
+			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas }),
 			{ mode: 0o444 },
 		);
 
 		// The INT-WEBHOOK-PAYLOAD-SUBSET body fields ONLY — no header, no signature, no token. `matched`
 		// is the single harness-computed addition: the filter's decision record, not a webhook field.
+		//
+		// `replica`/`replicas` are DELIBERATELY ABSENT, and that is a choice rather than an oversight. This
+		// literal is the webhook's own body plus one decision record; an execution knob is not a fact about
+		// the delivery. The agent already learns its index from the prompt and `PI_JOB_ID` already ends
+		// `-r2`, so nothing here needs it -- and INT-CONTAINER-JOB-INPUTS and INT-WEBHOOK-PAYLOAD-SUBSET stay
+		// untouched, which is worth more than the convenience.
 		const subset = {
 			event: job.trigger?.event,
 			action: job.trigger?.action,

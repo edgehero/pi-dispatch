@@ -1274,6 +1274,57 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-RESURRECTABLE-SANDBOX`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SANDBOX-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`
 
+## DES-REPLICA-INDEX-REACHES-THE-BRANCH
+
+- **Decision**: Implement replica runs (`REQ-REPLICA-RUNS`) by threading a single host-assigned integer —
+  the 1-based `replica` index — through the four layers that would otherwise collapse N attempts into one,
+  and **changing nothing else**. The index reaches the BullMQ job id, the semantic dedup key, the minted
+  branch, and the prompt. It deliberately does **not** reach the session key, `/job/event.json`, the
+  budget, or any container flag.
+- **Why**: The layers that prevent this are not obstacles to route around; each is a control someone chose
+  and each stays exactly as strong for an unflagged run. The cheapest way to keep that true is to make the
+  discriminator **one value with one owner** and let everything keyed off a job id inherit it for free —
+  the container name (`index.mjs`), `PI_JOB_ID` (`run-container.mjs`), and the `.log`/`.json` sidecars
+  (`run-history.mjs`) all become replica-distinct without being told. The work then reduces to four
+  deliberate additions rather than a feature flag threaded through the worker.
+- **The branch is the load-bearing one, and `issueBranch` is where it belongs.** `branch.mjs` exists
+  because the prompt and the session key must not each spell `pi/issue-${n}` — a second copy would not
+  fail, it would key a session on a branch the agent was never told to push to. A replica adds a **third**
+  fact to that same argument: `session-key.mjs` calls `issueBranch` with one argument and must keep doing
+  so, which is safe **only** because `triggers.mjs` refuses `replicas` beside `resume`. The coupling is
+  written into all three files, because it is invisible from any one of them.
+- **Where the index deliberately stops.**
+  - *Not the session key.* Adding it would be the wrong fix for a problem the refusal already prevents,
+    and it would create a second, silently-diverging notion of which transcript a job continues.
+  - *Not `/job/event.json`.* That literal is the webhook's own body plus one decision record
+    (`INT-CONTAINER-JOB-INPUTS`, `INT-WEBHOOK-PAYLOAD-SUBSET`); an execution knob is not a fact about the
+    delivery. The agent learns its index from the prompt, and `PI_JOB_ID` already ends `-r2`.
+  - *Not the budget.* N reservations is the honest count (`CONST-BUDGET-BEFORE-TOKENS`).
+- **Rejected**:
+  - *First-finished-wins with sibling cancellation.* Half a cancelled run has already spent its tokens, so
+    the saving is illusory — and it destroys the comparison the feature exists to produce. There is also
+    no cancellation machinery to reuse; building one to make the feature worse is a poor trade.
+  - *Auto-judging the two pull requests.* A third paid agent, ranking two agents, to save a human one
+    diff read. Two pull requests, one human, done.
+  - *An asymmetric branch scheme where replica 1 keeps `pi/issue-<n>`.* It reads as an original and a
+    copy, which is precisely the framing that makes an operator stop comparing them. Suffixing **every**
+    replica costs one string and keeps the pair symmetric; an unflagged run is unaffected either way.
+  - *Replicas for `local`/cron triggers.* A local job's `/workspace` IS the operator's folder, bind-mounted
+    read-write. Two replicas would edit one working tree with no gate and no undo — the hazard is the
+    reason, not the scope of v1 effort.
+  - *A `PI_REPLICA` environment variable.* The env allowlist is closed by design
+    (`INT-CONTAINER-RUNTIME-CONTRACT`), and nothing inside the container needs to branch on the index: the
+    prompt names the branch, and the runner treats every job identically. A variable would be a second
+    place for the index to live and a second place for it to disagree with the branch.
+  - *A `replica` field in `event.json`.* See above — recorded here as a rejected alternative rather than
+    left as an omission, because it is the first thing a reader will propose.
+  - *Deriving the cap from `PI_CONCURRENCY` at load.* `parseTriggers` is pure and fs-free and does not read
+    the deployment's settings; a literal `3` beside the reason (the default concurrency) is honest and
+    reviewable, and the operator who raises concurrency can raise it in the same commit.
+- **Traces to**: `REQ-REPLICA-RUNS`, `REQ-DEDUP-BY-DELIVERY-GUID`, `REQ-RESUMABLE-SESSION`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `OQ-017`
+
 ## Rejected alternatives (whole-project)
 
 Considered and declined. Recorded so they are not re-proposed.
@@ -1345,6 +1396,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-01 | Added **`DES-REPLICA-INDEX-REACHES-THE-BRANCH`** (issue #56, `REQ-REPLICA-RUNS`): implement replica runs by threading ONE host-assigned integer through the four layers that collapse N attempts into one — the BullMQ job id, the semantic dedup key, the minted branch, and the prompt — and changing nothing else. The framing is deliberate: those layers are controls someone chose, not obstacles, and each stays exactly as strong for an unflagged run; making the discriminator one value with one owner is what lets the container name, `PI_JOB_ID` and the `.log`/`.json` sidecars become replica-distinct **without being told**. The branch is the load-bearing addition, and it lands in `issueBranch` because that function exists precisely so the prompt and the session key cannot each spell `pi/issue-${n}` — a replica adds a THIRD fact to that argument, namely that `session-key.mjs` calls it with one argument and may keep doing so only because `triggers.mjs` refuses `replicas` beside `resume`. Where the index deliberately STOPS is recorded as decision rather than omission: not the session key (the refusal already prevents the problem, and a second notion of which transcript a job continues would silently diverge), not `event.json` (an execution knob is not a fact about the delivery), not the budget (N reservations is the honest count). Rejected, with reasons: first-finished-wins with sibling cancellation (a half-cancelled run has already spent its tokens, so the saving is illusory and the comparison is destroyed); auto-judging the two pull requests (a third paid agent ranking two agents to save a human one diff read); an asymmetric scheme where replica 1 keeps `pi/issue-<n>` (it reads as an original and a copy, which is the framing that makes an operator stop comparing them); replicas for local/cron triggers (the shared working tree is a hazard, not a scope decision); a `PI_REPLICA` env var (the allowlist is closed by design and nothing in the container branches on the index — it would be a second place for it to disagree with the branch); a `replica` field in `event.json`; and deriving the cap from `PI_CONCURRENCY` at load (`parseTriggers` is pure and fs-free). `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` **UNCHANGED, checked**: the key is still derived from what the job carries, and replicas add no index. `DES-JOB-OUTBOX-CHAINING` **UNCHANGED, checked**: the `local`-only guard already bounds fanout from a replica. |
 | 2026-08-01 | Added **`DES-SANDBOX-IS-A-FRESH-CONTAINER`** (issue #55, `REQ-RESURRECTABLE-SANDBOX`): to let an operator inspect what a run built, retain the run's inputs and start a **new** container, never preserve the original. Six rejected alternatives recorded, and the first three are the ones that would otherwise be re-proposed — keeping the job container alive for `docker exec`, a stdin channel to the running agent, and `docker commit` snapshots. The first two reopen `CONST-ISOLATION-CONTAINER-PER-JOB` (a live container that has run adversarial code, still holding the minted token, with `--rm` removed); the third costs gigabytes per run to preserve mostly what belonged in the image. The other three are the smaller near-misses that each looked cheaper than the shipped answer and were not: publishing a port on job containers, editing the boot reaper's filter instead of using a disjoint name namespace, and widening `makeLogReaper` instead of adding a sibling. `DES-RUN-HISTORY-FLAT-FILES-NO-DB` **UNCHANGED, and checked** — the sandbox lookup is a filename-keyed read of one directory, adding no index and no query surface. |
 | 2026-07-28 | **The pi-normal discovery posture** (`CONST-NO-CONTEXT-FILES-MANDATORY`, amended). `DES-OPERATOR-GLOBAL-OVERLAY`: overlay extensions are staged and loaded **by default** — `--no-extensions` is the escape hatch, every staged extension is **printed by name**, and `PI_GLOBAL_ALLOW_EXTENSIONS` survives inverted as the `"0"` opt-out — and staged packages load for every job except one whose trigger set `run.packages: false`. The "gated four times, not two" framing is restated honestly as **three gates that refuse by default** (exact pin, all-or-nothing host stage, runner pre-spend path check) **plus one withdrawal**, since the per-trigger switch now defaults open. The *Rejected* entry "load overlay extensions by default" is **superseded rather than deleted**: it is rewritten in place to record that this is what shipped first, that the arming flag sat behind two gates the operator had already passed, and that its failure mode was silent in the expensive direction — a present-but-dormant overlay is a deployment quietly missing the setup its flows were written against. The "copy `~/.pi` wholesale" rejection lost its stale justification (it argued host-global discovery was off anyway) and now rests on the curated-subset argument, which is the one that was always doing the work. Two cross-references de-staled elsewhere in the file: `DES-PERSONA-VIA-APPEND-SYSTEM-MD`'s *Rejected* `AGENTS.md` bullet said **"forbidden"** and now records that it loads but is rejected as the *persona channel* on **placement** (pi emits context files into `<project_context>` after the append block, so it can never be the floor); and `DES-AI-TRIGGER-FLOW-GATE`'s trust-doctrine parenthetical, which cited the constraint as "a cloned repo's `AGENTS.md` … must not load", now cites it as amended — the doctrine it was actually appealing to, reading committed content at a **fixed SHA** rather than the live tree, is unchanged. `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` was **checked and needed no change**: it asserts nothing about the discovery flags. |
 | 2026-07-15 | Initial. Extracted from `DESIGN.md` v0.1 (2026-07-14, local, uncommitted) §2, §3, §4, §5, §9, §11. That document recorded "50 claims adversarially verified: 48 confirmed, 2 refuted" — **verified against documentation**. Source-verification at `earendil-works/pi @ 5e336cf` subsequently corrected ~7 points. `DES-PERSONA-VIA-APPEND-SYSTEM-MD` is materially rewritten: the source doc's decisions #1 and #2 were mutually exclusive as written. `DES-NAME-KEEP-PI-DISPATCH` is new. `pi-harness` and `pi-sentry` were absent from the source doc's alternatives and are added. §5.7's "caches roll at midnight" caveat is **dropped** — 0.80.7 removed the date from the default system prompt. |

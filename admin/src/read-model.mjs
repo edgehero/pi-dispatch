@@ -593,6 +593,12 @@ export function normalizeTriggerForDisplay(entry) {
   // the riskiest triggers rendered with no badge and no warning, quiet exactly where the risk was.
   const resume = run.resume === true;
   const forge = typeof run.kind === "string" && run.kind.trim() !== "" ? run.kind : null;
+  // How many sandboxes race this trigger (INT-TRIGGERS-FILE-CONTRACT, REQ-REPLICA-RUNS). `null` is the
+  // one-run default, matching this function's flow/model/phrase convention, and `> 1` is the test rather
+  // than `!== undefined` because the only thing worth rendering is a trigger that MULTIPLIES SPEND -- the
+  // sharpest version of the reason `image` and `resume` are shown at all. Carried on the three webhook kinds
+  // and absent on cron, like `forge`: the loader refuses `run.replicas` on a cron entry outright.
+  const replicas = Number.isInteger(run.replicas) && run.replicas > 1 ? run.replicas : null;
   switch (on.type) {
     case "cron":
       return {
@@ -609,9 +615,9 @@ export function normalizeTriggerForDisplay(entry) {
         resume,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, resume, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, resume, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, resume, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, resume, replicas, forge };
     case "pull_request":
       return {
         type: "pull_request",
@@ -623,6 +629,7 @@ export function normalizeTriggerForDisplay(entry) {
         packages,
         image,
         resume,
+        replicas,
         forge,
       };
     default:

@@ -32,6 +32,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { missing: image }    -- the daemon answered and does not have it  => POLICY, refuse, do not retry
  *   { unavailable: image} -- docker itself did not answer              => INFRA, retry
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
+ *   { replicaUnsupported }-- present, but does not declare replica support for a replica job => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -60,9 +61,15 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 		// azure trigger that forgets it runs on the default image, finds no `az`, and fails INSIDE a paid
 		// container -- on every single delivery. The image declares which forges it can serve and this
 		// refuses before the budget slot is taken.
-		const probe = await runDocker(spawnFn, ["image", "inspect", `--format={{.Id}}${FIELD_SEP}${PI_VERSION_TEMPLATE}${FIELD_SEP}${FORGES_TEMPLATE}`, wanted], true);
+		//
+		// The CAPABILITIES label rides it too, for a failure the forges label cannot catch. A replica job's
+		// user prompt names `pi/issue-<n>-r2`, but an image built before REQ-REPLICA-RUNS bakes a
+		// HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>` -- and that is the SYSTEM prompt, which the
+		// model treats as authoritative. Both replicas would converge on one branch and the feature would
+		// become the push race it exists to avoid, with nothing in the run record saying so.
+		const probe = await runDocker(spawnFn, ["image", "inspect", `--format={{.Id}}${FIELD_SEP}${PI_VERSION_TEMPLATE}${FIELD_SEP}${FORGES_TEMPLATE}${FIELD_SEP}${CAPABILITIES_TEMPLATE}`, wanted], true);
 		if (probe.code === 0) {
-			const [piVersion, forges] = parseLabels(probe.stdout);
+			const [piVersion, forges, capabilities] = parseLabels(probe.stdout);
 			const kind = job?.kind;
 			// Absent label => ALLOW. The polarity matters and is the opposite of what "declare your
 			// capabilities" suggests: every operator-built image predating this label (OQ-012) declares
@@ -70,6 +77,15 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			// that is PRESENT and excludes this job's forge refuses.
 			if (forges !== null && kind !== undefined && kind !== "local" && !forges.includes(kind)) {
 				return { forgeUnsupported: wanted, kind, declared: forges };
+			}
+			// Absent label => REFUSE, which is the OPPOSITE polarity to `forges` directly above, and the
+			// asymmetry is deliberate rather than an oversight. `forges` is an EXCLUSION list, so no claim
+			// excludes nothing; `capabilities` is an INCLUSION list, so no claim includes nothing. One rule
+			// underlies both -- an image that declares nothing gets no benefit of the doubt about what it
+			// contains -- and neither costs an UNFLAGGED job anything: this branch is unreachable unless the
+			// job actually carries a replica index.
+			if (job?.replica !== undefined && !(capabilities ?? []).includes("replicas")) {
+				return { replicaUnsupported: wanted, declared: capabilities ?? [] };
 			}
 			return { ok: true, image: wanted, piVersion };
 		}
@@ -88,9 +104,11 @@ const PI_VERSION_LABEL = "dev.pi-dispatch.pi-version";
 const PI_VERSION_TEMPLATE = `{{index .Config.Labels "${PI_VERSION_LABEL}"}}`;
 export const FORGES_LABEL = "dev.pi-dispatch.forges";
 const FORGES_TEMPLATE = `{{index .Config.Labels "${FORGES_LABEL}"}}`;
+export const CAPABILITIES_LABEL = "dev.pi-dispatch.capabilities";
+const CAPABILITIES_TEMPLATE = `{{index .Config.Labels "${CAPABILITIES_LABEL}"}}`;
 
 /**
- * The image's declared pi version and forge list, each `null` when it declares none.
+ * The image's declared pi version, forge list and capability list, each `null` when it declares none.
  *
  * `null` is the SAFE answer and is treated as "never resume" downstream, not as "assume it matches". An
  * operator-built image (OQ-012) that omits the label therefore runs every job cold rather than resuming
@@ -102,17 +120,24 @@ const FORGES_TEMPLATE = `{{index .Config.Labels "${FORGES_LABEL}"}}`;
  * not a version rather than being compared as one.
  */
 function parseLabels(stdout) {
-	// A SPLIT, not two indexOf calls: the format string now has three fields, and the image id (which is
-	// `sha256:<hex>`) is the first. Neither a version nor a comma-separated forge list can contain `|`, so
-	// the split is unambiguous. A short line -- an older docker, a truncated pipe -- yields nulls, which is
-	// the safe answer on both fields.
+	// A SPLIT, not two indexOf calls: the format string now has four fields, and the image id (which is
+	// `sha256:<hex>`) is the first. Neither a version nor a comma-separated list can contain `|`, so the
+	// split is unambiguous. A short line -- an older docker, a truncated pipe -- yields nulls, which is
+	// the safe answer on every field. On `capabilities` "safe" means the caller refuses a replica job,
+	// which is the same direction a genuinely unlabelled image goes.
 	const parts = String(stdout ?? "").trim().split(FIELD_SEP);
 	const piVersion = label(parts[1]);
-	const forgesRaw = label(parts[2]);
-	const forges = forgesRaw === null ? null : forgesRaw.split(",").map((s) => s.trim()).filter((s) => s !== "");
-	// A label that is present but parses to nothing usable is treated as ABSENT rather than as "serves no
-	// forge" -- the latter would refuse every job on an image whose label was merely malformed.
-	return [piVersion, forges !== null && forges.length > 0 ? forges : null];
+	// A label that is present but parses to nothing usable is treated as ABSENT rather than as an empty
+	// list -- on `forges` the latter would refuse every job on an image whose label was merely malformed.
+	return [piVersion, list(parts[2]), list(parts[3])];
+}
+
+/** One comma-separated label value as a non-empty array, or `null` when it declares nothing usable. */
+function list(raw) {
+	const value = label(raw);
+	if (value === null) return null;
+	const items = value.split(",").map((s) => s.trim()).filter((s) => s !== "");
+	return items.length > 0 ? items : null;
 }
 
 /** One label value, or `null`. Go's text/template renders a missing map key as the literal "<no value>". */

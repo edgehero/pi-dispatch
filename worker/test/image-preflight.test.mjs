@@ -46,7 +46,7 @@ test("an image that inspects clean is ok, and costs exactly ONE spawn", async ()
 	assert.deepEqual(calls[0].args, [
 		"image",
 		"inspect",
-		`--format={{.Id}}${FIELD_SEP}{{index .Config.Labels "dev.pi-dispatch.pi-version"}}${FIELD_SEP}{{index .Config.Labels "dev.pi-dispatch.forges"}}`,
+		`--format={{.Id}}${FIELD_SEP}{{index .Config.Labels "dev.pi-dispatch.pi-version"}}${FIELD_SEP}{{index .Config.Labels "dev.pi-dispatch.forges"}}${FIELD_SEP}{{index .Config.Labels "dev.pi-dispatch.capabilities"}}`,
 		"pi-job:latest",
 	]);
 });
@@ -155,4 +155,51 @@ test("a local job is never refused on forge grounds -- it has no forge to check"
 test("the pi version still parses now that a third field follows it", async () => {
 	const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github\n`) });
 	assert.equal((await preflight({ kind: "github" })).piVersion, "0.80.7");
+});
+
+// --- the capabilities label: the stale-image gate for replicas (REQ-REPLICA-RUNS) ---
+
+test("a replica job on an image that declares no capabilities is REFUSED pre-spend", async () => {
+	// The OPPOSITE polarity to the forges label directly above, deliberately. `forges` is an EXCLUSION list,
+	// so no claim excludes nothing; `capabilities` is an INCLUSION list, so no claim includes nothing. An
+	// image built before this feature bakes a HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>` -- a
+	// SYSTEM rule, which the model treats as authoritative over the user prompt naming `-r2`. Both replicas
+	// would push to one branch: nothing errors, and you pay twice for one pull request.
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}\n`) });
+	assert.deepEqual(await preflight({ kind: "github", replica: 2, replicas: 2 }), { replicaUnsupported: "pi-job:latest", declared: [] });
+});
+
+test("an UNFLAGGED job on that same image is ok -- the gate costs a non-replica job nothing", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}\n`) });
+	assert.deepEqual(await preflight({ kind: "github" }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7" });
+});
+
+test("a replica job on an image that declares `replicas` runs", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas\n`) });
+	assert.deepEqual(await preflight({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7" });
+	// A multi-item list parses the same way the forges list does.
+	const multi = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP} replicas , something-else \n`) });
+	assert.deepEqual(await multi({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7" });
+});
+
+test("`<no value>`, an empty list and a SHORT line all read as no claim, and all refuse a replica job", async () => {
+	// Go's text/template renders a missing map key as the literal "<no value>"; an older docker or a
+	// truncated pipe yields a line with fewer fields. Every one of them is "declares nothing", and on this
+	// label that means refuse -- the same direction a genuinely unlabelled image goes.
+	for (const stdout of [
+		`sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}<no value>\n`,
+		`sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}  ,  \n`,
+		`sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github\n`,
+		"sha256:abc\n",
+	]) {
+		const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, stdout) });
+		assert.deepEqual(await preflight({ kind: "github", replica: 2, replicas: 2 }), { replicaUnsupported: "pi-job:latest", declared: [] }, `stdout=${JSON.stringify(stdout)}`);
+	}
+});
+
+test("the forge refusal still outranks the replica one -- a job that cannot run at all is the first thing to say", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}gitlab${FIELD_SEP}replicas\n`) });
+	const r = await preflight({ kind: "github", replica: 2, replicas: 2 });
+	assert.equal(r.forgeUnsupported, "pi-job:latest");
+	assert.equal(r.replicaUnsupported, undefined);
 });

@@ -270,3 +270,43 @@ test("the badge is opt-IN -- the opposite polarity to [packages], which is the b
   assert.match(both, /\[packages\]/);
   assert.match(both, /\[resume\]/);
 });
+
+test("renderRuns adds a REPLICA column, and an unreplicated run reads '-' rather than '0'", () => {
+  // Derived like CHAIN, and for the same reason: `cell()` would render 0 as "0". The set size rides along
+  // because `r2` alone does not say whether a sibling exists -- the two rows need not be adjacent.
+  const out = renderRuns([
+    { jobId: "j1", target: "o/r#5", flow: "fix", outcome: "completed", turns: 4, replica: 1, replicas: 2, endedAt: "2026-08-01T00:00:00.000Z" },
+    { jobId: "j2", target: "o/r#5", flow: "fix", outcome: "completed", turns: 6, replica: 2, replicas: 2, endedAt: "2026-08-01T00:01:00.000Z" },
+    { jobId: "j3", target: "o/r#6", flow: "fix", outcome: "completed", turns: 3, endedAt: "2026-08-01T00:02:00.000Z" },
+  ]);
+  assert.match(out, /REPLICA/);
+  assert.match(out, /\br1\/2\b/);
+  assert.match(out, /\br2\/2\b/);
+  // The third row is the unreplicated one; a "0/..." anywhere would mean the derive leaked a falsy index.
+  assert.doesNotMatch(out, /\br0\b/);
+});
+
+test("renderTriggers marks a replicating trigger, and an unflagged line is byte-identical", () => {
+  // A spend multiplier must not render like a preference -- the same class of badge as [resume], appended
+  // last so every existing line is unchanged.
+  const label = (replicas) => ({ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: false, replicas });
+  const racing = renderTriggers({ schedulers: [], triggers: { triggers: [label(2)] } });
+  assert.match(racing, /\[x2\]/);
+
+  const plain = renderTriggers({ schedulers: [], triggers: { triggers: [label(null)] } });
+  assert.doesNotMatch(plain, /\[x/);
+  assert.equal(plain, renderTriggers({ schedulers: [], triggers: { triggers: [label(undefined)] } }), "absent and null render the same single-run line");
+
+  // All three webhook kinds carry it; cron can never hold one, so it has nothing to show.
+  const all = renderTriggers({
+    schedulers: [],
+    triggers: {
+      triggers: [
+        { type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", replicas: 2 },
+        { type: "comment", phrase: "@pi", flow: "fix", replicas: 3 },
+        { type: "pull_request", action: ["labeled"], any: [], all: [], none: [], flow: "review", replicas: 2 },
+      ],
+    },
+  });
+  assert.equal(all.split("[x").length - 1, 3, "label, comment and pull_request each show their count");
+});

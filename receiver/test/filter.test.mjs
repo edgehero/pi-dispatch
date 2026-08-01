@@ -578,3 +578,39 @@ test("a matched rule's run.resume reaches the JOB, and an unflagged rule omits t
 	const commented = filter("issue_comment", { sender: { id: 1 }, action: "created", comment: { body: "@pi", author_association: "OWNER" }, issue: { number: 9, title: "T", body: "B", labels: [] } }, resumeCfg, 99, "d3");
 	assert.equal(commented.job.resume, true);
 });
+
+// --- replicas ride the MATCHED rule onto the job (REQ-REPLICA-RUNS) ---
+
+test("replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
+	// `trigger` is the descriptive context object copied verbatim into /job/event.json. This is the count of
+	// jobs to create -- the receiver reads it to decide how many times to enqueue -- so it has no business
+	// there. Asserted on ALL THREE routes: one shared job literal, three places that resolve into it.
+	const labelCfg = forgeCfg({ triggers: { ...cfgRaw.triggers, label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", replicas: 2 }] } });
+	const l = filter("issues", labeledSubset(["pi:frontend"]), labelCfg, SELF_ID, "d-rep-label");
+	assert.equal(l.job.replicas, 2);
+	assert.equal("replicas" in l.job.trigger, false);
+
+	const commentCfg = forgeCfg({ triggers: { ...cfgRaw.triggers, comment: { index: 4, phrase: "@pi", defaultFlow: "triage", replicas: 3 } } });
+	const c = filter("issue_comment", commentSubset(), commentCfg, SELF_ID, "d-rep-comment");
+	assert.equal(c.job.replicas, 3);
+	assert.equal("replicas" in c.job.trigger, false);
+
+	const prReplicaCfg = forgeCfg({ triggers: { ...prCfgRaw.triggers, pullRequest: [{ index: 6, actions: new Set(["opened"]), predicate: {}, flow: "autoreview", replicas: 2 }] } });
+	const p = filter("pull_request", prSubset({ action: "opened" }), prReplicaCfg, SELF_ID, "d-rep-pr");
+	assert.equal(p.job.replicas, 2);
+	assert.equal("replicas" in p.job.trigger, false);
+});
+
+test("an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
+	// The same byte-identical bar packages/image/resume hold: the key must be missing, so the enqueued job
+	// data and its dedup id are the exact strings they were before the feature.
+	for (const [event, subset, c] of [
+		["issues", labeledSubset(["pi:frontend"]), cfg],
+		["issue_comment", commentSubset(), cfg],
+		["pull_request", prSubset({ action: "opened" }), prCfg],
+	]) {
+		const r = filter(event, subset, c, SELF_ID, "d-plain");
+		assert.equal(r.enqueue, true);
+		assert.equal("replicas" in r.job, false, `${event} must emit no replicas key`);
+	}
+});

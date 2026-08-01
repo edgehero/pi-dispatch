@@ -692,6 +692,21 @@ Evidence convention as in `constitution.md`.
     declare its pi version as the `dev.pi-dispatch.pi-version` LABEL and its runner must honour
     `PI_SESSION_FILE`. An image that declares no version never resumes, which is the safe direction; one
     whose runner ignores the variable produces jobs that never resume and never say so, which is not.
+  - **A second labelled conformance item, and its polarity is the OPPOSITE of `dev.pi-dispatch.forges`.**
+    An image that can serve replica jobs (`REQ-REPLICA-RUNS`) must say so in a
+    `dev.pi-dispatch.capabilities` LABEL naming `replicas`, and its baked `HARD_RULES.md` rule 3 must name
+    *the branch your prompt names, always under `pi/issue-*`* rather than hard-coding `pi/issue-<n>`. The
+    two go together and neither is decorative: a replica's **user** prompt names `pi/issue-<n>-r2` while a
+    pre-feature safety floor names `pi/issue-<n>` as a **system** rule, which the model treats as
+    authoritative — so both replicas would converge on one branch. Nothing errors; the operator pays for
+    two runs and gets one pull request, which is precisely the "silent or late" class this list exists for.
+    Hence the polarity: `forges` is an **exclusion** list, so declaring nothing excludes nothing and an
+    unlabelled image is admitted for every forge; `capabilities` is an **inclusion** list, so declaring
+    nothing includes nothing and an unlabelled image is **refused** every replica job, pre-spend, with
+    reason `job-image-replicas-unsupported`. One rule underlies both — an image that declares nothing gets
+    no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
+    `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
+    any more than `forges` can.
   - User: non-root
   - **`--pull=never`.** `docker run` defaults to `--pull=missing`, which makes an unrecognised image name a
     **registry fetch**: a typo in the operator's image config would pull and execute a stranger's image under
@@ -1160,14 +1175,14 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>" } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
-               "image": "<optional>" } },
+               "image": "<optional>", "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>", "packages": <optional boolean>,
-               "image": "<optional>" } },
+               "image": "<optional>", "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "pull_request", "action": ["labeled"|"opened"|"synchronize"|"reopened", ...],
               "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
-               "image": "<optional>" } } ] }
+               "image": "<optional>", "replicas": <optional int 2..3; github only> } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`) `⟹ run.kind ∈ {"github", "gitlab"}` — a forge
@@ -1265,6 +1280,41 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   a settings-overlay key, so `dispatch_set` cannot repoint the fleet. A `PI_JOB_IMAGE_ALLOWLIST` was
   considered and rejected — see `DES-PER-TRIGGER-JOB-IMAGE`. Naming an image is an operator edit to the
   reviewed file.
+- **`run.replicas` (github `label`/`comment`/`pull_request` only, optional integer `2..3`) — a fanout
+  count, and the only field in this file that MULTIPLIES SPEND** (`REQ-REPLICA-RUNS`). Absent = today: one
+  delivery, one job, one branch, one pull request, and `data` byte-identical to the pre-feature shape.
+  Present = the receiver enqueues exactly that many independent jobs from the one delivery, each carrying
+  its own 1-based `replica` index. Every layer that would otherwise collapse them back to one is given the
+  index: the jobId (`gh-<guid>-r<i>`), the semantic dedup key (`repo#n:flow:r<i>`), the minted branch
+  (`pi/issue-<n>-r<i>`), the PR title marker, and the run record.
+  **Four refusals, each for its own reason, all fail-loud at load in both services.** A **`kind: "local"`
+  (cron) trigger** is refused because a local job's `/workspace` *is* the operator's folder, bind-mounted
+  read-write and edited in place — two replicas would edit one working tree with no gate and no undo,
+  where a forge job gets its own `mkdtemp`'d clone. A **non-`github` forge** is refused as *not yet
+  covered* rather than impossible: every forge mints its branch through the same `issueBranch`, so this is
+  a gap to close. A value outside `2..3` or not an integer is refused, and `1` is refused **rather than
+  accepted-and-ignored** — a one-member replica set is a field that does nothing, and a field that does
+  nothing is one an operator sets and then trusts. `3` is the ceiling because `PI_CONCURRENCY` defaults to
+  3, so a fourth replica would queue rather than race, promising a comparison the deployment cannot
+  deliver. Finally, **`run.replicas` beside `run.resume: true`** is refused, naming both fields: a resumed
+  run continues one lineage and replicas exist to fork it, and this refusal is what lets `session-key.mjs`
+  keep deriving its key from the unsuffixed branch — without it every replica of one issue resolves the
+  **same** key, sharing a transcript and contending for the store's one-writer lock.
+  **The semantic dedup window still does its job**, and the distinction is the delicate part: the key
+  gains `:r<i>` **only when a replica is set**, so re-deliveries of *each* replica still coalesce inside
+  the 10-minute TTL, replicas never coalesce against *each other*, and an unflagged job's key is the same
+  string it has always been. Distinct jobIds alone would not have been enough — duplicate `queue.add` under
+  a taken id is *silently ignored*, so the second replica would simply vanish with no error surface.
+  **Budget is untouched and that is the feature, not a gap.** N replicas make N honest reservations, each
+  before its own tokens in its own processor (`CONST-BUDGET-BEFORE-TOKENS`), so the daily/weekly/monthly
+  caps remain the ceiling and simply divide by N.
+  **A named image must declare it.** `dev.pi-dispatch.capabilities` is checked pre-spend for replica jobs
+  only; an image that does not name `replicas` is refused with `job-image-replicas-unsupported`
+  (`INT-CONTAINER-RUNTIME-CONTRACT`).
+  **There is deliberately no model-callable path to this field either.**
+  `dispatch_trigger_add`/`_edit` carry no `replicas` parameter, for a sharper version of the reason they
+  carry no `image` one: a spend multiplier is plainly a capability the model would *gain*. It is a file
+  edit, and the panel displays it without offering a key that sets it.
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
   owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
@@ -1309,6 +1359,16 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `INT-CONTAINER-RUNTIME-CONTRACT`), so two triggers naming two images do not have identical container
   environments and never could. That is a property of the feature, not a defect, and it is stated here so
   nobody reads the byte-match clause as covering it.
+  The byte-match admits `replicas` on the same terms: it stays **absent** when the trigger omits it, so an
+  unflagged trigger's `data` **and its semantic dedup id** are byte-identical to the pre-`replicas` shape.
+  Given `run.replicas` on a `cron` trigger, on a `gitlab`/`forgejo`/`azure` trigger, beside
+  `run.resume: true`, or with a value that is not an integer in `2..3` (including `1` and `4`), when the
+  config loads, then **both services throw** and the message names the field and the reason. Given
+  `run.replicas: 2` on a github label trigger and one matching delivery, when the receiver accepts it, then
+  **two** jobs are enqueued with jobIds `gh-<guid>-r1`/`-r2` and dedup ids `repo#n:flow:r1`/`:r2`, and a
+  redelivery of that same GUID enqueues **nothing further**. Given a failure enqueueing replica *k*, then
+  the receiver answers **503** with replicas `1..k-1` already queued — the retry converges on exactly *n*
+  jobs, never more, because the queued ones dedup on their own now-taken ids.
 
 ## INT-PI-PACKAGES-FILE-CONTRACT
 
@@ -1435,7 +1495,7 @@ worker reads.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -1447,6 +1507,8 @@ worker reads.
     "parentJobId": "<job id: same id-space as jobId>" | null,
     "chainDepth":  <int> | null,
     "chainRefused": <int> | null,   // count of chain requests refused on this parent; 0 = none
+    "replica":  <int> | null,       // this job's 1-based index within its replica set; null = an ordinary run
+    "replicas": <int> | null,       // the set size, so `r2` is legible without finding the sibling row
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
                  "reason": "<fixed enum: resumed|absent|expired|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
@@ -1481,7 +1543,13 @@ worker reads.
   the collector returns a running `refused` count, and the record stores it verbatim (`0` = none), so the runs
   view can surface "2 refused" rather than a bare yes/no. The `reason` enum is **untouched**: a chain refusal is
   **pre-enqueue of the child**, so there is no child record and no new terminal reason — `chainRefused` is
-  a separate count on the **parent**, never an enum value. The `tokens` field is **additive and nullable**
+  a separate count on the **parent**, never an enum value. The replica fields — `replica`, `replicas`
+  (`REQ-REPLICA-RUNS`) — are **additive and nullable on the chain fields' precedent**, explicit literals
+  read from the job's own `data` by the same no-spread `buildRecord`. They may be here at all because they
+  are **integers**: this record's PII-free-by-construction property rests on it holding no attacker-chosen
+  string, and a host-assigned index is not one. The **branch name they imply is deliberately absent**, for
+  the same reason `session` omits its key and branch. Without these two fields, two records on one target
+  read as an accidental double-run rather than as the pair an operator asked for. The `tokens` field is **additive and nullable**
   in exactly the same way — an explicit no-spread literal of the runner's per-job usage totals
   (`REQ-TOKEN-ACCOUNTING-AND-CAPS`), or `null` when the container died before emitting the runner `exit`
   line. It is PII-free by construction: integer token counts and a numeric cost only, no
@@ -1705,6 +1773,7 @@ worker reads.
 
 | Date | Change |
 |---|---|
+| 2026-08-01 | Replica runs (issue #56). **INT-TRIGGERS-FILE-CONTRACT** amended with **`run.replicas`** (github `label`/`comment`/`pull_request` only, integer `2..3`) — the only field in this file that MULTIPLIES SPEND, so every refusal is spelled out with its own reason rather than as one range check: a `local`/cron trigger is refused because its `/workspace` IS the operator's folder, bind-mounted rw, where a forge job gets its own `mkdtemp`'d clone; a non-github forge is refused as *not yet covered* rather than impossible, since every forge mints its branch through the same `issueBranch`; `1` is refused rather than accepted-and-ignored, because a one-member replica set is a field that does nothing and *accepted-and-ignored is how an operator comes to trust one that does*; `3` is the ceiling because `PI_CONCURRENCY` defaults to 3 and a fourth replica would queue rather than race; and `run.resume: true` is refused alongside, naming both fields, because that refusal is the ONLY reason `session-key.mjs` may keep deriving from the unsuffixed branch. The delicate half is recorded explicitly: the **semantic dedup key gains `:r<i>` only when a replica is set**, so re-deliveries of each replica still coalesce while replicas never coalesce against each other — and distinct job ids alone would NOT have sufficed, since a duplicate `queue.add` under a taken id is *silently ignored* and the second replica would vanish with no error surface. Acceptance gains the byte-match clause for `data` **and the dedup id**, the four load refusals, the two-jobs-one-delivery clause, and the 503-partial-failure clause (the retry converges on exactly *n* jobs because the queued ones dedup on their own now-taken ids). **INT-RUN-HISTORY-FILE-CONTRACT** amended: `replica`/`replicas`, additive and nullable **on the chain fields' precedent**, and the entry states WHY they are admissible at all — they are host-assigned INTEGERS, so the record's PII-free-by-construction property is untouched, and the branch name they imply is deliberately absent for the same reason `session` omits its key. The `reason` enum gains one token, `job-image-replicas-unsupported`. **INT-CONTAINER-RUNTIME-CONTRACT** amended: `dev.pi-dispatch.capabilities` joins the conformance checklist, and its **polarity is the OPPOSITE of `dev.pi-dispatch.forges`** — stated on the record because that asymmetry reads as a bug later. `forges` is an EXCLUSION list, so no claim excludes nothing; `capabilities` is an INCLUSION list, so no claim includes nothing and an unlabelled image is refused every replica job. The failure it prevents is the quiet one this list exists for: a pre-feature image bakes a `HARD_RULES.md` naming `pi/issue-<n>` as a SYSTEM rule, which overrides the user prompt naming `-r2`, so both replicas converge on one branch, nothing errors, and the operator pays twice for one pull request. `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so it cannot lie any more than `forges` can. **INT-CONTAINER-JOB-INPUTS** and **INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked, and the check is the point**: `event.json` is a deliberate literal of the webhook's own body plus one decision record, and an execution knob is not a fact about the delivery — the agent learns its index from the prompt and `PI_JOB_ID` already ends `-r2`, so nothing there needed to move. Recorded as a rejected alternative in `DES-REPLICA-INDEX-REACHES-THE-BRANCH`, not as an oversight. **INT-OUTBOX-CONTRACT UNCHANGED, checked**: its `local`-only guard already closes chain fanout, and a replica is always a github job. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked**: a replica job can never carry `run.resume`, so no replica reads or writes a transcript. |
 | 2026-08-01 | Added **`INT-SANDBOX-CONTRACT`** (issue #55, `REQ-RESURRECTABLE-SANDBOX`) — the operator-session container shape, plus the retained-directory layout and its manifest. **A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, not an amendment to it**, and the reasoning is the same one `INT-GITLAB-PAYLOAD-SUBSET` recorded: IDs are permanent addresses, and a container an operator opens with no agent in it is a different object, not more of the job one. That entry is **UNCHANGED, and was checked rather than forgotten** — its `No TTY (-it absent)` line still describes every container the harness launches, which is precisely why the new shape needed its own address instead of a qualifier on that one. Three decisions written down because a later reader would otherwise re-litigate them: the sandbox argv comes from `buildDockerRunArgs` through the previously-unused `extraFlags` seam, so the isolation flags are inherited **by construction** rather than re-listed; the retained-directory manifest is a **separate file from the run-history sidecar**, because `INT-RUN-HISTORY-FILE-CONTRACT`'s PII-free-by-construction property is what lets the admin extension feed those records to a model and this one holds a host path (that entry likewise **UNCHANGED and checked**); and expiry reads the manifest's `createdAt` rather than mtime, inverting `makeLogReaper`'s documented "mtime is the authority" for the one case where it fails — an operator working inside a sandbox moves mtime, so the window would never close. `INT-SESSION-STORE-CONTRACT` **UNCHANGED, and checked**: the per-job `/session` copy is deleted **before** retention, so no transcript ever enters a directory whose lifetime `--pin` can extend. |
 | 2026-07-28 | **The pi-normal discovery posture** (`CONST-NO-CONTEXT-FILES-MANDATORY`, amended in the same change). **INT-SDK-SESSION-OPTIONS**: the contract block showed all three suppression flags `true` and was two flags and two options behind the runner — it now mirrors the shipped loader (`noContextFiles: false`, `noExtensions: false`, `noSkills: true`, the `settingsManager`, `extensionsOverride`, and the `outboxProtocol` entry in `appendSystemPromptOverride` that a local job's `/outbox` mount adds). Trap **(c)** rewritten from "`noContextFiles: true` is the SDK equivalent of `-nc`, and it is OFF BY DEFAULT" to the amended posture, keeping the point that the value is written out **because** it is the decision on the record, and naming the inverted trap it leaves (the loader is not forgiving elsewhere). Trap **(f)** rewritten and this is the correction worth reading twice: it said "Project trust is never granted, and is not needed", which conflated *we never call `resolveProjectTrust`* (true) with *the project is untrusted* (false — `SettingsManager.fromStorage` takes `options.projectTrusted ?? true` and `inMemory` forwards no options). The distinction was **inert** while both discovery flags were `true` and is now **load-bearing**: that default is exactly what makes `addAutoDiscoveredResources`' `if (projectTrusted)` branch load `/workspace/.pi/extensions`, so if a future pi flips it, repo extensions stop loading **silently** — which is why the loader tests pin the outcome (the factory ran) and never the flag. Trap **(e)** flagged as MORE reachable, not historical. Two new traps: **(j)** the `extensionsOverride` recursion guard — two signals (entry-NAME pattern, and the `^dispatch_` TOOL-SURFACE check that actually catches this repo's `.pi/extensions/dispatch.ts`), applied before the loader stores the set so a dropped extension registers no tool and receives no event, with the honest limits recorded (the factory has already run; a repo's own `dispatch_*` tool is lost, logged and rename-able; a renamed re-export under other tool names is out of reach); **(k)** why `noSkills` STAYS `true` — mechanical, not caution: discovery double-registers every repo skill under `/workspace/.pi/skills` ahead of `additionalSkillPaths` and first-path-wins demotes the pinned-sha read-only mount to a collision diagnostic. Acceptance inverted to match (the `AGENTS.md` sentinel must now be **present** in `getAgentsFiles()` and **absent** from the append block), and a pinned-artifact evidence block added for the trust default and the two merge branches. **INT-CONTAINER-JOB-INPUTS**: a new bullet for what the container now reads from `/workspace` (`AGENTS.md`, `.pi/extensions`) and why neither is a `/job` input; the "why materialise" rationale re-grounded — it had claimed the checkout "for a PR-triggered job may be a fork", which `prepare-github.mjs` contradicts (always the base repo's default-branch sha, detached), so the surviving reasons are `:ro` untamperability and symlink-safety, both independent of trust. **INT-TRIGGERS-FILE-CONTRACT**: `run.packages` inverted to an **opt-OUT** (absent or `true` load; only `false` withholds), recording that the strictness which used to live in the worker's `=== true` moved to `parseTriggers`' load-time boolean validation, and that the damaging misreading flipped from a truthy `"true"` arming a trigger to a `"false"` string that looks like an opt-out and is not one. |
 | 2026-07-28 | **Corrected INT-SDK-SESSION-OPTIONS trap (g)**, which the row below stated as a flat, unconditional fact ("pi-ai is installed TWICE"). It is not unconditional — it is a property of the **install**, not of pi. The dual layout appears wherever the **worker's** dependencies are installed as well (a dev checkout, the contract-tests job), because the hoisted copy IS the worker's declared dependency, and that layout is what makes a bare specifier bind the wrong registry and meter nothing while reporting success. The **job image** installs the **runner's** dependencies only (`image/runner/package.json` declares `@earendil-works/pi-coding-agent` and `@playwright/cli`, never pi-ai), so there the nested copy is the ONLY copy and the same bare specifier does not resolve at all — `ERR_MODULE_NOT_FOUND`, not a wrong binding. The trap now leads with the invariant that holds in BOTH and is the thing worth remembering: **never reach pi-ai by bare specifier** — register through `modelRegistry.registerProvider` and let the **runtime mutation probe** decide which module object the registry actually writes to — and records that `resolvePiAiCompat` wraps **both** lookups in `tryResolve` for exactly this reason, so an unresolvable candidate is skipped rather than thrown and one implementation is correct in both environments. Found by the `image` CI job, whose pi-ai step asserted the dual layout *inside the container* and failed there while the code it was guarding was correct in both places; that step now runs `resolvePiAiCompat` inside the built image and asserts the NESTED copy is offered first with the compat surface the probe and the wrapper need, and the dual-copy fact stays pinned by `image/runner/test/pinned-api.test.mjs` in the contract-tests job, which is the environment where it is true. |
