@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/banner.png?v=0.4.0" alt="pi-dispatch — run the pi coding agent as a self-hosted service" width="880">
+  <img src="docs/images/banner.png?v=0.5.0" alt="pi-dispatch — run the pi coding agent as a self-hosted service" width="880">
 </p>
 
 # pi-dispatch
@@ -8,9 +8,11 @@
 cron schedule, or by a GitHub or GitLab issue, comment or pull/merge request — in a container you control, with a durable queue, a
 spend cap, and a live admin panel.**
 
-![The /dispatch dashboard overlay — theme-colored: live queue state, day/week/month spend meters + a daily token counter, the unified triggers pane (cron, label, comment, pull_request — selectable and editable), and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.4.0)
+![The /dispatch dashboard overlay — theme-colored: live queue state, day/week/month spend meters + a daily token counter, the unified triggers pane (cron, label, comment, pull_request — selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.5.0)
 
-![Transcript of /dispatch status, runs, and triggers — queue counts, the run-history table with per-job token and cost accounting, and the unified {on,run} triggers list](docs/images/dispatch-commands.svg?v=0.4.0)
+![The COSTS view — verdict-first cost analytics: per-plan SAVING/LOSING verdicts against API rates, a daily spend sparkline, per-flow spend with API-equivalents, subscription amortization with peak-window facts, and a what-if that re-prices a flow under another model — every estimate visibly marked](docs/images/costs-view.svg?v=0.5.0)
+
+![Transcript of /dispatch status, runs, and triggers — queue counts, the run-history table with per-job token and cost accounting, and the unified {on,run} triggers list](docs/images/dispatch-commands.svg?v=0.5.0)
 
 pi has no job queue, no concurrency control, no spend limit, and — by its own README — no permission
 system. **pi-dispatch is exactly that missing operational layer, and nothing else.**
@@ -19,6 +21,10 @@ system. **pi-dispatch is exactly that missing operational layer, and nothing els
   mounted read-only — pi's missing permission system, enforced by Docker.
 - **Spend is bounded before a container starts** — a per-job turn budget and a daily cap, checked before
   a single token is spent.
+- **And analyzed after.** Every run records which models spent what, and the dashboard's **COSTS view**
+  turns that into verdicts: spend per flow/model/day, what a declared subscription actually saves
+  against API rates, and what a flow *would* cost on another model — with every estimate visibly marked
+  as one ([`docs/costs.md`](docs/costs.md)).
 - **The image is yours to shape — per deployment, or per trigger.** Bake a project's toolchain into
   [`image/Dockerfile`](image/Dockerfile); it ships **Playwright + Chromium**, so a flow can build a frontend,
   screenshot it, and iterate on the rendered result — the edge over a fixed hosted routine or `/loop`. A
@@ -323,6 +329,13 @@ capture the container's raw stdout/stderr to `logs/<jobId>.log`; this is **opt-i
 because that raw stream can contain issue and comment text (PII). Both files stay host-side, are never
 mounted into the job container, and are gitignored. A boot-time sweep prunes anything older than
 `PI_LOG_RETENTION_DAYS` (default 30; `0` keeps them forever).
+
+Each record also carries a per-(provider, model) **usage ledger** — which models spent what, cache split
+included — which is what the dashboard's COSTS view (`c`), `/dispatch costs`, and the what-if re-pricing
+fold over. Declare what your subscriptions cost in `subscriptions.json` (see
+`subscriptions.example.json`) and the screen shows whether they are actually saving money; leave it out
+and zero-rate runs honestly show `$0 (unrated)`, never "free". The whole story is in
+[`docs/costs.md`](docs/costs.md).
 
 ## Re-open a finished run
 

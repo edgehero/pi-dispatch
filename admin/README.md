@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=0.4.0" alt="pi-dispatch — run the pi coding agent as a self-hosted service" width="880">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=0.5.0" alt="pi-dispatch — run the pi coding agent as a self-hosted service" width="880">
 </p>
 
 # pi-dispatch — run the pi coding agent as a self-hosted service
@@ -40,10 +40,15 @@ Every trigger produces the same job, through the same path — one queue, one co
 This extension puts a live TUI over the whole deployment in one command:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=0.4.0" alt="The /dispatch panel: status, spend meters, triggers, runs, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=0.5.0" alt="The /dispatch panel: status, spend meters, triggers, runs, and settings" width="820">
 </p>
 
 - **Status & spend.** Queue and worker state, day/week/month **spend meters** + a daily token counter, and a run-history table with per-job token & cost.
+- **Costs, analyzed honestly.** A verdict-first **COSTS view** (`c`): spend per flow/model/day over the retention window, what each declared subscription actually saves against API rates, amortized $/run, and a keyboard **what-if** that re-prices a flow's recorded token profile under another model. Every dollar carries its class — a plan-covered run never renders as $0.00, an estimate is always marked `~ est.`, and a quota no vendor discloses never grows an invented burn-down. Also plain: `/dispatch costs [7d|30d|mtd]` and a `dispatch_costs` tool whose JSON marks every value the same way.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/costs-view.png?v=0.5.0" alt="The COSTS view: per-plan verdicts against API rates, a daily spend sparkline, per-flow spend with API-equivalents, and subscription amortization" width="820">
+</p>
 - **Triggers, editable live.** cron / label / comment / pull_request, with colored drill-ins showing *what fires* each one, *what it runs*, and its *trust model* — added, edited, and deleted without a restart.
 - **You can see which triggers run third-party code.** A trigger loads the pi packages you pinned into your global overlay **unless** it carries `run.packages: false`, so the ones that do get a **`[packages]`** badge in the trigger list, and their **trust model** names the staged `name@version` set plus the one-line consequence — third-party code, on adversarial input, with open network egress. Declining is deliberately *not* a panel action: it stays an edit to the reviewed `triggers.json`, which neither the console nor a model-callable tool will make for you.
 - **You can see which image each trigger runs.** A trigger may name its own container image with `run.image` (absent = the deployment default), and the trigger list shows the tag while the drill-in states it either way — because which image a job runs *is* which code it runs. Like `packages`, it is display-only: naming an image stays an edit to the reviewed `triggers.json`, which neither the console nor a model-callable tool will make for you.
@@ -57,7 +62,7 @@ This extension puts a live TUI over the whole deployment in one command:
 pi install npm:@edgehero/pi-dispatch-admin
 ```
 
-Then run pi and open `/dispatch`. Point it at your deployment with `VALKEY_URL` / `PI_LOGS_DIR` / `PI_SETTINGS_FILE` / `PI_TRIGGERS_FILE` / `PI_PAUSE_WINDOWS_FILE` / `PI_GLOBAL_PI_DIR` — the same values your worker uses. It reads that deployment's queue and run history; on its own it will just say "queue unreachable."
+Then run pi and open `/dispatch`. Point it at your deployment with `VALKEY_URL` / `PI_LOGS_DIR` / `PI_SETTINGS_FILE` / `PI_TRIGGERS_FILE` / `PI_PAUSE_WINDOWS_FILE` / `PI_SUBSCRIPTIONS_FILE` / `PI_GLOBAL_PI_DIR` — the same values your worker uses. It reads that deployment's queue and run history; on its own it will just say "queue unreachable."
 
 ## Get the whole thing
 
