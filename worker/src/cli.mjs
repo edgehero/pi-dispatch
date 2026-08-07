@@ -15,8 +15,8 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            every write shown first and individually consented — no --yes here
                            (--webhook-url <URL> | --no-webhook) [--org <org>] [--name <appName>]
   pi-dispatch import-pi    stage your host pi setup (models/skills/persona) into a global overlay
-                           [--no-extensions] [--with-packages] [--packages-file <path>]
-                           [--from <agentDir>] [--to <overlayDir>]
+                           [--no-extensions] [--with-packages] [--no-host-packages]
+                           [--packages-file <path>] [--from <agentDir>] [--to <overlayDir>]
 
   pi-dispatch run <folder> --task "<what to do>" [--flow <name>]
                            [--provider <p>] [--model <m>] [--max-turns <n>] [--image <ref>] [--force]

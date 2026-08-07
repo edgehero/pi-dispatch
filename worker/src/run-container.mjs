@@ -33,7 +33,10 @@ export function makeRunContainer({
 	spawnFn = spawn,
 	globalPiDir = null, // REQ-GLOBAL-PI-OVERLAY: operator's global pi overlay dir, mounted :ro; null = off
 	allowGlobalExtensions = true, // REQ-GLOBAL-PI-OVERLAY: the staged overlay's extensions load unless PI_GLOBAL_ALLOW_EXTENSIONS=0
-	packagePaths = [], // REQ-GLOBAL-PI-OVERLAY: container paths of the operator-staged packages, resolved once at boot
+	// REQ-GLOBAL-PI-OVERLAY: container paths of the operator-staged packages. An array, or a RESOLVER called
+	// once per job (issue #102): the wired worker passes a resolver so a re-stage lands on the next job with
+	// no restart, while the array form stays valid for every caller that has a fixed set.
+	packagePaths = [],
 	forwardEnv = [],
 	authFromPi = false, // fall back to ~/.pi/agent/auth.json for the provider key when the env has none
 	forgeHosts = {}, // per-forge self-hosted instance URLs, so a forge CLI in the container talks to the right one
@@ -63,7 +66,9 @@ export function makeRunContainer({
 			// (INT-TRIGGERS-FILE-CONTRACT). The strictness that used to live in this `=== true` did not
 			// disappear, it moved: parseTriggers refuses any non-boolean run.packages fail-loud at load, so a
 			// hand-edited string "false" never becomes job data this comparison could misread as an opt-out.
-			packagePaths: job.packages === false ? [] : packagePaths,
+			// The opt-out short-circuits BEFORE the resolver runs: a trigger that withheld the staged set has no
+			// reason to make the worker read the manifest on its behalf.
+			packagePaths: job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths,
 			forwardEnv, // extra host var names to forward (e.g. a custom provider's key)
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript.
 			// The constant is imported rather than re-typed so the mount below and this variable name one

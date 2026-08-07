@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -448,7 +448,10 @@ test("staged packages: an overlay with no packages.json boots to packagePaths []
 
 		assert.ok(captured, "an unreadable/absent manifest must not block boot -- doctor is what fails loud on the mismatch");
 		assert.equal(runContainerCalls.length, 1, "the container factory is constructed exactly once, at boot");
-		assert.deepEqual(runContainerCalls[0].packagePaths, [], "an absent manifest resolves to the empty staged set, so every job stays unflagged");
+		// A resolver since issue #102, so a re-stage lands on the next job without a restart. The factory is
+		// still built once (asserted above); only the value it reads became a call.
+		assert.equal(typeof runContainerCalls[0].packagePaths, "function", "the staged set reaches the factory as a per-job resolver");
+		assert.deepEqual(runContainerCalls[0].packagePaths(), [], "an absent manifest resolves to the empty staged set, so every job stays unflagged");
 		assert.equal(runContainerCalls[0].globalPiDir, overlay, "the overlay itself is still mounted -- only the staged packages are missing");
 
 		const absent = logs.find((l) => l.event === "packages_manifest_absent");
@@ -462,8 +465,84 @@ test("staged packages: an overlay with no packages.json boots to packagePaths []
 test("staged packages: no overlay configured means no manifest read and no packages_manifest_absent noise", { skip }, async () => {
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
 	const { logs, runContainerCalls } = await runStart({ makeAuth, makeHost: () => fakeHost() });
-	assert.deepEqual(runContainerCalls[0].packagePaths, [], "no overlay -> the empty staged set");
+	assert.deepEqual(runContainerCalls[0].packagePaths(), [], "no overlay -> the empty staged set");
 	assert.ok(!logs.some((l) => l.event === "packages_manifest_absent"), "a deployment with no overlay at all has nothing to warn about");
+});
+
+/**
+ * Run `fn` with stdout captured, returning its value and the parsed log lines. runStart's own capture ends
+ * when it returns, and the per-job resolver is called AFTER that, so its lines need their own window.
+ */
+function whileCapturingLogs(fn) {
+	const origWrite = process.stdout.write;
+	const lines = [];
+	process.stdout.write = (chunk) => (lines.push(String(chunk)), true);
+	let value;
+	try {
+		value = fn();
+	} finally {
+		process.stdout.write = origWrite;
+	}
+	const logs = lines.flatMap((l) =>
+		l
+			.split("\n")
+			.filter(Boolean)
+			.map((one) => {
+				try {
+					return JSON.parse(one);
+				} catch {
+					return { raw: one };
+				}
+			}),
+	);
+	return { value, logs };
+}
+
+// The reason the boot-time read became a per-job one (issue #102): `pi install` then `import-pi` is now a
+// routine act, so a re-stage that only lands after a restart is a stale set nobody asked for.
+test("staged packages: a re-stage after boot reaches the NEXT job, with no worker restart", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const overlay = mkdtempSync(join(tmpdir(), "pi-global-"));
+	try {
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), [], "nothing staged at boot");
+
+		mkdirSync(join(overlay, "packages"), { recursive: true });
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] }));
+
+		const first = whileCapturingLogs(() => resolve());
+		assert.deepEqual(first.value, ["/opt/pi-global/packages/a__b"], "the next job sees what the stager just wrote");
+		assert.equal(first.logs.filter((l) => l.event === "packages_stage_changed").length, 1, "the change is logged");
+		const second = whileCapturingLogs(() => resolve());
+		assert.deepEqual(second.value, ["/opt/pi-global/packages/a__b"]);
+		assert.equal(second.logs.filter((l) => l.event === "packages_stage_changed").length, 0, "logged once per CHANGE, not once per job");
+	} finally {
+		rmSync(overlay, { recursive: true, force: true });
+	}
+});
+
+// The transient-fault hole this resolver could have opened, closed. Degrading to [] would emit no
+// PI_PACKAGES at all, so the runner's assertPackagePathsExist would have nothing to refuse and the job
+// would run WITHOUT its tools and still exit 0 -- the silent no-op, arrived at by a different road.
+test("staged packages: a manifest that goes unreadable after boot keeps the last-known-good set and says so", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const overlay = mkdtempSync(join(tmpdir(), "pi-global-"));
+	try {
+		mkdirSync(join(overlay, "packages"), { recursive: true });
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] }));
+
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), ["/opt/pi-global/packages/a__b"]);
+
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		const torn = whileCapturingLogs(() => resolve());
+		assert.deepEqual(torn.value, ["/opt/pi-global/packages/a__b"], "a torn read keeps the last set rather than silently running toolless");
+		assert.ok(torn.logs.some((l) => l.event === "packages_manifest_unreadable"), "and it is never silent");
+	} finally {
+		rmSync(overlay, { recursive: true, force: true });
+	}
 });
 
 test("the image preflight and the container factory are wired from the SAME config.jobImage", { skip }, async () => {

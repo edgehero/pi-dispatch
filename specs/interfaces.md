@@ -1403,6 +1403,13 @@ host-side stager materialises them into the global overlay and writes a receipt;
 read that receipt. Three consumers, one declaration, and the file the operator edits is never the file the
 worker reads.
 
+Since issue #102 this file is the **override-and-addition layer**, not the only source: `--with-packages`
+also discovers what the operator installed with `pi install`, from pi's own `settings.json`, and stages it
+at the exact version on disk. A declared entry still wins by name, so pinning older than the host runs stays
+possible. `--no-host-packages` restores the declared-only behaviour exactly. Everything below applies
+unchanged to a discovered entry: discovery adds **candidates, never exemptions**, and reaches this same
+validator rather than a second copy of it.
+
 - **Contract**:
   ```
   pi-packages.json  (path via `--packages-file <path>`, else PI_PACKAGES_FILE, else <cwd>/pi-packages.json;
@@ -1475,7 +1482,8 @@ worker reads.
     <PI_GLOBAL_PI_DIR>/packages/<dir>/package.json        the package, self-contained
     <PI_GLOBAL_PI_DIR>/packages/<dir>/node_modules/**     its OWN deps — no install, no network at job time
     <PI_GLOBAL_PI_DIR>/packages/packages.json             the stage manifest (the receipt)
-    { "stagedAt": "<ISO-8601>", "packages": [ { "name", "version", "dir" } ] }
+    { "stagedAt": "<ISO-8601>",
+      "packages": [ { "name", "version", "dir", "from": "pi-packages" | "host" } ] }
     ```
     `packages.json` is **the read model** for everything downstream: the worker turns it into container
     paths `/opt/pi-global/packages/<dir>` (built with template literals, never `path.join` — the worker may
@@ -1484,6 +1492,21 @@ worker reads.
     manifest must degrade to "no staged packages" rather than crash the worker mid-queue, and its entries
     are **re-validated on the way in** because the file is a host artifact an operator may have hand-edited
     between stage time and job time.
+    `from` is provenance (issue #102): `"pi-packages"` for an entry the operator declared, `"host"` for one
+    discovered in their pi setup. It is a **CLOSED enum with a default, never a pass-through** — anything
+    that is not exactly `"host"` reads as `"pi-packages"`, so a hand-edited receipt cannot inject a string
+    that reaches a printed `doctor` line. Both compatibility directions are covered by that one rule: a
+    receipt written before #102 carries no `from` and correctly reads as declared, and an older worker
+    reading a newer receipt drops the field like any other unknown key. The receipt deliberately records
+    **no install path** — it is bind-mounted into every job container, and provenance is the fact `doctor`
+    needs while a path off the operator's machine is not.
+    The receipt is re-read **at each job start**, not once at boot (changed in issue #102). The original
+    boot read was right while the staged set only changed when the operator edited a reviewed file;
+    discovery makes `pi install` then re-stage a routine act, and under a boot read a re-stage that DROPS a
+    package makes every subsequent job refuse at container start (exit `2`) with budget already reserved,
+    burning a daily-cap slot until someone restarts the worker. A failed read keeps the **last known good**
+    set and logs, never degrading to none: an empty set emits no `PI_PACKAGES` at all, so the runner's
+    path assertion would have nothing to refuse and the job would run without its tools and still exit `0`.
 - **Why**: Two directions, two error policies, and the split is the whole point. `pi-packages.json` is the
   **operator's** declaration, read once, on the host, by an interactive command — so it fails **loud** and
   names the offending package. `packages.json` is the **stager's receipt**, read on the money path by a
@@ -1972,6 +1995,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-07 | Issue #102: **INT-PI-PACKAGES-FILE-CONTRACT** records that `pi-packages.json` is now the override-and-addition layer rather than the only source (discovery reaches the same validator, so it adds candidates and never exemptions), and that the receipt gained `from` as a CLOSED enum with a default — which covers both compatibility directions at once, since a pre-#102 receipt carries no `from` and reads as declared while an older worker drops it as an unknown key. Also records that the receipt is now read at EACH job start rather than once at boot, why the boot read was right until discovery made re-staging routine, and why a failed read keeps last-known-good instead of degrading to none (an empty set emits no `PI_PACKAGES`, so the runner's path assertion would have nothing to refuse and the job would run toolless on a clean exit 0). **INT-CONTAINER-RUNTIME-CONTRACT, INT-TRIGGERS-FILE-CONTRACT, INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — the mount, `PI_PACKAGES`, `run.packages` and the pre-spend refusal are all untouched; only who fills the manifest, and how often it is read, moved. |
 | 2026-08-04 | Documentation audit fallout (issue #99). **INT-TRIGGERS-FILE-CONTRACT** amended on `run.resume`, which this file had described as carried on **ALL FOUR** kinds for a month while the wiring covered three: `resolveSession` is handed to the forge preparers only, so a cron job with the flag armed staged no transcript, mounted no `/session`, promoted nothing and exited `0` as though it had. That is the flag's own believed-on-while-off inversion reached through the wiring rather than through a truthy `"false"` string, so the fix is `run.replicas`' fix: **refused at load**, worded *not yet covered* rather than impossible, because `session-key.mjs` already derives the local key from the scheduler id and nothing reaches it. Only `true` is refused — `false` and absent still validate and still land in `data` byte-identically, since `false` is the documented default and refusing an operator for writing down present behaviour would also change a shape pinned as byte-identical; the asymmetry with `run.replicas` (which refuses ANY value on cron) is recorded rather than left to read as an oversight, `1` being a no-op flag where `false` is the truth. The same bullet gains the **pre-spend** half, which the triggers file cannot answer by construction: whether a session store exists is deployment state, not file content, so an armed trigger under a deployment with no `PI_SESSIONS_DIR` is refused per delivery and `doctor` keeps the load-time warning. **INT-RUN-HISTORY-FILE-CONTRACT**: the `reason` enum gains one token, **`sessions-dir-unset`**, on `job-image-missing`'s precedent — a policy outcome with `budgetReserved: false`, since it is answered from two values already in hand before the mint, the branch check, the clone, the token-cap read and the budget INCR. Its shape follows `settings-overlay-invalid`'s (`<config artifact>-<its bad state>`) and its words are the spec's own, so the token greps to the text that mandates it. The nested `session.reason` enum's **`disabled`** was audited as unimplemented and is **UNCHANGED, checked**: the runner produces it (`image/runner/src/session.mjs`) whenever no session file is mounted, which is every unarmed job, so the entry was right and the audit finding was wrong. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked**: the store's own no-`sessionsDir` return is now unreachable in a wired worker and kept as the DI-seam backstop, which changes no byte of its contract. |
 | 2026-08-04 | The panel learns to find a deployment built elsewhere (issue #92). Added **INT-DEPLOYMENT-POINTER-CONTRACT**: `<agent dir>/pi-dispatch-deployment.json` (override `PI_DISPATCH_DEPLOYMENT_FILE`), an allowlisted absolute-paths-only env map layered UNDER the operator's env once at extension load — env wins key by key, the worker/receiver never read it, and `PI_DISPATCH_RUN_ROOTS`/credentials in the file have no effect by construction (a pointer that widened the AI-run allowlist would be a second unreviewed door to a gated capability). Deliberate divergence from INT-SUBSCRIPTIONS' loud version refusal, recorded in the entry: a broken/newer pointer degrades to exactly the pre-pointer behavior with a one-line surfaced notice, never a throw — the read-model's never-throw doctrine outranks fail-loud here because the pointer is an availability aid, not a data file. **INT-SUBSCRIPTIONS-FILE-CONTRACT / INT-CONFIG-OVERLAY-CONTRACT UNCHANGED, checked**: the pointer changes how their Locations are *found*, not what the files contain. |
 | 2026-08-02 | Polling producer (issue #81). **INT-WEBHOOK-PAYLOAD-SUBSET** amended: the subset may be synthesized from REST objects by `pi-dispatch-receiver poll` (`DES-GH-POLLING-TRANSPORT`), feeding the same pure `filter()` — parity pinned by dual-form tests; `poll-*` delivery ids share the `gh-` dedup space disjointly; the headers/HMAC row explicitly does not apply to synthesized subsets (no inbound delivery exists — TLS + the operator's credential is the transport trust). **REQ-DEDUP-BY-DELIVERY-GUID UNCHANGED, checked**: poll ids are stable across poller restarts by construction (event id / comment id / PR+head-sha), which is the retry-stability property the REQ demands of any id source. **INT-GITLAB/FORGEJO/AZURE-PAYLOAD-SUBSET UNCHANGED, checked**: polling is GitHub-only in this slice. |

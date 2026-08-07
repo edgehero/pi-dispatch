@@ -10,9 +10,23 @@ function capture() {
 	return { out: (s) => buf.push(s), text: () => buf.join("") };
 }
 
-/** A host ~/.pi/agent fixture with the full surface: safe + secret-bearing + extensions. */
-function hostAgent({ models, withAuth = true, withExtensions = false } = {}) {
+/**
+ * A host ~/.pi/agent fixture with the full surface: safe + secret-bearing + extensions.
+ *
+ * `settings` writes pi's own settings.json (a string writes it verbatim, for the malformed cases) and
+ * `installed` materialises `npm/node_modules/<name>` the way `pi install` would, so discovery has something
+ * real to find (issue #102).
+ */
+function hostAgent({ models, withAuth = true, withExtensions = false, settings, installed = [] } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	if (settings !== undefined) writeFileSync(join(dir, "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings));
+	for (const pkg of installed) {
+		const target = join(dir, "npm", "node_modules", pkg.name);
+		mkdirSync(target, { recursive: true });
+		// `resourceDir: null` means it ships NO pi convention dir, which is how a non-pi package looks.
+		if (pkg.resourceDir !== null) mkdirSync(join(target, pkg.resourceDir ?? "skills"), { recursive: true });
+		writeFileSync(join(target, "package.json"), JSON.stringify({ name: pkg.name, version: pkg.version }));
+	}
 	if (models !== null) writeFileSync(join(dir, "models.json"), models ?? JSON.stringify({ providers: { anthropic: { name: "Anthropic" } } }));
 	mkdirSync(join(dir, "skills", "tidy"), { recursive: true });
 	writeFileSync(join(dir, "skills", "tidy", "SKILL.md"), "---\nname: tidy\n---\nTidy up.\n");
@@ -183,8 +197,8 @@ test("--with-packages stages a pinned package into packages/<dir> and writes the
 
 	const manifest = readManifest(to);
 	assert.deepEqual(manifest.packages, [
-		{ name: PKG, version: "0.1.0", dir: PKG_DIR },
-		{ name: "pi-widgets", version: "1.4.2", dir: "widgets" },
+		{ name: PKG, version: "0.1.0", dir: PKG_DIR, from: "pi-packages" },
+		{ name: "pi-widgets", version: "1.4.2", dir: "widgets", from: "pi-packages" },
 	]);
 	assert.match(manifest.stagedAt, /^\d{4}-\d{2}-\d{2}T/);
 	assert.match(text(), /packages\/.*2 packages -- third-party code, VET THESE/);
@@ -391,11 +405,14 @@ test("a package declaring a postinstall script is staged WITH a warn row (--igno
 	assert.deepEqual(readManifest(to).packages.length, 1);
 });
 
-test("--with-packages fails loud when the packages file is missing", async () => {
+// The refusal is scoped to the declared-only mode now (issue #102): with discovery on, a missing file just
+// means "nothing declared" because settings.packages is the other source. `--no-host-packages` is the mode
+// in which the file IS the only source, so it is the mode in which its absence is still fatal.
+test("--with-packages --no-host-packages fails loud when the packages file is missing", async () => {
 	const to = overlayDir();
 	const { out, text } = capture();
 
-	const code = await run(hostAgent(), to, ["--with-packages", "--packages-file", join(tmpdir(), "nope-pi-packages.json")], out, { exec: npmStub().exec });
+	const code = await run(hostAgent(), to, ["--with-packages", "--no-host-packages", "--packages-file", join(tmpdir(), "nope-pi-packages.json")], out, { exec: npmStub().exec });
 
 	assert.equal(code, 1);
 	assert.match(text(), /needs a packages file/);
@@ -440,4 +457,221 @@ test("findLiteralSecret: catches literal apiKey and auth headers, passes env/com
 	assert.equal(findLiteralSecret({ providers: { p: { headers: { Authorization: "Bearer sk-x" } } } }), "providers.p.headers.Authorization");
 	assert.equal(findLiteralSecret({ providers: { p: { headers: { "Content-Type": "application/json" } } } }), null, "a non-secret header is fine");
 	assert.equal(findLiteralSecret({ providers: {} }), null);
+});
+
+// --- discovery from the operator's own pi setup (issue #102) -------------------------------------------
+//
+// The gap this closes: a package installed with `pi install` never reached a job, and re-running import-pi
+// did not change that. The rule these tests pin is that discovery adds CANDIDATES, never exemptions --
+// every gate the declared path runs still runs on a discovered entry.
+
+const HOST_PKG = "@acme/pi-house-skills";
+
+test("--with-packages stages what pi has installed, at the host's EXACT version, named with its provenance", async () => {
+	const from = hostAgent({ settings: { packages: [`npm:${HOST_PKG}@^1`] }, installed: [{ name: HOST_PKG, version: "1.4.2" }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0);
+	// The source declared a RANGE and the pin came off disk. Capturing rather than inheriting is what keeps
+	// CONST-PI-VERSION-PINNED true through the discovery path.
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].args[1], `${HOST_PKG}@1.4.2`);
+	// The discovery path is a SECOND producer of this argv, so the win32 shell:true safety argument now
+	// rests on it too.
+	assertArgvHasNoPath(calls[0].args, calls[0].options.cwd);
+
+	assert.deepEqual(readManifest(to).packages, [{ name: HOST_PKG, version: "1.4.2", dir: "acme__pi-house-skills", from: "host" }]);
+	assert.match(text(), /^\s+- @acme\/pi-house-skills@1\.4\.2 \(from your pi setup\)$/m, "provenance rides on the name row, so the vetting list says where each came from");
+	assert.match(text(), /re-run with --no-host-packages/, "and the run whose meaning changed names how to get the old one back");
+});
+
+test("an explicit pi-packages.json entry WINS over the discovered one, and the override is printed", async () => {
+	// The reason pi-packages.json survives as a layer: pinning OLDER than the host runs is a legitimate act.
+	const from = hostAgent({ settings: { packages: [`npm:${HOST_PKG}`] }, installed: [{ name: HOST_PKG, version: "2.3.0" }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([{ name: HOST_PKG, version: "2.0.1" }])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 1, "the two are ONE package, not two");
+	assert.equal(calls[0].args[1], `${HOST_PKG}@2.0.1`, "the declared version is the one staged");
+	assert.equal(readManifest(to).packages[0].from, "pi-packages");
+	assert.match(text(), /overrides your pi setup's 2\.3\.0/, "the shadowed host version is stated, since nothing else would ever say so");
+});
+
+test("--no-host-packages stages only what pi-packages.json declares, byte for byte as before", async () => {
+	const from = hostAgent({ settings: { packages: [`npm:${HOST_PKG}`] }, installed: [{ name: HOST_PKG, version: "1.4.2" }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--no-host-packages", "--packages-file", packagesFile([{ name: PKG, version: "0.1.0" }])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].args[1], `${PKG}@0.1.0`);
+	assert.equal(readManifest(to).packages.length, 1);
+	assert.equal(/from your pi setup/.test(text()), false, "the escape hatch restores the old behaviour, output included");
+});
+
+test("a git-sourced host package is skipped with a NAMED reason and never reaches npm", async () => {
+	const from = hostAgent({ settings: { packages: ["git:github.com/acme/pi-thing"] } });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 0, "pi-packages.json pins an npm name plus an exact semver, and a ref is neither");
+	assert.match(text(), /host packages\s+1 skipped -- not staged/);
+	assert.match(text(), /git:github\.com\/acme\/pi-thing \(git source/, "silence here is how an operator concludes auto-import is broken");
+});
+
+test("a host package that contributes no pi resources is named, not staged, and never reaches npm", async () => {
+	const from = hostAgent({ settings: { packages: ["npm:not-a-pi-package"] }, installed: [{ name: "not-a-pi-package", version: "1.0.0", resourceDir: null }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 0);
+	assert.match(text(), /not-a-pi-package \(contributes no pi resources/);
+});
+
+test("a host package pi is not autoloading is skipped; one it partly loads stages WHOLE, with a warning", async () => {
+	// Staging copies a directory, so "the package minus one skill" is not expressible. Say that rather than
+	// pretend the host's filter travelled with it.
+	const from = hostAgent({
+		settings: { packages: [{ source: "npm:off-pkg", autoload: false }, { source: "npm:partial-pkg", autoload: false, skills: ["+skills/keep.md"] }] },
+		installed: [{ name: "off-pkg", version: "1.0.0" }, { name: "partial-pkg", version: "1.0.0" }],
+	});
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 1, "only the partly-loaded one stages");
+	assert.match(text(), /off-pkg \(autoload is off in your pi settings\)/);
+	assert.match(text(), /your pi settings load only part of partial-pkg; the overlay stages ALL of it/);
+});
+
+test("a DISCOVERED admin package is dropped with a reason and the rest of the stage still lands", async () => {
+	// Contrast with the declared case above, which refuses everything: an operator running the panel has the
+	// admin installed, and zeroing their whole overlay refresh over it would be the wrong trade. The block
+	// itself still holds -- it reaches discovery because discovery reuses the declared entry's validator.
+	const from = hostAgent({ settings: { packages: ["npm:pi-dispatch-admin", `npm:${HOST_PKG}`] }, installed: [{ name: "pi-dispatch-admin", version: "0.5.0" }, { name: HOST_PKG, version: "1.4.2" }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0, "a discovery-side refusal is not the operator's config error and must not block their stage");
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].args[1], `${HOST_PKG}@1.4.2`);
+	assert.match(text(), /pi-dispatch-admin.*recursion vector/s);
+	assert.deepEqual(readManifest(to).packages.map((p) => p.name), [HOST_PKG]);
+});
+
+test("--with-packages with NO packages file stages the host's packages instead of refusing", async () => {
+	const from = hostAgent({ settings: { packages: [`npm:${HOST_PKG}`] }, installed: [{ name: HOST_PKG, version: "1.4.2" }] });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", join(tmpdir(), "nope-pi-packages.json")], out, { exec });
+
+	assert.equal(code, 0, "with a second source of entries, a missing file just means nothing was declared");
+	assert.equal(calls.length, 1);
+	assert.equal(/needs a packages file/.test(text()), false);
+});
+
+test("an unreadable settings.json says so and still stages what pi-packages.json declares", async () => {
+	// Exit 0 deliberately: one bad file on the host must not block the models/skills/persona half of the
+	// import, none of which depends on it.
+	const from = hostAgent({ settings: "{ this is not json" });
+	const to = overlayDir();
+	const { exec, calls } = npmStub();
+	const { out, text } = capture();
+
+	const code = await run(from, to, ["--with-packages", "--packages-file", packagesFile([{ name: PKG, version: "0.1.0" }])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 1, "the declared entry is unaffected");
+	assert.match(text(), /settings\.json\s+UNREADABLE/);
+});
+
+// --- the extensions half: an extension disabled in pi used to load in every job ------------------------
+
+/** A host agent whose extensions/ children carry pi's own entry convention (index.js, not .mjs). */
+function hostAgentWithEntries(names, settings) {
+	const dir = hostAgent({ settings });
+	for (const name of names) {
+		mkdirSync(join(dir, "extensions", name), { recursive: true });
+		writeFileSync(join(dir, "extensions", name, "index.js"), "export default () => {};\n");
+	}
+	return dir;
+}
+
+test("an extension disabled in pi is NOT copied, and is reported by omission plus its own row", async () => {
+	const from = hostAgentWithEntries(["live", "retired"], { extensions: ["-extensions/retired/index.js"] });
+	const to = overlayDir();
+	const { out, text } = capture();
+
+	const code = await run(from, to, [], out);
+
+	assert.equal(code, 0);
+	assert.ok(existsSync(join(to, "extensions", "live")), "the live one still travels");
+	assert.equal(existsSync(join(to, "extensions", "retired")), false, "until #102 this ran in every job container");
+	assert.match(text(), /extensions\/\s+1 extension -- these LOAD in every job; VET THESE/, "the count is what is LIVE");
+	assert.match(text(), /^\s+- live$/m);
+	assert.match(text(), /extensions \(off\)\s+1 disabled in your pi settings, not copied/);
+	assert.match(text(), /^\s+- retired$/m);
+});
+
+test("a glob pattern copies everything and SAYS it could not honour it, rather than guessing", async () => {
+	const from = hostAgentWithEntries(["tool"], { extensions: ["!extensions/**"] });
+	const to = overlayDir();
+	const { out, text } = capture();
+
+	const code = await run(from, to, [], out);
+
+	assert.equal(code, 0);
+	assert.ok(existsSync(join(to, "extensions", "tool")), "fail OPEN: never withhold a tool the flows were written against on a guess");
+	assert.match(text(), /cannot evaluate[\s\S]*tool/, "and say which, so the operator can check it themselves");
+});
+
+// --- argv hygiene, which the new flag makes load-bearing ----------------------------------------------
+
+test("an unknown flag is REFUSED, because a typo must not be able to widen what loads", async () => {
+	const { out, text } = capture();
+	// Before discovery a typo was harmless. Now `--no-host-package` (singular) would silently mean
+	// "third-party code you did not expect runs in every job container".
+	const code = await run(hostAgent(), overlayDir(), ["--with-packages", "--no-host-package"], out, { exec: npmStub().exec });
+
+	assert.equal(code, 1);
+	assert.match(text(), /unknown flag "--no-host-package"/);
+	assert.match(text(), /--no-host-packages/, "the error names the accepted spelling");
+});
+
+test("--host-packages is accepted as a no-op, the way --with-extensions is", async () => {
+	const from = hostAgent({ settings: { packages: [`npm:${HOST_PKG}`] }, installed: [{ name: HOST_PKG, version: "1.4.2" }] });
+	const { exec, calls } = npmStub();
+	const { out } = capture();
+
+	const code = await run(from, overlayDir(), ["--with-packages", "--host-packages", "--packages-file", packagesFile([])], out, { exec });
+
+	assert.equal(code, 0);
+	assert.equal(calls.length, 1);
 });

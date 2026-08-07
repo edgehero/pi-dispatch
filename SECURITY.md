@@ -400,7 +400,8 @@ Stated openly rather than discovered later:
   lists every image your triggers name and warns when one's entrypoint does not look like the runner — that
   is presence and a hint, never conformance.
 - **Staged pi packages are third-party code you are choosing to run against adversarial input.** They live
-  inside the same overlay and pass four gates: an **exact** version in `pi-packages.json` (a floating
+  inside the same overlay and pass four gates: an **exact** version, either declared in `pi-packages.json` or
+  captured from what your host has installed (a floating
   range turns a silent upstream release into every queued job becoming a no-op that still reports success),
   host-side staging by `import-pi --with-packages`, a **per-trigger** `"packages"` switch — an **opt-OUT**,
   so once staged they load for every job and `"packages": false` on a trigger is how one flow declines
@@ -415,6 +416,23 @@ Stated openly rather than discovered later:
   the same recursion block the admin extension gets. Jobs run with `PI_OFFLINE=1` set unconditionally, so a
   package source can never become a network install from inside a container. Vet each one and pin it; you
   are extending your own trust boundary to whoever publishes it.
+  Since issue #102 `--with-packages` also **discovers** the packages you installed with `pi install`, which
+  widens what one command stages. It does not widen what is *permitted*: every gate above runs on a
+  discovered package exactly as it does on a declared one, discovery only ever adds candidates, and the
+  printed list names each one with where it came from. Two consequences are worth stating plainly. The
+  review surface moved: a version used to change only when you edited `pi-packages.json`, and now a
+  `pi update` followed by a re-stage moves it with no diff anywhere, so the receipt's provenance field,
+  `doctor`'s drift warning and that printed list are what stand in for the diff. And `doctor --fix`'s
+  restage offer deliberately runs `--no-host-packages`: the only path that stages without you typing the
+  command stays a repair, never a first-time import of your laptop into every job container.
+- **A serviced repo's declared packages are NOT installed, and that is deliberate.** A repo's
+  `.pi/extensions` execute (above), but nothing reads a repo's package list and installs it. Two independent
+  reasons: a clone does not contain installed `node_modules` unless someone committed them, so honouring
+  such a declaration would mean a job-time registry install, which `PI_OFFLINE=1` exists to make
+  unreachable; and whoever can merge can already instruct the agent, while adding arbitrary npm packages
+  would put third-party **install-time and load-time** code beside a live minted forge token in a container
+  with open egress. That is a materially bigger grant than editing a prompt. If it is ever wanted, the shape
+  is an operator-held allowlist, not a per-repo opt-in, because the repo is the thing that is not trusted.
 - **Token and cost accounting is process-wide, but it is not process-tree-wide.** The recorded totals cover
   every session inside the job container's Node process, including subagent sessions an extension spawns,
   and the per-job token budget is enforced against that total. A staged package that spawns a **`pi`

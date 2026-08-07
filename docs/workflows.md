@@ -84,17 +84,26 @@ package manager reachable path to the registry — a job that tried to `npm inst
 would fail on every delivery. So third-party pi packages are installed **on the host, once**, into the
 global overlay, and mounted into every job read-only. That is what staging is.
 
+There are two ways in, and you probably already used the first. If you ran
+`pi install npm:@juicesharp/rpiv-workflow` on your host, `--with-packages` **discovers it** and stages the
+exact version you have, with no second declaration anywhere. `pi-packages.json` remains for pinning a
+different version than your host runs, and for declaring a package your host does not have:
+
 ```jsonc
-// pi-packages.json, beside your .env
+// pi-packages.json, beside your .env — optional now, and an entry here wins over what your host has
 { "packages": [
   { "name": "@juicesharp/rpiv-workflow", "version": "2.4.0" }
 ] }
 ```
 
 ```bash
-pi-dispatch import-pi --with-packages     # stage into ./pi-global/packages/
-pi-dispatch doctor                        # confirms what is staged, and that it is credential-free
+pi-dispatch import-pi --with-packages     # stage your pi packages, plus any pins, into ./pi-global/packages/
+pi-dispatch doctor                        # confirms what is staged, what drifted, and that it is credential-free
 ```
+
+Each package is printed with where it came from, and `--no-host-packages` stages only what the file
+declares. A git-sourced package cannot be staged (an exact npm version is the pin, and a ref is not one) and
+is skipped by name rather than in silence.
 
 Versions are **exact** — no `^`, `~`, `*` or `latest`, refused at load. A floating range is the worst
 failure this project has: an upstream minor lands, every queued job quietly loses a tool, and the queue
@@ -109,7 +118,13 @@ What `--with-packages` does, per entry:
    pinned version, and every declared dependency must sit inside the package directory. A dependency npm
    hoisted out is a refusal, not a warning, because the staged copy could never import it at run time.
 3. Renames the staging dir into place as `packages/<dir>`, defaulting to `scope__name`.
-4. Writes `packages/packages.json`, the receipt: what is staged, at which version, in which directory.
+4. Writes `packages/packages.json`, the receipt: what is staged, at which version, in which directory, and
+   whether it came from your pi setup or from `pi-packages.json`.
+
+**No restart.** The receipt is read at each job start, so `pi install` something, re-run the stager, and the
+next job has it. That also means a re-stage that *removes* a package takes effect immediately, which is the
+point: before, every job would have kept failing on the missing directory until the worker was restarted,
+burning a daily-cap slot each time.
 
 Set `PI_GLOBAL_PI_DIR` to the overlay and the staged set lands at `/opt/pi-global/packages/<dir>` in every
 container, named by `PI_PACKAGES`. No new mount and no new trust boundary: staged packages ride the same

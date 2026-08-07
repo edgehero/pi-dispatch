@@ -796,6 +796,43 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   enforcement rather than by assertion; the job **runs**, and the attempt is reported so the operator learns
   that a staged package shipped a name the repo had already published; given a repo skill and an overlay
   skill of the same name, then the repo's still wins; given any job at all, then `PI_OFFLINE=1` is set.
+  **Discovery of the host's own pi packages (issue #102).** Given a package the operator installed with
+  `pi install` and `import-pi --with-packages`, then it is staged at the **exact version the host has on
+  disk** (captured, never inherited from the source string, which may hold a range), printed by name with
+  its provenance, and loaded in the next job; given a `pi-packages.json` entry for the same name, then the
+  **declared entry wins** and the shadowed host version is printed, so pinning older than the host runs
+  stays possible; given `--no-host-packages`, then only declared entries stage; given a host package that
+  contributes no pi resources — **no `pi` manifest AND none of `extensions/ skills/ prompts/ themes/`**,
+  which is pi's own predicate, not a `pi`-key requirement — then it is not staged **and the reason is
+  printed**; given one whose `autoload` is off in pi's settings with no `+` pattern re-adding anything, then
+  it is not staged and says so; given one pi only partly loads, then it stages **whole** with a warning,
+  because staging copies a directory and "the package minus one skill" is not expressible; given a
+  git-sourced host package, then it is skipped with a named reason; given the admin package on the host,
+  then it is dropped with a reason **and the rest of the stage still lands** — all-or-nothing is scoped to
+  the DECLARED set, since a discovered failure is an inference of ours and must not take the operator's
+  declared pins down with it; given a host package whose managed path is absent, then pi's legacy global
+  lookup is honoured **only then**, matching pi's own precedence; given no `settings.json`, an unreadable
+  one, or a probe that fails, then discovery yields nothing, the reason is printed, and the exit code is
+  **0** — one bad file on the host must not block the models/skills/persona half of the import. The stage
+  receipt records `from` per entry so `doctor` can tell a discovered package from a declared one.
+  **Enablement of the copied extensions (issue #102).** Given an extension the operator disabled with
+  `pi config`, then `import-pi` does **not** copy it and lists it as disabled rather than suffixing the
+  vetting list; given a disable expressed as a glob, then the extension **is** copied and the command prints
+  that it could not evaluate the pattern (fail open, and say which). Reading pi's `settings.json` is not
+  copying it: no part of that file reaches the overlay.
+  **Refresh.** Given a re-stage while the worker is running, then the **next job** loads the new set with no
+  restart; given a manifest that becomes unreadable after boot, then the last-known-good set is kept and
+  logged, never silently degraded to none.
+- **Repo-declared packages are still refused**, and this is settled rather than open (consistent with the
+  non-goals recorded when staging was designed). A clone does not contain `.pi/npm/node_modules` unless
+  somebody committed `node_modules`, so "auto-import from a repo" means "install what the repo declares",
+  and a job container has no registry access by design. More importantly, whoever can merge to the default
+  branch can already instruct the agent; letting them add arbitrary npm packages puts third-party
+  install-time and load-time code next to a live minted forge token in a container with open egress, which
+  is a materially bigger grant than editing a prompt. A repo's own `.pi/extensions/**` **does** load, and
+  that is not a reversal of the same reasoning: `/workspace` holds the base repo's default-branch sha, so it
+  is merge-gated rather than fork-controlled. If repo-declared packages are ever wanted, the shape is an
+  operator allowlist, not a per-repo opt-in, because the repo is the thing that is not trusted.
 
 ---
 
@@ -1019,6 +1056,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup): **REQ-GLOBAL-PI-OVERLAY** acceptance gains the discovery cases (a host package stages at the exact version on disk; a declared entry wins and prints the version it shadowed; `--no-host-packages`; a package contributing no pi resources, an autoload-off one, a git source and the admin package are each skipped or dropped WITH A NAMED REASON; the legacy global lookup honoured only when the managed path is absent; a malformed `settings.json` discovers nothing at exit 0), the extension-enablement cases (an extension disabled with `pi config` is no longer copied, a glob pattern is copied and reported as unevaluated), the refresh case (a re-stage reaches the next job with no restart, a torn read keeps last-known-good), and the receipt's `from` field. Records that repo-declared packages stay refused, with the forge-token reason, and that a repo's `.pi/extensions` loading is not a reversal of it because `/workspace` is merge-gated. One CORRECTION carried from the issue: the issue's proposed predicate ("no `pi` key means not a pi package") is **wrong at the 0.80.7 pin** and would have silently dropped packages that ship only a convention dir. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new doctor checks are all warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |
 | 2026-08-04 | The audit's session findings (issue #99). **REQ-RESUMABLE-SESSION amended**: Statement and Scope now match the code. The "one case fails CLOSED" clause was specified and never built, so an armed `run.resume` with `PI_SESSIONS_DIR` unset ran cold and completed green, indistinguishable from a job that never set the flag, which is precisely the belief-confirming failure the clause was written to stop; the pre-spend policy refusal now exists, reserving no budget slot and starting no container. Cron moves out of Scope's "all four trigger kinds": the session store reaches only the forge preparers, so a local job could never resolve a key, and `run.resume` on a cron trigger is refused fail-loud at load rather than accepted and ignored (`run.replicas`' precedent and its reason). The key material for cron exists in `session-key.mjs`, so the refusal names it as a gap to close, not a limit. Key material spelled as `(forge, repository, head branch)` — the forge kind was always the first component. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new gate is free and pre-reserve, in the same band as the image and branch-protection refusals. |
 | 2026-08-04 | The wizard becomes the default route (issue #96). **REQ-ADMIN-VIA-PI-EXTENSION Acceptance amended**: bare `/dispatch` with nothing configured lands directly in the wizard's opening select (Cancel spawns nothing, writes nothing — the select is the consent); an untested-but-complete pi version is one info advisory on first `/dispatch`, never a refusal; a runtime older than the console's pin is one skew notice pointing at `/dispatch setup`. The outage and nudge-latch clauses are unchanged in substance and restated. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new steps (Docker pre-check, trigger-edge choice) spawn only consented infrastructure commands; nothing reserves budget or enqueues. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked**: the wizard still drives the CLI's own gates; the service-unit re-anchoring fix (recorded in design.md) changes where units point, not what may be automated. |
 | 2026-08-04 | First-run setup joins the admin surface (issue #92). **REQ-ADMIN-VIA-PI-EXTENSION amended**: `/dispatch setup` (operator-typed only — deliberately no model-callable tool), the bare-`/dispatch` detection tree (the offer appears ONLY when pointer, env, and cwd scaffold are all absent AND the queue is unreachable — a configured deployment with a down queue keeps the banner, never an offer), and a once-ever notify-only `session_start` nudge; Acceptance gains declined-offer-⇒-nothing-spawned-nothing-written, no-offer-over-an-outage, and the nudge latch. **REQ-DEPLOYMENT-BOOTSTRAP Scope amended**: "not the admin extension" becomes the carve-in — the wizard is a *driver, not a power*: it reaches the same CLI actions through their own consent gates and adds only the deployment pointer. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: no wizard path reserves budget, enqueues, or spends — setup ends at the panel, not at a job. |

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTAINER_PACKAGES_ROOT, containerPackagePaths, parsePackagesFile, readStageManifest, stagedDirName } from "../src/packages.mjs";
+import { CONTAINER_PACKAGES_ROOT, containerPackagePaths, mergeHostPackages, normalizeDiscoveredPackage, parsePackagesFile, readStageManifest, stagedDirName } from "../src/packages.mjs";
 
 // parsePackagesFile is pure over the file TEXT -- no fs (mirrors triggers.test.mjs).
 const PATH = "/pi-packages.json";
@@ -110,7 +110,23 @@ test("readStageManifest returns the manifest when the staged receipt is well-for
 		fileExists: () => true,
 		readFile: () => JSON.stringify(manifest),
 	});
-	assert.deepEqual(got, { stagedAt: "2026-07-28T00:00:00.000Z", packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] });
+	// `from` is reconstructed from a closed enum and defaults to declared, so a pre-#102 receipt (no `from`
+	// at all, as here) still reads correctly. Every OTHER unknown key is still dropped -- that is what keeps
+	// an older worker safe against a receipt a newer one wrote.
+	assert.deepEqual(got, { stagedAt: "2026-07-28T00:00:00.000Z", packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b", from: "pi-packages" }] });
+});
+
+test("readStageManifest carries provenance as a closed enum, never a pass-through", () => {
+	const read = (packages) => readStageManifest({ globalPiDir: "/opt/overlay", fileExists: () => true, readFile: () => JSON.stringify({ stagedAt: null, packages }) });
+	const base = { name: "@a/b", version: "1.0.0", dir: "a__b" };
+
+	assert.equal(read([{ ...base, from: "host" }]).packages[0].from, "host", "a discovered entry survives the round trip");
+	assert.equal(read([base]).packages[0].from, "pi-packages", "a receipt written before #102 reads as declared");
+	assert.equal(
+		read([{ ...base, from: "<b>whatever an editor typed</b>" }]).packages[0].from,
+		"pi-packages",
+		"a hand-edited receipt cannot inject a string that reaches a printed doctor line",
+	);
 });
 
 test("readStageManifest returns null and NEVER throws on missing, unreadable, or garbage input", () => {
@@ -155,4 +171,62 @@ test("containerPackagePaths is empty for a null/garbage manifest (the overlay si
 	assert.deepEqual(containerPackagePaths({}), []);
 	assert.deepEqual(containerPackagePaths({ packages: [] }), []);
 	assert.deepEqual(containerPackagePaths({ packages: [{ name: "x", version: "1.0.0" }] }), []);
+});
+
+// --- mergeHostPackages: declared beats discovered (issue #102) ----------------------------------------
+//
+// The rule these pin is that discovery reaches the SAME validator the declared path uses. That is what
+// keeps the admin block, the exact-version rule and the dir-collision refusal true through a road the
+// operator never typed, without a second implementation that would eventually drift.
+
+// mergeHostPackages takes entries parsePackagesFile has ALREADY normalized, so `dir` is always present on
+// the declared side. Discovered candidates are raw and get normalized by the merge itself.
+const declared = (name, version, dir) => ({ name, version, dir: dir ?? stagedDirName(name) });
+
+test("mergeHostPackages: a declared entry wins by NAME, keeps its place, and reports the version it shadowed", () => {
+	const { entries, overrides, dropped } = mergeHostPackages([declared("pi-widgets", "2.0.1")], [{ name: "pi-widgets", version: "2.3.0" }, { name: "other", version: "1.0.0" }]);
+
+	assert.deepEqual(entries, [
+		{ name: "pi-widgets", version: "2.0.1", dir: "pi-widgets", from: "pi-packages" },
+		{ name: "other", version: "1.0.0", dir: "other", from: "host" },
+	]);
+	// Pinning OLDER than the host runs is the reason pi-packages.json survives as a layer at all, so the
+	// shadowed version is reported rather than silently discarded.
+	assert.deepEqual(overrides, [{ name: "pi-widgets", declared: "2.0.1", host: "2.3.0" }]);
+	assert.deepEqual(dropped, []);
+});
+
+test("mergeHostPackages: matching versions produce no override note, because nothing was overridden", () => {
+	const { overrides } = mergeHostPackages([declared("pi-widgets", "2.0.1")], [{ name: "pi-widgets", version: "2.0.1" }]);
+	assert.deepEqual(overrides, []);
+});
+
+test("mergeHostPackages: a discovered admin package is DROPPED with a reason, never thrown", () => {
+	// A declared admin entry refuses the whole run (asserted above). An operator running the panel normally
+	// has it installed, so the discovered case must degrade instead of zeroing their overlay refresh.
+	const { entries, dropped } = mergeHostPackages([], [{ name: "pi-dispatch-admin", version: "0.5.0" }, { name: "fine", version: "1.0.0" }]);
+	assert.deepEqual(entries.map((e) => e.name), ["fine"]);
+	assert.equal(dropped.length, 1);
+	assert.match(dropped[0].reason, /recursion vector/);
+	assert.equal(/: your pi setup$/.test(dropped[0].reason), false, "the synthetic path is stripped from the printed reason");
+});
+
+test("mergeHostPackages: a discovered entry colliding with a declared dir loses, and the declared one survives", () => {
+	const { entries, dropped } = mergeHostPackages([declared("@a/widgets", "1.0.0", "widgets")], [{ name: "widgets", version: "2.0.0" }]);
+	assert.deepEqual(entries.map((e) => e.name), ["@a/widgets"]);
+	assert.match(dropped[0].reason, /already used by/);
+});
+
+test("mergeHostPackages: a discovered version that is not exact is dropped by the SAME rule declared ones face", () => {
+	const { entries, dropped } = mergeHostPackages([], [{ name: "loose", version: "^1.0.0" }]);
+	assert.deepEqual(entries, []);
+	assert.match(dropped[0].reason, /CONST-PI-VERSION-PINNED/);
+});
+
+test("normalizeDiscoveredPackage returns a reason instead of throwing, and never pollutes seenDirs on failure", () => {
+	const seen = new Map();
+	assert.match(normalizeDiscoveredPackage({ name: "x", version: "not-exact" }, seen).reason, /EXACT version/);
+	assert.equal(seen.size, 0, "a refused candidate must not reserve a dir the next one could have used");
+	assert.deepEqual(normalizeDiscoveredPackage({ name: "x", version: "1.0.0" }, seen).entry, { name: "x", version: "1.0.0", dir: "x" });
+	assert.equal(seen.get("x"), "x");
 });

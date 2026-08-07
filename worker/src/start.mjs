@@ -320,14 +320,51 @@ export async function startWorker(
 	// (CONST-RETRY-INFRA-ONLY). The processor calls it as the sole COMPLETED-path chain step.
 	const collectChain = makeCollectChain({ queue: runtimeQueue, config, log });
 
-	// REQ-GLOBAL-PI-OVERLAY staged packages: read the operator's stage manifest ONCE at boot. The staged set
-	// is deploy-time state under the :ro overlay -- identical for every job -- so a per-job re-read would buy
-	// nothing and put a filesystem read on the hot path. A missing or unreadable manifest yields [] plus one
-	// log line and NEVER a boot failure: a deployment that never opted into packages must not be blocked by
-	// it, and `pi-dispatch doctor` is what fails loud on a mismatch between the overlay and the triggers.
-	const stagedPackages = config.globalPiDir ? readStageManifest({ globalPiDir: config.globalPiDir }) : null;
-	const packagePaths = stagedPackages ? containerPackagePaths(stagedPackages) : [];
-	if (config.globalPiDir && !stagedPackages) log("packages_manifest_absent", { overlay: config.globalPiDir });
+	// REQ-GLOBAL-PI-OVERLAY staged packages: read the operator's stage manifest at EACH job start, like
+	// getSettings above and the pause-window ref below.
+	//
+	// This was a boot-time read until issue #102, and the argument for that was sound while it held: the
+	// staged set was deploy-time state under a :ro mount, identical for every job, so a per-job read bought
+	// nothing. What changed is that `import-pi --with-packages` now discovers what the operator installed in
+	// pi, which makes `pi install X` then re-stage a ROUTINE act rather than a rare one. Under the boot read
+	// the jobs after such a re-stage keep the old set until someone restarts the worker, and when the re-stage
+	// DROPS a package the symptom is worse than staleness: the runner refuses a missing staged dir at
+	// container start (exit 2), and budget is reserved before the container, so every job burns a daily-cap
+	// slot until the restart. A free filesystem read that prevents a reserved-and-wasted slot is exactly what
+	// CONST-BUDGET-BEFORE-TOKENS asks for.
+	//
+	// Last-known-good on a failed read, never []: an empty set emits no PI_PACKAGES at all, so the runner's
+	// assertPackagePathsExist has nothing to refuse and the job would run WITHOUT its tools and still exit 0.
+	// That is the silent no-op this project refuses. And never a throw: a transient overlay fault must not
+	// become a queue retry (CONST-RETRY-INFRA-ONLY).
+	let lastGoodPackagePaths = [];
+	let lastPackageKey = null;
+	// Logged once per CHANGE, not once per job: a line every job would drown the log it is meant to serve.
+	// EVERY resolved read records its key, including the empty one, so "nothing staged" becoming "one package
+	// staged" is the change it obviously is rather than a first read that logs nothing.
+	const notePackageKey = (key) => {
+		if (lastPackageKey !== null && key !== lastPackageKey) log("packages_stage_changed", { count: key === "" ? 0 : key.split(":").length });
+		lastPackageKey = key;
+	};
+	const getPackagePaths = () => {
+		if (!config.globalPiDir) return [];
+		const staged = readStageManifest({ globalPiDir: config.globalPiDir });
+		if (!staged) {
+			if (lastGoodPackagePaths.length > 0) {
+				log("packages_manifest_unreadable", { overlay: config.globalPiDir, keeping: lastGoodPackagePaths.length });
+				return lastGoodPackagePaths;
+			}
+			notePackageKey("");
+			return [];
+		}
+		const paths = containerPackagePaths(staged);
+		notePackageKey(paths.join(":"));
+		lastGoodPackagePaths = paths;
+		return paths;
+	};
+	// One read at boot, for the same log line the boot read always emitted, and to seed last-known-good.
+	if (config.globalPiDir && !readStageManifest({ globalPiDir: config.globalPiDir })) log("packages_manifest_absent", { overlay: config.globalPiDir });
+	getPackagePaths();
 
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
@@ -363,7 +400,10 @@ export async function startWorker(
 				openJobLog,
 				globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
 				allowGlobalExtensions: config.allowGlobalExtensions,
-				packagePaths, // REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set packages:false
+				// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
+				// packages:false. A RESOLVER, not the array: the factory is still constructed exactly once, only
+				// the value it reads became a call, so a re-stage takes effect on the next job without a restart.
+				packagePaths: getPackagePaths,
 				forwardEnv: config.forwardEnv,
 				authFromPi: config.authFromPi, // source the provider key from ~/.pi/agent/auth.json when env has none
 				// Self-hosted instance URLs, keyed by forge. A MAP rather than one scalar per forge: the table says

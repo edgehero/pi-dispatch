@@ -52,6 +52,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
+import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStageManifest } from "./packages.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
@@ -93,8 +94,12 @@ export async function runDoctor(env = process.env, deps = {}) {
 		mkdir = mkdirSync,
 		chmod = chmodSync,
 		rm = rmSync,
+		// The operator's pi setup, compared against the staged overlay (issue #102). A seam because the
+		// default is a real path in the developer's home directory and the host comparison may spawn their
+		// package manager -- neither belongs in a unit test, and "no network, no Docker" is the same rule.
+		agentDir = agentDirFrom(env),
 	} = deps;
-	const seams = { cwd, out, spawn, probeValkey, fileExists, nodeVersion, mkdir, chmod, rm };
+	const seams = { cwd, out, spawn, probeValkey, fileExists, nodeVersion, mkdir, chmod, rm, agentDir };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -196,7 +201,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, fileExists, nodeVersion } = seams;
+	const { cwd, spawn, probeValkey, fileExists, nodeVersion, agentDir = agentDirFrom(env) } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -726,13 +731,20 @@ export async function collectChecks(env, seams) {
 				// in-process call, so import-pi's own gates run unmodified -- the literal-secret abort, the
 				// admin-extension block, the printed-names vetting -- and its output is forwarded so the
 				// operator still reads the names of exactly what will load into their job containers.
+				//
+				// `--no-host-packages` is load-bearing (issue #102). Since discovery landed, a bare
+				// `--with-packages` also stages whatever the operator installed in pi, and this is the ONE
+				// path where staging happens without them typing the command. Accepting a repair prompt must
+				// stay a repair: it restores what the overlay already had, it never performs a first-time
+				// import of the operator's laptop into every job container. Importing is always something
+				// they asked for.
 				const restageFixAction = {
 					tier: "prompt",
-					describe: `pi-dispatch import-pi --with-packages --to ${overlay}`,
+					describe: `pi-dispatch import-pi --with-packages --no-host-packages --to ${overlay}`,
 					run: async ({ spawn, out }) => {
 						const cli = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 						// npm staging can be slow, so 10 minutes rather than runCmdCapture's default 30s.
-						const res = await runCmdCapture(spawn, process.execPath, [cli, "import-pi", "--with-packages", "--to", overlay], { env, cwd, timeoutMs: 600000 });
+						const res = await runCmdCapture(spawn, process.execPath, [cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay], { env, cwd, timeoutMs: 600000 });
 						if (res.output) out(res.output);
 						return { ok: res.code === 0 };
 					},
@@ -777,6 +789,22 @@ export async function collectChecks(env, seams) {
 						label: `Staged packages LOAD in every job (${optingOut} trigger(s) opt out with run.packages: false)`,
 						fix: "they run third-party code against adversarial input with open egress -- vet each, keep every version exactly pinned, and set run.packages: false on any trigger that must not load them",
 					});
+
+					// A staged package whose --ignore-scripts build never ran (issue #102, comment 1). The
+					// stager warns once, at stage time, and then nothing mentions it again -- so the symptom
+					// is every job on that trigger failing INSIDE the container, after taking a daily-cap
+					// slot. Warn rather than fail: a package may declare a build script and still work.
+					const unbuilt = manifest.packages
+						.map((p) => ({ name: p.name, scripts: buildScriptsOf(join(packagesDir, p.dir), fileExists) }))
+						.filter((p) => p.scripts.length > 0);
+					if (unbuilt.length > 0) {
+						checks.push({
+							ok: false,
+							warn: true,
+							label: `Staged package declares a build step that did NOT run (${unbuilt.map((p) => `${p.name}: ${p.scripts.join(", ")}`).join("; ")})`,
+							fix: "staging is always --ignore-scripts, so such a package is staged INCOMPLETE and may fail at run time -- check it works in a job, or stage a prebuilt version",
+						});
+					}
 				}
 			} else if (requiring > 0) {
 				// The silently-package-less job, and the one check the flip does NOT touch: `run.packages:
@@ -787,6 +815,68 @@ export async function collectChecks(env, seams) {
 					ok: false,
 					label: `${requiring} trigger(s) require staged packages (run.packages: true) but nothing is staged in ${packagesDir}`,
 					fix: "declare them in pi-packages.json and run `pi-dispatch import-pi --with-packages`, or drop run.packages from the trigger -- otherwise the flow runs without its tools and still exits 0",
+				});
+			}
+
+			// Compare the operator's OWN pi setup against what is staged (issue #102). Until this landed,
+			// doctor reported a healthy overlay while N host packages would never load in a job, and it had
+			// every fact it needed to say so. All three are WARNINGS: a deployment may deliberately run a
+			// narrower set than the operator's laptop, and that is a choice, not a fault.
+			//
+			// NONE of them carries a fixAction, and that is doctrine rather than omission. Now that
+			// `--with-packages` discovers, an offered "restage for me" would stop meaning "restore what you
+			// declared" and start meaning "import whatever is on your laptop into every job container". That
+			// is a different consent class and it does not belong behind a y/N prompt.
+			const staged = readStageManifest({ globalPiDir: overlay, readFile: (p) => readFileSync(p, "utf8"), fileExists });
+			const stagedByName = new Map((staged?.packages ?? []).map((p) => [p.name, p]));
+			const hostPi = await readHostPi({
+				agentDir,
+				fs: { existsSync: fileExists, readFileSync, readdirSync, statSync },
+				// doctor's seam is `spawn`, host-pi's is an execFile-shaped call, so this adapts one to the
+				// other rather than giving doctor a second process seam to inject in tests.
+				exec: async (file, args) => {
+					const res = await runCmdCapture(spawn, file, args, { env, cwd, timeoutMs: 15000 });
+					if (res.code !== 0) throw new Error(`${file} exited ${res.code ?? "without a code"}`);
+					return { stdout: res.output };
+				},
+				withPackages: true,
+			});
+
+			const unstaged = hostPi.packages.filter((p) => !p.skip && !stagedByName.has(p.name));
+			if (unstaged.length > 0) {
+				// The label names the path it enumerated. An operator whose package lives somewhere this did
+				// not look needs to know WHERE it looked, or "auto-import is broken" is the only conclusion
+				// available to them.
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${unstaged.length} package(s) in your pi setup are NOT staged (${unstaged.map((p) => `${p.name}@${p.version}`).join(", ")})`,
+					fix: `re-run \`pi-dispatch import-pi --with-packages --to ${overlay}\` to stage them, or leave them out if this deployment runs a narrower set than your host`,
+				});
+			}
+
+			// Version drift. Today nothing notices, and the symptom is a flow behaving differently in a job
+			// than it does interactively, which is the hardest kind of difference to chase.
+			const drifted = hostPi.packages.filter((p) => !p.skip && stagedByName.has(p.name) && stagedByName.get(p.name).version !== p.version);
+			if (drifted.length > 0) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${drifted.length} staged package(s) differ from your pi setup (${drifted.map((p) => `${p.name}: overlay ${stagedByName.get(p.name).version}, host ${p.version}`).join("; ")})`,
+					fix: "re-run `pi-dispatch import-pi --with-packages` to move the overlay to your host's versions, or pin the version you want in pi-packages.json (an explicit pin wins over discovery)",
+				});
+			}
+
+			// Named rather than silent: a git-sourced host package cannot be expressed in pi-packages.json at
+			// all (it validates an npm name plus an exact semver, and a ref is neither), so its absence would
+			// otherwise be a mystery rather than a limitation.
+			const gitSourced = hostPi.packages.filter((p) => p.kind === "git");
+			if (gitSourced.length > 0) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${gitSourced.length} package(s) in your pi setup are git-sourced and cannot be staged (${gitSourced.map((p) => p.name).join(", ")})`,
+					fix: "pi-packages.json pins an npm name plus an exact version, and a git ref is neither -- publish the package to a registry, or accept that jobs run without it",
 				});
 			}
 		}
@@ -1101,6 +1191,22 @@ function runCmd(spawn, cmd, args) {
  * `opts.env` is passed through to the spawn so secrets can travel via env instead of argv; `opts.cwd`
  * likewise, for the child-process fixActions that must run where doctor's own cwd seam points.
  */
+/**
+ * The build-ish scripts a staged package declares, which `--ignore-scripts` means did NOT run (issue #102).
+ * `prepare` and `build` join the stager's own trio because a package can declare either and still ship
+ * unbuilt sources. Returns [] for anything unreadable: a package we cannot parse is not a finding.
+ */
+function buildScriptsOf(packageDir, fileExists) {
+	const path = join(packageDir, "package.json");
+	if (!fileExists(path)) return [];
+	try {
+		const scripts = JSON.parse(readFileSync(path, "utf8"))?.scripts ?? {};
+		return ["prepare", "postinstall", "install", "build"].filter((key) => typeof scripts[key] === "string");
+	} catch {
+		return [];
+	}
+}
+
 function runCmdCapture(spawn, cmd, args, opts = {}) {
 	const { timeoutMs = 30000 } = opts;
 	return new Promise((resolve) => {

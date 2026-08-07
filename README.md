@@ -238,15 +238,20 @@ Four basics follow from that shape:
   read-write, so a workflow's own state persists between runs. A forge job gets a fresh clone, so it does
   not.
 
-Staging is the setup, and it happens once on the host:
-
-```jsonc
-// pi-packages.json
-{ "packages": [ { "name": "@juicesharp/rpiv-workflow", "version": "2.4.0" } ] }
-```
+Staging is the setup, and it happens once on the host. If you already installed the package in pi, that is
+the whole setup: the stager finds it and pins the exact version your host has.
 
 ```bash
+pi install npm:@juicesharp/rpiv-workflow
 pi-dispatch import-pi --with-packages   # installs on the host, always --ignore-scripts, into ./pi-global/packages/
+```
+
+Declaring a package by hand is still available, for pinning a version different from your host's, or for one
+your host does not have. An entry here wins over what was discovered:
+
+```jsonc
+// pi-packages.json (optional)
+{ "packages": [ { "name": "@juicesharp/rpiv-workflow", "version": "2.4.0" } ] }
 ```
 
 That example is a real pi extension: it chains skills into typed multi-stage workflows with per-stage
@@ -257,7 +262,8 @@ staged directory can contribute extensions, skills, prompts and themes at once.
 What the deployment provides is the plumbing and the limits: no network at job time (so nothing installs
 inside a job, which is why staging exists), exact versions only, package code loaded **last** so it can
 never shadow your repo's own skills, any extension that tries to register a `dispatch_*` tool dropped,
-and `"packages": false` on any trigger that must not load it.
+and `"packages": false` on any trigger that must not load it. Every package is printed by name with where it
+came from, because that list is the moment to vet what will run in every job.
 
 Where a workflow's own state lives is the part worth reading before you build on it, because it differs
 between a cron job and a forge job: [`docs/workflows.md`](docs/workflows.md).
@@ -296,10 +302,15 @@ Three properties worth knowing, each with a full reference:
   from `~/.pi/agent/auth.json` and injects it per job. OAuth and subscription logins are refused; an
   unattended service needs an API key with a spend limit
   ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
-- **Third-party pi packages are pinned once, declinable per trigger.** Declare exact versions in
-  `pi-packages.json`, stage with `import-pi --with-packages` (always `--ignore-scripts`), opt any
-  trigger out with `"packages": false`. This is also how a workflow extension reaches a job
+- **Third-party pi packages are pinned once, declinable per trigger.** `import-pi --with-packages` stages
+  what you installed with `pi install`, at the exact version your host has, plus anything you pinned by hand
+  in `pi-packages.json` (always `--ignore-scripts`). Opt any trigger out with `"packages": false`, and use
+  `--no-host-packages` to stage only what you declared. This is also how a workflow extension reaches a job
   ([`docs/workflows.md`](docs/workflows.md)).
+- **What a repo declares is never installed.** A serviced repo's `.pi/extensions` do run, because the
+  checkout is the default branch and merging is the gate, but nothing installs packages on a repo's say so:
+  that would put third party install time code next to a live forge token
+  ([`SECURITY.md`](SECURITY.md)).
 - **Sessions can continue instead of restarting.** `"resume": true` on a trigger makes follow-up jobs
   continue the session that opened the pull request. It persists the full transcript to disk, which is
   a real disclosure: read [`docs/sessions.md`](docs/sessions.md) before enabling it.

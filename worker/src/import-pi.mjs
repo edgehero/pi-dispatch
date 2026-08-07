@@ -8,28 +8,41 @@
  * command copies only the safe subset and REFUSES a `models.json` that embeds a literal key.
  *
  * Copied:   models.json (definitions only, sanitized), skills/, APPEND_SYSTEM.md, and extensions/ (verbatim;
- *           the admin extension is hard-blocked). Extensions come along BY DEFAULT -- staging is the vetting
- *           step, and an overlay missing the operator's own extensions is not the setup they asked for --
- *           with `--no-extensions` as the escape hatch. Every extension staged is PRINTED by name, because
- *           this is the moment the operator can still see what is about to run inside every job container.
+ *           the admin extension is hard-blocked, and one the operator disabled in `pi config` is left behind).
+ *           Extensions come along BY DEFAULT -- staging is the vetting step, and an overlay missing the
+ *           operator's own extensions is not the setup they asked for -- with `--no-extensions` as the escape
+ *           hatch. Every extension staged is PRINTED by name, because this is the moment the operator can
+ *           still see what is about to run inside every job container.
  * Staged:   packages/ — only under --with-packages — pinned third-party pi packages, installed here on the
- *           host so a job container can load them from the overlay with NO network access (issue #58).
- * Never:    auth.json, settings.json, sessions/, themes/, prompts/, tools/.
+ *           host so a job container can load them from the overlay with NO network access (issue #58). Under
+ *           that flag the packages the operator installed with `pi install` are DISCOVERED from their own pi
+ *           setup and staged at the exact version their host runs (issue #102); `pi-packages.json` becomes
+ *           the override-and-addition layer rather than the only road in, and `--no-host-packages` restores
+ *           the declared-only behaviour exactly.
+ * Never:    auth.json, settings.json, sessions/, themes/, prompts/, tools/. Discovery READS settings.json to
+ *           learn what pi has installed and what the operator turned off; reading is not copying, and no part
+ *           of that file reaches the overlay.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync, renameSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { PACKAGES_SUBDIR, STAGE_MANIFEST, parsePackagesFile } from "./packages.mjs";
+import { FROM_HOST, PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
+import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 
 /** A valid skill/extension entry name: lowercase kebab/underscore, no dots (no "..") and no slashes. */
 export const ENTRY_NAME_RE = /^[a-z0-9](?:[a-z0-9_.-]{0,62}[a-z0-9])?$/i;
 /** The admin extension — never duplicated into a job overlay (it can enqueue paid jobs: a recursion vector). */
 export const ADMIN_RE = /pi-dispatch|dispatch-admin/i;
 
-/** The pi resource kinds a package may contribute by convention dir, when it carries no `pi` manifest. */
-const RESOURCE_DIRS = ["extensions", "skills", "prompts", "themes"];
+/**
+ * Every flag this command accepts. Unknown ones are REFUSED (issue #102) rather than ignored: argv here is
+ * parsed by a bare indexOf, so before discovery a typo was harmless, but `--no-host-package` (singular) now
+ * silently means "third-party code you did not expect runs in every job container". A typo must not be able
+ * to widen what loads.
+ */
+const BOOL_FLAGS = new Set(["--no-extensions", "--with-extensions", "--with-packages", "--host-packages", "--no-host-packages"]);
+const VALUE_FLAGS = new Set(["--from", "--to", "--packages-file"]);
 
 const execFileAsync = promisify(execFile);
 
@@ -42,12 +55,10 @@ function defaultExec(file, args, options) {
 	return execFileAsync(file, args, options);
 }
 
-// Resolve the host's pi agent dir the way pi's getAgentDir() does (env override, else ~/.pi/agent).
-// Custom: the worker CLI depends on @earendil-works/pi-ai/compat, not the whole pi-coding-agent SDK;
-// importing the SDK just to read one well-known path is not worth the weight.
-function defaultFrom(env) {
-	return env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-}
+// The host's pi agent dir (env override, else ~/.pi/agent). The resolution moved to host-pi.mjs, which now
+// needs the same answer for discovery and hands it to doctor as well; this alias keeps the call site here
+// reading the way it always did.
+const defaultFrom = agentDirFrom;
 
 /** A config value that defers to the environment/a command rather than embedding a literal secret. */
 function isIndirection(v) {
@@ -87,10 +98,21 @@ export async function runImportPi(argv = [], deps = {}) {
 		platform = process.platform,
 	} = deps;
 
+	const unknown = unknownFlag(argv);
+	if (unknown) {
+		out(`error: unknown flag ${JSON.stringify(unknown)}\n  Accepted: ${[...VALUE_FLAGS].map((f) => `${f} <value>`).join(", ")}, ${[...BOOL_FLAGS].join(", ")}.\n`);
+		return 1;
+	}
+
 	// Extensions are copied unless the operator says otherwise. `--with-extensions` is still accepted and is
 	// now a no-op, so an existing setup script keeps working and keeps meaning what it always meant.
 	const withExtensions = !argv.includes("--no-extensions");
 	const withPackages = argv.includes("--with-packages");
+	// Discovery rides inside --with-packages rather than arriving as a third gate. A flagless import still
+	// stages nothing, exactly as before; the only run whose behaviour moved is one that already asked for
+	// "the packages" and until now silently got a subset that excluded whatever `pi install` had put there.
+	// `--host-packages` is accepted as a no-op for symmetry with `--with-extensions`.
+	const withHostPackages = withPackages && !argv.includes("--no-host-packages");
 	const from = flagValue(argv, "--from") ?? defaultFrom(env);
 	const to = flagValue(argv, "--to") ?? join(cwd, "pi-global");
 	const packagesFile = flagValue(argv, "--packages-file") ?? env.PI_PACKAGES_FILE ?? join(cwd, "pi-packages.json");
@@ -125,6 +147,10 @@ export async function runImportPi(argv = [], deps = {}) {
 		}
 	}
 
+	// Read the operator's own pi setup ONCE, after the secret gate so a refused import never spawned a
+	// package manager, and before the extensions copy because that copy now depends on it (issue #102).
+	const hostPi = await readHostPi({ agentDir: from, fs, exec, platform, withPackages: withHostPackages });
+
 	const results = [];
 	fs.mkdirSync(to, { recursive: true });
 
@@ -155,11 +181,23 @@ export async function runImportPi(argv = [], deps = {}) {
 	// would leave them re-deriving the list from a directory they cannot see from the worker host.
 	const extSrc = join(from, "extensions");
 	if (withExtensions && fs.existsSync(extSrc)) {
-		const { copied, blocked } = copyExtensions(fs, extSrc, join(to, "extensions"), out);
+		const { copied, blocked, disabled } = copyExtensions(fs, extSrc, join(to, "extensions"), out, hostPi.extensions.disabled);
 		if (copied.length > 0) {
 			results.push(["extensions/", `${copied.length} extension${copied.length === 1 ? "" : "s"} -- these LOAD in every job; VET THESE`]);
 			// Note-less rows: the printer emits them bare, so the names read as a list under the count above.
 			for (const name of copied) results.push([`  - ${name}`, ""]);
+		}
+		// Reported by OMISSION plus its own row, never as a suffix on a name row: the names above are the
+		// vetting list, and a reader scanning it must not have to parse each line to learn what is live.
+		if (disabled.length > 0) {
+			results.push(["extensions (off)", `${disabled.length} disabled in your pi settings, not copied`]);
+			for (const name of disabled) results.push([`  - ${name}`, ""]);
+		}
+		if (hostPi.extensions.unevaluated.length > 0) {
+			out(
+				`\nnote: ${hostPi.settingsPath} disables extensions with a pattern this command cannot evaluate,\n` +
+					`  so these were copied and may be ones you turned off: ${hostPi.extensions.unevaluated.join(", ")}\n`,
+			);
 		}
 		for (const name of blocked) out(`  blocked extension "${name}" — the admin extension must never run inside a job.\n`);
 		out(
@@ -174,14 +212,45 @@ export async function runImportPi(argv = [], deps = {}) {
 	// packages/ — pinned third-party pi packages, staged from npm on THIS host so the job container never
 	// needs the network (issue #58). All-or-nothing: a failure leaves no half-staged set to load.
 	if (withPackages) {
-		const staged = await stagePackages({ fs, exec, out, packagesFile, to, platform });
+		// Discovered candidates split in two: the ones we can stage, and the ones we name a reason for. Both
+		// are printed. A discovery that quietly ignored half the host's packages would be the same silent
+		// no-op this feature exists to remove.
+		const stageable = hostPi.packages.filter((p) => !p.skip);
+		const byName = new Map(hostPi.packages.map((p) => [p.name, p]));
+		const staged = await stagePackages({ fs, exec, out, packagesFile, to, platform, discovered: stageable, requireFile: !withHostPackages });
 		if (staged.error) {
 			out(`error: ${staged.error}\n`);
 			return 1;
 		}
 		const n = staged.packages.length;
 		results.push(["packages/", `${n} package${n === 1 ? "" : "s"} -- third-party code, VET THESE`]);
+		const overrides = new Map(staged.overrides.map((o) => [o.name, o]));
+		for (const entry of staged.packages) {
+			const override = overrides.get(entry.name);
+			const provenance = entry.from === FROM_HOST
+				? "from your pi setup"
+				: override
+					? `from pi-packages.json, overrides your pi setup's ${override.host}`
+					: "from pi-packages.json";
+			results.push([`  - ${entry.name}@${entry.version} (${provenance})`, ""]);
+		}
 		for (const warn of staged.warnings) results.push([`packages/${warn.dir}`, `WARN: ${warn.reason}`]);
+		// A package pi only partly loads still stages WHOLE: staging copies a directory, so "the package minus
+		// one skill" is not expressible. Say that rather than pretend the host's filter travelled.
+		for (const entry of staged.packages) {
+			const host = entry.from === FROM_HOST ? byName.get(entry.name) : null;
+			if (host && (host.filtered || host.autoload === false)) {
+				results.push([`packages/${entry.dir}`, `WARN: your pi settings load only part of ${entry.name}; the overlay stages ALL of it`]);
+			}
+		}
+		const skipped = [...hostPi.packages.filter((p) => p.skip).map((p) => ({ name: p.source, reason: p.skip })), ...staged.dropped];
+		if (skipped.length > 0) {
+			results.push(["host packages", `${skipped.length} skipped -- not staged`]);
+			for (const item of skipped) results.push([`  - ${item.name} (${item.reason})`, ""]);
+		}
+		if (withHostPackages && hostPi.settingsState !== "ok") {
+			results.push(["settings.json", hostSettingsNote(hostPi)]);
+		}
 	} else if (fs.existsSync(join(to, PACKAGES_SUBDIR))) {
 		results.push(["packages/", "kept -- re-run with --with-packages to refresh"]);
 	}
@@ -191,7 +260,7 @@ export async function runImportPi(argv = [], deps = {}) {
 	// than padded out to a column that has nothing to hold.
 	for (const [name, note] of results) out(note ? `  ${name.padEnd(18)} ${note}\n` : `  ${name}\n`);
 	out(`\n  (auth.json, settings.json, sessions/ are never copied — your credential stays in env/auth.json.)\n`);
-	out(nextSteps(to, withExtensions, withPackages));
+	out(nextSteps(to, withExtensions, withPackages, withHostPackages && hostPi.packages.length > 0));
 	return 0;
 }
 
@@ -215,10 +284,16 @@ function copyNamedDirs(fs, src, dst, out) {
 /**
  * Like copyNamedDirs but reports the admin extension it refuses to copy. Returns the NAMES copied, not a
  * count: the caller prints them, so the operator sees exactly what is now going into job containers.
+ *
+ * `hostDisabled` holds the names the operator turned off with `pi config` (issue #102). They are not copied,
+ * and they are returned separately rather than merged into `copied`, because `copied` IS the vetting list and
+ * a list that mixed live and inert entries would be worse than no list. Skipping them is a correction, not a
+ * feature: until this landed, an extension explicitly disabled on the host still ran in every job container.
  */
-function copyExtensions(fs, src, dst, out) {
+function copyExtensions(fs, src, dst, out, hostDisabled = new Set()) {
 	const copied = [];
 	const blocked = [];
+	const disabled = [];
 	for (const name of fs.readdirSync(src)) {
 		if (ADMIN_RE.test(name)) {
 			blocked.push(name);
@@ -228,6 +303,10 @@ function copyExtensions(fs, src, dst, out) {
 			out(`  skipped "${name}" — unexpected name\n`);
 			continue;
 		}
+		if (hostDisabled.has(name)) {
+			disabled.push(name);
+			continue;
+		}
 		const childSrc = join(src, name);
 		const st = fs.statSync(childSrc);
 		if (st.isSymbolicLink?.()) continue;
@@ -235,7 +314,7 @@ function copyExtensions(fs, src, dst, out) {
 		else fs.copyFileSync(childSrc, join(dst, name));
 		copied.push(name);
 	}
-	return { copied, blocked };
+	return { copied, blocked, disabled };
 }
 
 /** Recursively copy a directory tree, skipping symlinks (a symlink could point outside the source). */
@@ -252,26 +331,44 @@ function copyTree(fs, src, dst) {
 
 /**
  * Stage every package pinned in `packagesFile` into `<to>/packages/<dir>` and write the stage manifest.
- * Returns `{ packages, warnings }`, or `{ error }` -- ALL-OR-NOTHING, because a half-staged set is worse
- * than none: pi would load the packages that made it and silently skip the rest (issue #58).
+ * Returns `{ packages, warnings, overrides, dropped }`, or `{ error }`.
+ *
+ * ALL-OR-NOTHING for DECLARED packages, because a half-staged set is worse than none: pi would load the
+ * packages that made it and silently skip the rest (issue #58). Scoped to the declared set once discovery
+ * landed (issue #102): a declared pin is a promise the operator made, so failing it still refuses everything,
+ * but a discovered package is an inference WE made and it is DROPPED with a printed reason instead. Without
+ * that split, discovery would multiply the entry count from two pins to twenty and one bad host package
+ * would zero an overlay that was working. A named drop is not the silent skip the original rule forbade.
  *
  * Each package is installed into a private `.staging-<i>` dir, asserted there, and only renamed into place
  * once EVERY package has passed. A staged dir must be SELF-CONTAINED (`package.json` + its own
  * `node_modules/`) because at job time it is resolved from a read-only mount with no network and no
  * install step -- so every assertion below is about that property.
+ *
+ * `discovered` is what host-pi.mjs found in the operator's own pi setup (issue #102). Discovery adds
+ * CANDIDATES, never exemptions: every assertion below runs on a discovered entry exactly as it does on a
+ * declared one, and the merge that produced the list refused an admin package and a colliding dir using the
+ * same validator the declared path uses.
  */
-async function stagePackages({ fs, exec, out, packagesFile, to, platform = process.platform }) {
-	if (!fs.existsSync(packagesFile)) {
+async function stagePackages({ fs, exec, out, packagesFile, to, platform = process.platform, discovered = [], requireFile = true }) {
+	const haveFile = fs.existsSync(packagesFile);
+	// The missing-file refusal is now conditional. With discovery on there is a second source of entries, so
+	// no file simply means "nothing declared"; with `--no-host-packages` there is no other source and the
+	// refusal is the same one it always was.
+	if (!haveFile && requireFile) {
 		return { error: `--with-packages needs a packages file, none at ${packagesFile}\n  Run \`pi-dispatch init\` to scaffold one, or pass --packages-file <path>.` };
 	}
 
-	let entries;
-	try {
-		entries = parsePackagesFile(fs.readFileSync(packagesFile, "utf8"), packagesFile);
-	} catch (error) {
-		// Refused before a single directory is created, so a bad file stages nothing at all.
-		return { error: error.message };
+	let declared = [];
+	if (haveFile) {
+		try {
+			declared = parsePackagesFile(fs.readFileSync(packagesFile, "utf8"), packagesFile);
+		} catch (error) {
+			// Refused before a single directory is created, so a bad file stages nothing at all.
+			return { error: error.message };
+		}
 	}
+	const { entries, overrides, dropped } = mergeHostPackages(declared, discovered);
 
 	const packagesRoot = join(to, PACKAGES_SUBDIR);
 	const rootExisted = fs.existsSync(packagesRoot);
@@ -282,94 +379,25 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 	const prepared = [];
 	const renamed = [];
 	const warnings = [];
+	const softDropped = [];
 
 	try {
 		for (const [index, entry] of entries.entries()) {
 			const staging = join(packagesRoot, `.staging-${index}`);
 			fs.rmSync(staging, { recursive: true, force: true }); // a crashed earlier run may have left one
 			stagingDirs.push(staging);
-			fs.mkdirSync(staging, { recursive: true });
-			// A private root package.json pins npm's idea of "the project" to the staging dir, so it cannot
-			// walk up and install into (or read config from) the operator's own checkout.
-			fs.writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "pi-dispatch-staging", private: true }, null, 2)}\n`);
-
-			// ARRAY argv, never a shell string: the name and version come from a config file and must never be
-			// able to become shell syntax on the operator's host. The install target is the exec's `cwd`, NOT a
-			// `--prefix <staging>` pair -- npm installs into the cwd's node_modules by default, and dropping the
-			// flag removes the only filesystem PATH from argv. What is left is nothing but literal flags and one
-			// `name@version` token already validated against NPM_NAME_RE + EXACT_VERSION_RE; that is the property
-			// npmExecOptions relies on below.
-			//
-			// --ignore-scripts is load-bearing: without it the lifecycle scripts of this package AND of every
-			// transitive dependency would run as the operator, on the operator's host, at stage time.
-			// --omit=peer because pi aliases its own packages for extensions at load time, so a staged peer
-			// copy is ignored dead weight -- and a floating pi version at that (CONST-PI-VERSION-PINNED).
-			// --install-strategy=nested asks npm to keep every dependency inside the package dir; step 4 below
-			// ASSERTS the result rather than trusting the flag, whose name and default have moved across npm
-			// versions.
-			const args = [
-				"install",
-				`${entry.name}@${entry.version}`,
-				"--omit=dev",
-				"--omit=peer",
-				"--omit=optional",
-				"--ignore-scripts",
-				"--install-strategy=nested",
-				"--no-audit",
-				"--no-fund",
-				"--loglevel=error",
-			];
-			out(`  staging ${entry.name}@${entry.version} -> packages/${entry.dir}\n`);
+			let source;
 			try {
-				await exec(npmBin, args, npmExecOptions(platform, staging));
+				source = await prepareOne({ fs, exec, out, entry, staging, npmBin, platform, warnings });
 			} catch (error) {
-				const detail = String(error?.stderr ?? error?.message ?? "").trim();
-				throw new Error(`npm install failed for ${entry.name}@${entry.version}: ${detail}`);
-			}
-
-			const source = join(staging, "node_modules", entry.name);
-			let pkg;
-			try {
-				pkg = JSON.parse(fs.readFileSync(join(source, "package.json"), "utf8"));
-			} catch {
-				throw new Error(`${entry.name}@${entry.version}: npm reported success but there is no readable package.json at ${join(source, "package.json")}`);
-			}
-			if (pkg.version !== entry.version) {
-				throw new Error(`${entry.name}: npm staged version ${JSON.stringify(pkg.version)}, not the pinned ${JSON.stringify(entry.version)} (CONST-PI-VERSION-PINNED)`);
-			}
-
-			// Dependency completeness -- catches hoisting whatever npm's flag defaults do this month. A
-			// hoisted dependency would only surface as an import failure inside a job, hours later.
-			for (const dep of Object.keys(pkg.dependencies ?? {})) {
-				if (!fs.existsSync(join(source, "node_modules", dep))) {
-					throw new Error(`${entry.name}: dependency "${dep}" is not inside the package dir -- npm hoisted it out, so the staged copy could not import it at run time (no network, no install)`);
+				// The declared/discovered split: an entry the operator pinned is fatal, one we inferred from
+				// their pi setup is dropped by name so the rest of the stage still lands.
+				if (entry.from === FROM_HOST) {
+					softDropped.push({ name: entry.name, reason: error.message });
+					continue;
 				}
+				throw error;
 			}
-
-			// A package that contributes no pi resources loads as a silent no-op; staging exists to turn that
-			// run-time nothing into a stage-time error the operator can act on.
-			const manifest = pkg.pi !== null && typeof pkg.pi === "object" ? pkg.pi : null;
-			const hasResourceDir = RESOURCE_DIRS.some((name) => fs.existsSync(join(source, name)));
-			if (!manifest && !hasResourceDir) {
-				throw new Error(`${entry.name} is not a pi package -- no "pi" manifest in package.json and none of ${RESOURCE_DIRS.join("/")}; it would load as a silent no-op`);
-			}
-
-			// Containment: manifest entries are resolved relative to the package dir at job time, so one that
-			// climbs out of it would reach the rest of the read-only overlay.
-			const escaping = manifest && findEscapingEntry(manifest);
-			if (escaping) {
-				throw new Error(`${entry.name}: pi manifest entry ${JSON.stringify(escaping)} leaves the package dir (no ".." segment, no leading "/")`);
-			}
-
-			// Warn, do not refuse: --ignore-scripts means a build/postinstall step did NOT run and an optional
-			// dependency was NOT fetched, so such a package is staged INCOMPLETE and may fail at run time.
-			const scriptKeys = ["install", "preinstall", "postinstall"].filter((key) => typeof pkg.scripts?.[key] === "string");
-			const hasOptional = Object.keys(pkg.optionalDependencies ?? {}).length > 0;
-			if (scriptKeys.length > 0 || hasOptional) {
-				const declares = [...scriptKeys.map((key) => `scripts.${key}`), ...(hasOptional ? ["optionalDependencies"] : [])].join(", ");
-				warnings.push({ dir: entry.dir, reason: `${entry.name} declares ${declares} -- staged with --ignore-scripts, so it is INCOMPLETE and may fail at run time` });
-			}
-
 			prepared.push({ entry, source });
 		}
 
@@ -392,9 +420,105 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 
 	for (const staging of stagingDirs) fs.rmSync(staging, { recursive: true, force: true });
 
-	const stageManifest = { stagedAt: new Date().toISOString(), packages: entries.map(({ name, version, dir }) => ({ name, version, dir })) };
+	// A dropped entry never made it into `prepared`, so it must not appear in the receipt either.
+	const staged = entries.filter((entry) => prepared.some((p) => p.entry === entry));
+	// `from` and nothing more. This receipt is bind-mounted into every job container, so it must never carry
+	// an install path off the operator's machine -- provenance is the fact doctor needs, the host path is not.
+	const stageManifest = { stagedAt: new Date().toISOString(), packages: staged.map(({ name, version, dir, from }) => ({ name, version, dir, from })) };
 	fs.writeFileSync(join(packagesRoot, STAGE_MANIFEST), `${JSON.stringify(stageManifest, null, 2)}\n`);
-	return { packages: entries, warnings };
+	return { packages: staged, warnings, overrides, dropped: [...dropped, ...softDropped] };
+}
+
+/**
+ * Install and ASSERT one package inside its private staging dir, returning the path to assert-clean source.
+ * Throws on any failure; the caller decides whether that is fatal (a declared pin) or a drop (a discovered
+ * one). Every assertion here is about one property: the staged dir must be SELF-CONTAINED, because at job
+ * time it is resolved from a read-only mount with no network and no install step.
+ */
+async function prepareOne({ fs, exec, out, entry, staging, npmBin, platform, warnings }) {
+	fs.mkdirSync(staging, { recursive: true });
+	// A private root package.json pins npm's idea of "the project" to the staging dir, so it cannot
+	// walk up and install into (or read config from) the operator's own checkout.
+	fs.writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "pi-dispatch-staging", private: true }, null, 2)}\n`);
+
+	// ARRAY argv, never a shell string: the name and version come from a config file and must never be
+	// able to become shell syntax on the operator's host. The install target is the exec's `cwd`, NOT a
+	// `--prefix <staging>` pair -- npm installs into the cwd's node_modules by default, and dropping the
+	// flag removes the only filesystem PATH from argv. What is left is nothing but literal flags and one
+	// `name@version` token already validated against NPM_NAME_RE + EXACT_VERSION_RE; that is the property
+	// npmExecOptions relies on below.
+	//
+	// --ignore-scripts is load-bearing: without it the lifecycle scripts of this package AND of every
+	// transitive dependency would run as the operator, on the operator's host, at stage time.
+	// --omit=peer because pi aliases its own packages for extensions at load time, so a staged peer
+	// copy is ignored dead weight -- and a floating pi version at that (CONST-PI-VERSION-PINNED).
+	// --install-strategy=nested asks npm to keep every dependency inside the package dir; step 4 below
+	// ASSERTS the result rather than trusting the flag, whose name and default have moved across npm
+	// versions.
+	const args = [
+		"install",
+		`${entry.name}@${entry.version}`,
+		"--omit=dev",
+		"--omit=peer",
+		"--omit=optional",
+		"--ignore-scripts",
+		"--install-strategy=nested",
+		"--no-audit",
+		"--no-fund",
+		"--loglevel=error",
+	];
+	out(`  staging ${entry.name}@${entry.version} -> packages/${entry.dir}\n`);
+	try {
+		await exec(npmBin, args, npmExecOptions(platform, staging));
+	} catch (error) {
+		const detail = String(error?.stderr ?? error?.message ?? "").trim();
+		throw new Error(`npm install failed for ${entry.name}@${entry.version}: ${detail}`);
+	}
+
+	const source = join(staging, "node_modules", entry.name);
+	let pkg;
+	try {
+		pkg = JSON.parse(fs.readFileSync(join(source, "package.json"), "utf8"));
+	} catch {
+		throw new Error(`${entry.name}@${entry.version}: npm reported success but there is no readable package.json at ${join(source, "package.json")}`);
+	}
+	if (pkg.version !== entry.version) {
+		throw new Error(`${entry.name}: npm staged version ${JSON.stringify(pkg.version)}, not the pinned ${JSON.stringify(entry.version)} (CONST-PI-VERSION-PINNED)`);
+	}
+
+	// Dependency completeness -- catches hoisting whatever npm's flag defaults do this month. A
+	// hoisted dependency would only surface as an import failure inside a job, hours later.
+	for (const dep of Object.keys(pkg.dependencies ?? {})) {
+		if (!fs.existsSync(join(source, "node_modules", dep))) {
+			throw new Error(`${entry.name}: dependency "${dep}" is not inside the package dir -- npm hoisted it out, so the staged copy could not import it at run time (no network, no install)`);
+		}
+	}
+
+	// A package that contributes no pi resources loads as a silent no-op; staging exists to turn that
+	// run-time nothing into a stage-time error the operator can act on.
+	const manifest = pkg.pi !== null && typeof pkg.pi === "object" ? pkg.pi : null;
+	const hasResourceDir = RESOURCE_DIRS.some((name) => fs.existsSync(join(source, name)));
+	if (!manifest && !hasResourceDir) {
+		throw new Error(`${entry.name} is not a pi package -- no "pi" manifest in package.json and none of ${RESOURCE_DIRS.join("/")}; it would load as a silent no-op`);
+	}
+
+	// Containment: manifest entries are resolved relative to the package dir at job time, so one that
+	// climbs out of it would reach the rest of the read-only overlay.
+	const escaping = manifest && findEscapingEntry(manifest);
+	if (escaping) {
+		throw new Error(`${entry.name}: pi manifest entry ${JSON.stringify(escaping)} leaves the package dir (no ".." segment, no leading "/")`);
+	}
+
+	// Warn, do not refuse: --ignore-scripts means a build/postinstall step did NOT run and an optional
+	// dependency was NOT fetched, so such a package is staged INCOMPLETE and may fail at run time.
+	const scriptKeys = ["install", "preinstall", "postinstall"].filter((key) => typeof pkg.scripts?.[key] === "string");
+	const hasOptional = Object.keys(pkg.optionalDependencies ?? {}).length > 0;
+	if (scriptKeys.length > 0 || hasOptional) {
+		const declares = [...scriptKeys.map((key) => `scripts.${key}`), ...(hasOptional ? ["optionalDependencies"] : [])].join(", ");
+		warnings.push({ dir: entry.dir, reason: `${entry.name} declares ${declares} -- staged with --ignore-scripts, so it is INCOMPLETE and may fail at run time` });
+	}
+
+	return source;
 }
 
 /**
@@ -437,7 +561,26 @@ function flagValue(argv, flag) {
 	return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
 }
 
-function nextSteps(to, withExtensions, withPackages) {
+/** The first argument that is neither a known flag nor the value of one, or null when argv is clean. */
+function unknownFlag(argv) {
+	for (let i = 0; i < argv.length; i++) {
+		if (VALUE_FLAGS.has(argv[i])) {
+			i++; // its value, whatever it is
+			continue;
+		}
+		if (!BOOL_FLAGS.has(argv[i])) return argv[i];
+	}
+	return null;
+}
+
+/** Why discovery found nothing, when pi's settings file is the reason. */
+function hostSettingsNote(hostPi) {
+	if (hostPi.settingsState === "absent") return `none at ${hostPi.settingsPath} -- nothing discovered from your pi setup`;
+	if (hostPi.settingsState === "packages-not-an-array") return `"packages" is not an array in ${hostPi.settingsPath} -- nothing discovered`;
+	return `UNREADABLE at ${hostPi.settingsPath} -- host packages NOT discovered, extension state NOT applied`;
+}
+
+function nextSteps(to, withExtensions, withPackages, withHostPackages) {
 	const steps = [`Set PI_GLOBAL_PI_DIR=${to} in .env`, "pi-dispatch doctor        # verifies the overlay is credential-free"];
 	// The vetting step is no longer a switch to flip -- it already happened by staging. What is left is the
 	// off switch, named here so an operator who does not want the extensions is not left hunting for it.
@@ -445,6 +588,9 @@ function nextSteps(to, withExtensions, withPackages) {
 	// Same inversion for packages: staging is what loads them, so the step worth naming is how to withhold
 	// them from a trigger that should not run third-party code.
 	if (withPackages) steps.push('Staged packages load in every job -- set `run.packages: false` on any trigger in triggers.json that must not load them');
+	// Named here rather than only in the docs: this is the run whose meaning changed, so the operator who
+	// wanted the old one should not have to go looking for how to get it back.
+	if (withHostPackages) steps.push("Packages from your pi setup were staged too -- re-run with --no-host-packages to stage only what pi-packages.json declares");
 	return `
 Next:
 ${steps.map((step, i) => `  ${i + 1}. ${step}\n`).join("")}`;

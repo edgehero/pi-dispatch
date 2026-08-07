@@ -459,3 +459,11 @@ jobs:
           # canary script re-copies fresh and asserts (a)-(d); see its header for the mechanics.
           cp admin/dist/index.mjs "$SCRATCH/admin-bundle.mjs"
           node .github/scripts/admin-pi-canary.mjs "$SCRATCH"
+
+      - name: "HOST-PI: pi's package-install paths and enablement grammar survive latest pi"
+        run: |
+          # worker/src/host-pi.mjs MIRRORS private pi internals (issue #102): where `pi install` puts a
+          # package, and whether `pi config` disabled a resource. pi exports no public answer to either.
+          # worker/test/host-pi.pinned.test.mjs gates the PINNED version in contract-tests; this is the
+          # advance warning against latest, sharing one needle list so the two cannot drift.
+          node .github/scripts/host-pi-canary.mjs "$SCRATCH"

@@ -159,7 +159,11 @@ function triggersFile(packages, image) {
 	return path;
 }
 const overlayEnv = (dir, extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_GLOBAL_PI_DIR: dir, ...extra });
-const overlayDeps = (out) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" });
+// `agentDir` points at a path that does not exist, so the host-vs-overlay comparison (issue #102) finds
+// nothing and, crucially, never reads the developer's real ~/.pi/agent or spawns their package manager.
+// A test that wants the comparison passes its own agentDir.
+const NO_AGENT_DIR = join(tmpdir(), "pi-dispatch-no-such-agent-dir");
+const overlayDeps = (out, extra = {}) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR, ...extra });
 
 // -- per-trigger job images (issue #41): presence is the only thing this project can check ------------
 
@@ -1116,11 +1120,13 @@ test("doctor --fix: accepting the restage offer re-runs import-pi as a child thr
 		promptFn,
 	});
 	assert.deepEqual(prompts, ["run this? [y/N] "]);
-	assert.ok(text().includes(`    $ pi-dispatch import-pi --with-packages --to ${dir}\n`), "the offer names the exact command");
+	assert.ok(text().includes(`    $ pi-dispatch import-pi --with-packages --no-host-packages --to ${dir}\n`), "the offer names the exact command");
 	const child = calls.find((c) => c.cmd === process.execPath);
 	assert.ok(child, "import-pi runs as a child process, so its own gates and printed-names vetting run unmodified");
 	assert.ok(child.args[0].endsWith("cli.mjs"), "spawned through the real CLI entry");
-	assert.deepEqual(child.args.slice(1), ["import-pi", "--with-packages", "--to", dir]);
+	// --no-host-packages keeps the ONE automated staging path a repair: accepting a doctor prompt restores
+	// what the overlay declared, it never performs a first-time import of the host's pi setup (issue #102).
+	assert.deepEqual(child.args.slice(1), ["import-pi", "--with-packages", "--no-host-packages", "--to", dir]);
 	assert.equal(child.opts.env, env, "the child inherits doctor's env (PI_PACKAGES_FILE, PI_CODING_AGENT_DIR)");
 	assert.equal(child.opts.cwd, cwd, "and doctor's cwd seam, where pi-packages.json lives");
 	assert.match(text(), /restage-run-output/, "import-pi's own output is forwarded");
@@ -1304,7 +1310,7 @@ test("doctor --fix doctrine: a missing manifest offers restage; overridden image
 	const manifest = checks.find((c) => /^Staged packages manifest readable/.test(c.label));
 	assert.ok(manifest && !manifest.ok);
 	assert.equal(manifest.fixAction.tier, "prompt");
-	assert.equal(manifest.fixAction.describe, `pi-dispatch import-pi --with-packages --to ${dir}`);
+	assert.equal(manifest.fixAction.describe, `pi-dispatch import-pi --with-packages --no-host-packages --to ${dir}`);
 	const img = checks.find((c) => c.label === "Job image present (acme/pi-job:2)");
 	assert.ok(img && !img.ok);
 	assert.equal(img.fixAction, undefined, "an overridden PI_JOB_IMAGE is the operator's trust choice -- pulling the default could not honor it");

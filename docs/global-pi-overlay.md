@@ -18,8 +18,10 @@ pi-dispatch doctor             # verifies the overlay is credential-free
 
 `import-pi` reads your host agent dir (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) and copies a **curated,
 credential-free** subset into the overlay dir. Re-run it whenever you change your host setup. Flags:
-`--no-extensions` (see below), `--with-packages` / `--packages-file <path>` (see below),
-`--from <agentDir>`, `--to <overlayDir>`. `--with-extensions` is still accepted as a documented no-op
+`--no-extensions` (see below), `--with-packages` / `--no-host-packages` / `--packages-file <path>`
+(see below), `--from <agentDir>`, `--to <overlayDir>`. An unknown flag is refused rather than ignored,
+because a typo in `--no-host-packages` would otherwise silently widen what runs in every job container.
+`--with-extensions` and `--host-packages` are accepted as documented no-ops
 (extensions come along by default now), so an older setup script keeps working and keeps meaning what it
 always meant.
 
@@ -59,10 +61,10 @@ Four tiers, most-trusted first; each refines but never removes the one above:
 | Copied into the overlay | Never copied |
 |---|---|
 | `models.json` (definitions; **refused if it embeds a literal key**) | `auth.json` — your credential stays in env/auth.json |
-| `skills/<name>/` | `settings.json`, `sessions/`, `themes/`, `prompts/`, `tools/` |
+| `skills/<name>/` | `settings.json`, `sessions/`, `themes/`, `prompts/`, `tools/` (`settings.json` is **read**, to learn what you installed and what you disabled; nothing from it is written) |
 | `APPEND_SYSTEM.md` (global persona) | anything holding a secret |
 | `extensions/` — by default; skip with `--no-extensions`, each one printed by name | the admin extension (hard-blocked) |
-| `packages/<dir>/` — only with `--with-packages`, exact-pinned, staged from npm on **your host** | any package whose name looks like the dispatch admin (hard-blocked) |
+| `packages/<dir>/` — only with `--with-packages`: what `pi-packages.json` declares **plus what you installed with `pi install`**, exact-pinned either way, staged from npm on **your host** | any package whose name looks like the dispatch admin (hard-blocked); a package a repo declares (never installed, see [`SECURITY.md`](../SECURITY.md)) |
 
 The overlay is mounted **read-only** into a container that runs adversarial input, so it must hold **no
 secret**. `import-pi` refuses a `models.json` with a literal `apiKey`, and equally with a literal value
@@ -106,6 +108,14 @@ present but dormant is a deployment missing the setup its flows were written aga
 1. `pi-dispatch import-pi` copies `extensions/` (verbatim — they are **not** scanned for secrets; the admin
    extension is refused) and **prints every extension it staged, by name**. That printed list is the
    vetting step: read it. Pass `--no-extensions` to skip the directory entirely.
+   **An extension you disabled with `pi config` is not copied.** Until issue #102 it was: `import-pi` never
+   read pi's own enable/disable state, so an extension you had explicitly turned off on your host still ran
+   in every job container, and the printed list did not mark it either. It now reads that state (reading
+   `settings.json` is not copying it — no part of that file reaches the overlay) and lists the disabled ones
+   under their own heading, separate from the vetting list, so the names above the fold are the ones that
+   are live. One honest limit: pi lets you express a disable as a glob, and `import-pi` carries no pattern
+   matcher, so a glob is **not** evaluated. The extension is copied and the command tells you which ones it
+   could not decide about, rather than guessing in either direction.
 2. They load in every job unless you set `PI_GLOBAL_ALLOW_EXTENSIONS=0`, which keeps them staged but
    dormant. Unset, empty and the legacy `1` all mean load, so an existing `.env` keeps working and still
    says what it always said. **Any other value fails loudly** — the worker refuses to boot, `doctor`
@@ -144,16 +154,51 @@ is doing the work here. The container's network is **not** cut off (egress is op
 [`SECURITY.md`](../SECURITY.md) says so plainly); offline mode is the thing that closes the job-time
 install, and the worker sets it on every job while the runner re-asserts it before the loader is built.
 
+**What you installed in pi is staged too.** If you ran `pi install npm:@acme/pi-house-skills`, you do not
+declare it a second time: `--with-packages` reads pi's own settings, finds it, and stages it **at the exact
+version your host has on disk**. `pi-packages.json` is the override-and-addition layer — an explicit entry
+wins over a discovered one, so you can pin *older* than your host runs, and you can still declare a package
+your host does not have. `--no-host-packages` stages only what the file declares.
+
 ```jsonc
 // pi-packages.json — scaffolded empty by `pi-dispatch init`; also honours PI_PACKAGES_FILE / --packages-file.
 // "version" must be EXACT; "dir" is optional and defaults to `scope__name`.
+// Optional now: a package you installed with `pi install` is discovered without an entry here.
 { "packages": [ { "name": "@acme/pi-house-skills", "version": "1.4.2", "dir": "house-skills" } ] }
 ```
 
 ```bash
-pi-dispatch import-pi --with-packages     # installs each pin into <overlay>/packages/<dir>/
-pi-dispatch doctor                        # shows what is staged, and how many triggers have opted out
+pi install npm:@acme/pi-house-skills      # your normal pi workflow, on your host
+pi-dispatch import-pi --with-packages     # stages your pi packages AND each pin into <overlay>/packages/<dir>/
+pi-dispatch doctor                        # shows what is staged, what drifted, and what is not staged at all
 ```
+
+Every package is printed by name with where it came from, because that list is the vetting step:
+
+```
+  packages/          2 packages -- third-party code, VET THESE
+    - @acme/pi-house-skills@1.4.2 (from your pi setup)
+    - pi-widgets@2.0.1 (from pi-packages.json, overrides your pi setup's 2.3.0)
+  host packages      1 skipped -- not staged
+    - git:github.com/acme/pi-thing (git source -- pi-packages.json pins an npm name + exact version only)
+```
+
+**What discovery will not do**, each of which it prints rather than passing over in silence:
+
+| Case | Why |
+|---|---|
+| A **git-sourced** package (`pi install github.com/…`) | `pi-packages.json` pins an npm name plus an exact semver, and a git ref is neither. Publish it to a registry, or accept that jobs run without it |
+| A package that contributes **no** pi resources | It would load as a silent no-op. "Contributes" means a `pi` manifest **or** one of `extensions/ skills/ prompts/ themes/`, which is pi's own rule, not ours |
+| A package whose `autoload` you turned **off** in pi | You disabled it; importing it would run code you turned off |
+| A package pi only **partly** loads | It stages **whole**, with a warning. Staging copies a directory, so "the package minus one skill" is not something the overlay can express, and pretending otherwise would be worse |
+| A package installed **project-locally** (`pi install -l`) | Not discovered in this release. The path sits one character from a *serviced* repo's `.pi/`, and confusing those two would be a security bug rather than a feature gap |
+
+Discovery follows pi's own lookup order: the managed path (`<agentDir>/npm/node_modules/<name>`) first, and
+your global npm or pnpm root **only** when the managed one is absent, which is exactly when pi itself falls
+back. If a package still cannot be found, the reason names the path that was searched.
+
+**Nothing needs a restart.** The stage receipt is read at each job start, so `pi install`, re-run
+`import-pi`, and the **next** job has it.
 
 That is all it takes: once staged, packages load for **every** job. If one flow must run without them,
 withdraw them on that trigger with `"packages": false` — available on **any** of the four kinds (`cron`,
@@ -169,7 +214,7 @@ A package is *someone else's*, so it passes four checks, and each stops a differ
 
 | # | Gate | Default | What it stops |
 |---|---|---|---|
-| 1 | An **exact** version in `pi-packages.json` (no `^`, `~`, `*`, `latest`) | refuses | a silent upstream minor turning every queued job into a no-op that still reports success |
+| 1 | An **exact** version: declared in `pi-packages.json`, or captured from what your host has installed (never a range, even when your pi source declared one) | refuses | a silent upstream minor turning every queued job into a no-op that still reports success |
 | 2 | `import-pi --with-packages` stages it on your host | refuses | a live `npm install` of third-party code inside a job container, every run |
 | 3 | `"packages"` on a trigger | **loads** | one flow that must not see the staged set — `"packages": false` withdraws it for that trigger alone |
 | 4 | The runner validates paths and enforces skill precedence | refuses | a package that did not mount (refused by the runner at container start, before any model call; the daily-cap slot is still taken), and a package skill taking a repo or overlay skill's name (the repo's stays in force) |
@@ -180,6 +225,21 @@ It defaults open for the same reason gates 1 and 2 exist at all: you pinned the 
 deliberately, so the staged set is the set your jobs get. `doctor` shows you what is staged and **how many**
 triggers have opted out: a count, never their names, so which flow it was is a question for the triggers
 file.
+
+`doctor` also compares your **host** against the overlay, and all four of these are warnings rather than
+failures, because running a narrower set on a deployment than on your laptop is a legitimate choice:
+
+| It warns when | Because |
+|---|---|
+| a package in your pi setup is **not staged** | the label names the path it searched, so "auto-import is broken" is never the only conclusion available |
+| a staged version **differs** from your host's | otherwise a flow behaves differently in a job than it does interactively, which is the hardest kind of difference to chase |
+| a host package is **git-sourced** | it cannot be staged at all, and an unexplained absence is worse than a stated limit |
+| a staged package declares a **build step** | `--ignore-scripts` means it never ran, so the package is staged incomplete (see below) and would otherwise fail once per job, after taking a daily-cap slot |
+
+None of them offers to fix itself. Now that `--with-packages` discovers, "restage for me" would stop meaning
+*restore what you declared* and start meaning *import whatever is on your laptop*, which is not a decision
+to make behind a `y/N` prompt. For the same reason `doctor --fix`'s existing restage offer runs
+`import-pi --with-packages --no-host-packages`: the one automated path stays a repair.
 
 **`--ignore-scripts` is on, and it cuts both ways.** Staging never runs a package's lifecycle scripts —
 without that flag, the `install`/`postinstall` of the package **and of every transitive dependency** would
