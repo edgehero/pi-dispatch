@@ -55,8 +55,12 @@ export const PINNED_PI_NEEDLES = {
 		"return this.getPnpmGlobalPackagePath(source.name) ?? join(this.getGlobalNpmRoot(), source.name);",
 		'this.runNpmCommandSync(["root", "-g"]).trim()',
 		'this.runNpmCommandSync(["list", "-g", "--depth", "0", "--json"])',
-		// A package with no `pi` key is still a pi package when it ships a convention dir.
-		"return pkg.pi ?? null;",
+		// A package with no `pi` key is still a pi package when it ships a convention dir. Anchored on the
+		// FALLTHROUGH rather than on `readPiManifest`'s null return, because the fallthrough IS the behaviour
+		// the mirror depends on while the manifest read is only how you arrive at it. pi 0.84.1 extracted
+		// that read into its own module without changing what it means, and a needle on its old body cried
+		// wolf on a pure refactor -- which is how a canary teaches people to ignore it.
+		"let hasAnyDir = false;",
 		// The enablement grammar: which prefixes are overrides, and the order they resolve in.
 		'return entries.filter((pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));',
 		"function isEnabledByOverrides(filePath, patterns, baseDir) {",

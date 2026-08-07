@@ -631,6 +631,14 @@ adversarial passes did.
 - **What would reopen it louder**: a pi release where the pinned test passes and the behaviour changed
   anyway — i.e. the needles turn out to be checking the wrong lines. That is the failure the two-distance
   split cannot catch, and the only remedy is re-deriving the mirror against the source, not the needles.
+- **Calibrated once already, on the day it was written**: the canary's first run fired against pi 0.84.1,
+  and the drift was **not** real. 0.84.1 extracted `readPiManifest` into its own module without changing
+  what it means, and a needle pinned to its old body reported a behaviour change that had not happened —
+  while the fallthrough the mirror actually depends on was intact. The needle now anchors that fallthrough
+  instead. The lesson generalises and is the reason this row exists rather than a comment: **a needle
+  pinned to an incidental line reports refactors as breakage**, and a canary that cries wolf is one people
+  stop reading, which costs more than the drift it was watching for. When this fires, check the needle
+  before believing the verdict.
 - **Related risks**: `OQ-005` (the upstream-drift row this is the same species as, and the one whose
   correction records that a sha is not a version), `OQ-011`.
 

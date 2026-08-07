@@ -27,6 +27,7 @@ on:
       - "triggers.example.json"
       - ".github/workflows/pi-upgrade-check.yml"
       - ".github/scripts/admin-pi-canary.mjs"
+      - ".github/scripts/host-pi-canary.mjs"
   pull_request:
     paths:
       - "image/**"
@@ -39,6 +40,7 @@ on:
       - "triggers.example.json"
       - ".github/workflows/pi-upgrade-check.yml"
       - ".github/scripts/admin-pi-canary.mjs"
+      - ".github/scripts/host-pi-canary.mjs"
   schedule:
     # Weekly: pi ships breaking changes between minors and its HEAD moved within 24h of this
     # project's design being written. A pin that is never exercised rots silently.
@@ -460,10 +462,46 @@ jobs:
           cp admin/dist/index.mjs "$SCRATCH/admin-bundle.mjs"
           node .github/scripts/admin-pi-canary.mjs "$SCRATCH"
 
-      - name: "HOST-PI: pi's package-install paths and enablement grammar survive latest pi"
+  host-pi-canary:
+    # `worker/src/host-pi.mjs` MIRRORS private pi internals (issue #102): where `pi install` puts a
+    # package, and whether `pi config` disabled a resource. pi exports no public answer to either, which
+    # is the residual recorded as OQ-018. `worker/test/host-pi.pinned.test.mjs` gates the PINNED version
+    # inside contract-tests as a hard failure; this job is the advance warning against `latest`, and both
+    # read one shared needle list (PINNED_PI_NEEDLES) so the gate and the canary cannot drift apart.
+    #
+    # Its OWN job rather than a step on the admin canary, deliberately. Sharing that job made a run named
+    # "the admin extension survives latest pi" go red for a reason that had nothing to do with the admin
+    # extension, which is a mislabelled signal however accurate the annotation underneath it was. Separate
+    # jobs also mean an admin failure no longer hides this result, and vice versa.
+    #
+    # Failure protocol: drift here is a `::warning::` and the job stays GREEN, because nothing shipped is
+    # broken -- the worker pins pi, and the pinned test is what fails when that pin is wrong. A RED run
+    # means the canary could not execute at all (pi did not install), which is infrastructure and says
+    # nothing either way about drift. See the script header for the full reasoning.
+    name: host-pi mirrors survive latest pi (canary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      # No `npm ci`: this job reads two source files and one scratch install, and never imports the
+      # repo's own pinned pi -- installing it would be the drift-hiding mistake the admin canary's own
+      # comment warns about.
+      - name: Install pi@latest into a scratch dir (never the repo)
         run: |
-          # worker/src/host-pi.mjs MIRRORS private pi internals (issue #102): where `pi install` puts a
-          # package, and whether `pi config` disabled a resource. pi exports no public answer to either.
-          # worker/test/host-pi.pinned.test.mjs gates the PINNED version in contract-tests; this is the
-          # advance warning against latest, sharing one needle list so the two cannot drift.
-          node .github/scripts/host-pi-canary.mjs "$SCRATCH"
+          SCRATCH=$(mktemp -d)
+          echo "SCRATCH=$SCRATCH" >> "$GITHUB_ENV"
+          cd "$SCRATCH"
+          npm init -y >/dev/null
+          # Same doctrine as the admin canary: an install error is infrastructure, NOT a drift verdict.
+          if ! npm install @earendil-works/pi-coding-agent@latest --no-audit --no-fund; then
+            echo "::error::npm install @earendil-works/pi-coding-agent@latest failed -- an infrastructure failure, not a pi-drift verdict. Re-run before reading anything into it."
+            exit 1
+          fi
+          node -p "'canary pi: ' + require('$SCRATCH/node_modules/@earendil-works/pi-coding-agent/package.json').version"
+
+      - name: "pi's package-install paths and enablement grammar still read the way host-pi.mjs assumes"
+        run: node .github/scripts/host-pi-canary.mjs "$SCRATCH"
