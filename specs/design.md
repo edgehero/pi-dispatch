@@ -1435,7 +1435,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `extensions/` is the sharp edge (it runs code in every job), and every additional mirrored internal is
     another thing that can drift out from under us. A glob in an enablement pattern is **not evaluated** at
     all — we carry no matcher — so the extension is copied and the command says it could not honour the
-    pattern. Fail open, and say which.
+    pattern. Fail open, and say which. That reach, together with git-sourced packages and project-local
+    installs, is `OQ-019`, recorded rather than glossed.
+  - **What this design buys with an unexported dependency, stated as a cost.** `worker/src/host-pi.mjs`
+    reimplements two pi internals that have no public equivalent: the user-scope install-path lookup and
+    the enablement grammar. Two pins at different distances bound it — a contract test against the resolved
+    artifact, a canary against `latest`, sharing one needle list — but neither catches a mirror that was
+    reading the wrong lines from the start. The residual is `OQ-018`, and it is the reason the bullet above
+    resists widening the mirror further.
 - **Traces to**: `REQ-GLOBAL-PI-OVERLAY`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`,
   `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
   `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`,

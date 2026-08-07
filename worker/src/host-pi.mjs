@@ -21,7 +21,9 @@
  * pi could change the grammar and we would silently start staging something the operator turned off -- so it
  * is pinned twice: `worker/test/host-pi.pinned.test.mjs` asserts the pinned artifact still reads the way this
  * file assumes, and `.github/scripts/host-pi-canary.mjs` runs the same needles against pi@latest for advance
- * warning. Both import PINNED_PI_NEEDLES from here so the pin and the canary cannot drift apart.
+ * warning. Both import PINNED_PI_NEEDLES from here so the pin and the canary cannot drift apart. The residual
+ * is `OQ-018`, recorded rather than glossed: the pins catch a moved internal, not a mirror that was checking
+ * the wrong lines all along.
  *
  * Where it cannot decide, it says so. A glob in an enablement pattern is NOT evaluated (we do not carry a
  * matcher), the extension is copied, and the caller prints that it could not be honoured. Fail open, and say

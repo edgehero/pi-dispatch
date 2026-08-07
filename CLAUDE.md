@@ -116,7 +116,7 @@ Two consequences worth internalising before you design anything:
 - **`worker/src/host-pi.mjs` mirrors private pi internals on purpose**, and pi exports no public
   alternative. It is pinned twice: `worker/test/host-pi.pinned.test.mjs` gates the pinned version, and
   `.github/scripts/host-pi-canary.mjs` warns against `latest`. Both share one needle list. If a pi bump
-  fails either, fix the mirror, never the assertion.
+  fails either, fix the mirror, never the assertion. The residual is `OQ-018`.
 
 ## One note on this file
 

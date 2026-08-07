@@ -597,10 +597,83 @@ adversarial passes did.
   `OQ-012` (an operator-built image is outside every gate this repo has — and it is the gate that would
   otherwise catch a stale safety floor here).
 
+## OQ-018 — `host-pi.mjs` reimplements two unexported pi internals, and pi offers no public alternative
+
+- **Status**: `ACCEPTED RISK`
+- **Position**: `worker/src/host-pi.mjs` (issue #102) answers two questions pi exports no public API for.
+  **Where a package the operator installed lives**: `getNpmInstallPath` for user scope, including the
+  precedence that honours `<agentDir>/npm/node_modules/<name>` first and the global npm/pnpm/bun root
+  **only** when that is absent. **Whether a resource is enabled**: `isEnabledByOverrides`'s grammar, where
+  a `-path` exact force-exclude beats a `+path` exact force-include beats a `!glob` exclude, plus the
+  `autoload` flag and per-kind pattern arrays that do the same job for a package's own resources. Both are
+  read out of a dist bundle. Neither is reachable from `@earendil-works/pi-coding-agent`'s exports.
+- **Why it is a risk row and not a constraint**: a constraint would promise the mirror stays true, and
+  nothing here can enforce that — pi would have to publish the surface. The honest shape is the same one
+  `OQ-012` and `OQ-013` take: state the gap rather than imply coverage.
+- **Why it matters more than an ordinary upstream dependency**: the failure is **not** a crash, and that is
+  the whole reason this row exists. If pi changes the grammar, the mirror keeps answering confidently and
+  `import-pi` silently stages a package the operator turned off, or silently withholds one they did not.
+  That is the silent-no-op class this project refuses, reached from a direction no runtime assertion sees:
+  every downstream gate still passes, because the wrong answer is well-formed.
+- **What bounds it meanwhile, and what detection ships today**: two pins, deliberately at different
+  distances. `worker/test/host-pi.pinned.test.mjs` asserts the **resolved artifact** and rides the existing
+  `contract-tests` job, so a pi bump that moves any mirrored internal fails the build rather than the
+  operator's overlay. `.github/scripts/host-pi-canary.mjs` runs the same needles against `pi@latest` inside
+  the `admin-extension-canary` job, so a release that will break the next bump is visible before anyone
+  makes it. Both import `PINNED_PI_NEEDLES` from `host-pi.mjs` itself, so the gate and the canary cannot
+  drift apart: a needle added to one is checked by both. Beyond the pins, the mirror is built to admit
+  ignorance — a glob in an enablement pattern returns a **third** state rather than a guess, the extension
+  is copied, and the command prints which ones it could not decide about.
+- **What would close it**: pi exposing a supported way to ask "where is this package installed" and "is
+  this resource enabled". Short of that the needle list **is** the contract, and it must grow whenever the
+  mirror does — which is the standing argument for keeping the mirror small, and half the reason `OQ-019`
+  leaves three parts of pi's setup unreached.
+- **What would reopen it louder**: a pi release where the pinned test passes and the behaviour changed
+  anyway — i.e. the needles turn out to be checking the wrong lines. That is the failure the two-distance
+  split cannot catch, and the only remedy is re-deriving the mirror against the source, not the needles.
+- **Related risks**: `OQ-005` (the upstream-drift row this is the same species as, and the one whose
+  correction records that a sha is not a version), `OQ-011`.
+
+## OQ-019 — Discovery reaches npm packages only, and the enablement mirror reaches extensions only
+
+- **Status**: `WATCH`
+- **Position**: `import-pi --with-packages` discovers what the operator installed in pi (issue #102), but
+  three parts of their setup are deliberately out of its reach, and this row is the register pointer rather
+  than a reconsideration of any of them.
+  **(a) Git-sourced packages** are skipped by name, never staged. `pi-packages.json` validates an npm name
+  plus an exact semver (`INT-PI-PACKAGES-FILE-CONTRACT`), and a git ref is neither, so staging one needs a
+  second entry type in that contract **and** a fresh `CONST-PI-VERSION-PINNED` argument about whether a
+  commit sha counts as a pin. That is a spec amendment wearing an implementation's clothes.
+  **(b) Skills, prompts and themes enablement** is not mirrored; only `extensions/` is, because only
+  `extensions/` runs code in every job container. The other three kinds are data.
+  **(c) Project-local installs** (`pi install -l`, which land in `<cwd>/.pi/npm`) are not discovered.
+- **Why each is deferred rather than dropped**: (a) is real work someone may want, and it is scoped above.
+  (b) is a cost/benefit call that leans on `OQ-018`: every additional mirrored internal widens that risk,
+  and the sharp edge is already covered. (c) is the uncomfortable one and worth stating plainly — those
+  packages are the **operator's**, so the trust argument that bars a serviced repo's packages does not
+  apply to them, and the reason to defer is that `<cwd>/.pi/` sits one character from a *serviced* repo's
+  `.pi/`. Confusing the two would be a security bug rather than a feature gap, so the path deserves its own
+  design pass rather than an extension of this one.
+- **The reconciliation this row also carries**, because nothing else states it in one place: a serviced
+  repo's declared **packages** are never installed, while its `.pi/extensions` **do** load, and that is not
+  a contradiction. The extensions load because `/workspace` is the base repo's **default-branch sha**, so
+  the content is merge-gated rather than fork-controlled. Installing what a repo declares would be
+  different in kind: it would put third-party install-time and load-time code next to a live minted forge
+  token in a container with open egress, on the say-so of anyone who can merge. If it is ever wanted, the
+  shape is an operator-held allowlist, not a per-repo opt-in, because the repo is the thing not trusted.
+- **What would close it**: (a) a decision on how a git ref is pinned, or a ratification that git-sourced
+  packages are permanently out of scope; (b) evidence that a non-extension resource the operator disabled
+  causing a job to behave differently is a real complaint rather than a hypothetical; (c) a design that
+  cannot confuse the operator's own project dir with a serviced repo's.
+- **Blocks**: nothing this slice — npm-sourced discovery and extension enablement ship now, and every
+  unreached case is **printed by name** at stage time rather than passed over in silence.
+- **May also get an issue**: (a), if someone intends to schedule it. The row stays regardless.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup). Added **`OQ-018`** (`ACCEPTED RISK`): `worker/src/host-pi.mjs` reimplements two internals pi does not export — the user-scope install-path lookup with its managed-before-global precedence, and the `-` beats `+` beats `!` enablement grammar. Recorded rather than left as an implementation detail because the failure mode is not a crash: if pi changes the grammar the mirror keeps answering confidently and `import-pi` silently stages a package the operator turned off, which is the silent-no-op class this project refuses, reached from a direction no runtime assertion sees. What bounds it is two pins at deliberately different distances (a contract test against the resolved artifact, a canary against `latest`) sharing one needle list so they cannot drift, plus a mirror built to admit ignorance — a glob returns a third state and is printed, never guessed. Added **`OQ-019`** (`WATCH`): discovery reaches npm packages only and the enablement mirror reaches extensions only, with git-sourced staging, skills/prompts/themes enablement and project-local (`pi install -l`) installs each deferred **for a different reason** — a spec amendment about whether a sha is a pin, a cost/benefit call that leans on `OQ-018`, and a path that sits one character from a *serviced* repo's `.pi/` respectively. That row also carries the reconciliation nothing else stated in one place: a repo's declared packages are never installed while its `.pi/extensions` do load, and that is not a contradiction because `/workspace` is the default-branch sha. Neither row got a GitHub issue, per this file's own header: an issue schedules work, a row records the answer, and these are scoping decisions rather than scheduled work. **`OQ-005` UNCHANGED, checked** — it is the same species as `OQ-018` (upstream drift) but concerns an API the runner *calls*, not one it reimplements. **`OQ-011` UNCHANGED, checked** — a staged package spawning an unmetered `pi` subprocess is unaffected by where the package came from. |
 | 2026-08-01 | Added **`OQ-017`** (`WATCH`, issue #56 / `REQ-REPLICA-RUNS`): two replicas on a **pull_request**-typed target share the pull request's head branch, and the harness bounds nothing — only the prompt asks. The asymmetry is the row's point: an **issue**-typed target is fully bounded, because the host mints `pi/issue-<n>-r1`/`-r2` and each replica is told to push only to its own; a pull_request target has no branch to mint, since the head branch belongs to a human and every replica sees the same one. It is allowed rather than refused because the common case is a **review** flow that writes nothing at all, and refusing the whole target type would remove the safest use of the feature to guard against its least common one. What bounds it meanwhile is stated honestly as three things that are not boundaries: the replica paragraph in the prompt, `--force-with-lease` (which genuinely **refuses** when a sibling has pushed, so a collision surfaces as a failed push rather than as lost work), and the fact that replicas share `PI_CONCURRENCY` with every other job and so often serialise — which is luck, not a control, and is recorded as such. |
 | 2026-08-01 | Added **`OQ-016`** (`WATCH`) — the admin panel's `tui.stop()` → spawn → `tui.start()` handoff for `REQ-RESURRECTABLE-SANDBOX` is verified by reading the pinned pi and by pi's own `$EDITOR` use of the same pair, **not** by having been run. Recorded rather than left implicit because the mechanism reaches past the extension API (which has no terminal handoff) into the `TUI` object the `custom` factory happens to hand over, so it is exactly the class of assumption `REQ-UPSTREAM-CONTRACT-TESTS` exists to catch — with the difference, stated in the row, that this one fails cosmetically and recoverably rather than silently. |
 | 2026-07-15 | Initial. Replaces `DESIGN.md` v0.1 §10. Collapsed from ~10 checklist items to 5 rows: source-verification at `earendil-works/pi @ 5e336cf` answered most of them. The register's value inverted in the process — from "holds ten unknowns" to "holds one known-incoming breaking change" (`OQ-005`). |

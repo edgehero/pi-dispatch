@@ -193,6 +193,9 @@ Every package is printed by name with where it came from, because that list is t
 | A package pi only **partly** loads | It stages **whole**, with a warning. Staging copies a directory, so "the package minus one skill" is not something the overlay can express, and pretending otherwise would be worse |
 | A package installed **project-locally** (`pi install -l`) | Not discovered in this release. The path sits one character from a *serviced* repo's `.pi/`, and confusing those two would be a security bug rather than a feature gap |
 
+What discovery does not reach, and why each case was left rather than dropped, is tracked as `OQ-019` in
+[`specs/open-questions.md`](../specs/open-questions.md).
+
 Discovery follows pi's own lookup order: the managed path (`<agentDir>/npm/node_modules/<name>`) first, and
 your global npm or pnpm root **only** when the managed one is absent, which is exactly when pi itself falls
 back. If a package still cannot be found, the reason names the path that was searched.
