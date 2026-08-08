@@ -156,8 +156,8 @@ export async function runJob(job, deps) {
 		}
 
 		// REQ-RESUMABLE-SESSION's one fail-CLOSED case. Everything else in that feature fails OPEN and
-		// NAMES itself -- absent, expired, too-large, unparseable, locked, no key -- because a cold start is
-		// a correct run. This one cannot be: with no `sessionsDir`, resolveSession returns null
+		// NAMES itself -- absent, expired, too-large, unparseable, locked, promote-failed -- because a cold
+		// start is a correct run. This one cannot be: with no `sessionsDir`, resolveSession returns null
 		// (session-store.mjs), so nothing is staged, no /session is mounted, the transcript dies with the
 		// container, and the NEXT job on that key cold-starts too. The job would exit 0 and look like the
 		// feature worked. That is an operator who believes a disclosure is on while it is off, with a green

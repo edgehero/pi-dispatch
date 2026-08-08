@@ -127,12 +127,27 @@ mid-run, the resume is refused. **Upgrading the job image costs every key one co
 nothing is deleted, each key simply cold-starts the first time its stamped version fails to match, and its
 next completed run rewrites both the transcript and the stamp.
 
-One further reason reaches `session.reason` without being a read-path outcome at all: `locked`. Only
-`promoteSession` produces it, on a **completed** run whose key was already held by another job's exclusive
-promotion lock. That run discards its own copy rather than clobbering the other's, and the reason is
-recorded to explain why the next run for the key will not see this run's work. Two jobs on one pull request
-inside one runtime is a real shape (`REQ-QUEUE-BURST-NO-DROP`), and last-write-wins there would interleave
-two agents' turns into one transcript.
+Two further reasons reach `session.reason` without being read-path outcomes at all. Both come from
+`promoteSession`, so both appear only on a **completed** run, and both describe the *write* back to the
+store rather than the read that started the job:
+
+| reason | meaning |
+|---|---|
+| `locked` | the key was already held by another job's exclusive promotion lock |
+| `promote-failed` | the write itself failed: a full disk, or a permissions change under the store mid-promotion |
+
+`locked` is the one with a design behind it. That run discards its own copy rather than clobbering the
+other's, and the reason is recorded to explain why the next run for the key will not see this run's work.
+Two jobs on one pull request inside one runtime is a real shape (`REQ-QUEUE-BURST-NO-DROP`), and
+last-write-wins there would interleave two agents' turns into one transcript. `promote-failed` is the
+disk telling you something: the run itself succeeded and its result is already on the forge, but its
+transcript did not persist, so the next run for that key cold-starts.
+
+A refused promotion **wins** over whatever the read path said, because on a completed run the more useful
+reason is the one that explains the *next* run's cold start rather than this one's.
+
+Two values are not cold starts at all and round out the enum: `resumed`, the transcript loaded and pi
+continued it, and `disabled`, which every job that did not arm `run.resume` records.
 
 ## Cost
 

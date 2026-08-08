@@ -611,6 +611,35 @@ test("a hostile skill in the workspace tree is still NOT loaded with packages on
 	assert.ok(!surface.includes(HOSTILE_SENTINEL), "hostile skill content reached the loader");
 });
 
+test("PI_GLOBAL_ALLOW_EXTENSIONS=0 makes the OVERLAY dormant and leaves staged packages loading", { skip }, async () => {
+	// The two switches are separate on purpose, and nothing pinned the OFF side of this one: every other
+	// case in this file passes allowGlobalExtensions:true. Without this, someone reading the loader could
+	// "fix" the packagePaths spread to ride the same option and silently withhold every staged package
+	// from every job on every deployment that sets the opt-out -- a change that loses the operator tools
+	// they armed, on a clean exit 0, with nothing red anywhere.
+	//
+	// The worker already applied the per-trigger opt-out before emitting PI_PACKAGES
+	// (worker/src/env-allowlist.mjs), so a non-empty packagePaths here IS the operator's yes. Withholding
+	// all third-party extension code takes BOTH PI_GLOBAL_ALLOW_EXTENSIONS=0 and run.packages:false.
+	const jobPiDir = fixtureExtensionDir("job-pi-ext-", REPO_EXT_SENTINEL);
+	const globalPiDir = fixtureExtensionDir("pi-global-ext-", OVERLAY_EXT_SENTINEL);
+	const pkg = fixturePackage();
+	const { loader } = await load({ jobPiDir, globalPiDir, allowGlobalExtensions: false, packagePaths: [pkg] });
+
+	const paths = loader.getExtensions().extensions.map((e) => e.path);
+	assert.ok(paths.includes(join(pkg, "ext", "sentinel.js")), `the staged package's extension must still load: ${JSON.stringify(paths)}`);
+	assert.ok(!paths.includes(join(globalPiDir, "extensions")), `the overlay's extensions must be dormant: ${JSON.stringify(paths)}`);
+
+	// Asserted on the loaded SURFACE too, not just the paths: the opt-out has to withhold what the overlay
+	// contributes, and the package's own contribution has to survive it intact.
+	const surface = [JSON.stringify(loader.getSkills()), JSON.stringify(extensionCommands(loader)), loader.getAppendSystemPrompt().join("\n\n")].join("\n");
+	assert.ok(surface.includes(PKG_SKILL_SENTINEL), "the staged package's skill was withheld by the OVERLAY's opt-out");
+	assert.ok(!surface.includes(OVERLAY_EXT_SENTINEL), "an overlay extension registered a command while the opt-out was set");
+
+	// And the repo's own extensions are untouched by either switch.
+	assert.ok(paths.includes(join(jobPiDir, "extensions")), "the repo's extensions path must survive the overlay opt-out");
+});
+
 test("package extension paths come LAST -- repo, then overlay, then packages", { skip }, async () => {
 	// Extension resolution is first-path-wins, so ordering IS the trust ordering: nothing a staged
 	// package ships may shadow a repo or operator-overlay extension. Asserted on the loaded

@@ -57,8 +57,11 @@ Evidence convention as in `constitution.md`.
     // Repo path FIRST so a repo skill overrides a global one of the same name (pi is first-path-wins).
     additionalSkillPaths:     ["/job/pi/skills", ...(existsSync("/opt/pi-global/skills") ? ["/opt/pi-global/skills"] : [])],
     // Overlay extensions load unless the operator opted OUT (PI_GLOBAL_ALLOW_EXTENSIONS=0) AND the dir
-    // is present. Operator-staged pi packages (REQ-GLOBAL-PI-OVERLAY) ride this same option, LAST —
-    // extension resolution is first-path-wins, so nothing a package ships can shadow a repo or overlay
+    // is present. Operator-staged pi packages (REQ-GLOBAL-PI-OVERLAY) come LAST and do NOT ride that
+    // option — the spread is unconditional, because the worker already applied the per-trigger
+    // `run.packages` opt-out before emitting PI_PACKAGES. Two switches, withholding two different things:
+    // withholding ALL third-party extension code takes both. LAST is the trust ordering: extension
+    // resolution is first-path-wins, so nothing a package ships can shadow a repo or overlay
     // EXTENSION. That ordering fix does NOT extend to skills; skillsOverride below is where that is
     // settled. With noExtensions off, reload() merges the paths DISCOVERED under /workspace/.pi/
     // extensions AFTER this whole list, so a workspace extension is last of all and shadows nothing.
@@ -1569,7 +1572,7 @@ validator rather than a second copy of it.
     "replica":  <int> | null,       // this job's 1-based index within its replica set; null = an ordinary run
     "replicas": <int> | null,       // the set size, so `r2` is legible without finding the sibling row
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
   ```
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
@@ -1577,6 +1580,26 @@ validator rather than a second copy of it.
   keeps the raw `jobId`. `reason` is a fixed enum passed through from the terminal outcome — never
   free-form and never payload text — and `turns` is `null` when the container died before emitting the
   runner `exit` line.
+
+  `session.reason` reads as one flat list but has **three producers**, which is why a token can look
+  unreachable from whichever half of the code you happen to be in:
+
+  | Producer | Tokens |
+  |---|---|
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
+  | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
+  | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
+
+  A refused promotion **wins** over the other two (`mergeSession`, `worker/src/processor.mjs`): on a
+  completed run it is the more useful reason, because it says why the NEXT run for this key will cold
+  start. Three things follow that the list cannot show. `expired` never arrives from the promote path,
+  which checks the file but not the TTL. `promoted` is a `promoteSession` return value that reaches no
+  record, because the merge reads a promotion's reason only when it refused. And `promote-failed` is the
+  one an operator meets in the wild: a full disk or a permissions change mid-promotion produces it.
+  `promoteSession`'s remaining return, `no-key`, is deliberately **absent from this enum** and cannot
+  reach a record — it is a DI-seam backstop, unreachable in a wired worker for the same reason the
+  store's own no-`sessionsDir` return is, since `sessionKeyFor` is total and binary and `resolveSession`
+  therefore returns `null` rather than a keyless session.
 - **Why**: The admin extension is a separate process (`DES-ADMIN-VIA-PI-EXTENSION`) that reads this as a
   read-model it does not share memory with — the worker writes the files, the admin extension reads them, and
   nothing crosses in RAM. The worker writes on both terminal paths: `worker/src/index.mjs` `makeProcessor`
@@ -1995,6 +2018,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #103, two records that disagreed with the code. **INT-RUN-HISTORY-FILE-CONTRACT**: the nested `session.reason` enum was documented as CLOSED while omitting `promote-failed`, which `promoteSession`'s outer catch returns on any fs fault during the swap and which `mergeSession` writes straight into the record on the completed path — a full disk would have produced a token the spec called impossible. Added, together with a producer table, because the enum reads as one flat list while three separate code paths write it (resolve, runner, promote) and a refused promotion WINS over the other two. Recorded three things the list cannot show: `expired` never arrives from the promote path, `promoted` is a return value that reaches no record, and `no-key` is deliberately NOT in the enum — a DI-seam backstop unreachable in a wired worker, since `sessionKeyFor` is total and binary so `resolveSession` returns `null` rather than a keyless session. Pinned by a new fault-injection test in `worker/test/session-store.test.mjs`. **INT-SDK-SESSION-OPTIONS**: the `additionalExtensionPaths` comment claimed operator-staged pi packages "ride this same option" as `PI_GLOBAL_ALLOW_EXTENSIONS`; the spread is and remains UNCONDITIONAL, so the comment was the defect, in both this file and `image/runner/src/loader.mjs`. Corrected to state the split and why (the worker applies `run.packages` before emitting `PI_PACKAGES`, so re-gating here would withhold what the operator armed), and the previously untested `allowGlobalExtensions: false` case is now pinned in `image/runner/test/loader.test.mjs`. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked** — its write-path prose names no reason tokens, so the drift could only ever have been visible from the record's own contract. |
 | 2026-08-07 | Issue #102: **INT-PI-PACKAGES-FILE-CONTRACT** records that `pi-packages.json` is now the override-and-addition layer rather than the only source (discovery reaches the same validator, so it adds candidates and never exemptions), and that the receipt gained `from` as a CLOSED enum with a default — which covers both compatibility directions at once, since a pre-#102 receipt carries no `from` and reads as declared while an older worker drops it as an unknown key. Also records that the receipt is now read at EACH job start rather than once at boot, why the boot read was right until discovery made re-staging routine, and why a failed read keeps last-known-good instead of degrading to none (an empty set emits no `PI_PACKAGES`, so the runner's path assertion would have nothing to refuse and the job would run toolless on a clean exit 0). **INT-CONTAINER-RUNTIME-CONTRACT, INT-TRIGGERS-FILE-CONTRACT, INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — the mount, `PI_PACKAGES`, `run.packages` and the pre-spend refusal are all untouched; only who fills the manifest, and how often it is read, moved. |
 | 2026-08-04 | Documentation audit fallout (issue #99). **INT-TRIGGERS-FILE-CONTRACT** amended on `run.resume`, which this file had described as carried on **ALL FOUR** kinds for a month while the wiring covered three: `resolveSession` is handed to the forge preparers only, so a cron job with the flag armed staged no transcript, mounted no `/session`, promoted nothing and exited `0` as though it had. That is the flag's own believed-on-while-off inversion reached through the wiring rather than through a truthy `"false"` string, so the fix is `run.replicas`' fix: **refused at load**, worded *not yet covered* rather than impossible, because `session-key.mjs` already derives the local key from the scheduler id and nothing reaches it. Only `true` is refused — `false` and absent still validate and still land in `data` byte-identically, since `false` is the documented default and refusing an operator for writing down present behaviour would also change a shape pinned as byte-identical; the asymmetry with `run.replicas` (which refuses ANY value on cron) is recorded rather than left to read as an oversight, `1` being a no-op flag where `false` is the truth. The same bullet gains the **pre-spend** half, which the triggers file cannot answer by construction: whether a session store exists is deployment state, not file content, so an armed trigger under a deployment with no `PI_SESSIONS_DIR` is refused per delivery and `doctor` keeps the load-time warning. **INT-RUN-HISTORY-FILE-CONTRACT**: the `reason` enum gains one token, **`sessions-dir-unset`**, on `job-image-missing`'s precedent — a policy outcome with `budgetReserved: false`, since it is answered from two values already in hand before the mint, the branch check, the clone, the token-cap read and the budget INCR. Its shape follows `settings-overlay-invalid`'s (`<config artifact>-<its bad state>`) and its words are the spec's own, so the token greps to the text that mandates it. The nested `session.reason` enum's **`disabled`** was audited as unimplemented and is **UNCHANGED, checked**: the runner produces it (`image/runner/src/session.mjs`) whenever no session file is mounted, which is every unarmed job, so the entry was right and the audit finding was wrong. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked**: the store's own no-`sessionsDir` return is now unreachable in a wired worker and kept as the DI-seam backstop, which changes no byte of its contract. |
 | 2026-08-04 | The panel learns to find a deployment built elsewhere (issue #92). Added **INT-DEPLOYMENT-POINTER-CONTRACT**: `<agent dir>/pi-dispatch-deployment.json` (override `PI_DISPATCH_DEPLOYMENT_FILE`), an allowlisted absolute-paths-only env map layered UNDER the operator's env once at extension load — env wins key by key, the worker/receiver never read it, and `PI_DISPATCH_RUN_ROOTS`/credentials in the file have no effect by construction (a pointer that widened the AI-run allowlist would be a second unreviewed door to a gated capability). Deliberate divergence from INT-SUBSCRIPTIONS' loud version refusal, recorded in the entry: a broken/newer pointer degrades to exactly the pre-pointer behavior with a one-line surfaced notice, never a throw — the read-model's never-throw doctrine outranks fail-loud here because the pointer is an availability aid, not a data file. **INT-SUBSCRIPTIONS-FILE-CONTRACT / INT-CONFIG-OVERLAY-CONTRACT UNCHANGED, checked**: the pointer changes how their Locations are *found*, not what the files contain. |

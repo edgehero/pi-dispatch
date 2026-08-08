@@ -266,7 +266,15 @@ export function buildResourceLoader({
 		// decision, so a second arming step was friction rather than safety. PI_GLOBAL_ALLOW_EXTENSIONS=0
 		// is the opt-out, and any other value is refused at config load so a typo cannot silently mean
 		// "load third-party code into every container" (worker/src/config.mjs, image/runner/src/config.mjs).
-		// Staged pi packages (INT-CONTAINER-JOB-INPUTS) ride this same option, LAST. One staged dir
+		// Staged pi packages (INT-CONTAINER-JOB-INPUTS) come LAST, and they do NOT ride that option: the
+		// packagePaths spread below is unconditional. Two switches, deliberately, because they withhold two
+		// different things. PI_GLOBAL_ALLOW_EXTENSIONS=0 makes the OVERLAY's own extensions/ dormant;
+		// `run.packages: false` on a trigger withholds the staged set from that trigger's jobs, and the
+		// worker has already applied it before emitting PI_PACKAGES (worker/src/env-allowlist.mjs) -- so an
+		// empty packagePaths here already means "this job loads none" and re-gating it on the overlay's
+		// opt-out would withhold packages the operator did arm. The honest answer to "how do I stop ALL
+		// third-party extension code loading in my containers" is therefore BOTH, which is what
+		// docs/global-pi-overlay.md's withhold table and docs/workflows.md tell the operator. One staged dir
 		// contributes extensions AND skills AND prompts AND themes through its package.json "pi"
 		// manifest: resolveExtensionSources reads the manifest and returns all four resource kinds,
 		// and reload() keeps cliEnabledExtensions/cliEnabledSkills REGARDLESS of noExtensions/noSkills

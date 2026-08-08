@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,12 +11,14 @@ const HEADER = `${JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "
 const PI = "0.80.7";
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
-function fixture({ ttlDays = 14, maxBytes = 1_000_000, now = () => 1_000_000_000 } = {}) {
+function fixture({ ttlDays = 14, maxBytes = 1_000_000, now = () => 1_000_000_000, fs } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];
-	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, now, log: (e, f) => logs.push([e, f]) });
+	// `fs` omitted = the store's own real-fs default. Passing one is how a disk fault is injected on a
+	// specific call without a chmod, which root ignores and Windows spells differently.
+	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
 	const jobDir = mkdtempSync(join(root, "job-"));
 	return { root, sessionsDir, store, jobDir, logs };
 }
@@ -189,4 +192,40 @@ test("the lock is released, so the next job on the key is not wedged forever", (
 	writeFileSync(join(s2.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message"}\n`);
 	assert.equal(store.promoteSession(s2, { piVersion: PI }).promoted, true, "a held-and-released lock must not outlive the run that took it");
 	assert.match(readFileSync(join(sessionsDir, sessionKeyFor(ghIssue), SESSION_FILE_NAME), "utf8"), /"type":"message"/);
+});
+
+test("a disk fault mid-promotion is named promote-failed, and does not wedge the key", () => {
+	// The promote-path reason an operator actually meets (INT-RUN-HISTORY-FILE-CONTRACT): a full disk or a
+	// permissions change under the store while the swap is in flight. Faulted at renameSync, which ONLY the
+	// promote path calls -- copyFileSync would also fault the resolve path's read-in and the job would never
+	// reach a promotion. By then the lock is HELD, which is the interesting half: a promotion that failed
+	// while leaving the lock behind would cold-start every future run for that key, a worse and much
+	// quieter outcome than the failure that caused it.
+	const { store, jobDir, sessionsDir, logs } = fixture({
+		fs: {
+			...realFs,
+			renameSync: () => {
+				throw new Error("ENOSPC: no space left on device");
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	const canonical = seed(sessionsDir, key);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message"}\n`);
+
+	let p;
+	assert.doesNotThrow(() => {
+		p = store.promoteSession(s, { piVersion: PI });
+	}, "the store NEVER throws: a promotion fault must not turn a completed run into a retry");
+	assert.equal(p.promoted, false);
+	assert.equal(p.reason, "promote-failed");
+
+	assert.equal(readFileSync(canonical, "utf8"), HEADER, "a failed swap must leave the canonical transcript untouched");
+	assert.equal(existsSync(join(sessionsDir, key, "lock")), false, "the lock must be released even when the promotion under it failed");
+	assert.ok(
+		logs.some(([event, fields]) => event === "session_store_failed" && fields.phase === "promote"),
+		"the fault is logged with its phase, so an operator can tell a refused promotion from a broken one",
+	);
 });

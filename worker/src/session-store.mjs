@@ -115,6 +115,12 @@ export function makeSessionStore({
 	 * agents' turns into one transcript.
 	 */
 	function promoteSession(session, { piVersion = null } = {}) {
+		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
+		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
+		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
+		// because the store and the preparer are separately injected and neither can assume the other. It is
+		// NOT in INT-RUN-HISTORY-FILE-CONTRACT's session.reason enum, deliberately: a token no wired worker
+		// can emit does not belong in the record's vocabulary, and `promote-failed` below does.
 		if (!session?.key) return { promoted: false, reason: "no-key" };
 		try {
 			const staged = join(session.hostDir, SESSION_FILE_NAME);
