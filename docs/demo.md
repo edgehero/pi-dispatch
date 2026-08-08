@@ -86,6 +86,7 @@ An `.cast` file can also be uploaded to asciinema.org and embedded (autoplaying)
 - **pi.dev gallery card**: `admin/package.json` already carries `pi.image` (the banner PNG) next to
   `pi.extensions` and `pi.skills`; repoint it at a panel frame, or add a `pi.video` field with a hosted
   `.mp4`/`.gif` URL. `pi.video` would be **new** here (nothing in this repo sets it today), so check pi's own
-  manifest schema before relying on it. Submission context lives in [launch-kit.md](launch-kit.md).
+  manifest schema before relying on it. The rest of the manifest is described in
+  [launch-kit.md](launch-kit.md#packaging-the-extension), and submission context is in the same file.
 
 Keep the file small (< ~3 MB): trim to ~25s, cap width at ~1200px, and prefer the GIF for GitHub autoplay.

@@ -36,6 +36,14 @@ const MIRRORED_DEPLOY = [
 	"worker.service",
 ];
 
+// Everything the ROOT deploy/ holds: the mirrored set above, plus the one example triggers file that
+// stays behind because the receiver's tests read it and the docs point at it. Nothing else belongs here.
+// A config file dropped in among the service templates reads as a deployment artifact and is not one --
+// the worker resolves triggers.json, pause-windows.json and friends from the DEPLOYMENT folder or an
+// explicit env path, never from this directory (issue #104, which is where deploy/pause-windows.json
+// sat unread since the day it was added).
+const ROOT_DEPLOY = [...MIRRORED_DEPLOY, "triggers.json"].sort();
+
 // npm pack forks a whole npm; generous headroom so a cold cache on CI never flakes the suite.
 const PACK_TIMEOUT = { timeout: 120_000 };
 
@@ -64,6 +72,19 @@ test("sync: every worker/deploy template is byte-identical to its root deploy/ t
 			`worker/deploy/${name} drifted from deploy/${name} — the ROOT deploy/ is the documented source; edit both (copy root over the mirror)`,
 		);
 	}
+});
+
+test("sync: the root deploy/ holds the mirrored templates and the example triggers file, nothing else", () => {
+	// The mirror test above enumerates worker/deploy and only INDEXES root deploy/ by name, so a stray
+	// under deploy/ is invisible to it — which is how a dead pause-windows.json lived there unread. This
+	// is the other direction: a new file here is either a service artifact that belongs in the mirror and
+	// the npm tarball, or operator config that belongs in the deployment folder. Adding it to this list
+	// is the moment to decide which.
+	assert.deepEqual(
+		readdirSync(join(REPO_ROOT, "deploy")).sort(),
+		ROOT_DEPLOY,
+		"an unexpected file under deploy/ — mirror it into worker/deploy (and MIRRORED_DEPLOY) if it ships, or move it out if it is operator config that nothing here reads",
+	);
 });
 
 // ---------------------------------------------------------------------------------------------------

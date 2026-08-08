@@ -121,9 +121,55 @@ that defer runs between certain times via BullMQ moveToDelayed and auto-resume.
 Repo: https://github.com/edgehero/pi-dispatch — feedback and pokes at the security model welcome.
 ```
 
-**pi.dev showcase / packages submission:** publish the operator extension as a scoped `pi-package` (see
-`docs/demo.md` + the packaging steps) so it appears in the gallery, and — if pi maintains a showcase list
-(OpenClaw, etc.) — open an issue/PR on earendil-works/pi proposing pi-dispatch as an integration entry.
+**pi.dev showcase / packages submission:** the operator extension already ships as a scoped `pi-package`
+(see [Packaging the extension](#packaging-the-extension) for what makes it one), so a submission is a
+pointer at the published package rather than work. If pi maintains a showcase list (OpenClaw, etc.), open
+an issue/PR on earendil-works/pi proposing pi-dispatch as an integration entry.
+
+---
+
+## Packaging the extension
+
+Nothing here is a build step you have to run: `@edgehero/pi-dispatch-admin` is already packaged and
+published this way, and this section exists so a submission, or a second package, does not have to
+reverse-engineer it from `admin/package.json`.
+
+**What makes it a pi package** is the `pi` block in `admin/package.json`. pi reads it on install and
+registers what it names:
+
+```json
+"pi": {
+  "extensions": ["./dist/index.mjs"],
+  "skills": ["./skills"],
+  "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=0.5.0"
+}
+```
+
+- `extensions` points at the **bundle**, not at source. `admin/build.mjs` inlines the worker subpaths with
+  esbuild into a single self-contained `dist/index.mjs`; pi itself is a `peerDependency`, so the operator's
+  own pi satisfies it rather than the package shipping a second copy. `prepublishOnly` runs that build, so
+  `dist/` exists in the tarball even though it is gitignored and never committed.
+- `skills` points at a directory that ships beside the bundle. `files: ["dist", "skills"]` is what puts
+  both in the tarball, and the build preserves `import.meta.url` so `../skills` still resolves from inside
+  `dist/`.
+- `image` is the gallery card's artwork. `pi.video` would be new here (nothing in this repo sets it); see
+  [demo.md](demo.md) for what to point either at.
+- The `pi-package` keyword is what a package directory would index on.
+
+**The name is not negotiable.** Scoped only, `@edgehero/pi-dispatch-admin`, per the naming rule at the top
+of this file: the bare `pi-dispatch` on npm is an unrelated squatted package. Everything a reader can
+copy, the install line included, has to carry the scope.
+
+**What `pi install npm:@edgehero/pi-dispatch-admin` needs** is therefore just the published package: pi
+resolves it from npm, reads the `pi` block, and registers the extension and skills from it. There is no
+registration step anywhere else, which is why the install line and `/dispatch` are the whole quickstart.
+
+**Publishing is automatic and idempotent.** `release.yml` publishes each workspace whose version changed
+on `main` (`npm publish --workspace admin --access public`, gated on `npm view` returning a 404), and tags
+its GitHub release `admin-v<version>`. There is no `publishConfig` in the manifest: `--access public` lives
+in the workflow, because a scoped package is private by default and a first publish would otherwise fail
+on a paid-plan error rather than say what it wanted. To ship a change, bump `version` in
+`admin/package.json` inside the PR; merging is what publishes.
 
 ---
 
@@ -219,8 +265,8 @@ TEMPLATE, NOT the current release. This block is v0.2.0-era copy and its feature
 Forgejo and Azure DevOps arms, the resurrectable sandbox, run.replicas, resumable sessions, the COSTS view,
 the setup wizard, polling mode and `setup github`. Re-cut it per release against that release's own changes,
 keeping the shape (Admin / AI-operable / feature area / Docs & safety / the maturity footer) and nothing
-else. Versions at the time of writing: root 0.7.0, @edgehero/pi-dispatch 0.1.1,
-@edgehero/pi-dispatch-admin 0.4.0, @edgehero/pi-dispatch-receiver 0.1.0.
+else. Versions at the time of writing: root 0.8.0, @edgehero/pi-dispatch 0.1.2,
+@edgehero/pi-dispatch-admin 0.5.0, @edgehero/pi-dispatch-receiver 0.1.1.
 -->
 
 **Title:** `v0.2.0 — admin panel, AI-operable controls, scoped pause windows`

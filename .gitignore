@@ -46,8 +46,11 @@ coverage/
 /triggers.json
 !triggers.example.json
 
-# Scoped pause windows ("quiet hours"). pause-windows.example.json is the template;
-# deploy/pause-windows.json is the deployed default (empty). See docs/pause-windows.md.
+# Scoped pause windows ("quiet hours"). pause-windows.example.json is the template to copy windows out
+# of; the EMPTY one an operator actually runs is scaffolded into the deployment folder by `pi-dispatch
+# init` (worker/src/init.mjs), which is why the scaffold is committable by accident without this rule.
+# There is no copy under deploy/: the worker resolves this file only via PI_PAUSE_WINDOWS_FILE, so one
+# sitting among the service templates would be read by nothing. See docs/pause-windows.md.
 /pause-windows.json
 !pause-windows.example.json
 
