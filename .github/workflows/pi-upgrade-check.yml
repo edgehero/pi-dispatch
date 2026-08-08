@@ -28,19 +28,17 @@ on:
       - ".github/workflows/pi-upgrade-check.yml"
       - ".github/scripts/admin-pi-canary.mjs"
       - ".github/scripts/host-pi-canary.mjs"
+  # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status
+  # checks on main (issue #105), and a required check that never reports blocks the merge FOREVER -- a
+  # docs-only PR under the old path filter reported nothing at all (PR #106: "no checks reported") and
+  # would now be unmergeable. Re-adding a `paths:` here re-opens that deadlock.
+  #
+  # The rejected alternative was a companion workflow carrying the complementary `paths-ignore:` list and
+  # emitting same-named stand-in jobs: a PR touching BOTH docs/ and worker/ fires both workflows, because
+  # paths-ignore runs whenever ANY changed file falls outside its list, and two check runs then share one
+  # context name -- a green stand-in that can mask a red real run. The whole suite is ~90s; buying that
+  # back is not worth a mechanism that can hide a failure.
   pull_request:
-    paths:
-      - "image/**"
-      - "worker/**"
-      - "receiver/**"
-      - "admin/**"
-      - "guardrails/**"
-      - "package.json"
-      - "pi-packages.example.json"
-      - "triggers.example.json"
-      - ".github/workflows/pi-upgrade-check.yml"
-      - ".github/scripts/admin-pi-canary.mjs"
-      - ".github/scripts/host-pi-canary.mjs"
   schedule:
     # Weekly: pi ships breaking changes between minors and its HEAD moved within 24h of this
     # project's design being written. A pin that is never exercised rots silently.

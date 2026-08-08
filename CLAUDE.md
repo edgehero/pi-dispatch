@@ -86,6 +86,20 @@ Two consequences worth internalising before you design anything:
   touched: the workspaces share the triggers schema and the queue.
 - CI runs the same suite with `PI_DISPATCH_REQUIRE_{LOADER,WORKER,RECEIVER}_TESTS=1` and a live Valkey, which
   is where the integration tests that skip locally actually execute.
+- **Five checks are REQUIRED on `main`** (issue #105), all from `pi-upgrade-check.yml`: `pins are exact
+  (CONST-PI-VERSION-PINNED)`, `no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)`, `pinned assumptions still
+  hold (offline, no API key)`, `the job image holds its contract`, `the admin extension survives latest pi
+  (canary)`. `enforce_admins` is **on**, so a red build is unmergeable by the owner too.
+  - That workflow's **`pull_request` trigger is deliberately unfiltered**. A required check that never
+    reports blocks a merge forever, and the old path filter meant a docs-only PR reported nothing at all.
+    Do not add `paths:` back to it. The `push:` filter is unaffected and stays.
+  - Two PR-reporting checks are deliberately **not** required. `host-pi mirrors survive latest pi (canary)`
+    is green-on-drift by design, so its red means pi failed to install (upstream flake, not a defect), and
+    `deploy/ artifacts are syntactically valid` is still path-filtered to `deploy/**`, so requiring it
+    would deadlock every PR that does not touch `deploy/`.
+  - If Actions is down or a workflow file breaks, `main` is frozen. Escape hatch: `gh api -X DELETE
+    repos/edgehero/pi-dispatch/branches/main/protection/enforce_admins`, merge, then `gh api -X POST` the
+    same path to put it back.
 - `admin/dist/` is gitignored and built by `node admin/build.mjs`. Never commit it.
 - Two mirrors must stay **byte-identical**, pinned by tests: `worker/.env.example` to the root
   `.env.example`, and `worker/deploy/*` to `deploy/*`. Edit both.
@@ -99,6 +113,10 @@ Two consequences worth internalising before you design anything:
 - DCO sign-off (`git commit -s`). Branch names are `type/short-slug`.
 - One PR per issue where possible; stacked PRs are merged one at a time, parent first, never with
   `--delete-branch` until the whole chain has landed.
+- **`gh pr merge --admin` is no longer the merge path.** It was, while `main` required an approving review
+  that a solo author cannot give themselves. `main` now requires a PR and green checks instead of an
+  approval, so a green PR merges with a plain `gh pr merge`. Reach for `--admin` and you are bypassing the
+  contract tests, not a paperwork rule.
 
 ## Things that look like bugs and are not
 

@@ -1,6 +1,7 @@
 # Build and publish the pi-dispatch job image to GHCR so operators `docker pull` instead of the slow local
-# build (Chromium + Playwright + fonts, minutes). main is branch-protected (PR + 1 approving review), so a
-# push here is an already-approved merge — nothing in this workflow merges anything (CONST-MERGE-NEVER-AUTOMATIC).
+# build (Chromium + Playwright + fonts, minutes). main is branch-protected (a PR is required and the five
+# contract checks in pi-upgrade-check.yml must be green, admins included), so a push here is an already-gated
+# merge — nothing in this workflow merges anything (CONST-MERGE-NEVER-AUTOMATIC).
 #
 # The pushed image is a snapshot of THIS repo's runner + guardrails at the built commit. Operators who bake
 # their own toolchain into image/Dockerfile still build locally; the pull is only the fast default path.

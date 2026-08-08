@@ -1,7 +1,7 @@
 # Build and publish the receiver image to GHCR so operators `docker compose --profile receiver up` a
-# prebuilt multi-arch image instead of building locally. main is branch-protected (PR + 1 approving
-# review), so a push here is an already-approved merge — nothing in this workflow merges anything
-# (CONST-MERGE-NEVER-AUTOMATIC).
+# prebuilt multi-arch image instead of building locally. main is branch-protected (a PR is required and the
+# five contract checks in pi-upgrade-check.yml must be green, admins included), so a push here is an
+# already-gated merge — nothing in this workflow merges anything (CONST-MERGE-NEVER-AUTOMATIC).
 #
 # The pushed image is a snapshot of the receiver AND the worker sources it imports (`@edgehero/pi-dispatch`
 # is a workspace dependency) at the built commit — hence the worker paths in the trigger: a change to a

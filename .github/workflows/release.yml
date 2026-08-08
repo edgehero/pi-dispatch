@@ -10,9 +10,10 @@
 # in an earlier group stops the later ones, which is what you want when the later package depends on the
 # earlier one landing.
 #
-# main is branch-protected (PR + 1 approving review required), so a push here is an already-approved merge —
-# the human gate is the merge, not this workflow (consistent with CONST-MERGE-NEVER-AUTOMATIC: nothing here
-# merges anything). Publishing is idempotent PER PACKAGE: each group fires only when its workspace's version
+# main is branch-protected (a PR is required and the five contract checks in pi-upgrade-check.yml must be
+# green, admins included), so a push here is an already-gated merge — the human gate is the merge, not this
+# workflow (consistent with CONST-MERGE-NEVER-AUTOMATIC: nothing here merges anything). Publishing is
+# idempotent PER PACKAGE: each group fires only when its workspace's version
 # is not already on npm, so re-runs, reverts, and pushes that touch only one workspace are no-ops for the
 # other two. Bump a workspace's version in your PR to ship that package.
 #

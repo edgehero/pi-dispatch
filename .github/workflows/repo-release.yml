@@ -5,8 +5,9 @@
 # `version` in the root package.json in a PR; it is idempotent (skips when the tag already exists), so an
 # unrelated root package.json edit — a dependency bump, a script tweak — is a no-op.
 #
-# main is branch-protected (PR + 1 approving review), so a push here is an already-approved merge — nothing
-# here merges anything (CONST-MERGE-NEVER-AUTOMATIC). No secret is required to tag a release; the optional
+# main is branch-protected (a PR is required and the five contract checks in pi-upgrade-check.yml must be
+# green, admins included), so a push here is an already-gated merge — nothing here merges anything
+# (CONST-MERGE-NEVER-AUTOMATIC). No secret is required to tag a release; the optional
 # repo secret ANTHROPIC_API_KEY enables AI-written notes, and without it the release falls back to a plain
 # commit list. Optional repo variable RELEASE_MODEL (default: claude-sonnet-5).
 
