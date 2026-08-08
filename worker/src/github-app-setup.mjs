@@ -381,9 +381,14 @@ export function sanitizeAppName(raw) {
 /**
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
- * because the API requires it, private, and only the three event families the triggers file can name.
+ * because the API requires it, private, and only the event families the triggers file can name.
  * `hook_attributes` carries the receiver URL, or `active: false` under --no-webhook — the
  * no-public-URL shape the polling transport will consume.
+ *
+ * `pull_request_review` (issue #66) is subscribed for every new App, armed trigger or not. That is the
+ * posture `pull_request` already has for a label-only deployment: an unsubscribed event cannot be turned
+ * on later without a visit to the App's settings page, while a subscribed one an operator does not want
+ * costs a 204 and a log line. Existing Apps predate this and must add the event by hand.
  */
 export function buildManifest({ name, redirectUrl, webhookUrl }) {
 	return {
@@ -393,7 +398,7 @@ export function buildManifest({ name, redirectUrl, webhookUrl }) {
 		hook_attributes: webhookUrl ? { url: webhookUrl } : { active: false },
 		public: false,
 		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
-		default_events: ["issues", "issue_comment", "pull_request"],
+		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	};
 }
 

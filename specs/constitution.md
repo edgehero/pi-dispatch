@@ -333,10 +333,15 @@ passing, on the record — issue #80.)
 - **Statement**: A job shall start from a webhook only on the say-so of an actor with **write access or
   above to the target repository**, established by whatever mechanism that forge offers.
   **GitHub**: an allowlisted label, a comment from `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`,
-  or a `pull_request` event whose approval gate is satisfied. For a `pull_request`: **labeling**
+  or a `pull_request` event whose approval gate is satisfied. For a `pull_request`, three arms, and
+  **which field each reads is part of the constraint, not an implementation detail**: **labeling**
   (`action: labeled`) is gated by the label allowlist — a collaborator-applied label is the approval,
   exactly as for an issue; **auto actions** (`opened`, `synchronize`, `reopened`) are gated by the PR
-  `author_association`, so a fork or external PR never auto-fires.
+  `author_association`, so a fork or external PR never auto-fires; and a **submitted review**
+  (`pull_request_review.submitted`, spelled `review_submitted` in the trigger file) is gated by the
+  **reviewer's** `review.author_association` and never by the PR author's. All three are hard-coded in the
+  filter, never config-optional. A collaborator's review of a stranger's fork PR therefore runs, and a
+  stranger's review of their own PR does not.
   **GitLab**: the actor's project `access_level` is resolved from the API (`members/all`, so
   group-inherited access counts) and must be **>= 30 (Developer)** — for *every* trigger type, labels
   included.
@@ -357,6 +362,21 @@ passing, on the record — issue #80.)
   a fork PR — the exact spend-and-run vector this gate exists to close — so it is hard-coded in the
   filter, never a config toggle. Together with `CONST-HMAC-OVER-RAW-BODY` this is the entire "who can
   spend our money and run our agent" gate.
+  **Why the review arm reads a different field, when every other arm reads the PR author's** (issue #66):
+  the question this gate asks is always "does the actor who caused this event have write access". For
+  `labeled` and for comments the field describes that actor directly. For auto actions the gate takes a
+  **shortcut** — it reads the PR *author* rather than the actor, which is exact for `opened` and a fair
+  proxy for `synchronize`/`reopened`, where the PR author is whose code is in play. A submitted review is
+  the first GitHub event where actor and PR author are **different people**, which makes the shortcut
+  visible and wrong: reading the PR's field would refuse the collaborator reviewing a stranger's fork PR
+  (the one case a review trigger exists for) and accept the stranger reviewing their own PR (an unbounded
+  paid run bought by opening a PR and commenting on it). Wrong in both directions at once, from one
+  plausible-looking field access, which is why the field is named here rather than left to the filter.
+  Two residuals are recorded rather than glossed. Arming a review trigger widens *who* may spend: unlike a
+  comment trigger there is no phrase and unlike a label trigger there is no label, so every submitted
+  review from anyone with write access starts a run unless `on.reviewState` narrows it
+  (`INT-TRIGGERS-FILE-CONTRACT`). And the bot-loop guard knows only *our own* identity, so a third-party
+  review bot holding `MEMBER` is outside it — `OQ-020`.
   **On GitLab that premise is false, and the gate is stronger to compensate.** The label-implies-approval
   reasoning above fails three independent ways there: the minimum role for label management has differed
   across versions, Ultimate's **custom roles** let an operator grant it at any level, and a **Guest can
@@ -366,10 +386,17 @@ passing, on the record — issue #80.)
   need; it is paid in the receiver, before the pure gate, so the gate stays offline-testable
   (`REQ-TRIGGER-AUTHOR-GATE`). The residual — that this gate now depends on a lookup that can fail, and on
   a role table that varies by version and edition — is `OQ-013`, recorded rather than glossed.
-- **Traces to**: `REQ-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`
+- **Traces to**: `REQ-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`, `OQ-020`
 - **Acceptance**: Given `@pi fix this` from `author_association: NONE`, the receiver returns 204 and
   enqueues nothing. Given a `pull_request.opened` whose PR `author_association` is `NONE` (a fork PR), the
   receiver returns 204 and enqueues nothing; given the same from a `COLLABORATOR`, exactly one job runs.
+  Given a `pull_request_review.submitted` whose `review.author_association` is `COLLABORATOR` and whose
+  `pull_request.author_association` is `NONE`, exactly one job runs; given the mirror
+  (`review.author_association: NONE`, `pull_request.author_association: OWNER`), the receiver returns 204
+  and enqueues nothing. The two cases are a **pair** and must be verified together: a delivery whose two
+  associations agree passes against either field and proves nothing. Given a `commented` review with an
+  empty body, 204 and zero jobs; given an `approved` review with an empty body from a collaborator, one
+  job. Given a review whose `sender.id` is our own identity, 204 and zero jobs.
   Given a GitLab issue labelled with an allowlisted label by an actor whose resolved `access_level` is
   below 30, the receiver returns 204 and enqueues nothing; given the same from a Developer, exactly one job
   runs. Given a GitLab delivery whose access lookup could not be completed, the receiver returns **503**
@@ -624,6 +651,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #66 (ingest `pull_request_review`). **CONST-TRIGGER-AUTHOR-GATE AMENDED**, and this is a substantive amendment rather than an enumeration fix. The GitHub `pull_request` clause listed two arms and named `pull_request.author_association` for the auto ones; a submitted review is neither `labeled` nor one of the three auto actions, so the constraint did not cover it and a reader applying it literally would have reached for the PR author's field — the exact wrong one. The clause now has three arms and states which FIELD each reads, because that is part of the constraint. The Why records the general point the new arm exposes: this gate always asks "does the actor who caused this event have write access", and for auto actions it takes a **shortcut**, reading the PR *author* rather than the actor, which is exact for `opened` and a fair proxy for `synchronize`/`reopened`. A submitted review is the first GitHub event where actor and PR author are DIFFERENT PEOPLE, which makes the shortcut visible and wrong in both directions at once: reading the PR's field would refuse the collaborator reviewing a stranger's fork PR (the case the trigger exists for) and accept the stranger reviewing their own PR (a paid run bought by opening a PR and commenting on it). Acceptance gains that pair, stated as a pair and required to be verified together, because a delivery whose two associations AGREE passes against either field and pins nothing — the mutation test that proves this is in `receiver/test/filter.test.mjs`. Also added: the empty-`commented` refusal, the empty-`approved` acceptance (there the verdict is the signal), and the self-review case. Two residuals named and pointed at `OQ-020` (a review trigger has no second gate, and the bot-loop guard knows only our own identity, so a third-party review bot is outside it). **CONST-HMAC-OVER-RAW-BODY UNCHANGED, checked** — a new event name arrives over the same verified transport and changes nothing about what is signed. **CONST-ISSUE-TEXT-IS-DATA UNCHANGED, checked** — `review.body` is untrusted text placed exactly where `comment.body` already is, which is the constraint working rather than a new case for it. **CONST-ISOLATION-CONTAINER-PER-JOB and CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked** — a review-triggered job is an ordinary job downstream of the gate. |
 | 2026-08-02 | Housekeeping in passing (issue #80): the evidence-conventions section claimed "there is no code yet (this repo has zero commits)" — false since the first merge and stale for months. Rewritten to state the living rule (entries grow `Code evidence` when their code lands) with the staleness itself kept as the recorded lesson. No constraint changed. **CONST-PI-VERSION-PINNED, CONST-MERGE-NEVER-AUTOMATIC, CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked** — this row exists only so a prose fix in this file is never a silent edit. |
 | 2026-08-01 | No statement change. Recording that **replica runs (`REQ-REPLICA-RUNS`, issue #56) are consistent with `CONST-BUDGET-BEFORE-TOKENS`, and that the consistency is the FEATURE rather than a technicality**. A `run.replicas: 2` trigger turns one delivery into two independent jobs, and each of them reserves its own slot in its own processor, before its own container, exactly as any other job does — so N replicas are N **honest** reservations, not one reservation spent twice. The check-and-increment-before-the-container ordering is untouched at every replica, and the daily/weekly/monthly caps remain the ceiling: they simply divide by N. That is stated rather than softened, because the tempting move — exempting or discounting replicas so a cap "means the same thing" — would have converted a cost multiplier into a cap bypass, which is the one thing this constraint exists to prevent. `CONST-ISOLATION-CONTAINER-PER-JOB` **UNCHANGED, and checked**: each replica is an ordinary job container with its own `mkdtemp`'d clone and its own name (`pi-job-gh-<guid>-r<i>`), so per-job isolation holds by construction and is in fact the reason replicas are safe on forge jobs and refused on local ones, where `/workspace` IS the operator's folder. `CONST-ISSUE-TEXT-IS-DATA` **UNCHANGED, checked**: the replica index is a host-assigned integer interpolated into the instruction region, and the issue text below the delimiter is unaffected. `CONST-TOKEN-SCOPED-PER-JOB` **UNCHANGED, checked**: each replica mints its own scoped token, as any two jobs on one repository already do. |
 | 2026-08-01 | `CONST-ISOLATION-CONTAINER-PER-JOB` **AMENDED** for `REQ-RESURRECTABLE-SANDBOX` (issue #55): a second container shape now exists — an operator-started interactive shell on a finished run's workspace. Written into this entry rather than somewhere quieter, for the reason the 2026-07-31 row gives about mounts: the Statement's carve-out covers **pi running on the host** and the Acceptance is scoped *"Given any job"*, so neither reaches a container that is not a job container and the case could not be borrowed from either. The job container is **UNCHANGED and was verified rather than asserted** — `--rm`, no TTY, no port, gone at exit; a sandbox is a NEW container built from the same `buildDockerRunArgs`, so the isolation flags apply by construction, and its name sits outside the boot reaper's namespace rather than being exempted from it. **Three of the carve-out's four tests are met and the fourth is explicitly NOT**: not harness-invoked, operator-present, no harness credentials (structural — `buildContainerEnv` throws without a provider key and so cannot produce this env), but it **does** process adversarial input, since a forge workspace is whatever a run made of an issue anyone could open. That is recorded as the accepted trade rather than argued away: the act is the one every maintainer already performs when they check out a stranger's pull request, here with cap-drop, resource bounds and no credentials. Acceptance extended with a `Given a resurrected sandbox` clause kept **separate** from the mount enumeration, because a sandbox is not a job and folding it in would have quietly widened a sentence that means something precise. `CONST-TOKEN-SCOPED-PER-JOB` **UNCHANGED, and checked** — a sandbox mints nothing and carries nothing, so the scoping rule has no new case to cover. |

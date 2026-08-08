@@ -50,11 +50,19 @@ const prCfgRaw = {
 		pullRequest: [
 			{ index: 3, actions: new Set(["labeled"]), predicate: { any: ["pi:review"] }, flow: "review" },
 			{ index: 6, actions: new Set(["opened", "synchronize", "reopened"]), predicate: {}, flow: "autoreview" },
+			{ index: 8, actions: new Set(["review_submitted"]), reviewStates: null, predicate: {}, flow: "reviewfix" },
 		],
-		knownFlows: new Set(["review", "autoreview", "triage"]),
+		knownFlows: new Set(["review", "autoreview", "triage", "reviewfix"]),
 	},
 };
 const prCfg = forgeCfg(prCfgRaw);
+// The same file with the review rule narrowed to one verdict, for the on.reviewState cases.
+const reviewStateCfg = forgeCfg({
+	triggers: {
+		...prCfgRaw.triggers,
+		pullRequest: [{ index: 8, actions: new Set(["review_submitted"]), reviewStates: new Set(["changes_requested"]), predicate: {}, flow: "reviewfix" }],
+	},
+});
 const SELF_ID = 999;
 
 /** A well-formed `issue_comment.created` subset, overridable per case. */
@@ -100,6 +108,22 @@ function prSubset({ action = "opened", senderId = 7, author = "COLLABORATOR", la
 			head: { ref: "feat", sha: "abc", repo: { full_name: "fork/x" } },
 			base: { ref: "main" },
 		},
+	};
+}
+
+/**
+ * A `pull_request_review.submitted` subset (issue #66).
+ *
+ * `author` is the PR AUTHOR's association and `reviewer` the REVIEWER's, and they are independently
+ * settable on purpose: which of the two gates the delivery is the entire issue, and a fixture that
+ * couples them cannot express the case that catches the inversion.
+ *
+ * `state` defaults lower case because parseSubset folds it before the filter ever sees it.
+ */
+function reviewSubset({ senderId = 7, author = "NONE", reviewer = "COLLABORATOR", state = "approved", body = "looks good", labels = [] } = {}) {
+	return {
+		...prSubset({ action: "submitted", senderId, author, labels }),
+		review: { id: 555, body, state, author_association: reviewer },
 	};
 }
 
@@ -377,6 +401,194 @@ test("an unsupported PR action (closed) is dropped as unhandled-event", () => {
 	const r = filter("pull_request", prSubset({ action: "closed" }), prCfg, SELF_ID, "d-prclosed");
 	assert.equal(r.enqueue, false);
 	assert.equal(r.reason, "unhandled-event");
+});
+
+// -- pull_request_review: the INVERTED author gate (issue #66) ------------------------------------
+//
+// These two tests are a PAIR and must stay one. Each delivery sets review.author_association and
+// pull_request.author_association to DIFFERENT values, in opposite directions, so that reading the wrong
+// one fails exactly one of them. A suite that only ever tests deliveries where the two agree would pass
+// against a gate that reads the PR author, which is the bug this whole change exists to avoid.
+
+test("a COLLABORATOR reviewing a STRANGER's fork PR runs -- the gate is the REVIEWER's association", () => {
+	const r = filter("pull_request_review", reviewSubset({ author: "NONE", reviewer: "COLLABORATOR" }), prCfg, SELF_ID, "d-rev-fork");
+	assert.equal(r.enqueue, true, "reading pull_request.author_association here would refuse the whole feature");
+	assert.equal(r.job.flow, "reviewfix");
+	assert.deepEqual(r.job.trigger.matched, { index: 8, type: "pull_request", action: "review_submitted" });
+});
+
+test("a STRANGER reviewing an OWNER's PR is refused -- the PR author's standing must not rescue it", () => {
+	for (const reviewer of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR"]) {
+		const r = filter("pull_request_review", reviewSubset({ author: "OWNER", reviewer }), prCfg, SELF_ID, "d-rev-stranger");
+		assert.equal(r.enqueue, false, `reviewer=${reviewer} must not fire`);
+		assert.equal(r.reason, "review-author-not-allowed");
+	}
+	// And the absent field, deleted rather than passed as undefined so the fixture default cannot mask it.
+	const missing = reviewSubset({ author: "OWNER" });
+	delete missing.review.author_association;
+	const r = filter("pull_request_review", missing, prCfg, SELF_ID, "d-rev-noassoc");
+	assert.equal(r.enqueue, false, "a review with no association at all must not fire");
+	assert.equal(r.reason, "review-author-not-allowed");
+});
+
+test("a review delivery carrying no review object at all is refused (has(undefined) === false)", () => {
+	const subset = reviewSubset({ author: "OWNER" });
+	delete subset.review;
+	const r = filter("pull_request_review", subset, prCfg, SELF_ID, "d-rev-noreview");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "review-author-not-allowed");
+});
+
+test("the harness's own review is dropped by the bot-loop guard, BEFORE the new gate runs", () => {
+	// A flow that runs `gh pr review` fires pull_request_review.submitted as our own identity. The guard
+	// is unconditional and costs nothing here -- but a review bot reviewing every push is a loop it
+	// cannot see, which is why SECURITY.md names that vector.
+	const r = filter("pull_request_review", reviewSubset({ senderId: SELF_ID, reviewer: "OWNER" }), prCfg, SELF_ID, "d-rev-self");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "self");
+});
+
+test("the accepted job says what GitHub said (event + raw action) while `matched` says what the FILE said", () => {
+	const r = filter("pull_request_review", reviewSubset({ reviewer: "MEMBER" }), prCfg, SELF_ID, "d-rev-shape");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.trigger.event, "pull_request_review");
+	assert.equal(r.job.trigger.action, "submitted", "the payload's own word, byte-for-byte");
+	assert.equal(r.job.trigger.matched.action, "review_submitted", "the triggers.json word, which GitHub never sent");
+	assert.deepEqual(r.job.trigger.review, { id: 555, body: "looks good", state: "approved", author_association: "MEMBER" });
+	assert.equal("user" in r.job.trigger.review, false, "no login rides the job -- sender.id is the only identity");
+	// The target is the PR, head/base carried as DATA exactly as on any other pull_request action.
+	assert.deepEqual(r.job.target, {
+		type: "pull_request",
+		number: 12,
+		title: "PR T",
+		body: "PR B",
+		head: { ref: "feat", sha: "abc", repo: "fork/x" },
+		base: { ref: "main" },
+	});
+});
+
+test("`review` rides ONLY the review route -- no other trigger grows the key", () => {
+	const cases = [
+		["issues", issuesSubset(), cfg],
+		["issue_comment", commentSubset(), cfg],
+		["pull_request", prSubset({ action: "labeled", labels: ["pi:review"] }), prCfg],
+		["pull_request", prSubset({ action: "opened" }), prCfg],
+	];
+	for (const [event, subset, c] of cases) {
+		const r = filter(event, subset, c, SELF_ID, `d-norev-${event}`);
+		assert.equal(r.enqueue, true);
+		assert.equal("review" in r.job.trigger, false, `${event} must not grow a review key`);
+	}
+});
+
+test("an empty-bodied `commented` review is dropped as no-review-body, in either of GitHub's spellings", () => {
+	// A Comment-type review of line comments only arrives exactly like this: the remarks ride
+	// pull_request_review_comment, an event this project does not ingest, and the filter is pure so it
+	// cannot tell that from a genuinely empty review. Refusing is the cheaper error.
+	for (const state of ["commented", "COMMENTED"]) {
+		for (const body of [null, "", "   \n\t "]) {
+			const r = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state, body }), prCfg, SELF_ID, "d-rev-empty");
+			assert.equal(r.enqueue, false, `state=${state} body=${JSON.stringify(body)} must not buy a container`);
+			assert.equal(r.reason, "no-review-body");
+		}
+		// The absent key, deleted rather than passed as undefined so the fixture default cannot mask it.
+		const noBody = reviewSubset({ reviewer: "OWNER", state });
+		delete noBody.review.body;
+		const r = filter("pull_request_review", noBody, prCfg, SELF_ID, "d-rev-nobody");
+		assert.equal(r.enqueue, false, `state=${state} with no body key must not buy a container`);
+		assert.equal(r.reason, "no-review-body");
+	}
+});
+
+test("a `commented` review WITH a body fires -- the drop is about emptiness, not about the verdict", () => {
+	const r = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state: "commented", body: "please rename x" }), prCfg, SELF_ID, "d-rev-cmt");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.trigger.review.body, "please rename x");
+});
+
+test("an empty-bodied approve or request-changes still fires -- there the VERDICT is the signal", () => {
+	for (const state of ["approved", "changes_requested"]) {
+		const r = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state, body: "" }), prCfg, SELF_ID, "d-rev-verdict");
+		assert.equal(r.enqueue, true, `${state} with no summary is still a maintainer's decision`);
+		assert.equal(r.job.trigger.review.state, state);
+	}
+});
+
+test("when a stranger submits an EMPTY review, the security reason wins over the content one", () => {
+	const r = filter("pull_request_review", reviewSubset({ author: "OWNER", reviewer: "NONE", state: "commented", body: "" }), prCfg, SELF_ID, "d-rev-both");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "review-author-not-allowed", "both are true; the one an operator must act on is the gate");
+});
+
+test("pull_request_review actions other than `submitted` are dropped as unhandled-event", () => {
+	for (const action of ["edited", "dismissed"]) {
+		const subset = { ...reviewSubset({ reviewer: "OWNER" }), action };
+		const r = filter("pull_request_review", subset, prCfg, SELF_ID, "d-rev-other");
+		assert.equal(r.enqueue, false, `${action} must not start a paid run`);
+		assert.equal(r.reason, "unhandled-event");
+	}
+});
+
+test("the canonical word is not accepted from the wire, and the raw word is not accepted from the file", () => {
+	// `review_submitted` is a triggers.json word; GitHub never sends it. And `submitted` on the plain
+	// `pull_request` event is not a thing either. Neither direction may route.
+	const asWireAction = filter("pull_request", { ...reviewSubset({ reviewer: "OWNER" }), action: "review_submitted" }, prCfg, SELF_ID, "d-rev-wire");
+	assert.equal(asWireAction.enqueue, false);
+	assert.equal(asWireAction.reason, "unhandled-event");
+
+	const asPlainPr = filter("pull_request", reviewSubset({ reviewer: "OWNER" }), prCfg, SELF_ID, "d-rev-plain");
+	assert.equal(asPlainPr.enqueue, false);
+	assert.equal(asPlainPr.reason, "unhandled-event");
+});
+
+test("a review label predicate narrows exactly as it does for an auto action", () => {
+	const narrowed = forgeCfg({
+		triggers: {
+			...prCfgRaw.triggers,
+			pullRequest: [{ index: 8, actions: new Set(["review_submitted"]), reviewStates: null, predicate: { any: ["pi:review"] }, flow: "reviewfix" }],
+		},
+	});
+	const hit = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", labels: ["pi:review"] }), narrowed, SELF_ID, "d-rev-lab1");
+	assert.equal(hit.enqueue, true);
+	const miss = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", labels: ["chore"] }), narrowed, SELF_ID, "d-rev-lab2");
+	assert.equal(miss.enqueue, false);
+	assert.equal(miss.reason, "no-matching-pr-trigger");
+});
+
+test("a review with no review rule armed at all drops as a plain no-match", () => {
+	const noReviewRule = forgeCfg({ triggers: { ...prCfgRaw.triggers, pullRequest: [{ index: 6, actions: new Set(["opened"]), predicate: {}, flow: "autoreview" }] } });
+	const r = filter("pull_request_review", reviewSubset({ reviewer: "OWNER" }), noReviewRule, SELF_ID, "d-rev-norule");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "no-matching-pr-trigger");
+});
+
+// -- on.reviewState: narrowing which verdicts may spend --------------------------------------------
+
+test("on.reviewState fires on a listed verdict and refuses an unlisted one under its OWN reason", () => {
+	const hit = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state: "changes_requested" }), reviewStateCfg, SELF_ID, "d-rvs-hit");
+	assert.equal(hit.enqueue, true);
+	assert.equal(hit.job.flow, "reviewfix");
+
+	for (const state of ["approved", "commented"]) {
+		const miss = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state }), reviewStateCfg, SELF_ID, "d-rvs-miss");
+		assert.equal(miss.enqueue, false, `${state} is not in the narrowing and must not spend`);
+		// Distinct from no-matching-pr-trigger on purpose: "your rule exists, this verdict was not in your
+		// list" and "no rule matched at all" call for different operator responses.
+		assert.equal(miss.reason, "review-state-not-matched");
+	}
+});
+
+test("an unnarrowed rule (reviewStates null) fires on every verdict -- the narrowing only ever subtracts", () => {
+	for (const state of ["approved", "changes_requested"]) {
+		const r = filter("pull_request_review", reviewSubset({ reviewer: "OWNER", state }), prCfg, SELF_ID, "d-rvs-open");
+		assert.equal(r.enqueue, true, `${state} must fire when no reviewState is configured`);
+	}
+});
+
+test("a narrowed rule still loses to the gate: an unlisted verdict from a STRANGER reports the gate", () => {
+	const r = filter("pull_request_review", reviewSubset({ author: "OWNER", reviewer: "NONE", state: "approved" }), reviewStateCfg, SELF_ID, "d-rvs-stranger");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "review-author-not-allowed");
 });
 
 // -- the per-trigger pi-packages opt-in (REQ-GLOBAL-PI-OVERLAY) -----------------------------------

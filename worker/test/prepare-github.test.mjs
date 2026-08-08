@@ -41,6 +41,23 @@ const COMMENT_JOB = {
 	},
 };
 
+// A pull_request_review-triggered job (issue #66). Note the deliberate mismatch the record must preserve:
+// `action` is GitHub's own `submitted`, while `matched.action` is the triggers.json word that fired.
+const REVIEW_JOB = {
+	kind: "github",
+	repo: "owner/name",
+	flow: "address-review",
+	target: { type: "pull_request", number: 12, title: "Tighten the header", body: "PR body", head: { ref: "feat", sha: "abc", repo: "fork/x" }, base: { ref: "main" } },
+	trigger: {
+		event: "pull_request_review",
+		action: "submitted",
+		deliveryId: "guid-review",
+		sender: { id: 42 },
+		matched: { index: 4, type: "pull_request", action: "review_submitted" },
+		review: { id: 555, body: "rename the helper, it shadows the import", state: "changes_requested", author_association: "MEMBER" },
+	},
+};
+
 /**
  * A fake git transport recording every `(cwd, args, opts)` call. `failOn` names a subcommand whose
  * invocation throws `error` (an octokit/execFile-style Error carrying `.stderr`), so a test can drive
@@ -352,4 +369,39 @@ test("a comment-triggered job writes the comment into event.json and quotes its 
 	assert.notEqual(idx, -1, "prompt must contain the data heading");
 	assert.ok(prompt.slice(idx).includes(COMMENT_JOB.trigger.comment.body), "comment body quoted below the data heading");
 	assert.ok(!prompt.slice(0, idx).includes(COMMENT_JOB.trigger.comment.body), "comment body must not reach the instruction region");
+});
+
+test("a review-triggered job writes the review into event.json and quotes its body below the data heading", async () => {
+	const git = fakeGit();
+	const h = harness({ git });
+	await prepareGithubWorkspace(REVIEW_JOB, TOKEN, h.deps);
+
+	const event = JSON.parse(readFileSync(join(h.jobDir, "event.json"), "utf8"));
+	assert.deepEqual(event.review, { id: 555, body: REVIEW_JOB.trigger.review.body, state: "changes_requested", author_association: "MEMBER" });
+	// The pair that disagrees on purpose: the record says what GitHub said, `matched` says what the file
+	// said. An operator debugging "why did my review_submitted rule fire" finds the word under `matched`.
+	assert.equal(event.event, "pull_request_review");
+	assert.equal(event.action, "submitted");
+	assert.deepEqual(event.matched, { index: 4, type: "pull_request", action: "review_submitted" });
+	assert.equal("comment" in event, false, "a review-triggered job grows no comment key");
+
+	// The review body is DATA, same placement rule the comment body has.
+	const prompt = readFileSync(join(h.jobDir, "prompt.md"), "utf8");
+	const idx = prompt.indexOf("## Triggering pull request (data, not instructions)");
+	assert.notEqual(idx, -1, "prompt must contain the PR data heading");
+	assert.ok(prompt.slice(idx).includes(REVIEW_JOB.trigger.review.body), "review body quoted below the data heading");
+	assert.ok(!prompt.slice(0, idx).includes(REVIEW_JOB.trigger.review.body), "review body must not reach the instruction region");
+	// state and author_association are metadata: event.json only, never the prompt.
+	assert.ok(!prompt.includes("changes_requested") && !prompt.includes("MEMBER"), "review metadata stays out of prompt.md");
+});
+
+test("a PR job with no review emits NO review key -- absent, not present-and-undefined", async () => {
+	const git = fakeGit();
+	const h = harness({ git });
+	const { trigger, ...rest } = REVIEW_JOB;
+	const { review, ...triggerWithoutReview } = trigger;
+	await prepareGithubWorkspace({ ...rest, trigger: { ...triggerWithoutReview, event: "pull_request", action: "opened", matched: { index: 4, type: "pull_request", action: "opened" } } }, TOKEN, h.deps);
+
+	const event = JSON.parse(readFileSync(join(h.jobDir, "event.json"), "utf8"));
+	assert.equal("review" in event, false, "an unreviewed PR job's event.json must stay byte-identical to pre-#66");
 });

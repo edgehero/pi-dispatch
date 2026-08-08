@@ -516,9 +516,23 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   executed by the host or baked into the system prompt. The job-data carries a discriminated
   `target: { type: "issue" | "pull_request", number, title, body, head?, base? }` rather than a compat union
   of flat fields.
+- **A submitted review routes through this same decision** (issue #66). `review_submitted` is an action on
+  this trigger type rather than a type of its own, and it changes nothing about the clone ref, the target
+  shape or who decides what to do: the harness hands the flow the PR context plus the review's own
+  `{ id, body, state, author_association }` and the flow decides whether that means push, comment or
+  nothing. Two consequences follow from routing rather than interpreting. The `state` reaches the flow as
+  data, so "only act on changes_requested" is a **flow** decision, while `on.reviewState` is the operator's
+  separate, cheaper control over what is worth paying for at all — the same split as a label predicate
+  versus what the skill does once it runs. And `review.id` is carried because the review's inline comments
+  ride an event this project does not ingest, so fetching them is the flow's job and the id is what it
+  needs to do it.
 - **Rejected**: cloning the PR head ref in the worker (executes fork code on the host clone path, and a
   base-scoped token cannot push to a fork branch anyway) · harness-side review/push logic (reimplements pi) ·
-  auto-firing on any PR open (unbounded paid runs from fork PRs — `CONST-TRIGGER-AUTHOR-GATE`).
+  auto-firing on any PR open (unbounded paid runs from fork PRs — `CONST-TRIGGER-AUTHOR-GATE`) · a fifth
+  `on.type` for reviews (GitLab's `approved` already rides `pull_request`, so a new type would make one
+  forge's review a type and the other's an action) · ingesting `pull_request_review_comment` (one delivery
+  per line comment, a volume characteristic nothing else here has; the empty-body refusal plus `review.id`
+  is the cheap answer until there is a reason to do more).
 - **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `INT-WEBHOOK-PAYLOAD-SUBSET`, `INT-CONTAINER-JOB-INPUTS`,
   `CONST-ISOLATION-CONTAINER-PER-JOB`
 
@@ -610,7 +624,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-GH-POLLING-TRANSPORT
 
 - **Decision**: `pi-dispatch-receiver poll` is an **alternative producer** for GitHub triggers that
-  needs no public URL: it polls issue events, issue comments, and open PRs per serviced repo (ETag
+  needs no public URL: it polls issue events, issue comments, open PRs, and the reviews on those open
+  PRs per serviced repo (ETag
   conditional requests, ~60s cadence honoring `x-poll-interval`), synthesizes the exact
   `INT-WEBHOOK-PAYLOAD-SUBSET` shapes, and feeds the **unchanged** pure `filter()` and the shared
   enqueue path with `poll-*` delivery ids. **The webhook receiver stays the default and the
@@ -628,6 +643,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the same gate. The accepted cost is ~60s trigger latency, cheap against jobs that run for minutes.
   Conditional 304s are rate-limit-free, so a handful of repos polls within a fraction of the 5000/hr
   budget.
+  **The reviews source is per-PR, and that shapes its cost model** (issue #66). `GET /pulls/{n}/reviews`
+  has no repo-wide form, so a cycle would otherwise spend one request per open PR forever. The validators
+  therefore live in one hash keyed by PR number rather than a key per PR — an unbounded key family would
+  break the "refresh the cursor family as a unit" TTL argument this design rests on — and the idle steady
+  state is one 304 per open PR, which costs no quota. The sweep is bounded and says so in a log line when
+  it truncates. It also runs when the open-PR list itself answers 304: whether submitting a review
+  perturbs that list is GitHub's business, and betting correctness on it would mean review triggers that
+  fire only when something else happens to touch the PR. The cursor is persisted **once per sweep**, not
+  per review, because many endpoints' ids interleave — advancing per item would either re-enqueue or
+  strand, and a mid-sweep failure retrying the whole sweep is idempotent on the `poll-rv<id>` jobIds.
+  Reviews on closed PRs are never synthesized: the open list is the sweep set, and a job started by a
+  review of a merged PR has nothing left to act on. This source exists because the alternative was a
+  `review_submitted` trigger that loads clean and can never fire under polling, which is the silently dead
+  config this project refuses everywhere else.
   **The polling credential is not a job token.** Under App auth the poller mints an *unscoped*
   installation token for itself — it must call `GET /installation/repositories` and read every
   serviced repo, which a per-repo-scoped mint cannot. That token never reaches a job:
@@ -1712,6 +1741,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #66 (ingest `pull_request_review`). **DES-PR-TRIGGER-ROUTES-TO-FLOW AMENDED**: a submitted review routes through this same decision rather than getting one of its own — the harness still implements no review behaviour, does not change the clone ref, and hands the flow the PR context plus the review's four fields. Two consequences recorded because they are the shape of the decision rather than details of it: `review.state` reaches the flow as DATA, so "only act on changes_requested" is a flow decision, while `on.reviewState` is the operator's separate and cheaper control over what is worth paying for at all (the same split as a label predicate versus what the skill does once it runs); and `review.id` is carried because the review's inline comments ride an event this project does not ingest, so fetching them is the flow's job. Rejected gains two entries: a fifth `on.type` for reviews (GitLab's `approved` already rides `pull_request`), and ingesting `pull_request_review_comment` (one delivery per line comment, a volume characteristic nothing else here has). **DES-GH-POLLING-TRANSPORT AMENDED**: a fourth source, `GET /pulls/{n}/reviews` over the OPEN pull requests the PR feed already fetched, so a polled deployment can arm a review trigger at all — without it the trigger loads clean and can never fire, which is the silently dead config this project refuses everywhere else. Its cost model is written down because it is the first per-entity source: validators live in ONE hash keyed by PR number rather than a key per PR, since an unbounded key family would break the "refresh the cursor family as a unit" TTL argument this entry rests on; the idle steady state is one quota-free 304 per open PR; the sweep is bounded and LOGS when it truncates. Two correctness calls stated rather than assumed: the sweep runs even when the open-PR list itself answers 304, because whether a review perturbs that list is GitHub's business and betting on it would mean review triggers that fire only when something else touches the PR; and the cursor is persisted ONCE per sweep rather than per review, because many endpoints' ids interleave, so per-item advance would either re-enqueue or strand — a mid-sweep failure retries the whole sweep and dedups on `poll-rv<id>`. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — `review_submitted` and `on.reviewState` are an action word and a narrowing inside the existing `pull_request` type, so the file's on × run matrix is untouched. **DES-GH-APP-MANIFEST-SETUP UNCHANGED in shape, checked** — `default_events` gains `pull_request_review` for every new App, armed or not, the same posture `pull_request` already has for a label-only deployment; existing Apps must add the subscription by hand. |
 | 2026-08-07 | Issue #102: **DES-OPERATOR-GLOBAL-OVERLAY** gains the discovery design and the four calls behind it — read pi's `settings.json` rather than walking its hoisted `node_modules` (where an installed package and a transitive dependency are indistinguishable, so a walk would stage code nobody asked for) while capturing the version off disk; treat a convention dir as sufficient, correcting the issue's `pi`-key predicate against the pinned source; default ON inside `--with-packages` with the opt-in-for-one-release alternative rejected and recorded; and scope all-or-nothing to the DECLARED set so one bad host package cannot zero a working overlay. Also records the boot-read to per-job-read change and why the original was right at the time, and that skills/prompts/themes enablement plus glob evaluation were deliberately left out. **DES-CLI-SURFACE UNCHANGED, checked** — `--no-host-packages` is a flag on an existing command, and the never-tier it defines is what kept the new doctor checks free of a `fixAction`. |
 | 2026-08-04 | A docs audit found six code defects; these are the two that changed a recorded decision (issue #99). **DES-TRIGGER-OUTSIDE-PI amended**: every forge arm is conditional now, GitHub included. Its identity resolution and `WEBHOOK_SECRET` requirement were unconditional while the other three arms were gated, so a forge-only deployment could not boot the receiver without `gh` logged in and a webhook secret it would never use; all three forge docs described a setup that stops at that wall. The uniform gate keeps the property that mattered: skipping identity resolution is sound only because the route is absent too, an unconfigured forge answers 404 rather than 401, and the guard must return if `/` is ever mounted unconditionally again. **REQ-RESUMABLE-SESSION amended** (requirements.md): its "one case fails CLOSED" clause was specified and never implemented, so an armed `run.resume` with no `PI_SESSIONS_DIR` ran cold and exited green, which is the exact failure the clause exists to prevent; the pre-spend refusal now exists, which also makes two `session-store.mjs` comments and doctor's fix text true. Cron `run.resume` moves from accepted-and-silently-ignored to refused at load, on `run.replicas`' precedent and for its reason. **CONST-HMAC-OVER-RAW-BODY UNCHANGED, checked**: the secret is still required wherever a GitHub endpoint exists to verify. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new session gate is a free pre-spend refusal that reserves no slot. |
 | 2026-08-04 | The front door becomes the default route (issue #96). **DES-FIRST-RUN-SETUP-WIZARD amended**: bare `/dispatch` with nothing configured lands directly in the wizard's opening select — the select is the consent, replacing the yes/no offer; the outage rule is restated load-bearing (a configured deployment with a down queue keeps the banner, never the wizard). Two steps join the flow: a Docker pre-check (capture probe, Re-check/Continue/Stop loop, per-OS pointers, never a piped installer) and a trigger-edge choice (receiver as a service via a consented pinned `@edgehero/pi-dispatch-receiver` install + `service install --receiver`; compose profile with the compose file now shipped in the runtime package and copied create-only; or the polling command printed). A once-per-process skew notice makes re-running setup the visible upgrade path. **Fixed in the same change, recorded plainly**: `service` units were broken for every npm deployment — the renderer derived a "repo root" two directories above its module, which in an npm install is the scope directory, so ExecStart/EnvironmentFile/wrapper paths all pointed at nothing; units now anchor on the deployment dir (WorkingDirectory, `.env`, logs) and resolved script paths (the CLI beside the service module; the receiver via `import.meta.resolve`), the wrapper execs the argv the render substituted instead of guessing, and npm-layout fixtures now exist so the seam that masked this cannot mask it again. **CONST-RETRY-INFRA-ONLY UNCHANGED, checked**: the exit-2 conversion survives the wrapper contract change, asserted against the real shipped wrapper. pi compatibility becomes strategy instead of luck: the peer widens to the `"*"` range pi's own packages doc prescribes for host-provided packages (the exact devDep pin stays the tested marker), a runtime advisory names an untested pi version on first `/dispatch` (never a refusal — the capability probe stays the only hard gate), and a weekly canary installs latest pi into a scratch dir (never the repo root — the pinned assertions must keep asserting the pin) and fails CI when any used API member or type needle disappears. |

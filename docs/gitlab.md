@@ -170,7 +170,15 @@ Practical consequences:
 | `reopened` | `reopen` |
 | `synchronize` | `update` (carrying `oldrev`) |
 | `labeled` | — *(a label add is `update` with a `changes.labels` diff)* |
-| — | `approved` |
+| `review_submitted` | `approved` *(near, not equal — see below)* |
+
+`approved` and `review_submitted` are the closest the two vocabularies come, and treating them as the same
+word would mislead in both directions. `approved` is **one verdict**: GitLab emits it when an approval
+lands, and nothing at all for a comment-only review. `review_submitted` is **every verdict** — an approve,
+a request-changes and a plain commented review alike — which is why the GitHub side has an
+`on.reviewState` narrowing and GitLab has no need of one. The gates differ too: a GitLab trigger is
+access-gated by an API lookup on the actor whatever the action, while `review_submitted` is gated on the
+reviewer's `author_association` specifically (see `SECURITY.md`).
 
 Writing a GitHub word on a GitLab trigger is **refused when the file loads**. It would not crash anything
 otherwise — it would simply never match an event, and the trigger would sit there looking configured and

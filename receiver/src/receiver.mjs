@@ -75,6 +75,28 @@ export function parseSubset(payload) {
 					base: { ref: pr.base?.ref },
 				}
 			: undefined,
+		// pull_request_review event fields (issue #66). Shape-gated like `pull_request` above rather than
+		// event-gated, for the same reason: this function never sees the event name, and a payload either
+		// carries a review or it does not.
+		//
+		// `id` is here because a review's INLINE comments ride `pull_request_review_comment`, an event this
+		// project deliberately does not ingest -- so the id is the only handle a flow has on them. No
+		// `review.user`: the bot-loop guard reads `sender.id` and nothing else, a second identity field is a
+		// second thing to keep in sync, and a login is PII with no reader (see issue.pull_request above).
+		review: payload.review
+			? {
+					id: payload.review.id,
+					body: payload.review.body,
+					// Folded to lower case HERE, the one place both sources converge. The webhook sends
+					// `approved`; GET /pulls/{n}/reviews sends `APPROVED`. The poller feeds this same function
+					// with REST-derived payloads, so without the fold the identical logical review would produce
+					// two different jobs depending on transport, and a polled `COMMENTED` would slip past the
+					// empty-body check and buy a container for an empty string. (GitHub docs, not source at a
+					// pin: filter.test.mjs drives both casings so the claim is pinned by behaviour.)
+					state: typeof payload.review.state === "string" ? payload.review.state.toLowerCase() : payload.review.state,
+					author_association: payload.review.author_association,
+				}
+			: undefined,
 		repository: { full_name: payload.repository?.full_name },
 	};
 }

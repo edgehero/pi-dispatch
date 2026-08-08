@@ -279,7 +279,9 @@ function loadTriggers(env, readFile, fileExists) {
 		} else if (on.type === "comment") {
 			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
-			group.pullRequest.push({ index, actions: new Set(on.action), predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas });
+			// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
+			// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
+			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, resume: run.resume, replicas: run.replicas });
 		}
 	}
 

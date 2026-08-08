@@ -436,8 +436,10 @@ function registerTools(pi: ExtensionAPI): void {
       "the agent), and may set optional model/provider/maxTurns for that schedule (omit = deployment default). " +
       "label needs labels[]+flow; comment needs phrase+flow; pull_request needs action[] (+ optional labels[]) + " +
       "flow. Webhook triggers take an optional `forge` = github (default) | gitlab, which also decides which " +
-      "action words pull_request accepts: github is labeled|opened|synchronize|reopened, gitlab is " +
-      "open|update|reopen|approved. For webhook triggers the repo and the task come from the triggering " +
+      "action words pull_request accepts: github is labeled|opened|synchronize|reopened|review_submitted, " +
+      "gitlab is open|update|reopen|approved. A github review_submitted trigger may also set " +
+      "reviewState[] (approved|changes_requested|commented) to narrow which verdicts fire; omitted, all " +
+      "three do. For webhook triggers the repo and the task come from the triggering " +
       "issue/PR event — set only the match + flow — and they run under the deployment default model.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -722,7 +724,7 @@ function triggerList(paths: any): any[] {
  */
 const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
 const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
-  github: { hint: "labeled opened synchronize reopened", dflt: "labeled" },
+  github: { hint: "labeled opened synchronize reopened review_submitted", dflt: "labeled" },
   gitlab: { hint: "open update reopen approved", dflt: "update" },
   forgejo: { hint: "label_updated opened synchronized reopened", dflt: "label_updated" },
   azure: { hint: "created updated", dflt: "updated" },

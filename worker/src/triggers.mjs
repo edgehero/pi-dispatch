@@ -40,12 +40,22 @@ export { FORGE_KINDS };
  * what their forge's documentation says and can grep for it there.
  *
  * GitLab has no `labeled`: adding a label to a merge request arrives as `update` carrying a
- * `changes.labels` diff, and `open`/`reopen` are its spellings of `opened`/`reopened`. `approved` has no
- * GitHub counterpart at all and is a genuinely useful gate (a member approved the MR). `merge` and
+ * `changes.labels` diff, and `open`/`reopen` are its spellings of `opened`/`reopened`. `merge` and
  * `close` are omitted on purpose: a job started by a merge or a close has nothing left to act on.
+ *
+ * `review_submitted` (issue #66) is github's fifth and the one compound word here. It names the
+ * `pull_request_review` event's `submitted` action, so both halves are greppable in GitHub's own docs, the
+ * same reason Forgejo's `label_updated` is spelled Forgejo's way. It is also the first case where ONE
+ * `on.type` covers TWO GitHub event names: a review is an event about a pull request, and GitLab's
+ * analogue `approved` already rides `on.type: "pull_request"`, so making GitHub's a fifth `on.type` would
+ * have made one forge's review a type and the other's an action. The gate on it is the REVIEWER's
+ * `author_association`, never the PR author's -- see filter.mjs and CONST-TRIGGER-AUTHOR-GATE.
  */
 const PR_ACTIONS = {
-	github: new Set(["labeled", "opened", "synchronize", "reopened"]),
+	github: new Set(["labeled", "opened", "synchronize", "reopened", "review_submitted"]),
+	// GitLab's `approved` is its review gate (a member approved the MR). It is NOT github's
+	// `review_submitted` renamed: `approved` is one verdict, `review_submitted` is every verdict, which is
+	// what `on.reviewState` below exists to narrow.
 	gitlab: new Set(["open", "update", "reopen", "approved"]),
 	// Forgejo's own spellings. `label_updated` is its `labeled` and `synchronized` its `synchronize` -- a
 	// one-letter difference that an operator would otherwise discover as a trigger that loads clean and
@@ -58,6 +68,24 @@ const PR_ACTIONS = {
 	// requests -- which is why azure's `prLabelAction` is null and a predicated PR rule is refused below.
 	azure: new Set(["created", "updated"]),
 };
+
+/**
+ * The verdicts a submitted GitHub review can carry, in the webhook's own (lower-case) spelling, and the
+ * vocabulary of the optional `on.reviewState` narrowing (issue #66).
+ *
+ * The narrowing exists because `review_submitted` is a WIDER paid surface than any other GitHub trigger:
+ * an approve, a request-changes and a drive-by "lgtm thanks" all submit a review, and unlike a comment
+ * trigger there is no phrase in the way and unlike a label trigger there is no label. `["changes_requested"]`
+ * is the arming most operators actually want. Omitted means all three, so the default is the issue's own
+ * shape and the narrowing only ever subtracts.
+ *
+ * `dismissed` is absent because it is an ACTION on the `pull_request_review` event, not a state a
+ * submitted review carries.
+ */
+const REVIEW_STATES = new Set(["approved", "changes_requested", "commented"]);
+
+/** The one action `on.reviewState` can narrow. Spelled once, read by the validator and named in its error. */
+const REVIEW_ACTION = "review_submitted";
 
 // A cron id flows into BullMQ's deterministic `repeat:<id>:<nextMillis>` jobId, so a `:` corrupts that
 // parse; the charset also excludes `:` and the dedicated check names the reason.
@@ -488,6 +516,8 @@ function normalizePullRequest(on, run, index, path) {
 		}
 	}
 
+	const reviewState = validateReviewState(on, actions, run, at, path);
+
 	// A `labeled` PR trigger is gated by its label predicate (the collaborator-applied label is the
 	// approval), so it MUST carry a positive selector -- exactly as a label trigger does. Auto actions
 	// (opened/synchronize/reopened) are gated by author_association in the filter, so a predicate is
@@ -515,7 +545,46 @@ function normalizePullRequest(on, run, index, path) {
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
 	return {
-		on: { type: "pull_request", action: [...actions], any: predicate.any, all: predicate.all, none: predicate.none },
+		on: {
+			type: "pull_request",
+			action: [...actions],
+			// Absent rather than present-and-undefined: an unnarrowed rule's normalized shape must stay
+			// byte-identical to the one every pre-#66 trigger file produces.
+			...(reviewState !== undefined && { reviewState }),
+			any: predicate.any,
+			all: predicate.all,
+			none: predicate.none,
+		},
 		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas },
 	};
+}
+
+/**
+ * The optional `on.reviewState` narrowing (issue #66). Returns the normalized array, or `undefined` when
+ * unset, which means every verdict fires.
+ *
+ * All four refusals are the same call the action vocabulary makes at the top of `normalizePullRequest`: a
+ * narrowing that can never apply does not crash anything downstream, it simply sits in the file looking
+ * configured while the trigger either fires on everything or on nothing. Refusing at load is what turns
+ * that into a message. The `review_submitted` requirement is the sharpest of the four -- a `reviewState`
+ * beside `["opened","synchronize"]` reads as "only run for these verdicts" and does the exact opposite.
+ */
+function validateReviewState(on, actions, run, at, path) {
+	if (on.reviewState === undefined) return undefined;
+	if (run.kind !== "github") {
+		throw configError(`${at}: on.reviewState is github-only (got ${run.kind}), no other forge reports a review verdict: ${path}`);
+	}
+	if (!actions.includes(REVIEW_ACTION)) {
+		throw configError(`${at}: on.reviewState requires on.action to include ${JSON.stringify(REVIEW_ACTION)}, otherwise it narrows nothing: ${path}`);
+	}
+	if (!Array.isArray(on.reviewState) || on.reviewState.length === 0) {
+		throw configError(`${at}: on.reviewState must be a non-empty array: ${path}`);
+	}
+	const expected = [...REVIEW_STATES].join("|");
+	for (const s of on.reviewState) {
+		if (!REVIEW_STATES.has(s)) {
+			throw configError(`${at}: on.reviewState has an unsupported review state ${JSON.stringify(s)} (expected ${expected}): ${path}`);
+		}
+	}
+	return [...on.reviewState];
 }

@@ -23,6 +23,7 @@ const TRIGGERS_JSON = JSON.stringify({
 		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage" } },
 		{ on: { type: "pull_request", action: ["labeled"], any: ["pi:review"] }, run: { kind: "github", flow: "review" } },
 		{ on: { type: "pull_request", action: ["opened", "synchronize", "reopened"] }, run: { kind: "github", flow: "review" } },
+		{ on: { type: "pull_request", action: ["review_submitted"] }, run: { kind: "github", flow: "address-review" } },
 	],
 });
 const FS = { fileExists: () => true, readFile: () => TRIGGERS_JSON };
@@ -62,6 +63,11 @@ const PR9C = prNine("c".repeat(40));
 const EV100 = { id: 100, event: "labeled", actor: { id: 5 }, label: { name: "pi:fix" }, issue: ISSUE7 };
 const EV201 = { id: 201, event: "labeled", actor: { id: 5 }, label: { name: "pi:fix" }, issue: ISSUE7 };
 const EV202 = { id: 202, event: "labeled", actor: { id: 5 }, label: { name: "pi:review" }, issue: ISSUE8 };
+
+// Reviews as the REST list endpoint returns them. `state` is UPPER case here and lower case on the
+// webhook -- the one field where the two producers disagree at the source, folded by parseSubset.
+const RV500 = { id: 500, user: { id: 5 }, author_association: "MEMBER", state: "APPROVED", body: "seeded, must not replay" };
+const RV600 = { id: 600, user: { id: 5 }, author_association: "MEMBER", state: "CHANGES_REQUESTED", body: "rename the helper" };
 
 const C301 = { id: 301, user: { id: 5 }, author_association: "OWNER", body: "@pi do it", created_at: "2026-08-02T12:00:30Z", updated_at: "2026-08-02T12:00:30Z", issue_url: "https://api.github.com/repos/o/r/issues/7" };
 const C302 = { id: 302, user: { id: 5 }, author_association: "OWNER", body: "@pi fix this", created_at: "2026-08-02T12:00:31Z", updated_at: "2026-08-02T12:00:31Z", issue_url: "https://api.github.com/repos/o/r/issues/8" };
@@ -116,6 +122,10 @@ function fakeRedis() {
 		},
 		async hgetall(key) {
 			return Object.fromEntries(hashes.get(key) ?? []);
+		},
+		async hget(key, field) {
+			const h = hashes.get(key);
+			return h?.has(String(field)) ? h.get(String(field)) : null;
 		},
 		async hset(key, field, value) {
 			if (!hashes.has(key)) hashes.set(key, new Map());
@@ -173,6 +183,10 @@ function scenarioRoutes() {
 		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV100]), ghResponse(200, [EV202, EV201, EV100])] },
 		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [C301, C302])] },
 		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, []), ghResponse(200, [PR9A]), ghResponse(200, [PR9B])] },
+		// The reviews sweep runs on every cycle that reaches an open PR. Routed even though it yields
+		// nothing here: unrouted would THROW, and pollRepo's per-repo isolation would swallow it into a
+		// `poll_repo_failed` line while every assertion below stayed green. See the guard in each test.
+		{ path: "/repos/o/r/pulls/9/reviews", replies: [ghResponse(200, [])] },
 		{ path: "/repos/o/r/pulls/8", replies: [ghResponse(200, PR8)] },
 		{ path: "/repos/o/r/issues/7", replies: [ghResponse(200, ISSUE7)] },
 		{ path: "/repos/o/r/issues/8", replies: [ghResponse(200, ISSUE8)] },
@@ -182,6 +196,17 @@ function scenarioRoutes() {
 /** The job with its deliveryId normalized -- the ONE field that legitimately differs between producers. */
 function stripDelivery(job) {
 	return { ...job, trigger: { ...job.trigger, deliveryId: "normalized" } };
+}
+
+/**
+ * Assert the cycle did not quietly fall over. `pollRepo` catches per repo so one dead repo cannot stall
+ * the roster, which means ANY throw inside a feed -- an unrouted fetch, a redis method the fake forgot --
+ * becomes one log line and zero failed assertions. Every scenario test calls this, because "green because
+ * nothing ran" is precisely the failure this suite exists to prevent.
+ */
+function assertNoRepoFailure(out) {
+	const failed = out.filter((o) => o.event === "poll_repo_failed");
+	assert.deepEqual(failed, [], `the cycle swallowed a failure: ${JSON.stringify(failed)}`);
 }
 
 async function withStdout(fn) {
@@ -204,7 +229,8 @@ async function withStdout(fn) {
 
 test("SUBSET PARITY: every polled REST shape enqueues field-for-field what its webhook delivery would", async () => {
 	const cfg = loadPollerConfig({ POLL_REPOS: "o/r" }, FS);
-	const { queued } = await runPoller({ cycles: 3, routes: scenarioRoutes() });
+	const { queued, out } = await runPoller({ cycles: 3, routes: scenarioRoutes() });
+	assertNoRepoFailure(out);
 	assert.equal(queued.length, 6, "one job per fresh shape: labeled issue, labeled PR, 2 comments, PR opened, PR synchronize");
 	const byDelivery = new Map(queued.map((j) => [j.trigger.deliveryId, j]));
 
@@ -239,6 +265,115 @@ test("dedup ids: poll-e<eventId> / poll-c<commentId> / poll-pr<number>-<sha7>, s
 	for (const id of ids) {
 		assert.match(id, /^poll-(e\d+|c\d+|pr\d+-[0-9a-f]{7})$/, `${id}: a stable, retry-deterministic stand-in for the delivery GUID`);
 	}
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The reviews source (issue #66)
+// ---------------------------------------------------------------------------------------------------
+
+/** Routes for the review scenario. The `/reviews` route MUST precede `/pulls/9`: fakeFetch matches by
+ *  substring, and `/repos/o/r/pulls/9/reviews` contains `/repos/o/r/pulls/9`. */
+function reviewRoutes({ pulls, reviews }) {
+	return [
+		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/pulls/9/reviews", replies: reviews },
+		{ path: "/repos/o/r/pulls/9", replies: [ghResponse(200, PR9A)] },
+		{ path: "/repos/o/r/pulls?state=open", replies: pulls },
+	];
+}
+
+test("reviews arm WITHOUT replay: a review that predates the cursor never fires, the next one does", async () => {
+	const { queued, out, redis } = await runPoller({
+		cycles: 2,
+		routes: reviewRoutes({
+			pulls: [ghResponse(200, [PR9A])],
+			reviews: [ghResponse(200, [RV500]), ghResponse(200, [RV500, RV600])],
+		}),
+	});
+	assertNoRepoFailure(out);
+
+	assert.ok(
+		out.some((o) => o.event === "poll_armed" && o.endpoint === "reviews" && o.cursor === 500),
+		"cycle 1 learns the high-water mark and enqueues nothing -- a review submitted months ago was an approval for THAT moment",
+	);
+	// PR 9 also arrives as `opened` on cycle 1's PR diff, so filter by the review's own delivery id.
+	const reviewJobs = queued.filter((j) => j.trigger.deliveryId.startsWith("poll-rv"));
+	assert.equal(reviewJobs.length, 1, "only the review submitted AFTER arming fires");
+	assert.equal(reviewJobs[0].trigger.deliveryId, "poll-rv600");
+	assert.equal(reviewJobs[0].flow, "address-review");
+	assert.equal(redis.kv.get("poll:o/r:cursor:reviews"), "600", "the cursor advances once, after the whole sweep");
+});
+
+test("a re-polled review does not fire twice, and the per-PR validator rides in a hash", async () => {
+	const { queued, out, fetch, redis } = await runPoller({
+		cycles: 3,
+		routes: reviewRoutes({
+			pulls: [ghResponse(200, [PR9A])],
+			// Same list every cycle after the new review lands: the cursor, not the endpoint, is what dedups.
+			reviews: [ghResponse(200, [], { etag: 'W/"r1"' }), ghResponse(200, [RV600]), ghResponse(200, [RV600])],
+		}),
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(
+		queued.filter((j) => j.trigger.deliveryId.startsWith("poll-rv")).map((j) => j.trigger.deliveryId),
+		["poll-rv600"],
+		"cycle 3 sees the same review and must not re-enqueue it",
+	);
+
+	const reviewCalls = fetch.calls.filter((c) => c.url.includes("/pulls/9/reviews"));
+	assert.equal(reviewCalls[0].headers["if-none-match"], undefined, "arming must not send a validator");
+	assert.equal(reviewCalls[1].headers["if-none-match"], 'W/"r1"', "the armed cycle revalidates with the stored per-PR validator");
+	assert.equal(redis.hashes.get("poll:o/r:etag:reviews")?.get("9"), 'W/"r1"', "validators live in ONE hash keyed by PR number, so touchRepo can still expire the family as a unit");
+	assert.equal(redis.ttls.get("poll:o/r:cursor:reviews"), 35 * 24 * 3600, "the reviews cursor carries the same 35-day TTL as the rest of the family");
+});
+
+test("a 304 on the open-PR list still sweeps reviews, taking its PR numbers from the snapshot hash", async () => {
+	// The load-bearing case for not betting on whether a review perturbs the /pulls list. Cycle 2's list
+	// is unchanged, and the review must still be found.
+	const { queued, out, fetch } = await runPoller({
+		cycles: 2,
+		routes: reviewRoutes({
+			pulls: [ghResponse(200, [PR9A], { etag: 'W/"p1"' }), ghResponse(304, null)],
+			reviews: [ghResponse(200, []), ghResponse(200, [RV600])],
+		}),
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(
+		queued.filter((j) => j.trigger.deliveryId.startsWith("poll-rv")).map((j) => j.trigger.deliveryId),
+		["poll-rv600"],
+		"a 304 on /pulls must not make review triggers fire only when something else touches the PR",
+	);
+	assert.ok(
+		fetch.calls.some((c) => /\/pulls\/9(\?|$)/.test(c.url.replace("https://api.github.com", ""))),
+		"with no list in hand the PR object is fetched lazily, once, and only because a NEW review turned up",
+	);
+});
+
+test("SUBSET PARITY for a review, including the case GitHub itself is inconsistent about", async () => {
+	const cfg = loadPollerConfig({ POLL_REPOS: "o/r" }, FS);
+	const { queued, out } = await runPoller({
+		cycles: 2,
+		routes: reviewRoutes({ pulls: [ghResponse(200, [PR9A])], reviews: [ghResponse(200, []), ghResponse(200, [RV600])] }),
+	});
+	assertNoRepoFailure(out);
+	const polled = queued.find((j) => j.trigger.deliveryId === "poll-rv600");
+	assert.ok(polled, "the poller must have enqueued the review");
+
+	// The webhook twin carries the SAME review with GitHub's OTHER spelling of state: the list endpoint
+	// says CHANGES_REQUESTED, the webhook says changes_requested. If the fold ever moves out of
+	// parseSubset, one transport starts writing a state the gate and the flow do not recognise.
+	const webhookPayload = {
+		action: "submitted",
+		sender: { id: 5 },
+		pull_request: PR9A,
+		review: { ...RV600, state: "changes_requested" },
+		repository: REPOSITORY,
+	};
+	const verdict = filter("pull_request_review", parseSubset(webhookPayload), cfg, SELF, "wh-poll-rv600");
+	assert.equal(verdict.enqueue, true, "the webhook twin must clear the gate");
+	assert.deepEqual(stripDelivery(polled), stripDelivery(verdict.job), "REST and webhook must land the identical job");
+	assert.equal(polled.trigger.review.state, "changes_requested", "the upper-case REST spelling is folded, not carried");
 });
 
 // ---------------------------------------------------------------------------------------------------

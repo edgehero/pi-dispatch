@@ -161,7 +161,7 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 		hook_attributes: { url: "https://hooks.example/github" },
 		public: false,
 		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
-		default_events: ["issues", "issue_comment", "pull_request"],
+		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	});
 });
 
@@ -169,7 +169,7 @@ test("buildManifest: no webhook URL yields hook_attributes {active:false} — th
 	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: undefined });
 	assert.deepEqual(manifest.hook_attributes, { active: false });
 	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
-	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request"]);
+	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
 });
 
 // -- the served form page: embeds the manifest, POSTs to the right target ------------------------------

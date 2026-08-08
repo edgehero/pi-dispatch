@@ -602,11 +602,14 @@ Evidence convention as in `constitution.md`.
 - **`/job/event.json` — both shapes.** Written for **every** job, `0o444` like everything under `/job`,
   one file per concern — trigger context lives here, never merged into the prompt file.
   - A **github** job gets the webhook payload subset — an `issue` OR a `pull_request` body per the target
-    discriminator (`INT-WEBHOOK-PAYLOAD-SUBSET`) — plus three additions. `comment: { body,
+    discriminator (`INT-WEBHOOK-PAYLOAD-SUBSET`) — plus four additions. `comment: { body,
     author_association }`, comment-triggered jobs only: the invoking comment, carried on the job's
     `trigger`; the body is untrusted user-authored data permitted in `/job` and the prompt's fenced data
     region **only** — never in worker logs or the run record (`no-pii-in-logs`,
-    `CONST-ISSUE-TEXT-IS-DATA`). `sender: { id }` — **no `login`**: the subset never extracted it, so the
+    `CONST-ISSUE-TEXT-IS-DATA`). `review: { id, body, state, author_association }`, review-triggered jobs
+    only (issue #66): the invoking review, on the same terms — `body` is untrusted data with the same
+    permitted placements, while `id`, `state` and `author_association` are metadata that reach
+    `event.json` and never the prompt. `sender: { id }` — **no `login`**: the subset never extracted it, so the
     key was written but never populated, and it is now not written at all. And `matched: { index, type,
     label | phrase | action }` — **HARNESS-COMPUTED** metadata, the filter's own decision record and not a
     webhook payload field: `index` is the 0-based position of the winning entry in the raw `triggers.json`
@@ -614,6 +617,12 @@ Evidence convention as in `constitution.md`.
     entry's `on.type`, and the third key names what satisfied the rule — for `label` the label that hit
     (first `any` hit, else `all[0]`), for `comment` the configured `phrase`, for `pull_request` the
     `action`. `matched` does **not** enter the prompt.
+  - **On a review-triggered job `matched.action` and the record's own `action` deliberately DIFFER**, and
+    this is the first GitHub case where they do. The record's `event`/`action` pair is byte-for-byte what
+    GitHub sent (`pull_request_review` / `submitted`); `matched.action` is the `triggers.json` word that
+    fired (`review_submitted`), which GitHub never sent on any event. That follows from what each object
+    is for — the record says what the forge said, `matched` names the rule the operator wrote — but it
+    means "for `pull_request` the `action`" above must be read as the rule's action, not the payload's.
   - A **local** job gets one of three `source`-discriminated shapes — naming the fields IS the contract:
     ```
     cron:    { source: "cron", trigger: { id, pattern }, folder: <basename>, sha: <folder HEAD>,
@@ -978,14 +987,35 @@ its name and its GitHub-only body: IDs are permanent addresses, and a second for
 different shape rather than an extension of this one.)*
 
 - **Contract**:
-  - Events consumed: `issues`, `issue_comment`, `pull_request`. Everything else drops as `unhandled-event`.
+  - Events consumed: `issues`, `issue_comment`, `pull_request`, `pull_request_review`. Everything else
+    drops as `unhandled-event`.
+  - **`pull_request_review` is a second event name on ONE trigger type** (issue #66). Its `submitted`
+    action routes exactly as a `pull_request` action does, under the trigger word `review_submitted`
+    (`INT-TRIGGERS-FILE-CONTRACT`); `edited` and `dismissed` drop as `unhandled-event`, because an edit
+    would re-fire on text already paid for and a dismissal withdraws a verdict rather than stating one.
   - Headers consumed: `X-Hub-Signature-256`, `X-GitHub-Event`, `X-GitHub-Delivery`
   - Body fields consumed: `action`, `issue.number`, `issue.title`, `issue.body`, `issue.labels[].name`,
     `issue.pull_request` (presence marker only — an `issue_comment` on a PR carries it), `comment.body`,
     `comment.author_association`, `sender.id`, `repository.full_name`, and for a `pull_request` event:
     `pull_request.number`, `pull_request.title`, `pull_request.body`, `pull_request.author_association`,
     `pull_request.labels[].name`, `pull_request.head.ref`, `pull_request.head.sha`,
-    `pull_request.head.repo.full_name`, `pull_request.base.ref`
+    `pull_request.head.repo.full_name`, `pull_request.base.ref`; and for a `pull_request_review` event
+    those same `pull_request.*` fields (the payload carries the full PR object) **plus** `review.id`,
+    `review.body`, `review.state`, `review.author_association`.
+  - **`review.state` is folded to lower case on projection**, and that fold is normative rather than
+    cosmetic. GitHub spells it `approved` on the webhook and `APPROVED` on
+    `GET /repos/{o}/{r}/pulls/{n}/reviews`, so without the fold the identical review would produce two
+    different jobs depending on transport, and a polled `COMMENTED` would slip past the empty-body refusal
+    below. `review.user` is deliberately **not** consumed: `sender.id` is the only identity the gate and
+    the bot-loop guard read, and a login is PII with no reader.
+  - **`review.id` is consumed because the receiver cannot see a review's inline comments.** Those ride
+    `pull_request_review_comment`, an event this contract does not consume, so a flow that wants them has
+    the id and nothing else. Note the consequence, which is stated plainly rather than buried: a
+    Comment-type review made ONLY of line comments arrives with an empty body and is refused below, so the
+    id serves the `approved` and `changes_requested` reviews that carry inline comments and do fire.
+  - **An empty-bodied `commented` review is refused** under its own reason, `no-review-body`, rather than
+    starting a run on an empty string. `approved` and `changes_requested` still fire with no body: there
+    the verdict is itself the signal.
   - `issue.labels[].name` and `pull_request.labels[].name` are consumed as a **set**, evaluated by the
     `{any, all, none}` trigger predicate (`REQ-TRIGGER-AUTHOR-GATE`) — this changes *how* the field is
     used, not which fields are read.
@@ -994,17 +1024,29 @@ different shape rather than an extension of this one.)*
     (`INT-CONTAINER-JOB-INPUTS`) — the first time these two fields leave the receiver. The subset itself is
     unchanged — both were already named here — and the body stays data-by-placement
     (`CONST-ISSUE-TEXT-IS-DATA`).
+  - For a review-triggered job, all four `review.*` fields ride the job as `trigger.review` into
+    `/job/event.json`, and `review.body` **alone** enters the prompt's fenced data region — `state`, `id`
+    and `author_association` are metadata and stay in `event.json`, the same line `comment.author_association`
+    has always been on. The body is data-by-placement (`CONST-ISSUE-TEXT-IS-DATA`); it is untrusted text
+    from whoever cleared the gate, and it is the whole point of carrying the review at all, since a
+    "Request changes: rename the helper" review that starts a job the agent cannot read is a half fix.
   - **`pull_request.head.*` and `.base.*` are DATA only.** They are attacker-controlled (the head may be a
     fork) and are carried into `/job/event.json` for the flow's own `gh` use; they are **never** used as a
     clone ref. The worker still clones the base repo's default-branch SHA (`INT-CONTAINER-JOB-INPUTS`).
   - **Everything else is ignored.**
   - **The subset may be SYNTHESIZED from REST objects** (issue #81): the polling producer
     (`pi-dispatch-receiver poll`, `DES-GH-POLLING-TRANSPORT`) builds these exact shapes from
-    `GET /repos/{o}/{r}/issues/events`, `/issues/comments`, and `/pulls` responses instead of webhook
+    `GET /repos/{o}/{r}/issues/events`, `/issues/comments`, `/pulls`, and `/pulls/{n}/reviews` responses
+    instead of webhook
     deliveries, and feeds them through the SAME pure `filter()` — the parity is pinned by tests that
     run both forms through the gate and assert identical verdicts and enqueue payloads. Delivery ids
-    become `poll-e<event>`/`poll-c<comment>`/`poll-pr<n>-<sha7>`, disjoint from webhook GUIDs inside
-    the same `gh-` dedup space. The headers row above does not apply to synthesized subsets — there is
+    become `poll-e<event>`/`poll-c<comment>`/`poll-pr<n>-<sha7>`/`poll-rv<review>`, disjoint from webhook
+    GUIDs inside
+    the same `gh-` dedup space. The reviews source (issue #66) sweeps only OPEN pull requests, so a review
+    on a closed one is never synthesized — the same call `merge` and `close` get in the action vocabulary —
+    and it exists at all because the alternative was a `review_submitted` trigger that loads clean under
+    polling and can never fire, the silently dead trigger `INT-TRIGGERS-FILE-CONTRACT` refuses at load.
+    The headers row above does not apply to synthesized subsets — there is
     no HMAC because there is no inbound delivery to authenticate; TLS + the operator's own credential
     against api.github.com is the transport trust (`SECURITY.md`).
 - **Why**: Naming the subset **is** the contract. Because everything else is ignored by construction, an
@@ -1012,13 +1054,25 @@ different shape rather than an extension of this one.)*
   surface as one list, instead of inferring it from destructuring scattered across a handler. Every
   field here is attacker-controlled except the headers and `sender.id`, and the headers are only
   trustworthy *after* `CONST-HMAC-OVER-RAW-BODY` has run. `pull_request.author_association` is
-  attacker-*claimed* but GitHub-*computed*, and it gates only auto actions — a stranger cannot forge
+  attacker-*claimed* but GitHub-*computed*, and it gates the auto actions — a stranger cannot forge
   themselves into `COLLABORATOR` because GitHub, not the payload author, sets it.
+  `review.author_association` is the same class of field and carries the same argument, but it is a
+  **different field gating a different arm**, and the distinction is the reason this entry names both:
+  on an auto action the say-so being taken is the PR author's, on a review it is the reviewer's, because
+  a review is the first GitHub event where those are different people
+  (`CONST-TRIGGER-AUTHOR-GATE`). Reading `pull_request.author_association` for a review would refuse a
+  collaborator's review of a stranger's fork PR and accept a stranger's review of their own — wrong in
+  both directions at once, which is why the subset names the reviewer's field explicitly rather than
+  letting a reader infer it from the PR one sitting next to it.
 - **Traces to**: `CONST-HMAC-OVER-RAW-BODY`, `REQ-TRIGGER-AUTHOR-GATE`, `REQ-DEDUP-BY-DELIVERY-GUID`,
   `INT-CONTAINER-JOB-INPUTS`
 - **Acceptance**: Given a payload with unknown extra fields, behaviour is unchanged. Given a
   `pull_request` payload, no `head.sha`/`head.ref` value is ever passed to a clone or fetch — the fetch
-  pins the base default-branch SHA.
+  pins the base default-branch SHA. Given a `pull_request_review.submitted` whose `review.author_association`
+  is `COLLABORATOR` and whose `pull_request.author_association` is `NONE`, the subset carries both and the
+  gate reads the review's; given the mirror (`review` `NONE`, `pull_request` `OWNER`) it reads the review's
+  again and refuses. Given a REST review whose `state` is `APPROVED` and its webhook twin whose `state` is
+  `approved`, the two subsets are identical and enqueue identical jobs.
 
 ## INT-GITLAB-PAYLOAD-SUBSET
 
@@ -1195,7 +1249,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>", "packages": <optional boolean>,
                "image": "<optional>", "replicas": <optional int 2..3; github only> } },
-    { "on": { "type": "pull_request", "action": ["labeled"|"opened"|"synchronize"|"reopened", ...],
+    { "on": { "type": "pull_request",
+              "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
+              "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
+                                                                    // and only beside review_submitted
               "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
                "image": "<optional>", "replicas": <optional int 2..3; github only> } } ] }
@@ -1208,14 +1265,33 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **`run.kind` selects the forge; `on.type` is shared.** A label is a label and a comment is a comment on
   any forge, so the trigger types and their `{any, all, none}` predicates are identical. The **action**
   vocabulary is not, and is validated against the vocabulary of whichever forge the entry names:
-  `github` takes `labeled|opened|synchronize|reopened`, `gitlab` takes `open|update|reopen|approved` — each
+  `github` takes `labeled|opened|synchronize|reopened|review_submitted`, `gitlab` takes
+  `open|update|reopen|approved` — each
   in that forge's own words, so an operator can grep their own documentation for them. GitLab has no
-  `labeled` (a label added to a merge request arrives as `update` with a `changes.labels` diff), no
-  `synchronize` (an `update` carrying `oldrev` is the analogue), and `approved` has no GitHub counterpart
-  at all; `merge` and `close` are omitted because a job started by either has nothing left to act on.
+  `labeled` (a label added to a merge request arrives as `update` with a `changes.labels` diff) and no
+  `synchronize` (an `update` carrying `oldrev` is the analogue); `merge` and `close` are omitted because a
+  job started by either has nothing left to act on.
   **The refusal matters more than it looks**: an action word from the wrong forge is not malformed and
   breaks nothing downstream — it simply never matches an event, so the trigger loads clean and is
   silently dead. Refusing at load is what turns that into a message.
+- **`review_submitted` is the one action word that names an event as well as an action** (issue #66), and
+  it is the one place ONE `on.type` spans two GitHub event names: it is `pull_request_review`'s `submitted`
+  action, spelled as a compound so both halves stay greppable in GitHub's docs, exactly as Forgejo's
+  `label_updated` is spelled Forgejo's way. It rides `pull_request` rather than becoming a fifth `on.type`
+  because GitLab's analogue `approved` already rides `pull_request`, and a new type would have made one
+  forge's review a type and the other's an action. GitLab's `approved` is **not** this word renamed:
+  `approved` is one verdict, `review_submitted` is every verdict, which is what `on.reviewState` narrows.
+- **`on.reviewState` (optional, github only, and only beside `review_submitted`)** narrows which review
+  verdicts may start a job; omitted means all three. It exists because `review_submitted` is a WIDER paid
+  surface than any other GitHub trigger — a `commented` review needs no phrase, unlike a comment trigger,
+  and no label, unlike a `labeled` one, so arming the action arms every drive-by "lgtm thanks". Four
+  refusals at load, all the same call the action vocabulary makes: a word outside
+  `approved|changes_requested|commented`, an empty or non-array value, the field on a non-github entry, and
+  the field on an entry whose actions do not include `review_submitted` — that last one because a
+  `reviewState` beside `["opened","synchronize"]` reads as "only run for these verdicts" and does the exact
+  opposite. An unlisted verdict drops as `review-state-not-matched`, distinct from `no-matching-pr-trigger`,
+  because "your rule exists and this verdict was not in your list" and "no rule matched" call for different
+  operator responses.
 - **A `labeled` github `pull_request` rule must carry a positive selector; a gitlab one need not.** Not an
   inconsistency: on GitHub the predicate IS the approval gate for that action, so a rule without one is
   ungated. Every gitlab trigger is additionally gated on the actor's resolved access level
@@ -2018,6 +2094,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #66 (ingest `pull_request_review`). **INT-WEBHOOK-PAYLOAD-SUBSET AMENDED**: `pull_request_review` joins the consumed events as a SECOND event name on one trigger type (`submitted` only; `edited` and `dismissed` drop as `unhandled-event`, since an edit re-fires on text already paid for and a dismissal withdraws a verdict rather than stating one), and the body-field list gains `review.{id, body, state, author_association}` — the PR fields need no addition, because the review payload carries the full PR object and the projection was always shape-gated rather than event-gated. Three clauses are normative rather than descriptive. **`review.state` is folded to lower case on projection**, because GitHub spells it `approved` on the webhook and `APPROVED` on `GET /pulls/{n}/reviews`, so without one fold point the identical review would produce two different jobs depending on transport and a polled `COMMENTED` would slip past the empty-body refusal; the parity test drives both spellings. **`review.user` is deliberately NOT consumed** — `sender.id` is the only identity the gate and the bot-loop guard read, and a login is PII with no reader. **`review.id` is consumed** because a review's inline comments ride `pull_request_review_comment`, an event this contract does not consume. That last one carries a correction to the issue's own framing, recorded because the record should not stay wrong: #66 justified `review.id` by the line-comments-only case, which is precisely the case the `no-review-body` refusal drops, so the id in fact earns its place on the `approved`/`changes_requested` reviews that carry inline comments AND fire — the residual is `OQ-021`. The **Why** gains the sentence the change actually needed: it said `pull_request.author_association` "gates only auto actions", which became false by omission, and it now states that `review.author_association` is the same class of field gating a DIFFERENT arm, with the reason the fields differ. The synthesized-subset clause gains `/pulls/{n}/reviews` and `poll-rv<review>`. Acceptance gains the two directional gate cases and the case-fold case. **INT-TRIGGERS-FILE-CONTRACT AMENDED**: the github action vocabulary goes to five with `review_submitted`, spelled as a compound so both halves stay greppable in GitHub's docs (the `label_updated` precedent) and riding `pull_request` rather than becoming a fifth `on.type`, because GitLab's `approved` already rides `pull_request` and a new type would have made one forge's review a type and the other's an action. Records that `approved` is NOT this word renamed — `approved` is one verdict, `review_submitted` is every verdict — which is exactly what the new optional **`on.reviewState`** narrows, github-only and legal only beside `review_submitted`, with four load-time refusals including that last one, because a `reviewState` beside `["opened","synchronize"]` reads as a narrowing and does the opposite. The stale claim that `approved` "has no GitHub counterpart at all" is removed here and in `docs/gitlab.md`. **INT-CONTAINER-JOB-INPUTS AMENDED**: "plus three additions" becomes four, `review` gets the data-by-placement clause `comment` has (body to the prompt, `id`/`state`/`author_association` to `event.json` only), and a new clause records that on a review-triggered job `matched.action` (`review_submitted`, the file's word) and the record's own `action` (`submitted`, GitHub's word) deliberately DIFFER — the first GitHub case where they do, which makes the existing "for `pull_request` the `action`" sentence read as the rule's action rather than the payload's. **INT-GITLAB-, INT-FORGEJO- and INT-AZURE-PAYLOAD-SUBSET UNCHANGED, checked** — no other forge reports a review verdict, and `on.reviewState` is refused on all three at load. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked** — `no-review-body`, `review-author-not-allowed` and `review-state-not-matched` are RECEIVER drop reasons, which are log fields and not the record's closed terminal-outcome enum. |
 | 2026-08-08 | Issue #103, two records that disagreed with the code. **INT-RUN-HISTORY-FILE-CONTRACT**: the nested `session.reason` enum was documented as CLOSED while omitting `promote-failed`, which `promoteSession`'s outer catch returns on any fs fault during the swap and which `mergeSession` writes straight into the record on the completed path — a full disk would have produced a token the spec called impossible. Added, together with a producer table, because the enum reads as one flat list while three separate code paths write it (resolve, runner, promote) and a refused promotion WINS over the other two. Recorded three things the list cannot show: `expired` never arrives from the promote path, `promoted` is a return value that reaches no record, and `no-key` is deliberately NOT in the enum — a DI-seam backstop unreachable in a wired worker, since `sessionKeyFor` is total and binary so `resolveSession` returns `null` rather than a keyless session. Pinned by a new fault-injection test in `worker/test/session-store.test.mjs`. **INT-SDK-SESSION-OPTIONS**: the `additionalExtensionPaths` comment claimed operator-staged pi packages "ride this same option" as `PI_GLOBAL_ALLOW_EXTENSIONS`; the spread is and remains UNCONDITIONAL, so the comment was the defect, in both this file and `image/runner/src/loader.mjs`. Corrected to state the split and why (the worker applies `run.packages` before emitting `PI_PACKAGES`, so re-gating here would withhold what the operator armed), and the previously untested `allowGlobalExtensions: false` case is now pinned in `image/runner/test/loader.test.mjs`. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked** — its write-path prose names no reason tokens, so the drift could only ever have been visible from the record's own contract. |
 | 2026-08-07 | Issue #102: **INT-PI-PACKAGES-FILE-CONTRACT** records that `pi-packages.json` is now the override-and-addition layer rather than the only source (discovery reaches the same validator, so it adds candidates and never exemptions), and that the receipt gained `from` as a CLOSED enum with a default — which covers both compatibility directions at once, since a pre-#102 receipt carries no `from` and reads as declared while an older worker drops it as an unknown key. Also records that the receipt is now read at EACH job start rather than once at boot, why the boot read was right until discovery made re-staging routine, and why a failed read keeps last-known-good instead of degrading to none (an empty set emits no `PI_PACKAGES`, so the runner's path assertion would have nothing to refuse and the job would run toolless on a clean exit 0). **INT-CONTAINER-RUNTIME-CONTRACT, INT-TRIGGERS-FILE-CONTRACT, INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — the mount, `PI_PACKAGES`, `run.packages` and the pre-spend refusal are all untouched; only who fills the manifest, and how often it is read, moved. |
 | 2026-08-04 | Documentation audit fallout (issue #99). **INT-TRIGGERS-FILE-CONTRACT** amended on `run.resume`, which this file had described as carried on **ALL FOUR** kinds for a month while the wiring covered three: `resolveSession` is handed to the forge preparers only, so a cron job with the flag armed staged no transcript, mounted no `/session`, promoted nothing and exited `0` as though it had. That is the flag's own believed-on-while-off inversion reached through the wiring rather than through a truthy `"false"` string, so the fix is `run.replicas`' fix: **refused at load**, worded *not yet covered* rather than impossible, because `session-key.mjs` already derives the local key from the scheduler id and nothing reaches it. Only `true` is refused — `false` and absent still validate and still land in `data` byte-identically, since `false` is the documented default and refusing an operator for writing down present behaviour would also change a shape pinned as byte-identical; the asymmetry with `run.replicas` (which refuses ANY value on cron) is recorded rather than left to read as an oversight, `1` being a no-op flag where `false` is the truth. The same bullet gains the **pre-spend** half, which the triggers file cannot answer by construction: whether a session store exists is deployment state, not file content, so an armed trigger under a deployment with no `PI_SESSIONS_DIR` is refused per delivery and `doctor` keeps the load-time warning. **INT-RUN-HISTORY-FILE-CONTRACT**: the `reason` enum gains one token, **`sessions-dir-unset`**, on `job-image-missing`'s precedent — a policy outcome with `budgetReserved: false`, since it is answered from two values already in hand before the mint, the branch check, the clone, the token-cap read and the budget INCR. Its shape follows `settings-overlay-invalid`'s (`<config artifact>-<its bad state>`) and its words are the spec's own, so the token greps to the text that mandates it. The nested `session.reason` enum's **`disabled`** was audited as unimplemented and is **UNCHANGED, checked**: the runner produces it (`image/runner/src/session.mjs`) whenever no session file is mounted, which is every unarmed job, so the entry was right and the audit finding was wrong. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked**: the store's own no-`sessionsDir` return is now unreachable in a wired worker and kept as the DI-seam backstop, which changes no byte of its contract. |

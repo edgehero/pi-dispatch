@@ -199,15 +199,24 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   one. A label rule (and a `labeled` PR rule) shall carry at least one positive selector (a non-empty
   `any` or `all`). For a `pull_request`: `action: labeled` is gated by the label predicate (a
   collaborator-applied label is the approval); `action ∈ {opened, synchronize, reopened}` is gated by the
-  PR `author_association ∈ {OWNER, MEMBER, COLLABORATOR}` — a gate hard-coded in the filter, never
-  config-optional. A comment carrying `issue.pull_request` is a PR-context comment and enqueues a
-  pull_request target.
+  PR `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`; and `action: review_submitted` (the
+  `pull_request_review` event's `submitted` action) is gated by the **reviewer's**
+  `review.author_association ∈ {OWNER, MEMBER, COLLABORATOR}`, never the PR author's. All three are
+  hard-coded in the filter, never config-optional. A comment carrying `issue.pull_request` is a PR-context
+  comment and enqueues a pull_request target. A `review_submitted` rule may carry an optional
+  `on.reviewState` narrowing which verdicts fire (`INT-TRIGGERS-FILE-CONTRACT`); an unlisted verdict drops
+  as `review-state-not-matched`. A `commented` review with an empty body drops as `no-review-body` rather
+  than starting a run on nothing; an empty-bodied `approved` or `changes_requested` still fires.
 - **Why**: The enforcement of `CONST-TRIGGER-AUTHOR-GATE`. The bot-loop guard matters independently: our
   own job comments on the issue — or pushes to a PR head branch, which fires `pull_request.synchronize` —
   an event that without the guard triggers another job, an unbounded paid recursion. The positive-selector
   requirement is what keeps a `none`-only rule — which would match every labeled event lacking the excluded
   labels, wider than a single-label OR — from ever loading. The PR auto-action author gate is
   load-bearing money control: without it, any fork PR opened by a stranger launches a paid agent run.
+  The review arm reads a **different field** because a review is the first GitHub event whose actor is not
+  the PR author, and reading the PR's field there fails in both directions at once — see
+  `CONST-TRIGGER-AUTHOR-GATE` for the argument. Two acceptance cases below are therefore a pair: a
+  delivery whose two associations agree passes against either field and pins nothing.
 - **Where the GitLab lookup runs, and why it is not in the gate**: `filter.mjs` and `filter-gitlab.mjs`
   import nothing side-effecting, do no I/O and never throw. That purity is what makes the
   security-critical decision unit-testable without a server, a socket or a queue, so the access-level
@@ -217,7 +226,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **indeterminate** lookup is a **503**, so GitLab redelivers and the stable `webhook-id` dedups the
   retry. Answering 204 there would drop real work during an outage and look identical on the wire to a
   stranger being correctly refused.
-- **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`
+- **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`, `OQ-020`
 - **Acceptance**: Given `@pi fix this` with `author_association: NONE`, 204 and zero jobs. Given a
   comment from our own App id, 204 and zero jobs. Given a GitLab issue opened by a Guest with the trigger
   label already applied, 204 and zero jobs. Given a GitLab access lookup that could not complete, 503 and
@@ -225,7 +234,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   only, or empty), config load fails and the receiver does not boot. Given a `pull_request.opened` whose
   PR `author_association` is not a collaborator, 204 and zero jobs; given the same from a `COLLABORATOR`,
   exactly one job. Given a `pull_request.synchronize` whose `sender.id` is our own identity, 204 and zero
-  jobs (the bot-loop guard).
+  jobs (the bot-loop guard). Given a `pull_request_review.submitted` with `review.author_association:
+  COLLABORATOR` and `pull_request.author_association: NONE`, exactly one job; given the mirror
+  (`review` `NONE`, `pull_request` `OWNER`), 204 and zero jobs — the two together are what catch a gate
+  reading the wrong field. Given a `commented` review whose body is empty or whitespace, 204 and zero
+  jobs; given an `approved` review whose body is empty, one job. Given a review whose verdict is outside a
+  configured `on.reviewState`, 204 and zero jobs. Given a review whose `sender.id` is our own identity,
+  204 and zero jobs.
 
 ## REQ-JOB-TIMEOUT-30M
 
@@ -1056,6 +1071,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #66 (ingest `pull_request_review`). **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the Statement enumerated the gated PR actions (`opened, synchronize, reopened`) and named the PR `author_association`, so a review action inherited neither branch. It now carries the third arm gated on the REVIEWER's `review.author_association`, the optional `on.reviewState` narrowing with its `review-state-not-matched` drop, and the `no-review-body` refusal of an empty `commented` review (with an empty-bodied `approved` or `changes_requested` still firing, since there the verdict is the signal). Acceptance gains the two directional cases as an explicit PAIR, plus the empty-body, unlisted-verdict and self-review cases. The Why records why the field differs and points at `CONST-TRIGGER-AUTHOR-GATE` for the argument. **REQ-DEDUP-BY-DELIVERY-GUID UNCHANGED, checked** — a review delivery carries the same `X-GitHub-Delivery` GUID every other event does, and the polled form mints `poll-rv<reviewId>` inside the existing `gh-` space, so the dedup contract is exercised rather than extended. **REQ-RESUMABLE-SESSION UNCHANGED, checked** — a review-triggered job on a PR resolves its session key from target type and head ref exactly as a `synchronize` one does; what the change DID require was carrying the review into the resumed prompt's data region, since that envelope says "address the activity quoted below" and would otherwise have quoted nothing. **REQ-REPLICA-RUNS UNCHANGED, checked** — replicas on a review-triggered PR target inherit `OQ-017` unchanged. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked**, and load-bearing: it is what bounds the widened trigger surface recorded in `OQ-020`. |
 | 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup): **REQ-GLOBAL-PI-OVERLAY** acceptance gains the discovery cases (a host package stages at the exact version on disk; a declared entry wins and prints the version it shadowed; `--no-host-packages`; a package contributing no pi resources, an autoload-off one, a git source and the admin package are each skipped or dropped WITH A NAMED REASON; the legacy global lookup honoured only when the managed path is absent; a malformed `settings.json` discovers nothing at exit 0), the extension-enablement cases (an extension disabled with `pi config` is no longer copied, a glob pattern is copied and reported as unevaluated), the refresh case (a re-stage reaches the next job with no restart, a torn read keeps last-known-good), and the receipt's `from` field. Records that repo-declared packages stay refused, with the forge-token reason, and that a repo's `.pi/extensions` loading is not a reversal of it because `/workspace` is merge-gated. One CORRECTION carried from the issue: the issue's proposed predicate ("no `pi` key means not a pi package") is **wrong at the 0.80.7 pin** and would have silently dropped packages that ship only a convention dir. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new doctor checks are all warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |
 | 2026-08-04 | The audit's session findings (issue #99). **REQ-RESUMABLE-SESSION amended**: Statement and Scope now match the code. The "one case fails CLOSED" clause was specified and never built, so an armed `run.resume` with `PI_SESSIONS_DIR` unset ran cold and completed green, indistinguishable from a job that never set the flag, which is precisely the belief-confirming failure the clause was written to stop; the pre-spend policy refusal now exists, reserving no budget slot and starting no container. Cron moves out of Scope's "all four trigger kinds": the session store reaches only the forge preparers, so a local job could never resolve a key, and `run.resume` on a cron trigger is refused fail-loud at load rather than accepted and ignored (`run.replicas`' precedent and its reason). The key material for cron exists in `session-key.mjs`, so the refusal names it as a gap to close, not a limit. Key material spelled as `(forge, repository, head branch)` — the forge kind was always the first component. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new gate is free and pre-reserve, in the same band as the image and branch-protection refusals. |
 | 2026-08-04 | The wizard becomes the default route (issue #96). **REQ-ADMIN-VIA-PI-EXTENSION Acceptance amended**: bare `/dispatch` with nothing configured lands directly in the wizard's opening select (Cancel spawns nothing, writes nothing — the select is the consent); an untested-but-complete pi version is one info advisory on first `/dispatch`, never a refusal; a runtime older than the console's pin is one skew notice pointing at `/dispatch setup`. The outage and nudge-latch clauses are unchanged in substance and restated. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new steps (Docker pre-check, trigger-edge choice) spawn only consented infrastructure commands; nothing reserves budget or enqueues. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked**: the wizard still drives the CLI's own gates; the service-unit re-anchoring fix (recorded in design.md) changes where units point, not what may be automated. |

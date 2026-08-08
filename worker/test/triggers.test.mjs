@@ -379,9 +379,51 @@ test("pull_request actions are validated against the vocabulary of the forge the
 	);
 	assert.throws(
 		() => parse([{ on: { type: "pull_request", action: ["update"] }, run: { kind: "github", flow: "review" } }]),
-		(e) => isConfigError(e) && e.message.includes("github") && e.message.includes("labeled|opened|synchronize|reopened"),
+		// The FULL github vocabulary, not a prefix of it. `.includes` on a shorter string would still pass
+		// against a message that had grown a word, which is exactly how a new action ships unpinned.
+		(e) => isConfigError(e) && e.message.includes("github") && e.message.includes("labeled|opened|synchronize|reopened|review_submitted"),
 		"a gitlab action word on a github trigger must refuse at load",
 	);
+});
+
+test("review_submitted is a github pull_request action, and needs no positive selector", () => {
+	// It is not the label action, so `requirePositive` never engages -- an unpredicated review rule loads
+	// exactly as an `opened`-only one does.
+	const [t] = parse([{ on: { type: "pull_request", action: ["review_submitted"] }, run: { kind: "github", flow: "address-review" } }]);
+	assert.deepEqual(t.on.action, ["review_submitted"]);
+	assert.equal("reviewState" in t.on, false, "an unnarrowed rule normalizes with no reviewState key at all");
+});
+
+test("review_submitted is refused on every forge but github -- it is GitHub's word, not a shared one", () => {
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		assert.throws(
+			() => parse([{ on: { type: "pull_request", action: ["review_submitted"] }, run: { kind, flow: "review" } }]),
+			(e) => isConfigError(e) && e.message.includes(kind),
+			`review_submitted must refuse at load on ${kind}`,
+		);
+	}
+});
+
+test("on.reviewState narrows a review rule, and normalizes to its own array", () => {
+	const [t] = parse([{ on: { type: "pull_request", action: ["review_submitted"], reviewState: ["changes_requested", "approved"] }, run: { kind: "github", flow: "address-review" } }]);
+	assert.deepEqual(t.on.reviewState, ["changes_requested", "approved"]);
+});
+
+test("every on.reviewState refusal is fail-loud at load, because a dead narrowing looks configured", () => {
+	const cases = [
+		[{ type: "pull_request", action: ["review_submitted"], reviewState: ["merged"] }, "github", "unsupported review state", "a word GitHub never reports"],
+		[{ type: "pull_request", action: ["review_submitted"], reviewState: [] }, "github", "non-empty array", "an empty list narrows to nothing and would refuse every review"],
+		[{ type: "pull_request", action: ["review_submitted"], reviewState: "approved" }, "github", "non-empty array", "a bare string is not the array shape"],
+		[{ type: "pull_request", action: ["opened", "synchronize"], reviewState: ["approved"] }, "github", "review_submitted", "beside auto actions it reads as a narrowing and does the opposite"],
+		[{ type: "pull_request", action: ["approved"], reviewState: ["approved"] }, "gitlab", "github-only", "no other forge reports a review verdict"],
+	];
+	for (const [on, kind, needle, why] of cases) {
+		assert.throws(
+			() => parse([{ on, run: { kind, flow: "review" } }]),
+			(e) => isConfigError(e) && e.message.includes(needle),
+			`${JSON.stringify(on.reviewState)} on ${kind}: ${why}`,
+		);
+	}
 });
 
 test("gitlab merge-request actions load, including the one with no github counterpart", () => {

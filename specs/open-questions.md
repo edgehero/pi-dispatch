@@ -677,10 +677,55 @@ adversarial passes did.
   unreached case is **printed by name** at stage time rather than passed over in silence.
 - **May also get an issue**: (a), if someone intends to schedule it. The row stays regardless.
 
+## OQ-020 — A review trigger widens who may spend, in two ways the bot-loop guard cannot see
+
+- **Status**: `ACCEPTED RISK`
+- **Position**: `review_submitted` (issue #66) is the first GitHub trigger with **no second gate**. A
+  comment trigger needs the phrase, a label trigger needs the label, and both of those are things a human
+  types on purpose. A review needs only that the reviewer clears `author_association`, so arming the action
+  arms every submitted review from everyone with write access, including a one-word "lgtm". `on.reviewState`
+  narrows *which verdicts* count and is the recommended arming, but it narrows verdicts, not actors.
+  **The sharper half is other people's bots.** The bot-loop guard compares `sender.id` against **our own**
+  identity and nothing else, which is exactly right for the recursion it was built for (our flow pushes,
+  `synchronize` fires, the guard breaks the loop). A third-party review bot — CI, a security scanner, a
+  code-review SaaS — is a different actor holding, very often, `author_association: MEMBER`. If it reviews
+  on every push and the armed flow pushes, the two form a recursion **neither guard can see**, because each
+  only knows itself. No comparable vector exists on the other triggers: bots do not apply trigger labels
+  and do not type `@pi`.
+- **Why it is accepted rather than closed**: the obvious fix, refusing any sender GitHub marks as a bot,
+  needs `sender.type` in `INT-WEBHOOK-PAYLOAD-SUBSET` and a new clause in `CONST-TRIGGER-AUTHOR-GATE`, and
+  it would refuse a legitimate arrangement — an operator whose own review bot is *meant* to start jobs. It
+  is also not obviously the right shape: the general problem is a spend loop between two automated actors,
+  and `sender.type` is one narrow instrument for it. What bounds the risk meanwhile is real but partial:
+  the spend caps (`REQ-SPEND-CAPS-MULTI-WINDOW`) put a ceiling on any runaway, dedup bounds re-delivery of
+  the *same* review, and the trigger is opt-in — a deployment that never writes `review_submitted` has
+  none of this. Stated in `SECURITY.md` so an operator meets it before arming, not on the bill.
+- **What would close it**: evidence of the loop happening in practice, or a decision on the general shape
+  (a bot-actor refusal, an operator allowlist of automated reviewers, or a per-trigger rate ceiling).
+
+## OQ-021 — A review made only of line comments never fires, and the gate cannot tell why
+
+- **Status**: `ACCEPTED RISK`
+- **Position**: a Comment-type review submitted with inline comments and no summary arrives as
+  `state: "commented"` with an empty `body`, which `no-review-body` refuses (issue #66). That is
+  indistinguishable, inside the filter, from a genuinely empty review: the inline comments ride
+  `pull_request_review_comment`, an event this project does not ingest, and the `pull_request_review`
+  payload carries no count of them. `filter.mjs` is pure by contract, so it cannot ask.
+- **Why it is accepted**: the alternative is paying for a container whose only instruction is an empty
+  string, on every empty review, to serve a case that a maintainer can trigger deliberately by typing one
+  line of summary. The narrower fix — refuse only when there are also no line comments — needs an API call
+  from inside the gate, which would cost the purity that makes the security decision unit-testable
+  offline (`REQ-TRIGGER-AUTHOR-GATE`). Note that `approved` and `changes_requested` reviews with inline
+  comments **do** fire regardless of body, so this affects the neutral Comment verdict only, and
+  `review.id` rides the job precisely so a flow can fetch the line comments in those cases.
+- **What would close it**: ingesting `pull_request_review_comment` (explicitly out of scope in #66, one
+  delivery per line comment), or upstream adding a comment count to the review payload.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #66 (ingest `pull_request_review`). Added **`OQ-020`** (`ACCEPTED RISK`): a review trigger is the first GitHub trigger with no second gate — a comment needs its phrase and a label needs its label, both typed on purpose, while a review needs only that the reviewer clears `author_association` — and the sharper half is that the bot-loop guard compares `sender.id` against **our own** identity alone, so a third-party review bot holding `MEMBER` sits outside it and, if it reviews every push while the armed flow pushes, forms a recursion neither party's guard can see. Accepted rather than closed because the obvious fix (refuse any `sender.type: "Bot"`) needs a new subset field and a new constitutional clause, would refuse an operator whose own review bot is *meant* to start jobs, and is one narrow instrument for the general problem of a spend loop between two automated actors; what bounds it meanwhile is the spend caps, dedup, and the fact that the trigger is opt-in. Added **`OQ-021`** (`ACCEPTED RISK`): a Comment-type review of inline comments only arrives with an empty body and is refused as `no-review-body`, indistinguishable inside a pure filter from a genuinely empty review, because the line comments ride `pull_request_review_comment` (not ingested) and the payload carries no count of them — the narrower fix would need an API call from inside the gate and cost the purity that makes the security decision testable offline. Both rows are named in `SECURITY.md` so an operator meets them before arming rather than on the bill. **`OQ-017` UNCHANGED, checked** — a review-triggered replica set shares the PR head branch exactly as any other pull_request-typed target does, so the row's scope is unchanged by a new way of reaching it. **`OQ-013` UNCHANGED, checked** — GitLab's approval gate is an API lookup and is untouched by GitHub gaining a review action. |
 | 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup). Added **`OQ-018`** (`ACCEPTED RISK`): `worker/src/host-pi.mjs` reimplements two internals pi does not export — the user-scope install-path lookup with its managed-before-global precedence, and the `-` beats `+` beats `!` enablement grammar. Recorded rather than left as an implementation detail because the failure mode is not a crash: if pi changes the grammar the mirror keeps answering confidently and `import-pi` silently stages a package the operator turned off, which is the silent-no-op class this project refuses, reached from a direction no runtime assertion sees. What bounds it is two pins at deliberately different distances (a contract test against the resolved artifact, a canary against `latest`) sharing one needle list so they cannot drift, plus a mirror built to admit ignorance — a glob returns a third state and is printed, never guessed. Added **`OQ-019`** (`WATCH`): discovery reaches npm packages only and the enablement mirror reaches extensions only, with git-sourced staging, skills/prompts/themes enablement and project-local (`pi install -l`) installs each deferred **for a different reason** — a spec amendment about whether a sha is a pin, a cost/benefit call that leans on `OQ-018`, and a path that sits one character from a *serviced* repo's `.pi/` respectively. That row also carries the reconciliation nothing else stated in one place: a repo's declared packages are never installed while its `.pi/extensions` do load, and that is not a contradiction because `/workspace` is the default-branch sha. Neither row got a GitHub issue, per this file's own header: an issue schedules work, a row records the answer, and these are scoping decisions rather than scheduled work. **`OQ-005` UNCHANGED, checked** — it is the same species as `OQ-018` (upstream drift) but concerns an API the runner *calls*, not one it reimplements. **`OQ-011` UNCHANGED, checked** — a staged package spawning an unmetered `pi` subprocess is unaffected by where the package came from. |
 | 2026-08-01 | Added **`OQ-017`** (`WATCH`, issue #56 / `REQ-REPLICA-RUNS`): two replicas on a **pull_request**-typed target share the pull request's head branch, and the harness bounds nothing — only the prompt asks. The asymmetry is the row's point: an **issue**-typed target is fully bounded, because the host mints `pi/issue-<n>-r1`/`-r2` and each replica is told to push only to its own; a pull_request target has no branch to mint, since the head branch belongs to a human and every replica sees the same one. It is allowed rather than refused because the common case is a **review** flow that writes nothing at all, and refusing the whole target type would remove the safest use of the feature to guard against its least common one. What bounds it meanwhile is stated honestly as three things that are not boundaries: the replica paragraph in the prompt, `--force-with-lease` (which genuinely **refuses** when a sibling has pushed, so a collision surfaces as a failed push rather than as lost work), and the fact that replicas share `PI_CONCURRENCY` with every other job and so often serialise — which is luck, not a control, and is recorded as such. |
 | 2026-08-01 | Added **`OQ-016`** (`WATCH`) — the admin panel's `tui.stop()` → spawn → `tui.start()` handoff for `REQ-RESURRECTABLE-SANDBOX` is verified by reading the pinned pi and by pi's own `$EDITOR` use of the same pair, **not** by having been run. Recorded rather than left implicit because the mechanism reaches past the extension API (which has no terminal handoff) into the `TUI` object the `custom` factory happens to hand over, so it is exactly the class of assumption `REQ-UPSTREAM-CONTRACT-TESTS` exists to catch — with the difference, stated in the row, that this one fails cosmetically and recoverably rather than silently. |

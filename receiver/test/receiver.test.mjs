@@ -25,8 +25,11 @@ const cfg = {
 	triggers: forgeTriggers({
 		label: [{ index: 0, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix" }],
 		comment: { index: 1, phrase: "@pi", defaultFlow: null },
-		pullRequest: [{ index: 2, actions: new Set(["opened", "synchronize"]), predicate: {}, flow: "review" }],
-		knownFlows: new Set(["frontend-fix", "review"]),
+		pullRequest: [
+			{ index: 2, actions: new Set(["opened", "synchronize"]), predicate: {}, flow: "review" },
+			{ index: 3, actions: new Set(["review_submitted"]), reviewStates: null, predicate: {}, flow: "address-review" },
+		],
+		knownFlows: new Set(["frontend-fix", "review", "address-review"]),
 	}),
 };
 
@@ -189,6 +192,64 @@ test("signed pull_request.opened by a collaborator enqueues a pull_request job a
 	assert.equal(calls[0].data.target.number, 12);
 	assert.equal(calls[0].data.target.head.ref, "feat");
 	assert.equal(res.statusCode, 202);
+});
+
+/** A `pull_request_review.submitted` payload whose two associations are independently settable. */
+function reviewPayload({ author = "NONE", reviewer = "COLLABORATOR", state = "changes_requested", body = "rename the helper" } = {}) {
+	return {
+		action: "submitted",
+		sender: { id: 1 },
+		repository: { full_name: "octo/repo" },
+		pull_request: {
+			number: 12,
+			title: "PR T",
+			body: "PR B",
+			author_association: author,
+			labels: [],
+			head: { ref: "feat", sha: "abc", repo: { full_name: "fork/x" } },
+			base: { ref: "main" },
+		},
+		review: { id: 777, body, state, author_association: reviewer },
+	};
+}
+
+test("a signed pull_request_review from a collaborator on a STRANGER's PR enqueues and responds 202", async () => {
+	const delivery = "d-review";
+	const raw = JSON.stringify(reviewPayload());
+
+	const logs = [];
+	const { calls, queue } = recordingQueue();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (o) => logs.push(o) });
+	const req = mockReq({ headers: headersFor("pull_request_review", delivery, raw) });
+	const res = mockRes();
+	await drive(handler, req, res, raw);
+
+	assert.equal(res.statusCode, 202);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].data.flow, "address-review");
+	assert.equal(calls[0].data.target.type, "pull_request");
+	assert.equal(calls[0].opts.jobId, `gh-${delivery}`, "the delivery GUID is still the dedup key on this event");
+	assert.deepEqual(calls[0].data.trigger.review, { id: 777, body: "rename the helper", state: "changes_requested", author_association: "COLLABORATOR" });
+	// no-pii-in-logs: the review body is untrusted user text and must never reach a log line.
+	assert.equal(JSON.stringify(logs).includes("rename the helper"), false, "the review body must not appear in the log sink");
+});
+
+test("a signed pull_request_review from a STRANGER is dropped 204, and the LOG says which gate refused it", async () => {
+	// The mirror of the test above: the PR author is now an OWNER and the reviewer a stranger. Reading
+	// pull_request.author_association would enqueue this, so the pair is what proves the gate's subject.
+	const delivery = "d-review-stranger";
+	const raw = JSON.stringify(reviewPayload({ author: "OWNER", reviewer: "NONE" }));
+
+	const logs = [];
+	const { calls, queue } = recordingQueue();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (o) => logs.push(o) });
+	const req = mockReq({ headers: headersFor("pull_request_review", delivery, raw) });
+	const res = mockRes();
+	await drive(handler, req, res, raw);
+
+	assert.equal(res.statusCode, 204);
+	assert.equal(calls.length, 0, "a stranger's review must not launch a paid run");
+	assert.deepEqual(logs.at(-1), { event: "dropped", delivery, reason: "review-author-not-allowed" });
 });
 
 test("signed pull_request.opened from a fork author (NONE) is dropped 204, nothing enqueued", async () => {

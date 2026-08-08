@@ -35,20 +35,33 @@
  *                   presence, not transitions, so close->reopen inside one cycle is invisible, and a
  *                   reopen that also pushed fires a single `reopened` where webhooks would fire two
  *                   events -- the fresh sha still rides the job's target).
+ *   - reviews:      GET /repos/{o}/{r}/pulls/{n}/reviews for each OPEN pr, cursor = last processed
+ *                   review id (numeric and monotonic, so the events discipline applies). Issue #66's
+ *                   fourth source, and it exists because the alternative was a `review_submitted`
+ *                   trigger that loads clean under polling and can never fire -- the silently dead
+ *                   trigger this project refuses everywhere else. Only open PRs are swept: a review on
+ *                   a closed PR has nothing left to act on, the same call `merge`/`close` get in the
+ *                   action vocabulary. REST spells `state` in upper case where the webhook spells it
+ *                   lower; `parseSubset` folds it, so both transports produce the same job.
  *
  * DEDUP IDS (REQ-DEDUP-BY-DELIVERY-GUID): polling has no delivery GUID, so each source mints a
  * deterministic stand-in that is stable across retried cycles -- `poll-e<eventId>` (label events),
  * `poll-c<commentId>` (comments), `poll-pr<number>-<headSha7>` (PR actions; sha-keyed so a retried
  * cycle cannot double-enqueue while a real new push mints a new id -- with the honest corollary that
- * a same-sha reopen inside the retention window coalesces with its own `opened` job). The shared
+ * a same-sha reopen inside the retention window coalesces with its own `opened` job), and
+ * `poll-rv<reviewId>` (reviews; a review id is immutable, so the id alone is the identity). The shared
  * `gh-` prefix is added by enqueueGitHubJob's jobId path, same as for webhook deliveries.
  *
  * CURSORS AND ETAGS live in redis, namespaced per repo:
  *   poll:<owner/repo>:cursor:events    last processed /issues/events id (numeric, monotonic)
  *   poll:<owner/repo>:cursor:comments  newest processed comment updated_at (second-precision ISO)
  *   poll:<owner/repo>:cursor:prs       ISO of when the PR snapshot was armed (presence = armed)
+ *   poll:<owner/repo>:cursor:reviews   last processed review id (numeric, monotonic; presence = armed)
  *   poll:<owner/repo>:prs              hash: PR number -> head sha while open, "closed" once gone
  *   poll:<owner/repo>:etag:<endpoint>  conditional-GET validator (endpoint: events|comments|pulls)
+ *   poll:<owner/repo>:etag:reviews     hash: PR number -> that PR's reviews-endpoint validator. A HASH
+ *                                      rather than a key per PR, so the family below stays enumerable
+ *                                      and `touchRepo` can still refresh it as a unit.
  * All keys carry a ~35-day TTL and are refreshed TOGETHER after each successful repo poll. 35 days
  * deliberately exceeds the 31-day gh-* jobId retention (REQ-DEDUP-BY-DELIVERY-GUID): the cursor and
  * the jobId are the poller's two dedup layers, and refreshing/expiring the cursor family as a unit
@@ -100,6 +113,10 @@ const DISCOVERY_EVERY = 10;
 // next cycle picks up the rest); the open-PR list just caps how many open PRs the diff can see.
 const MAX_EVENT_PAGES = 5;
 const MAX_PR_PAGES = 10;
+// How many open PRs one cycle sweeps for reviews. This is a REQUEST bound, not a page bound: the reviews
+// endpoint is per-PR, so an unbounded sweep would spend one request per open PR per cycle. 50 covers any
+// repo a single poller realistically services, and the overflow is logged rather than silently dropped.
+const MAX_REVIEW_PRS = 50;
 // The hash value marking a PR that left the open list. Cannot collide with a head sha (hex only).
 const CLOSED_MARKER = "closed";
 
@@ -320,6 +337,8 @@ function keyNames(repo) {
 		etagEvents: `${p}:etag:events`,
 		etagComments: `${p}:etag:comments`,
 		etagPulls: `${p}:etag:pulls`,
+		reviews: `${p}:cursor:reviews`,
+		etagReviews: `${p}:etag:reviews`,
 	};
 }
 
@@ -330,7 +349,7 @@ async function setWithTtl(ctx, key, value) {
 /** Refresh the whole key family together -- coherence over per-key precision (see module header). */
 async function touchRepo(ctx, repo) {
 	const k = keyNames(repo);
-	for (const key of [k.events, k.comments, k.prsArmed, k.prs, k.etagEvents, k.etagComments, k.etagPulls]) {
+	for (const key of [k.events, k.comments, k.prsArmed, k.prs, k.etagEvents, k.etagComments, k.etagPulls, k.reviews, k.etagReviews]) {
 		await ctx.redis.expire(key, CURSOR_TTL_SECONDS);
 	}
 }
@@ -349,6 +368,11 @@ function isoSeconds(ms) {
  * never sends one -- arming needs the body, and a stray stored validator answering 304 on an unarmed
  * endpoint would leave it unarmed forever.
  *
+ * `etagKey` may also be `{ key, field }`, which stores the validator in a HASH field instead. That form
+ * exists for the per-PR reviews endpoint (issue #66): one validator per open PR would otherwise mean an
+ * unbounded key family that `touchRepo` cannot enumerate, and the whole TTL argument in the header rests
+ * on the family being refreshable as a unit. The conditional-GET discipline stays in this one place.
+ *
  * An exhausted quota (403/429 with x-ratelimit-remaining: 0) throws RateLimited for the cycle loop
  * to sleep out; any other non-2xx throws a plain error for per-repo isolation to log.
  */
@@ -362,7 +386,7 @@ function makeApi(ctx, token, stats) {
 				authorization: `Bearer ${token}`,
 			};
 			if (etagKey && revalidate) {
-				const etag = await ctx.redis.get(etagKey);
+				const etag = etagKey.field === undefined ? await ctx.redis.get(etagKey) : await ctx.redis.hget(etagKey.key, etagKey.field);
 				if (etag) headers["if-none-match"] = etag;
 			}
 			const res = await ctx.fetchFn(`${API_URL}${path}`, { headers });
@@ -383,7 +407,13 @@ function makeApi(ctx, token, stats) {
 			}
 			if (etagKey) {
 				const tag = res.headers?.get?.("etag");
-				if (tag) await ctx.redis.set(etagKey, tag, "EX", CURSOR_TTL_SECONDS);
+				if (tag && etagKey.field === undefined) {
+					await ctx.redis.set(etagKey, tag, "EX", CURSOR_TTL_SECONDS);
+				} else if (tag) {
+					// The hash carries no TTL of its own here; `touchRepo` expires it with the rest of the family.
+					await ctx.redis.hset(etagKey.key, etagKey.field, tag);
+					await ctx.redis.expire(etagKey.key, CURSOR_TTL_SECONDS);
+				}
 			}
 			stats.fetched += 1;
 			return { json: await res.json() };
@@ -580,7 +610,15 @@ async function pollPulls(ctx, api, repo, stats) {
 	const armed = (await ctx.redis.get(k.prsArmed)) !== null;
 
 	const first = await api.get(`/repos/${repo}/pulls?state=open&sort=updated&direction=asc&per_page=100`, k.etagPulls, armed);
-	if (first.notModified) return;
+	if (first.notModified) {
+		// Reviews still sweep on this path, and that is deliberate rather than defensive. Whether submitting
+		// a review perturbs the open-PR LIST is GitHub's business, not a property this project should bet
+		// correctness on: if it does not, an unswept 304 cycle would mean review triggers that fire only when
+		// something else happens to touch the PR. `null` tells pollReviews to take its sweep set from the
+		// snapshot hash instead of a list it does not have.
+		await pollReviews(ctx, api, repo, null, stats);
+		return;
+	}
 	let open = Array.isArray(first.json) ? first.json : [];
 	let batch = open;
 	let page = 2;
@@ -601,6 +639,10 @@ async function pollPulls(ctx, api, repo, stats) {
 		await ctx.redis.expire(k.prs, CURSOR_TTL_SECONDS);
 		await setWithTtl(ctx, k.prsArmed, isoSeconds(ctx.now()));
 		ctx.out({ event: "poll_armed", repo, endpoint: "pulls", open: open.length });
+		// Reviews arm on this cycle too. Returning without them would leave the reviews cursor unset for a
+		// whole extra cycle, and the first cycle that DID arm it would silently swallow every review
+		// submitted in between -- arming twice against one snapshot, losing the window between the two.
+		await pollReviews(ctx, api, repo, open, stats);
 		return;
 	}
 
@@ -629,6 +671,100 @@ async function pollPulls(ctx, api, repo, stats) {
 		if (!seen.has(field) && known[field] !== CLOSED_MARKER) {
 			await ctx.redis.hset(k.prs, field, CLOSED_MARKER);
 		}
+	}
+
+	// Reviews ride the SAME open-PR list this function already paid for -- one /pulls response feeds both
+	// sources, which is the whole reason this call lives here rather than in its own pollRepo step.
+	await pollReviews(ctx, api, repo, open, stats);
+}
+
+/**
+ * The review feed (issue #66): GET /repos/{o}/{r}/pulls/{n}/reviews per OPEN pr, cursor = last processed
+ * review id.
+ *
+ * Review ids are numeric and monotonic, but this sweep reads MANY endpoints (one per open PR) whose ids
+ * interleave, so the cursor is persisted ONCE at the end -- the comments-feed discipline, not the label
+ * feed's per-item one. Advancing per review would be actively wrong here: PR #1's review 200 followed by
+ * PR #2's review 150 would leave the cursor at 150 and re-enqueue 200 next cycle, or (writing the running
+ * max) would strand 150 forever if the sweep died between the two. Persisting once means a mid-sweep
+ * failure retries the WHOLE sweep, and the reviews already enqueued dedup on their `gh-poll-rv<id>`
+ * jobIds -- the same idempotence the replica fanout in `gate` leans on.
+ *
+ * COST is why the per-PR ETag exists. Without it a 50-open-PR repo spends 50 requests a cycle forever;
+ * with it the idle steady state is 50 * 304, which GitHub does not charge against the rate limit. The
+ * validators live in one hash (see keyNames) so the key family stays enumerable for touchRepo.
+ *
+ * A review on a CLOSED pr is never seen, deliberately: the open list is the sweep set, and a job started
+ * by a review of a merged PR has nothing left to act on -- the same call `merge` and `close` get in the
+ * action vocabulary.
+ */
+async function pollReviews(ctx, api, repo, open, stats) {
+	const k = keyNames(repo);
+	const cursorRaw = await ctx.redis.get(k.reviews);
+	const armed = cursorRaw !== null;
+	const cursor = armed ? Number(cursorRaw) : 0;
+
+	// The sweep set. `open` is the list pollPulls just fetched; `null` means it got a 304 and the snapshot
+	// hash is the only record of which PRs are open. Numbers are enough to drive the sweep -- the PR OBJECT
+	// is only needed for a PR that turns out to have a new review, and is fetched lazily below, which is
+	// the same once-per-new-event fetch handleLabeledEvent and handleComment already do.
+	let numbers;
+	if (open !== null) {
+		numbers = open.filter((pr) => pr?.number != null).map((pr) => pr.number);
+	} else {
+		const known = await ctx.redis.hgetall(k.prs);
+		numbers = Object.entries(known)
+			.filter(([, sha]) => sha !== CLOSED_MARKER)
+			.map(([field]) => Number(field))
+			.filter((n) => Number.isFinite(n))
+			.sort((a, b) => a - b);
+	}
+
+	// Bounded, and said out loud when it bites: a silent cap reads as coverage.
+	if (numbers.length > MAX_REVIEW_PRS) {
+		ctx.out({ event: "poll_reviews_gap", repo, open: numbers.length, swept: MAX_REVIEW_PRS });
+	}
+	const bounded = numbers.slice(0, MAX_REVIEW_PRS);
+	const byNumber = new Map((open ?? []).filter((pr) => pr?.number != null).map((pr) => [pr.number, pr]));
+
+	let maxId = cursor;
+	for (const number of bounded) {
+		const field = String(number);
+		// While ARMING, `revalidate: false` for the same reason every other source uses it: arming needs
+		// the body, and a stored validator answering 304 on an unarmed endpoint would strand it unarmed.
+		const res = await api.get(`/repos/${repo}/pulls/${number}/reviews?per_page=100`, { key: k.etagReviews, field }, armed);
+		if (res.notModified) continue;
+		const reviews = Array.isArray(res.json) ? res.json : [];
+
+		let pr = byNumber.get(number) ?? null;
+		for (const review of reviews) {
+			if (typeof review?.id !== "number" || review.id <= cursor) continue;
+			if (review.id > maxId) maxId = review.id;
+			if (!armed) continue; // ARM WITHOUT REPLAY: learn the high-water mark, enqueue nothing.
+
+			// Lazily, and at most once per PR per cycle: only a PR with a genuinely new review costs this.
+			if (pr === null) {
+				pr = (await api.get(`/repos/${repo}/pulls/${number}`)).json ?? null;
+				byNumber.set(number, pr);
+			}
+
+			// The webhook's own payload shape, so the SAME parseSubset + filter decide. `sender` is the
+			// REVIEWER, which is what keeps the bot-loop guard correct: a review the harness itself posted
+			// carries our own id and drops as `self` before any gate runs. `state` arrives upper-case from
+			// REST and parseSubset folds it; that fold is what makes this job identical to the webhook twin's.
+			const payload = { action: "submitted", sender: { id: review.user?.id }, pull_request: pr, review, repository: { full_name: repo } };
+			await gate(ctx, "pull_request_review", payload, `poll-rv${review.id}`, stats);
+		}
+	}
+
+	// Once, after the whole sweep -- see the header of this function for why per-item would be wrong.
+	// Arming ALWAYS writes, even at 0: a repo whose open PRs carry no reviews yet must still become armed,
+	// or it stays on the `revalidate: false` path and re-fetches every PR in full, every cycle, forever.
+	if (!armed) {
+		await setWithTtl(ctx, k.reviews, String(maxId));
+		ctx.out({ event: "poll_armed", repo, endpoint: "reviews", cursor: maxId });
+	} else if (maxId !== cursor) {
+		await setWithTtl(ctx, k.reviews, String(maxId));
 	}
 }
 

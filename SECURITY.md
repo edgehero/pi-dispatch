@@ -67,11 +67,38 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   COLLABORATOR}`, and label triggers require an allowlisted label — since only collaborators can apply
   labels, **the label is the human approval step**, not a routing hint. A stranger's issue sits until a
   maintainer labels it.
-  `pull_request` triggers split the same way, and the split is worth stating because half of it is not a
-  check. The **auto** actions (`opened`, `synchronize`, `reopened`) are hard-gated on the PR author's
+  `pull_request` triggers split three ways, and the split is worth stating because one arm is not a check
+  at all and another reads a *different field*. The **auto** actions (`opened`, `synchronize`, `reopened`)
+  are hard-gated on the PR author's
   `author_association`, hard-coded and never config-optional, so a stranger's fork PR cannot launch a paid
   run. A `pull_request` + `labeled` trigger performs **no author check at all**, deliberately: the label
   predicate *is* the approval there, resting on the same GitHub permission the issue-label path rests on.
+  And a `pull_request` + `review_submitted` trigger is gated on the **reviewer's**
+  `review.author_association` — never the PR author's. That is not an inconsistency: the gate always asks
+  whether the actor who caused the event has write access, and a submitted review is the first GitHub event
+  where the actor and the PR author are different people. So a collaborator's review of a stranger's fork PR
+  **does** start a job (the collaborator is the approving human), and a stranger's review of their own PR
+  does not.
+- **Who can trigger, and what a review trigger widens.** Arming `review_submitted` is a wider grant than
+  any other GitHub trigger, and there are three things to know before you arm it.
+  **It has no second gate.** A comment trigger needs its phrase and a label trigger needs its label, both
+  typed on purpose by a human; a review needs only that the reviewer clears `author_association`. Every
+  submitted review from anyone with write access starts a paid run, including a one-line "lgtm". Use
+  `on.reviewState` (for example `["changes_requested"]`) to narrow which verdicts count. It narrows
+  verdicts, not actors.
+  **Other people's bots are outside the bot-loop guard.** That guard compares the sender against **our
+  own** identity and nothing else, which is exactly right for the recursion it was built for: our flow
+  pushes, `synchronize` fires, the guard breaks the loop. A third-party review bot — CI, a scanner, a
+  code-review service — is a different actor, and such bots frequently hold `author_association: MEMBER`.
+  If one reviews on every push while your armed flow pushes, the two form a spend loop **neither guard can
+  see**, because each knows only itself. No comparable vector exists on the other triggers: bots do not
+  apply your trigger labels and do not type `@pi`. The spend caps are what bound it; `OQ-020` records the
+  residual and what would close it.
+  **A Comment-type review of line comments only starts nothing.** Its remarks ride
+  `pull_request_review_comment`, an event this service does not ingest, so the review arrives with an empty
+  body and is refused as `no-review-body` rather than buying a container for an empty string. Approve and
+  Request changes still fire with an empty body, since there the verdict is the signal, and `review.id`
+  reaches the flow in `/job/event.json` so it can fetch the line comments itself. `OQ-021` records it.
 - **Who can trigger, on GitLab — and why the rule is different there.** That reasoning does not hold on
   GitLab: the minimum role for managing labels has differed across versions, Ultimate's **custom roles**
   can grant it at any level, and **a Guest can set labels on an issue they are creating**, so a stranger

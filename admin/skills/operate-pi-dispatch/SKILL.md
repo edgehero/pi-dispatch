@@ -128,9 +128,14 @@ trigger is the same — the `on.type`, the `{any, all, none}` label predicate, `
 Two things are NOT the same, and both refuse at load rather than misbehaving quietly:
 
 - **`pull_request` actions are the forge's own words.** GitHub takes
-  `labeled | opened | synchronize | reopened`; GitLab takes `open | update | reopen | approved`. A word
+  `labeled | opened | synchronize | reopened | review_submitted`; GitLab takes
+  `open | update | reopen | approved`. A word
   from the wrong forge is refused when the file is written. It would not break anything otherwise — it
   would simply never match an event, and the trigger would look configured while doing nothing.
+  `review_submitted` is GitHub's `pull_request_review` event: it fires on **every** submitted review, so
+  add `reviewState` (`approved | changes_requested | commented`) to narrow which verdicts are worth paying
+  for. That field is github-only and legal only beside `review_submitted`; anywhere else it refuses at
+  load, because a narrowing that cannot apply reads as one that does.
 - **One `comment` trigger per forge.** Two GitHub comment triggers are refused; one GitHub and one GitLab
   are fine.
 

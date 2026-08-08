@@ -1418,7 +1418,13 @@ function trustModel(t: any): string[] {
       ];
     default:
       return [
-        t?.type === "comment" ? "authorized by a collaborator comment (author_association) + HMAC" : "authorized by a collaborator's label + HMAC webhook + author gate",
+        // A review trigger reads the REVIEWER's author_association, not the PR author's (issue #66), so it
+        // cannot share the generic line: an operator reading "author gate" would picture the wrong person.
+        t?.type === "comment"
+          ? "authorized by a collaborator comment (author_association) + HMAC"
+          : t?.type === "pull_request" && (t?.action ?? []).includes("review_submitted")
+            ? "authorized by the REVIEWER's author_association (not the PR author's) + HMAC"
+            : "authorized by a collaborator's label + HMAC webhook + author gate",
         "dedup by X-GitHub-Delivery GUID (redelivery-safe)",
         where,
       ];

@@ -5,6 +5,7 @@
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "github", "flow": "fix", "resume": true } },
     { "on": { "type": "pull_request", "action": ["labeled"], "any": ["pi:review"] }, "run": { "kind": "github", "flow": "review" } },
     { "on": { "type": "pull_request", "action": ["opened", "synchronize"] }, "run": { "kind": "github", "flow": "review" } },
+    { "on": { "type": "pull_request", "action": ["review_submitted"], "reviewState": ["changes_requested"] }, "run": { "kind": "github", "flow": "address-review" } },
 
     { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "gitlab", "flow": "frontend-fix" } },
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "gitlab", "flow": "fix" } },

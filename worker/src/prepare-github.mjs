@@ -188,7 +188,9 @@ export async function prepareGithubWorkspace(
 			// to interpolate, and they are what makes this job's branch differ from its sibling's. This is the
 			// SHARED forge preparer, so the gitlab/forgejo/azure builders receive the two keys and destructure
 			// them away -- harmless, and always undefined while replicas are github-only.
-			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas }),
+			// `review` rides beside `comment` and, like `replica`/`replicas`, is destructured away by the
+			// gitlab/forgejo/azure builders -- harmless, and always undefined while reviews are github-only.
+			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review }),
 			{ mode: 0o444 },
 		);
 
@@ -207,6 +209,15 @@ export async function prepareGithubWorkspace(
 			repository: { full_name: job.repo },
 			...(job.target?.type === "pull_request" ? { pull_request: prEventBody(job.target) } : { issue: { number: job.target?.number, title: job.target?.title, body: job.target?.body } }),
 			...(job.trigger?.comment ? { comment: { body: job.trigger.comment.body, author_association: job.trigger.comment.author_association } } : {}),
+			// The invoking review, review-triggered jobs only (issue #66). Written as an explicit literal
+			// rather than a spread, the same discipline as `comment` above: this object is the subset's
+			// named fields, not whatever happened to reach the queue. Conditional for the same reason too --
+			// a PR job without a review must stay byte-identical to the one this file wrote before #66.
+			//
+			// `action` above is `submitted` (GitHub's word) while `matched.action` below is
+			// `review_submitted` (the triggers.json word). They differ on purpose; INT-CONTAINER-JOB-INPUTS
+			// says which is which.
+			...(job.trigger?.review ? { review: { id: job.trigger.review.id, body: job.trigger.review.body, state: job.trigger.review.state, author_association: job.trigger.review.author_association } } : {}),
 			sender: { id: job.trigger?.sender?.id },
 			...(job.trigger?.matched ? { matched: job.trigger.matched } : {}),
 		};

@@ -20,11 +20,18 @@
  *      check would reintroduce exactly that loop.
  *   2. Only then route on event + action: issue label, author-gated comment, or pull_request.
  *
- * PR AUTHOR GATE (security-critical): auto actions (`opened|synchronize|reopened`) fire ONLY when the PR
- * `author_association` is a collaborator. This is hard-coded here, never config-optional -- a fork PR from
- * a stranger would otherwise launch an unbounded paid run (CONST-TRIGGER-AUTHOR-GATE, job-budget rules).
- * PR labeling is self-gating: only collaborators can apply labels, so the label predicate IS the approval,
- * exactly as on the issue label path.
+ * PR GATE (security-critical), three arms, and WHICH FIELD each reads is the load-bearing part:
+ *   - `labeled` is self-gating: only collaborators can apply labels, so the label predicate IS the
+ *     approval, exactly as on the issue label path. No author check at all, deliberately.
+ *   - auto actions (`opened|synchronize|reopened`) fire only when the PR `author_association` is a
+ *     collaborator, so a stranger's fork PR never auto-fires.
+ *   - a submitted review (`review_submitted`, issue #66) fires on the REVIEWER's
+ *     `review.author_association`, NEVER the PR author's. This is the first GitHub event where the actor
+ *     and the PR author are DIFFERENT PEOPLE, which is why the auto-action shortcut of gating on the PR
+ *     author does not carry: a collaborator reviewing a stranger's fork PR must run, and a stranger
+ *     reviewing their own PR must not. Reading `pr.author_association` here inverts both halves at once.
+ * All three are hard-coded here, never config-optional -- an ungated auto-trigger is an unbounded paid run
+ * started by whoever opens a fork PR (CONST-TRIGGER-AUTHOR-GATE, job-budget rules).
  *
  * `selfId` is the numeric id of whichever identity posts as the harness (the App's bot user, or the PAT
  * user); `deliveryId` is the `X-GitHub-Delivery` GUID, carried into the job for downstream dedup.
@@ -35,6 +42,12 @@ const AUTHOR_ALLOWLIST = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const LABEL_ACTIONS = new Set(["opened", "labeled", "reopened"]);
 const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened"]);
 const PR_AUTO_ACTIONS = new Set(["opened", "synchronize", "reopened"]);
+// The triggers.json word for a submitted review, and the raw action GitHub sends on the
+// `pull_request_review` event. They differ on purpose -- see the routing block below.
+const REVIEW_ACTION = "review_submitted";
+const REVIEW_EVENT_ACTION = "submitted";
+// PR_AUTO_ACTIONS is deliberately NOT extended with REVIEW_ACTION: it exists only to select the
+// `pr-author-not-allowed` drop reason, and the review path has reasons of its own.
 
 export function filter(eventName, subset, cfg, selfId, deliveryId) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header, ordering constraint.
@@ -61,6 +74,17 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 		resolved = routeComment(subset, triggers, cfg?.triggers?.knownFlows);
 	} else if (eventName === "pull_request" && PR_ACTIONS.has(action)) {
 		resolved = routePullRequest(subset, triggers, action);
+	} else if (eventName === "pull_request_review" && action === REVIEW_EVENT_ACTION) {
+		// A SECOND event name on the SAME route, not a fifth on.type (issue #66): a review is an event about
+		// a pull request, and GitLab's analogue `approved` already rides on.type "pull_request", so a new
+		// type would make one forge's review a type and the other's an action. The route is handed the
+		// CANONICAL word because that is what triggers.json spells and what the rule loop matches --
+		// `submitted` alone would be meaningless in a pull_request action list.
+		//
+		// `edited` and `dismissed` fall through to unhandled-event deliberately: an edit would re-fire on
+		// text the harness has already been paid to read, and a dismissal removes a verdict rather than
+		// stating one.
+		resolved = routePullRequest(subset, triggers, REVIEW_ACTION);
 	} else {
 		return { enqueue: false, reason: "unhandled-event" };
 	}
@@ -102,6 +126,16 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 			sender: { id: subset.sender.id },
 			matched: resolved.matched,
 			...(resolved.comment ? { comment: resolved.comment } : {}),
+			// The invoking review, present only on the review route (issue #66), sibling of `comment` and
+			// carried for the same reason: without it a "Request changes: rename the helper" review starts a
+			// job that cannot know what was asked. All four fields are named by INT-WEBHOOK-PAYLOAD-SUBSET and
+			// the body stays DATA all the way down (CONST-ISSUE-TEXT-IS-DATA).
+			//
+			// NOTE the pair above: `event` is `pull_request_review` and `action` is the raw `submitted`,
+			// byte-for-byte what GitHub sent. `matched.action` is the canonical `review_submitted`, because
+			// `matched` names the triggers.json entry that fired rather than the payload. This is the first
+			// GitHub case where the two differ, and INT-CONTAINER-JOB-INPUTS says so.
+			...(resolved.review ? { review: resolved.review } : {}),
 		},
 	};
 	return { enqueue: true, job };
@@ -174,10 +208,43 @@ function routeComment(subset, triggers, knownFlows) {
 }
 
 /**
- * Pull-request path. `labeled` is gated by the label predicate (collaborator-applied label = approval);
- * auto actions (`opened|synchronize|reopened`) are gated by the PR author_association (hard-coded, never
- * config-optional). A trigger's optional predicate only narrows an auto action; an empty predicate is
- * vacuously true. First matching rule (in file order) wins.
+ * Whether the actor behind a PR event clears the write-access gate -- and WHICH actor that is.
+ *
+ * One expression rather than a branch inside the rule loop, deliberately (issue #66). A review is the
+ * REVIEWER's say-so, never the PR author's: a collaborator reviewing a stranger's fork PR must run, and a
+ * stranger reviewing their own PR must not. Reading `pr.author_association` for a review inverts both
+ * halves at once, and an `authorOk` that means two different things depending on which `if` you are
+ * standing in is exactly how that inversion gets silently reintroduced later. `labeled` reaches neither
+ * branch: it is gated by its label predicate instead.
+ */
+function prAuthorOk(action, pr, review) {
+	if (action === REVIEW_ACTION) return AUTHOR_ALLOWLIST.has(review?.author_association);
+	return AUTHOR_ALLOWLIST.has(pr?.author_association);
+}
+
+/**
+ * A `commented` review carrying nothing to act on.
+ *
+ * A review made only of INLINE comments arrives here with an empty body, because those comments ride
+ * `pull_request_review_comment` -- an event this project does not ingest. The payload carries no
+ * line-comment count and this module is pure, so it cannot tell "empty because it has line comments" from
+ * "empty because it is empty", and buying a container for an empty string is the worse of the two errors.
+ * The residual (a Comment-type review of line comments only never fires) is stated in SECURITY.md rather
+ * than left to a drop reason.
+ *
+ * `approved` and `changes_requested` still fire with no body: there the verdict IS the signal.
+ * Case-insensitive on `state` as belt-and-braces; `parseSubset` has already folded it.
+ */
+function isEmptyCommentedReview(review) {
+	return String(review?.state ?? "").toLowerCase() === "commented" && String(review?.body ?? "").trim() === "";
+}
+
+/**
+ * Pull-request path, three gates by action. `labeled` is gated by the label predicate
+ * (collaborator-applied label = approval); auto actions (`opened|synchronize|reopened`) by the PR
+ * author_association; `review_submitted` by the REVIEWER's (see `prAuthorOk`). All hard-coded, never
+ * config-optional. A trigger's optional predicate only narrows; an empty predicate is vacuously true.
+ * First matching rule (in file order) wins.
  */
 function routePullRequest(subset, triggers, action) {
 	const pr = subset.pull_request;
@@ -185,16 +252,37 @@ function routePullRequest(subset, triggers, action) {
 		return { enqueue: false, reason: "missing-pull-request" };
 	}
 	const L = labelSet(pr.labels);
-	const authorOk = AUTHOR_ALLOWLIST.has(pr.author_association);
+	const isReview = action === REVIEW_ACTION;
+	const review = subset.review;
+	const authorOk = prAuthorOk(action, pr, review);
 
+	// The review path refuses BEFORE the rule loop, in the order routeComment uses (author, then is there
+	// anything to act on, then which rule). Two consequences worth stating rather than discovering:
+	// security beats content when both are true, so a stranger's empty review reports the author refusal;
+	// and an operator with no review rule armed sees these reasons rather than `no-matching-pr-trigger`,
+	// which `pr-author-not-allowed` below already does and which is the right trade -- "nobody may start a
+	// job this way" and "there is nothing here to act on" are both facts about the DELIVERY, true whatever
+	// the trigger file says.
+	if (isReview) {
+		if (!authorOk) return { enqueue: false, reason: "review-author-not-allowed" };
+		if (isEmptyCommentedReview(review)) return { enqueue: false, reason: "no-review-body" };
+	}
+
+	let stateSkipped = false;
 	for (const rule of triggers.pullRequest ?? []) {
 		if (!rule.actions.has(action)) continue;
 		if (action === "labeled") {
 			if (!matchesRule(L, rule.predicate)) continue;
 		} else {
-			// Auto action -- author_association is the hard gate; the predicate (if any) narrows scope.
+			// Auto action or review -- author_association is the hard gate; the predicate (if any) narrows.
 			if (!authorOk) continue;
 			if (!matchesRule(L, rule.predicate)) continue;
+		}
+		// The optional `on.reviewState` narrowing, checked LAST among a rule's tests so the flag below means
+		// the verdict was the ONLY thing that failed. Unnarrowed rules carry null and fire on every verdict.
+		if (isReview && rule.reviewStates !== null && rule.reviewStates !== undefined && !rule.reviewStates.has(review?.state)) {
+			stateSkipped = true;
+			continue;
 		}
 		return {
 			enqueue: true,
@@ -204,10 +292,17 @@ function routePullRequest(subset, triggers, action) {
 			resume: rule.resume,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
+			...(isReview ? { review: { id: review.id, body: review.body, state: review.state, author_association: review.author_association } } : {}),
 			target: buildPrTarget(pr),
 		};
 	}
 
+	// "Your rule exists, this verdict was not in your list" is a different operator response from "no rule
+	// matched at all", so it gets its own reason -- the same call filter-forgejo.mjs makes for a recognised
+	// but unactionable action.
+	if (stateSkipped) {
+		return { enqueue: false, reason: "review-state-not-matched" };
+	}
 	// Surface the security-relevant author drop distinctly from a plain no-match so it is observable.
 	if (PR_AUTO_ACTIONS.has(action) && !authorOk) {
 		return { enqueue: false, reason: "pr-author-not-allowed" };

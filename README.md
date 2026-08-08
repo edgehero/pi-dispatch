@@ -110,7 +110,7 @@ staging a workflow extension).
 | `cron` | your schedule | `id` (unique, no `:`) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
 | `label` | a label on an **issue** (or an Azure work item), never a pull request | at least one positive selector, `any` or `all` | the label **predicate**: `any` (any of these) · `all` (all of them) · `none` (suppress-only, it can prevent a fire but never cause one) | the issue title and body |
 | `comment` | a comment containing your phrase | `phrase`, for example `@pi` | the phrase, and **one comment trigger per forge** | the comment body plus the issue title and body |
-| `pull_request` | a PR or MR event | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required** | the PR title and body |
+| `pull_request` | a PR or MR event, including a submitted GitHub review | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState` | the PR title and body, plus the review body when a review fired it |
 
 Every type also needs `run.kind` (`local` for cron, else the forge) and `run.flow`. Cron additionally
 needs `folder` (a host path the worker checks exists when it loads the file; make it absolute, since a
@@ -132,10 +132,28 @@ refused rather than silently never matching:
 
 | `run.kind` | `pull_request` actions | Its label action | Notes |
 |---|---|---|---|
-| `github` | `labeled` `opened` `synchronize` `reopened` | `labeled` | |
-| `gitlab` | `open` `update` `reopen` `approved` | none | a label add arrives as `update` carrying a label diff; a predicate here matches the labels that update added |
+| `github` | `labeled` `opened` `synchronize` `reopened` `review_submitted` | `labeled` | `review_submitted` is the `pull_request_review` event's `submitted` action, so a formal Approve or Request changes starts a job. It is gated on the **reviewer's** permission, never the PR author's, so a collaborator reviewing a stranger's fork PR runs and a stranger reviewing their own PR does not |
+| `gitlab` | `open` `update` `reopen` `approved` | none | a label add arrives as `update` carrying a label diff; a predicate here matches the labels that update added. `approved` is one verdict where GitHub's `review_submitted` is every verdict |
 | `forgejo` | `label_updated` `opened` `synchronized` `reopened` | `label_updated` | `label_cleared` fires nothing, ever: removing a label must never start a paid run |
 | `azure` | `created` `updated` | none | a label predicate on an Azure PR is refused at load: Azure tags work items, never pull requests |
+
+**A review trigger is wider than it looks, so narrow it.** `review_submitted` fires on every submitted
+review: an Approve, a Request changes, and a one word "lgtm thanks" alike. Unlike a comment trigger there
+is no phrase in the way and unlike a label trigger there is no label, so arming it means anyone with write
+access starts a paid run by reviewing. Add `reviewState` (GitHub only, and only beside `review_submitted`)
+to pick the verdicts worth paying for:
+
+```jsonc
+{ "on": { "type": "pull_request", "action": ["review_submitted"], "reviewState": ["changes_requested"] },
+  "run": { "kind": "github", "flow": "address-review" } }
+```
+
+Two behaviours to know before you arm it. A **Comment** type review whose remarks are all line comments
+and whose summary box is empty starts nothing, because those remarks arrive on an event this service does
+not read, so the review reaches us empty; Approve and Request changes still fire with an empty summary,
+since there the verdict is the signal. And the bot loop guard knows only **our own** identity, so another
+bot that reviews (a CI bot, a review service) can start jobs if it holds write access. [`SECURITY.md`](SECURITY.md)
+states both, and the flow gets `review.id` in `/job/event.json` so it can fetch the line comments itself.
 
 **Who may fire a trigger is not ours to grant.** Your forge decides that, differently per forge, and
 [`SECURITY.md`](SECURITY.md) states each one plainly (short version: on GitHub only collaborators can
@@ -387,7 +405,7 @@ Label an issue, and a container works it on a fresh clone, opens a PR, and comme
 
 ```mermaid
 flowchart LR
-  GH["GitHub repo<br/>issue labeled, @pi comment, or PR"] -->|"webhook, HMAC-signed"| R
+  GH["GitHub repo<br/>issue labeled, @pi comment, PR, or review"] -->|"webhook, HMAC-signed"| R
   subgraph EDGE["receiver/ (public edge, binds 0.0.0.0)"]
     R["verify raw-body HMAC (401 on mismatch)<br/>filter: label allowlist, author gate, bot-loop"]
   end
@@ -400,9 +418,10 @@ flowchart LR
   C -->|"GITHUB_TOKEN via env only, never merges"| GH
 ```
 
-- Only a collaborator's label or `@pi` comment starts a job; the label is the approval step. PR triggers
-  (label, comment, or auto on open/update) gate the auto path on the PR author being a collaborator, so
-  a fork PR from a stranger never auto-fires.
+- Only a collaborator's label, `@pi` comment or formal review starts a job; the label is the approval
+  step. PR triggers (label, comment, auto on open/update, or a submitted review) gate the auto path on the
+  PR author being a collaborator, so a fork PR from a stranger never auto-fires, and gate a review on the
+  **reviewer** instead, so a collaborator reviewing that same fork PR does.
 - The per-job token is repo-scoped and short-lived, and honestly: it *can* merge, because GitHub gates
   push and merge behind the same scope. **Branch protection on your default branch is the real
   control**, and the worker refuses an unprotected repo before any spend.
