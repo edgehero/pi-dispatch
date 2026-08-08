@@ -44,7 +44,12 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 	const outboxDir = join(jobDir, "outbox");
 	mkdirSync(outboxDir, { recursive: true });
 	// Instructions from HEAD, via the symlink-safe git materialiser, into /job/pi (mounted :ro).
-	const written = await materializePiDir({ gitDir: folder, sha, destDir: jobDir });
+	const pi = await materializePiDir({ gitDir: folder, sha, destDir: jobDir });
+	// A .pi/ over a materialiser cap (issue #60) refuses the job determinately, before prompt.md and
+	// event.json exist. Returned rather than thrown: the same tree breaches the same cap on every
+	// retry (CONST-RETRY-INFRA-ONLY), and the processor's policy branch spends nothing on it.
+	if (pi?.outcome === "policy") return pi;
+	const written = pi.written;
 
 	// The task the operator asked for. Plain data below the instructions.
 	writeFileSync(join(jobDir, "prompt.md"), String(task ?? ""), { mode: 0o444 });

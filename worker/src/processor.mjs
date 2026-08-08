@@ -216,8 +216,9 @@ export async function runJob(job, deps) {
 
 		prepared = await prepareWorkspace(job, token, { piVersion }); // resolves SHA, clones, materialises .pi/, writes prompt
 
-		// A determinate prepare refusal (e.g. sha-gone: the default branch advanced past the resolved
-		// tip) is POLICY -- return before reserveBudget so it burns no cap slot and is never retried.
+		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
+		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
+		// -- is POLICY: return before reserveBudget so it burns no cap slot and is never retried.
 		// Mirrors the branch-protection policy return above. Spread-plus-attribution: the prepare
 		// result keeps its own reason and fields, and the host-effective provider/model land beside
 		// them exactly as on every other terminal result.

@@ -12,7 +12,7 @@ skills, or a pi extension that orchestrates them.
 |---|---|---|
 | **trigger** | one `{ on, run }` entry in `triggers.json`: what fires, and which flow it runs | you, in a reviewed file |
 | **flow** | the skill a trigger names, at `.pi/skills/<flow>/SKILL.md` on the target repo's **default branch** | the target repo |
-| **skill** | pi's unit of instruction; a flow is just the entry one | the target repo, or the overlay |
+| **skill** | pi's unit of instruction; a flow is just the entry one. The whole directory travels, not only `SKILL.md` | the target repo, or the overlay |
 | **workflow extension** | a pi extension that chains skills into stages, with its own state and routing | a third party, staged by you |
 | **staged package** | the pinned directory a workflow extension lives in, inside the global overlay | `import-pi --with-packages` |
 
@@ -76,6 +76,15 @@ one budget slot, and the whole chain is visible in that job's transcript.
 Reach for more only when you need what prose cannot give you: typed hand-offs between stages, validation
 that a stage produced what the next one expects, resumability, or an audit trail separate from the
 transcript.
+
+**The skill's own supporting files come with it.** `references/`, checklists, templates and scripts
+committed beside `SKILL.md` are materialised into the container from the same pinned sha, so a stage that
+says "follow `references/review-checklist.md`" finds the file. Three things to know: scripts arrive non
+executable (everything under `/job` is read only, so use `bash scripts/x.sh`), dotfiles are skipped the
+same way pi's own loader skips them, and a directory that ships no `SKILL.md` anywhere beneath it is not
+copied at all, because pi would register no skill for it. A skill past the size caps (256 files, 8 MiB)
+refuses the job with the cap named, which is deliberate: a partly copied skill is a skill whose
+instructions point at files that are not there.
 
 ## The structured case: stage a workflow extension
 

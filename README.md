@@ -219,6 +219,14 @@ The flow is the standing instructions; the **task** is the one-off ask (your `--
 `task`, or the issue/comment text itself). Flows are read from the **default branch**, so commit and
 merge a flow before a trigger can use it. That merge is the repo's consent.
 
+**A skill arrives whole.** Ship `references/`, templates or scripts beside your `SKILL.md` and they are
+copied into the job container with it, so a relative path in your skill resolves to a file that is
+actually there. Three limits worth knowing. Scripts arrive **non executable**, because everything under
+`/job` is read only, so invoke them as `bash scripts/build.sh` rather than `./scripts/build.sh`. Files
+whose names begin with a dot are skipped, matching pi's own loader. And a skill directory is bounded (256
+files, 8 MiB, 1 MiB per file, 4 levels deep): a repo past any of those refuses its jobs with a reason
+naming the cap, before spending anything, rather than quietly copying part of the skill.
+
 **`ai-trigger` gates a different axis, and it is worth being precise about which.** It answers *which
 flows a model may fire*, not *who may fire a job*. Only two paths read it: the model-callable
 `dispatch_run` tool and job chaining (a finished job requesting a follow-up). A cron entry or a forge

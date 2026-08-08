@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -74,16 +74,23 @@ function fakeGit({ failOn, error } = {}) {
 	return git;
 }
 
-/** A fake materialize capturing its args; returns a canned written-paths list. */
-function fakeMaterialize(record) {
+/**
+ * A fake materialize capturing its args; returns a canned receipt.
+ *
+ * The shape is `{ written, skipped }` since issue #60, because the real materialiser can also return
+ * `{ outcome: "policy", reason }` when a repo's .pi/ breaches a size cap, and a bare array could not
+ * express both. `outcome` lets a test drive that refusal without a large fixture.
+ */
+function fakeMaterialize(record, outcome) {
 	return async (args) => {
 		record.push(args);
-		return ["pi/APPEND_SYSTEM.md", "pi/skills/tidy/SKILL.md"];
+		if (outcome) return outcome;
+		return { written: ["pi/APPEND_SYSTEM.md", "pi/skills/tidy/SKILL.md"], skipped: 0 };
 	};
 }
 
 /** Set up a real jobDir under tmp plus the standard fakes; return everything a test may assert on. */
-function harness({ git, materializeRecord = [] } = {}) {
+function harness({ git, materializeRecord = [], materializeOutcome } = {}) {
 	const jobDir = mkdtempSync(join(tmpdir(), "pi-ghjob-"));
 	const shaCalls = [];
 	return {
@@ -99,7 +106,7 @@ function harness({ git, materializeRecord = [] } = {}) {
 				shaCalls.push({ repo: ref?.repo, token });
 				return { branch: "main", sha: SHA };
 			},
-			materialize: fakeMaterialize(materializeRecord),
+			materialize: fakeMaterialize(materializeRecord, materializeOutcome),
 		},
 	};
 }
@@ -259,6 +266,18 @@ test("materialize is invoked with { gitDir: workspace, sha, destDir: jobDir }", 
 	assert.equal(record[0].gitDir, join(h.jobDir, "workspace"));
 	assert.equal(record[0].sha, SHA);
 	assert.equal(record[0].destDir, h.jobDir);
+});
+
+test("a materialiser cap refusal is returned as policy, and NO /job inputs are written", async () => {
+	// Issue #60. The refusal must land before prompt.md and event.json exist, so a repo whose .pi/ is
+	// too large leaves no half-built job directory for a resurrected sandbox to re-open.
+	const git = fakeGit();
+	const h = harness({ git, materializeOutcome: { outcome: "policy", reason: "pi-too-large" } });
+	const result = await prepareGithubWorkspace(JOB, TOKEN, h.deps);
+
+	assert.deepEqual(result, { outcome: "policy", reason: "pi-too-large" });
+	assert.equal(existsSync(join(h.jobDir, "prompt.md")), false, "prompt.md was written despite the refusal");
+	assert.equal(existsSync(join(h.jobDir, "event.json")), false, "event.json was written despite the refusal");
 });
 
 // -- 9: event.json is the subset only, no header/signature/token ---------------------------------

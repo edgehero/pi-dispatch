@@ -554,9 +554,10 @@ Evidence convention as in `constitution.md`.
   /job/prompt.md          task text (issue/PR payload, or the operator-supplied task)
   /job/event.json         structured trigger context — written for EVERY job, github and local alike
                           (both shapes below)
-  /job/pi/APPEND_SYSTEM.md      project persona   ─┐ materialised by the worker from the
-  /job/pi/skills/<name>/SKILL.md project skills    ┘  project's .pi/ at the DEFAULT-BRANCH SHA,
-                                                     via `git show`, never `fs.readFile`
+  /job/pi/APPEND_SYSTEM.md         project persona  ─┐ materialised by the worker from the
+  /job/pi/skills/<name>/SKILL.md   project skills,   │  project's .pi/ at the DEFAULT-BRANCH SHA,
+  /job/pi/skills/<name>/<support>  materialised      │  via `git ls-tree -l` + `git cat-file blob
+                                   WHOLE            ┘  <oid>`, never `fs.readFile`
   ```
   **The guardrails are baked into the image** at a path outside `agentDir` and are **not** mounted.
 - **What the container additionally reads from `/workspace`, and why it is not a `/job` input.** A job's
@@ -576,9 +577,57 @@ Evidence convention as in `constitution.md`.
   `/job` would have required making part of that mount writable, which is the property `/job` exists to
   have. Its own contract is `INT-SESSION-STORE-CONTRACT`, and the symlink paragraph above is the
   precedent its `lstat` rule cites: the same attack, with the direction reversed.
+- **A repo skill is materialised WHOLE, and bounded** (issue #60). The allowlist accepts
+  `.pi/APPEND_SYSTEM.md` (an exact path) and **every declared file under `.pi/skills/<name>/`**, not just
+  each `SKILL.md`. It used to accept only the latter, which meant a skill shipping `references/`,
+  `scripts/` or templates had those files dropped by a bare `continue` — and **nothing failed**: pi's own
+  prompt text instructs the model to *"resolve it against the skill directory"*, so the skill loaded, read
+  correctly, and pointed the agent at files that were not in the container. A confidently wrong agent, not
+  an error.
+  - **Grammar.** The tree path is split on `/` and every piece is validated independently, then the output
+    path is **rebuilt from the validated pieces**. This is stronger than the single regex it replaced: any
+    other separator (a backslash, a NUL, a CR) survives *inside* a piece and is refused by the anchored
+    charset, and a literal `..` piece is refused by the leading-alphanumeric rule, which is also why no
+    separate `!= ".."` test is needed. The skill **directory name** keeps the lowercase-only
+    `SKILL_NAME_RE` shared with the flow gate; only the segments **below** it are case-insensitive,
+    because `SKILL.md` and `README.md` are the point. Windows reserved device basenames (`CON`, `NUL`,
+    `COM1`…) are refused: writing one on Windows targets a device and produces no file and no error.
+  - **A subtree declaring no `SKILL.md` anywhere beneath it is not materialised**, because pi registers a
+    skill only where a literal `SKILL.md` exists and loose `.md` files load only at the skills root — so
+    those bytes could never be referenced, and copying them would be a data-dump channel into the job
+    container that never has to look like a skill. The test is "anywhere beneath", not "at the root",
+    because pi keeps recursing while a directory has no `SKILL.md`: `.pi/skills/group/sub/SKILL.md` is a
+    real skill, and a root-only rule would recreate this defect one level down.
+  - **Executable blobs (`100755`) stay rejected**, so a skill's `scripts/` arrive non-executable and are
+    invoked as `bash script.sh`. `/job` is `:ro` and every file lands `0444`, so accepting the mode and
+    writing `0444` anyway would accept what the repo asked for and silently strip it; writing `0555`
+    instead would have the worker grant execve on repo bytes. The drop is loud (the file is absent, or the
+    invocation says `Permission denied`), which is the opposite of the silent class above.
+  - **Bounded, and decided before anything is spent.** Enumeration is a single `git ls-tree -r -l -z`, and
+    `-l`'s size column lets every cap be evaluated **before the first `cat-file` and before the first
+    write** — `CONST-BUDGET-BEFORE-TOKENS`' ordering one layer down. The caps are 256 files, 64 per skill,
+    1 MiB per file, 8 MiB total, 4 path segments below the skill name, and 200 characters of output path;
+    the listing itself is separately bounded at 1 MiB, because the caps are computed *from* it and so
+    cannot bound it. A breach is a determinate **policy refusal** (`pi-too-many-files`,
+    `pi-file-too-large`, `pi-too-large`, `pi-path-collision`) that returns rather than throws, writes
+    nothing, and is never retried. Truncating instead was rejected: a truncated skill **is** the defect
+    above, and which files survived would be decided by git's tree order. The `pi-` prefix on those
+    tokens is load-bearing rather than decorative: the nested `session.reason` enum in
+    `INT-RUN-HISTORY-FILE-CONTRACT` already carries a bare `too-large`, and two enums in one record
+    sharing a token is how a reader misattributes a refusal.
+  - **`pi-path-collision`** refuses two paths differing only in case (`README.md` beside `readme.md`), or
+    a file colliding with another file's directory prefix. A case-insensitive host collapses them onto one
+    file and the second write `EACCES`es against the `0444` first one — unreachable while each skill was
+    one lowercase-named file, and reachable now.
+  - Per-entry problems are **skipped and counted**, never refused: a non-`100644` mode, a leading-dot name
+    (parity with pi's own loader), an out-of-charset or over-long segment, a device name, an over-deep
+    path. A refusal keyed on a *filename* would be a denial-of-service surface for exactly the population
+    this file treats as the threat: one committed `.DS_Store` would brick every job for that repo.
 - **`/job/pi/extensions` is NOT written, and the seam is deliberate.** An earlier revision of this list
-  carried it; the worker's materialiser only ever emits `pi/APPEND_SYSTEM.md` and
-  `pi/skills/<name>/SKILL.md`, so the path documented a file that never existed. Repo extensions stay
+  carried it; the worker's materialiser emits `pi/APPEND_SYSTEM.md` and the declared files of
+  `pi/skills/<name>/`, and **never** `extensions/`, so the path documented a file that never existed.
+  (The premise widened in issue #60 when whole skill directories began to materialise; the conclusion did
+  not.) Repo extensions stay
   unmaterialised, and that is now a **routing** fact rather than a refusal: they arrive by cwd discovery
   instead, which means there is exactly **one** path a repo extension has ever had and no double-load to
   reconcile. The runner still lists `/job/pi/extensions` in `additionalExtensionPaths`
@@ -667,8 +716,14 @@ Evidence convention as in `constitution.md`.
   `DES-PERSONA-VIA-APPEND-SYSTEM-MD`, `INT-SDK-SESSION-OPTIONS`
 - **Acceptance**: A write to any path under `/job` fails from inside the container; `/outbox` is writable
   for a local job and absent for a github job. A hostile symlink at
-  `.pi/APPEND_SYSTEM.md` or `.pi/skills/x/SKILL.md` in the serviced repo results in **no host file
-  content anywhere** in `/job` or the assembled prompt.
+  `.pi/APPEND_SYSTEM.md`, `.pi/skills/x/SKILL.md` **or `.pi/skills/x/references/y.md`** in the serviced
+  repo results in **no host file content anywhere** in `/job` or the assembled prompt, and a symlinked
+  *directory* or a gitlink inside a skill produces nothing at all.
+  Given a repo skill shipping `references/` and `scripts/`, every declared file arrives under
+  `/job/pi/skills/<name>/`, `0444`, with its executable blobs absent. Given a `.pi/skills/<x>/` that
+  declares no `SKILL.md` anywhere beneath it, nothing under it arrives. Given a `.pi/` over any cap, the
+  job is refused with a `pi-` reason, **no file is written and no blob is read**, no budget slot is
+  burned, and the refusal is not retried.
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
 
@@ -1623,7 +1678,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2094,6 +2149,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-08 | Issue #60 (Gap 1: a repo skill's supporting files were silently dropped). **INT-CONTAINER-JOB-INPUTS AMENDED**: the materialiser's allowlist accepted exactly `.pi/APPEND_SYSTEM.md` and `.pi/skills/<name>/SKILL.md`, so a skill shipping `references/`, `scripts/` or templates had those files dropped by a bare `continue` with no error anywhere. That is worse than it sounds, and the reason is upstream: at the 0.80.7 pin `core/skills.js` instructs the model to "resolve it against the skill directory", so the skill loaded, read correctly, and pointed the agent at files that were not in the container. A confidently wrong agent, not a failure. The entry now documents whole-directory materialisation, the split-and-validate-every-segment grammar that replaced the single regex (STRONGER than the fixed template it replaces, because any separator other than `/` survives inside a piece and is refused by the anchored charset, and `..` is refused by the leading-alphanumeric rule), the two-tier charset (the skill NAME keeps the lowercase-only `SKILL_NAME_RE` it shares with the flow gate; only the segments below it are case-insensitive, because `SKILL.md` and `README.md` are the point), the Windows device-name refusal, the documented skips, and the six caps with the refuse-before-write ordering. Three sub-decisions are recorded rather than left implicit. **A subtree declaring no `SKILL.md` anywhere beneath it is not materialised**, because pi registers a skill only where a literal `SKILL.md` exists, so those bytes could never be referenced and copying them would be a data-dump channel that never has to look like a skill; the test is "anywhere beneath" and not "at the root" because pi keeps recursing while a directory has no `SKILL.md`, and a root-only rule would have recreated this very defect one level down. **`100755` stays rejected**, so a skill's scripts are invoked as `bash script.sh`: `/job` is `:ro` and files land `0444`, so accepting the mode and writing `0444` anyway would accept what the repo asked for and silently strip it, while `0555` would have the worker grant execve on repo bytes. **A cap breach REFUSES the job** rather than truncating, because a truncated skill IS this defect and which files survived would be decided by git's tree order. The `/job/pi/extensions` bullet's PREMISE was rewritten (it asserted the materialiser "only ever emits ... SKILL.md", now false) while its CONCLUSION is untouched: `extensions/` is still never written, so discovery remains the only path a repo extension has ever had. Acceptance gains the symlink-inside-a-skill-subdirectory case and the cap cases. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: four terminal reasons (`pi-too-many-files`, `pi-file-too-large`, `pi-too-large`, `pi-path-collision`), plus `sha-gone`, which the enum had always omitted. The `pi-` prefix is load-bearing rather than decorative: the nested `session.reason` enum already carries a bare `too-large`, and two enums in one record sharing a token is how a reader misattributes a refusal. **INT-SDK-SESSION-OPTIONS UNCHANGED, checked**, and the check is the interesting one: it has always written the layout as `.pi/skills/**/SKILL.md`, one level deeper than the code implemented, so the spec was right and the code has now caught up to it rather than the other way round. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked** — no mount, no flag, no env var; the widened content rides the `/job:ro` bind that already existed. Repaired in passing, because this change made it unavoidable: `makePrepareWorkspace` leaked its `mkdtemp`'d job dir on EVERY policy refusal, since a refusal carries no `jobDir` and both teardown paths guard on `prepared?.jobDir` — true of `sha-gone` since it shipped, and about to be hit on every delivery by a repo that breaches a cap. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **INT-WEBHOOK-PAYLOAD-SUBSET AMENDED**: `pull_request_review` joins the consumed events as a SECOND event name on one trigger type (`submitted` only; `edited` and `dismissed` drop as `unhandled-event`, since an edit re-fires on text already paid for and a dismissal withdraws a verdict rather than stating one), and the body-field list gains `review.{id, body, state, author_association}` — the PR fields need no addition, because the review payload carries the full PR object and the projection was always shape-gated rather than event-gated. Three clauses are normative rather than descriptive. **`review.state` is folded to lower case on projection**, because GitHub spells it `approved` on the webhook and `APPROVED` on `GET /pulls/{n}/reviews`, so without one fold point the identical review would produce two different jobs depending on transport and a polled `COMMENTED` would slip past the empty-body refusal; the parity test drives both spellings. **`review.user` is deliberately NOT consumed** — `sender.id` is the only identity the gate and the bot-loop guard read, and a login is PII with no reader. **`review.id` is consumed** because a review's inline comments ride `pull_request_review_comment`, an event this contract does not consume. That last one carries a correction to the issue's own framing, recorded because the record should not stay wrong: #66 justified `review.id` by the line-comments-only case, which is precisely the case the `no-review-body` refusal drops, so the id in fact earns its place on the `approved`/`changes_requested` reviews that carry inline comments AND fire — the residual is `OQ-021`. The **Why** gains the sentence the change actually needed: it said `pull_request.author_association` "gates only auto actions", which became false by omission, and it now states that `review.author_association` is the same class of field gating a DIFFERENT arm, with the reason the fields differ. The synthesized-subset clause gains `/pulls/{n}/reviews` and `poll-rv<review>`. Acceptance gains the two directional gate cases and the case-fold case. **INT-TRIGGERS-FILE-CONTRACT AMENDED**: the github action vocabulary goes to five with `review_submitted`, spelled as a compound so both halves stay greppable in GitHub's docs (the `label_updated` precedent) and riding `pull_request` rather than becoming a fifth `on.type`, because GitLab's `approved` already rides `pull_request` and a new type would have made one forge's review a type and the other's an action. Records that `approved` is NOT this word renamed — `approved` is one verdict, `review_submitted` is every verdict — which is exactly what the new optional **`on.reviewState`** narrows, github-only and legal only beside `review_submitted`, with four load-time refusals including that last one, because a `reviewState` beside `["opened","synchronize"]` reads as a narrowing and does the opposite. The stale claim that `approved` "has no GitHub counterpart at all" is removed here and in `docs/gitlab.md`. **INT-CONTAINER-JOB-INPUTS AMENDED**: "plus three additions" becomes four, `review` gets the data-by-placement clause `comment` has (body to the prompt, `id`/`state`/`author_association` to `event.json` only), and a new clause records that on a review-triggered job `matched.action` (`review_submitted`, the file's word) and the record's own `action` (`submitted`, GitHub's word) deliberately DIFFER — the first GitHub case where they do, which makes the existing "for `pull_request` the `action`" sentence read as the rule's action rather than the payload's. **INT-GITLAB-, INT-FORGEJO- and INT-AZURE-PAYLOAD-SUBSET UNCHANGED, checked** — no other forge reports a review verdict, and `on.reviewState` is refused on all three at load. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked** — `no-review-body`, `review-author-not-allowed` and `review-state-not-matched` are RECEIVER drop reasons, which are log fields and not the record's closed terminal-outcome enum. |
 | 2026-08-08 | Issue #103, two records that disagreed with the code. **INT-RUN-HISTORY-FILE-CONTRACT**: the nested `session.reason` enum was documented as CLOSED while omitting `promote-failed`, which `promoteSession`'s outer catch returns on any fs fault during the swap and which `mergeSession` writes straight into the record on the completed path — a full disk would have produced a token the spec called impossible. Added, together with a producer table, because the enum reads as one flat list while three separate code paths write it (resolve, runner, promote) and a refused promotion WINS over the other two. Recorded three things the list cannot show: `expired` never arrives from the promote path, `promoted` is a return value that reaches no record, and `no-key` is deliberately NOT in the enum — a DI-seam backstop unreachable in a wired worker, since `sessionKeyFor` is total and binary so `resolveSession` returns `null` rather than a keyless session. Pinned by a new fault-injection test in `worker/test/session-store.test.mjs`. **INT-SDK-SESSION-OPTIONS**: the `additionalExtensionPaths` comment claimed operator-staged pi packages "ride this same option" as `PI_GLOBAL_ALLOW_EXTENSIONS`; the spread is and remains UNCONDITIONAL, so the comment was the defect, in both this file and `image/runner/src/loader.mjs`. Corrected to state the split and why (the worker applies `run.packages` before emitting `PI_PACKAGES`, so re-gating here would withhold what the operator armed), and the previously untested `allowGlobalExtensions: false` case is now pinned in `image/runner/test/loader.test.mjs`. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked** — its write-path prose names no reason tokens, so the drift could only ever have been visible from the record's own contract. |
 | 2026-08-07 | Issue #102: **INT-PI-PACKAGES-FILE-CONTRACT** records that `pi-packages.json` is now the override-and-addition layer rather than the only source (discovery reaches the same validator, so it adds candidates and never exemptions), and that the receipt gained `from` as a CLOSED enum with a default — which covers both compatibility directions at once, since a pre-#102 receipt carries no `from` and reads as declared while an older worker drops it as an unknown key. Also records that the receipt is now read at EACH job start rather than once at boot, why the boot read was right until discovery made re-staging routine, and why a failed read keeps last-known-good instead of degrading to none (an empty set emits no `PI_PACKAGES`, so the runner's path assertion would have nothing to refuse and the job would run toolless on a clean exit 0). **INT-CONTAINER-RUNTIME-CONTRACT, INT-TRIGGERS-FILE-CONTRACT, INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — the mount, `PI_PACKAGES`, `run.packages` and the pre-spend refusal are all untouched; only who fills the manifest, and how often it is read, moved. |

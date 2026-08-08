@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveJobImage } from "./image-preflight.mjs";
@@ -63,23 +63,26 @@ export function makePrepareWorkspace({
 				? `Use the "${job.flow}" skill for this task.\n\n${pointer}${job.task ?? ""}`
 				: `${pointer}${job.task ?? ""}`;
 			const event = localEventContext(job, queueJobId, findPreviousRun);
-			return stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event }), sandbox);
+			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event }), sandbox), jobDir);
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {
 			const host = forgeFor?.(job)?.host;
-			return stampSandbox(
-				await prepare(job, token, {
-					jobDir,
-					resolveDefaultBranchSha: host?.resolveDefaultBranchSha,
-					// The head ref a pull/merge-request job keys on comes from the FORGE API, never the webhook
-					// payload: an issue_comment on a PR carries no head at all, and a payload-supplied head repo
-					// is attacker-controlled data that must not decide which transcript a job is handed.
-					resolvePullRequestHead: host?.resolvePullRequestHead,
-					resolveSession,
-					piVersion,
-				}),
-				sandbox,
+			return discardOnPolicy(
+				stampSandbox(
+					await prepare(job, token, {
+						jobDir,
+						resolveDefaultBranchSha: host?.resolveDefaultBranchSha,
+						// The head ref a pull/merge-request job keys on comes from the FORGE API, never the webhook
+						// payload: an issue_comment on a PR carries no head at all, and a payload-supplied head repo
+						// is attacker-controlled data that must not decide which transcript a job is handed.
+						resolvePullRequestHead: host?.resolvePullRequestHead,
+						resolveSession,
+						piVersion,
+					}),
+					sandbox,
+				),
+				jobDir,
 			);
 		}
 		throw new Error(`unknown job kind: ${job.kind}`);
@@ -129,6 +132,27 @@ function scheduledForMillis(queueJobId) {
 function stampSandbox(prepared, sandbox) {
 	if (!prepared?.jobDir) return prepared;
 	return { ...prepared, sandbox };
+}
+
+/**
+ * Remove the mkdtemp'd job dir when the preparer REFUSED, because nothing downstream will.
+ *
+ * A determinate refusal carries no `jobDir` (see stampSandbox), and both teardown paths -- `cleanup`
+ * and `makeCleanup`'s retention branch -- guard on `prepared?.jobDir`. So the directory this function
+ * created two dozen lines up, which by then may hold a partial clone, was simply left on disk: one
+ * per refusal, forever. That has been true of `sha-gone` since it shipped and was only ever invisible
+ * because refusals are rare; issue #60 adds cap refusals that a misconfigured repo hits on EVERY
+ * delivery, which turns a slow leak into a fast one.
+ *
+ * Deliberately not folded into stampSandbox: that function's job is to decide what a RESULT carries,
+ * and a filesystem side effect hidden inside it would be the kind of thing the next reader has to
+ * discover. Deliberately `rmSync` rather than the async `rm`, so the directory is gone before the
+ * refusal is returned and no teardown ordering has to be reasoned about.
+ */
+function discardOnPolicy(prepared, jobDir) {
+	if (prepared?.outcome !== "policy") return prepared;
+	rmSync(jobDir, { recursive: true, force: true });
+	return prepared;
 }
 
 /** Remove a per-job dir after the run. The workspace (the operator's folder) is never touched here. */

@@ -97,10 +97,13 @@ function isShaGone(error) {
  *   - `git(cwd, args, { env })`      transport for a single git invocation; default runs the real
  *                                     binary via execFile (no shell). Args arrive already hardened.
  *   - `resolveDefaultBranchSha(repo, token) => { sha }`  fresh default-branch tip (github-host).
- *   - `materialize({ gitDir, sha, destDir }) => string[]`  the .pi/ materialiser (git cat-file).
+ *   - `materialize({ gitDir, sha, destDir })`  the .pi/ materialiser (git cat-file). Returns
+ *                                     `{ written, skipped }`, or `{ outcome: "policy", reason }`
+ *                                     when the repo's .pi/ breaches a size cap (issue #60).
  *   - `writeFile` / `mkdir`          fs writes for the job inputs (default sync fs).
  *
- * On a determinate gone-SHA returns `{ outcome: "policy", reason: "sha-gone" }`. On success returns
+ * On a determinate gone-SHA returns `{ outcome: "policy", reason: "sha-gone" }`, and likewise on a
+ * materialiser cap breach (`pi-too-large` and friends). On success returns
  * `{ workspace, jobDir, sha, materialised }`.
  */
 export async function prepareGithubWorkspace(
@@ -165,7 +168,12 @@ export async function prepareGithubWorkspace(
 		}
 
 		// .pi/ is read by object id from the pinned SHA — symlink/submodule/exec safe, no working tree.
-		const materialised = await materialize({ gitDir: workspace, sha, destDir: jobDir });
+		const pi = await materialize({ gitDir: workspace, sha, destDir: jobDir });
+		// A repo whose .pi/ breaches a materialiser cap (issue #60) is a determinate refusal, returned
+		// BEFORE the session resolve and before prompt.md/event.json are written, so a refused job leaves
+		// no /job inputs behind at all. The processor's existing policy branch reserves no budget for it.
+		if (pi?.outcome === "policy") return pi;
+		const materialised = pi.written;
 
 		// Which transcript, if any, this job continues. The head ref for a pull/merge-request target is
 		// resolved from the FORGE, not the payload -- an issue_comment on a PR carries no head at all, and

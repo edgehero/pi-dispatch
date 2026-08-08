@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { PI_LIMITS } from "../src/materialize.mjs";
 import { prepareLocalWorkspace } from "../src/prepare-local.mjs";
 
 function git(dir, args) {
@@ -43,6 +44,26 @@ test("prepares a local git folder: materialises .pi/ from HEAD, writes the task,
 	assert.ok(result.materialised.includes("pi/skills/tidy/SKILL.md"));
 	// the symlink is NOT materialised -- the local path inherits the git materialiser's safety
 	assert.ok(!result.materialised.some((p) => p.includes("EVIL")), "a hostile symlink must not materialise locally either");
+});
+
+test("a .pi/ over a materialiser cap refuses the local job, writing no prompt.md (issue #60)", async () => {
+	// Driven with a real oversized blob rather than a fake, because prepareLocalWorkspace calls the
+	// materialiser directly and has no seam for it. One file past maxFileBytes is the cheapest breach.
+	const dir = mkdtempSync(join(tmpdir(), "pi-local-big-"));
+	git(dir, ["init", "-q"]);
+	git(dir, ["config", "core.autocrlf", "false"]);
+	const blob = (c) => execFileSync("git", ["-C", dir, "hash-object", "-w", "--stdin"], { input: c, encoding: "utf8" }).trim();
+	git(dir, ["update-index", "--add", "--cacheinfo", `100644,${blob("---\nname: tidy\n---\nsteps\n")},.pi/skills/tidy/SKILL.md`]);
+	git(dir, ["update-index", "--add", "--cacheinfo", `100644,${blob("x".repeat(PI_LIMITS.maxFileBytes + 1))},.pi/skills/tidy/huge.md`]);
+	git(dir, ["commit", "-qm", "x"]);
+
+	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const result = await prepareLocalWorkspace({ folder: dir, task: "tidy", jobDir });
+
+	assert.deepEqual(result, { outcome: "policy", reason: "pi-file-too-large" });
+	assert.equal(existsSync(join(jobDir, "prompt.md")), false, "prompt.md was written despite the refusal");
+	assert.equal(existsSync(join(jobDir, "event.json")), false, "event.json was written despite the refusal");
+	assert.equal(existsSync(join(jobDir, "pi")), false, "a partial /job/pi was written despite the refusal");
 });
 
 test("creates a writable /outbox host dir and returns its path (the container's chain-request channel)", async () => {

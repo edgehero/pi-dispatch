@@ -280,6 +280,57 @@ test("a preparer's policy refusal carries no jobDir, so it is passed through uns
 	}
 });
 
+test("a policy refusal removes the mkdtemp'd jobDir -- it used to leak one per refusal", async () => {
+	// Neither teardown path can do it: a refusal carries no jobDir (the test above pins that), and
+	// both `cleanup` and `makeCleanup` guard on `prepared?.jobDir`. So the directory created at the
+	// top of prepareWorkspace, which by then may hold a partial clone, was simply left behind. True of
+	// sha-gone since it shipped, and issue #60 adds cap refusals a misconfigured repo hits on EVERY
+	// delivery.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		let seenJobDir = null;
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			preparers: {
+				github: async (_job, _token, { jobDir }) => {
+					seenJobDir = jobDir;
+					assert.equal(existsSync(jobDir), true, "the preparer should be handed a real directory");
+					return { outcome: "policy", reason: "pi-too-large" };
+				},
+			},
+			forgeFor: () => ({ host: {} }),
+		});
+		const refused = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-9" });
+		assert.deepEqual(refused, { outcome: "policy", reason: "pi-too-large" });
+		assert.equal(existsSync(seenJobDir), false, "the refused job's directory was left on disk");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a local job's policy refusal removes its jobDir too", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		let seenJobDir = null;
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			prepareLocal: async ({ jobDir }) => {
+				seenJobDir = jobDir;
+				return { outcome: "policy", reason: "pi-too-many-files" };
+			},
+			preparers: {},
+			forgeFor: () => ({ host: {} }),
+		});
+		const refused = await prepareWorkspace({ kind: "local", folder: "/tmp/x", flow: "tidy", task: "t" }, null, {});
+		assert.deepEqual(refused, { outcome: "policy", reason: "pi-too-many-files" });
+		assert.equal(existsSync(seenJobDir), false, "the refused local job's directory was left on disk");
+	} finally {
+		cleanup();
+	}
+});
+
 test("with retention OFF, cleanup is the rm it always was", async () => {
 	const { jobsDir, cleanup } = withJobsDir();
 	try {

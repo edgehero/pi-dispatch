@@ -179,8 +179,10 @@ export function enforceProtectedSkillPrecedence(
  *   SettingsManager.isProjectTrusted(), and SettingsManager.inMemory (run-job.mjs) reports TRUE --
  *   trust defaults to granted and nothing here revokes it, so flipping that default would silently
  *   turn this flag back into a no-op. (2) There is no double-load to worry about, because the worker's
- *   materialiser copies ONLY .pi/APPEND_SYSTEM.md and .pi/skills/<name>/SKILL.md -- /job/pi/extensions
- *   is never written, so discovery is the only path a repo extension has ever had.
+ *   materialiser copies ONLY .pi/APPEND_SYSTEM.md and the declared files of .pi/skills/<name>/ (whole
+ *   skill directories since issue #60, not just each SKILL.md) -- /job/pi/extensions is STILL never
+ *   written, so discovery remains the only path a repo extension has ever had. The premise widened;
+ *   the conclusion did not.
  *   What discovery may NOT bring in is the admin extension: see extensionsOverride below. A serviced
  *   repo can ship one (this repo does), and it would hand a job container the paid-enqueue tools.
  *
