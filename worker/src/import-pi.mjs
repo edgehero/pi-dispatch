@@ -23,15 +23,20 @@
  *           learn what pi has installed and what the operator turned off; reading is not copying, and no part
  *           of that file reaches the overlay.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { FROM_HOST, PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
+import { ENTRY_NAME_RE, copyDirContents, copySkillTree } from "./copy-tree.mjs";
 
-/** A valid skill/extension entry name: lowercase kebab/underscore, no dots (no "..") and no slashes. */
-export const ENTRY_NAME_RE = /^[a-z0-9](?:[a-z0-9_.-]{0,62}[a-z0-9])?$/i;
+/**
+ * A valid skill/extension entry name. Defined in copy-tree.mjs, which is the module that enforces it,
+ * and re-exported from here because this is the address its readers already use (the materialiser's
+ * drift test, this module's own tests). Renaming an import path that has readers is not a tidy-up.
+ */
+export { ENTRY_NAME_RE };
 /** The admin extension — never duplicated into a job overlay (it can enqueue paid jobs: a recursion vector). */
 export const ADMIN_RE = /pi-dispatch|dispatch-admin/i;
 
@@ -91,7 +96,9 @@ export async function runImportPi(argv = [], deps = {}) {
 		env = process.env,
 		cwd = process.cwd(),
 		out = (s) => process.stdout.write(s),
-		fs = { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync, renameSync, rmSync },
+		// lstatSync rides along for the shared copier, whose symlink guard is the whole point of it: the
+		// walker this dir's copies used to go through guarded with statSync, which FOLLOWS links.
+		fs = { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, statSync, copyFileSync, renameSync, rmSync },
 		exec = defaultExec,
 		// Injected like `fs`/`exec`/`out` so the win32 npm branch below is reachable from a test on any host;
 		// it is the branch that was dead on arrival precisely because nothing could exercise it here.
@@ -264,21 +271,29 @@ export async function runImportPi(argv = [], deps = {}) {
 	return 0;
 }
 
-/** Copy `<src>/<name>/**` for each valid, non-symlink child dir. Returns the count copied. */
+/**
+ * Copy `<src>/<name>/**` for each valid, non-symlink child dir. Returns the count copied.
+ *
+ * Delegates to the shared copier (issue #60), which is where the symlink guard actually works. The
+ * guard here USED to be `fs.statSync(p).isSymbolicLink?.()`, and `statSync` FOLLOWS links, so it was
+ * permanently false: a symlinked skill directory in `~/.pi/agent/skills` was staged as its target's
+ * CONTENTS into an overlay that is :ro-mounted into every job container. `copySkillTree` uses lstat.
+ *
+ * Caps are off and source modes are preserved, so this command behaves exactly as it did apart from
+ * the repair: the overlay is deploy-time operator config, not a per-job input, and a staged file that
+ * changed mode would break a re-import (copyFileSync onto a 0444 file is EACCES).
+ */
 function copyNamedDirs(fs, src, dst, out) {
 	if (!fs.existsSync(src)) return 0;
-	let n = 0;
-	for (const name of fs.readdirSync(src)) {
-		if (!ENTRY_NAME_RE.test(name)) {
-			out(`  skipped "${name}" — unexpected name\n`);
-			continue;
-		}
-		const childSrc = join(src, name);
-		if (fs.statSync(childSrc).isSymbolicLink?.() || !fs.statSync(childSrc).isDirectory()) continue;
-		copyTree(fs, childSrc, join(dst, name));
-		n++;
-	}
-	return n;
+	const result = copySkillTree(src, dst, {
+		fs,
+		limits: null,
+		mode: null,
+		onSkip: (name, reason) => out(`  skipped "${name}" — ${reason === "symlink" ? "symlink" : "unexpected name"}\n`),
+	});
+	// "empty" is a refusal for a TRIGGER that asked for skills; here it just means the operator has
+	// none, which is the ordinary case for a host that never wrote a skill.
+	return result.refused ? 0 : result.dirs;
 }
 
 /**
@@ -308,7 +323,9 @@ function copyExtensions(fs, src, dst, out, hostDisabled = new Set()) {
 			continue;
 		}
 		const childSrc = join(src, name);
-		const st = fs.statSync(childSrc);
+		// lstat, NEVER stat: stat follows the link, so the old `statSync(p).isSymbolicLink?.()` here was
+		// permanently false and a symlinked extension was staged as its target's contents (issue #60).
+		const st = (fs.lstatSync ?? fs.statSync)(childSrc);
 		if (st.isSymbolicLink?.()) continue;
 		if (st.isDirectory()) copyTree(fs, childSrc, join(dst, name));
 		else fs.copyFileSync(childSrc, join(dst, name));
@@ -317,16 +334,13 @@ function copyExtensions(fs, src, dst, out, hostDisabled = new Set()) {
 	return { copied, blocked, disabled };
 }
 
-/** Recursively copy a directory tree, skipping symlinks (a symlink could point outside the source). */
+/**
+ * Recursively copy one directory's contents, skipping symlinks (a symlink could point outside the
+ * source). A thin adapter over the shared walker, so extensions and skills cannot drift apart on the
+ * guard that matters: it is `lstat` there, where it used to be a `statSync` that followed every link.
+ */
 function copyTree(fs, src, dst) {
-	fs.mkdirSync(dst, { recursive: true });
-	for (const entry of fs.readdirSync(src)) {
-		const s = join(src, entry);
-		const st = fs.statSync(s);
-		if (st.isSymbolicLink?.()) continue;
-		if (st.isDirectory()) copyTree(fs, s, join(dst, entry));
-		else fs.copyFileSync(s, join(dst, entry));
-	}
+	copyDirContents(src, dst, { fs, limits: null, mode: null });
 }
 
 /**

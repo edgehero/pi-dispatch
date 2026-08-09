@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImportPi, findLiteralSecret } from "../src/import-pi.mjs";
@@ -55,6 +55,29 @@ test("import-pi copies models/skills/persona and NEVER auth.json", async () => {
 	assert.ok(existsSync(join(to, "skills", "tidy", "SKILL.md")), "skill copied");
 	assert.ok(existsSync(join(to, "APPEND_SYSTEM.md")), "persona copied");
 	assert.equal(existsSync(join(to, "auth.json")), false, "auth.json must NEVER be copied — the credential stays in env");
+});
+
+test("a symlinked skill directory is NOT staged (it was, BY CONTENT, before the shared copier)", async () => {
+	// The guard here used to be `statSync(p).isSymbolicLink?.()`, and statSync FOLLOWS links, so it was
+	// permanently false: the link's TARGET was walked and its contents copied into an overlay that is
+	// :ro-mounted into every adversarial-input container. This is the regression test for that.
+	const from = hostAgent();
+	const secretDir = mkdtempSync(join(tmpdir(), "pi-host-secret-"));
+	writeFileSync(join(secretDir, "SKILL.md"), "HOST-TREE-SENTINEL");
+	symlinkSync(secretDir, join(from, "skills", "aliased"));
+	const to = overlayDir();
+	const { out, text } = capture();
+
+	const code = await run(from, to, [], out);
+
+	assert.equal(code, 0);
+	assert.ok(existsSync(join(to, "skills", "tidy", "SKILL.md")), "the real skill must still stage");
+	assert.ok(!existsSync(join(to, "skills", "aliased")), "a symlinked skill dir was staged");
+	assert.ok(!readdirSync(to, { recursive: true }).some((r) => {
+		const p = join(to, r);
+		return statSync(p).isFile() && readFileSync(p, "utf8").includes("HOST-TREE-SENTINEL");
+	}), "the symlink target's CONTENTS were staged");
+	assert.ok(text().includes("symlink"), "the operator must be told what was skipped");
 });
 
 test("import-pi refuses a models.json with a literal key and writes nothing", async () => {
