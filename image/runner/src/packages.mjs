@@ -8,8 +8,14 @@
  */
 import { basename, dirname } from "node:path";
 
-/** Roots whose skills a staged package must never be able to replace. */
-export const PROTECTED_SKILL_ROOTS = ["/job/pi/skills", "/opt/pi-global/skills"];
+/**
+ * Roots whose skills a staged package must never be able to replace, most specific FIRST.
+ *
+ * The middle entry is a trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), and it sits
+ * between the repo and the overlay for the same reason it does in additionalSkillPaths: "for THIS
+ * trigger" is a narrower operator statement than "for this deployment", and narrower wins.
+ */
+export const PROTECTED_SKILL_ROOTS = ["/job/pi/skills", "/job/trigger-skills", "/opt/pi-global/skills"];
 
 /**
  * The admin extension, BY NAME -- a deliberate duplicate of `ADMIN_RE` in worker/src/import-pi.mjs.

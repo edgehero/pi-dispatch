@@ -745,3 +745,38 @@ test("a replica job on an image that does not declare replica support refuses pr
 	assert.ok(posted[0]?.includes("dev.pi-dispatch.capabilities"), "the message names the label so it can be grepped for");
 	assert.ok(posted[0]?.includes("Rebuild"), "and names the fix, not merely the symptom");
 });
+
+// ---- REQ-PER-TRIGGER-SKILLS: a trigger that named a skills dir the worker cannot see.
+
+test("an absent run.skillsDir refuses BEFORE the mint, the clone and the budget", async () => {
+	// Free and determinate -- one lstat -- so it belongs among the free gates and strictly before anything
+	// that spends. Without it the job runs its flow WITHOUT the skills it was written against, writes a
+	// plausible report, and exits 0.
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, isReadableDir: () => false });
+	const r = await runJob({ ...ghJob, skillsDir: "/srv/gone" }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "skills-dir-missing");
+	assert.equal(r.budgetReserved, false, "refused pre-reserve, so no daily slot was consumed");
+	assert.equal(redis.incrCalls, 0, "reserveBudget never reached -- the gate is free by construction");
+	assert.deepEqual(calls, ["comment:Refused: thi"], "no mint, no branch check, no clone, no container");
+});
+
+test("a readable run.skillsDir does not refuse, and the gate is skipped entirely when the field is absent", async () => {
+	let probed = 0;
+	const ok = await runJob({ ...ghJob, skillsDir: "/srv/skills" }, deps({ isReadableDir: () => { probed++; return true; } }).deps);
+	assert.equal(ok.outcome, "completed");
+	assert.equal(probed, 1);
+	const none = await runJob(ghJob, deps({ isReadableDir: () => { probed++; return false; } }).deps);
+	assert.equal(none.outcome, "completed", "a job with no run.skillsDir must not be gated on one");
+	assert.equal(probed, 1, "and the probe must not even run");
+});
+
+test("the skills-dir refusal names the FIELD and never the host path -- the comment is posted publicly", async () => {
+	const said = [];
+	const d = deps({ isReadableDir: () => false }).deps;
+	const r = await runJob({ ...ghJob, skillsDir: "/srv/acme-internal/layout/skills" }, { ...d, comment: async (_j, text) => said.push(text) });
+	assert.equal(r.reason, "skills-dir-missing");
+	assert.ok(said[0].includes("run.skillsDir"), "the operator must be told which field");
+	assert.ok(!said.join(" ").includes("acme-internal"), "a host path was published on the issue");
+});

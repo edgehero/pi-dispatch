@@ -7,7 +7,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { assertPackagePathsExist, assertSessionMountReady, enforceOfflineMode, parseRunnerEnv } from "./src/config.mjs";
-import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, WORKSPACE } from "./src/loader.mjs";
+import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import {
 	captureTerminal,
 	classifyThrow,
@@ -127,7 +127,7 @@ async function main() {
 		// The protected roots are derived from the loader's own constants rather than written out
 		// again, so a change to where the worker materialises .pi/ cannot leave this check guarding
 		// paths that no longer exist.
-		const protectedRoots = [`${JOB_PI_DIR}/skills`, `${GLOBAL_PI_DIR}/skills`];
+		const protectedRoots = [`${JOB_PI_DIR}/skills`, TRIGGER_SKILLS_DIR, `${GLOBAL_PI_DIR}/skills`];
 		const shadowed = findShadowedSkills(diagnostics, { packageRoots: cfg.packages, protectedRoots });
 		if (shadowed.length > 0) {
 			// The winner is read off the LOADED skill, not off pi's pre-override diagnostic: the

@@ -105,6 +105,11 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		flow: resolved.flow,
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
+		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
+		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
+		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
+		// basename(folder) restraint already exists to prevent.
+		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
 		trigger: {
 			event,
@@ -165,6 +170,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		repository: rule.repository,
 		packages: rule.packages,
 		image: rule.image,
+		skillsDir: rule.skillsDir,
 		resume: rule.resume,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.target?.number, title: subset.target?.title, body: subset.target?.body },
@@ -193,6 +199,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		repository: triggers.comment.repository,
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
+		skillsDir: triggers.comment.skillsDir,
 		resume: triggers.comment.resume,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// No author_association: Azure has none, and the authority that admitted this comment was resolved
@@ -219,6 +226,7 @@ function routePullRequest(subset, triggers, action) {
 			repository: rule.repository,
 			packages: rule.packages,
 			image: rule.image,
+			skillsDir: rule.skillsDir,
 			resume: rule.resume,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {

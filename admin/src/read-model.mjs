@@ -692,6 +692,10 @@ export function normalizeTriggerForDisplay(entry) {
   const flow = typeof run.flow === "string" ? run.flow : null;
   const packages = run.packages !== false;
   const image = typeof run.image === "string" && run.image.trim() !== "" ? run.image : null;
+  // The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS, issue #60). Carried on all four kinds like
+  // `image`, and shown for the same reason: which skills a job loads IS what the agent can do. `null` is
+  // the none sentinel, matching this function's own convention.
+  const skillsDir = typeof run.skillsDir === "string" && run.skillsDir.trim() !== "" ? run.skillsDir : null;
   // An opt-IN, so `=== true` and not `!== false` -- the opposite test from `packages` directly above, and
   // the difference is the whole point. Getting this polarity wrong is the defect 0.1.4 shipped a fix for:
   // the riskiest triggers rendered with no badge and no warning, quiet exactly where the risk was.
@@ -716,12 +720,13 @@ export function normalizeTriggerForDisplay(entry) {
         model: typeof run.model === "string" ? run.model : null,
         packages,
         image,
+        skillsDir,
         resume,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, resume, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, skillsDir, resume, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, resume, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, skillsDir, resume, replicas, forge };
     case "pull_request":
       return {
         type: "pull_request",
@@ -732,6 +737,7 @@ export function normalizeTriggerForDisplay(entry) {
         flow,
         packages,
         image,
+        skillsDir,
         resume,
         replicas,
         forge,

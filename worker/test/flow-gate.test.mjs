@@ -132,3 +132,32 @@ test("SKILL_NAME_RE is exported as the single source of truth (issue #92) and ho
 	for (const ok of ["tidy", "bug-fix", "a", "x_1", "a".repeat(64)]) assert.ok(SKILL_NAME_RE.test(ok), ok);
 	for (const bad of ["", "Tidy", "a..b", "a/b", "-lead", "trail-", ".hidden", "a".repeat(65)]) assert.ok(!SKILL_NAME_RE.test(bad), bad);
 });
+
+// --- Gap 5 of issue #60: an INJECTED skill is trigger-reachable and never AI-reachable ---
+
+test("a flow that exists only in an injected skills dir is no-skill at the gate, so a chain refuses", async () => {
+	// The property falls out rather than being built: this gate reads the serviced repo's git OBJECT STORE
+	// at a pre-agent sha, and a skill copied from the worker host has no object-store presence at all. The
+	// caller's test is `gate !== "allow"`, so `no-skill` refuses. Pinned here because it is a SAFETY
+	// property of the injected tier, and a future change that made the gate consult the filesystem would
+	// otherwise open it silently.
+	const { dir, sha } = repoWithSkill({ flow: "committed", body: "---\nname: committed\nai-trigger: allow\n---\nsteps\n" });
+	// Simulate the injected tree by putting the skill on DISK only, never in a commit.
+	mkdirSync(join(dir, ".pi", "skills", "injected-only"), { recursive: true });
+	writeFileSync(join(dir, ".pi", "skills", "injected-only", "SKILL.md"), "---\nname: injected-only\nai-trigger: allow\n---\nx\n");
+
+	assert.equal((await readFlowGate({ folder: dir, flow: "committed", sha })).gate, "allow", "the committed flow is unaffected");
+	const injected = await readFlowGate({ folder: dir, flow: "injected-only", sha });
+	assert.equal(injected.gate, "no-skill", "a flow present only on disk must not open the gate");
+	assert.notEqual(injected.gate, "allow");
+});
+
+test("an injected SKILL.md carrying ai-trigger: allow does not open the gate -- the frontmatter is never read", async () => {
+	// The corollary an operator cannot discover unaided, which is why doctor warns about it. Writing the
+	// opt-in into an injected skill is a silent no-op, and this test is what keeps it silent-but-refused
+	// rather than quietly becoming allowed.
+	const { dir, sha } = repoWithSkill({ flow: "committed", body: "---\nname: committed\n---\nsteps\n" });
+	mkdirSync(join(dir, ".pi", "skills", "eager"), { recursive: true });
+	writeFileSync(join(dir, ".pi", "skills", "eager", "SKILL.md"), "---\nname: eager\nai-trigger: allow\n---\nx\n");
+	assert.equal((await readFlowGate({ folder: dir, flow: "eager", sha })).gate, "no-skill");
+});

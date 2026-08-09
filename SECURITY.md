@@ -247,8 +247,9 @@ Stated openly rather than discovered later:
   flow.** A trigger's `run.image` names the container its jobs run in; absent, they run `PI_JOB_IMAGE`.
   Whichever it is, the *isolation* holds: `--cap-drop=ALL`, `--security-opt no-new-privileges`, the
   memory/CPU/pids limits, `/job` read-only, the closed env allowlist and the mount set (four mounts, five
-  once `run.resume` is armed) are all built by the worker's `docker run` argv, so nothing an image contains
-  can weaken them. **Non-root is not in that argv.** It is `USER pi` in the image itself, as the trust table
+  once `run.resume` is armed, and `run.skillsDir` adds none: its skills are copied into the per-job dir and
+  ride the `/job` mount that already exists) are all built by the worker's `docker run` argv, so nothing an
+  image contains can weaken them. **Non-root is not in that argv.** It is `USER pi` in the image itself, as the trust table
   above says, and that is exactly why an unconformant image can lose it: `docs/job-image.md` requires a
   non-root runtime user with a writable agent dir, and nothing here verifies that the image you named
   honours it. What is **not** checked is the image's contents, and every way that can be wrong fails

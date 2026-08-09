@@ -175,6 +175,12 @@ function triggerLine(t) {
   // A trigger that PERSISTS the agent's working history to disk says so. Without this badge it renders
   // identically to one that does not, which is the defect 0.1.4 fixed for [packages] arriving in a new
   // field -- and a transcript is a bigger disclosure than staged packages are.
+  // A trigger whose jobs load operator-authored skills from the host says which directory (issue #60).
+  // Same doctrine as [resume] and [image]: it must never render the same as one that does not, because
+  // choosing the skills IS choosing what the agent can do. The BASENAME only, so the line stays skimmable;
+  // the full path lives in the trigger detail view, where the panel is the operator's own session on their
+  // own host and a path discloses nothing new.
+  const skl = t?.skillsDir ? `  [skills ${String(t.skillsDir).split(/[\\/]/).filter(Boolean).pop()}]` : "";
   const res = t?.resume === true ? "  [resume]" : "";
   // A trigger that turns one delivery into N paid runs says so (REQ-REPLICA-RUNS). Same class of badge as
   // [resume]: not a preference an operator can skim past, but the field that multiplies the bill. Absent on
@@ -182,15 +188,15 @@ function triggerLine(t) {
   const rep = t?.replicas > 1 ? `  [x${t.replicas}]` : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${res}${rep}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${res}${rep}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${res}${rep}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
-      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${res}${rep}`;
+      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
     }
     default:
       return "(unknown trigger)";

@@ -606,3 +606,42 @@ test("run.replicas outside 2..3, or not an integer, refuses at load", () => {
 		}
 	}
 });
+
+// --- run.skillsDir (issue #60, REQ-PER-TRIGGER-SKILLS) ---
+
+test("run.skillsDir survives normalization on all four trigger kinds", () => {
+	const withDir = (base) => ({ ...base, run: { ...base.run, skillsDir: "/srv/skills" } });
+	for (const [name, entry] of [["cron", CRON], ["label", LABEL], ["comment", COMMENT], ["pull_request", PR_AUTO]]) {
+		assert.equal(parse([withDir(entry)])[0].run.skillsDir, "/srv/skills", `${name} dropped run.skillsDir`);
+	}
+});
+
+test("run.skillsDir absent stays ABSENT, not present-and-undefined -- an unflagged trigger is byte-identical", () => {
+	for (const entry of [CRON, LABEL, COMMENT, PR_AUTO]) {
+		assert.equal("skillsDir" in parse([entry])[0].run, false);
+	}
+});
+
+test("run.skillsDir that is not a non-empty string is refused, naming the trigger, on all four kinds", () => {
+	for (const entry of [CRON, LABEL, COMMENT, PR_AUTO]) {
+		for (const bad of ["", "   ", 5, null, {}, []]) {
+			assert.throws(
+				() => parse([{ ...entry, run: { ...entry.run, skillsDir: bad } }]),
+				isConfigError,
+				`${JSON.stringify(bad)} was accepted`,
+			);
+		}
+	}
+});
+
+test("run.skillsDir with surrounding whitespace is REFUSED rather than trimmed", () => {
+	// The file is the reviewed artifact: it must not disagree with what runs. validateImageRef's rule.
+	assert.throws(() => parse([{ ...LABEL, run: { ...LABEL.run, skillsDir: " /srv/skills " } }]), isConfigError);
+});
+
+test("a RELATIVE run.skillsDir loads here -- absoluteness is not decidable identically on two hosts", () => {
+	// path.isAbsolute is OS-dependent ("C:\\x" is absolute on win32, relative on posix) and BOTH services
+	// parse this file, so a shared check would let a Windows worker and a Linux receiver disagree about the
+	// same reviewed file. The worker enforces it where the answer is knowable (schedules.mjs, processor.mjs).
+	assert.equal(parse([{ ...LABEL, run: { ...LABEL.run, skillsDir: "relative/skills" } }])[0].run.skillsDir, "relative/skills");
+});

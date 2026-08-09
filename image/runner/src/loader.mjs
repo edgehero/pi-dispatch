@@ -15,6 +15,21 @@ export const OUTBOX_MOUNT = "/outbox";
 export const JOB_PI_DIR = "/job/pi";
 
 /**
+ * Where a trigger's INJECTED skills land (REQ-PER-TRIGGER-SKILLS, issue #60). Operator-authored, copied
+ * per job by the worker from the host directory `run.skillsDir` names, and reaching us on the /job:ro
+ * bind that already exists -- this feature adds NO mount, which is what keeps
+ * CONST-ISOLATION-CONTAINER-PER-JOB's mount enumeration untouched.
+ *
+ * Spelled `trigger-skills` and NOT `skills`: `/job/skills` beside `/job/pi/skills` would be two roots one
+ * letter apart in a precedence list, which is how the wrong one gets edited.
+ *
+ * The worker writes the same last segment from its own side (TRIGGER_SKILLS_SUBDIR in prepare.mjs); it is
+ * not in this container and this file is not on that host, so the duplication is forced. CHANGE BOTH, IN
+ * THE SAME COMMIT -- the same discipline ADMIN_EXTENSION_RE carries, and each side pins the literal.
+ */
+export const TRIGGER_SKILLS_DIR = "/job/trigger-skills";
+
+/**
  * Read-only mount of the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global
  * skills, and a global persona from the operator's own ~/.pi/agent, present only when configured. It is
  * operator deploy-time config -- the same trust class as the baked floor -- layered UNDER each repo's .pi/.
@@ -217,6 +232,7 @@ export function buildResourceLoader({
 	guardrailsPath = GUARDRAILS_PATH,
 	jobPiDir = JOB_PI_DIR,
 	globalPiDir = GLOBAL_PI_DIR,
+	triggerSkillsDir = TRIGGER_SKILLS_DIR,
 	outboxMount = OUTBOX_MOUNT,
 	outboxProtocolPath = OUTBOX_PROTOCOL_PATH,
 	// ON, matching the runtime posture (REQ-GLOBAL-PI-OVERLAY): the operator staged that dir themselves,
@@ -243,7 +259,7 @@ export function buildResourceLoader({
 	// The roots a staged package may never take a skill name from. Both are listed unconditionally: a
 	// root that is not mounted contributes no skill to protect, so gating it would only add a way to
 	// forget one.
-	const protectedSkillRoots = [`${jobPiDir}/skills`, globalSkills];
+	const protectedSkillRoots = [`${jobPiDir}/skills`, triggerSkillsDir, globalSkills];
 	// Roots the recursion guard can NAME in its log line, most specific FIRST: a staged package sits
 	// under the overlay, so an overlay-first list would report a package's extension as the operator's.
 	// The workspace is last because it is the catch-all -- a discovered repo extension is anywhere in it.
@@ -263,7 +279,18 @@ export function buildResourceLoader({
 		// second path and take the mount out of force on a first-path-wins collision. See the docstring.
 		noSkills: true,
 		// Repo path FIRST so a repo skill overrides a global one of the same name (first-path-wins).
-		additionalSkillPaths: [`${jobPiDir}/skills`, ...(existsSync(globalSkills) ? [globalSkills] : [])],
+		// then the trigger's INJECTED skills, then the deployment-wide overlay: repo > injected > overlay
+		// (REQ-GLOBAL-PI-OVERLAY, REQ-PER-TRIGGER-SKILLS). The middle tier is the narrower operator statement,
+		// "for THIS trigger", so it refines the overlay and is refined by the repo -- the same most-specific-
+		// wins ordering the persona layers use. The order here is OURS: under noSkills, pi builds skillPaths as
+		// mergePaths(cliEnabledSkills, additionalSkillPaths), mergePaths preserves order, and loadSkills keeps
+		// the first of each name. existsSync-gated like the overlay, because an absent path becomes a permanent
+		// "skill path does not exist" diagnostic, and an always-populated channel cannot detect anything.
+		additionalSkillPaths: [
+			`${jobPiDir}/skills`,
+			...(existsSync(triggerSkillsDir) ? [triggerSkillsDir] : []),
+			...(existsSync(globalSkills) ? [globalSkills] : []),
+		],
 		// Global overlay extensions load whenever the dir is present -- staging them IS the operator's
 		// decision, so a second arming step was friction rather than safety. PI_GLOBAL_ALLOW_EXTENSIONS=0
 		// is the opt-out, and any other value is refused at config load so a typo cannot silently mean

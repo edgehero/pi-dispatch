@@ -252,7 +252,7 @@ Evidence convention as in `constitution.md`.
   and inject headers in that layer); and `refresh()` hands back **fresh** provider objects, so
   "did we already wrap this?" is answerable only by object identity, never by api id.
 
-  **(i) Skill precedence is decided by `skillsOverride`, not by path order.** `additionalSkillPaths` sets
+  **(i) Skill precedence is decided by `skillsOverride`, not by path order -- and there are now THREE protected roots, `/job/pi/skills`, `/job/trigger-skills` and `/opt/pi-global/skills`, consulted in that order (`REQ-PER-TRIGGER-SKILLS`).** `additionalSkillPaths` sets
   the order *among our own* paths (repo before overlay), but pi builds `skillPaths` as
   `mergePaths(cliEnabledSkills, additionalSkillPaths)` — the paths a staged package contributes through its
   `pi` manifest come **first** regardless of where the package was listed in `additionalExtensionPaths` —
@@ -558,6 +558,8 @@ Evidence convention as in `constitution.md`.
   /job/pi/skills/<name>/SKILL.md   project skills,   │  project's .pi/ at the DEFAULT-BRANCH SHA,
   /job/pi/skills/<name>/<support>  materialised      │  via `git ls-tree -l` + `git cat-file blob
                                    WHOLE            ┘  <oid>`, never `fs.readFile`
+  /job/trigger-skills/<name>/**    the trigger's INJECTED skills, copied from the worker-host directory
+                                   `run.skillsDir` names. Present only when the trigger set it.
   ```
   **The guardrails are baked into the image** at a path outside `agentDir` and are **not** mounted.
 - **What the container additionally reads from `/workspace`, and why it is not a `/job` input.** A job's
@@ -623,6 +625,18 @@ Evidence convention as in `constitution.md`.
     (parity with pi's own loader), an out-of-charset or over-long segment, a device name, an over-deep
     path. A refusal keyed on a *filename* would be a denial-of-service surface for exactly the population
     this file treats as the threat: one committed `.DS_Store` would brick every job for that repo.
+- **`/job/trigger-skills/` is the one `/job` input that does NOT come from git** (`REQ-PER-TRIGGER-SKILLS`,
+  issue #60), and the asymmetry is worth stating because the rest of this entry argues so hard for the
+  object store. `.pi/` is read by oid because the serviced repo is only trusted at maintainer level and the
+  read must be symlink-safe against a tree an attacker can shape. `run.skillsDir` is **operator-authored
+  deploy-time config** named in a reviewed file, the same trust class as the global overlay, so there is no
+  hostile tree to defend against -- what remains is the ordinary filesystem hazard, and the copier answers
+  it the same way the materialiser does: `lstat` (never `stat`, which follows), regular files only,
+  destination paths rebuilt from validated segments, containment re-checked, counts and bytes bounded.
+  It arrives on the **existing** `/job:ro` bind rather than a mount of its own, so the container sees it
+  read-only and `CONST-ISOLATION-CONTAINER-PER-JOB`'s mount enumeration is unchanged. Absent unless the
+  trigger set the field, so a job without one has a byte-identical `/job` to one prepared before the
+  feature existed.
 - **`/job/pi/extensions` is NOT written, and the seam is deliberate.** An earlier revision of this list
   carried it; the worker's materialiser emits `pi/APPEND_SYSTEM.md` and the declared files of
   `pi/skills/<name>/`, and **never** `extensions/`, so the path documented a file that never existed.
@@ -1297,26 +1311,61 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "provider": "<optional passthrough>", "model": "<optional>", "maxTurns": <optional>,
                "github": <optional boolean>, "packages": <optional boolean>,
                "resume": <optional boolean>,
-               "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>" } },
+               "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
+               "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>" } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
-               "image": "<optional>", "replicas": <optional int 2..3; github only> } },
+               "image": "<optional>", "skillsDir": "<optional>",
+               "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>", "packages": <optional boolean>,
-               "image": "<optional>", "replicas": <optional int 2..3; github only> } },
+               "image": "<optional>", "skillsDir": "<optional>",
+               "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
               "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
                                                                     // and only beside review_submitted
               "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
-               "image": "<optional>", "replicas": <optional int 2..3; github only> } } ] }
+               "image": "<optional>", "skillsDir": "<optional>",
+               "replicas": <optional int 2..3; github only> } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`) `⟹ run.kind ∈ {"github", "gitlab"}` — a forge
   job, never a local one. Off-matrix throws a `piDispatchConfig` error — a `cron` trigger has no webhook
   delivery, issue/PR number, title, or body to supply a forge run, and a webhook trigger is adversarial
   input that always produces a forge job.
+- **`run.skillsDir` (optional, all four kinds)** names a directory of operator-authored skills on the
+  WORKER host, in the `<name>/SKILL.md` layout `~/.pi/agent/skills` already uses. Its contents are COPIED
+  into the per-job dir and reach the container at `/job/trigger-skills`, layered between the repo's own
+  `.pi/skills` and the global overlay: **repo > injected > overlay** (`REQ-PER-TRIGGER-SKILLS`,
+  `INT-SDK-SESSION-OPTIONS`). Accepted on every kind for `run.image`'s reason: a skill set is a capability
+  of the FLOW, and a webhook trigger runs the flows a cron trigger runs.
+  **Copied rather than mounted**, and that is the decision rather than an implementation detail: `:ro`
+  bounds the container, not the host, and pi reads a skill's body on demand, so a live bind could change
+  under a running agent. The copy pins the instruction set for the life of the job, exactly as
+  materialising `.pi/` at a fixed sha does for the repo's own. It also adds **no mount**, so
+  `CONST-ISOLATION-CONTAINER-PER-JOB`'s enumeration is untouched, and it answers symlinks once on the host
+  side rather than handing pi a tree whose links it would follow.
+  **Validated as a non-empty, untrimmed string HERE and no further**, deliberately. Existence is not
+  checked, because BOTH services parse this file and the receiver may run on another host (the `run.folder`
+  split). Absoluteness is not checked either, because `path.isAbsolute` is OS-dependent, so a shared check
+  would let a Windows worker and a Linux receiver disagree about the same reviewed file. The worker
+  enforces both where the answer is knowable: at boot for cron, and pre-spend per job for every kind, where
+  an absent or non-directory path is the policy refusal `skills-dir-missing`. A cap breach or an empty
+  directory refuses in prepare as `skills-dir-too-large`, `skills-dir-too-many-files`,
+  `skills-dir-too-deep`, `skills-dir-unreadable` or `skills-dir-empty` -- all pre-budget, all returned.
+  **Empty is a refusal, not a no-op**: an operator who pointed at the wrong directory and got an unchanged
+  job is the silent failure this project refuses.
+  **The value never reaches `/job/event.json`.** It rides at JOB level and never inside `trigger`, which is
+  the object the event subset is built from -- a worker-host path in an agent-readable file is exactly what
+  `prepare-local`'s `folder: basename(folder)` restraint already exists to prevent.
+  **Injected skills are trigger-reachable and never AI-reachable.** `DES-AI-TRIGGER-FLOW-GATE` reads the
+  target repo's committed `.pi/skills/<flow>/SKILL.md` from the object store at a pinned sha, and an
+  injected skill has no object-store presence, so a chain request or a `dispatch_run` naming one resolves
+  `no-skill` and is refused. An injected `SKILL.md` carrying `ai-trigger: allow` is therefore **never
+  read**; `doctor` warns when one is present, because nothing else would tell the operator their opt-in is
+  inert.
 - **`run.kind` selects the forge; `on.type` is shared.** A label is a label and a comment is a comment on
   any forge, so the trigger types and their `{any, all, none}` predicates are identical. The **action**
   vocabulary is not, and is validated against the vocabulary of whichever forge the entry names:
@@ -1678,7 +1727,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2149,6 +2198,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-09 | Issue #60 (Gap 2: `run.skillsDir`, a per-trigger operator skills directory). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: a new optional field on all four run kinds, with the validation SPLIT written out because both halves are load-bearing. Existence is not checked in the shared validator because BOTH services parse this file and the receiver may run on another host (the `run.folder` precedent); absoluteness is not checked there either, and that one is subtler, because `path.isAbsolute` is OS-dependent, so a shared check would let a Windows worker and a Linux receiver disagree about the same reviewed file. The worker enforces both where the answer is knowable: at boot for cron, and pre-spend per job for every kind. Also records that the value never reaches `/job/event.json` (it rides at JOB level, never inside `trigger`, which is what the subset is built from), and that injected skills are trigger-reachable and never AI-reachable. **INT-CONTAINER-JOB-INPUTS AMENDED**: `/job/trigger-skills/<name>/**` joins the layout as the one `/job` input that does NOT come from git, with the asymmetry argued rather than left to be noticed -- `.pi/` is read by oid because the serviced repo is only maintainer-trusted and an attacker can shape that tree, while `run.skillsDir` is operator-authored deploy-time config named in a reviewed file, so what remains is the ordinary filesystem hazard and the copier answers it the same way (lstat never stat, regular files only, destinations rebuilt from validated segments, bounded). It arrives on the EXISTING `/job:ro` bind. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: six `skills-dir-*` reasons. **INT-SDK-SESSION-OPTIONS AMENDED**: the protected-root list goes to three, `/job/pi/skills` then `/job/trigger-skills` then `/opt/pi-global/skills`, consulted in that order. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked** -- and this is the entry the change was designed around: no mount is added, no flag, no env var, so a job with an injected skills dir has a docker argv byte-identical to one without, pinned by a test. |
 | 2026-08-08 | Issue #60 (Gap 1: a repo skill's supporting files were silently dropped). **INT-CONTAINER-JOB-INPUTS AMENDED**: the materialiser's allowlist accepted exactly `.pi/APPEND_SYSTEM.md` and `.pi/skills/<name>/SKILL.md`, so a skill shipping `references/`, `scripts/` or templates had those files dropped by a bare `continue` with no error anywhere. That is worse than it sounds, and the reason is upstream: at the 0.80.7 pin `core/skills.js` instructs the model to "resolve it against the skill directory", so the skill loaded, read correctly, and pointed the agent at files that were not in the container. A confidently wrong agent, not a failure. The entry now documents whole-directory materialisation, the split-and-validate-every-segment grammar that replaced the single regex (STRONGER than the fixed template it replaces, because any separator other than `/` survives inside a piece and is refused by the anchored charset, and `..` is refused by the leading-alphanumeric rule), the two-tier charset (the skill NAME keeps the lowercase-only `SKILL_NAME_RE` it shares with the flow gate; only the segments below it are case-insensitive, because `SKILL.md` and `README.md` are the point), the Windows device-name refusal, the documented skips, and the six caps with the refuse-before-write ordering. Three sub-decisions are recorded rather than left implicit. **A subtree declaring no `SKILL.md` anywhere beneath it is not materialised**, because pi registers a skill only where a literal `SKILL.md` exists, so those bytes could never be referenced and copying them would be a data-dump channel that never has to look like a skill; the test is "anywhere beneath" and not "at the root" because pi keeps recursing while a directory has no `SKILL.md`, and a root-only rule would have recreated this very defect one level down. **`100755` stays rejected**, so a skill's scripts are invoked as `bash script.sh`: `/job` is `:ro` and files land `0444`, so accepting the mode and writing `0444` anyway would accept what the repo asked for and silently strip it, while `0555` would have the worker grant execve on repo bytes. **A cap breach REFUSES the job** rather than truncating, because a truncated skill IS this defect and which files survived would be decided by git's tree order. The `/job/pi/extensions` bullet's PREMISE was rewritten (it asserted the materialiser "only ever emits ... SKILL.md", now false) while its CONCLUSION is untouched: `extensions/` is still never written, so discovery remains the only path a repo extension has ever had. Acceptance gains the symlink-inside-a-skill-subdirectory case and the cap cases. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: four terminal reasons (`pi-too-many-files`, `pi-file-too-large`, `pi-too-large`, `pi-path-collision`), plus `sha-gone`, which the enum had always omitted. The `pi-` prefix is load-bearing rather than decorative: the nested `session.reason` enum already carries a bare `too-large`, and two enums in one record sharing a token is how a reader misattributes a refusal. **INT-SDK-SESSION-OPTIONS UNCHANGED, checked**, and the check is the interesting one: it has always written the layout as `.pi/skills/**/SKILL.md`, one level deeper than the code implemented, so the spec was right and the code has now caught up to it rather than the other way round. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked** — no mount, no flag, no env var; the widened content rides the `/job:ro` bind that already existed. Repaired in passing, because this change made it unavoidable: `makePrepareWorkspace` leaked its `mkdtemp`'d job dir on EVERY policy refusal, since a refusal carries no `jobDir` and both teardown paths guard on `prepared?.jobDir` — true of `sha-gone` since it shipped, and about to be hit on every delivery by a repo that breaches a cap. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **INT-WEBHOOK-PAYLOAD-SUBSET AMENDED**: `pull_request_review` joins the consumed events as a SECOND event name on one trigger type (`submitted` only; `edited` and `dismissed` drop as `unhandled-event`, since an edit re-fires on text already paid for and a dismissal withdraws a verdict rather than stating one), and the body-field list gains `review.{id, body, state, author_association}` — the PR fields need no addition, because the review payload carries the full PR object and the projection was always shape-gated rather than event-gated. Three clauses are normative rather than descriptive. **`review.state` is folded to lower case on projection**, because GitHub spells it `approved` on the webhook and `APPROVED` on `GET /pulls/{n}/reviews`, so without one fold point the identical review would produce two different jobs depending on transport and a polled `COMMENTED` would slip past the empty-body refusal; the parity test drives both spellings. **`review.user` is deliberately NOT consumed** — `sender.id` is the only identity the gate and the bot-loop guard read, and a login is PII with no reader. **`review.id` is consumed** because a review's inline comments ride `pull_request_review_comment`, an event this contract does not consume. That last one carries a correction to the issue's own framing, recorded because the record should not stay wrong: #66 justified `review.id` by the line-comments-only case, which is precisely the case the `no-review-body` refusal drops, so the id in fact earns its place on the `approved`/`changes_requested` reviews that carry inline comments AND fire — the residual is `OQ-021`. The **Why** gains the sentence the change actually needed: it said `pull_request.author_association` "gates only auto actions", which became false by omission, and it now states that `review.author_association` is the same class of field gating a DIFFERENT arm, with the reason the fields differ. The synthesized-subset clause gains `/pulls/{n}/reviews` and `poll-rv<review>`. Acceptance gains the two directional gate cases and the case-fold case. **INT-TRIGGERS-FILE-CONTRACT AMENDED**: the github action vocabulary goes to five with `review_submitted`, spelled as a compound so both halves stay greppable in GitHub's docs (the `label_updated` precedent) and riding `pull_request` rather than becoming a fifth `on.type`, because GitLab's `approved` already rides `pull_request` and a new type would have made one forge's review a type and the other's an action. Records that `approved` is NOT this word renamed — `approved` is one verdict, `review_submitted` is every verdict — which is exactly what the new optional **`on.reviewState`** narrows, github-only and legal only beside `review_submitted`, with four load-time refusals including that last one, because a `reviewState` beside `["opened","synchronize"]` reads as a narrowing and does the opposite. The stale claim that `approved` "has no GitHub counterpart at all" is removed here and in `docs/gitlab.md`. **INT-CONTAINER-JOB-INPUTS AMENDED**: "plus three additions" becomes four, `review` gets the data-by-placement clause `comment` has (body to the prompt, `id`/`state`/`author_association` to `event.json` only), and a new clause records that on a review-triggered job `matched.action` (`review_submitted`, the file's word) and the record's own `action` (`submitted`, GitHub's word) deliberately DIFFER — the first GitHub case where they do, which makes the existing "for `pull_request` the `action`" sentence read as the rule's action rather than the payload's. **INT-GITLAB-, INT-FORGEJO- and INT-AZURE-PAYLOAD-SUBSET UNCHANGED, checked** — no other forge reports a review verdict, and `on.reviewState` is refused on all three at load. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked** — `no-review-body`, `review-author-not-allowed` and `review-state-not-matched` are RECEIVER drop reasons, which are log fields and not the record's closed terminal-outcome enum. |
 | 2026-08-08 | Issue #103, two records that disagreed with the code. **INT-RUN-HISTORY-FILE-CONTRACT**: the nested `session.reason` enum was documented as CLOSED while omitting `promote-failed`, which `promoteSession`'s outer catch returns on any fs fault during the swap and which `mergeSession` writes straight into the record on the completed path — a full disk would have produced a token the spec called impossible. Added, together with a producer table, because the enum reads as one flat list while three separate code paths write it (resolve, runner, promote) and a refused promotion WINS over the other two. Recorded three things the list cannot show: `expired` never arrives from the promote path, `promoted` is a return value that reaches no record, and `no-key` is deliberately NOT in the enum — a DI-seam backstop unreachable in a wired worker, since `sessionKeyFor` is total and binary so `resolveSession` returns `null` rather than a keyless session. Pinned by a new fault-injection test in `worker/test/session-store.test.mjs`. **INT-SDK-SESSION-OPTIONS**: the `additionalExtensionPaths` comment claimed operator-staged pi packages "ride this same option" as `PI_GLOBAL_ALLOW_EXTENSIONS`; the spread is and remains UNCONDITIONAL, so the comment was the defect, in both this file and `image/runner/src/loader.mjs`. Corrected to state the split and why (the worker applies `run.packages` before emitting `PI_PACKAGES`, so re-gating here would withhold what the operator armed), and the previously untested `allowGlobalExtensions: false` case is now pinned in `image/runner/test/loader.test.mjs`. **INT-SESSION-STORE-CONTRACT UNCHANGED, checked** — its write-path prose names no reason tokens, so the drift could only ever have been visible from the record's own contract. |

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -361,6 +361,110 @@ test("with retention ON, cleanup retains the directory under the sandbox root", 
 		assert.equal(existsSync(join(sandboxDir, "gh-1", "prompt.md")), true, "the run's /job inputs travelled with it");
 		const manifest = JSON.parse(readFileSync(join(sandboxDir, "gh-1", "manifest.json"), "utf8"));
 		assert.equal(manifest.workspace, join(sandboxDir, "gh-1", "workspace"), "the workspace path follows the rename");
+	} finally {
+		cleanup();
+	}
+});
+
+// --- run.skillsDir injection (issue #60, REQ-PER-TRIGGER-SKILLS) ---
+
+test("a job with run.skillsDir gets jobDir/trigger-skills; one without gets no such directory", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const seen = [];
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			injectSkills: (src, dest) => {
+				seen.push({ src, dest });
+				mkdirSync(dest, { recursive: true });
+				return { dirs: 1, files: 2, bytes: 30, skipped: { symlinks: 0, badNames: 0, nonRegular: 0 } };
+			},
+			preparers: { github: async (_j, _t, { jobDir }) => ({ jobDir, workspace: join(jobDir, "workspace"), sha: "s" }) },
+			forgeFor: () => ({ host: {} }),
+		});
+
+		const withDir = await prepareWorkspace({ kind: "github", repo: "a/b", skillsDir: "/srv/skills" }, "tok", {});
+		assert.equal(seen.length, 1);
+		assert.equal(seen[0].src, "/srv/skills");
+		assert.equal(seen[0].dest, join(withDir.jobDir, "trigger-skills"), "the container path's last segment is fixed");
+		assert.equal(existsSync(join(withDir.jobDir, "trigger-skills")), true);
+
+		const without = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", {});
+		assert.equal(seen.length, 1, "a job without run.skillsDir must not call the copier at all");
+		assert.equal(existsSync(join(without.jobDir, "trigger-skills")), false);
+	} finally {
+		cleanup();
+	}
+});
+
+test("the injection runs for BOTH kinds -- a local job takes the same path a forge job does", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const seen = [];
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			injectSkills: (src, dest) => {
+				seen.push(dest);
+				mkdirSync(dest, { recursive: true });
+				return { dirs: 1, files: 1, bytes: 3, skipped: { symlinks: 0, badNames: 0, nonRegular: 0 } };
+			},
+			prepareLocal: async ({ jobDir }) => ({ jobDir, workspace: "/f", sha: "s" }),
+			preparers: {},
+			forgeFor: () => ({ host: {} }),
+		});
+		await prepareWorkspace({ kind: "local", folder: "/f", flow: "tidy", task: "t", skillsDir: "/srv/skills" }, null, {});
+		assert.equal(seen.length, 1, "a cron job must inject too -- the copy site is shared on purpose");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a copier refusal is a policy return that removes the jobDir and never reaches the preparer", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		let preparerRan = false;
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			injectSkills: () => ({ refused: "skills-dir-empty" }),
+			preparers: {
+				github: async () => {
+					preparerRan = true;
+					return { outcome: "ok" };
+				},
+			},
+			forgeFor: () => ({ host: {} }),
+		});
+		const refused = await prepareWorkspace({ kind: "github", repo: "a/b", skillsDir: "/srv/skills" }, "tok", {});
+		assert.deepEqual(refused, { outcome: "policy", reason: "skills-dir-empty" });
+		assert.equal(preparerRan, false, "the clone must not run behind a refused injection");
+		assert.deepEqual(readdirSync(jobsDir), [], "the refused job's directory was left on disk");
+	} finally {
+		cleanup();
+	}
+});
+
+test("the injection log line carries COUNTS only, never a host path or a skill name", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const lines = [];
+		const prepareWorkspace = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:latest",
+			log: (event, fields) => lines.push({ event, fields }),
+			injectSkills: (_src, dest) => {
+				mkdirSync(dest, { recursive: true });
+				return { dirs: 2, files: 5, bytes: 900, skipped: { symlinks: 1, badNames: 0, nonRegular: 0 } };
+			},
+			preparers: { github: async (_j, _t, { jobDir }) => ({ jobDir, workspace: "/w", sha: "s" }) },
+			forgeFor: () => ({ host: {} }),
+		});
+		await prepareWorkspace({ kind: "github", repo: "a/b", skillsDir: "/srv/secret-layout/skills" }, "tok", {});
+		const line = lines.find((l) => l.event === "trigger_skills_injected");
+		assert.deepEqual(line.fields, { dirs: 2, files: 5, bytes: 900 });
+		assert.ok(!JSON.stringify(line).includes("secret-layout"), "the log line leaked the host path");
 	} finally {
 		cleanup();
 	}

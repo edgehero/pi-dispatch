@@ -16,7 +16,7 @@ export function makeQueue(connection) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, { folder, flow, task, provider, model, maxTurns, image, chainDepth, parentJobId, jobId, now = new Date() }) {
+export async function enqueueLocalJob(queue, { folder, flow, task, provider, model, maxTurns, image, skillsDir, chainDepth, parentJobId, jobId, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key.
@@ -33,6 +33,11 @@ export async function enqueueLocalJob(queue, { folder, flow, task, provider, mod
 		model,
 		maxTurns,
 		...(image !== undefined && { image }),
+		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
+		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
+		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the
+		// delivery -- and `trigger` is the object copied into /job/event.json.
+		...(skillsDir !== undefined && { skillsDir }),
 		...(chainDepth !== undefined && { chainDepth }),
 		...(parentJobId !== undefined && { parentJobId }),
 	};
@@ -110,7 +115,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, resume, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, skillsDir, resume, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -133,6 +138,11 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		maxTurns,
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
+		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
+		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
+		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the
+		// delivery -- and `trigger` is the object copied into /job/event.json.
+		...(skillsDir !== undefined && { skillsDir }),
 		...(resume !== undefined && { resume }),
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;

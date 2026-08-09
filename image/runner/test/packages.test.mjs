@@ -133,7 +133,9 @@ test("root matching is by path segment, so a sibling root cannot claim another's
 	];
 	assert.deepEqual(findShadowedSkills(diagnostics, { packageRoots: ["/opt/pi-global/packages/tool"] }), []);
 	assert.equal(findShadowedSkills(diagnostics, { packageRoots: [`${PACKAGE_ROOT}/`] }).length, 1, "a trailing slash still matches");
-	assert.deepEqual(PROTECTED_SKILL_ROOTS, ["/job/pi/skills", "/opt/pi-global/skills"]);
+	// Exact on purpose (issue #60 added the middle entry): a root that quietly leaves this list stops
+	// being defended against a staged package, with no other test noticing.
+	assert.deepEqual(PROTECTED_SKILL_ROOTS, ["/job/pi/skills", "/job/trigger-skills", "/opt/pi-global/skills"]);
 });
 
 test("isUnderAnyRoot and owningRoot share the segment boundary, and owningRoot names the FIRST match", () => {

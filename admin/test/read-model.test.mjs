@@ -448,10 +448,10 @@ test("readTriggers normalizes each on.type into its discriminated display record
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
   assert.deepEqual(res.triggers, [
-    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, resume: false },
-    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, resume: false, replicas: null, forge: "github" },
-    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, resume: false, replicas: null, forge: "github" },
-    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, resume: false, replicas: null, forge: "github" },
+    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, skillsDir: null, resume: false },
+    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, skillsDir: null, resume: false, replicas: null, forge: "github" },
+    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, skillsDir: null, resume: false, replicas: null, forge: "github" },
+    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, skillsDir: null, resume: false, replicas: null, forge: "github" },
   ]);
 });
 
@@ -516,7 +516,7 @@ test("readTriggers skips an entry that is not a usable { on, run } object (viewe
     }),
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
-  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, resume: false, replicas: null, forge: "github" }]);
+  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, skillsDir: null, resume: false, replicas: null, forge: "github" }]);
 });
 
 test("readTriggers returns { invalid } when there is no triggers array", () => {

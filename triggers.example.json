@@ -1,7 +1,7 @@
 {
   "triggers": [
     { "on": { "type": "cron", "id": "nightly-tidy", "pattern": "0 3 * * *" }, "run": { "kind": "local", "folder": "/absolute/path/to/your/project", "flow": "tidy", "task": "dedupe imports and run the formatter", "image": "pi-job:latest" } },
-    { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "github", "flow": "frontend-fix", "packages": false } },
+    { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "github", "flow": "frontend-fix", "packages": false, "skillsDir": "/absolute/path/to/your/skills" } },
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "github", "flow": "fix", "resume": true } },
     { "on": { "type": "pull_request", "action": ["labeled"], "any": ["pi:review"] }, "run": { "kind": "github", "flow": "review" } },
     { "on": { "type": "pull_request", "action": ["opened", "synchronize"] }, "run": { "kind": "github", "flow": "review" } },

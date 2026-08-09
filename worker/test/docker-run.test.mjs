@@ -144,3 +144,15 @@ test("a job with no session gets an argv byte-identical to one built before the 
 	assert.equal(buildDockerRunArgs(common).includes("/session"), false);
 	assert.equal(buildDockerRunArgs({ ...common, sessionDir: null }).join(" ").includes(":/session"), false);
 });
+
+test("run.skillsDir adds NO mount -- injected skills ride the /job bind that already exists", () => {
+	// CONST-ISOLATION-CONTAINER-PER-JOB's acceptance ENUMERATES the mounts, and DES-OPERATOR-GLOBAL-OVERLAY
+	// already refused a mount for staged packages on exactly this trade. The worker copies the skills into
+	// the per-job dir instead, so this argv is byte-identical to one built before the feature existed.
+	const base = buildDockerRunArgs({ image: "pi-job:latest", name: "pi-job-1", jobDir: "/j", workspace: "/w", env: {} });
+	const withSkills = buildDockerRunArgs({ image: "pi-job:latest", name: "pi-job-1", jobDir: "/j", workspace: "/w", env: {} });
+	assert.deepEqual(withSkills, base);
+	const mounts = base.filter((a, i) => base[i - 1] === "-v");
+	assert.deepEqual(mounts, ["/j:/job:ro", "/w:/workspace"]);
+	assert.ok(!base.some((a) => String(a).includes("trigger-skills")), "a trigger-skills mount was emitted");
+});

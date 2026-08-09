@@ -211,6 +211,7 @@ function normalizeCron(on, run, index, path, state) {
 
 	const packages = validatePackagesFlag(run, `cron trigger "${id}"`, path);
 	const image = validateImageRef(run, `cron trigger "${id}"`, path);
+	const skillsDir = validateSkillsDir(run, `cron trigger "${id}"`, path);
 	// RETURNED, not discarded like validateReplicas below, because `resume` still has a legal value on a
 	// cron entry: only `true` is refused (the local path has nothing to resume with), so what survives is
 	// `false` or absent. Both must keep reaching the job payload unchanged -- an operator who wrote down
@@ -227,7 +228,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(skillsDir !== undefined && { skillsDir }) },
 	};
 }
 
@@ -357,6 +358,46 @@ function validateImageRef(run, at, path) {
 }
 
 /**
+ * `run.skillsDir` (issue #60): a directory of operator-authored skills on the WORKER host, copied into
+ * this trigger's jobs and layered between the repo's own `.pi/skills` and the global overlay.
+ *
+ * Accepted on all four run kinds, for `run.image`'s reason restated: a skill set is a capability of the
+ * FLOW, and a label/comment/PR trigger runs the flows a cron trigger runs. The copy site in prepare.mjs
+ * is shared by every kind, so accepting it everywhere accepts it where it works.
+ *
+ * TWO checks are deliberately NOT here, and both would be bugs if they were.
+ *
+ * EXISTENCE is not checked, because BOTH services parse this file and the receiver may run on a
+ * different host entirely, where a worker-side path means nothing. That is `run.folder`'s split
+ * exactly: type here, reality where it can be known -- at worker boot for cron (schedules.mjs) and
+ * pre-spend per job for every kind (processor.mjs).
+ *
+ * ABSOLUTENESS is not checked either, and this one is subtler. `path.isAbsolute` is OS-DEPENDENT:
+ * `"C:\\skills"` is absolute on win32 and relative on posix. This worker is cross-platform (see
+ * materialize.mjs's safeJoin, written with path.relative for that reason), so enforcing it in the
+ * SHARED validator would let a Windows worker and a Linux receiver disagree about whether the same
+ * reviewed file is valid -- a file that loads on one service and refuses on the other is worse than a
+ * late refusal. The worker enforces it where the answer is knowable.
+ *
+ * No charset either: this is an absolute host path chosen by an operator who can already name any path
+ * in `run.folder`, so traversal is not a threat model here. Containment is enforced where it can be, on
+ * the DESTINATION side, by copy-tree.mjs's validated-segment rebuild and safeJoin.
+ */
+function validateSkillsDir(run, at, path) {
+	const dir = run.skillsDir;
+	if (dir === undefined) return undefined;
+	if (typeof dir !== "string" || dir.trim() === "") {
+		throw configError(`${at}: run.skillsDir must be a non-empty string when present: ${path}`);
+	}
+	// Whitespace is refused rather than trimmed, for validateImageRef's reason: the file is the reviewed
+	// artifact and must not disagree with what runs.
+	if (dir !== dir.trim()) {
+		throw configError(`${at}: run.skillsDir must not have leading or trailing whitespace (got ${JSON.stringify(dir)}): ${path}`);
+	}
+	return dir;
+}
+
+/**
  * Validate an `{any, all, none}` label predicate. Selectors are validated as arrays of non-empty strings
  * BEFORE the positive-selector count, because `.length` is truthy on a string too -- a string selector
  * that reached the pure `matchesRule` in the receiver would throw there, breaking the gate's never-throw
@@ -464,12 +505,13 @@ function normalizeLabel(on, run, index, path) {
 	}
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
+	const skillsDir = validateSkillsDir(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -490,12 +532,13 @@ function normalizeComment(on, run, index, path, state) {
 	}
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
+	const skillsDir = validateSkillsDir(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -541,6 +584,7 @@ function normalizePullRequest(on, run, index, path) {
 	}
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
+	const skillsDir = validateSkillsDir(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
@@ -555,7 +599,7 @@ function normalizePullRequest(on, run, index, path) {
 			all: predicate.all,
 			none: predicate.none,
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }) },
 	};
 }
 

@@ -836,3 +836,63 @@ test("a staged extension resolves a dep from the package's OWN nested node_modul
 	const packageErrors = loader.getExtensions().errors.filter((e) => e.path.startsWith(pkg));
 	assert.deepEqual(packageErrors, [], `the staged extension must load with no error: ${JSON.stringify(packageErrors)}`);
 });
+
+// --- REQ-PER-TRIGGER-SKILLS: the injected tier sits BETWEEN the repo and the overlay (issue #60) ---
+
+const INJECTED_SENTINEL = "INJECTED-SKILL-SENTINEL-91c4";
+const INJECTED_BUGFIX_SENTINEL = "INJECTED-BUGFIX-SENTINEL-77de";
+const INJECTED_GLOBALONLY_SENTINEL = "INJECTED-GLOBALONLY-SENTINEL-2b8f";
+
+/**
+ * A /job/trigger-skills tree: a skill only it has, one colliding with the REPO's bug-fix, and one
+ * colliding with the OVERLAY's global-only. Those two collisions are what pin the tier's position from
+ * both sides -- the repo must beat it, and it must beat the overlay.
+ */
+function injectedSkills() {
+	const dir = mkdtempSync(join(tmpdir(), "pi-injected-"));
+	mkdirSync(join(dir, "injected-only"), { recursive: true });
+	writeFileSync(join(dir, "injected-only", "SKILL.md"), `---\nname: injected-only\ndescription: ${INJECTED_SENTINEL} a per-trigger skill\n---\n\nDo the thing.\n`);
+	mkdirSync(join(dir, "bug-fix"), { recursive: true });
+	writeFileSync(join(dir, "bug-fix", "SKILL.md"), `---\nname: bug-fix\ndescription: ${INJECTED_BUGFIX_SENTINEL} the INJECTED bug-fix\n---\n\nInjected steps.\n`);
+	mkdirSync(join(dir, "global-only"), { recursive: true });
+	writeFileSync(join(dir, "global-only", "SKILL.md"), `---\nname: global-only\ndescription: ${INJECTED_GLOBALONLY_SENTINEL} the INJECTED global-only\n---\n\nInjected house rule.\n`);
+	return dir;
+}
+
+test("an injected trigger skill loads, and a REPO skill of the same name still overrides it", { skip }, async () => {
+	const { loader } = await load({ triggerSkillsDir: injectedSkills() });
+	const { skills } = loader.getSkills();
+	assert.ok(skills.find((s) => s.name === "injected-only")?.description.includes(INJECTED_SENTINEL), "an injected-only skill must load");
+	const bugFix = skills.find((s) => s.name === "bug-fix");
+	assert.ok(bugFix.description.includes(SKILL_SENTINEL), "the REPO bug-fix must win: the repo path is still first");
+	assert.ok(!bugFix.description.includes(INJECTED_BUGFIX_SENTINEL), "the injected bug-fix must be shadowed, not merged");
+});
+
+test("an injected skill overrides an OVERLAY skill of the same name -- injected sits between them", { skip }, async () => {
+	// The narrower operator statement wins: "for THIS trigger" refines "for this deployment".
+	const { loader } = await load({ triggerSkillsDir: injectedSkills(), globalPiDir: globalOverlay() });
+	const { skills } = loader.getSkills();
+	const globalOnly = skills.find((s) => s.name === "global-only");
+	assert.ok(globalOnly.description.includes(INJECTED_GLOBALONLY_SENTINEL), "the INJECTED global-only must win over the overlay's");
+	assert.ok(!globalOnly.description.includes(GLOBAL_SKILL_SENTINEL), "the overlay's copy must be shadowed");
+	// And the repo still beats both, so the full order is repo > injected > overlay.
+	assert.ok(skills.find((s) => s.name === "bug-fix").description.includes(SKILL_SENTINEL));
+});
+
+test("no injected dir -> the loader behaves exactly as before", { skip }, async () => {
+	const { loader } = await load({ triggerSkillsDir: join(tmpdir(), "pi-injected-absent-xyz") });
+	const { skills } = loader.getSkills();
+	assert.ok(!skills.some((s) => s.name === "injected-only"), "an absent injected dir contributes nothing");
+	assert.ok(skills.find((s) => s.name === "bug-fix").description.includes(SKILL_SENTINEL), "and the repo skill is untouched");
+});
+
+test("a staged package cannot shadow an INJECTED skill either", { skip }, async () => {
+	// pi puts a package's skill paths FIRST no matter where we list the package, so the injected root has
+	// to be in protectedSkillRoots or a package silently takes its name -- the same hole the repo and
+	// overlay roots are defended against.
+	const injected = injectedSkills();
+	const pkg = fixturePackage({ skillName: "injected-only" });
+	const { loader } = await load({ triggerSkillsDir: injected, packagePaths: [pkg] });
+	const skill = loader.getSkills().skills.find((s) => s.name === "injected-only");
+	assert.ok(skill.description.includes(INJECTED_SENTINEL), "the INJECTED skill must be put back in force");
+});

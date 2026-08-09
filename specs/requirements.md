@@ -707,6 +707,44 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ---
 
+## REQ-PER-TRIGGER-SKILLS
+
+- **Statement**: A trigger may name a directory of operator-authored skills on the worker host
+  (`run.skillsDir`). Its `<name>/SKILL.md` children shall be **copied** into that job's `/job` inputs and
+  layered between the serviced repo's own `.pi/skills` and the deployment-wide overlay: **repo > injected
+  > overlay**. Absent, a job is byte-identical to one prepared before this existed.
+- **Scope**: All four run kinds. Operator-authored config from the reviewed `triggers.json` only. NOTHING
+  reachable from a webhook payload, an issue or comment body, or `dispatch_run` can supply it, and no
+  model-callable tool can set it: choosing which skills a job loads is choosing what the agent can do,
+  which is `run.image`'s answer rather than `f.forge`'s.
+- **Why**: `run.flow` could only name a flow that already existed, either committed to the serviced repo
+  or baked into the deployment-wide overlay. So an operator could not run a flow against a repo that has
+  not adopted `.pi/skills/`, A/B two versions of a flow across two triggers, or keep a private or
+  in-development flow out of a public repo's history. The overlay is the only operator-side path and it is
+  **per deployment**; this is the same capability at **per trigger** granularity, which is the granularity
+  the decision actually has.
+  **Copied, not mounted, and the copy is the point.** `:ro` bounds the container, not the host, and pi
+  reads a skill's body on demand, so a live bind could change under a running agent mid-job. Copying gives
+  the injected tier the property `INT-CONTAINER-JOB-INPUTS` gives `/job/pi`: the instruction set cannot
+  move while the agent works. It also adds **no mount**, so `CONST-ISOLATION-CONTAINER-PER-JOB`'s
+  enumeration is untouched, and a resurrected sandbox re-mounts the same job dir and sees the same skills
+  for free rather than re-reading a host directory that may since have changed.
+  **The middle tier is where it is because narrower wins.** "For THIS trigger" is a more specific operator
+  statement than "for this deployment", so it refines the overlay; the repo's own `.pi/` is more specific
+  still and refines both. That is the same most-specific-wins ordering the persona layers already use.
+- **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-SDK-SESSION-OPTIONS`,
+  `REQ-GLOBAL-PI-OVERLAY`, `DES-TRIGGER-SKILLS-COPIED-NOT-MOUNTED`, `DES-AI-TRIGGER-FLOW-GATE`
+- **Acceptance**: Given a trigger naming a directory of skills, a job of that trigger loads them; a repo
+  skill of the same name still wins; an overlay skill of the same name loses; and a staged package cannot
+  take any of their names. Given no `run.skillsDir`, the docker argv, the `/job` tree and the job payload
+  are byte-identical to before the feature. Given a path that is absent or not a directory, the job is
+  refused **pre-spend** with `skills-dir-missing`, no token is minted and no budget slot is consumed.
+  Given a directory that is empty or over a cap, the job is refused in prepare, before the budget, with
+  the cap named. Given a flow that exists ONLY in an injected directory, a chain request or a
+  `dispatch_run` for it is refused, and `doctor` warns that an injected `ai-trigger: allow` is never read.
+  No mount is added to any container, and the host path appears in no container-readable file and no log
+  line.
+
 ## REQ-GLOBAL-PI-OVERLAY
 
 - **Statement**: An operator shall be able to reuse their existing host `pi` setup in every job. A single
@@ -780,6 +818,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   package source that does not resolve with no error and no diagnostic, so an unmounted package would run
   the flow to a clean exit `0` without the tools it was written for. Hence `doctor` surfaces the staged set,
   its armed/dormant state, and the four silent-failure modes.
+- **A third skill tier sits between the overlay and the repo** (`REQ-PER-TRIGGER-SKILLS`, issue #60).
+  "Repo wins on conflict" is unchanged and now reads in full as **repo > injected > overlay**: a trigger's
+  own `run.skillsDir` refines this deployment-wide overlay, because "for THIS trigger" is the narrower
+  operator statement, and is itself refined by the serviced repo's committed `.pi/`. Both halves are
+  enforced rather than asserted -- by path order in `additionalSkillPaths`, and again by
+  `skillsOverride`'s protected roots, which is what keeps a staged package from taking any of the three.
 - **Traces to**: `DES-OPERATOR-GLOBAL-OVERLAY`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`,
   `INT-CONTAINER-JOB-INPUTS`, `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`,
   `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`,
@@ -1071,6 +1115,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-09 | Issue #60 (Gap 2). **NEW `REQ-PER-TRIGGER-SKILLS`**: a trigger may name a worker-host directory of skills, copied per job into `/job/trigger-skills` and layered repo > injected > overlay. Operator-authored only: nothing reachable from a webhook payload, an issue or comment body, or `dispatch_run` can supply it, and no model-callable tool can set it, because choosing which skills a job loads is choosing what the agent can do -- `run.image`'s answer rather than `f.forge`'s. **REQ-GLOBAL-PI-OVERLAY AMENDED**: its "repo wins on conflict" now reads in full as repo > injected > overlay, with the middle tier justified on specificity ("for THIS trigger" is narrower than "for this deployment") rather than on trust, since both are the operator's own. **REQ-UPSTREAM-CONTRACT-TESTS UNCHANGED, checked**: "a repo skill resolves once, from `/job/pi/skills`" is still exactly true -- the injected tier adds a second SOURCE, never a second copy of the same skill, and a name collision resolves to exactly one winner by the ordering above. **REQ-RESURRECTABLE-SANDBOX UNCHANGED, checked**, and it is a dividend of copying rather than mounting: `retainJobDir` renames the whole job dir, so a resurrected sandbox sees the skills the run actually saw instead of re-reading a host directory that may since have changed. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the Statement enumerated the gated PR actions (`opened, synchronize, reopened`) and named the PR `author_association`, so a review action inherited neither branch. It now carries the third arm gated on the REVIEWER's `review.author_association`, the optional `on.reviewState` narrowing with its `review-state-not-matched` drop, and the `no-review-body` refusal of an empty `commented` review (with an empty-bodied `approved` or `changes_requested` still firing, since there the verdict is the signal). Acceptance gains the two directional cases as an explicit PAIR, plus the empty-body, unlisted-verdict and self-review cases. The Why records why the field differs and points at `CONST-TRIGGER-AUTHOR-GATE` for the argument. **REQ-DEDUP-BY-DELIVERY-GUID UNCHANGED, checked** — a review delivery carries the same `X-GitHub-Delivery` GUID every other event does, and the polled form mints `poll-rv<reviewId>` inside the existing `gh-` space, so the dedup contract is exercised rather than extended. **REQ-RESUMABLE-SESSION UNCHANGED, checked** — a review-triggered job on a PR resolves its session key from target type and head ref exactly as a `synchronize` one does; what the change DID require was carrying the review into the resumed prompt's data region, since that envelope says "address the activity quoted below" and would otherwise have quoted nothing. **REQ-REPLICA-RUNS UNCHANGED, checked** — replicas on a review-triggered PR target inherit `OQ-017` unchanged. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked**, and load-bearing: it is what bounds the widened trigger surface recorded in `OQ-020`. |
 | 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup): **REQ-GLOBAL-PI-OVERLAY** acceptance gains the discovery cases (a host package stages at the exact version on disk; a declared entry wins and prints the version it shadowed; `--no-host-packages`; a package contributing no pi resources, an autoload-off one, a git source and the admin package are each skipped or dropped WITH A NAMED REASON; the legacy global lookup honoured only when the managed path is absent; a malformed `settings.json` discovers nothing at exit 0), the extension-enablement cases (an extension disabled with `pi config` is no longer copied, a glob pattern is copied and reported as unevaluated), the refresh case (a re-stage reaches the next job with no restart, a torn read keeps last-known-good), and the receipt's `from` field. Records that repo-declared packages stay refused, with the forge-token reason, and that a repo's `.pi/extensions` loading is not a reversal of it because `/workspace` is merge-gated. One CORRECTION carried from the issue: the issue's proposed predicate ("no `pi` key means not a pi package") is **wrong at the 0.80.7 pin** and would have silently dropped packages that ship only a convention dir. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new doctor checks are all warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |
 | 2026-08-04 | The audit's session findings (issue #99). **REQ-RESUMABLE-SESSION amended**: Statement and Scope now match the code. The "one case fails CLOSED" clause was specified and never built, so an armed `run.resume` with `PI_SESSIONS_DIR` unset ran cold and completed green, indistinguishable from a job that never set the flag, which is precisely the belief-confirming failure the clause was written to stop; the pre-spend policy refusal now exists, reserving no budget slot and starting no container. Cron moves out of Scope's "all four trigger kinds": the session store reaches only the forge preparers, so a local job could never resolve a key, and `run.resume` on a cron trigger is refused fail-loud at load rather than accepted and ignored (`run.replicas`' precedent and its reason). The key material for cron exists in `session-key.mjs`, so the refusal names it as a gap to close, not a limit. Key material spelled as `(forge, repository, head branch)` — the forge kind was always the first component. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new gate is free and pre-reserve, in the same band as the image and branch-protection refusals. |

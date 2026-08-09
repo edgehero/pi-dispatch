@@ -157,6 +157,11 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// (INT-OUTBOX-CONTRACT's explicit-property-reads rule). Undefined stays undefined, so a parent with
 					// no image chains a child whose data is byte-identical to today's.
 					image: job.data?.image,
+					// The parent's injected skills follow the child, off validated JOB DATA and never off the
+					// request file (REQ-PER-TRIGGER-SKILLS). Same reason `image` does: a chained child runs the
+					// same operator's flows and, without them, would look up a skill that is not there, write a
+					// plausible report and exit 0. It is NOT part of chainedJobId, for the reason stated below.
+					skillsDir: job.data?.skillsDir,
 					chainDepth: childDepth,
 					parentJobId: job.id,
 					// chainedJobId deliberately does NOT take the image: the child's identity is (parent, flow, task).

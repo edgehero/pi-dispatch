@@ -172,6 +172,12 @@ or what it costs):
   ([`docs/job-image.md`](docs/job-image.md)).
 - `"packages": false` opts one trigger out of the staged third-party pi packages, which is also how a
   workflow extension is withheld from one flow ([`docs/workflows.md`](docs/workflows.md)).
+- `"skillsDir"` points at a directory of skills on the worker host, in the same `<name>/SKILL.md` layout
+  as your own `~/.pi/agent/skills`. They are copied into that trigger's jobs and layered under the repo's
+  own `.pi/skills` and over the global overlay, so a repo skill of the same name still wins. Use it to run
+  a flow against a repo that has not adopted `.pi/skills/` at all, to A/B two versions of a flow across two
+  triggers, or to keep a private flow out of a public repo's history
+  ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
 - `"replicas": 2` (GitHub only) races independent sandboxes on the same event and opens one PR per
   replica. Each replica spends its own budget slot ([`docs/replicas.md`](docs/replicas.md)).
 - `"resume": true` continues the session that opened the PR ([`docs/sessions.md`](docs/sessions.md)).

@@ -44,8 +44,8 @@
  * about severity: a --fix run still exits by the same failed/ok logic, warns stay warns, and the fix pass
  * happens at most once (check, fix, re-check -- never a loop).
  */
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -54,6 +54,7 @@ import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStageManifest } from "./packages.mjs";
+import { copySkillTree } from "./copy-tree.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -250,7 +251,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, images, forges, repositories } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, images, skillsDirs, forges, repositories } = readTriggerFacts(env, fileExists, cwd);
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -277,6 +278,52 @@ export async function collectChecks(env, seams) {
 				}
 			: {}),
 	});
+
+	// REQ-PER-TRIGGER-SKILLS (issue #60). Every distinct `run.skillsDir`, checked BEFORE anything fires,
+	// because the worker's own gate for these refuses at job time -- correct, but at 03:00 in a log nobody
+	// is reading. A deployment naming none adds no lines at all, so its output is byte-identical.
+	for (const dir of skillsDirs) {
+		const present = dirExists(dir);
+		checks.push({
+			ok: present,
+			label: `Trigger skills dir present (${dir})`,
+			fix: `create ${dir} with one <name>/SKILL.md per skill, or drop run.skillsDir from that trigger -- every job of it refuses pre-spend while the path is absent`,
+		});
+		if (!present) continue;
+		// A dry run of the real copier: same walker, same caps, same lstat symlink rule, into a throwaway
+		// destination. Anything it would refuse at job time is reported here instead, in the operator's own
+		// terminal, with the reason the job would have carried.
+		const probe = probeSkillsDir(dir);
+		if (probe.refused) {
+			checks.push({
+				ok: false,
+				label: `Trigger skills dir is usable (${dir})`,
+				fix: probeFix(probe.refused, dir),
+			});
+			continue;
+		}
+		checks.push({ ok: true, label: `Trigger skills dir holds ${probe.dirs} skill(s), ${probe.files} file(s)` });
+		if (probe.skipped.symlinks > 0) {
+			checks.push({
+				ok: true,
+				warn: true,
+				label: `${probe.skipped.symlinks} entry(ies) under ${dir} are symlinks and are SKIPPED`,
+				fix: "the copier never follows a link (a link out of the tree would put a host file in a job container); replace them with real files if the jobs need them",
+			});
+		}
+		// Gap 5 of issue #60, and the one an operator cannot discover any other way: the ai-trigger gate
+		// reads the repo's committed .pi/skills at the pinned sha, so an injected SKILL.md carrying the
+		// opt-in is never consulted. Without this line the operator writes it and nothing honours it.
+		const chainable = aiTriggerNames(dir);
+		if (chainable.length > 0) {
+			checks.push({
+				ok: true,
+				warn: true,
+				label: `${chainable.length} injected skill(s) under ${dir} set ai-trigger: allow, which is NEVER read`,
+				fix: "injected skills are trigger-reachable but not AI-reachable: the gate reads the target repo's committed .pi/skills at the pinned sha, so chain and dispatch_run requests for these flows are refused. Commit the flow to the repo if a model must be able to start it",
+			});
+		}
+	}
 
 	// Issue #41: every DISTINCT image a trigger names in run.image, minus the deployment default already
 	// checked above. Two silent-failure modes, and both used to be impossible because there was one image.
@@ -1070,8 +1117,71 @@ function nodeCheck(version) {
  * worker boot (config.mjs, schedules.mjs), so re-reporting the parse failure here would only bury doctor's
  * own findings under a second copy of a diagnosis the operator already gets.
  */
+/** lstat, so a symlinked skillsDir is judged on its own inode -- copy-tree.mjs's rule, restated. */
+function dirExists(dir) {
+	try {
+		return lstatSync(dir).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Dry-run the REAL copier against a skills dir, into a throwaway destination that is removed again.
+ *
+ * Deliberately the same function the job path calls rather than a reimplementation of its rules: a
+ * second, agreeing-by-hand checker is how doctor comes to report green on a directory the worker then
+ * refuses. The cost is one copy of a bounded tree, on a command an operator runs by hand.
+ */
+function probeSkillsDir(dir) {
+	const scratch = mkdtempSync(join(tmpdir(), "pi-doctor-skills-"));
+	try {
+		return copySkillTree(dir, scratch);
+	} catch {
+		return { refused: "skills-dir-unreadable" };
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
+	}
+}
+
+/** The operator-facing fix line for each refusal the copier can return. */
+function probeFix(reason, dir) {
+	if (reason === "skills-dir-empty") {
+		return `${dir} holds no usable <name>/SKILL.md, so every job of that trigger refuses as skills-dir-empty -- point run.skillsDir at the directory whose CHILDREN are skill dirs (the ~/.pi/agent/skills layout)`;
+	}
+	if (reason === "skills-dir-too-deep") return `${dir} nests deeper than the copier walks -- flatten it`;
+	if (reason === "skills-dir-too-many-files") return `${dir} holds more files than one job may carry -- split the set across triggers`;
+	if (reason === "skills-dir-unreadable") return `${dir} could not be read -- check its permissions on the worker host`;
+	return `${dir} is over the injection size caps -- trim it, or split the set across triggers`;
+}
+
+/**
+ * The injected skills that carry `ai-trigger: allow`, which is the opt-in that will never be honoured.
+ *
+ * Reads only `<dir>/<name>/SKILL.md`, and never throws: this is a warning, and a doctor line must not be
+ * the thing that fails a doctor run. The frontmatter test mirrors flow-gate.mjs's -- deliberately a
+ * loose one here, because over-reporting a skill that would not have opened the gate anyway is harmless
+ * while missing one leaves the operator's opt-in silently dead.
+ */
+function aiTriggerNames(dir) {
+	const names = [];
+	try {
+		for (const name of readdirSync(dir)) {
+			try {
+				const text = readFileSync(join(dir, name, "SKILL.md"), "utf8");
+				if (/^ai-trigger:\s*("?)allow\1\s*$/m.test(text)) names.push(name);
+			} catch {
+				// no SKILL.md, or unreadable: not a skill that could have opted in.
+			}
+		}
+	} catch {
+		// unreadable dir: the presence check above already reported it.
+	}
+	return names;
+}
+
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, images: [], forges: [], repositories: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, images: [], skillsDirs: [], forges: [], repositories: [] };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1087,6 +1197,10 @@ function readTriggerFacts(env, fileExists, cwd) {
 			replicating: triggers.filter((t) => t.run.replicas > 1).length,
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
+			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,
+			// because the checks below cost a filesystem walk each and two triggers sharing a directory are one
+			// question.
+			skillsDirs: [...new Set(triggers.map((t) => t.run.skillsDir).filter((d) => typeof d === "string"))].sort(),
 			// The forges this file actually needs credentials for. Read from the triggers rather than from
 			// the env, so the check answers "is what you configured enough for what you wrote" instead of
 			// "did you set some variables".

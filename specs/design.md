@@ -1170,6 +1170,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Rejected**: reading the **working tree** rather than the object store — it reintroduces exactly the two
   holes the pinned-SHA read closes: an agent self-opening the gate by writing `SKILL.md` mid-run, and a
   symlink bypass that a blob-only object-store read cannot follow.
+- **Injected skills are trigger-reachable and NEVER AI-reachable, and that falls out rather than being
+  built** (`REQ-PER-TRIGGER-SKILLS`, issue #60). This gate reads `.pi/skills/<flow>/SKILL.md` from the
+  serviced repo's git OBJECT STORE at a pre-agent sha. A skill injected from the worker host has no
+  object-store presence at all, so the read finds nothing, the gate returns `no-skill`, and both callers
+  refuse. No new code, and the fail-closed direction is the right one: an operator's own reviewed
+  `triggers.json` entry is the authorization for a TRIGGER to run an injected flow, and that is a
+  different question from which flows a MODEL may fire.
+  The corollary is the part an operator cannot discover unaided, so it is stated rather than left implicit:
+  an injected `SKILL.md` carrying `ai-trigger: allow` is **never read**, and writing one is a silent no-op.
+  `doctor` warns when it finds one. Making injected skills AI-reachable was considered and refused for v1:
+  the opt-in would live in a tree the operator can edit at runtime, outside the merge gate that makes the
+  frontmatter meaningful, so the right shape would be an operator allowlist rather than frontmatter — the
+  same reasoning `REQ-GLOBAL-PI-OVERLAY` gives for refusing repo-declared packages. Residual `OQ-022`.
 - **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-NO-CONTEXT-FILES-MANDATORY`,
   `CONST-BUDGET-BEFORE-TOKENS`, `DES-ADMIN-VIA-PI-EXTENSION`
 
@@ -1341,6 +1354,57 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-TOKEN-ACCOUNTING-AND-CAPS`, `REQ-RUNNER-TURN-BUDGET`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-PI-VERSION-PINNED`, `INT-SDK-SESSION-OPTIONS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-010`, `OQ-011`
+
+## DES-TRIGGER-SKILLS-COPIED-NOT-MOUNTED
+
+- **Decision**: A trigger's `run.skillsDir` is **copied**, per job, into `<jobDir>/trigger-skills`, and
+  reaches the container at `/job/trigger-skills` on the `/job:ro` bind that already exists. No mount is
+  added. The copier is `worker/src/copy-tree.mjs`, shared with `import-pi`. Precedence is repo > injected
+  > overlay, in `additionalSkillPaths` and again in `skillsOverride`'s protected roots.
+- **Why**: Three reasons, and the mount-count one is the weakest of them.
+  **The copy is the pin.** `:ro` bounds the CONTAINER, not the host. pi reads a skill's body on demand
+  through the read tool, so under a live bind an operator editing their skills directory would change the
+  instructions of a job already running. Copying gives the injected tier exactly the property
+  `INT-CONTAINER-JOB-INPUTS` cites for materialising `.pi/` rather than letting pi discover it: the agent
+  cannot be handed a moving target.
+  **Symlinks get answered once, on the side that can answer them.** `loadSkillsFromDirInternal` follows
+  both file and directory symlinks. Under a mount, a directory symlink pointing at `/` would turn skill
+  discovery into a walk of the container filesystem, and one pointing into `/workspace` would alias
+  repo-controlled content into the operator-trusted tier. The host-side copier refuses links outright, so
+  the tree pi walks contains none.
+  **And it adds no mount.** `CONST-ISOLATION-CONTAINER-PER-JOB`'s acceptance ENUMERATES the mounts, and
+  this entry's sibling already refused a mount for staged packages on exactly that trade. A per-trigger
+  mount would be a worse case than the one the 2026-07-31 `/session` row argues for: `/session` is at
+  least worker-created and per-job, whereas this source is operator-named and shared across every job of
+  the trigger.
+  A fourth, smaller: `retainJobDir` renames the whole job dir and `buildSandboxRunArgs` re-mounts it, so a
+  resurrected sandbox sees the skills the run actually saw, rather than re-reading a host directory that
+  may have changed since.
+- **Rejected**:
+  - *A per-trigger `:ro` bind of the operator's directory* — the shape the issue originally sketched. It
+    costs an amendment to a constitutional enumeration for zero capability the copy lacks, and it is
+    weaker on three counts (the source can change under a running agent, the tree pi walks keeps whatever
+    symlinks the operator's tree has, and a resurrected sandbox re-mounts a moving target). The one thing
+    it buys, no per-job copy cost, is bought back by the caps. Honestly qualified: a bind's source path is
+    also legible from inside the container via `/proc/self/mountinfo`, which is host-layout disclosure the
+    design otherwise avoids — an increment rather than a new class, since `/job` and `/workspace` already
+    bind host paths.
+  - *Copy into the existing `/job/pi/skills`* — it would make repo skills and injected skills
+    indistinguishable, so precedence between them would be decided by copy order rather than a stated
+    rule, and it would put host-filesystem bytes into the tree whose acceptance promises "no host file
+    content anywhere in `/job`", making that clause ambiguous exactly where it must not be.
+  - *A host-side cache or hardlink farm shared across jobs* — cross-job host state is what
+    `CONST-ISOLATION-CONTAINER-PER-JOB`'s "none host-wide" clause excludes, and a hardlink is the same
+    inode the operator can rewrite mid-run, which forfeits the pin the copy exists to provide.
+  - *An env var telling the runner where the injected root is* — a second source of truth that can
+    disagree with the filesystem, silently and in the expensive direction (a variable set, a directory
+    that did not land, a job running without the skills its flow was written for). The worker creates the
+    directory only when the trigger set the field, so PRESENCE is the signal and `existsSync` is the whole
+    detection. `CONST-NO-CONTEXT-FILES-MANDATORY`'s "no env knob for this, deliberately" is the same
+    instinct, and `PI_PACKAGES` is not a counter-example: package paths are operator-chosen and variable
+    in count, so they must be told; this root is a fixed constant whose only variable is existence.
+- **Traces to**: `REQ-PER-TRIGGER-SKILLS`, `INT-CONTAINER-JOB-INPUTS`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `DES-OPERATOR-GLOBAL-OVERLAY`
 
 ## DES-OPERATOR-GLOBAL-OVERLAY
 
@@ -1741,6 +1805,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-09 | Issue #60 (Gap 2). **NEW `DES-TRIGGER-SKILLS-COPIED-NOT-MOUNTED`**: the injected skills are COPIED into the per-job dir rather than bind-mounted, and the mount-count argument is deliberately recorded as the WEAKEST of the three reasons. The copy is the PIN: `:ro` bounds the container and not the host, and pi reads a skill's body on demand, so under a live bind an operator editing their directory would change the instructions of a job already running. It also answers symlinks once on the host side, where `loadSkillsFromDirInternal` would otherwise follow both file and directory links -- a directory symlink at `/` would have turned skill discovery into a walk of the container filesystem. And it adds no mount, so this entry CAN borrow the argument the 2026-07-31 `/session` row explicitly could not. Four rejected alternatives recorded, including the per-trigger `:ro` bind the issue originally sketched (with the honest qualification that a bind's source path is legible via `/proc/self/mountinfo`) and an env var naming the injected root (a second source of truth that can disagree with the filesystem, silently and in the expensive direction). **DES-AI-TRIGGER-FLOW-GATE AMENDED**: injected skills are trigger-reachable and never AI-reachable, and it FALLS OUT rather than being built -- the gate reads the object store at a pre-agent sha and an injected skill has no object-store presence, so `no-skill` and both callers refuse. The corollary is stated because an operator cannot discover it: an injected `ai-trigger: allow` is never read, `doctor` warns, and the residual is `OQ-022`. **DES-OPERATOR-GLOBAL-OVERLAY UNCHANGED, checked** -- its own rejected `/opt/pi-packages:ro` mount is the precedent the new entry cites, and the overlay's tier is unmoved. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **DES-PR-TRIGGER-ROUTES-TO-FLOW AMENDED**: a submitted review routes through this same decision rather than getting one of its own — the harness still implements no review behaviour, does not change the clone ref, and hands the flow the PR context plus the review's four fields. Two consequences recorded because they are the shape of the decision rather than details of it: `review.state` reaches the flow as DATA, so "only act on changes_requested" is a flow decision, while `on.reviewState` is the operator's separate and cheaper control over what is worth paying for at all (the same split as a label predicate versus what the skill does once it runs); and `review.id` is carried because the review's inline comments ride an event this project does not ingest, so fetching them is the flow's job. Rejected gains two entries: a fifth `on.type` for reviews (GitLab's `approved` already rides `pull_request`), and ingesting `pull_request_review_comment` (one delivery per line comment, a volume characteristic nothing else here has). **DES-GH-POLLING-TRANSPORT AMENDED**: a fourth source, `GET /pulls/{n}/reviews` over the OPEN pull requests the PR feed already fetched, so a polled deployment can arm a review trigger at all — without it the trigger loads clean and can never fire, which is the silently dead config this project refuses everywhere else. Its cost model is written down because it is the first per-entity source: validators live in ONE hash keyed by PR number rather than a key per PR, since an unbounded key family would break the "refresh the cursor family as a unit" TTL argument this entry rests on; the idle steady state is one quota-free 304 per open PR; the sweep is bounded and LOGS when it truncates. Two correctness calls stated rather than assumed: the sweep runs even when the open-PR list itself answers 304, because whether a review perturbs that list is GitHub's business and betting on it would mean review triggers that fire only when something else touches the PR; and the cursor is persisted ONCE per sweep rather than per review, because many endpoints' ids interleave, so per-item advance would either re-enqueue or strand — a mid-sweep failure retries the whole sweep and dedups on `poll-rv<id>`. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — `review_submitted` and `on.reviewState` are an action word and a narrowing inside the existing `pull_request` type, so the file's on × run matrix is untouched. **DES-GH-APP-MANIFEST-SETUP UNCHANGED in shape, checked** — `default_events` gains `pull_request_review` for every new App, armed or not, the same posture `pull_request` already has for a label-only deployment; existing Apps must add the subscription by hand. |
 | 2026-08-07 | Issue #102: **DES-OPERATOR-GLOBAL-OVERLAY** gains the discovery design and the four calls behind it — read pi's `settings.json` rather than walking its hoisted `node_modules` (where an installed package and a transitive dependency are indistinguishable, so a walk would stage code nobody asked for) while capturing the version off disk; treat a convention dir as sufficient, correcting the issue's `pi`-key predicate against the pinned source; default ON inside `--with-packages` with the opt-in-for-one-release alternative rejected and recorded; and scope all-or-nothing to the DECLARED set so one bad host package cannot zero a working overlay. Also records the boot-read to per-job-read change and why the original was right at the time, and that skills/prompts/themes enablement plus glob evaluation were deliberately left out. **DES-CLI-SURFACE UNCHANGED, checked** — `--no-host-packages` is a flag on an existing command, and the never-tier it defines is what kept the new doctor checks free of a `fixAction`. |
 | 2026-08-04 | A docs audit found six code defects; these are the two that changed a recorded decision (issue #99). **DES-TRIGGER-OUTSIDE-PI amended**: every forge arm is conditional now, GitHub included. Its identity resolution and `WEBHOOK_SECRET` requirement were unconditional while the other three arms were gated, so a forge-only deployment could not boot the receiver without `gh` logged in and a webhook secret it would never use; all three forge docs described a setup that stops at that wall. The uniform gate keeps the property that mattered: skipping identity resolution is sound only because the route is absent too, an unconfigured forge answers 404 rather than 401, and the guard must return if `/` is ever mounted unconditionally again. **REQ-RESUMABLE-SESSION amended** (requirements.md): its "one case fails CLOSED" clause was specified and never implemented, so an armed `run.resume` with no `PI_SESSIONS_DIR` ran cold and exited green, which is the exact failure the clause exists to prevent; the pre-spend refusal now exists, which also makes two `session-store.mjs` comments and doctor's fix text true. Cron `run.resume` moves from accepted-and-silently-ignored to refused at load, on `run.replicas`' precedent and for its reason. **CONST-HMAC-OVER-RAW-BODY UNCHANGED, checked**: the secret is still required wherever a GitHub endpoint exists to verify. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**: the new session gate is a free pre-spend refusal that reserves no slot. |

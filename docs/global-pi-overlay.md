@@ -34,12 +34,18 @@ Four tiers, most-trusted first; each refines but never removes the one above:
 | 1. Safety floor | baked `HARD_RULES.md` (from **whichever image the trigger names** — `run.image`) | image, root-owned | no (immutable) |
 | 2a. **Global overlay** | `PI_GLOBAL_PI_DIR` → `/opt/pi-global:ro` | **operator, deploy-time** | re-run `import-pi` |
 | 2b. **Staged packages** | `<overlay>/packages/<dir>` — per-trigger opt-out | **third-party**, operator-pinned | re-run `import-pi --with-packages` |
+| 2c. **Injected skills** | a trigger's `run.skillsDir`, copied per job into `/job/trigger-skills` | **operator, per trigger** | edit `triggers.json` |
 | 3. Per-repo `.pi/` | repo's committed `.pi/` (default-branch SHA) | trusted-by-merge | per PR |
 | 3b. Repo `AGENTS.md` + `.pi/extensions` | the checkout, which is always the **default-branch SHA** | trusted-by-merge; **extensions execute** | per PR |
 | 4. Task/issue text | the webhook / CLI input | **adversarial — never instructions** | — |
 
 - **Skills**: repo skills are listed **first**, so a repo skill **overrides** a global one of the same name
   (pi is first-path-wins); names that don't collide all load.
+  A trigger's own `run.skillsDir` sits **between** the two: repo beats injected beats global. "For this
+  trigger" is a narrower statement than "for this deployment", so it refines the overlay, and the repo's
+  own committed skills refine both. Those skills are **copied** per job rather than mounted, which is what
+  stops an edit to your skills directory from changing a job that is already running, and it means the
+  feature adds no mount to any container.
 - **Persona**: the assembled prompt is `guardrails → outbox protocol → global persona → repo persona`. The
   floor is always first and cannot be removed; global is your baseline; the repo's `.pi/APPEND_SYSTEM.md` is
   most specific. The outbox tier is **local jobs only**: it is read only when the `/outbox` mount exists, so

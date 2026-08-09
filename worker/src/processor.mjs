@@ -1,3 +1,4 @@
+import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
@@ -55,6 +56,17 @@ export async function runJob(job, deps) {
 		// cannot disagree about whether a store exists. A wiring may still pass `sessionsDir` explicitly to
 		// make the seam visible; it resolves to the same value.
 		sessionsDir = process.env.PI_SESSIONS_DIR || null,
+		// REQ-PER-TRIGGER-SKILLS. Injected so the pre-spend gate is testable without a real directory, and
+		// lstat rather than stat so a symlinked skillsDir is judged on its own inode -- the habit copy-tree.mjs,
+		// outbox.mjs and sandbox-store.mjs all keep. A throw is a refusal: an unreadable path is still absent
+		// as far as this job is concerned.
+		isReadableDir = (p) => {
+			try {
+				return lstatSync(p).isDirectory();
+			} catch {
+				return false;
+			}
+		},
 		// (job) => scoped short-lived token. Takes the JOB, not the repo: which forge mints -- and therefore
 		// which credential the container gets -- is a property of `job.kind`, and only the wiring knows the
 		// map. Called for forge-backed jobs and for local jobs opted in via `github: true`; unflagged local
@@ -188,6 +200,23 @@ export async function runJob(job, deps) {
 			// exactly as the image refusals above. RETURNED, not thrown: an unset environment variable is
 			// determinate, and no number of retries sets it (CONST-RETRY-INFRA-ONLY).
 			return { outcome: "policy", reason: "sessions-dir-unset", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		// REQ-PER-TRIGGER-SKILLS. A trigger that named a skills directory the worker cannot see would run
+		// its flow WITHOUT the skills it was written against, produce a plausible report, and exit 0. Free
+		// and determinate -- one lstat, no credential needed to know the answer -- so it belongs among the
+		// free refusals and strictly before anything that spends: before the mint (no token is created only
+		// to be discarded), before the clone, before the token-cap read and before reserveBudget
+		// (CONST-BUDGET-BEFORE-TOKENS). Last among the free gates because it is the NARROWEST: a missing
+		// image blocks every job on this host, an unset sessions dir blocks every armed trigger, a bad
+		// skillsDir blocks one trigger.
+		if (job.skillsDir && !isReadableDir(job.skillsDir)) {
+			await comment(job, "Refused: this trigger set `run.skillsDir`, and that path is absent or is not a directory on the worker host. The job would have run without the skills the flow was written against. Not run.");
+			// The FIELD name, never its value. `comment` posts publicly on the issue, so a host path here
+			// would publish the operator's filesystem layout to anyone reading the thread; the log line is
+			// the same restraint refused_sessions_dir_unset keeps.
+			log("refused_skills_dir_missing", { kind: job.kind ?? null });
+			return { outcome: "policy", reason: "skills-dir-missing", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		if (wantsForgeToken) {

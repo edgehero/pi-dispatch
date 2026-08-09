@@ -15,6 +15,7 @@ skills, or a pi extension that orchestrates them.
 | **skill** | pi's unit of instruction; a flow is just the entry one. The whole directory travels, not only `SKILL.md` | the target repo, or the overlay |
 | **workflow extension** | a pi extension that chains skills into stages, with its own state and routing | a third party, staged by you |
 | **staged package** | the pinned directory a workflow extension lives in, inside the global overlay | `import-pi --with-packages` |
+| **injected skills** | a directory of skills on the worker host that one trigger's jobs load, via `run.skillsDir` | you, in a reviewed file |
 
 ## How a workflow gets triggered
 
@@ -38,7 +39,9 @@ Four properties of that chain decide what is possible inside it.
 
 **`run.flow` is the only entry point.** There is no `run.workflow` and there is not going to be one. Which
 stages run is a property of the repo's own skill, which the repo changes by merging; the trigger stays a
-reviewed pairing of an event with a flow name. That split is the same one the whole trigger schema rests
+reviewed pairing of an event with a flow name. `run.skillsDir` does not change that and is worth being
+precise about why: it supplies **where a flow comes from**, never **which stages run**. The trigger still
+names one flow, and what that flow does is still the skill's business. That split is the same one the whole trigger schema rests
 on: this service decides *when* and *in what box*, the repo decides *what*.
 
 **A job is not an interactive session.** The runner assembles one prompt, calls pi once, and reads the exit

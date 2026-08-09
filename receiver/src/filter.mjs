@@ -111,6 +111,11 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 		flow: resolved.flow,
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
+		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
+		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
+		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
+		// basename(folder) restraint already exists to prevent.
+		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
@@ -153,6 +158,7 @@ function routeIssueLabel(subset, triggers) {
 		flow: rule.flow,
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
+		skillsDir: rule.skillsDir,
 		resume: rule.resume,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
@@ -197,6 +203,7 @@ function routeComment(subset, triggers, knownFlows) {
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
+		skillsDir: triggers.comment.skillsDir,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
@@ -289,6 +296,7 @@ function routePullRequest(subset, triggers, action) {
 			flow: rule.flow,
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image,
+			skillsDir: rule.skillsDir,
 			resume: rule.resume,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },

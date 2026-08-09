@@ -13,6 +13,7 @@
  */
 
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
@@ -42,6 +43,20 @@ function normalizeCronSchedule({ on, run }, path, existsSync) {
 		throw configError(`cron trigger "${on.id}": run.folder does not exist: ${run.folder} (${path})`);
 	}
 
+	// `run.skillsDir` gets the same treatment, and for the same reason (REQ-PER-TRIGGER-SKILLS): the pure
+	// validator cannot check a host path, because the RECEIVER parses the same file and may run on another
+	// machine entirely. Absoluteness is checked here rather than there for a second reason -- `isAbsolute`
+	// is OS-dependent, so a shared check would let a Windows worker and a Linux receiver disagree about the
+	// same reviewed file. A broken cron trigger refuses the worker's BOOT rather than failing at 03:00.
+	if (run.skillsDir !== undefined) {
+		if (!isAbsolute(run.skillsDir)) {
+			throw configError(`cron trigger "${on.id}": run.skillsDir must be an absolute path: ${run.skillsDir} (${path})`);
+		}
+		if (!existsSync(run.skillsDir)) {
+			throw configError(`cron trigger "${on.id}": run.skillsDir does not exist: ${run.skillsDir} (${path})`);
+		}
+	}
+
 	// Absent provider/model/maxTurns stay absent (undefined) so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). data key order matches
 	// queue.mjs -- the shape the processor's runJob consumes. The three per-trigger fields ride along the same
@@ -53,7 +68,7 @@ function normalizeCronSchedule({ on, run }, path, existsSync) {
 	// cron-only field: it is carried into the local `/job/event.json` (INT-CONTAINER-JOB-INPUTS) so a
 	// scheduled job can name its own trigger; the INT-TRIGGERS-FILE-CONTRACT byte-match acceptance is
 	// amended for exactly this field.
-	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
+	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.
 	const opts = { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } };

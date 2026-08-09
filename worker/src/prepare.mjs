@@ -11,6 +11,17 @@ import { buildGitLabPrompt } from "./gitlab-prompt.mjs";
 import { buildForgejoPrompt } from "./forgejo-prompt.mjs";
 import { buildAzurePrompt } from "./azure-prompt.mjs";
 import { prepareLocalWorkspace } from "./prepare-local.mjs";
+import { copySkillTree } from "./copy-tree.mjs";
+
+/**
+ * The subdirectory of the per-job dir a trigger's injected skills are copied into, so they reach the
+ * container at `/job/trigger-skills` on the `/job:ro` bind that already exists.
+ *
+ * The runner spells the same last segment from its own side (TRIGGER_SKILLS_DIR in
+ * image/runner/src/loader.mjs). It is not on this host and this file is not in that container, so the
+ * duplication is forced. CHANGE BOTH, IN THE SAME COMMIT.
+ */
+export const TRIGGER_SKILLS_SUBDIR = "trigger-skills";
 
 /**
  * The `prepareWorkspace` dispatcher the processor injects. Creates a per-job dir under `jobsDir`
@@ -45,10 +56,34 @@ export function makePrepareWorkspace({
 	// Keyed by `job.kind`, so a new forge is one entry rather than a new `if`. A kind with no entry falls
 	// through to the throw below, which is what makes an unrouted job loud instead of a silent no-op.
 	preparers = { github: prepareGithubWorkspace },
+	// REQ-PER-TRIGGER-SKILLS. Injected so the copy is testable without a real host tree, and defaulted so
+	// an unwired dispatcher behaves exactly as it did: a job with no `run.skillsDir` never calls it.
+	injectSkills = copySkillTree,
+	log = () => {},
 }) {
 	mkdirSync(jobsDir, { recursive: true });
 	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null } = {}) {
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
+		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
+		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
+		//
+		// Copied, not bind-mounted, and that is the decision rather than the implementation. `:ro` bounds
+		// the CONTAINER, not the host, and pi reads a skill's body on demand through the read tool, so a
+		// live bind could change under a running agent -- the copy is what pins the instruction set for the
+		// life of the job, exactly as materialising .pi/ at a fixed sha does for the repo's own. It also
+		// answers symlinks once, on the side that can (copy-tree.mjs), instead of handing pi a tree whose
+		// links it would follow. And it adds NO mount, so CONST-ISOLATION-CONTAINER-PER-JOB's enumeration
+		// is untouched -- the same trade DES-OPERATOR-GLOBAL-OVERLAY made for staged packages.
+		if (job.skillsDir) {
+			const injected = injectSkills(job.skillsDir, join(jobDir, TRIGGER_SKILLS_SUBDIR));
+			if (injected?.refused) {
+				rmSync(jobDir, { recursive: true, force: true });
+				return { outcome: "policy", reason: injected.refused };
+			}
+			// Counts only. `injected` carries no name and no path by construction, so this line cannot grow
+			// a host path by a later edit (the same shape packages.mjs's `dropped` record has).
+			log("trigger_skills_injected", { dirs: injected.dirs, files: injected.files, bytes: injected.bytes });
+		}
 		// What `cleanup` needs to retain this run's directory, stamped here because this is the only place
 		// that holds all three at once. Applied to the RESULT rather than mutated in, so a preparer's
 		// `{ outcome: "policy" }` refusal -- which carries no jobDir -- is passed through untouched.
