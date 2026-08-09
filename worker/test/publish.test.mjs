@@ -115,6 +115,31 @@ test("receiver package.json: scoped name, publishable (no private), files list, 
 	assert.ok(pkg.repository?.directory === "receiver" && pkg.license === "MIT" && pkg.description && pkg.keywords?.length, "registry metadata present");
 });
 
+test("receiver's caret worker range actually SATISFIES the in-repo worker version", () => {
+	// The test above pins the range's SHAPE and nothing else, which is how this nearly shipped broken:
+	// on a 0.x version `^0.1.0` means `>=0.1.0 <0.2.0`, so bumping the worker to 0.2.0 and leaving the
+	// range alone resolves an installed receiver against the OLD worker. That matters more here than a
+	// stale dependency usually does, because the receiver imports `@edgehero/pi-dispatch/triggers` and
+	// runs the shared validator: an old one DROPS unknown `run.*` fields by reconstruction, so a new
+	// trigger field would be silently absent on the webhook path with no error anywhere.
+	//
+	// Hand-rolled rather than pulling in `semver`: the range is asserted to be exactly `^X.Y.Z` above, so
+	// the only rule needed is caret's own, and a transitive dev dep is not worth taking for it.
+	const range = JSON.parse(readFileSync(join(RECEIVER_DIR, "package.json"), "utf8")).dependencies["@edgehero/pi-dispatch"];
+	const worker = JSON.parse(readFileSync(join(WORKER_DIR, "package.json"), "utf8")).version;
+	const [ra, rb, rc] = range.slice(1).split(".").map(Number);
+	const [wa, wb, wc] = worker.split(".").map(Number);
+
+	assert.equal(wa, ra, `caret pins the left-most non-zero digit: worker ${worker} cannot satisfy ${range}`);
+	if (ra === 0) {
+		// ^0.Y.Z allows only 0.Y.*, so the MINOR must match exactly.
+		assert.equal(wb, rb, `on 0.x, ^${range.slice(1)} means >=0.${rb}.${rc} <0.${rb + 1}.0 -- worker ${worker} is outside it. Bump the receiver's range in the same commit as the worker.`);
+		assert.ok(wc >= rc, `worker ${worker} is older than the range floor ${range}`);
+	} else {
+		assert.ok(wb > rb || (wb === rb && wc >= rc), `worker ${worker} is older than the range floor ${range}`);
+	}
+});
+
 // ---------------------------------------------------------------------------------------------------
 // tarball: npm pack --dry-run --json, the file list npm would actually publish
 // ---------------------------------------------------------------------------------------------------

@@ -27,7 +27,8 @@ always meant.
 
 ## What layers, and who wins
 
-Four tiers, most-trusted first; each refines but never removes the one above:
+Four trust levels, most-trusted first, with sub-tiers where one level has more than one source. Each
+refines but never removes the one above:
 
 | Tier | Source | Trust | Mutable? |
 |---|---|---|---|
