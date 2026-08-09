@@ -198,7 +198,7 @@ export async function prepareGithubWorkspace(
 			// them away -- harmless, and always undefined while replicas are github-only.
 			// `review` rides beside `comment` and, like `replica`/`replicas`, is destructured away by the
 			// gitlab/forgejo/azure builders -- harmless, and always undefined while reviews are github-only.
-			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review }),
+			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions }),
 			{ mode: 0o444 },
 		);
 

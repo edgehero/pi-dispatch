@@ -645,3 +645,52 @@ test("a RELATIVE run.skillsDir loads here -- absoluteness is not decidable ident
 	// same reviewed file. The worker enforces it where the answer is knowable (schedules.mjs, processor.mjs).
 	assert.equal(parse([{ ...LABEL, run: { ...LABEL.run, skillsDir: "relative/skills" } }])[0].run.skillsDir, "relative/skills");
 });
+
+// --- run.instructions (issue #60, REQ-PER-TRIGGER-INSTRUCTION) ---
+
+test("run.instructions survives normalization on the three webhook kinds", () => {
+	for (const [name, entry] of [["label", LABEL], ["comment", COMMENT], ["pull_request", PR_AUTO]]) {
+		const out = parse([{ ...entry, run: { ...entry.run, instructions: "Tests run with pnpm." } }]);
+		assert.equal(out[0].run.instructions, "Tests run with pnpm.", `${name} dropped run.instructions`);
+	}
+});
+
+test("run.instructions absent stays ABSENT -- an unflagged trigger is byte-identical", () => {
+	for (const entry of [LABEL, COMMENT, PR_AUTO]) {
+		assert.equal("instructions" in parse([entry])[0].run, false);
+	}
+});
+
+test("run.instructions on a CRON trigger is refused, and the message names run.task", () => {
+	// A different refusal from run.replicas' "not yet covered": cron ALREADY has operator-authored free
+	// text landing in the same region of the same file, and a local prompt has no envelope for a second
+	// field to occupy. Two fields writing one region with an undefined order would both appear to work.
+	try {
+		parse([{ ...CRON, run: { ...CRON.run, instructions: "prefer X" } }]);
+		assert.fail("a cron run.instructions was accepted");
+	} catch (error) {
+		assert.ok(isConfigError(error));
+		assert.ok(error.message.includes("run.task"), "the refusal must point at the field that already does this");
+	}
+});
+
+test("run.instructions over the length cap is refused, and the message names where longer text belongs", () => {
+	try {
+		parse([{ ...LABEL, run: { ...LABEL.run, instructions: "x".repeat(2001) } }]);
+		assert.fail("an over-cap run.instructions was accepted");
+	} catch (error) {
+		assert.ok(isConfigError(error));
+		assert.ok(error.message.includes("SKILL.md"), "the cap must teach, not merely block");
+		assert.ok(error.message.includes("APPEND_SYSTEM.md"));
+	}
+	// Exactly at the cap is fine: the bound is a refusal above it, not at it.
+	assert.equal(parse([{ ...LABEL, run: { ...LABEL.run, instructions: "x".repeat(2000) } }])[0].run.instructions.length, 2000);
+});
+
+test("a whitespace-only run.instructions is refused; surrounding whitespace in real prose is NOT", () => {
+	// Deliberately unlike run.image, and the comment in the validator says why: whitespace changes what an
+	// image REFERENCE means and does not change what prose means. A trailing newline in a multi-line JSON
+	// string is a papercut, not a hazard.
+	assert.throws(() => parse([{ ...LABEL, run: { ...LABEL.run, instructions: "   " } }]), isConfigError);
+	assert.equal(parse([{ ...LABEL, run: { ...LABEL.run, instructions: "prefer X\n" } }])[0].run.instructions, "prefer X\n");
+});

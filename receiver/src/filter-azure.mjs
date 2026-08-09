@@ -110,6 +110,7 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
 		trigger: {
 			event,
@@ -171,6 +172,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		instructions: rule.instructions,
 		resume: rule.resume,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.target?.number, title: subset.target?.title, body: subset.target?.body },
@@ -200,6 +202,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// No author_association: Azure has none, and the authority that admitted this comment was resolved
@@ -227,6 +230,7 @@ function routePullRequest(subset, triggers, action) {
 			packages: rule.packages,
 			image: rule.image,
 			skillsDir: rule.skillsDir,
+			instructions: rule.instructions,
 			resume: rule.resume,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {

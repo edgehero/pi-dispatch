@@ -251,7 +251,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, images, skillsDirs, forges, repositories } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, images, skillsDirs, forges, repositories } = readTriggerFacts(env, fileExists, cwd);
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -978,6 +978,17 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
+	// REQ-PER-TRIGGER-INSTRUCTION. A plain fact line, not a warning: standing text is an ordinary operator
+	// choice. It is reported at all because it changes what EVERY job of that trigger is told, and unlike a
+	// flow (which lives in the repo, reviewed by a merge) it lives only in triggers.json, so nothing else
+	// would put it in front of the operator. The COUNT only -- the text itself is theirs and may be long.
+	if (instructing > 0) {
+		checks.push({
+			ok: true,
+			label: `${instructing} trigger(s) attach a standing instruction to every job's prompt`,
+		});
+	}
+
 	// REQ-REPLICA-RUNS. A warning, never a failure -- replicas are an opt-in an operator chose in a reviewed
 	// file, and the harness is doing exactly what was asked. What is worth saying is the arithmetic: each
 	// replica reserves its OWN budget slot before its own tokens (CONST-BUDGET-BEFORE-TOKENS), so a delivery
@@ -1181,7 +1192,7 @@ function aiTriggerNames(dir) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, images: [], skillsDirs: [], forges: [], repositories: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, images: [], skillsDirs: [], forges: [], repositories: [] };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1192,6 +1203,9 @@ function readTriggerFacts(env, fileExists, cwd) {
 		return {
 			requiring: triggers.filter((t) => t.run.packages === true).length,
 			resuming: triggers.filter((t) => t.run.resume === true).length,
+			// REQ-PER-TRIGGER-INSTRUCTION. Counted beside `resuming` for the same reason: it is a per-trigger
+			// choice that changes what every job of it is told, and an operator should see it before it fires.
+			instructing: triggers.filter((t) => typeof t.run.instructions === "string").length,
 			// REQ-REPLICA-RUNS. `> 1` rather than `!== undefined` because the loader already refuses anything
 			// else -- this counts triggers that will actually multiply spend, which is the only reason to say so.
 			replicating: triggers.filter((t) => t.run.replicas > 1).length,

@@ -115,7 +115,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, skillsDir, resume, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -143,6 +143,10 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the
 		// delivery -- and `trigger` is the object copied into /job/event.json.
 		...(skillsDir !== undefined && { skillsDir }),
+		// The operator's standing instruction for this trigger (REQ-PER-TRIGGER-INSTRUCTION). Conditional like
+		// the rest, and at JOB level rather than inside `trigger`: it is operator config, not a fact about the
+		// delivery, and `trigger` is what /job/event.json is built from.
+		...(instructions !== undefined && { instructions }),
 		...(resume !== undefined && { resume }),
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;

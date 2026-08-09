@@ -181,6 +181,9 @@ function triggerLine(t) {
   // the full path lives in the trigger detail view, where the panel is the operator's own session on their
   // own host and a path discloses nothing new.
   const skl = t?.skillsDir ? `  [skills ${String(t.skillsDir).split(/[\\/]/).filter(Boolean).pop()}]` : "";
+  // A trigger that puts operator standing text into every job's prompt says so. Same doctrine as the
+  // badges above: a trigger that changes what the agent is told must never render like one that does not.
+  const ins = t?.instructions === true ? "  [instructions]" : "";
   const res = t?.resume === true ? "  [resume]" : "";
   // A trigger that turns one delivery into N paid runs says so (REQ-REPLICA-RUNS). Same class of badge as
   // [resume]: not a preference an operator can skim past, but the field that multiplies the bill. Absent on
@@ -188,15 +191,15 @@ function triggerLine(t) {
   const rep = t?.replicas > 1 ? `  [x${t.replicas}]` : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
-      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${res}${rep}`;
+      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
     }
     default:
       return "(unknown trigger)";

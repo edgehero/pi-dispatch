@@ -112,6 +112,7 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
 		trigger: {
 			event: eventName,
@@ -139,6 +140,7 @@ function routeIssueLabel(subset, triggers) {
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		instructions: rule.instructions,
 		resume: rule.resume,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
@@ -173,6 +175,7 @@ function routeComment(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// The invoking comment rides on the trigger. No author_association: Forgejo has none, and the
@@ -198,6 +201,7 @@ function routePullRequest(subset, triggers, action) {
 			packages: rule.packages,
 			image: rule.image,
 			skillsDir: rule.skillsDir,
+			instructions: rule.instructions,
 			resume: rule.resume,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {

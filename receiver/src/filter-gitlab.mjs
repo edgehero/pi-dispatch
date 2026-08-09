@@ -103,6 +103,7 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
@@ -137,6 +138,7 @@ function routeLabel(subset, triggers, targetType) {
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		instructions: rule.instructions,
 		resume: rule.resume,
 		matched: { index: rule.index, type: "label", label: matchedLabel(added, rule.predicate) },
 		target: buildTarget(subset, targetType),
@@ -195,6 +197,7 @@ function mrResult(subset, rule, matched) {
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		instructions: rule.instructions,
 		resume: rule.resume,
 		matched,
 		target: buildTarget(subset, "pull_request"),
@@ -230,6 +233,7 @@ function routeNote(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		target: buildTarget(subset, targetType),

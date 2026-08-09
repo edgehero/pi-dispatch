@@ -696,6 +696,10 @@ export function normalizeTriggerForDisplay(entry) {
   // `image`, and shown for the same reason: which skills a job loads IS what the agent can do. `null` is
   // the none sentinel, matching this function's own convention.
   const skillsDir = typeof run.skillsDir === "string" && run.skillsDir.trim() !== "" ? run.skillsDir : null;
+  // Whether this trigger attaches operator standing text (REQ-PER-TRIGGER-INSTRUCTION). A BOOLEAN, not
+  // the text: the panel line must say that a trigger carries one, and the text itself may be 2000
+  // characters. The detail view is where the words belong.
+  const instructions = typeof run.instructions === "string" && run.instructions.trim() !== "";
   // An opt-IN, so `=== true` and not `!== false` -- the opposite test from `packages` directly above, and
   // the difference is the whole point. Getting this polarity wrong is the defect 0.1.4 shipped a fix for:
   // the riskiest triggers rendered with no badge and no warning, quiet exactly where the risk was.
@@ -721,12 +725,13 @@ export function normalizeTriggerForDisplay(entry) {
         packages,
         image,
         skillsDir,
+        instructions,
         resume,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, skillsDir, resume, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, skillsDir, instructions, resume, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, skillsDir, resume, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, skillsDir, instructions, resume, replicas, forge };
     case "pull_request":
       return {
         type: "pull_request",
@@ -738,6 +743,7 @@ export function normalizeTriggerForDisplay(entry) {
         packages,
         image,
         skillsDir,
+        instructions,
         resume,
         replicas,
         forge,

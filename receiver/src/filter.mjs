@@ -116,6 +116,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
@@ -159,6 +160,7 @@ function routeIssueLabel(subset, triggers) {
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
@@ -204,6 +206,7 @@ function routeComment(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
@@ -297,6 +300,7 @@ function routePullRequest(subset, triggers, action) {
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image,
 			skillsDir: rule.skillsDir,
+			instructions: rule.instructions,
 			resume: rule.resume,
 			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },

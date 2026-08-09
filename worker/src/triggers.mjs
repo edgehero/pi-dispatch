@@ -212,6 +212,7 @@ function normalizeCron(on, run, index, path, state) {
 	const packages = validatePackagesFlag(run, `cron trigger "${id}"`, path);
 	const image = validateImageRef(run, `cron trigger "${id}"`, path);
 	const skillsDir = validateSkillsDir(run, `cron trigger "${id}"`, path);
+	validateInstructions(run, `cron trigger "${id}"`, path, { cron: true });
 	// RETURNED, not discarded like validateReplicas below, because `resume` still has a legal value on a
 	// cron entry: only `true` is refused (the local path has nothing to resume with), so what survives is
 	// `false` or absent. Both must keep reaching the job payload unchanged -- an operator who wrote down
@@ -398,6 +399,58 @@ function validateSkillsDir(run, at, path) {
 }
 
 /**
+ * The ceiling on `run.instructions` (REQ-PER-TRIGGER-INSTRUCTION, issue #60).
+ *
+ * NOT a caching bound, and the entry says so rather than letting a reader assume it. The text is written
+ * once into /job/prompt.md and `session.prompt()` is called once, so the pattern
+ * CONST-PERSONA-IN-CACHED-PREFIX names -- injecting a persistent user message on every prompt -- is not
+ * what this is; and at the pin, pi-ai attaches cache_control to the LAST USER MESSAGE as well as the
+ * system prompt, so after turn one this sits in the cached prefix at roughly the persona's rate anyway.
+ *
+ * What the cap is actually for is two other things. A field with no bound invites a 200 KB style guide
+ * pasted in, which overflows context inside a PAID container on every delivery of that trigger, with no
+ * pre-spend signal -- a cap turns that into a free load-time refusal in both services. And it keeps the
+ * field in its lane: a standing instruction is a sentence or two, and anything longer belongs in the
+ * flow's own SKILL.md (versioned, reviewed) or in the overlay persona (deploy-time, system prompt). The
+ * refusal message names both destinations, so the cap teaches rather than merely blocks.
+ */
+const INSTRUCTIONS_MAX = 2000;
+
+/**
+ * `run.instructions` (issue #60): one line of operator standing text, rendered into the USER prompt's
+ * envelope above the fenced data region.
+ *
+ * REFUSED on cron, and it is a DIFFERENT refusal from run.replicas' "not yet covered": cron already has
+ * an operator-authored free-text field landing in the same region of the same file. A local job's prompt
+ * is `flow hint + pointer + run.task` with no envelope, no data heading and no fence (prepare.mjs), so
+ * there is no "standing" region distinct from the task for a second field to occupy. Two fields writing
+ * one region with an undefined combination order is worse than a field that does nothing, because both
+ * would appear to work.
+ *
+ * Whitespace is NOT refused here, unlike run.image, and the divergence is deliberate: that rule exists
+ * because whitespace changes what an image REFERENCE means, and it does not change what prose means. A
+ * trailing newline in a multi-line JSON string is a papercut, not a hazard. A whitespace-ONLY value is
+ * refused, because that is a field the operator believes they set.
+ *
+ * Refused rather than truncated at the cap, for validateImageRef's reason: the file is the reviewed
+ * artifact and must not disagree with what runs.
+ */
+function validateInstructions(run, at, path, { cron = false } = {}) {
+	const text = run.instructions;
+	if (text === undefined) return undefined;
+	if (cron) {
+		throw configError(`${at}: run.instructions is not accepted on a cron trigger -- a local job's prompt IS run.task, the same operator-authored text in the same place. Put the standing instruction at the top of run.task: ${path}`);
+	}
+	if (typeof text !== "string" || text.trim() === "") {
+		throw configError(`${at}: run.instructions must be a non-empty string when present: ${path}`);
+	}
+	if (text.length > INSTRUCTIONS_MAX) {
+		throw configError(`${at}: run.instructions is ${text.length} characters, over the ${INSTRUCTIONS_MAX} cap -- a standing instruction is a sentence or two. Anything longer belongs in the flow's own SKILL.md, or in the global overlay's APPEND_SYSTEM.md if it applies to every job: ${path}`);
+	}
+	return text;
+}
+
+/**
  * Validate an `{any, all, none}` label predicate. Selectors are validated as arrays of non-empty strings
  * BEFORE the positive-selector count, because `.length` is truthy on a string too -- a string selector
  * that reached the pure `matchesRule` in the receiver would throw there, breaking the gate's never-throw
@@ -506,12 +559,13 @@ function normalizeLabel(on, run, index, path) {
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
 	const skillsDir = validateSkillsDir(run, at, path);
+	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -533,12 +587,13 @@ function normalizeComment(on, run, index, path, state) {
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
 	const skillsDir = validateSkillsDir(run, at, path);
+	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -585,6 +640,7 @@ function normalizePullRequest(on, run, index, path) {
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
 	const skillsDir = validateSkillsDir(run, at, path);
+	const instructions = validateInstructions(run, at, path);
 	const resume = validateResumeFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
@@ -599,7 +655,7 @@ function normalizePullRequest(on, run, index, path) {
 			all: predicate.all,
 			none: predicate.none,
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }) },
 	};
 }
 

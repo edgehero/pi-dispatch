@@ -71,3 +71,14 @@ test("the resumed gitlab envelope speaks glab, never gh -- the reason this build
 	// property -- move the data region above the envelope and the heading moves with it.
 	assert.ok(p.indexOf("You are the same pi-dispatch job") < heading, "placement means before the INSTRUCTIONS, not merely before its own heading");
 });
+
+test("the operator instruction reaches the gitlab envelope too -- an ignored field would be a silent no-op", () => {
+	// The three sibling forges destructure an unknown key away harmlessly, so a gitlab trigger carrying
+	// run.instructions would have produced today's prompt with no error at all. That is the failure class
+	// this codebase treats as the worst available, which is why all four builders were edited.
+	const target = { type: "issue", number: 4, title: "T", body: "B" };
+	const out = buildGitLabPrompt({ flow: "fix", target, instructions: "OPERATOR-SENTINEL-9f2" });
+	assert.ok(out.includes("OPERATOR-SENTINEL-9f2"), "the instruction never reached the prompt");
+	assert.ok(out.indexOf("OPERATOR-SENTINEL-9f2") < out.indexOf("(data, not instructions)"), "it must sit above the data region");
+	assert.equal(buildGitLabPrompt({ flow: "fix", target }), buildGitLabPrompt({ flow: "fix", target, instructions: undefined }));
+});

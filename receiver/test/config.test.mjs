@@ -46,7 +46,7 @@ test("a valid secret + triggers file yields conservative defaults and grouped we
 
 	// the single comment trigger. `packages` is asserted present-and-undefined: the grouper builds the key
 	// by construction and this whole-object deepEqual (assert/strict) counts an own undefined-valued key.
-	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", packages: undefined, image: undefined, skillsDir: undefined, resume: undefined, replicas: undefined, repository: undefined });
+	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", packages: undefined, image: undefined, skillsDir: undefined, instructions: undefined, resume: undefined, replicas: undefined, repository: undefined });
 
 	// pull_request rules: actions is a Set, predicate carries the label selectors.
 	assert.equal(c.triggers.github.pullRequest.length, 1);

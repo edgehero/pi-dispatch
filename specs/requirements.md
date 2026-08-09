@@ -707,6 +707,37 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ---
 
+## REQ-PER-TRIGGER-INSTRUCTION
+
+- **Statement**: A webhook trigger may carry one line of operator standing text (`run.instructions`),
+  rendered into the USER prompt's instruction region: above the fenced data region, below the harness's
+  own steps, and before the never-merge paragraph. Absent, the prompt is byte-identical to before.
+- **Scope**: The three webhook types, on all four forges. **Refused on cron**, which already has
+  `run.task`. Operator-authored config only, and no model-callable tool may set it.
+- **Why**: Label, comment and pull_request triggers carried no prompt text at all, so "for this trigger
+  specifically: the tests run with X, this repo's convention is Y" had to be committed into the repo's
+  `SKILL.md` or pushed into the deployment-wide persona, which applies it to every job everywhere.
+  **Refused on cron rather than accepted**, and that is not a gap: a local job's prompt IS `run.task`,
+  with no envelope, no data heading and no fence, so there is no standing region distinct from the task
+  for a second field to occupy. Two fields writing one region with an undefined combination order is
+  worse than a field that does nothing, because both would appear to work.
+  **Capped at 2000 characters, and NOT for the caching reason.** The text is written once and
+  `session.prompt()` is called once, so `CONST-PERSONA-IN-CACHED-PREFIX`'s named anti-pattern is not what
+  this is; and at the pin, pi-ai attaches `cache_control` to the last user message as well as the system
+  prompt, so after turn one it sits in the cached prefix at roughly the persona's rate anyway. What the
+  cap is for is an unbounded field pasted with a style guide, which overflows context inside a **paid**
+  container on every delivery with no pre-spend signal, and keeping the field in its lane, since anything
+  longer belongs in the flow's `SKILL.md` or the overlay persona. The refusal names both destinations.
+  Refused rather than truncated: the reviewed file must not disagree with what runs.
+- **Traces to**: `CONST-ISSUE-TEXT-IS-DATA`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
+  `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`, `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`
+- **Acceptance**: Given a trigger carrying `run.instructions`, the text appears in `/job/prompt.md` above
+  the data heading and below the harness's steps, is never fenced, and the never-merge paragraph still
+  follows it. The data region is byte-identical with and without it, on all three prompt shapes and all
+  four forges, and a job without one produces a byte-identical prompt to before the feature. It never
+  appears in `/job/event.json` or the run record. A cron trigger carrying it is refused at load with a
+  message naming `run.task`; one over the cap is refused with a message naming both destinations.
+
 ## REQ-PER-TRIGGER-SKILLS
 
 - **Statement**: A trigger may name a directory of operator-authored skills on the worker host
@@ -1115,6 +1146,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-09 | Issue #60 (Gap 3). **NEW `REQ-PER-TRIGGER-INSTRUCTION`**: the three webhook types may carry one line of operator standing text, rendered into the user prompt's envelope above the fenced data region. Refused on cron, and that is a decision rather than a gap: a local job's prompt IS `run.task`, with no envelope and no fence, so there is no standing region distinct from the task for a second field to occupy, and two fields writing one region with an undefined order would both appear to work. Capped at 2000 characters and refused rather than truncated, with the reasoning recorded because the obvious one does not hold -- the cap is not about caching, it bounds a context overflow inside a PAID container that has no pre-spend signal, and keeps the field in its lane. **REQ-PER-TRIGGER-SKILLS UNCHANGED, checked**: the two fields are independent and a trigger may set either, neither or both. |
 | 2026-08-09 | Issue #60 (Gap 2). **NEW `REQ-PER-TRIGGER-SKILLS`**: a trigger may name a worker-host directory of skills, copied per job into `/job/trigger-skills` and layered repo > injected > overlay. Operator-authored only: nothing reachable from a webhook payload, an issue or comment body, or `dispatch_run` can supply it, and no model-callable tool can set it, because choosing which skills a job loads is choosing what the agent can do -- `run.image`'s answer rather than `f.forge`'s. **REQ-GLOBAL-PI-OVERLAY AMENDED**: its "repo wins on conflict" now reads in full as repo > injected > overlay, with the middle tier justified on specificity ("for THIS trigger" is narrower than "for this deployment") rather than on trust, since both are the operator's own. **REQ-UPSTREAM-CONTRACT-TESTS UNCHANGED, checked**: "a repo skill resolves once, from `/job/pi/skills`" is still exactly true -- the injected tier adds a second SOURCE, never a second copy of the same skill, and a name collision resolves to exactly one winner by the ordering above. **REQ-RESURRECTABLE-SANDBOX UNCHANGED, checked**, and it is a dividend of copying rather than mounting: `retainJobDir` renames the whole job dir, so a resurrected sandbox sees the skills the run actually saw instead of re-reading a host directory that may since have changed. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the Statement enumerated the gated PR actions (`opened, synchronize, reopened`) and named the PR `author_association`, so a review action inherited neither branch. It now carries the third arm gated on the REVIEWER's `review.author_association`, the optional `on.reviewState` narrowing with its `review-state-not-matched` drop, and the `no-review-body` refusal of an empty `commented` review (with an empty-bodied `approved` or `changes_requested` still firing, since there the verdict is the signal). Acceptance gains the two directional cases as an explicit PAIR, plus the empty-body, unlisted-verdict and self-review cases. The Why records why the field differs and points at `CONST-TRIGGER-AUTHOR-GATE` for the argument. **REQ-DEDUP-BY-DELIVERY-GUID UNCHANGED, checked** — a review delivery carries the same `X-GitHub-Delivery` GUID every other event does, and the polled form mints `poll-rv<reviewId>` inside the existing `gh-` space, so the dedup contract is exercised rather than extended. **REQ-RESUMABLE-SESSION UNCHANGED, checked** — a review-triggered job on a PR resolves its session key from target type and head ref exactly as a `synchronize` one does; what the change DID require was carrying the review into the resumed prompt's data region, since that envelope says "address the activity quoted below" and would otherwise have quoted nothing. **REQ-REPLICA-RUNS UNCHANGED, checked** — replicas on a review-triggered PR target inherit `OQ-017` unchanged. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked**, and load-bearing: it is what bounds the widened trigger surface recorded in `OQ-020`. |
 | 2026-08-07 | Issue #102 (auto-import pi packages from the global pi setup): **REQ-GLOBAL-PI-OVERLAY** acceptance gains the discovery cases (a host package stages at the exact version on disk; a declared entry wins and prints the version it shadowed; `--no-host-packages`; a package contributing no pi resources, an autoload-off one, a git source and the admin package are each skipped or dropped WITH A NAMED REASON; the legacy global lookup honoured only when the managed path is absent; a malformed `settings.json` discovers nothing at exit 0), the extension-enablement cases (an extension disabled with `pi config` is no longer copied, a glob pattern is copied and reported as unevaluated), the refresh case (a re-stage reaches the next job with no restart, a torn read keeps last-known-good), and the receipt's `from` field. Records that repo-declared packages stay refused, with the forge-token reason, and that a repo's `.pi/extensions` loading is not a reversal of it because `/workspace` is merge-gated. One CORRECTION carried from the issue: the issue's proposed predicate ("no `pi` key means not a pi package") is **wrong at the 0.80.7 pin** and would have silently dropped packages that ship only a convention dir. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new doctor checks are all warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |

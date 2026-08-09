@@ -89,6 +89,27 @@ copied at all, because pi would register no skill for it. A skill past the size 
 refuses the job with the cap named, which is deliberate: a partly copied skill is a skill whose
 instructions point at files that are not there.
 
+## A standing instruction, and what it is not
+
+`run.instructions` on a forge trigger attaches one line of your own text to every job that trigger
+starts. It reaches the prompt above the issue or pull request text, labelled as coming from you, so the
+agent can tell it apart from whatever a stranger wrote in the issue.
+
+It is the smallest of three places instructions can live, and picking the right one matters more than the
+feature does:
+
+| Where | Scope | Reviewed by | Reach for it when |
+|---|---|---|---|
+| `run.instructions` | one trigger | your edit to `triggers.json` | a sentence or two, specific to this pairing of event and flow |
+| the flow's `SKILL.md` | every job that runs that flow, on that repo | a merge on the target repo | the instructions ARE the procedure |
+| the overlay's `APPEND_SYSTEM.md` | every job, every repo, every flow | `import-pi`, at deploy time | house style that outlives any one trigger |
+
+The 2000 character cap is there to keep the first row from quietly becoming the second. If your standing
+text no longer fits on a screen, it is a flow, and it belongs in a file someone reviews.
+
+Cron triggers do not take it, and use `task` instead. That is not an omission: a scheduled job's whole
+prompt IS its `task`, so a second field would write the same region with no defined order between them.
+
 ## The structured case: stage a workflow extension
 
 **Nothing installs at job time.** Job containers run with `PI_OFFLINE=1` and, on the shipped image, no

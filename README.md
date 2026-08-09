@@ -180,6 +180,11 @@ or what it costs):
   ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
 - `"replicas": 2` (GitHub only) races independent sandboxes on the same event and opens one PR per
   replica. Each replica spends its own budget slot ([`docs/replicas.md`](docs/replicas.md)).
+- `"instructions"` attaches one line of standing text to that trigger (forge triggers only, up to 2000
+  characters). It reaches the job's prompt above the issue or PR text, labelled as coming from you rather
+  than from the issue, so "the tests run with pnpm here" applies to every run of that trigger without
+  being committed to the repo or pushed into the deployment wide persona. Cron triggers use `task`
+  instead, which is the same text in the same place.
 - `"resume": true` continues the session that opened the PR ([`docs/sessions.md`](docs/sessions.md)).
 - `"github": true` on a cron trigger mints the same per-job GitHub token the webhook path gets, so a
   scheduled flow can use `gh`.

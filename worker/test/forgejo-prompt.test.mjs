@@ -55,3 +55,14 @@ test("a non-positive-integer number refuses rather than minting a garbage refere
 		assert.throws(() => buildForgejoPrompt({ flow: "fix", target: { type: "issue", number } }), (e) => e.piDispatchConfig === true);
 	}
 });
+
+test("the operator instruction reaches the forgejo envelope too -- an ignored field would be a silent no-op", () => {
+	// The three sibling forges destructure an unknown key away harmlessly, so a forgejo trigger carrying
+	// run.instructions would have produced today's prompt with no error at all. That is the failure class
+	// this codebase treats as the worst available, which is why all four builders were edited.
+	const target = { type: "issue", number: 4, title: "T", body: "B" };
+	const out = buildForgejoPrompt({ flow: "fix", target, instructions: "OPERATOR-SENTINEL-9f2" });
+	assert.ok(out.includes("OPERATOR-SENTINEL-9f2"), "the instruction never reached the prompt");
+	assert.ok(out.indexOf("OPERATOR-SENTINEL-9f2") < out.indexOf("(data, not instructions)"), "it must sit above the data region");
+	assert.equal(buildForgejoPrompt({ flow: "fix", target }), buildForgejoPrompt({ flow: "fix", target, instructions: undefined }));
+});

@@ -424,3 +424,19 @@ test("a PR job with no review emits NO review key -- absent, not present-and-und
 	const event = JSON.parse(readFileSync(join(h.jobDir, "event.json"), "utf8"));
 	assert.equal("review" in event, false, "an unreviewed PR job's event.json must stay byte-identical to pre-#66");
 });
+
+test("instructions reach prompt.md and never event.json", async () => {
+	// event.json is an explicit literal of webhook body fields plus `matched`, so a job-level knob has no
+	// route into it. Pinned rather than trusted: the operator's standing text is theirs, but the file is
+	// the agent-readable one and the rule that keeps host-side config out of it is worth a test.
+	const git = fakeGit();
+	const h = harness({ git });
+	await prepareGithubWorkspace({ ...JOB, instructions: "OPERATOR-SENTINEL-e71" }, TOKEN, h.deps);
+
+	const prompt = readFileSync(join(h.jobDir, "prompt.md"), "utf8");
+	assert.ok(prompt.includes("OPERATOR-SENTINEL-e71"), "the instruction must reach the user prompt");
+	assert.ok(prompt.indexOf("OPERATOR-SENTINEL-e71") < prompt.indexOf("(data, not instructions)"));
+	const event = readFileSync(join(h.jobDir, "event.json"), "utf8");
+	assert.ok(!event.includes("OPERATOR-SENTINEL-e71"), "operator config leaked into event.json");
+	assert.ok(!event.includes("instructions"), "and not even the key belongs there");
+});
