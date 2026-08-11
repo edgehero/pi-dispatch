@@ -1075,6 +1075,65 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `INT-PRICING-EXPORT-CONTRACT`, `REQ-TOKEN-ACCOUNTING-AND-CAPS`; implemented in
   `admin/src/read-model.mjs` (`scanRunRecords`) and `admin/src/costs.mjs`.
 
+## DES-GRAPH-EDGE-DERIVATION
+
+- **Decision**: The trigger/flow graph (issue #54) is assembled by **one pure fold**
+  (`buildGraphModel`, `admin/src/graph-model.mjs`) over the read-model's outputs, and every edge it
+  emits is labelled by its **evidence class**, drawn from a closed, test-pinned vocabulary:
+  - **`config`** — trigger → flow, from the live triggers file. Every trigger naming a `run.flow`
+    gets exactly one, **always** — dangling, unverifiable and charset-invalid included; a target the
+    enumeration did not find exists as a `skill-missing` (enumerated folder) or `skill-unverified`
+    (forge repo / unreachable folder) node so the edge has a visible end.
+  - **`observed`** — flow → flow, from run records only (`parentJobId` joins), folded per flow pair
+    with its **count and last occurrence**. An observed edge exists because a run actually spawned
+    another, never because one could. Same-target only; an edge that cannot be hung on exactly one
+    enumerated folder is **dropped and counted** (`meta.droppedObservedEdges`), never guessed onto a
+    basename that merely matches.
+  - **`potential`** — flow → flow, from a **text mention** of a sibling skill's name in a SKILL.md,
+    labelled `strong` (near the outbox vocabulary) and `eligible` (the target's own
+    `ai-trigger: allow`, the exact static half of the edge). Gate-eligibility alone draws **no
+    edge**: it is a node badge, because an all-pairs "could chain" fabric among allow-listed skills
+    would bury the informative edges under a combinatorial lie.
+  - **`cron-rearm`** — the one self-edge every cron trigger carries by definition, labelled with its
+    pattern: config, not history.
+  Two structural prohibitions, from `OQ-009`: **no chain edge is ever drawn out of a forge
+  trigger's flow** (a forge job gets no `/outbox` mount), and **no chain edge ever crosses
+  folders** (the child folder is forced to the parent's own) — the harness makes both
+  unrepresentable, so the graph never renders either. Dangling is precise: `no-skill` flags only
+  where enumeration **succeeded** and the path is absent at HEAD (the gate's own token); an
+  unreachable or remote folder renders **unverified**, never dangling, and a `run.flow` failing
+  `SKILL_NAME_RE` is its own `charset-invalid` flag — the gate would answer `deny` for it, and
+  deny proves nothing about existence. Orphanhood is three distinct facts, not one: `orphan` (no
+  trigger, no `ai-trigger`, no incoming mention), `ai-reachable-no-trigger` (deliberately
+  chain/dispatch_run-reachable), and `injected-ai-trigger` (the `OQ-022` silent no-op, badged
+  loudly). Sub-skills are never orphan candidates — the gate's path template has no room for them.
+  Every model carries the chain caps (`chainDepthMax`, `chainMaxPerJob`, same-folder-only, the
+  record window) and every consumer must render them; the honesty counters (`unattributedRuns`,
+  refusals, truncation, dropped edges) ride `meta` for the same reason.
+- **Why**: The four gaps issue #54 names are all failures of *assembly*, not of data — every edge
+  already exists somewhere in triggers.json, the records, or the object store. What a graph adds is
+  precisely the temptation to blur evidence classes: a mention rendered like an observation, a
+  gate-eligibility fabric rendered like config, a stale index landing on today's row. So the
+  derivation rules are the design, they live in exactly one pure function, and the negative claims
+  ("an observed edge never comes from potential-only evidence", "an unreachable folder produces
+  zero dangling flags", "a potential edge never carries a count") are asserted as tests, the
+  zero-cost-day-versus-absent-day discipline applied to topology.
+- **Rejected**:
+  - *Declared chain topology in config* — chains are agent-requested at runtime by design
+    (`DES-JOB-OUTBOX-CHAINING`); the graph reports what happened and what could, it does not promise
+    what will. Issue #54 refuses this explicitly.
+  - *An all-pairs "could chain" edge set from gate eligibility* — with N allow-listed skills that is
+    N×(N−1) identical arrows; eligibility becomes a badge and a mention becomes the edge, or the
+    graph is noise.
+  - *Treating `deny` as dangling* — `deny` conflates a missing gate opt-in, a bad sha, and a git
+    failure; only `no-skill` means "absent", and a graph that flags `deny` as dangling tells an
+    operator to delete a trigger whose skill exists.
+  - *Resolving ambiguous observed-edge targets by first match* — pins real history onto the wrong
+    folder's skills; dropped-and-counted is honest, guessed is not.
+- **Traces to**: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-JOB-OUTBOX-CHAINING`, `DES-AI-TRIGGER-FLOW-GATE`,
+  `OQ-008`, `OQ-009`, `OQ-022`, `INT-RUN-HISTORY-FILE-CONTRACT`; implemented in
+  `admin/src/graph-model.mjs` (`buildGraphModel`) over `admin/src/read-model.mjs`'s graph readers.
+
 ## DES-RUNTIME-SETTINGS-FILE-OVERLAY
 
 - **Decision**: Runtime-tunable settings are a flat `settings.json` **overlay** — path `PI_SETTINGS_FILE`,
@@ -1854,6 +1913,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (the model assembler). **NEW `DES-GRAPH-EDGE-DERIVATION`**: the graph's edge honesty rules, in one pure fold (`buildGraphModel`). Four evidence classes (`config`/`observed`/`potential`/`cron-rearm`, a closed test-pinned vocabulary), the two OQ-009 structural prohibitions (no forge-parent chain edges, no cross-folder chain edges — the harness makes both unrepresentable, so drawing either would draw a lie), precise dangling (`no-skill` only where enumeration succeeded; unverified is not dangling; `charset-invalid` is its own flag because the gate's `deny` proves nothing about existence), three-way orphanhood, caps and honesty counters on every model. The interesting rejections are recorded: an all-pairs gate-eligibility fabric (eligibility is a node badge, a mention is the edge, or the graph is noise) and first-match resolution of ambiguous observed-edge targets (dropped-and-counted beats pinning real history onto the wrong folder). **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked** (the graph consumes its record fields and caps; nothing about collection moves). **DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (same scan, second consumer, still fold-time-derived and never stored). |
 | 2026-08-11 | Issue #54 (the data layer under the trigger/flow graph). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**, and this row says out loud what the last three dashboard rows certified as unchanged, because this time it DID change: a new read-model surface and new fs/git access. `readFolderSkills` enumerates a cron folder's committed skills from the git OBJECT STORE at HEAD via the worker's own `selectEntries`/`keepOnlyDeclaredSkills` (a `./materialize` exports-map subpath added for exactly this — re-deriving the listing parse admin-side is how the graph would show a skill the job path never materialises), one hardened `ls-tree` plus one bounded `cat-file` per top-level SKILL.md, with the frontmatter read through the gate's own newly exported `aiTriggerAllows`. `readInjectedSkills` lists a `run.skillsDir` from the working tree and is labelled advisory (the doctor precedent; host files have no object store to prefer). `cronRunStats`/`joinRunsToTriggers`/`observedChainEdges` fold already-scanned records into the joins the graph will draw; `collectGraphInputs` is the one dedupe/caps funnel over the folder spawns. Everything is never-throw, degrades per folder to a discriminated `unreachable`, and is bounded by the frozen, literal-pinned `GRAPH_LIMITS`. Three properties re-affirmed rather than assumed: the enumeration is DISPLAY-ADVISORY and never a gate decision (`DES-AI-TRIGGER-FLOW-GATE`'s pre-agent-sha truth untouched; HEAD-at-display-time answers what the NEXT run will see, a different question, and an unreadable SKILL.md reads as NOT chainable); the dashboard's source-regex fs ban UNCHANGED, checked (every new spawn and read lives in read-model.mjs); the `.log` placement boundary UNCHANGED, checked (the folds read `.json` records only). `resolvePaths` mirrors the chain caps with defaults IMPORTED from the worker (new `CHAIN_DEPTH_MAX_DEFAULT`/`CHAIN_MAX_PER_JOB_DEFAULT` exports) so the graph can never state a cap the worker does not enforce, and `readTriggers` display records now carry the RAW triggers-array index — the identity `matched.index` counts, cron entries and unusable rows included, so a dropped row leaves a hole rather than renumbering every attribution below it. The graph VIEW itself is a later slice; this row is only its data. |
 | 2026-08-09 | Issue #60 (Gap 3). **NEW `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`**: the operator's text goes in the user prompt's envelope, above the fenced data region and BEFORE the never-merge paragraph, because later text reads as more specific and the harness's non-negotiables must not look like something an operator instruction is qualifying. Five rejected alternatives recorded, and two of them are the interesting ones. Inside the fenced data region it would be DOCUMENTED TO BE IGNORED, since `dataRegion` tells the model everything below its heading must be reported rather than obeyed -- the accepted-where-it-does-nothing hazard. In the system prompt it would work and be marginally cheaper per turn, and is still refused: every other member of that layer is read from a fixed file path once at loader build, which is the shape `CONST-PERSONA-IN-CACHED-PREFIX`'s acceptance leans on, and `run.task` is already contracted user-prompt-only, so two operator text fields with two placements would be an incoherence. Also rejected: reusing `run.task` on webhook triggers, giving local jobs an envelope so cron could take the field, and content-filtering the operator's text (placement is the boundary; the delimiter is defence in depth, and this module's docstring already refuses that reasoning for the payload). Putting it in the envelope is what leaves `dataRegion` UNCHANGED, so the shared export keeps its signature and the new-parameters-go-last rule is honoured without threading a hole through three sibling forges. **DES-FLOWS-ARE-DATA-PERSONA-IS-CODE UNCHANGED, checked**: its clarification already admits operator-authored deploy-time config, and the reviewed `triggers.json` is that; the admin-editable runtime channel it actually bars is untouched, since no `dispatch_trigger_*` parameter was added. |
 | 2026-08-09 | Issue #60 (Gap 2). **NEW `DES-TRIGGER-SKILLS-COPIED-NOT-MOUNTED`**: the injected skills are COPIED into the per-job dir rather than bind-mounted, and the mount-count argument is deliberately recorded as the WEAKEST of the three reasons. The copy is the PIN: `:ro` bounds the container and not the host, and pi reads a skill's body on demand, so under a live bind an operator editing their directory would change the instructions of a job already running. It also answers symlinks once on the host side, where `loadSkillsFromDirInternal` would otherwise follow both file and directory links -- a directory symlink at `/` would have turned skill discovery into a walk of the container filesystem. And it adds no mount, so this entry CAN borrow the argument the 2026-07-31 `/session` row explicitly could not. Four rejected alternatives recorded, including the per-trigger `:ro` bind the issue originally sketched (with the honest qualification that a bind's source path is legible via `/proc/self/mountinfo`) and an env var naming the injected root (a second source of truth that can disagree with the filesystem, silently and in the expensive direction). **DES-AI-TRIGGER-FLOW-GATE AMENDED**: injected skills are trigger-reachable and never AI-reachable, and it FALLS OUT rather than being built -- the gate reads the object store at a pre-agent sha and an injected skill has no object-store presence, so `no-skill` and both callers refuse. The corollary is stated because an operator cannot discover it: an injected `ai-trigger: allow` is never read, `doctor` warns, and the residual is `OQ-022`. **DES-OPERATOR-GLOBAL-OVERLAY UNCHANGED, checked** -- its own rejected `/opt/pi-packages:ro` mount is the precedent the new entry cites, and the overlay's tier is unmoved. |
