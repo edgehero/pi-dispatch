@@ -15,6 +15,13 @@ export function configError(message) {
 	return error;
 }
 
+// The chain caps' DEFAULTS, exported (issue #54) so the admin's read-model can state them without a
+// second literal to drift and without calling loadConfig, whose GitHub-auth validation throws on
+// problems unrelated to a path read (the documented reason resolvePaths never calls it). The env
+// OVERRIDES stay right here in loadConfig; only the defaults are shared.
+export const CHAIN_DEPTH_MAX_DEFAULT = 1; // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
+export const CHAIN_MAX_PER_JOB_DEFAULT = 2; // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
+
 function boundedInt(env, name, fallback, min, want) {
 	const raw = env[name];
 	if (raw === undefined || raw === "") {
@@ -191,8 +198,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// A bound on how large a transcript may be before it stops being resumed. Not disk hygiene: an
 		// oversized transcript is a prefill an operator never sized PI_MAX_TOKENS for.
 		sessionMaxBytes: nonNegativeInt(env, "PI_SESSION_MAX_BYTES", 8 * 1024 * 1024), // 0 = no cap
-		chainDepthMax: nonNegativeInt(env, "PI_CHAIN_DEPTH_MAX", 1), // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
-		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", 2), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
+		chainDepthMax: nonNegativeInt(env, "PI_CHAIN_DEPTH_MAX", CHAIN_DEPTH_MAX_DEFAULT), // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
+		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", CHAIN_MAX_PER_JOB_DEFAULT), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 		dispatchRunPerHour: nonNegativeInt(env, "PI_DISPATCH_RUN_PER_HOUR", 3), // DES-ADMIN-VIA-PI-EXTENSION; 0 = disable dispatch_run
 		dispatchRunRoots: delimitedList(env.PI_DISPATCH_RUN_ROOTS), // DES-AI-TRIGGER-FLOW-GATE: default [] fails closed — no folder passes, dispatch_run refuses everything
 		github: { ...loadGitHubAuth(env, fileExists), allowGhResume: env.PI_SESSIONS_ALLOW_GH_SOURCE === "1" },

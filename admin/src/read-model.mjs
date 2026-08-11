@@ -18,7 +18,7 @@
 import * as nodeFs from "node:fs";
 import { join, delimiter, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultLogsDir, defaultSandboxDir } from "@edgehero/pi-dispatch/config";
+import { defaultLogsDir, defaultSandboxDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey } from "@edgehero/pi-dispatch/budget";
@@ -29,9 +29,18 @@ import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, enqueueLocalJob } from "@edgehero/pi-dispatch/queue";
-import { readFlowGate } from "@edgehero/pi-dispatch/flow-gate";
+import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest } from "@edgehero/pi-dispatch/packages";
+// The skill enumeration reuses the worker's OWN listing parsers (issue #54), the same anti-drift rule
+// as parseTriggers/readOverlay above: selectEntries keeps only regular blobs at allowed paths, and
+// keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
+// the graph would show a skill the job path can never materialise.
+import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
+// The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
+// supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
+import { parseSkillMeta, findSiblingMentions } from "./graph-model.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -84,6 +93,12 @@ export function resolvePaths(env = process.env) {
     // The per-scheduler stall threshold, mirrored from the worker's PI_SCHEDULER_STALL_MAX (default 2) so the
     // cron drill-in can show `stalls n/threshold`. Read directly from env for the same reason as above.
     schedulerStallMax: parseNonNegInt(env.PI_SCHEDULER_STALL_MAX, 2),
+    // The chain caps the graph states (issue #54), on the schedulerStallMax pattern: env read directly
+    // (never loadConfig), DEFAULTS imported from the worker so there is no second literal to drift --
+    // a graph printing "depth <= 1" while the worker enforces 2 would be the exact dishonesty the
+    // GRAPH view exists to remove.
+    chainDepthMax: parseNonNegInt(env.PI_CHAIN_DEPTH_MAX, CHAIN_DEPTH_MAX_DEFAULT),
+    chainMaxPerJob: parseNonNegInt(env.PI_CHAIN_MAX_PER_JOB, CHAIN_MAX_PER_JOB_DEFAULT),
   };
 }
 
@@ -648,10 +663,14 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
     return { invalid: 'triggers file must have a "triggers" array' };
   }
   const triggers = [];
-  for (const entry of entries) {
+  entries.forEach((entry, index) => {
     const display = normalizeTriggerForDisplay(entry);
-    if (display) triggers.push(display);
-  }
+    // The RAW array position rides every display record (issue #54). It is the identity the receiver's
+    // matched.index and the record's persisted triggerIndex both count -- cron entries AND unusable
+    // entries included -- so it must be the file's position, not this filtered array's: a dropped entry
+    // above row i would otherwise shift every attribution below it onto the wrong trigger.
+    if (display) triggers.push({ ...display, index });
+  });
   return { triggers };
 }
 
@@ -794,6 +813,303 @@ export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = re
 /** One manifest entry as `name@version`, or bare `name` when the entry pins no version string. */
 function nameAtVersion(pkg) {
   return typeof pkg.version === "string" && pkg.version !== "" ? `${pkg.name}@${pkg.version}` : pkg.name;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The graph read-model (issue #54): the joins and enumerations the trigger/flow topology renders from.
+// Every function below is never-throw and degrades to a safe empty shape (the readStagedPackages
+// doctrine), because the graph is a viewer: one unreadable folder must dim one folder, not kill the
+// panel. All bounds live in GRAPH_LIMITS, literal-pinned in the tests so widening one is a reviewed
+// edit (the PI_LIMITS lesson).
+// ---------------------------------------------------------------------------------------------------
+
+export const GRAPH_LIMITS = Object.freeze({
+  maxFoldersScanned: 16, // distinct cron folders enumerated per graph build; git spawns are the cost
+  maxSkillsPerFolder: 64, // cat-file spawns per folder; mirrors PI_LIMITS.maxFilesPerSkill's altitude
+  maxSkillBytes: 64 * 1024, // one SKILL.md read cap; frontmatter + prose, never a dataset
+  maxMentionScanBytes: 32 * 1024, // sibling-name scan window into each SKILL.md
+  maxEdges: 200, // distinct observed chain edges kept; beyond this the graph says "truncated"
+  windowDays: 30, // run-record window the graph folds; matches the default PI_LOG_RETENTION_DAYS
+});
+
+/**
+ * Fold run counts and the last outcome per cron scheduler id from already-parsed records.
+ *
+ * The join is the RAW jobId (`repeat:<id>:<millis>`, INT-RUN-HISTORY-FILE-CONTRACT keeps it raw in
+ * the body) against each scheduler id, with the digits-only tail as the disambiguator -- the same
+ * doctrine as the worker's makeFindPreviousRun filename scan: scheduler `a` must not swallow
+ * `a:1`-shaped siblings, and a millis tail is all digits while a foreign id segment is not. Pure over
+ * its inputs (records come from scanRunRecords) so it costs no extra I/O and tests hand-build both.
+ */
+export function cronRunStats({ records, schedulerIds } = {}) {
+  const byId = {};
+  if (!Array.isArray(records) || !Array.isArray(schedulerIds)) return { byId };
+  for (const id of schedulerIds) {
+    if (typeof id !== "string" || id === "") continue;
+    const re = new RegExp(`^repeat:${escapeRegExp(id)}:(\\d+)$`);
+    let runs = 0;
+    let lastMillis = -1;
+    let last = null;
+    for (const record of records) {
+      const m = typeof record?.jobId === "string" ? re.exec(record.jobId) : null;
+      if (!m) continue;
+      runs++;
+      const millis = Number(m[1]);
+      if (millis > lastMillis) {
+        lastMillis = millis;
+        last = record;
+      }
+    }
+    byId[id] = {
+      runs,
+      lastOutcome: last?.outcome ?? null,
+      lastEndedAt: last ? (last.endedAt ?? last.startedAt ?? null) : null,
+    };
+  }
+  return { byId };
+}
+
+/**
+ * Join forge run records to their triggers.json entry via the persisted `triggerIndex`
+ * (INT-RUN-HISTORY-FILE-CONTRACT, issue #54). `triggerCount` is the CURRENT file's length, and the
+ * range guard is the honesty rule: the file live-reloads (OQ-008), so a record whose index no longer
+ * exists -- or predates the field -- counts under `unattributed` rather than landing on whatever entry
+ * now occupies that row. Index 0 attributes; only a forge-kind record can be unattributed, because
+ * cron/local/chained runs never carried a matched index and their attribution lives elsewhere.
+ */
+export function joinRunsToTriggers({ records, triggerCount } = {}) {
+  const byIndex = {};
+  let unattributed = 0;
+  if (!Array.isArray(records)) return { byIndex, unattributed };
+  const count = Number.isInteger(triggerCount) && triggerCount >= 0 ? triggerCount : 0;
+  for (const record of records) {
+    if (!isForgeKind(record?.kind)) continue;
+    const idx = record?.triggerIndex;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= count) {
+      unattributed++;
+      continue;
+    }
+    const slot = (byIndex[idx] ??= { runs: 0, lastOutcome: null, lastEndedAt: null });
+    slot.runs++;
+    const at = record.endedAt ?? record.startedAt ?? null;
+    if (at !== null && (slot.lastEndedAt === null || at > slot.lastEndedAt)) {
+      slot.lastEndedAt = at;
+      slot.lastOutcome = record.outcome ?? null;
+    }
+  }
+  return { byIndex, unattributed };
+}
+
+/**
+ * The OBSERVED flow->flow chain edges: child records joined to their parent via `parentJobId` over
+ * one already-scanned window, folded per (parentFlow, childFlow, folder basename). Observed means
+ * exactly that -- an edge exists here because a run actually spawned another, never because a skill
+ * could. Same-target only, belt-and-suspenders on what the outbox already forces (OQ-009: the child
+ * folder IS the parent's); a cross-target pair in the records would be a bug upstream, and drawing it
+ * would draw the unrepresentable, so it is dropped. `refusals` counts chainRefused per parent flow --
+ * attempts the caps or the gate blocked, which the graph shows beside the edges that did fire.
+ */
+export function observedChainEdges({ records } = {}) {
+  const empty = { edges: [], refusals: {}, truncated: false };
+  if (!Array.isArray(records)) return empty;
+  const byJobId = new Map();
+  for (const record of records) {
+    if (typeof record?.jobId === "string" && record.jobId !== "") byJobId.set(record.jobId, record);
+  }
+  const folded = new Map();
+  const refusals = {};
+  let truncated = false;
+  for (const child of records) {
+    const parentId = child?.parentJobId;
+    if (typeof parentId !== "string" || parentId === "") continue;
+    const parent = byJobId.get(parentId);
+    if (!parent) continue; // parent outside the window/retention: an edge with one visible end is no edge
+    if (typeof parent.flow !== "string" || typeof child.flow !== "string") continue;
+    if (parent.target !== child.target) continue; // unrepresentable by construction; never drawn
+    const key = `${parent.flow} ${child.flow} ${parent.target ?? ""}`;
+    let edge = folded.get(key);
+    if (!edge) {
+      if (folded.size >= GRAPH_LIMITS.maxEdges) {
+        truncated = true;
+        continue;
+      }
+      edge = { parentFlow: parent.flow, childFlow: child.flow, target: parent.target ?? null, count: 0, lastEndedAt: null };
+      folded.set(key, edge);
+    }
+    edge.count++;
+    const at = child.endedAt ?? child.startedAt ?? null;
+    if (at !== null && (edge.lastEndedAt === null || at > edge.lastEndedAt)) edge.lastEndedAt = at;
+  }
+  for (const record of records) {
+    if (Number.isInteger(record?.chainRefused) && record.chainRefused > 0 && typeof record?.flow === "string") {
+      refusals[record.flow] = (refusals[record.flow] ?? 0) + record.chainRefused;
+    }
+  }
+  return { edges: [...folded.values()], refusals, truncated };
+}
+
+// The ls-tree LISTING bound, separate from the per-skill byte caps for the same reason the worker's
+// LS_TREE_MAX_BYTES is separate from PI_LIMITS: the caps are computed FROM the listing, so they
+// cannot bound it.
+const GRAPH_LS_TREE_MAX_BYTES = 1 << 20;
+
+/**
+ * Enumerate a cron folder's committed skills from the git OBJECT STORE at HEAD (issue #54, Gap 3):
+ * `git ls-tree -r -l -z HEAD .pi/`, parsed by the worker's own selectEntries +
+ * keepOnlyDeclaredSkills, then one bounded cat-file per top-level SKILL.md for the frontmatter facts
+ * (`ai-trigger`, name, description) and the sibling-mention scan.
+ *
+ * ADVISORY, and labelled so wherever it renders: the chain gate's truth is readFlowGate at a
+ * PRE-AGENT sha (DES-AI-TRIGGER-FLOW-GATE), while this reads HEAD at display time -- right for a
+ * viewer (it shows what the NEXT run will see), wrong for a gate, and never used as one. The
+ * object-store read (never the working tree) still holds here, for the same two reasons the gate's
+ * Rejected records: an uncommitted SKILL.md is not what a job runs, and a blob read cannot follow a
+ * symlink.
+ *
+ * Degrades per folder, never throws: `{ head: null, skills: [], truncated: false, unreachable: <why> }`
+ * for a non-repo or failed git; the graph dims the folder as "unverified" rather than inventing
+ * dangling-trigger flags from a read that never happened (deny != no-skill, one module up).
+ */
+export function readFolderSkills({ folder, exec = execFileSync } = {}) {
+  const empty = { head: null, skills: [], truncated: false };
+  if (typeof folder !== "string" || folder === "") return { ...empty, unreachable: "no-folder" };
+  const head = revParseHead(folder, { exec });
+  if (head === null) return { ...empty, unreachable: "not-a-git-repo" };
+  let listing;
+  try {
+    // Hardening flags mirror materialize.mjs defaultGit -- keep in sync: no hooks, no fsmonitor, no
+    // pager, so a hostile repo config cannot run code or corrupt output during a read.
+    listing = exec(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager", "-C", folder, "ls-tree", "-r", "-l", "-z", head, ".pi/"],
+      { encoding: "utf8", maxBuffer: GRAPH_LS_TREE_MAX_BYTES },
+    );
+  } catch {
+    return { head, skills: [], truncated: false, unreachable: "ls-tree-failed" };
+  }
+  let kept;
+  try {
+    const selected = selectEntries(listing);
+    kept = keepOnlyDeclaredSkills(selected.entries).kept;
+  } catch {
+    // selectEntries throws on an unreadable size column (its own -l guard); for a viewer that is an
+    // unreachable folder, not a crash.
+    return { head, skills: [], truncated: false, unreachable: "listing-unparseable" };
+  }
+
+  // Top-level skills are flow candidates (outRel exactly pi/skills/<name>/SKILL.md); a deeper
+  // SKILL.md is a helper sub-skill pi can load but the gate can never fire (the gate's path template
+  // has no room for it), so it renders inside its group and is never an orphan candidate.
+  const topLevel = new Map();
+  const subs = [];
+  for (const entry of kept) {
+    if (entry.skill === null || !entry.outRel.endsWith("/SKILL.md")) continue;
+    if (entry.outRel === `pi/skills/${entry.skill}/SKILL.md`) {
+      topLevel.set(entry.skill, entry);
+    } else {
+      subs.push({ name: entry.outRel.slice("pi/skills/".length, -"/SKILL.md".length), group: entry.skill });
+    }
+  }
+
+  const names = [...topLevel.keys()].sort();
+  const truncated = names.length > GRAPH_LIMITS.maxSkillsPerFolder;
+  const keptNames = names.slice(0, GRAPH_LIMITS.maxSkillsPerFolder);
+  const skills = [];
+  let anyUnread = false;
+  for (const name of keptNames) {
+    const entry = topLevel.get(name);
+    let text = null;
+    try {
+      const buf = exec(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager", "-C", folder, "cat-file", "blob", entry.oid],
+        { maxBuffer: GRAPH_LIMITS.maxSkillBytes },
+      );
+      text = buf.toString("utf8");
+    } catch {
+      anyUnread = true; // oversized or unreadable: the skill still exists; its frontmatter facts do not
+    }
+    skills.push({
+      name,
+      isSub: false,
+      group: null,
+      // Fail-closed like the gate: an unreadable SKILL.md reads as not-chainable, never as chainable.
+      aiTrigger: text !== null && aiTriggerAllows(text),
+      meta: text !== null ? parseSkillMeta(text) : null,
+      mentions:
+        text !== null
+          ? findSiblingMentions(text.slice(0, GRAPH_LIMITS.maxMentionScanBytes), keptNames.filter((n) => n !== name))
+          : [],
+      unread: text === null,
+    });
+  }
+  for (const sub of subs.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    skills.push({ name: sub.name, isSub: true, group: sub.group, aiTrigger: false, meta: null, mentions: [], unread: false });
+  }
+  return { head, skills, truncated: truncated || anyUnread, unreachable: null };
+}
+
+/**
+ * Enumerate a trigger's injected skills dir (`run.skillsDir`, REQ-PER-TRIGGER-SKILLS) for display.
+ * A WORKING-TREE readdir on purpose, and labelled advisory where it renders: injected skills are
+ * operator-authored host files with no git history, so there is no object store to prefer -- the
+ * same posture as doctor's aiTriggerNames walk. The one fact worth the read: an injected skill
+ * carrying `ai-trigger: allow` is a silent no-op (OQ-022, injected skills are never AI-reachable),
+ * and today only doctor says so; the graph badges it loudly.
+ */
+export function readInjectedSkills({ skillsDir, fs = nodeFs } = {}) {
+  if (typeof skillsDir !== "string" || skillsDir === "") return { skills: [], truncated: false, unreachable: null };
+  let names;
+  try {
+    names = fs.readdirSync(skillsDir);
+  } catch {
+    return { skills: [], truncated: false, unreachable: "unreadable" };
+  }
+  const valid = names.filter((n) => SKILL_NAME_RE.test(n)).sort();
+  const truncated = valid.length > GRAPH_LIMITS.maxSkillsPerFolder;
+  const skills = [];
+  for (const name of valid.slice(0, GRAPH_LIMITS.maxSkillsPerFolder)) {
+    let aiTrigger = false;
+    try {
+      const text = fs.readFileSync(join(skillsDir, name, "SKILL.md"), "utf8");
+      aiTrigger = aiTriggerAllows(text);
+    } catch {
+      continue; // no SKILL.md at the layout's one required path: not a skill, skip
+    }
+    skills.push({ name, aiTrigger });
+  }
+  return { skills, truncated, unreachable: null };
+}
+
+/**
+ * The one I/O aggregation for a graph build: enumerate every distinct cron folder and injected
+ * skills dir the display triggers name, deduped and capped. Lives here so the dashboard seam and the
+ * `/dispatch graph` command share one folder-dedupe/caps implementation; callers bring their own
+ * records/schedulers reads. Forge triggers contribute no folder -- their repo is not on this host,
+ * which is exactly what the graph's "skills unverifiable from the admin host" folder line says.
+ */
+export function collectGraphInputs({ triggers, readFolder = readFolderSkills, readInjected = readInjectedSkills } = {}) {
+  const out = { folderSkills: {}, injectedSkills: {}, foldersTruncated: false };
+  if (!Array.isArray(triggers)) return out;
+  const folders = [];
+  const injectedDirs = [];
+  for (const t of triggers) {
+    if (t?.type === "cron" && typeof t.folder === "string" && t.folder !== "" && !folders.includes(t.folder)) folders.push(t.folder);
+    if (typeof t?.skillsDir === "string" && t.skillsDir !== "" && !injectedDirs.includes(t.skillsDir)) injectedDirs.push(t.skillsDir);
+  }
+  out.foldersTruncated = folders.length > GRAPH_LIMITS.maxFoldersScanned;
+  for (const folder of folders.slice(0, GRAPH_LIMITS.maxFoldersScanned)) {
+    out.folderSkills[folder] = readFolder({ folder });
+  }
+  for (const dir of injectedDirs.slice(0, GRAPH_LIMITS.maxFoldersScanned)) {
+    out.injectedSkills[dir] = readInjected({ skillsDir: dir });
+  }
+  return out;
+}
+
+/** Escape a string for literal use inside a RegExp source (the cron id join above). */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** The sanitized ids present in the logs dir (from `*.json` filenames), for `logs <id>` autocomplete. */

@@ -27,7 +27,15 @@ import {
   writeSubscriptions,
   enqueueDispatchRun,
   revParseHead,
+  GRAPH_LIMITS,
+  cronRunStats,
+  joinRunsToTriggers,
+  observedChainEdges,
+  readFolderSkills,
+  readInjectedSkills,
+  collectGraphInputs,
 } from "../src/read-model.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 
 // In-memory fs for the triggers write tests: readFileSync/writeFileSync/renameSync over a plain object.
 function triggerFs(initial = {}) {
@@ -153,6 +161,8 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     dispatchRunRoots: ["/root-a"],
     dispatchRunPerHour: 5,
     schedulerStallMax: 2,
+    chainDepthMax: 1,
+    chainMaxPerJob: 2,
     pauseWindowsPath: "./pause-windows.json",
     subscriptionsPath: "/subs.json",
   });
@@ -447,11 +457,12 @@ test("readTriggers normalizes each on.type into its discriminated display record
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
+  // `index` is the RAW file position (issue #54), attached by readTriggers, not the normalizer.
   assert.deepEqual(res.triggers, [
-    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false },
-    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
-    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
-    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, index: 0 },
+    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 1 },
+    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 2 },
+    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 3 },
   ]);
 });
 
@@ -516,7 +527,7 @@ test("readTriggers skips an entry that is not a usable { on, run } object (viewe
     }),
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
-  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" }]);
+  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 0 }]);
 });
 
 test("readTriggers returns { invalid } when there is no triggers array", () => {
@@ -1157,4 +1168,302 @@ test("normalizeTriggerForDisplay surfaces replicas on the webhook kinds, and nul
   // A cron entry can never carry one, so it has no key -- the same absence `forge` has there.
   const cron = normalizeTriggerForDisplay({ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "f", task: "t" } });
   assert.equal("replicas" in cron, false);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The graph read-model (issue #54)
+// ---------------------------------------------------------------------------------------------------
+
+test("GRAPH_LIMITS is the LITERAL reviewed numbers, frozen", () => {
+  // The PI_LIMITS lesson (worker/test/materialize.test.mjs): a constant-derived test is correct at any
+  // value and therefore blind to a change IN that value. If you are here because this went red, change
+  // the numbers on purpose and say why in the commit body.
+  assert.deepEqual(
+    { ...GRAPH_LIMITS },
+    { maxFoldersScanned: 16, maxSkillsPerFolder: 64, maxSkillBytes: 65536, maxMentionScanBytes: 32768, maxEdges: 200, windowDays: 30 },
+  );
+  assert.ok(Object.isFrozen(GRAPH_LIMITS));
+});
+
+test("resolvePaths mirrors the chain caps from env with the worker's own defaults", () => {
+  // The defaults are IMPORTED, not retyped: a graph stating "depth <= 1" while the worker enforces
+  // another number is the exact dishonesty the view exists to remove, so there is no second literal
+  // anywhere to drift.
+  assert.equal(resolvePaths({}).chainDepthMax, CHAIN_DEPTH_MAX_DEFAULT);
+  assert.equal(resolvePaths({}).chainMaxPerJob, CHAIN_MAX_PER_JOB_DEFAULT);
+  assert.equal(resolvePaths({ PI_CHAIN_DEPTH_MAX: "3" }).chainDepthMax, 3);
+  assert.equal(resolvePaths({ PI_CHAIN_MAX_PER_JOB: "0" }).chainMaxPerJob, 0, "0 is the kill switch, not invalid");
+  assert.equal(resolvePaths({ PI_CHAIN_DEPTH_MAX: "abc" }).chainDepthMax, CHAIN_DEPTH_MAX_DEFAULT, "invalid falls back");
+});
+
+test("readTriggers attaches the RAW array index, unshifted by dropped entries", () => {
+  // matched.index and the record's triggerIndex count every file row, unusable ones included; a
+  // filtered-array index would shift every attribution below a bad row onto the wrong trigger.
+  const text = JSON.stringify({
+    triggers: [
+      { on: { type: "label", any: ["ai"] }, run: { kind: "github", flow: "fix" } },
+      { on: { type: "unknown-kind" }, run: {} },
+      { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage" } },
+    ],
+  });
+  const out = readTriggers({ triggersPath: "/t.json", fs: { readFileSync: () => text } });
+  assert.deepEqual(
+    out.triggers.map((t) => [t.type, t.index]),
+    [["label", 0], ["comment", 2]],
+    "the dropped row 1 must leave a hole, not renumber row 2",
+  );
+});
+
+// A minimal run record for the join tests; every field a real record carries that these folds read.
+const runRec = (over = {}) => ({
+  jobId: "gh-guid",
+  kind: "github",
+  target: "o/r#1",
+  flow: "fix",
+  outcome: "completed",
+  startedAt: "2026-08-01T00:00:00.000Z",
+  endedAt: "2026-08-01T00:01:00.000Z",
+  parentJobId: null,
+  chainRefused: null,
+  triggerIndex: null,
+  triggerType: null,
+  ...over,
+});
+
+test("cronRunStats folds runs and last outcome per scheduler id from raw jobIds", () => {
+  const records = [
+    runRec({ jobId: "repeat:nightly:100", kind: "local", outcome: "failed", endedAt: "2026-08-01T00:00:00.000Z" }),
+    runRec({ jobId: "repeat:nightly:200", kind: "local", outcome: "completed", endedAt: "2026-08-02T00:00:00.000Z" }),
+    runRec({ jobId: "gh-x" }),
+  ];
+  const { byId } = cronRunStats({ records, schedulerIds: ["nightly", "idle"] });
+  assert.deepEqual(byId.nightly, { runs: 2, lastOutcome: "completed", lastEndedAt: "2026-08-02T00:00:00.000Z" });
+  assert.deepEqual(byId.idle, { runs: 0, lastOutcome: null, lastEndedAt: null }, "a scheduler with no runs still answers, with zeros");
+});
+
+test("cronRunStats joins exactly: prefix ids, foreign segments and regex metacharacters cannot cross-match", () => {
+  const records = [
+    runRec({ jobId: "repeat:a:100", kind: "local" }),
+    runRec({ jobId: "repeat:ab:200", kind: "local" }),
+    runRec({ jobId: "repeat:a.b:300", kind: "local" }),
+    runRec({ jobId: "repeat:a:not-digits", kind: "local" }),
+  ];
+  const { byId } = cronRunStats({ records, schedulerIds: ["a", "a.b"] });
+  assert.equal(byId.a.runs, 1, "id a must not swallow ab's runs or a non-digit tail");
+  assert.equal(byId["a.b"].runs, 1, "the dot is a literal, never a regex any-char (aXb must not match)");
+});
+
+test("cronRunStats degrades to an empty fold on bad input", () => {
+  assert.deepEqual(cronRunStats({}), { byId: {} });
+  assert.deepEqual(cronRunStats({ records: null, schedulerIds: ["a"] }), { byId: {} });
+  assert.deepEqual(cronRunStats(), { byId: {} });
+  assert.deepEqual(cronRunStats({ records: [runRec()], schedulerIds: [""] }), { byId: {} }, "an empty id joins nothing");
+});
+
+test("joinRunsToTriggers attributes by persisted index, and index 0 attributes", () => {
+  const records = [
+    runRec({ triggerIndex: 0, triggerType: "label", endedAt: "2026-08-02T00:00:00.000Z", outcome: "failed" }),
+    runRec({ jobId: "gh-2", triggerIndex: 0, triggerType: "label", endedAt: "2026-08-01T00:00:00.000Z" }),
+    runRec({ jobId: "gh-3", triggerIndex: 2, triggerType: "comment" }),
+  ];
+  const { byIndex, unattributed } = joinRunsToTriggers({ records, triggerCount: 3 });
+  assert.deepEqual(byIndex[0], { runs: 2, lastOutcome: "failed", lastEndedAt: "2026-08-02T00:00:00.000Z" }, "index 0 is a legal index and must attribute");
+  assert.equal(byIndex[2].runs, 1);
+  assert.equal(unattributed, 0);
+});
+
+test("joinRunsToTriggers counts stale, out-of-range and pre-field forge records as unattributed, never misattributes", () => {
+  const records = [
+    runRec({ triggerIndex: 7, triggerType: "label" }), // triggers.json shrank since this ran (OQ-008 drift)
+    runRec({ jobId: "gh-2" }), // a record from before the field existed
+    runRec({ jobId: "repeat:n:1", kind: "local" }), // cron: attribution lives in the jobId join, not here
+    runRec({ jobId: "chain-x", kind: "local", parentJobId: "local-p" }), // chained child: no trigger at all
+  ];
+  const { byIndex, unattributed } = joinRunsToTriggers({ records, triggerCount: 2 });
+  assert.deepEqual(byIndex, {}, "a stale index must not land on whatever entry now occupies the row");
+  assert.equal(unattributed, 2, "only the two FORGE records count; cron and chained runs are not unattributed, they are differently attributed");
+});
+
+test("joinRunsToTriggers degrades on bad input", () => {
+  assert.deepEqual(joinRunsToTriggers({}), { byIndex: {}, unattributed: 0 });
+  assert.deepEqual(joinRunsToTriggers(), { byIndex: {}, unattributed: 0 });
+  assert.deepEqual(joinRunsToTriggers({ records: [runRec({ triggerIndex: 0 })], triggerCount: null }), { byIndex: {}, unattributed: 1 });
+});
+
+test("observedChainEdges folds child->parent joins per (parentFlow, childFlow, target), self-chains included", () => {
+  const records = [
+    runRec({ jobId: "local-p", kind: "local", target: "local:proj", flow: "build", chainRefused: 2 }),
+    runRec({ jobId: "chain-1", kind: "local", target: "local:proj", flow: "notify", parentJobId: "local-p", endedAt: "2026-08-03T00:00:00.000Z" }),
+    runRec({ jobId: "chain-2", kind: "local", target: "local:proj", flow: "notify", parentJobId: "local-p", endedAt: "2026-08-04T00:00:00.000Z" }),
+    runRec({ jobId: "chain-3", kind: "local", target: "local:proj", flow: "build", parentJobId: "local-p" }),
+  ];
+  const { edges, refusals, truncated } = observedChainEdges({ records });
+  assert.equal(truncated, false);
+  const notify = edges.find((e) => e.childFlow === "notify");
+  assert.deepEqual(notify, { parentFlow: "build", childFlow: "notify", target: "local:proj", count: 2, lastEndedAt: "2026-08-04T00:00:00.000Z" });
+  const self = edges.find((e) => e.childFlow === "build");
+  assert.equal(self.parentFlow, "build", "a flow chaining to itself is a real observed self-edge");
+  assert.deepEqual(refusals, { build: 2 }, "chainRefused counts surface per parent flow");
+});
+
+test("observedChainEdges drops a cross-target pair and a parent outside the window", () => {
+  const records = [
+    runRec({ jobId: "local-p", kind: "local", target: "local:proj", flow: "build" }),
+    runRec({ jobId: "chain-x", kind: "local", target: "local:OTHER", flow: "notify", parentJobId: "local-p" }),
+    runRec({ jobId: "chain-y", kind: "local", target: "local:proj", flow: "notify", parentJobId: "local-gone" }),
+  ];
+  const { edges } = observedChainEdges({ records });
+  assert.deepEqual(edges, [], "cross-folder is unrepresentable by construction (OQ-009) and a half-visible join is no edge");
+});
+
+test("observedChainEdges caps distinct edges at maxEdges and says truncated", () => {
+  const records = [];
+  for (let i = 0; i < GRAPH_LIMITS.maxEdges + 5; i++) {
+    records.push(runRec({ jobId: `local-p${i}`, kind: "local", target: "local:proj", flow: `f${i}` }));
+    records.push(runRec({ jobId: `chain-c${i}`, kind: "local", target: "local:proj", flow: `g${i}`, parentJobId: `local-p${i}` }));
+  }
+  const { edges, truncated } = observedChainEdges({ records });
+  assert.equal(edges.length, GRAPH_LIMITS.maxEdges);
+  assert.equal(truncated, true, "a silent cap reads as covered-everything; the flag is the honesty");
+});
+
+test("observedChainEdges degrades on bad input", () => {
+  assert.deepEqual(observedChainEdges({}), { edges: [], refusals: {}, truncated: false });
+  assert.deepEqual(observedChainEdges(), { edges: [], refusals: {}, truncated: false });
+});
+
+// A routed exec fake for the folder-skills enumeration: throws on anything unrouted, the poller-fake
+// doctrine -- a fake that answers what it does not understand hides a swallowed failure.
+function skillExec(routes) {
+  return (cmd, args) => {
+    const key = args.join(" ");
+    for (const [needle, answer] of routes) {
+      if (key.includes(needle)) {
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }
+    }
+    throw new Error(`skillExec: unrouted ${cmd} ${key}`);
+  };
+}
+
+const LS_TREE_FIXTURE = [
+  "100644 blob aaa     120\t.pi/skills/build-report/SKILL.md",
+  "100644 blob bbb      50\t.pi/skills/build-report/references/notes.md",
+  "100644 blob ccc      80\t.pi/skills/notify/SKILL.md",
+  "100644 blob ddd      60\t.pi/skills/group/sub/SKILL.md",
+  "100644 blob eee      10\t.pi/skills/undeclared/data.md",
+].join("\0") + "\0";
+
+const BUILD_REPORT_MD = '---\nname: build-report\ndescription: Build the report.\nai-trigger: allow\n---\nWhen done, write /outbox/request-1.json with {"flow": "notify"}.\n';
+const NOTIFY_MD = "---\nname: notify\n---\nPost the summary.\n";
+
+test("readFolderSkills enumerates the object store at HEAD: flows, sub-skills, gates, mentions", () => {
+  const exec = skillExec([
+    ["rev-parse HEAD", "abc123\n"],
+    ["ls-tree -r -l -z abc123 .pi/", LS_TREE_FIXTURE],
+    ["cat-file blob aaa", Buffer.from(BUILD_REPORT_MD)],
+    ["cat-file blob ccc", Buffer.from(NOTIFY_MD)],
+  ]);
+  const out = readFolderSkills({ folder: "/proj", exec });
+  assert.equal(out.head, "abc123");
+  assert.equal(out.unreachable, null);
+  assert.equal(out.truncated, false);
+
+  const byName = Object.fromEntries(out.skills.map((s) => [s.name, s]));
+  assert.deepEqual(Object.keys(byName).sort(), ["build-report", "group/sub", "notify"]);
+  assert.equal("undeclared" in byName, false, "a subtree with no SKILL.md is not a skill (keepOnlyDeclaredSkills)");
+
+  assert.equal(byName["build-report"].aiTrigger, true);
+  assert.deepEqual(byName["build-report"].meta, { name: "build-report", description: "Build the report." });
+  assert.deepEqual(byName["build-report"].mentions, [{ name: "notify", strong: true }], "the outbox-adjacent mention is strong");
+
+  assert.equal(byName.notify.aiTrigger, false, "no ai-trigger: allow means not chainable");
+  assert.deepEqual(byName.notify.mentions, []);
+
+  assert.deepEqual(byName["group/sub"], { name: "group/sub", isSub: true, group: "group", aiTrigger: false, meta: null, mentions: [], unread: false });
+});
+
+test("readFolderSkills degrades per failure class, never throws, and deny is not dangling", () => {
+  // no folder at all
+  assert.deepEqual(readFolderSkills({}), { head: null, skills: [], truncated: false, unreachable: "no-folder" });
+  assert.deepEqual(readFolderSkills({ folder: "" }), { head: null, skills: [], truncated: false, unreachable: "no-folder" });
+  // not a git repo: rev-parse fails
+  const noGit = readFolderSkills({ folder: "/p", exec: skillExec([["rev-parse HEAD", new Error("not a repo")]]) });
+  assert.deepEqual(noGit, { head: null, skills: [], truncated: false, unreachable: "not-a-git-repo" });
+  // ls-tree fails after a good HEAD
+  const noTree = readFolderSkills({ folder: "/p", exec: skillExec([["rev-parse HEAD", "abc\n"], ["ls-tree", new Error("boom")]]) });
+  assert.deepEqual(noTree, { head: "abc", skills: [], truncated: false, unreachable: "ls-tree-failed" });
+  // a listing selectEntries refuses (missing -l size column) is unreachable, not a crash
+  const badListing = readFolderSkills({ folder: "/p", exec: skillExec([["rev-parse HEAD", "abc\n"], ["ls-tree", "100644 blob aaa -\t.pi/skills/x/SKILL.md\0"]]) });
+  assert.equal(badListing.unreachable, "listing-unparseable");
+});
+
+test("readFolderSkills keeps an unreadable SKILL.md as an unread skill, fail-closed on the gate", () => {
+  const exec = skillExec([
+    ["rev-parse HEAD", "abc123\n"],
+    ["ls-tree -r -l -z abc123 .pi/", "100644 blob aaa     120\t.pi/skills/big/SKILL.md\0"],
+    ["cat-file blob aaa", new Error("ENOBUFS: oversized")],
+  ]);
+  const out = readFolderSkills({ folder: "/proj", exec });
+  assert.equal(out.skills.length, 1);
+  assert.deepEqual(out.skills[0], { name: "big", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: true });
+  assert.equal(out.truncated, true, "an unread skill marks the enumeration incomplete rather than pretending");
+  assert.equal(out.skills[0].aiTrigger, false, "unreadable reads as NOT chainable, never as chainable");
+});
+
+test("readInjectedSkills lists the working tree advisorily: charset-filtered, SKILL.md required", () => {
+  const files = {
+    "/inj/tidy/SKILL.md": "---\nai-trigger: allow\n---\n",
+    "/inj/plain/SKILL.md": "no frontmatter",
+  };
+  const fs = {
+    readdirSync: (dir) => (dir === "/inj" ? ["tidy", "plain", "Bad.Name", "empty"] : (() => { throw new Error("unrouted"); })()),
+    readFileSync: (p) => {
+      if (p in files) return files[p];
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  };
+  const out = readInjectedSkills({ skillsDir: "/inj", fs });
+  assert.deepEqual(out, {
+    skills: [
+      { name: "plain", aiTrigger: false },
+      { name: "tidy", aiTrigger: true },
+    ],
+    truncated: false,
+    unreachable: null,
+  }, "Bad.Name fails the charset, empty has no SKILL.md; tidy's allow is the OQ-022 badge fact");
+});
+
+test("readInjectedSkills degrades: no dir, unreadable dir", () => {
+  assert.deepEqual(readInjectedSkills({}), { skills: [], truncated: false, unreachable: null });
+  assert.deepEqual(readInjectedSkills({ skillsDir: "" }), { skills: [], truncated: false, unreachable: null });
+  const out = readInjectedSkills({ skillsDir: "/x", fs: { readdirSync: () => { throw new Error("EACCES"); } } });
+  assert.deepEqual(out, { skills: [], truncated: false, unreachable: "unreadable" });
+});
+
+test("collectGraphInputs dedupes folders and skills dirs, caps folders, and says so", () => {
+  const folders = [];
+  const injected = [];
+  const readFolder = ({ folder }) => { folders.push(folder); return { head: "h", skills: [], truncated: false, unreachable: null }; };
+  const readInjected = ({ skillsDir }) => { injected.push(skillsDir); return { skills: [], truncated: false, unreachable: null }; };
+
+  const triggers = [];
+  for (let i = 0; i < GRAPH_LIMITS.maxFoldersScanned + 1; i++) {
+    triggers.push({ type: "cron", folder: `/f${i}`, skillsDir: null });
+  }
+  triggers.push({ type: "cron", folder: "/f0", skillsDir: "/inj" }); // duplicate folder, one injected dir
+  triggers.push({ type: "label", forge: "github", skillsDir: "/inj" }); // forge: no folder, same injected dir
+
+  const out = collectGraphInputs({ triggers, readFolder, readInjected });
+  assert.equal(folders.length, GRAPH_LIMITS.maxFoldersScanned, "the cap bounds the git spawns, the whole point of the cap");
+  assert.equal(new Set(folders).size, folders.length, "each folder enumerated once");
+  assert.deepEqual(injected, ["/inj"], "the injected dir dedupes across triggers");
+  assert.equal(out.foldersTruncated, true);
+});
+
+test("collectGraphInputs degrades on bad input", () => {
+  assert.deepEqual(collectGraphInputs({}), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
+  assert.deepEqual(collectGraphInputs(), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
+  assert.deepEqual(collectGraphInputs({ triggers: "nope" }), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
 });

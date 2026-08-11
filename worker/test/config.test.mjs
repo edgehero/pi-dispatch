@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { delimiter } from "node:path";
 import { test } from "node:test";
-import { configError, globalExtensionsEnabled, loadConfig, loadGitLabAuth } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, globalExtensionsEnabled, loadConfig, loadGitLabAuth } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
@@ -32,6 +32,17 @@ test("AI-trigger / chaining knobs default conservatively", () => {
 	assert.equal(c.chainMaxPerJob, 2);
 	assert.equal(c.dispatchRunPerHour, 3);
 	assert.deepEqual(c.dispatchRunRoots, []);
+});
+
+test("the exported chain-cap defaults are the literals loadConfig uses (issue #54)", () => {
+	// The admin's resolvePaths imports these so the graph never states a cap the worker does not
+	// enforce. The literal assertions beside the loadConfig ones make widening either a reviewed edit:
+	// change a number here on purpose and say why in the commit body.
+	assert.equal(CHAIN_DEPTH_MAX_DEFAULT, 1);
+	assert.equal(CHAIN_MAX_PER_JOB_DEFAULT, 2);
+	const c = loadConfig({});
+	assert.equal(c.chainDepthMax, CHAIN_DEPTH_MAX_DEFAULT);
+	assert.equal(c.chainMaxPerJob, CHAIN_MAX_PER_JOB_DEFAULT);
 });
 
 test("chaining / dispatch knobs take explicit values", () => {

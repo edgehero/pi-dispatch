@@ -64,7 +64,9 @@ export async function readFlowGate({ folder, flow, sha, git = defaultGit }) {
 // Custom: no YAML parser in worker deps; a single ai-trigger boolean does not justify js-yaml.
 // Strict leading-frontmatter scan: strip a BOM, normalise CRLF, isolate the leading `---`..`---`
 // block, and require an exact `ai-trigger: allow` line (an optional surrounding double quote).
-function aiTriggerAllows(buf) {
+// Exported (issue #54) so the admin's skill enumeration answers "chainable?" with THIS scanner and
+// not a keep-in-sync copy -- the SKILL_NAME_RE lesson one export up, applied to the frontmatter test.
+export function aiTriggerAllows(buf) {
 	const text = buf.toString("utf8").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 	const block = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
 	if (!block) return false; // no parseable frontmatter -> deny

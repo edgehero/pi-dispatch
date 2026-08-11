@@ -44,6 +44,7 @@
     "./config": "./src/config.mjs",
     "./exit-code": "./src/exit-code.mjs",
     "./flow-gate": "./src/flow-gate.mjs",
+    "./materialize": "./src/materialize.mjs",
     "./git-dirty": "./src/git-dirty.mjs",
     "./queue": "./src/queue.mjs",
     "./connection": "./src/connection.mjs",
