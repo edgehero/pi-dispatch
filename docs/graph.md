@@ -17,6 +17,8 @@ git, and topology changes when you edit things, not per second. `Esc` returns to
 
 ## `/dispatch graph html`: the browser view
 
+![The graph page: triggers wired to their flows Node-RED style, an observed chain edge with its count, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.9.0)
+
 `/dispatch graph html` renders the same model as a Node-RED-style diagram: trigger nodes wired to
 their flows, observed chain edges with their counts, potential (mentioned) edges dashed, folders as
 group boxes, orphans dimmed and dashed, dangling triggers flagged. It writes **one self-contained

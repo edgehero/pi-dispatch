@@ -387,6 +387,8 @@ dashboard view (`g`), as plain text, and as `/dispatch graph html`, a self conta
 opens from disk (still no server and no port) with the topology drawn Node-RED style
 ([`docs/graph.md`](docs/graph.md)).
 
+![The trigger and flow graph as /dispatch graph html draws it: cron and forge triggers wired to their flows, an observed chain edge carrying its run count, a potential mention, cron re-arm loops with their schedules, an orphan skill dimmed, per-trigger run counts with outcomes, and the legend stating the chain caps](docs/images/graph-view.png?v=0.9.0)
+
 ```bash
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
 ```
