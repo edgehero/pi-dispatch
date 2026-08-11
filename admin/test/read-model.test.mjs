@@ -1212,6 +1212,7 @@ test("readTriggers attaches the RAW array index, unshifted by dropped entries", 
     [["label", 0], ["comment", 2]],
     "the dropped row 1 must leave a hole, not renumber row 2",
   );
+  assert.equal(out.count, 3, "count is the RAW length: the range guard must accept an index at an unusable-but-present row");
 });
 
 // A minimal run record for the join tests; every field a real record carries that these folds read.

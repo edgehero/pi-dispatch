@@ -380,7 +380,10 @@ Steer the running worker without stopping it, from any terminal:
 ## The admin panel
 
 The dashboard shown at the top of this README is a **pi extension**: it loads into your own interactive
-pi session. No daemon, no web app, no network port.
+pi session. No daemon, no web app, no network port. Beside the dashboard, `/dispatch graph` renders the
+whole trigger and flow topology as text: what triggers what, what chained to what in the recorded runs,
+what a skill's own text says it might chain to, plus orphan skills and dangling triggers
+([`docs/graph.md`](docs/graph.md)).
 
 ```bash
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch

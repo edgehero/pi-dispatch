@@ -75,7 +75,13 @@ import {
   scanRunRecords,
   readSubscriptions,
   KNOWN_KEYS,
+  GRAPH_LIMITS,
+  cronRunStats,
+  joinRunsToTriggers,
+  observedChainEdges,
+  collectGraphInputs,
 } from "./read-model.mjs";
+import { buildGraphModel } from "./graph-model.mjs";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
 // (the operator's env always wins), so resolvePaths stays env-only by contract while every one of its
@@ -96,7 +102,7 @@ import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } f
 import { setGlyphs } from "./panel.mjs";
 import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderCosts, renderWhatIf } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderCosts, renderWhatIf, renderGraph } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -152,7 +158,7 @@ const REBUILT_NOTICE = (reason: string) =>
   `replaced invalid settings file (${reason}) — other keys were lost`;
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|costs|triggers|settings|set|unset|setup>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|costs|graph|triggers|settings|set|unset|setup>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -163,6 +169,7 @@ const KNOWN_SUBCOMMANDS = [
   "logs",
   "budget",
   "costs",
+  "graph",
   "triggers",
   "settings",
   "set",
@@ -913,6 +920,14 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       costsCommand(pi, paths, tokens, notify);
       return;
     }
+    case "graph": {
+      // Operator-typed read, ungated (DES-CLI-SURFACE: typing it is the approval); renders the same
+      // model the GRAPH view draws, as plain text into the admin channel. Deliberately NOT an
+      // LLM-callable tool: the folder enumeration spawns git per folder, and the text is a topology
+      // the operator reads, not a fold a model consumes.
+      send(pi, renderGraph(await assembleGraph(paths)));
+      return;
+    }
     case "run": {
       const folder = tokens[1];
       const flow = tokens[2];
@@ -1017,6 +1032,34 @@ function assembleCosts(paths: any, window: string, flow?: string): any {
     piAiPin: piAiVersion(),
   });
   return { fold };
+}
+
+// ---- the graph command surface (issue #54) ----
+
+/**
+ * Assemble the trigger/flow graph model exactly as the dashboard's seam will: a FRESH triggers read
+ * every call (the file live-reloads, OQ-008 -- a cached topology is a stale topology), the resident
+ * schedulers, one bounded record scan for the window, the folder/injected enumerations through
+ * `collectGraphInputs`, and the pure fold. All I/O lives in the read-model; this function only
+ * aggregates its outputs into buildGraphModel's input shape.
+ */
+async function assembleGraph(paths: any): Promise<any> {
+  const nowMs = Date.now();
+  const triggers: any = readTriggers({ triggersPath: paths.triggersPath });
+  const triggerList: any[] = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
+  const schedulers: any = await readSchedulers({ url: paths.valkeyUrl });
+  const records: any = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
+  const recs: any[] = Array.isArray(records) ? records : [];
+  return buildGraphModel({
+    triggers,
+    schedulers: Array.isArray(schedulers) ? schedulers : [],
+    ...collectGraphInputs({ triggers: triggerList }),
+    cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
+    runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count }),
+    chainEdges: observedChainEdges({ records: recs }),
+    caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
+    nowMs,
+  });
 }
 
 /**

@@ -413,3 +413,84 @@ test("renderTriggers marks a replicating trigger, and an unflagged line is byte-
   });
   assert.equal(all.split("[x").length - 1, 3, "label, comment and pull_request each show their count");
 });
+
+// ---- renderGraph (issue #54): the /dispatch graph text body and the dashboard's unframed twin ----
+
+import { renderGraph } from "../src/render.mjs";
+import { buildGraphModel } from "../src/graph-model.mjs";
+
+// Hand-built through the REAL assembler so the render tests cannot drift from the model contract;
+// every number below is hand-computable from these literals.
+const GRAPH_MODEL = () =>
+  buildGraphModel({
+    triggers: {
+      count: 2,
+      triggers: [
+        { type: "cron", index: 0, id: "nightly", pattern: "0 3 * * *", folder: "/srv/site", flow: "build-report", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false },
+        { type: "label", index: 1, any: ["ai"], all: [], none: [], flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+      ],
+    },
+    schedulers: [],
+    folderSkills: {
+      "/srv/site": {
+        head: "abc1234def",
+        truncated: false,
+        unreachable: null,
+        skills: [
+          { name: "build-report", isSub: false, group: null, aiTrigger: true, meta: null, mentions: [{ name: "notify", strong: true }], unread: false },
+          { name: "notify", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false },
+          { name: "old-import", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false },
+        ],
+      },
+    },
+    injectedSkills: {},
+    cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" } } },
+    runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "failed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
+    chainEdges: { edges: [{ parentFlow: "build-report", childFlow: "notify", target: "local:site", count: 3, lastEndedAt: null }], refusals: {}, truncated: false },
+    caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 },
+    nowMs: 1770000000000,
+  });
+
+test("renderGraph renders folders, triggers with stats, skills with badges, and evidence-labelled edges", () => {
+  const out = renderGraph(GRAPH_MODEL());
+  assert.match(out, /^Graph: triggers and flows/, "header anchored at the start");
+  assert.match(out, /folder \/srv\/site, HEAD abc1234\b/, "the folder heading carries the short HEAD");
+  assert.match(out, /cron nightly 0 3 \* \* \* -> build-report {2}\(runs 41, last completed\)/);
+  assert.match(out, /forge github \(skills unverifiable from the admin host\)/);
+  assert.match(out, /label any\[ai\] -> triage {2}\(runs 12, last failed\)/, "forge runs join via the persisted index");
+  assert.match(out, /-> notify {2}observed x3/, "an observed edge carries its count");
+  assert.match(out, /-> notify {2}mention \(potential, strong; can never fire: target has no ai-trigger allow\)/, "a mention of a non-eligible target says it can never fire");
+  assert.match(out, /skill old-import {2}\[orphan/, "the orphan badge renders");
+  assert.match(out, /2 runs unattributed/);
+  assert.match(out, /caps: chain depth <= 1, <= 2 per job, same folder only, window 30d/, "the caps line always renders");
+
+  // The negative claims: evidence classes never blur, and record-side text never appears.
+  assert.ok(!out.includes("label:"), "no matched label text exists anywhere in the model or the render");
+  const observedLines = out.split("\n").filter((l) => /observed x\d/.test(l));
+  assert.equal(observedLines.length, 1, "exactly the one observed edge renders with a count (the legend's xN is not a count)");
+  for (const line of out.split("\n").filter((l) => l.includes("mention (potential") && !l.startsWith("edges:"))) {
+    assert.ok(!/observed/.test(line), "a potential EDGE line never borrows observed's vocabulary (the legend names both on purpose)");
+  }
+});
+
+test("renderGraph: empty model and degraded inputs render exact, honest strings", () => {
+  assert.equal(renderGraph({ meta: { triggersMissing: true } }), "Graph: no triggers file found");
+  assert.equal(renderGraph({ meta: { triggersInvalid: "not valid JSON" } }), "Graph: triggers file invalid: not valid JSON");
+  const empty = renderGraph(buildGraphModel({ caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 } }));
+  assert.equal(
+    empty,
+    ["Graph: triggers and flows", "", "no triggers configured", "", "edges: -> configured, observed xN (from records), mention (potential; a mention is not a promise)", "caps: chain depth <= 1, <= 2 per job, same folder only, window 30d"].join("\n"),
+    "the empty render is exact-equality pinned, caps included",
+  );
+});
+
+test("renderGraph surfaces truncation and dropped edges rather than pretending coverage", () => {
+  const model = GRAPH_MODEL();
+  model.meta.truncated.folders = true;
+  model.meta.truncated.edges = true;
+  model.meta.droppedObservedEdges = 2;
+  const out = renderGraph(model);
+  assert.match(out, /folder scan truncated .*unscanned/);
+  assert.match(out, /observed edges truncated/);
+  assert.match(out, /2 observed edges dropped \(no unique folder/);
+});

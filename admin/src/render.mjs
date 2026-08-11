@@ -377,3 +377,115 @@ export function renderSettingsView(settings) {
   }
   return out.join("\n");
 }
+
+/**
+ * Render the trigger/flow graph model as plain text -- the `/dispatch graph` command body and the
+ * dashboard's unframed degrade twin. Pure over the model (built by graph-model.mjs buildGraphModel);
+ * every honesty rule lives THERE, so this function only formats: folder groups, their triggers with
+ * run stats and dangling badges, their skills with reachability badges and outgoing edges labelled by
+ * evidence class, then the counters and the caps line -- which renders ALWAYS, because edges without
+ * their bounds invite the reader to extrapolate an unbounded chain fabric (DES-GRAPH-EDGE-DERIVATION).
+ */
+export function renderGraph(model) {
+  const m = model ?? {};
+  if (m.meta?.triggersMissing) return "Graph: no triggers file found";
+  if (typeof m.meta?.triggersInvalid === "string" && m.meta.triggersInvalid !== "") return `Graph: triggers file invalid: ${m.meta.triggersInvalid}`;
+  const nodes = Array.isArray(m.nodes) ? m.nodes : [];
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const edges = Array.isArray(m.edges) ? m.edges : [];
+  const flagsByNode = new Map();
+  for (const f of Array.isArray(m.flags) ? m.flags : []) {
+    if (!flagsByNode.has(f.nodeId)) flagsByNode.set(f.nodeId, []);
+    flagsByNode.get(f.nodeId).push(f.flag);
+  }
+
+  const out = ["Graph: triggers and flows"];
+  const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
+  if (triggerCount === 0) out.push("", "no triggers configured");
+
+  for (const group of Array.isArray(m.folders) ? m.folders : []) {
+    if ((group.triggerIds?.length ?? 0) === 0 && (group.skillIds?.length ?? 0) === 0) continue;
+    out.push("", groupHeading(group));
+    for (const id of group.triggerIds ?? []) {
+      const t = nodeById.get(id);
+      if (t) out.push(`  ${graphTriggerLine(t, flagsByNode.get(id) ?? [])}`);
+    }
+    for (const id of group.skillIds ?? []) {
+      const s = nodeById.get(id);
+      if (!s || s.kind === "skill-unverified") continue; // an unverified flow is already on its trigger line
+      out.push(`  ${graphSkillLine(s, flagsByNode.get(id) ?? [])}`);
+      for (const e of edges) {
+        if (e.from !== id || e.kind === "cron-rearm") continue;
+        const target = nodeById.get(e.to);
+        out.push(`    ${graphEdgeLine(e, target)}`);
+      }
+    }
+  }
+
+  const injected = nodes.filter((n) => n.kind === "injected");
+  if (injected.length > 0) {
+    out.push("", "injected skills (trigger-reachable, never AI-reachable):");
+    for (const n of injected) {
+      const marks = (flagsByNode.get(n.id) ?? []).includes("injected-ai-trigger") ? "  [ai-trigger: allow is a silent no-op here]" : "";
+      out.push(`  ${n.name} (${n.dir})${marks}`);
+    }
+  }
+
+  out.push("");
+  if ((m.meta?.unattributedRuns ?? 0) > 0) out.push(`${m.meta.unattributedRuns} runs unattributed (triggers file changed since they ran, or they predate attribution)`);
+  const refusals = Object.entries(m.meta?.chainRefusals ?? {});
+  if (refusals.length > 0) out.push(`chain refusals: ${refusals.map(([flow, n]) => `${flow} ${n}`).join(", ")}`);
+  const trunc = m.meta?.truncated ?? {};
+  if (trunc.folders) out.push("folder scan truncated (cap reached): unlisted folders are not empty, they are unscanned");
+  if (trunc.skills) out.push("skill enumeration truncated or partly unread");
+  if (trunc.edges) out.push("observed edges truncated (cap reached)");
+  if ((m.meta?.droppedObservedEdges ?? 0) > 0) out.push(`${m.meta.droppedObservedEdges} observed edges dropped (no unique folder to attach them to)`);
+  out.push("edges: -> configured, observed xN (from records), mention (potential; a mention is not a promise)");
+  out.push(capsLine(m.caps));
+  return out.join("\n");
+}
+
+function groupHeading(group) {
+  if (group.kind === "forge") return `forge ${group.label} (skills unverifiable from the admin host)`;
+  const head = group.head ? `, HEAD ${String(group.head).slice(0, 7)}` : "";
+  const state = group.unreachable ? `, ${group.unreachable}` : "";
+  return `folder ${group.path ?? group.label}${head}${state}`;
+}
+
+function graphTriggerLine(t, flags) {
+  const stats = t.runs > 0 ? `runs ${t.runs}${t.lastOutcome ? `, last ${t.lastOutcome}` : ""}` : "no runs in window";
+  const badges = [];
+  if (flags.includes("no-skill")) badges.push("[no-skill: flow absent at HEAD]");
+  if (flags.includes("charset-invalid")) badges.push("[invalid flow name: can never materialise]");
+  if (flags.includes("pr-spend-loop-risk")) badges.push("[spend-loop risk: fires on opened/synchronize]");
+  const replicas = t.replicas ? ` x${t.replicas}` : "";
+  return `${t.onType} ${t.label} -> ${t.flow ?? "(no flow)"}${replicas}  (${stats})${badges.length ? ` ${badges.join(" ")}` : ""}`;
+}
+
+function graphSkillLine(s, flags) {
+  const badges = [];
+  if (s.kind === "skill-missing") badges.push("[missing at HEAD]");
+  if (s.isSub) badges.push(`[sub-skill of ${s.group}: loadable, never a flow]`);
+  if (s.aiTrigger) badges.push("[chainable]");
+  if (flags.includes("orphan")) badges.push("[orphan: no trigger, no ai-trigger, no mention]");
+  if (flags.includes("ai-reachable-no-trigger")) badges.push("[AI-reachable, no trigger]");
+  if (flags.includes("unread")) badges.push("[SKILL.md unread: facts unknown]");
+  return `skill ${s.name}${badges.length ? `  ${badges.join(" ")}` : ""}`;
+}
+
+function graphEdgeLine(e, target) {
+  const name = target?.name ?? "(unknown)";
+  if (e.kind === "observed") return `-> ${name}  observed x${e.count}`;
+  if (e.kind === "potential") {
+    const fire = e.eligible ? "could fire" : "can never fire: target has no ai-trigger allow";
+    return `-> ${name}  mention (potential${e.strong ? ", strong" : ""}; ${fire})`;
+  }
+  return `-> ${name}  ${e.kind}`;
+}
+
+function capsLine(caps) {
+  const depth = caps?.chainDepthMax ?? "?";
+  const width = caps?.chainMaxPerJob ?? "?";
+  const window = caps?.windowDays ?? "?";
+  return `caps: chain depth <= ${depth}, <= ${width} per job, same folder only, window ${window}d`;
+}

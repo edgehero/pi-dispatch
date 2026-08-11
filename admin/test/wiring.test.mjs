@@ -401,6 +401,53 @@ test("costs renders into the pi-dispatch-admin channel with triggerTurn unset", 
   assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
 });
 
+test("graph renders into the pi-dispatch-admin channel with triggerTurn unset, caps line always", async () => {
+  // Offline-deterministic on purpose: an UNPARSEABLE VALKEY_URL degrades the scheduler read
+  // synchronously ({ unreachable: "Invalid URL" }) without ever creating a redis client -- a dead
+  // PORT would degrade too, but the failFast client emits a stray async error event the test runner
+  // attributes to this test, which is exactly why this suite never opens real connections. The
+  // trigger's folder does not exist, so the enumeration degrades to not-a-git-repo -- the graph must
+  // still render, with its caps line, because degrade never means silent (DES-GRAPH-EDGE-DERIVATION).
+  const dir = mkdtempSync(join(tmpdir(), "admin-graph-wiring-"));
+  const triggersPath = join(dir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: join(dir, "absent"), flow: "tidy", task: "t" } }] }));
+  const prevTriggers = process.env.PI_TRIGGERS_FILE;
+  const prevValkey = process.env.VALKEY_URL;
+  process.env.PI_TRIGGERS_FILE = triggersPath;
+  process.env.VALKEY_URL = "not-a-url";
+  try {
+    const { calls, def } = await loadRegistered();
+    await def.handler("graph", fakeCtx().ctx);
+    assert.equal(calls.sendMessage.length, 1);
+    const [message, options] = calls.sendMessage[0];
+    assert.equal(message.customType, "pi-dispatch-admin");
+    assert.equal(message.display, true);
+    assert.match(message.content, /^Graph: triggers and flows/, "the graph text is the message");
+    assert.match(message.content, /caps: chain depth <= \d+, <= \d+ per job, same folder only/, "the caps line renders even on a degraded model");
+    assert.match(message.content, /not-a-git-repo/, "an unreadable folder says so instead of inventing dangling flags");
+    assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
+  } finally {
+    if (prevTriggers === undefined) delete process.env.PI_TRIGGERS_FILE;
+    else process.env.PI_TRIGGERS_FILE = prevTriggers;
+    if (prevValkey === undefined) delete process.env.VALKEY_URL;
+    else process.env.VALKEY_URL = prevValkey;
+  }
+});
+
+test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {
+  // Two copies of one list (the string is what an operator reads, the array is what completion
+  // offers), and until now nothing pinned them together -- the exact drift class this suite exists
+  // for. Source-read because neither is exported, deliberately.
+  const src = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  const usage = /usage: \/dispatch <([^>]+)>/.exec(src);
+  assert.ok(usage, "the USAGE string must keep its <a|b|c> shape");
+  const fromUsage = usage[1].split("|");
+  const arr = /const KNOWN_SUBCOMMANDS = \[([^\]]+)\]/s.exec(src);
+  assert.ok(arr, "KNOWN_SUBCOMMANDS must stay a literal array");
+  const fromArray = [...arr[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(fromUsage, fromArray, "a subcommand added to one list must be added to the other, in the same position");
+});
+
 /**
  * dispatch_costs.execute folds the on-disk history against the declared subscriptions with the REAL
  * pricing façade and returns TYPED dollars: every money value carries its `class`, so a model reading the
@@ -503,6 +550,7 @@ test("argument completion offers subcommands then run ids", async () => {
   assert.ok(Array.isArray(subs) && subs.some((i) => i.value === "status" || i.value === "settings"));
   assert.ok(subs.some((i) => i.value === "setup"), "setup completes as a first token");
   assert.deepEqual(await def.getArgumentCompletions("setu"), [{ value: "setup", label: "setup" }]);
+  assert.deepEqual(await def.getArgumentCompletions("gra"), [{ value: "graph", label: "graph" }], "graph completes as a first token (issue #54)");
   // Empty logs dir -> no ids to complete -> null (not []).
   assert.equal(await def.getArgumentCompletions("logs "), null);
   // No subcommand matches -> null.

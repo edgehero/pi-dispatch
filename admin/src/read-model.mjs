@@ -671,7 +671,10 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
     // above row i would otherwise shift every attribution below it onto the wrong trigger.
     if (display) triggers.push({ ...display, index });
   });
-  return { triggers };
+  // `count` is the RAW entries length, for the same reason `index` is raw: the attribution range
+  // guard must accept an index that points at an unusable-but-present row (triggers.length would
+  // reject it and miscount the run as stale).
+  return { triggers, count: entries.length };
 }
 
 /**

@@ -227,7 +227,8 @@ Two supported ways to continue work **across** jobs:
   no store is configured. Read [`sessions.md`](sessions.md) first.
 - **Job chaining** through `/outbox`: a finished job may request a follow-up job. It is **local jobs only**
   (a forge parent gets no `/outbox` mount), depth-bounded, and gated on the target flow carrying
-  `ai-trigger: allow`.
+  `ai-trigger: allow`. `/dispatch graph` shows the whole picture: configured trigger edges, observed
+  chain edges from the run records, and potential ones a skill's text names ([`graph.md`](graph.md)).
 
 ## What is not supported
 

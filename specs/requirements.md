@@ -400,7 +400,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The admin surface shall ship as a pi extension in `admin/`, loaded into the operator's
   interactive pi session. It provides operator slash commands for observability (`status`, `runs`, `logs`,
-  `budget`, `triggers`, `costs` — the last with a `whatif` form, `REQ-COST-ANALYTICS`), queue on/off
+  `budget`, `triggers`, `costs` — the last with a `whatif` form, `REQ-COST-ANALYTICS` — and `graph`,
+  `REQ-TOPOLOGY-GRAPH`), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
@@ -675,6 +676,49 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   plain with identical labeling; given `dispatch_costs`, then every monetary value in the returned JSON
   carries its `class`; given a run recorded under an older pi-ai pin, then it is counted as
   rates-drifted, and its stored cost is never rewritten.
+
+## REQ-TOPOLOGY-GRAPH
+
+- **Statement**: The harness shall make the trigger/flow **topology** visible: a `/dispatch graph`
+  command rendering one assembled model (`DES-GRAPH-EDGE-DERIVATION`) of every trigger, every
+  enumerated skill, and every edge between them, grouped by folder. The screen informs; it changes
+  nothing — no port, no database, no new dependency, all fs/redis access in the read-model. The
+  **honesty rules are requirements, not conventions**:
+  (a) every trigger naming a `run.flow` renders its config edge — dangling, unverifiable and
+  charset-invalid included;
+  (b) a cron trigger's run count and last outcome are **exact** over the stated window (the jobId
+  join), and a forge trigger's come **only** from the persisted `triggerIndex` — a record the
+  current file cannot claim renders under an explicit `unattributed` count, never on whatever entry
+  now occupies its row;
+  (c) an **observed** edge is always labelled with its count and source (records over the window);
+  a **potential** edge is always labelled as a mention, with whether it could ever fire (the
+  target's `ai-trigger`), and the two vocabularies never mix in one line;
+  (d) no chain edge renders out of a forge trigger's flow or across folders (`OQ-009`);
+  (e) orphan skills, `no-skill` triggers, charset-invalid flows, AI-reachable-without-trigger and
+  injected-`ai-trigger` skills are visibly flagged, each by its own name;
+  (f) the chain caps and the record window render on **every** output, and every truncation or
+  dropped edge says so — a capped scan must never read as complete coverage;
+  (g) an unreachable folder renders **unverified** and produces no dangling flags.
+- **Scope**: Display only, from the operator's session. The graph triggers nothing, writes nothing,
+  and is deliberately **not** a model-callable tool: the enumeration spawns git per folder, and the
+  topology is for the operator's eyes (`DES-CLI-SURFACE`'s ungated operator-typed tier).
+- **Why**: Every edge already exists somewhere in `triggers.json`, the run records, or the object
+  store — issue #54's four gaps are failures of assembly, not of data. The labeling rules exist
+  because a graph invites exactly one failure: blurring evidence classes until a mention reads like
+  history (`REQ-COST-ANALYTICS`'s estimate-never-mislabeled-as-truth discipline, applied to
+  topology).
+- **Traces to**: `DES-GRAPH-EDGE-DERIVATION`, `DES-ADMIN-VIA-PI-EXTENSION`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-008`, `OQ-009`, `OQ-022`
+- **Acceptance**: Given a triggers file with a cron trigger whose folder enumeration succeeds and a
+  label trigger, when `/dispatch graph` runs, then the cron trigger shows exact run counts joined by
+  jobId, the label trigger shows counts joined by `triggerIndex` only, and both config edges render;
+  given a record whose `triggerIndex` exceeds the current file, then it counts as unattributed and
+  attributes to no row; given a folder whose skills include one no trigger names, with no
+  `ai-trigger` and no mention, then it flags `orphan`; given a trigger whose flow is absent at HEAD
+  in an enumerated folder, then it flags `no-skill`, and given the folder is unreachable instead,
+  then it renders unverified with no dangling flag; given any output, then the caps line
+  (`chain depth`, `per job`, `same folder only`, window) is present; given an observed chain edge,
+  then its line carries `observed x<count>`, and no potential line carries a count.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -1146,6 +1190,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (`/dispatch graph`). **NEW `REQ-TOPOLOGY-GRAPH`**: the trigger/flow topology as one assembled model with the honesty rules written as requirements, on the `REQ-COST-ANALYTICS` precedent — the estimate-never-mislabeled-as-truth discipline applied to topology (a mention must never read like history, a stale index must never land on today's row, a capped scan must never read as complete coverage, the chain caps render on every output). Display-only and deliberately NOT a model-callable tool: the enumeration spawns git per folder, and the topology is for the operator's eyes (`DES-CLI-SURFACE`'s operator-typed ungated tier; the registered-tool count is untouched, pinned by test). **REQ-ADMIN-VIA-PI-EXTENSION AMENDED**: `graph` joins the observability command list. **REQ-COST-ANALYTICS UNCHANGED, checked** (same scan, sibling consumer). The GRAPH dashboard view and the HTML export are later slices and will amend this entry when they land. |
 | 2026-08-09 | Issue #60 (Gap 3). **NEW `REQ-PER-TRIGGER-INSTRUCTION`**: the three webhook types may carry one line of operator standing text, rendered into the user prompt's envelope above the fenced data region. Refused on cron, and that is a decision rather than a gap: a local job's prompt IS `run.task`, with no envelope and no fence, so there is no standing region distinct from the task for a second field to occupy, and two fields writing one region with an undefined order would both appear to work. Capped at 2000 characters and refused rather than truncated, with the reasoning recorded because the obvious one does not hold -- the cap is not about caching, it bounds a context overflow inside a PAID container that has no pre-spend signal, and keeps the field in its lane. **REQ-PER-TRIGGER-SKILLS UNCHANGED, checked**: the two fields are independent and a trigger may set either, neither or both. |
 | 2026-08-09 | Issue #60 (Gap 2). **NEW `REQ-PER-TRIGGER-SKILLS`**: a trigger may name a worker-host directory of skills, copied per job into `/job/trigger-skills` and layered repo > injected > overlay. Operator-authored only: nothing reachable from a webhook payload, an issue or comment body, or `dispatch_run` can supply it, and no model-callable tool can set it, because choosing which skills a job loads is choosing what the agent can do -- `run.image`'s answer rather than `f.forge`'s. **REQ-GLOBAL-PI-OVERLAY AMENDED**: its "repo wins on conflict" now reads in full as repo > injected > overlay, with the middle tier justified on specificity ("for THIS trigger" is narrower than "for this deployment") rather than on trust, since both are the operator's own. **REQ-UPSTREAM-CONTRACT-TESTS UNCHANGED, checked**: "a repo skill resolves once, from `/job/pi/skills`" is still exactly true -- the injected tier adds a second SOURCE, never a second copy of the same skill, and a name collision resolves to exactly one winner by the ordering above. **REQ-RESURRECTABLE-SANDBOX UNCHANGED, checked**, and it is a dividend of copying rather than mounting: `retainJobDir` renames the whole job dir, so a resurrected sandbox sees the skills the run actually saw instead of re-reading a host directory that may since have changed. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the Statement enumerated the gated PR actions (`opened, synchronize, reopened`) and named the PR `author_association`, so a review action inherited neither branch. It now carries the third arm gated on the REVIEWER's `review.author_association`, the optional `on.reviewState` narrowing with its `review-state-not-matched` drop, and the `no-review-body` refusal of an empty `commented` review (with an empty-bodied `approved` or `changes_requested` still firing, since there the verdict is the signal). Acceptance gains the two directional cases as an explicit PAIR, plus the empty-body, unlisted-verdict and self-review cases. The Why records why the field differs and points at `CONST-TRIGGER-AUTHOR-GATE` for the argument. **REQ-DEDUP-BY-DELIVERY-GUID UNCHANGED, checked** — a review delivery carries the same `X-GitHub-Delivery` GUID every other event does, and the polled form mints `poll-rv<reviewId>` inside the existing `gh-` space, so the dedup contract is exercised rather than extended. **REQ-RESUMABLE-SESSION UNCHANGED, checked** — a review-triggered job on a PR resolves its session key from target type and head ref exactly as a `synchronize` one does; what the change DID require was carrying the review into the resumed prompt's data region, since that envelope says "address the activity quoted below" and would otherwise have quoted nothing. **REQ-REPLICA-RUNS UNCHANGED, checked** — replicas on a review-triggered PR target inherit `OQ-017` unchanged. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked**, and load-bearing: it is what bounds the widened trigger surface recorded in `OQ-020`. |
