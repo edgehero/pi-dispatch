@@ -5,11 +5,14 @@ import { settingsFilePath } from "@edgehero/pi-dispatch/runtime-settings";
 // test, rather than at the first /dispatch graph in a bundled install.
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
 import { aiTriggerAllows } from "@edgehero/pi-dispatch/flow-gate";
-import { CHAIN_DEPTH_MAX_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { CHAIN_DEPTH_MAX_DEFAULT, defaultGraphDir } from "@edgehero/pi-dispatch/config";
+import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 
 export const ok =
   typeof settingsFilePath === "function" &&
   typeof selectEntries === "function" &&
   typeof keepOnlyDeclaredSkills === "function" &&
   typeof aiTriggerAllows === "function" &&
+  typeof defaultGraphDir === "function" &&
+  typeof openBrowser === "function" &&
   Number.isInteger(CHAIN_DEPTH_MAX_DEFAULT);

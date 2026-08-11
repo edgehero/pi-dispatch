@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { delimiter } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, globalExtensionsEnabled, loadConfig, loadGitLabAuth } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, globalExtensionsEnabled, loadConfig, loadGitLabAuth } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
@@ -32,6 +32,15 @@ test("AI-trigger / chaining knobs default conservatively", () => {
 	assert.equal(c.chainMaxPerJob, 2);
 	assert.equal(c.dispatchRunPerHour, 3);
 	assert.deepEqual(c.dispatchRunRoots, []);
+});
+
+test("defaultGraphDir is the worker-owned temp path, beside logs/ and jobs/, never inside logsDir", () => {
+	// NOT logsDir on purpose: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape,
+	// and a stray .html beside the sidecars would widen a contract for a file that is not a record.
+	assert.equal(defaultGraphDir({ TMPDIR: "/t" }), "/t/pi-dispatch/graph");
+	assert.equal(defaultGraphDir({ TEMP: "C:\\Temp" }), "C:/Temp/pi-dispatch/graph", "backslashes normalise like the sibling defaults");
+	assert.equal(defaultGraphDir({}), "/tmp/pi-dispatch/graph");
+	assert.ok(!defaultGraphDir({}).includes("/logs"), "never inside the run-history directory");
 });
 
 test("the exported chain-cap defaults are the literals loadConfig uses (issue #54)", () => {

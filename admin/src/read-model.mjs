@@ -18,7 +18,7 @@
 import * as nodeFs from "node:fs";
 import { join, delimiter, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultLogsDir, defaultSandboxDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { defaultLogsDir, defaultSandboxDir, defaultGraphDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey } from "@edgehero/pi-dispatch/budget";
@@ -99,6 +99,11 @@ export function resolvePaths(env = process.env) {
     // GRAPH view exists to remove.
     chainDepthMax: parseNonNegInt(env.PI_CHAIN_DEPTH_MAX, CHAIN_DEPTH_MAX_DEFAULT),
     chainMaxPerJob: parseNonNegInt(env.PI_CHAIN_MAX_PER_JOB, CHAIN_MAX_PER_JOB_DEFAULT),
+    // Where the graph HTML artifact lands (issue #54): the worker's own temp-dir default, imported
+    // like defaultLogsDir/defaultSandboxDir above, so the admin and any future worker consumer agree
+    // on the path without loadConfig. Deliberately NOT logsDir -- that directory's filename shape is
+    // contract (INT-RUN-HISTORY-FILE-CONTRACT).
+    graphDir: env.PI_GRAPH_DIR || defaultGraphDir(env),
   };
 }
 

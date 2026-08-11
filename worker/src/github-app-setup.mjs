@@ -32,13 +32,13 @@
  * Everything side-effecting is injected (fetch, the listener, the browser opener, prompt, fs, clock),
  * defaulting to the real thing — the up.mjs convention — so the whole flow is testable offline.
  */
-import { spawn as nodeSpawn } from "node:child_process";
 import { createSign } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { updateEnvFile } from "./env-file.mjs";
+import { openBrowser as defaultOpenBrowser } from "./open-browser.mjs";
 import { defaultPrompt } from "./up.mjs";
 
 const API_ROOT = "https://api.github.com";
@@ -503,20 +503,6 @@ async function defaultListen(pageFor) {
 	};
 }
 
-/**
- * Best-effort platform browser opener. ALWAYS paired with the URL printed to the terminal — a
- * headless or SSH'd operator has no opener that works, and the printed URL pasted into any browser
- * (on the right machine, or through the port-forward the wizard suggests) is the real contract; the
- * spawn is only a convenience on top. Failures are swallowed for the same reason.
- */
-function defaultOpenBrowser(url) {
-	const [cmd, args] =
-		process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
-	try {
-		const child = nodeSpawn(cmd, args, { stdio: "ignore", detached: true });
-		child.on("error", () => {});
-		child.unref();
-	} catch {
-		// No opener on this host — the printed URL carries the flow.
-	}
-}
+// The best-effort platform opener moved to its own module (issue #54) so the admin's graph export
+// shares this one reviewed argv table instead of hand-copying it; the print-the-URL-first doctrine
+// lives in its docstring and is unchanged here.

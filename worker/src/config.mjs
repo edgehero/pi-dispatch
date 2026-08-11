@@ -269,6 +269,16 @@ export function defaultLogsDir() {
 	return `${process.env.TMPDIR ?? process.env.TEMP ?? "/tmp"}/pi-dispatch/logs`.replace(/\\/g, "/");
 }
 
+export function defaultGraphDir(env = process.env) {
+	// Under the OS temp dir by default, beside logs/ and jobs/ -- the admin's graph HTML artifact
+	// (issue #54) is host-side display output on the defaultLogsDir doctrine, and deliberately NOT
+	// inside logsDir: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape, and a
+	// stray .html beside the sidecars would widen a contract for a file that is not a record.
+	// Overridable with PI_GRAPH_DIR; exported so the admin resolves the same default without
+	// loadConfig, like defaultSandboxDir above.
+	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/graph`.replace(/\\/g, "/");
+}
+
 export function defaultSettingsFile() {
 	// Under the OS temp dir by default. Holds the runtime-tunable settings overlay shared with the admin
 	// extension (INT-CONFIG-OVERLAY-CONTRACT); a worker-owned path that never enters the container env

@@ -146,6 +146,8 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     // Pinned so the sandbox default does not drag the OS temp dir into this equality
     // (REQ-RESURRECTABLE-SANDBOX); the defaulting itself is asserted in its own test below.
     PI_SANDBOX_DIR: "/sbx",
+    // Pinned for the same temp-dir reason; the default is asserted in its own test below.
+    PI_GRAPH_DIR: "/g",
   });
   assert.deepEqual(p, {
     valkeyUrl: "redis://h:1",
@@ -163,9 +165,16 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     schedulerStallMax: 2,
     chainDepthMax: 1,
     chainMaxPerJob: 2,
+    graphDir: "/g",
     pauseWindowsPath: "./pause-windows.json",
     subscriptionsPath: "/subs.json",
   });
+});
+
+test("resolvePaths resolves the graph dir from PI_GRAPH_DIR with the worker's temp default", () => {
+  assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphDir, "/x/graphs");
+  assert.ok(resolvePaths({}).graphDir.endsWith("/pi-dispatch/graph"), "the default is the worker-owned temp path, never cwd");
+  assert.ok(resolvePaths({ PI_GRAPH_DIR: "" }).graphDir.endsWith("/pi-dispatch/graph"), "empty falls back like every other path here");
 });
 
 test("resolvePaths falls back to defaults on empty env (no worker config required)", () => {
