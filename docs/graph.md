@@ -17,7 +17,7 @@ git, and topology changes when you edit things, not per second. `Esc` returns to
 
 ## `/dispatch graph html`: the browser view
 
-![The graph page: triggers wired to their flows Node-RED style, an observed chain edge with its count, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.9.0)
+![The graph page: triggers wired to their flows Node-RED style, an observed chain edge with its count, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.9.1)
 
 `/dispatch graph html` renders the same model as a Node-RED-style diagram: trigger nodes wired to
 their flows, observed chain edges with their counts, potential (mentioned) edges dashed, folders as
@@ -68,6 +68,29 @@ skill talks about it", never "this happens". An observed edge says "this happene
 "this will happen again". The caps line renders on every output because the chain fabric is bounded
 by design: depth ≤ `PI_CHAIN_DEPTH_MAX` (default 1), width ≤ `PI_CHAIN_MAX_PER_JOB` (default 2),
 same folder only, and a forge-triggered run never chains at all (`OQ-009`).
+
+## Loops inside a skill
+
+There is no structured loop construct anywhere in this system: a "loop inside a skill" is a sentence
+in `SKILL.md` telling the agent to iterate ("iterate until it renders right", "for each page…").
+The graph scans each skill's body for that vocabulary and shows what it finds **inside the skill's
+own node**, because everything a loop does happens inside that one job, one container, one budget
+slot. In the browser view a skill with loop hints becomes a group box: the skill chip, a `⟳` marker
+per detected phrase, and the loop wire, all visibly contained in the skill. In the TUI and text
+views the hints ride the skill's row as `[loop: "…"]` badges. Like potential edges, a hint is text
+evidence, not a promise; the frontmatter is excluded from the scan so a `description: repeat daily`
+never reads as a loop. The other two loop shapes have their own visuals: a cron trigger's re-arm is
+the dashed self-loop labelled with its schedule, and a flow that chained to itself shows as an
+observed self-edge with its count.
+
+## Which repos and folders
+
+A local folder group is headed by its `run.folder` (the TUI and `/dispatch graph` show the full
+path; the HTML artifact shows the basename unless you pass `--full-paths`, since the file is durable
+and shareable while your terminal is not). A forge group's triggers name no repository in
+`triggers.json` (routing belongs to the forge app installation), so the group instead lists the
+repositories its **recorded runs** actually hit in the window, labelled as record-derived: history
+answering a question configuration cannot.
 
 ## Run attribution
 

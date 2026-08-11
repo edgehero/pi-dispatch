@@ -25,7 +25,7 @@ const CANNED = () => ({
       truncated: false,
       unreachable: null,
       skills: [
-        { name: "build-report", isSub: false, group: null, aiTrigger: true, meta: { name: "build-report", description: "d" }, mentions: [{ name: "notify", strong: true }], unread: false },
+        { name: "build-report", isSub: false, group: null, aiTrigger: true, meta: { name: "build-report", description: "d" }, mentions: [{ name: "notify", strong: true }], loops: [{ hint: "until the report renders right" }], unread: false },
         { name: "notify", isSub: false, group: null, aiTrigger: true, meta: null, mentions: [], unread: false },
         { name: "old-import", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false },
         { name: "group/sub", isSub: true, group: "group", aiTrigger: false, meta: null, mentions: [], unread: false },
@@ -34,6 +34,7 @@ const CANNED = () => ({
     },
   },
   injectedSkills: { "/inj": { skills: [{ name: "tidy", aiTrigger: true }], truncated: false, unreachable: null } },
+  forgeRepos: { github: ["acme/website", "acme/api"] },
   cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" }, gone: { runs: 0, lastOutcome: null, lastEndedAt: null } } },
   runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
   chainEdges: { edges: [{ parentFlow: "build-report", childFlow: "notify", target: "local:site", count: 3, lastEndedAt: "2026-08-10T00:00:00.000Z" }], refusals: { "build-report": 1 }, truncated: false },
@@ -225,6 +226,67 @@ test("a mention cycle marks one back edge and routes it under the rows without c
   assertUnderRoutesClearChips(layout);
 });
 
+// ---- 6c. loop-in-skill groups ----
+
+test("a skill with loops becomes a group: chip inside the box, marker with hint, ring inside, ports untouched", () => {
+  const layout = layoutGraph(buildGraphModel(CANNED()));
+  const sg = layout.skillGroups.find((s) => s.label === "build-report");
+  assert.ok(sg, "a prose-loop hint promotes the skill to a group box");
+  const chip = layout.nodes.find((n) => n.id === sg.nodeId);
+  assert.ok(
+    chip.x >= sg.x && chip.y >= sg.y && chip.x + chip.w <= sg.x + sg.w && chip.y + chip.h <= sg.y + sg.h,
+    "the skill's own chip sits INSIDE its group box",
+  );
+  assert.equal(sg.markers.length, 1, "one marker per loop hint");
+  assert.equal(sg.markers[0].hint, "until the report renders…", "the hint rides the marker, clipped");
+  for (const [x, y] of sg.points) {
+    assert.ok(x >= sg.x && x <= sg.x + sg.w && y >= sg.y && y <= sg.y + sg.h, "every loop-wire point stays inside the box");
+  }
+  // Containment is visual only: external wires keep leaving the CHIP's output port, not the box.
+  const outgoing = layout.wires.filter((w) => w.from === chip.id && !w.self);
+  assert.ok(outgoing.length >= 2, "the observed edge and the potential mention still leave build-report");
+  for (const w of outgoing) {
+    assert.ok(w.d.startsWith(`M ${chip.x + chip.w} ${chip.y + 15} `), `wire ${w.id} must leave the chip's output port`);
+  }
+  const folder = layout.groups.find((f) => f.id === sg.groupId);
+  assert.ok(
+    sg.x >= folder.x && sg.y >= folder.y && sg.x + sg.w <= folder.x + folder.w && sg.y + sg.h <= folder.y + folder.h,
+    "the group box itself stays inside its folder rect",
+  );
+});
+
+test("sub-skills nest inside the parent's group box as small unwired chips", () => {
+  const layout = layoutGraph(buildGraphModel(CANNED()));
+  const sg = layout.skillGroups.find((s) => s.label === "group");
+  assert.ok(sg, "owning a sub-skill promotes the parent to a group box even without loops");
+  const sub = layout.nodes.find((n) => n.node.name === "group/sub");
+  assert.ok(sg.subIds.includes(sub.id), "the sub chip belongs to its parent's group");
+  assert.equal(sub.nested, true);
+  assert.ok(
+    sub.x >= sg.x && sub.y >= sg.y && sub.x + sub.w <= sg.x + sg.w && sub.y + sub.h <= sg.y + sg.h,
+    "the sub chip sits inside the parent's box",
+  );
+  assert.equal(layout.wires.filter((w) => w.from === sub.id || w.to === sub.id).length, 0, "sub chips are unwired");
+});
+
+test("the page carries the group visuals and the forge scope line", () => {
+  const out = cannedHtml();
+  assert.ok(out.includes('class="sgroup"'), "skill group boxes render");
+  assert.ok(out.includes(">⟳</text>"), "the loop marker glyph renders");
+  assert.ok(out.includes("until the report renders…"), "the clipped hint text renders beside the marker");
+  assert.ok(
+    out.includes("github · ran against acme/website, acme/api · forge · unverifiable from this host"),
+    "forge groups state their record-derived repo scope and keep the unverifiable note",
+  );
+
+  // Empty repos leave the label exactly as before -- absence of history must not invent scope.
+  const inputs = CANNED();
+  delete inputs.forgeRepos;
+  const bare = buildGraphHtml(buildGraphModel(inputs), { now: NOW });
+  assert.ok(bare.includes("github · forge · unverifiable from this host"));
+  assert.ok(!bare.includes("ran against"));
+});
+
 // ---- 7. content canary ----
 
 test("an unexpected model field and a folder's absolute path never reach the page", () => {
@@ -239,8 +301,13 @@ test("an unexpected model field and a folder's absolute path never reach the pag
   model.nodes[0].secret = "CANARY-9f3"; // a field no allowlist names; a spread would leak it
   const out = buildGraphHtml(model, { now: NOW });
   assert.ok(!out.includes("CANARY-9f3"), "unknown fields must be structurally unreachable, not merely unused");
-  assert.ok(!out.includes("/Users/someone/private"), "groups render their label (basename), never group.path");
+  assert.ok(!out.includes("/Users/someone/private"), "groups render their label (basename) by DEFAULT, never group.path");
   assert.ok(out.includes("private"), "the basename label itself still renders");
+
+  // The twin: fullPaths is the operator's explicit opt-in, and then the path DOES render.
+  const full = buildGraphHtml(model, { now: NOW, fullPaths: true });
+  assert.ok(full.includes("/Users/someone/private"), "fullPaths: true labels local groups with their path");
+  assert.ok(!full.includes("CANARY-9f3"), "the opt-in widens labels, not the allowlist");
 });
 
 // ---- 8. file:// posture ----

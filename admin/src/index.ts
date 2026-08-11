@@ -80,6 +80,7 @@ import {
   joinRunsToTriggers,
   observedChainEdges,
   collectGraphInputs,
+  forgeRepoTargets,
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildGraphHtml } from "./graph-html.mjs";
@@ -1071,12 +1072,13 @@ async function assembleGraph(paths: any): Promise<any> {
     cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
     runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count, triggerTypes: Object.fromEntries(triggerList.map((t: any) => [t.index, t.type])) }),
     chainEdges: observedChainEdges({ records: recs }),
+    forgeRepos: forgeRepoTargets({ records: recs }),
     caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
     nowMs,
   });
 }
 
-const GRAPH_USAGE = "usage: /dispatch graph [html [--no-open]]";
+const GRAPH_USAGE = "usage: /dispatch graph [html [--no-open] [--full-paths]]";
 
 /** The real side-effect deps for graphHtmlCommand; tests inject fakes for every one of them. */
 function realGraphHtmlDeps(): any {
@@ -1110,12 +1112,16 @@ export function isHeadlessEnv(env: any, platform: string): string | null {
 export async function graphHtmlCommand(paths: any, tokens: string[], notify: Notify, deps: any = realGraphHtmlDeps()): Promise<void> {
   const rest = tokens.slice(2);
   const noOpen = rest.includes("--no-open");
-  if (rest.some((t) => t !== "--no-open")) {
+  // Full local folder paths are an explicit OPT-IN (REQ-GRAPH-HTML-EXPORT): the artifact defaults to
+  // basename-only because it is a durable, shareable file, but "which folder is this" is a fair
+  // question on a multi-folder deployment, and the paths are the operator's own reviewed config.
+  const fullPaths = rest.includes("--full-paths");
+  if (rest.some((t) => t !== "--no-open" && t !== "--full-paths")) {
     notify?.(GRAPH_USAGE, "warning");
     return;
   }
   const model = await assembleGraph(paths);
-  const html = buildGraphHtml(model, { now: deps.now() });
+  const html = buildGraphHtml(model, { now: deps.now(), fullPaths });
   const file = `${paths.graphDir}/graph.html`;
   try {
     deps.fs.mkdirSync(paths.graphDir, { recursive: true });

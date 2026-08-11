@@ -702,6 +702,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (d) no chain edge renders out of a forge trigger's flow or across folders (`OQ-009`);
   (e) orphan skills, `no-skill` triggers, charset-invalid flows, AI-reachable-without-trigger and
   injected-`ai-trigger` skills are visibly flagged, each by its own name;
+  (e2) a skill whose text instructs iteration carries its **loop hints as node facts, grouped inside
+  the skill** — a loop lives inside its one job, so it renders inside its one node, labelled as text
+  evidence (the mention discipline), never as an edge; and a forge group names the repositories its
+  window's **records** actually ran against, labelled as record-derived, because a forge trigger's
+  config names none;
   (f) the chain caps and the record window render on **every** output, and every truncation or
   dropped edge says so — a capped scan must never read as complete coverage;
   (g) an unreachable folder renders **unverified** and produces no dangling flags.
@@ -737,7 +742,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the auto-reload setting) that survives its own reloads via the URL hash — so a re-run of the
   command updates an already-open tab. **No port is ever bound; nothing serves the file.**
 - **Scope**: Display only. The artifact carries run-record fields and operator-authored
-  trigger/skill strings only — **never `.log` bytes, never a host path beyond a folder's basename**.
+  trigger/skill strings only — **never `.log` bytes, and a host path beyond a folder's basename only
+  under the explicit `--full-paths` opt-in** (the paths are the operator's own reviewed
+  `triggers.json` config, and "which folder is this" is a fair question on a multi-folder
+  deployment; the default stays basename-only because the artifact is a durable, shareable file).
   Over SSH or without a display the spawn is skipped and the skip is stated; `--no-open` skips it
   unconditionally; a write failure notifies the path and never opens. Zero new dependencies.
 - **Why**: The interactivity a topology needs (pan/zoom, hover detail, click-to-trace) needs a
@@ -750,7 +758,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Acceptance**: Given `/dispatch graph html`, then exactly one artifact lands at
   `<graphDir>/graph.html` via a `.tmp` rename with mode 0644, the `file://` URL is notified before
   any opener spawn, and the rendered bytes contain no external `src`/`href`/`url()`/`@import`, no
-  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path; given a
+  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path — unless
+  `--full-paths` was passed, in which case exactly the configured `run.folder` paths appear; given a
   second run, the artifact lands at the **same** path; given `SSH_CONNECTION`/`SSH_TTY` (any
   platform) or linux without `DISPLAY`/`WAYLAND_DISPLAY`, the spawn is skipped and the reason
   notified; given `--no-open`, no spawn ever; given a write failure, an error names the path and no
@@ -1227,6 +1236,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (operator feedback: "not clear which repos/folders, and where are the skill loops"). **REQ-TOPOLOGY-GRAPH AMENDED** with (e2): prose-loop hints are node facts grouped INSIDE the skill (a loop lives inside its one job, one container, one budget slot, so it renders inside its one node — the original issue-#54 conversation's headline ask, which the first slices carried in design but not in data), and forge groups name the repositories their window's records ran against (record-derived and labelled as such, because a github trigger's config names no repository — the repo half of `target` is the same id-only string every runs view already shows). **REQ-GRAPH-HTML-EXPORT AMENDED**: `--full-paths`, an explicit operator opt-in that puts the configured `run.folder` paths (reviewed operator config) into the artifact; the default stays basename-only because the artifact is a durable, shareable file. The loop scanner (`findLoopHints`) reads the SKILL.md BODY only — a frontmatter `description: repeat daily` must not read as a loop — and its hints render with the mention discipline: text evidence, never a promise. |
 | 2026-08-11 | Issue #54 (adversarial-review hardening). **REQ-TOPOLOGY-GRAPH (b) AMENDED to a promise the persisted fields can actually keep** — the review CONFIRMED the old sentence over-promised: `joinRunsToTriggers` guarded only the index RANGE, so deleting a cron above a comment trigger slid the comment's run history onto whatever entry occupied its row, exactly the lie the sentence forbade. The join now also requires TYPE agreement with the entry currently at that index (the persisted `triggerType` was sitting unused), which catches every cross-type shift; the same-type-reorder residual is named in the requirement, pinned by a test, and priced honestly (closing it needs a persisted identity string, against the record's posture). Also folder-scoped the `chainRefused` counters (same-folder-only chaining makes two folders' same-named flows different flows; a flat counter blurred 2+5 into one number nobody could place), dropped-and-counted observed edges whose folder is unreachable (they minted phantom "[missing at HEAD]" endpoints off a read that never happened), gave a folderless cron entry its config edge on a "(no folder)" group ("every trigger gets its edge, ALWAYS" admits no exception for the broken entries an operator most needs to see), surfaced unreadable injected dirs in meta (the OQ-022 badge must not silently vanish), wired `collectGraphInputs`' folder-cap flag into `meta.truncated.folders` (hardcoded false meant the cap banner could never fire), and made the mention heuristic test EVERY occurrence for vocabulary distance. |
 | 2026-08-11 | Issue #54 (the HTML export). **NEW `REQ-GRAPH-HTML-EXPORT`**: the topology as a self-contained `file://` artifact with its own refresh loop (Reload, off/5s/30s auto-reload, hash-persisted view state), atomically overwritten at one stable path so an open tab stays current across re-runs. The acceptance pins the postures that make this spec-clean rather than spec-adjacent: no port, no server, no external requests, no `.log` bytes, no host paths, printed-URL-before-spawn, skip-and-say when headless. **REQ-TOPOLOGY-GRAPH AMENDED implicitly completed**: its "the HTML export remains a later slice" note is discharged by this row. **REQ-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (`graph` was already in the command list; `html` is its sub-verb, the `costs whatif` shape). |
 | 2026-08-11 | Issue #54 (the GRAPH view). **REQ-TOPOLOGY-GRAPH AMENDED** as its own prior row promised: the GRAPH dashboard view (sixth view, `g`) joins the Statement beside the command; the honesty rules bind both surfaces because both render the one assembled model. The refresh posture is part of the requirement's spirit made concrete: entry and `r` only, never the poll tick (the enumeration spawns git per folder). **REQ-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (the command list already named `graph`; the view is the same surface's overlay half). The HTML export remains a later slice. |

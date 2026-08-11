@@ -30,7 +30,7 @@ import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 // injected seams (`fetchCosts`/`listPricedModels`/`whatIf`), never the façade, so tests stay fully
 // canned and the one worker/pricing coupling sits beside the queue and redis this module already owns.
 import * as pricing from "@edgehero/pi-dispatch/pricing";
-import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords, GRAPH_LIMITS, cronRunStats, joinRunsToTriggers, observedChainEdges, collectGraphInputs } from "./read-model.mjs";
+import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords, GRAPH_LIMITS, cronRunStats, joinRunsToTriggers, observedChainEdges, collectGraphInputs, forgeRepoTargets } from "./read-model.mjs";
 import { renderStatus, renderBudget, renderTriggers, renderSettingsView, renderGraph } from "./render.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -159,6 +159,7 @@ export function createDashboardDeps(paths: any) {
         cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
         runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggersView?.count, triggerTypes: Object.fromEntries(triggerList.map((t) => [t.index, t.type])) }),
         chainEdges: observedChainEdges({ records: recs }),
+        forgeRepos: forgeRepoTargets({ records: recs }),
         caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
         nowMs,
       });
@@ -1636,8 +1637,11 @@ function graphRowLine(row: any, cursor: boolean, inner: number, styler: any): st
     const g = row.group;
     const fold = styler.fg("accent", row.folded ? G.foldClosed : G.foldOpen);
     const label = g.kind === "forge" ? `forge ${g.label}` : `folder ${g.path ?? g.label}`;
+    // Record-derived scope for a forge group: which repos its runs actually hit in the window,
+    // because a forge trigger's config names none and "github" alone answers nothing.
+    const seen = g.kind === "forge" && Array.isArray(g.repos) && g.repos.length > 0 ? styler.fg("dim", ` · ran against ${g.repos.join(", ")}`) : "";
     const state = g.unreachable ? styler.fg("warning", ` · ${g.kind === "forge" ? "skills unverifiable from this host" : g.unreachable}`) : g.head ? styler.fg("dim", ` · HEAD ${String(g.head).slice(0, 7)}`) : "";
-    return fitLine(pre + fold + " " + styler.fg("accent", label) + state, inner, styler);
+    return fitLine(pre + fold + " " + styler.fg("accent", label) + seen + state, inner, styler);
   }
   if (row.kind === "gtrigger") {
     const t = row.node;
@@ -1657,6 +1661,7 @@ function graphRowLine(row: any, cursor: boolean, inner: number, styler: any): st
     if (missing) marks.push(styler.fg("error", "[missing at HEAD]"));
     if (s.isSub) marks.push(styler.fg("dim", `[sub of ${s.group}]`));
     if (s.aiTrigger) marks.push(styler.fg("success", "[chainable]"));
+    for (const loop of Array.isArray(s.loops) ? s.loops : []) marks.push(styler.fg("accent", `${G.rearm} "${loop.hint}"`));
     const badges = graphBadges(row.flags, styler);
     return fitLine(pre + styler.fg("dim", "skill ") + name + (marks.length ? " " + marks.join(" ") : "") + badges, inner, styler);
   }

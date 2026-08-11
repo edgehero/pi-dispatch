@@ -55,6 +55,18 @@ const PARALLEL_LABEL_STEP = 10.5;
 // A wire spanning under 40px has its midpoint hugging the ports, so its label lifts above the
 // wire (siblings stacking further up) instead of sitting on the port squares and the wire itself.
 const LABEL_MIN_SPAN = 40;
+// Skill-group (loop-in-skill) geometry: the Node-RED group treatment around a skill whose SKILL.md
+// iterates (prose-loop hints) or which owns sub-skills. The chip keeps its ports and every external
+// wire -- the box, the ⟳ markers and the ring wire only VISUALISE that the looping lives inside
+// this one node's job (one trigger = one job = one budget slot; the loop never leaves the node),
+// which is why the group is not itself a node and draws no edge anywhere.
+const SG_CHIP_X = 22; // chip inset: the ring at inset 10, the 5px input-port overhang, some air
+const SG_CHIP_Y = 26; // chip sits below the group's own label line
+const SG_RING = 10; // the loop wire's inset from the box edge
+const SG_MARKER = 40; // the ⟳ marker square
+const SG_HINT_CHARS = 24; // loop-hint clip; small text at ~6px/char sizes the box
+const SG_SMALL_CHAR_W = 6;
+const SUB_CHIP_H = 24; // nested sub-skill chips are deliberately smaller than real nodes
 const VIEW_MARGIN = 80; // viewBox margin around the content bbox
 
 // ---- palette: repo-dark chrome, authentic pale Node-RED chips with DARK labels inside ----
@@ -176,10 +188,17 @@ function normalizeModel(model) {
     if (!f || typeof f !== "object" || typeof f.key !== "string") continue;
     folders.push({
       key: f.key,
-      label: strOr(f.label, "(folder)"), // label only; f.path is an absolute host path and never copied
+      label: strOr(f.label, "(folder)"),
+      // The absolute host path rides the model but is RENDERED only under { fullPaths: true } (an
+      // operator opt-in); the default page stays basename-only, so a shared screenshot or artifact
+      // cannot leak home-directory names -- the canary test pins the default.
+      path: typeof f.path === "string" ? f.path : null,
       kind: f.kind === "forge" ? "forge" : "local",
       head: typeof f.head === "string" ? f.head : null,
       unreachable: typeof f.unreachable === "string" ? f.unreachable : null,
+      // Record-derived scope for forge groups ("which repos is this group even about"); already
+      // id-only repo#n-style strings upstream, clipped and capped again here anyway.
+      repos: Array.isArray(f.repos) ? f.repos.slice(0, 5).filter((r) => typeof r === "string").map((r) => clip(r, 60)) : [],
     });
   }
   folders.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
@@ -203,6 +222,12 @@ function normalizeModel(model) {
       lastOutcome: typeof n.lastOutcome === "string" ? n.lastOutcome : null,
       lastEndedAt: typeof n.lastEndedAt === "string" || Number.isFinite(n.lastEndedAt) ? n.lastEndedAt : null,
       isSub: n.isSub === true,
+      group: typeof n.group === "string" ? n.group : null,
+      // Prose-loop hints from the SKILL.md body; capped and clipped so a hostile skill cannot
+      // inflate its own group box into a page-filling banner.
+      loops: Array.isArray(n.loops)
+        ? n.loops.slice(0, 3).flatMap((l) => (typeof l?.hint === "string" && l.hint !== "" ? [{ hint: clip(l.hint, 80) }] : []))
+        : [],
       aiTrigger: n.aiTrigger === true,
       unread: n.unread === true,
       description: typeof n.meta?.description === "string" ? clip(n.meta.description, 120) : null,
@@ -266,7 +291,7 @@ export function layoutGraph(model) {
 }
 
 function layoutNormalized(norm) {
-  const empty = { nodes: [], wires: [], groups: [], viewBox: { x: 0, y: 0, w: 800, h: 600 } };
+  const empty = { nodes: [], wires: [], groups: [], skillGroups: [], viewBox: { x: 0, y: 0, w: 800, h: 600 } };
   if (!norm.ok && norm.nodes.length === 0) return empty;
 
   // Groups: every folder from the model, in sorted-key order, then synthetic homes for nodes the
@@ -274,13 +299,13 @@ function layoutNormalized(norm) {
   // malformed node still draws somewhere instead of vanishing).
   const groups = [];
   const groupIndexByKey = new Map();
-  const addGroup = (key, label, kind, head, unreachable) => {
-    const g = { id: `g${groups.length}`, label, kind, head, unreachable, members: [], x: 0, y: 0, w: 0, h: 0 };
+  const addGroup = (key, label, kind, head, unreachable, path, repos) => {
+    const g = { id: `g${groups.length}`, label, kind, head, unreachable, path: path ?? null, repos: repos ?? [], members: [], x: 0, y: 0, w: 0, h: 0 };
     groups.push(g);
     groupIndexByKey.set(key, g);
     return g;
   };
-  for (const f of norm.folders) addGroup(f.key, f.label, f.kind, f.head, f.unreachable);
+  for (const f of norm.folders) addGroup(f.key, f.label, f.kind, f.head, f.unreachable, f.path, f.repos);
 
   const placed = [];
   const placedByOrig = new Map();
@@ -308,11 +333,15 @@ function layoutNormalized(norm) {
   }
   markBackEdges(placed, wires);
 
-  // Rank + order + coordinates, one group at a time; groups then stack vertically.
+  // Rank + order + coordinates, one group at a time; groups then stack vertically. Skill groups
+  // (loop-in-skill boxes) are collected with folder-local coords and translated alongside the
+  // members they contain.
+  const skillGroups = [];
   let groupY = 0;
   let maxGroupW = 0;
   for (const g of groups) {
-    const size = layoutGroup(g, wires);
+    const sgStart = skillGroups.length;
+    const size = layoutGroup(g, wires, skillGroups);
     g.x = 0;
     g.y = groupY;
     g.w = size.w;
@@ -320,6 +349,19 @@ function layoutNormalized(norm) {
     for (const p of g.members) {
       p.x += g.x;
       p.y += g.y;
+    }
+    for (let i = sgStart; i < skillGroups.length; i++) {
+      const sg = skillGroups[i];
+      sg.x += g.x;
+      sg.y += g.y;
+      for (const m of sg.markers) {
+        m.x += g.x;
+        m.y += g.y;
+        m.hintX += g.x;
+        m.hintY += g.y;
+      }
+      sg.points = sg.points.map(([px, py]) => [px + g.x, py + g.y]);
+      sg.d = sg.points.map(([px, py], j) => `${j === 0 ? "M" : "L"} ${fmt(px)} ${fmt(py)}`).join(" ");
     }
     groupY += g.h + GROUP_GAP;
     if (g.w > maxGroupW) maxGroupW = g.w;
@@ -345,7 +387,7 @@ function layoutNormalized(norm) {
   const viewBox = groups.length > 0
     ? { x: -VIEW_MARGIN, y: -VIEW_MARGIN, w: maxGroupW + VIEW_MARGIN * 2, h: totalH + VIEW_MARGIN * 2 }
     : { x: 0, y: 0, w: 800, h: 600 };
-  return { nodes: placed, wires, groups, viewBox };
+  return { nodes: placed, wires, groups, skillGroups, viewBox };
 }
 
 // Iterative DFS in sorted order; an edge landing on a node still on the stack is a back edge.
@@ -382,18 +424,53 @@ function markBackEdges(placed, wires) {
   }
 }
 
-function layoutGroup(g, allWires) {
+function layoutGroup(g, allWires, sgOut) {
   const members = g.members;
   if (members.length === 0) return { w: GROUP_PAD_L + NODE_MAX_W + GROUP_PAD_R, h: GROUP_PAD_T + GROUP_PAD_B };
-  const inGroup = new Set(members.map((p) => p.id));
-  const rankEdges = allWires.filter((w) => !w.self && !w.back && inGroup.has(w.from) && inGroup.has(w.to));
+
+  // Sub-skills nest inside their parent skill's group box instead of taking a grid cell; a sub
+  // whose parent is not in this folder falls back to the grid so it still draws somewhere.
+  const subsByParent = new Map();
+  const grid = [];
+  for (const p of members) {
+    if (p.node.isSub && typeof p.node.group === "string") {
+      if (!subsByParent.has(p.node.group)) subsByParent.set(p.node.group, []);
+      subsByParent.get(p.node.group).push(p);
+    } else {
+      grid.push(p);
+    }
+  }
+  const parentByName = new Map();
+  for (const p of grid) {
+    if (p.kind === "skill" && p.node.name !== null && !parentByName.has(p.node.name)) parentByName.set(p.node.name, p);
+  }
+  for (const [name, subs] of subsByParent) {
+    if (!parentByName.has(name)) for (const s of subs) grid.push(s);
+  }
+
+  // A skill with prose-loop hints or nested sub-skills becomes a Node-RED GROUP: its own chip, one
+  // ⟳ marker per hint, the sub chips, and a ring wire, all inside one tinted box that joins the
+  // rank grid as a super-node. Containment is visual only -- the chip keeps its ports and every
+  // external wire, because the group is not a node and the loop never leaves the job.
+  const supers = new Map();
+  for (const p of grid) {
+    if (p.kind !== "skill") continue;
+    const subs = parentByName.get(p.node.name) === p ? (subsByParent.get(p.node.name) ?? []) : [];
+    if (p.node.loops.length === 0 && subs.length === 0) continue;
+    supers.set(p.id, computeSkillGroup(p, p.node.loops, subs));
+  }
+  const effW = (p) => (supers.has(p.id) ? supers.get(p.id).w : p.w);
+  const effH = (p) => (supers.has(p.id) ? supers.get(p.id).h : p.h);
+
+  const gridSet = new Set(grid.map((p) => p.id));
+  const rankEdges = allWires.filter((w) => !w.self && !w.back && gridSet.has(w.from) && gridSet.has(w.to));
 
   // Longest-path ranks: triggers pinned at column 0, everything else starts one column in and is
   // pushed right by each edge. Relaxation is bounded by the member count, which suffices once back
   // edges are gone; a topological sort would be no cheaper for graphs this small.
   const rank = new Map();
-  for (const p of members) rank.set(p.id, p.kind === "trigger" ? 0 : 1);
-  for (let i = 0; i < members.length; i++) {
+  for (const p of grid) rank.set(p.id, p.kind === "trigger" ? 0 : 1);
+  for (let i = 0; i < grid.length; i++) {
     let changed = false;
     for (const w of rankEdges) {
       if (w.t.kind === "trigger") continue; // triggers stay in column 0, whatever points at them
@@ -409,20 +486,29 @@ function layoutGroup(g, allWires) {
   const maxRank = Math.max(...[...rank.values()]);
   const rows = [];
   for (let r = 0; r <= maxRank; r++) rows.push([]);
-  for (const p of members) rows[rank.get(p.id)].push(p);
+  for (const p of grid) rows[rank.get(p.id)].push(p);
   for (const row of rows) row.sort((a, b) => cmpStr(a.label, b.label) || cmpStr(a.id, b.id));
   orderRows(rows, rankEdges);
+
+  // Columns stretch for super-boxes: RANK_PITCH is the minimum, and a rank's widest box plus a
+  // wire gap wins when larger, so the forward left-to-right invariant survives boxes wider than
+  // one chip (the fixed-pitch shortcut only held while every node was chip-sized).
+  const rankMaxW = [];
+  for (let r = 0; r <= maxRank; r++) rankMaxW.push(Math.max(NODE_MAX_W, ...rows[r].map(effW)));
+  const colX = [GROUP_PAD_L];
+  for (let r = 1; r <= maxRank; r++) colX.push(colX[r - 1] + Math.max(RANK_PITCH, rankMaxW[r - 1] + 20));
 
   // Row bands hosting an under-row route (a self-loop, or either end of a back edge) get extra
   // pitch below them. Band-wide rather than per rank, so rows stay grid-aligned and the back
   // edge's horizontal run -- which crosses ranks -- clears every chip in the bands below it, not
-  // just the chips in its own column.
+  // just the chips in its own column. Band height itself is the tallest box in the band, so a
+  // skill group pushes the next band down instead of bleeding into it.
   const underIds = new Set();
   for (const w of allWires) {
-    if (w.self && inGroup.has(w.from)) underIds.add(w.from);
+    if (w.self && gridSet.has(w.from)) underIds.add(w.from);
     if (w.back) {
-      if (inGroup.has(w.from)) underIds.add(w.from);
-      if (inGroup.has(w.to)) underIds.add(w.to);
+      if (gridSet.has(w.from)) underIds.add(w.from);
+      if (gridSet.has(w.to)) underIds.add(w.to);
     }
   }
   const maxRows = Math.max(...rows.map((row) => row.length));
@@ -430,19 +516,90 @@ function layoutGroup(g, allWires) {
   let y = GROUP_PAD_T;
   for (let i = 0; i < maxRows; i++) {
     rowY.push(y);
-    const under = rows.some((row) => row.length > i && underIds.has(row[i].id));
-    y += NODE_H + (under ? UNDER_ROUTE_EXTRA : 0) + ROW_GAP;
+    const band = rows.flatMap((row) => (row.length > i ? [row[i]] : []));
+    const bandH = Math.max(NODE_H, ...band.map(effH));
+    const under = band.some((p) => underIds.has(p.id));
+    y += bandH + (under ? UNDER_ROUTE_EXTRA : 0) + ROW_GAP;
   }
+
   for (let r = 0; r <= maxRank; r++) {
     for (let i = 0; i < rows[r].length; i++) {
-      rows[r][i].x = GROUP_PAD_L + r * RANK_PITCH;
-      rows[r][i].y = rowY[i];
+      const p = rows[r][i];
+      if (supers.has(p.id)) {
+        placeSkillGroup(g, p, supers.get(p.id), colX[r], rowY[i], sgOut);
+      } else {
+        p.x = colX[r];
+        p.y = rowY[i];
+      }
     }
   }
   return {
-    w: GROUP_PAD_L + maxRank * RANK_PITCH + NODE_MAX_W + GROUP_PAD_R,
+    w: colX[maxRank] + rankMaxW[maxRank] + GROUP_PAD_R,
     h: y - ROW_GAP + GROUP_PAD_B,
   };
+}
+
+// Size a skill group's box in box-local coords: chip up top, one ⟳ marker (hint beside it) per
+// loop, sub chips below, and the ring wire's anchor points threading output -> around the markers
+// -> input. Sub chips are resized here (small, portless) -- their placed node object IS the chip.
+function computeSkillGroup(p, loops, subs) {
+  let cy = SG_CHIP_Y + NODE_H + 14;
+  const markers = [];
+  for (const l of loops.slice(0, 3)) {
+    markers.push({ x: SG_CHIP_X, y: cy, w: SG_MARKER, h: SG_MARKER, hint: clip(l.hint, SG_HINT_CHARS), hintX: SG_CHIP_X + SG_MARKER + 6, hintY: cy + 24 });
+    cy += SG_MARKER + 8;
+  }
+  const subPlaced = [];
+  for (const s of subs) {
+    const label = clip(s.node.name ?? "(sub)", 16);
+    s.label = label;
+    s.w = Math.min(140, Math.max(80, 12 + label.length * 7));
+    s.h = SUB_CHIP_H;
+    s.nested = true;
+    subPlaced.push({ p: s, x: SG_CHIP_X, y: cy });
+    cy += SUB_CHIP_H + 6;
+  }
+  const wCandidates = [SG_CHIP_X + p.w + 18];
+  if (markers.length > 0) wCandidates.push(SG_CHIP_X + SG_MARKER + 6 + SG_HINT_CHARS * SG_SMALL_CHAR_W + 14);
+  for (const s of subPlaced) wCandidates.push(SG_CHIP_X + s.p.w + 18);
+  const w = Math.max(...wCandidates);
+  const h = cy + 8;
+  const py = SG_CHIP_Y + NODE_H / 2;
+  const points = [
+    [SG_CHIP_X + p.w, py],
+    [w - SG_RING, py],
+    [w - SG_RING, h - SG_RING],
+    [SG_RING, h - SG_RING],
+    [SG_RING, py],
+    [SG_CHIP_X, py],
+  ];
+  return { w, h, markers, subPlaced, points };
+}
+
+// Place a sized skill group at its grid cell (folder-local coords); the translation to page
+// coords happens with the rest of the folder in layoutNormalized.
+function placeSkillGroup(g, p, box, x, y, sgOut) {
+  p.x = x + SG_CHIP_X;
+  p.y = y + SG_CHIP_Y;
+  const markers = box.markers.map((m) => ({ ...m, x: m.x + x, y: m.y + y, hintX: m.hintX + x, hintY: m.hintY + y }));
+  for (const s of box.subPlaced) {
+    s.p.x = x + s.x;
+    s.p.y = y + s.y;
+  }
+  sgOut.push({
+    id: `sg${sgOut.length}`,
+    groupId: g.id,
+    nodeId: p.id,
+    label: p.node.name ?? p.label,
+    x,
+    y,
+    w: box.w,
+    h: box.h,
+    markers,
+    subIds: box.subPlaced.map((s) => s.p.id),
+    points: box.points.map(([px, py]) => [px + x, py + y]),
+    d: "",
+  });
 }
 
 // Two median sweeps (down over predecessors, up over successors), the deterministic core of the
@@ -577,15 +734,24 @@ function buildTip(n, flags, groupLabel, nowMs) {
     }
   }
   if (n.aiTrigger) lines.push("chainable: ai-trigger allow");
+  if (n.kind === "skill" && n.loops.length > 0) {
+    lines.push(`loops in skill: ${n.loops.map((l) => l.hint).join(" · ")}`);
+  }
   for (const f of flags) lines.push(f.detail !== null ? `${f.flag}: ${f.detail}` : f.flag);
   return lines.join("\n");
 }
 
-function groupTitle(g) {
-  if (g.kind === "forge") return `${g.label} · forge · unverifiable from this host`;
-  if (g.unreachable !== null && g.unreachable !== undefined && g.unreachable !== "") return `${g.label} · ${g.unreachable}`;
-  if (g.head !== null && g.head !== undefined && g.head !== "") return `${g.label} · HEAD ${String(g.head).slice(0, 7)}`;
-  return g.label;
+function groupTitle(g, fullPaths) {
+  if (g.kind === "forge") {
+    // Record-derived scope first, the unverifiable note kept: history says which repos this group
+    // ran against, and nothing on this host can say more.
+    const scope = Array.isArray(g.repos) && g.repos.length > 0 ? ` · ran against ${g.repos.join(", ")}` : "";
+    return `${g.label}${scope} · forge · unverifiable from this host`;
+  }
+  const name = fullPaths === true && typeof g.path === "string" && g.path !== "" ? g.path : g.label;
+  if (g.unreachable !== null && g.unreachable !== undefined && g.unreachable !== "") return `${name} · ${g.unreachable}`;
+  if (g.head !== null && g.head !== undefined && g.head !== "") return `${name} · HEAD ${String(g.head).slice(0, 7)}`;
+  return name;
 }
 
 function capsLineText(caps) {
@@ -627,6 +793,17 @@ function statusColor(outcome) {
 
 function nodeSvg(p, flags, hasIn, hasOut) {
   const n = p.node;
+  if (p.nested === true) {
+    // A nested sub-skill: a small quiet chip inside its parent's group box. No ports, no icon
+    // column, no status row -- a sub-skill is loadable context, never a flow, and drawing it with
+    // full node furniture would claim wireability it does not have.
+    return [
+      `<g class="gnode" id="${p.id}" transform="translate(${fmt(p.x)},${fmt(p.y)})">`,
+      `<rect width="${fmt(p.w)}" height="${fmt(p.h)}" rx="4" fill="${CHIP_FILL.skill}" stroke="${CHIP_STROKE}" stroke-width="1"/>`,
+      `<text x="8" y="16" font-size="11" fill="${CHIP_LABEL}">${escapeHtml(p.label)}</text>`,
+      "</g>",
+    ].join("");
+  }
   const flagNames = new Set(flags.map((f) => f.flag));
   const state = nodeState(n, flagNames);
   const parts = [`<g class="gnode" id="${p.id}" transform="translate(${fmt(p.x)},${fmt(p.y)})">`];
@@ -677,14 +854,31 @@ function wireSvg(w) {
   return parts.join("");
 }
 
-function groupSvg(g) {
+function groupSvg(g, fullPaths) {
   const opacity = g.kind === "forge" ? "0.03" : "0.06";
   return [
     `<g class="ggroup">`,
     `<rect x="${fmt(g.x)}" y="${fmt(g.y)}" width="${fmt(g.w)}" height="${fmt(g.h)}" rx="2" fill="${GROUP_FILL}" fill-opacity="${opacity}" stroke="${PAGE_BORDER}" stroke-width="2"/>`,
-    `<text x="${fmt(g.x + 8)}" y="${fmt(g.y + 18)}" font-size="11" fill="${PAGE_DIM}">${escapeHtml(groupTitle(g))}</text>`,
+    `<text x="${fmt(g.x + 8)}" y="${fmt(g.y + 18)}" font-size="11" fill="${PAGE_DIM}">${escapeHtml(groupTitle(g, fullPaths))}</text>`,
     `</g>`,
   ].join("");
+}
+
+// The loop-in-skill group: a stronger tint than the folder box behind it (nesting reads as
+// stacked tints), the skill's name top-left, one ⟳ marker per prose-loop hint, and the ring wire
+// threading output -> around the markers -> input so the loop reads as living inside the skill.
+function skillGroupSvg(sg) {
+  const parts = [`<g class="sgroup" id="${sg.id}">`];
+  parts.push(`<rect x="${fmt(sg.x)}" y="${fmt(sg.y)}" width="${fmt(sg.w)}" height="${fmt(sg.h)}" rx="2" fill="${GROUP_FILL}" fill-opacity="0.08" stroke="${PAGE_BORDER}" stroke-width="2"/>`);
+  parts.push(`<text x="${fmt(sg.x + 8)}" y="${fmt(sg.y + 16)}" font-size="11" fill="${PAGE_DIM}">${escapeHtml(sg.label)}</text>`);
+  parts.push(`<path d="${sg.d}" fill="none" stroke="${WIRE_POTENTIAL}" stroke-width="1.5" stroke-dasharray="4,3"/>`);
+  for (const m of sg.markers) {
+    parts.push(`<rect x="${fmt(m.x)}" y="${fmt(m.y)}" width="${fmt(m.w)}" height="${fmt(m.h)}" rx="6" fill="${CHIP_FILL.skill}" stroke="${CHIP_STROKE}" stroke-width="1"/>`);
+    parts.push(`<text x="${fmt(m.x + m.w / 2)}" y="${fmt(m.y + m.h / 2 + 6)}" text-anchor="middle" font-size="16" fill="${CHIP_LABEL}">⟳</text>`);
+    parts.push(`<text x="${fmt(m.hintX)}" y="${fmt(m.hintY)}" font-size="10" fill="${PAGE_DIM}">${escapeHtml(m.hint)}</text>`);
+  }
+  parts.push("</g>");
+  return parts.join("");
 }
 
 // ---- legend ----
@@ -951,7 +1145,7 @@ const PAGE_JS = `
  * the available outcomes. `now` is the injected generation instant (ms epoch); the module never
  * reads a clock of its own, so the same model and the same now are byte-identical forever.
  */
-export function buildGraphHtml(model, { now } = {}) {
+export function buildGraphHtml(model, { now, fullPaths } = {}) {
   let norm;
   try {
     norm = normalizeModel(model);
@@ -1002,7 +1196,8 @@ export function buildGraphHtml(model, { now } = {}) {
   }
 
   const svgBody = [
-    layout.groups.map(groupSvg).join(""),
+    layout.groups.map((g) => groupSvg(g, fullPaths)).join(""),
+    layout.skillGroups.map(skillGroupSvg).join(""),
     layout.wires.map(wireSvg).join(""),
     nodeParts.join(""),
   ].join("");

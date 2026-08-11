@@ -40,7 +40,7 @@ import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/mat
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
-import { parseSkillMeta, findSiblingMentions } from "./graph-model.mjs";
+import { parseSkillMeta, findSiblingMentions, findLoopHints } from "./graph-model.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -838,6 +838,7 @@ export const GRAPH_LIMITS = Object.freeze({
   maxMentionScanBytes: 32 * 1024, // sibling-name scan window into each SKILL.md
   maxEdges: 200, // distinct observed chain edges kept; beyond this the graph says "truncated"
   windowDays: 30, // run-record window the graph folds; matches the default PI_LOG_RETENTION_DAYS
+  maxReposListed: 5, // repos named per forge group, from record targets; a scope label, not an inventory
 });
 
 /**
@@ -1068,6 +1069,9 @@ export function readFolderSkills({ folder, exec = execFileSync } = {}) {
         text !== null
           ? findSiblingMentions(text.slice(0, GRAPH_LIMITS.maxMentionScanBytes), keptNames.filter((n) => n !== name))
           : [],
+      // The prose-loop hints (issue #54's grouped-inside-the-skill visual): scanned over the same
+      // bounded window as the mentions, because both are text evidence of the same trust class.
+      loops: text !== null ? findLoopHints(text.slice(0, GRAPH_LIMITS.maxMentionScanBytes)) : [],
       unread: text === null,
     });
   }
@@ -1133,6 +1137,27 @@ export function collectGraphInputs({ triggers, readFolder = readFolderSkills, re
     out.injectedSkills[dir] = readInjected({ skillsDir: dir });
   }
   return out;
+}
+
+/**
+ * The repositories each forge's records actually ran against in the window: `target` is the id-only
+ * `repo#n` / `project!iid` string every runs view already shows, so the repo half is admissible
+ * anywhere the record is. This is the graph's answer to "which repos is the forge group even about"
+ * -- a github trigger's config names no repository (routing is the installation's), so the honest
+ * source is history, labelled as such by the consumer. Pure over parsed records; capped per forge.
+ */
+export function forgeRepoTargets({ records } = {}) {
+  const byKind = {};
+  if (!Array.isArray(records)) return byKind;
+  for (const record of records) {
+    if (!isForgeKind(record?.kind) || typeof record?.target !== "string") continue;
+    const repo = record.target.replace(/[#!]\d+$/, "");
+    if (repo === "" || repo === record.target) continue; // no numeric tail: not a repo-shaped target
+    (byKind[record.kind] ??= new Set()).add(repo);
+  }
+  return Object.fromEntries(
+    Object.entries(byKind).map(([kind, set]) => [kind, [...set].sort().slice(0, GRAPH_LIMITS.maxReposListed)]),
+  );
 }
 
 /** Escape a string for literal use inside a RegExp source (the cron id join above). */

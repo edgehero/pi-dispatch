@@ -94,6 +94,38 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// The iteration vocabulary a skill's prose can use. There is NO structured loop construct anywhere in
+// the system -- a "loop inside a skill" is a sentence telling the agent to iterate -- so a bounded
+// phrase scan is the only static evidence that exists, and it renders as exactly that: a hint read
+// from the text, never a promise (the potential-edge discipline, applied to a node's insides).
+const LOOP_HINT_RE = /\b(?:until|repeat(?:ing)?|iterate(?:s|d)?|loop(?:s|ing)?|while|for each|keep \w+ing|try again)\b[^.\n]{0,60}/gi;
+const LOOP_HINT_MAX = 3;
+
+/**
+ * Find the iteration phrases in a skill's BODY text (the frontmatter block is stripped first, so a
+ * `description: repeat daily` cannot read as a loop). Returns up to LOOP_HINT_MAX `{ hint }` entries,
+ * each the matched phrase clipped to its sentence fragment -- the graph groups these INSIDE the
+ * skill node, because everything a skill's loop does happens inside that one job, one container, one
+ * budget slot (docs/workflows.md). Total function, never throws.
+ */
+export function findLoopHints(text) {
+  if (typeof text !== "string") return [];
+  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  const body = normalized.replace(FRONTMATTER_BLOCK_RE, "");
+  const hints = [];
+  const seen = new Set();
+  let match;
+  LOOP_HINT_RE.lastIndex = 0;
+  while ((match = LOOP_HINT_RE.exec(body)) !== null && hints.length < LOOP_HINT_MAX) {
+    const hint = match[0].trim();
+    const key = hint.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hints.push({ hint });
+  }
+  return hints;
+}
+
 // The closed edge and flag vocabularies. Closed on purpose and pinned in the tests: every consumer
 // (the text renderer, the TUI view, the HTML export) switches on these strings, and a producer
 // minting a new one without a renderer arm should go red in a unit test, not render as nothing.
@@ -128,7 +160,7 @@ export const GRAPH_FLAGS = Object.freeze([
  * Total function: absent or malformed inputs degrade to an empty-but-well-formed model, never a
  * throw (the read-model's viewer doctrine, one layer up).
  */
-export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, cronStats, runJoin, chainEdges, caps, nowMs } = {}) {
+export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, forgeRepos, cronStats, runJoin, chainEdges, caps, nowMs } = {}) {
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulerList = Array.isArray(schedulers) ? schedulers : [];
   const folders = folderSkills && typeof folderSkills === "object" ? folderSkills : {};
@@ -194,7 +226,11 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
     if (!group) {
       // A forge trigger's repo is not on this host, so its skills are unverifiable from the admin
       // (readFlowGate needs a local git dir); the group says so instead of growing dangling flags.
-      group = { key: `forge:${name}`, path: null, label: name, kind: "forge", head: null, unreachable: "remote-repo", triggerIds: [], skillIds: [] };
+      // `repos` names the repositories the window's RECORDS actually ran against (target is the
+      // id-only repo#n string every runs view already shows) -- the answer to "which repos is this
+      // group even about", derived from history because a github trigger's config names none.
+      const repos = Array.isArray(forgeRepos?.[name]) ? forgeRepos[name] : [];
+      group = { key: `forge:${name}`, path: null, label: name, kind: "forge", head: null, unreachable: "remote-repo", repos, triggerIds: [], skillIds: [] };
       forgeGroups.set(name, group);
       model.folders.push(group);
     }
@@ -214,6 +250,10 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       group: skill.isSub === true ? skill.group : null,
       aiTrigger: skill.aiTrigger === true,
       meta: skill.meta ?? null,
+      // The prose-loop hints read from the SKILL.md body (findLoopHints): everything a loop does
+      // happens INSIDE this one node's job, which is why consumers group the marker inside the
+      // skill rather than drawing an edge anywhere.
+      loops: Array.isArray(skill.loops) ? skill.loops.filter((l) => typeof l?.hint === "string") : [],
       unread: skill.unread === true,
       isFlow: false, // set true when a config edge lands on it
       mentionedBy: 0,

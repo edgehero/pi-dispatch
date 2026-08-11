@@ -447,7 +447,12 @@ export function renderGraph(model) {
 }
 
 function groupHeading(group) {
-  if (group.kind === "forge") return `forge ${group.label} (skills unverifiable from the admin host)`;
+  if (group.kind === "forge") {
+    // The repos come from the window's RECORDS (a forge trigger's config names none), so the label
+    // says what this group is ABOUT while staying honest about where the claim comes from.
+    const seen = Array.isArray(group.repos) && group.repos.length > 0 ? ` -- ran against: ${group.repos.join(", ")}` : "";
+    return `forge ${group.label}${seen} (skills unverifiable from the admin host)`;
+  }
   const head = group.head ? `, HEAD ${String(group.head).slice(0, 7)}` : "";
   const state = group.unreachable ? `, ${group.unreachable}` : "";
   return `folder ${group.path ?? group.label}${head}${state}`;
@@ -468,6 +473,9 @@ function graphSkillLine(s, flags) {
   if (s.kind === "skill-missing") badges.push("[missing at HEAD]");
   if (s.isSub) badges.push(`[sub-skill of ${s.group}: loadable, never a flow]`);
   if (s.aiTrigger) badges.push("[chainable]");
+  // The prose-loop hints, grouped INTO the skill's own line because the loop lives inside its one
+  // job: a hint read from the text, never a promise (the potential-edge discipline).
+  for (const loop of Array.isArray(s.loops) ? s.loops : []) badges.push(`[loop: "${loop.hint}"]`);
   if (flags.includes("orphan")) badges.push("[orphan: no trigger, no ai-trigger, no mention]");
   if (flags.includes("ai-reachable-no-trigger")) badges.push("[AI-reachable, no trigger]");
   if (flags.includes("unread")) badges.push("[SKILL.md unread: facts unknown]");

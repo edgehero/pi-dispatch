@@ -134,3 +134,26 @@ test("isHeadlessEnv: SSH wins over the display check, and only linux gates on DI
   assert.equal(mod.isHeadlessEnv({}, "darwin"), null, "darwin's opener needs no display variable");
   assert.equal(mod.isHeadlessEnv({}, "win32"), null);
 });
+
+test("--full-paths is the explicit opt-in that puts run.folder paths into the artifact", async () => {
+  // The default artifact is basename-only (durable, shareable file); the flag is the operator's own
+  // choice to name their folders (REQ-GRAPH-HTML-EXPORT). The fixture folder path is the probe.
+  const deps = (writeSink) => ({
+    fs: {
+      mkdirSync: () => {},
+      writeFileSync: (path, data) => writeSink.push(String(data)),
+      renameSync: () => {},
+    },
+    openBrowser: () => {},
+    env: {},
+    platform: "darwin",
+    now: () => 1770000000000,
+  });
+  const without = [];
+  await mod.graphHtmlCommand(cannedPaths(), ["graph", "html", "--no-open"], () => {}, deps(without));
+  const withFlag = [];
+  await mod.graphHtmlCommand(cannedPaths(), ["graph", "html", "--no-open", "--full-paths"], () => {}, deps(withFlag));
+  const probe = join(fixtureDir, "absent");
+  assert.ok(!without[0].includes(probe), "the default artifact carries no absolute host path");
+  assert.ok(withFlag[0].includes(probe), "the opted-in artifact names the configured folder by its full path");
+});

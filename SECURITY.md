@@ -487,7 +487,8 @@ Stated openly rather than discovered later:
 - **The graph export writes one static HTML file, on your keystroke, to a temp path it names.** What
   crosses into it: trigger configuration you authored, skill names and frontmatter from the repos you
   service, and the PII-free run-record fields the panel already shows. What never does: raw job log
-  bytes, issue or task text, session material, or a host path beyond a folder's basename. Nothing
+  bytes, issue or task text, session material, or a host path beyond a folder's basename unless you
+  pass `--full-paths` yourself (your own reviewed `run.folder` config, on your keystroke). Nothing
   listens and nothing serves the file — opening it is a local browser reading local bytes, and the
   page makes no network request of any kind. The browser spawn is best-effort, skipped and announced
   over SSH or without a display; the printed `file://` URL is the contract.

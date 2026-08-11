@@ -34,6 +34,7 @@ import {
   readFolderSkills,
   readInjectedSkills,
   collectGraphInputs,
+  forgeRepoTargets,
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 
@@ -1189,7 +1190,7 @@ test("GRAPH_LIMITS is the LITERAL reviewed numbers, frozen", () => {
   // the numbers on purpose and say why in the commit body.
   assert.deepEqual(
     { ...GRAPH_LIMITS },
-    { maxFoldersScanned: 16, maxSkillsPerFolder: 64, maxSkillBytes: 65536, maxMentionScanBytes: 32768, maxEdges: 200, windowDays: 30 },
+    { maxFoldersScanned: 16, maxSkillsPerFolder: 64, maxSkillBytes: 65536, maxMentionScanBytes: 32768, maxEdges: 200, windowDays: 30, maxReposListed: 5 },
   );
   assert.ok(Object.isFrozen(GRAPH_LIMITS));
 });
@@ -1451,7 +1452,7 @@ test("readFolderSkills keeps an unreadable SKILL.md as an unread skill, fail-clo
   ]);
   const out = readFolderSkills({ folder: "/proj", exec });
   assert.equal(out.skills.length, 1);
-  assert.deepEqual(out.skills[0], { name: "big", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: true });
+  assert.deepEqual(out.skills[0], { name: "big", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], loops: [], unread: true });
   assert.equal(out.truncated, true, "an unread skill marks the enumeration incomplete rather than pretending");
   assert.equal(out.skills[0].aiTrigger, false, "unreadable reads as NOT chainable, never as chainable");
 });
@@ -1510,4 +1511,37 @@ test("collectGraphInputs degrades on bad input", () => {
   assert.deepEqual(collectGraphInputs({}), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
   assert.deepEqual(collectGraphInputs(), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
   assert.deepEqual(collectGraphInputs({ triggers: "nope" }), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
+});
+
+test("forgeRepoTargets lists each forge's repos from record targets, capped and sorted", () => {
+  const records = [
+    runRec({ jobId: "gh-1", kind: "github", target: "acme/website#41" }),
+    runRec({ jobId: "gh-2", kind: "github", target: "acme/website#44" }),
+    runRec({ jobId: "gh-3", kind: "github", target: "acme/api#7" }),
+    runRec({ jobId: "gl-1", kind: "gitlab", target: "team/site!3" }),
+    runRec({ jobId: "local-1", kind: "local", target: "local:website" }),
+    runRec({ jobId: "gh-4", kind: "github", target: "weird-target-no-number" }),
+  ];
+  assert.deepEqual(forgeRepoTargets({ records }), {
+    github: ["acme/api", "acme/website"],
+    gitlab: ["team/site"],
+  }, "repo halves only, deduped and sorted; local and non-repo-shaped targets contribute nothing");
+});
+
+test("forgeRepoTargets degrades on bad input and honours the cap", () => {
+  assert.deepEqual(forgeRepoTargets({}), {});
+  assert.deepEqual(forgeRepoTargets(), {});
+  const many = Array.from({ length: GRAPH_LIMITS.maxReposListed + 3 }, (_, i) => runRec({ jobId: `gh-${i}`, kind: "github", target: `org/repo-${String(i).padStart(2, "0")}#1` }));
+  assert.equal(forgeRepoTargets({ records: many }).github.length, GRAPH_LIMITS.maxReposListed, "a scope label, not an inventory");
+});
+
+test("readFolderSkills attaches the prose-loop hints from the SKILL.md body", () => {
+  const md = '---\nname: build-report\ndescription: repeat daily\nai-trigger: allow\n---\nBuild it, then iterate until the report renders right.\n';
+  const exec = skillExec([
+    ["rev-parse HEAD", "abc123\n"],
+    ["ls-tree -r -l -z abc123 .pi/", "100644 blob aaa     120\t.pi/skills/build-report/SKILL.md\0"],
+    ["cat-file blob aaa", Buffer.from(md)],
+  ]);
+  const out = readFolderSkills({ folder: "/proj", exec });
+  assert.deepEqual(out.skills[0].loops, [{ hint: "iterate until the report renders right" }], "the body's loop phrase, not the frontmatter's 'repeat daily'");
 });

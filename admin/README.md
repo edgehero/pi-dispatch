@@ -68,7 +68,7 @@ One command puts a live TUI over the whole deployment:
 - **The topology, as a graph.** The GRAPH view (`g`) and `/dispatch graph` show what triggers what, what chained to what in the recorded runs, and what a skill's own text says it might chain to, with orphan skills and dangling triggers flagged. `/dispatch graph html` draws the same picture Node-RED style in your browser, from one self contained file on disk: no server, no port, and the page reloads itself when you regenerate it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/graph-view.png?v=0.9.0" alt="The trigger and flow graph: triggers wired to their flows, an observed chain edge with its count, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend stating the chain caps" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/graph-view.png?v=0.9.1" alt="The trigger and flow graph: triggers wired to their flows, an observed chain edge with its count, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps" width="820">
 </p>
 
 - **Triggers, editable live.** cron, label, comment and pull_request triggers with colored drill-ins showing what fires each one, what it runs, and its trust model. Added, edited and deleted without a restart. Triggers that run third-party code or a custom image are badged; opting in or out of either stays an edit to the reviewed `triggers.json`, which neither the console nor a model-callable tool will make for you.

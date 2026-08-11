@@ -289,3 +289,27 @@ test("findSiblingMentions marks strong on ANY occurrence near the vocabulary, no
   const text = `See the notify skill for background.${" filler".repeat(60)} Then write /outbox/request-1.json with {"flow": "notify"}.`;
   assert.deepEqual(findSiblingMentions(text, ["notify"]), [{ name: "notify", strong: true }], "an early weak mention must not mask a later strong one");
 });
+
+// ---- loop hints and forge scope (user feedback round) ----
+
+import { findLoopHints } from "../src/graph-model.mjs";
+
+test("findLoopHints reads iteration phrases from the BODY, never the frontmatter, deduped and capped", () => {
+  const md = '---\nname: x\ndescription: repeat daily\n---\nBuild it. Iterate until it renders right. Then loop over the pages. Iterate until it renders right.\n';
+  assert.deepEqual(findLoopHints(md), [
+    { hint: "Iterate until it renders right" },
+    { hint: "loop over the pages" },
+  ], "body phrases only, deduped ('Iterate until …' consumes its own 'until'); the frontmatter's 'repeat daily' must not read as a loop");
+  assert.deepEqual(findLoopHints("no iteration here, plain prose."), []);
+  assert.deepEqual(findLoopHints(null), []);
+});
+
+test("skill nodes carry their loops, and forge groups carry their record-derived repos", () => {
+  const inputs = CANNED();
+  inputs.folderSkills["/srv/site"].skills[0].loops = [{ hint: "until the report renders right" }];
+  inputs.forgeRepos = { github: ["acme/website"] };
+  const m = buildGraphModel(inputs);
+  assert.deepEqual(m.nodes.find((n) => n.id === "skill:folder:/srv/site:build-report").loops, [{ hint: "until the report renders right" }]);
+  assert.deepEqual(m.folders.find((f) => f.key === "forge:github").repos, ["acme/website"], "the group says which repos it is ABOUT");
+  assert.deepEqual(buildGraphModel(CANNED()).folders.find((f) => f.key === "forge:github").repos, [], "no records, no claim");
+});
