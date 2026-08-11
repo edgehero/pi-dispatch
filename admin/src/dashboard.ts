@@ -175,7 +175,10 @@ export function makeDashboard({
   deps = createDashboardDeps(paths),
 }: any = {}) {
   // The overlay-only color styler, bound to pi's injected theme (null in tests -> plain, same geometry).
-  const styler = makeStyler(theme);
+  // The ascii opt-in rides the same resolved paths as panel.mjs' setGlyphs funnel, so PI_DISPATCH_ASCII=1
+  // degrades the overlay frame and the panel primitives TOGETHER -- half-ASCII output was the pending gap
+  // the old comment here deferred (issue #54's works-in-ASCII acceptance is what landed it).
+  const styler = makeStyler(theme, { ascii: paths?.asciiGlyphs === true });
   let snapshot: any = null;
   let fetching = false;
   let disposed = false;

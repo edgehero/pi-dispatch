@@ -816,7 +816,8 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
   const paths = resolvePaths(process.env);
   // Glyph posture BEFORE any rendering: every /dispatch surface (the overlay, the costs view's sparkline)
   // draws through panel.mjs' active table, and this is the one funnel all subcommands pass through. The
-  // dashboard's own styler keeps its default for now -- its `ascii` opt-in lands when the view PR settles.
+  // dashboard's own styler opts in per instance (makeStyler's `ascii`, threaded from these same paths in
+  // makeDashboard), so PI_DISPATCH_ASCII now flips the overlay frame too, not only panel.mjs (issue #54).
   setGlyphs(paths.asciiGlyphs);
 
   // Drain the deployment pointer's retained one-line notice (a broken or newer pointer file) into the

@@ -93,6 +93,25 @@ test("with a theme, the framed LIST is colored (ANSI present) but every line sti
   assert.match(stripAnsi(lines.join("\n")), /PAUSED/, "plain content survives under the color");
 });
 
+test("paths.asciiGlyphs threads into the overlay styler: the frame degrades with the panel, together", async () => {
+  // PI_DISPATCH_ASCII used to flip panel.mjs' table but not the overlay's own frame glyphs -- the
+  // half-ASCII gap the old dashboard comment deferred. The opt-in is per styler instance on purpose
+  // (setGlyphs must not restyle overlays behind a styler's back), so the thread is paths -> makeStyler.
+  const comp = makeDashboard({ paths: { asciiGlyphs: true }, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  const ascii = comp.render(80);
+  await comp.dispose();
+  assert.ok(ascii[0].startsWith("+"), "ascii corners frame the overlay");
+  const joined = ascii.join("\n");
+  assert.ok(!joined.includes("┌") && !joined.includes("│") && !joined.includes("├"), "no frame box-drawing glyph leaks through the ascii overlay");
+
+  const comp2 = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  const box = comp2.render(80);
+  await comp2.dispose();
+  assert.ok(box[0].startsWith("┌"), "no opt-in keeps the box-drawing default, byte-identically");
+});
+
 test("before the first fetch resolves it renders a loading panel, not a crash", () => {
   // A fetch that never resolves: the panel must still render (from the null snapshot) synchronously.
   const comp = makeDashboard({
