@@ -295,6 +295,19 @@ export function buildRecord({ job, result, error, startedAt, endedAt }) {
 		// deliberately not stored, for the reason `session` states one group below.
 		replica: data.replica ?? null,
 		replicas: data.replicas ?? null,
+		// Trigger attribution (INT-RUN-HISTORY-FILE-CONTRACT, issue #54): additive and nullable, explicit
+		// literals beside the replica fields whose admissibility argument they reuse, no spread. Both read
+		// the receiver's harness-computed `matched` from this job's own `job.data.trigger`: `index` is the
+		// raw triggers-array position of the entry that fired (cron entries counted) and `type` that entry's
+		// `on.type` -- an INTEGER and a FIXED ENUM ("label" | "comment" | "pull_request"), nothing
+		// attacker-chosen. The third `matched` key (`label`/`phrase`/`action`) is DELIBERATELY absent:
+		// a label that satisfied an `any` predicate is collaborator-applied payload text, and `type`
+		// already names the route. Cron jobs carry `trigger: { id, pattern }` with no `matched`, so both
+		// stay null there on purpose -- a cron run's attribution is already exact via its
+		// `repeat:<id>:<millis>` jobId (see makeFindPreviousRun), and that join also works retroactively
+		// over the whole retention window, which a new record field cannot.
+		triggerIndex: data.trigger?.matched?.index ?? null,
+		triggerType: data.trigger?.matched?.type ?? null,
 		// Session telemetry (INT-RUN-HISTORY-FILE-CONTRACT): additive, nullable, an explicit literal, no
 		// spread. `{ resumed, reason, bytes }` -- a boolean, a fixed enum and an integer. THE KEY AND THE
 		// BRANCH NAME ARE DELIBERATELY ABSENT: this record's PII-free-by-construction property rests on it

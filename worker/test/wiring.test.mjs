@@ -344,11 +344,19 @@ function makeRealRecordRun({ writeThrows = false } = {}) {
 }
 
 // The full BullMQ job wrapper carrying user-authored PII (title/body) the record must never serialise.
+// trigger.matched rides along so (a) can prove the attribution SPLIT end-to-end: index/type persist,
+// the collaborator-applied label never does (INT-RUN-HISTORY-FILE-CONTRACT, issue #54).
 const secretJob = (id = "j1") => ({
 	id,
 	attemptsMade: 0,
 	name: "github",
-	data: { kind: "github", repo: "o/r", flow: "fix", target: { type: "issue", number: 1, title: "SECRET_T", body: "SECRET_B" } },
+	data: {
+		kind: "github",
+		repo: "o/r",
+		flow: "fix",
+		target: { type: "issue", number: 1, title: "SECRET_T", body: "SECRET_B" },
+		trigger: { kind: "issues", matched: { index: 0, type: "label", label: "SECRET_LABEL" } },
+	},
 });
 
 // A processor wired to the real recordRun. `runContainer`/`redis` are overridable so the infra-exit
@@ -396,9 +404,14 @@ test("(a) completed run: real writer serialises a PII-free record to <jobId>.jso
 	assert.equal(rec.provider, "anthropic", "provider is the overlay-resolved host fact, never a container string");
 	assert.equal(rec.model, "m");
 	assert.equal(rec.usage, null);
+	// Trigger attribution rides the serialized bytes end-to-end, split exactly as the contract says:
+	// the integer and the enum persist, the collaborator-applied label does not.
+	assert.equal(rec.triggerIndex, 0, "matched.index persists, and index 0 is 0, never null");
+	assert.equal(rec.triggerType, "label");
 	// buildRecord reads only stable non-PII fields, so the serialized bytes carry neither title nor body.
 	assert.equal(writes[0].data.includes("SECRET_T"), false, "issue title must not leak into the record bytes");
 	assert.equal(writes[0].data.includes("SECRET_B"), false, "issue body must not leak into the record bytes");
+	assert.equal(writes[0].data.includes("SECRET_LABEL"), false, "the matched label must not leak into the record bytes");
 });
 
 test("(b) infra exit 1: a failed record is written on the catch path BEFORE InfraRetry rethrows", { skip }, async () => {

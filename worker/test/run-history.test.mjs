@@ -407,6 +407,8 @@ test("buildRecord for a github job keeps id-only fields and admits no PII", () =
 	assert.equal(record.exitCode, null);
 	assert.equal(record.budgetReserved, null);
 	assert.equal(record.reason, null);
+	assert.equal(record.triggerIndex, null, "a job whose data carries no trigger.matched records null attribution");
+	assert.equal(record.triggerType, null);
 
 	const json = JSON.stringify(record);
 	assert.ok(!json.includes("SECRET_T"), "title must not leak");
@@ -1001,4 +1003,65 @@ test("the replica fields keep the record PII-free by construction -- integers on
 	assert.equal(json.includes("pi/issue-"), false, "the record names no branch, replica or not");
 	assert.equal(typeof rec.replica, "number");
 	assert.equal(typeof rec.replicas, "number");
+});
+
+test("buildRecord persists triggerIndex and triggerType from trigger.matched, and index 0 is 0, never null", () => {
+	// Additive and nullable on the replica fields' precedent (INT-RUN-HISTORY-FILE-CONTRACT, issue #54).
+	// Index 0 is a LEGAL index -- the first triggers.json entry -- so the `?? null` default must not
+	// swallow it; this is the assertion a `|| null` typo would turn red.
+	const rec = buildRecord({
+		job: {
+			id: "gh-guid",
+			name: "github",
+			data: {
+				kind: "github",
+				repo: "o/r",
+				target: { type: "issue", number: 7 },
+				flow: "fix",
+				trigger: { kind: "issues", matched: { index: 0, type: "label", label: "SECRET_LABEL" } },
+			},
+		},
+		result: { outcome: "completed" },
+	});
+	assert.equal(rec.triggerIndex, 0, "index 0 persists as 0 -- the ?? default must not eat it");
+	assert.equal(rec.triggerType, "label");
+	assert.equal("matched" in rec, false, "the matched OBJECT is never stored -- only its two admissible fields");
+
+	const json = JSON.stringify(rec);
+	assert.equal(json.includes("SECRET_LABEL"), false, "the third matched key is collaborator-applied text and never persists");
+});
+
+test("triggerType persists each of the closed route set, and nothing else rides along", () => {
+	// The set is minted by the receiver's filters (receiver/src/filter.mjs: label, comment, pull_request;
+	// the review route reuses pull_request). A record consumer may switch on these three values exactly.
+	for (const type of ["label", "comment", "pull_request"]) {
+		const rec = buildRecord({
+			job: {
+				id: `gh-${type}`,
+				name: "github",
+				data: { kind: "github", repo: "o/r", target: { type: "issue", number: 1 }, flow: "fix", trigger: { matched: { index: 3, type, phrase: "SECRET_PHRASE" } } },
+			},
+			result: { outcome: "completed" },
+		});
+		assert.equal(rec.triggerType, type);
+		assert.equal(rec.triggerIndex, 3);
+		assert.equal(JSON.stringify(rec).includes("SECRET_PHRASE"), false);
+	}
+});
+
+test("a cron-shaped trigger ({id, pattern}, no matched) records null attribution on purpose", () => {
+	// Cron attribution is already exact via the repeat:<id>:<millis> jobId join (makeFindPreviousRun),
+	// which also reaches records written before these fields existed. Persisting trigger.id here would
+	// duplicate a fact the record's own jobId carries.
+	const rec = buildRecord({
+		job: {
+			id: "repeat:nightly:1754870400000",
+			name: "local",
+			data: { kind: "local", folder: "/x/proj", flow: "tidy", trigger: { id: "nightly", pattern: "0 3 * * *" } },
+		},
+		result: { outcome: "completed" },
+	});
+	assert.equal(rec.triggerIndex, null);
+	assert.equal(rec.triggerType, null);
+	assert.equal(JSON.stringify(rec).includes("nightly"), true, "the id still reaches the record -- inside jobId, its canonical home");
 });

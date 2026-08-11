@@ -683,7 +683,10 @@ Evidence convention as in `constitution.md`.
     `triggers` array (cron entries counted — the file index is the rule's identity), `type` is that
     entry's `on.type`, and the third key names what satisfied the rule — for `label` the label that hit
     (first `any` hit, else `all[0]`), for `comment` the configured `phrase`, for `pull_request` the
-    `action`. `matched` does **not** enter the prompt.
+    `action`. `matched` does **not** enter the prompt. Since issue #54 the harness also persists
+    `matched.index` and `matched.type` — and only those two — host-side on the run record as
+    `triggerIndex`/`triggerType` (`INT-RUN-HISTORY-FILE-CONTRACT`); the third key stays in `event.json`
+    alone, inside the container, because it can carry collaborator-applied text.
   - **On a review-triggered job `matched.action` and the record's own `action` deliberately DIFFER**, and
     this is the first GitHub case where they do. The record's `event`/`action` pair is byte-for-byte what
     GitHub sent (`pull_request_review` / `submitted`); `matched.action` is the `triggers.json` word that
@@ -1776,6 +1779,8 @@ validator rather than a second copy of it.
     "chainRefused": <int> | null,   // count of chain requests refused on this parent; 0 = none
     "replica":  <int> | null,       // this job's 1-based index within its replica set; null = an ordinary run
     "replicas": <int> | null,       // the set size, so `r2` is legible without finding the sibling row
+    "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
+    "triggerType": "label" | "comment" | "pull_request" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
                  "reason": "<fixed enum: resumed|absent|expired|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
@@ -1836,7 +1841,22 @@ validator rather than a second copy of it.
   are **integers**: this record's PII-free-by-construction property rests on it holding no attacker-chosen
   string, and a host-assigned index is not one. The **branch name they imply is deliberately absent**, for
   the same reason `session` omits its key and branch. Without these two fields, two records on one target
-  read as an accidental double-run rather than as the pair an operator asked for. The `tokens` field is **additive and nullable**
+  read as an accidental double-run rather than as the pair an operator asked for. The trigger-attribution
+  fields — `triggerIndex`, `triggerType` — are **additive and nullable on the replica fields' precedent**,
+  explicit literals read from the job's own `data.trigger.matched` by the same no-spread `buildRecord`.
+  They persist the receiver's harness-computed decision record (`INT-CONTAINER-JOB-INPUTS`):
+  `triggerIndex` is the raw `triggers.json` array position of the entry that fired (cron entries counted —
+  the file index is the rule's identity), `triggerType` that entry's `on.type`. An **integer and a fixed
+  enum are the same admissible class as `replica` and `session.reason`**; the third `matched` key
+  (`label`/`phrase`/`action`) is **deliberately absent**, because a label that satisfied an `any`
+  predicate is collaborator-applied payload text, and persisting it would put an attacker-adjacent string
+  in a record whose PII-free property rests on holding none. Without these two fields a forge run joins to
+  its trigger only by the flow-name heuristic, which two triggers naming one flow defeat — the exact
+  ambiguity `matched` was minted to remove (issue #49; persisting it was deferred there by that issue's
+  no-new-record-fields scope, not by this record's posture). **Cron records hold `null` for both on
+  purpose**: a cron job's `data.trigger` is `{ id, pattern }` with no `matched`, and its attribution is
+  already exact via the `repeat:<id>:<millis>` jobId join (above) — a join that also reaches records
+  written before these fields existed, where a new field cannot. The `tokens` field is **additive and nullable**
   in exactly the same way — an explicit no-spread literal of the runner's per-job usage totals
   (`REQ-TOKEN-ACCOUNTING-AND-CAPS`), or `null` when the container died before emitting the runner `exit`
   line. It is PII-free by construction: integer token counts and a numeric cost only, no
@@ -1894,7 +1914,10 @@ validator rather than a second copy of it.
   charset-validated ids and its rows sum to `tokens.total`; given a usage block violating any field rule,
   the record stores `usage: null`, never a partial; given a catch-path or pre-exit-line death,
   `provider`/`model` still carry the host-effective dispatch values; given a fallback-metered
-  (`metered: false`) or pre-ledger run, `usage` is `null` and no reader treats that as an error.
+  (`metered: false`) or pre-ledger run, `usage` is `null` and no reader treats that as an error. Given a
+  forge job whose data carries `trigger.matched`, the record holds `triggerIndex` and `triggerType` —
+  index `0` persists as `0`, never as `null` — and neither field ever carries the matched
+  `label`/`phrase`/`action`; given a cron, chained, or manual job, both are `null`.
 
 ## INT-OUTBOX-CONTRACT
 
@@ -2223,6 +2246,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (Gap 2: a forge run's record could not be attributed to the `triggers.json` entry that fired it). **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: two additive, nullable fields on the replica fields' precedent — `triggerIndex` (the raw triggers-array index of the winning entry, cron entries counted) and `triggerType` (that entry's `on.type`) — explicit literals read from the job's own `data.trigger.matched` by the same no-spread `buildRecord`. An integer and a fixed enum, the admissible class the record already holds; the third `matched` key (`label`/`phrase`/`action`) is deliberately NOT persisted, because a label that satisfied an `any` predicate is collaborator-applied payload text and this record's PII-free property rests on holding no attacker-chosen string. Cron records keep `null` for both on purpose: a cron job's attribution is already exact via the `repeat:<id>:<millis>` jobId join, which also reaches records written before these fields existed, where a new field cannot. Persisting `matched` was deferred by issue #49's own no-new-record-fields scope, not by this record's posture; issue #54 is the consumer that makes it earn its place. Acceptance pins index `0` persisting as `0`, never `null`. **INT-CONTAINER-JOB-INPUTS AMENDED**: one cross-reference — `matched` remains event.json-only inside the container and never enters the prompt; its `index`/`type` alone are now also persisted host-side. **INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked**: `matched` is harness-computed metadata, not a payload field, so the subset is untouched. **INT-OUTBOX-CONTRACT UNCHANGED, checked**: chained children carry no `trigger` and record `null`/`null`, exactly as manual runs do. |
 | 2026-08-09 | Follow-up audit after issue #60. **INT-SDK-SESSION-OPTIONS AMENDED**, a correction rather than an addition: the option block still showed the TWO-path `additionalSkillPaths` literal, while the prose beside it had already been updated to three protected roots. A contract block that disagrees with its own note is worse than either being wrong alone, since a reader checking the code against the spec would have found the spec confirming the old shape. Now shows repo, injected, overlay. No behaviour changed; the literal had been stale since the injected tier landed hours earlier. |
 | 2026-08-09 | Issue #60 (Gap 3: `run.instructions`). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: a new optional field on the three webhook types, refused on cron with a message naming `run.task`, capped at 2000 characters and refused rather than truncated. Surrounding whitespace is deliberately NOT refused here, unlike `run.image`, and the divergence is recorded: that rule exists because whitespace changes what an image REFERENCE means, and it does not change what prose means. **INT-CONTAINER-JOB-INPUTS AMENDED**: `prompt.md` may now carry an operator standing-instruction block in the envelope above the data region; it reaches no other file. **INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked**: the field is operator config and is not a webhook body field, so the subset is untouched and the value never appears in `event.json`. |
 | 2026-08-09 | Issue #60 (Gap 2: `run.skillsDir`, a per-trigger operator skills directory). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: a new optional field on all four run kinds, with the validation SPLIT written out because both halves are load-bearing. Existence is not checked in the shared validator because BOTH services parse this file and the receiver may run on another host (the `run.folder` precedent); absoluteness is not checked there either, and that one is subtler, because `path.isAbsolute` is OS-dependent, so a shared check would let a Windows worker and a Linux receiver disagree about the same reviewed file. The worker enforces both where the answer is knowable: at boot for cron, and pre-spend per job for every kind. Also records that the value never reaches `/job/event.json` (it rides at JOB level, never inside `trigger`, which is what the subset is built from), and that injected skills are trigger-reachable and never AI-reachable. **INT-CONTAINER-JOB-INPUTS AMENDED**: `/job/trigger-skills/<name>/**` joins the layout as the one `/job` input that does NOT come from git, with the asymmetry argued rather than left to be noticed -- `.pi/` is read by oid because the serviced repo is only maintainer-trusted and an attacker can shape that tree, while `run.skillsDir` is operator-authored deploy-time config named in a reviewed file, so what remains is the ordinary filesystem hazard and the copier answers it the same way (lstat never stat, regular files only, destinations rebuilt from validated segments, bounded). It arrives on the EXISTING `/job:ro` bind. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: six `skills-dir-*` reasons. **INT-SDK-SESSION-OPTIONS AMENDED**: the protected-root list goes to three, `/job/pi/skills` then `/job/trigger-skills` then `/opt/pi-global/skills`, consulted in that order. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked** -- and this is the entry the change was designed around: no mount is added, no flag, no env var, so a job with an injected skills dir has a docker argv byte-identical to one without, pinned by a test. |
