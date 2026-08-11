@@ -47,8 +47,10 @@ export const PLAIN_THEME = {
 // switch (`setGlyphs`) must not restyle overlays behind a styler's back, so the overlay opts in per
 // styler instance via `makeStyler(theme, { ascii })`. (The sparkline ramp is the one exception -- its
 // quantization geometry lives only in panel.mjs, so `styler.sparkline` follows panel's active table.)
-const OVERLAY_GLYPHS = { tl: "┌", tr: "┐", bl: "└", br: "┘", ml: "├", mr: "┤", h: "─", v: "│", full: "█", empty: "░", ellipsis: "…" };
-const OVERLAY_ASCII = { tl: "+", tr: "+", bl: "+", br: "+", ml: "+", mr: "+", h: "-", v: "|", full: "#", empty: ".", ellipsis: "..." };
+// The graph rows (issue #54) add four keys; every twin pair below is width-identical on purpose, so a
+// renderer's padding math never depends on which table is active.
+const OVERLAY_GLYPHS = { tl: "┌", tr: "┐", bl: "└", br: "┘", ml: "├", mr: "┤", h: "─", v: "│", full: "█", empty: "░", ellipsis: "…", arrowRight: "─▶", foldOpen: "▾", foldClosed: "▸", rearm: "↻" };
+const OVERLAY_ASCII = { tl: "+", tr: "+", bl: "+", br: "+", ml: "+", mr: "+", h: "-", v: "|", full: "#", empty: ".", ellipsis: "...", arrowRight: "->", foldOpen: "v", foldClosed: ">", rearm: "~" };
 
 /** Per-class colors for `fmtCost`: an estimate must LOOK provisional, and plan coverage must not look free. */
 const COST_COLORS = {

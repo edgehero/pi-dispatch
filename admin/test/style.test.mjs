@@ -116,6 +116,20 @@ test("makeStyler ascii option swaps frame/meter/divider glyphs with identical ge
   assert.equal(s.cell("abcdefgh", 5), "ab...", "the 3-char ellipsis still lands on exactly width");
 });
 
+test("the graph glyphs (issue #54) keep key parity and identical widths across both tables", () => {
+  // Width-identical twins are the contract: a graph row's padding math must not depend on which
+  // table is active, or the 80-col invariant breaks only for ASCII terminals -- the least debuggable
+  // place for it to break.
+  const box = makeStyler(PLAIN_THEME).glyphs;
+  const ascii = makeStyler(PLAIN_THEME, { ascii: true }).glyphs;
+  assert.deepEqual(Object.keys(ascii).sort(), Object.keys(box).sort(), "key parity between the twin tables");
+  for (const key of ["arrowRight", "foldOpen", "foldClosed", "rearm"]) {
+    assert.ok(typeof box[key] === "string" && box[key].length > 0, key);
+    assert.equal(ascii[key].length, box[key].length, `${key}: twin widths must match`);
+  }
+  assert.doesNotMatch(Object.values(ascii).join(""), /[─│┌┐├┤└┘▾▸↻▶]/, "no non-ASCII glyph leaks into the ascii table");
+});
+
 test("styler.sparkline under PLAIN_THEME is byte-identical to the plain sparkline", () => {
   const s = makeStyler(PLAIN_THEME);
   const values = [0, 1, null, 4, 2];
