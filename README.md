@@ -381,8 +381,10 @@ Steer the running worker without stopping it, from any terminal:
 
 The dashboard shown at the top of this README is a **pi extension**: it loads into your own interactive
 pi session. No daemon, no web app, no network port. Beside the dashboard, `/dispatch graph` renders the
-whole trigger and flow topology as text: what triggers what, what chained to what in the recorded runs,
-what a skill's own text says it might chain to, plus orphan skills and dangling triggers
+whole trigger and flow topology: what triggers what, what chained to what in the recorded runs, what a
+skill's own text says it might chain to, plus orphan skills and dangling triggers. It comes as a
+dashboard view (`g`), as plain text, and as `/dispatch graph html`, a self contained page your browser
+opens from disk (still no server and no port) with the topology drawn Node-RED style
 ([`docs/graph.md`](docs/graph.md)).
 
 ```bash

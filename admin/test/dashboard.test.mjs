@@ -1968,3 +1968,41 @@ test("GRAPH in ascii mode leaks no box-drawing or graph glyphs", async () => {
   assert.ok(!/[┌┐└┘├┤│─▾▸↻▶]/.test(joined), "the ascii graph is pure ASCII, frame and rows alike");
   assert.match(stripAnsi(joined), /-> build-report/, "the ascii arrow twin renders");
 });
+
+test("Esc from a GRAPH-entered trigger drill returns to GRAPH, not LIST (one layer per Esc)", async () => {
+  const comp = await openGraph(graphDeps());
+  comp.handleInput("\x1b[B"); // down: onto the cron trigger row
+  comp.handleInput("\r");
+  await flush();
+  assert.match(stripAnsi(comp.render(80).join("\n")), /trigger · cron/, "the drill opened");
+  comp.handleInput("\x1b");
+  await flush();
+  const back = stripAnsi(comp.render(80).join("\n"));
+  assert.match(back, /GRAPH · triggers and flows/, "Esc pops back to the graph the drill came from (review finding)");
+  comp.handleInput("\x1b");
+  await flush();
+  const list = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(list, /RUNS /, "and one more Esc reaches LIST");
+});
+
+test("a LIST trigger row carries the RAW file index, so delete targets the right entry past a dropped row", async () => {
+  // The display drops unusable entries but keeps raw indexes; the row using its display POSITION was
+  // a live-fire wrong-delete: garbage at file row 0, x+y on the visible trigger deleted the garbage
+  // and reported the real trigger gone while it kept firing (review finding).
+  const snap = {
+    ...SNAPSHOT,
+    triggers: { count: 2, triggers: [{ type: "label", index: 1, any: ["ai"], all: [], none: [], flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" }] },
+  };
+  let payload = null;
+  const comp = makeDashboard({ paths: {}, done: (p) => (payload = p), tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  comp.handleInput("\r"); // cursor starts on the one trigger row
+  await flush();
+  comp.handleInput("x");
+  comp.handleInput("y");
+  await flush();
+  await comp.dispose();
+  assert.equal(payload?.action, "deleteTrigger");
+  assert.equal(payload?.index, 1, "the RAW file index, not the display position 0");
+});

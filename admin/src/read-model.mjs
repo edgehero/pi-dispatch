@@ -878,22 +878,38 @@ export function cronRunStats({ records, schedulerIds } = {}) {
 }
 
 /**
- * Join forge run records to their triggers.json entry via the persisted `triggerIndex`
- * (INT-RUN-HISTORY-FILE-CONTRACT, issue #54). `triggerCount` is the CURRENT file's length, and the
- * range guard is the honesty rule: the file live-reloads (OQ-008), so a record whose index no longer
- * exists -- or predates the field -- counts under `unattributed` rather than landing on whatever entry
- * now occupies that row. Index 0 attributes; only a forge-kind record can be unattributed, because
- * cron/local/chained runs never carried a matched index and their attribution lives elsewhere.
+ * Join forge run records to their triggers.json entry via the persisted `triggerIndex` AND
+ * `triggerType` (INT-RUN-HISTORY-FILE-CONTRACT, issue #54). `triggerCount` is the CURRENT file's
+ * length and `triggerTypes` maps each raw index to the entry's CURRENT `on.type`; both guards are
+ * the honesty rule, because the file live-reloads (OQ-008). A record whose index no longer exists,
+ * predates the field, points at a row the display dropped, or DISAGREES ON TYPE with the entry now
+ * at that index counts under `unattributed` -- an edit that shifted a different kind of trigger onto
+ * the row is detectable from the persisted pair and refused (found by adversarial review: without
+ * the type check, deleting a cron above a comment trigger moved the comment's run history onto
+ * whatever slid into its slot). The residual the pair cannot see -- a SAME-type reorder within range
+ * -- is beneath these two integers-and-enums' resolution; catching it would need a persisted entry
+ * identity, and the record's PII posture prices strings high, so it is documented in
+ * REQ-TOPOLOGY-GRAPH instead of half-solved here. Index 0 attributes; only a forge-kind record can
+ * be unattributed, because cron/local/chained runs never carried a matched index and their
+ * attribution lives elsewhere.
  */
-export function joinRunsToTriggers({ records, triggerCount } = {}) {
+export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {}) {
   const byIndex = {};
   let unattributed = 0;
   if (!Array.isArray(records)) return { byIndex, unattributed };
   const count = Number.isInteger(triggerCount) && triggerCount >= 0 ? triggerCount : 0;
+  const types = triggerTypes && typeof triggerTypes === "object" ? triggerTypes : null;
   for (const record of records) {
     if (!isForgeKind(record?.kind)) continue;
     const idx = record?.triggerIndex;
     if (!Number.isInteger(idx) || idx < 0 || idx >= count) {
+      unattributed++;
+      continue;
+    }
+    // Type agreement, when the caller supplied the current types: an undefined slot means the row
+    // exists in the file but not on the display (an unusable entry), so there is no node to carry
+    // the count -- unattributed keeps it visible instead of vanishing it.
+    if (types && (types[idx] === undefined || types[idx] !== record.triggerType)) {
       unattributed++;
       continue;
     }
@@ -934,7 +950,7 @@ export function observedChainEdges({ records } = {}) {
     if (!parent) continue; // parent outside the window/retention: an edge with one visible end is no edge
     if (typeof parent.flow !== "string" || typeof child.flow !== "string") continue;
     if (parent.target !== child.target) continue; // unrepresentable by construction; never drawn
-    const key = `${parent.flow} ${child.flow} ${parent.target ?? ""}`;
+    const key = `${parent.flow} ${child.flow} ${parent.target ?? ""}`;
     let edge = folded.get(key);
     if (!edge) {
       if (folded.size >= GRAPH_LIMITS.maxEdges) {
@@ -950,7 +966,11 @@ export function observedChainEdges({ records } = {}) {
   }
   for (const record of records) {
     if (Number.isInteger(record?.chainRefused) && record.chainRefused > 0 && typeof record?.flow === "string") {
-      refusals[record.flow] = (refusals[record.flow] ?? 0) + record.chainRefused;
+      // Folder-scoped like the edges (adversarial-review finding): chaining is same-folder-only, so
+      // two folders' same-named flows are genuinely different flows, and a flat per-flow counter
+      // would blur their refusals into one number nobody can place.
+      const scope = typeof record.target === "string" && record.target.startsWith("local:") ? `${record.target.slice("local:".length)}/${record.flow}` : record.flow;
+      refusals[scope] = (refusals[scope] ?? 0) + record.chainRefused;
     }
   }
   return { edges: [...folded.values()], refusals, truncated };

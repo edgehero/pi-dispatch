@@ -15,6 +15,22 @@ trigger row opens the same trigger detail the LIST offers. `r` refreshes the mod
 re-read besides entry, because assembling the graph enumerates each folder's committed skills with
 git, and topology changes when you edit things, not per second. `Esc` returns to the LIST.
 
+## `/dispatch graph html`: the browser view
+
+`/dispatch graph html` renders the same model as a Node-RED-style diagram: trigger nodes wired to
+their flows, observed chain edges with their counts, potential (mentioned) edges dashed, folders as
+group boxes, orphans dimmed and dashed, dangling triggers flagged. It writes **one self-contained
+HTML file** (inline SVG/CSS/JS, no network requests of any kind) to a stable temp path
+(`PI_GRAPH_DIR` override) and opens your browser; the `file://` URL is always printed first, so over
+SSH you copy the file instead (`--no-open` skips the browser unconditionally).
+
+The page is a snapshot with its own refresh loop: a Reload button, an auto-reload toggle (off, 5s,
+30s) and a "generated N ago" stamp. Because the command overwrites the **same file atomically**,
+the workflow is: keep the tab open, re-run `/dispatch graph html` after editing triggers or skills,
+and the tab picks up the new topology within the auto-reload interval — pan/zoom and selection
+survive the reload. Pan by dragging, zoom with the wheel, hover a node for its details, click one to
+highlight what it triggers and what reaches it.
+
 ## `/dispatch graph`
 
 ```

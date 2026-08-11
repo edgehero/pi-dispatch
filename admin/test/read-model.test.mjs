@@ -1313,7 +1313,41 @@ test("observedChainEdges folds child->parent joins per (parentFlow, childFlow, t
   assert.deepEqual(notify, { parentFlow: "build", childFlow: "notify", target: "local:proj", count: 2, lastEndedAt: "2026-08-04T00:00:00.000Z" });
   const self = edges.find((e) => e.childFlow === "build");
   assert.equal(self.parentFlow, "build", "a flow chaining to itself is a real observed self-edge");
-  assert.deepEqual(refusals, { build: 2 }, "chainRefused counts surface per parent flow");
+  assert.deepEqual(refusals, { "proj/build": 2 }, "chainRefused counts are folder-scoped, like the edges");
+});
+
+test("observedChainEdges keeps two folders' same-named flows' refusals apart", () => {
+  // Chaining is same-folder-only, so site/build and other/build are genuinely different flows; a flat
+  // per-flow counter would blur 2+5 into one number nobody can place (adversarial-review finding).
+  const records = [
+    runRec({ jobId: "local-a", kind: "local", target: "local:site", flow: "build", chainRefused: 2 }),
+    runRec({ jobId: "local-b", kind: "local", target: "local:other", flow: "build", chainRefused: 5 }),
+  ];
+  assert.deepEqual(observedChainEdges({ records }).refusals, { "site/build": 2, "other/build": 5 });
+});
+
+test("joinRunsToTriggers refuses a TYPE-changing in-range shift, and pins the same-type residual", () => {
+  // The adversarial review's live-fire lie: delete the cron above a comment trigger and the comment's
+  // run history slid onto whatever now occupies its row. With the current types supplied, the
+  // persisted triggerType catches every cross-type shift. The SAME-type reorder is beneath the two
+  // persisted fields' resolution -- the third assertion pins that residual on purpose, so a future
+  // fix is a deliberate edit here, not an accident.
+  const records = [runRec({ triggerIndex: 1, triggerType: "comment" })];
+  const shifted = joinRunsToTriggers({ records, triggerCount: 2, triggerTypes: { 0: "comment", 1: "label" } });
+  assert.deepEqual(shifted.byIndex, {}, "a label entry now at row 1 must not inherit a comment run's history");
+  assert.equal(shifted.unattributed, 1);
+
+  const matching = joinRunsToTriggers({ records, triggerCount: 2, triggerTypes: { 0: "cron", 1: "comment" } });
+  assert.equal(matching.byIndex[1].runs, 1, "a type-agreeing row attributes");
+
+  const sameTypeReorder = joinRunsToTriggers({ records, triggerCount: 2, triggerTypes: { 0: "comment", 1: "comment" } });
+  assert.equal(sameTypeReorder.byIndex[1].runs, 1, "RESIDUAL, pinned: two same-type rows reordered are indistinguishable to index+type");
+
+  const droppedRow = joinRunsToTriggers({ records, triggerCount: 3, triggerTypes: { 0: "comment" } });
+  assert.equal(droppedRow.unattributed, 1, "an in-file but undisplayable row has no node to carry the count");
+
+  const noTypes = joinRunsToTriggers({ records, triggerCount: 2 });
+  assert.equal(noTypes.byIndex[1].runs, 1, "callers that supply no types keep the range-only join");
 });
 
 test("observedChainEdges drops a cross-target pair and a parent outside the window", () => {

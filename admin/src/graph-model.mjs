@@ -67,12 +67,25 @@ export function findSiblingMentions(text, siblingNames) {
   const mentions = [];
   for (const name of siblingNames) {
     if (typeof name !== "string" || name === "") continue;
-    const re = new RegExp(`(?<![a-z0-9_-])${escapeRegExp(name)}(?![a-z0-9_-])`);
-    const at = text.search(re);
-    if (at === -1) continue;
-    const windowStart = Math.max(0, at - CHAIN_VOCAB_RADIUS);
-    const windowEnd = Math.min(text.length, at + name.length + CHAIN_VOCAB_RADIUS);
-    mentions.push({ name, strong: CHAIN_VOCAB_RE.test(text.slice(windowStart, windowEnd)) });
+    // EVERY occurrence is tested, not only the first (review finding): a skill mentioned early in
+    // prose and again beside the outbox vocabulary is a strong mention -- the distance rule is about
+    // any co-location, not the first one. Bounded, because a hostile SKILL.md could repeat a name
+    // thousands of times and this scan already runs once per sibling.
+    const re = new RegExp(`(?<![a-z0-9_-])${escapeRegExp(name)}(?![a-z0-9_-])`, "g");
+    let found = false;
+    let strong = false;
+    let match;
+    let occurrences = 0;
+    while ((match = re.exec(text)) !== null && occurrences++ < 32) {
+      found = true;
+      const windowStart = Math.max(0, match.index - CHAIN_VOCAB_RADIUS);
+      const windowEnd = Math.min(text.length, match.index + name.length + CHAIN_VOCAB_RADIUS);
+      if (CHAIN_VOCAB_RE.test(text.slice(windowStart, windowEnd))) {
+        strong = true;
+        break;
+      }
+    }
+    if (found) mentions.push({ name, strong });
   }
   return mentions;
 }
@@ -115,7 +128,7 @@ export const GRAPH_FLAGS = Object.freeze([
  * Total function: absent or malformed inputs degrade to an empty-but-well-formed model, never a
  * throw (the read-model's viewer doctrine, one layer up).
  */
-export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, cronStats, runJoin, chainEdges, caps, nowMs } = {}) {
+export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, cronStats, runJoin, chainEdges, caps, nowMs } = {}) {
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulerList = Array.isArray(schedulers) ? schedulers : [];
   const folders = folderSkills && typeof folderSkills === "object" ? folderSkills : {};
@@ -142,11 +155,19 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       unattributedRuns: Number.isInteger(runJoin?.unattributed) ? runJoin.unattributed : 0,
       chainRefusals: chainEdges?.refusals && typeof chainEdges.refusals === "object" ? chainEdges.refusals : {},
       truncated: {
-        folders: false,
+        // collectGraphInputs' cap flag rides its spread into this input (review finding: this was
+        // hardcoded false, so the cap-reached banner could never fire on any surface).
+        folders: foldersTruncated === true,
         skills: Object.values(folders).some((f) => f?.truncated === true),
         edges: chainEdges?.truncated === true,
       },
       droppedObservedEdges: 0,
+      // Injected dirs whose readdir failed (review finding): the OQ-022 badge is the one fact the
+      // injected enumeration exists for, and an unreadable dir must not make it silently vanish.
+      injectedUnreachable: Object.entries(injected)
+        .filter(([, r]) => typeof r?.unreachable === "string")
+        .map(([dir]) => dir)
+        .sort(),
     },
   };
 
@@ -181,7 +202,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
   };
 
   // ---- skill nodes from the enumerations ----
-  const skillNode = new Map(); // "folderKey name" -> node
+  const skillNode = new Map(); // "folderKey name" -> node
   const addSkill = (group, skill) => {
     const id = `skill:${group.key}:${skill.name}`;
     const node = {
@@ -197,7 +218,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       isFlow: false, // set true when a config edge lands on it
       mentionedBy: 0,
     };
-    skillNode.set(`${group.key} ${skill.name}`, node);
+    skillNode.set(`${group.key} ${skill.name}`, node);
     model.nodes.push(node);
     group.skillIds.push(id);
     if (node.unread) model.flags.push({ nodeId: id, flag: "unread", detail: "SKILL.md unreadable at enumeration; gate read as closed" });
@@ -223,7 +244,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
   // A config edge may point at a flow the enumeration did not find; the target then exists as a
   // `skill-missing` node so the edge has a visible end. Created lazily, once per (group, name).
   const missingNode = (group, name) => {
-    const key = `${group.key} ${name}`;
+    const key = `${group.key} ${name}`;
     let node = skillNode.get(key);
     if (node) return node;
     node = { id: `skill:${group.key}:${name}`, kind: "skill-missing", name, folderKey: group.key, isSub: false, group: null, aiTrigger: false, meta: null, unread: false, isFlow: false, mentionedBy: 0 };
@@ -248,6 +269,17 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
           // says why its skills are unknown, rather than silently losing the edge.
           group = { key: `folder:${t.folder}`, path: t.folder, label: basenameOf(t.folder), kind: "local", head: null, unreachable: "not-enumerated", triggerIds: [], skillIds: [] };
           folderByPath.set(t.folder, group);
+          model.folders.push(group);
+        }
+      } else {
+        // A cron entry with no usable folder (only the fail-soft display normalizer can produce one;
+        // the worker refuses it at boot) still draws its trigger and config edge -- "every trigger
+        // naming a flow gets one, ALWAYS" admits no exception for broken entries, which are exactly
+        // the ones an operator needs to see (review finding).
+        group = folderByPath.get("") ?? null;
+        if (!group) {
+          group = { key: "folder:(none)", path: null, label: "(no folder)", kind: "local", head: null, unreachable: "no-folder", triggerIds: [], skillIds: [] };
+          folderByPath.set("", group);
           model.folders.push(group);
         }
       }
@@ -297,7 +329,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
         continue;
       }
       if (isCron && group && group.unreachable === null) {
-        const existing = skillNode.get(`${group.key} ${t.flow}`);
+        const existing = skillNode.get(`${group.key} ${t.flow}`);
         if (existing && existing.kind === "skill" && !existing.isSub) {
           existing.isFlow = true;
           model.edges.push({ from: id, to: existing.id, kind: "config" });
@@ -333,6 +365,13 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       continue;
     }
     const group = matches[0];
+    if (group.unreachable !== null) {
+      // An unreachable folder has no real skill nodes to hang history on: minting them here would
+      // badge phantom "[missing at HEAD]" endpoints off a read that never happened (review finding),
+      // so the edge is dropped INTO THE COUNTER, same as the ambiguous case.
+      model.meta.droppedObservedEdges++;
+      continue;
+    }
     const from = missingNode(group, edge.parentFlow);
     const to = missingNode(group, edge.childFlow);
     model.edges.push({ from: from.id, to: to.id, kind: "observed", count: Number.isInteger(edge.count) ? edge.count : 0, lastEndedAt: edge.lastEndedAt ?? null });
@@ -343,10 +382,10 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
     const group = folderByPath.get(path);
     for (const skill of Array.isArray(result?.skills) ? result.skills : []) {
       if (skill?.isSub === true) continue;
-      const from = skillNode.get(`${group.key} ${skill?.name}`);
+      const from = skillNode.get(`${group.key} ${skill?.name}`);
       if (!from) continue;
       for (const mention of Array.isArray(skill?.mentions) ? skill.mentions : []) {
-        const to = skillNode.get(`${group.key} ${mention?.name}`);
+        const to = skillNode.get(`${group.key} ${mention?.name}`);
         if (!to || to.isSub) continue;
         to.mentionedBy++;
         model.edges.push({

@@ -492,5 +492,7 @@ test("renderGraph surfaces truncation and dropped edges rather than pretending c
   const out = renderGraph(model);
   assert.match(out, /folder scan truncated .*unscanned/);
   assert.match(out, /observed edges truncated/);
-  assert.match(out, /2 observed edges dropped \(no unique folder/);
+  assert.match(out, /2 observed edges dropped \(no unique readable folder/);
+  model.meta.injectedUnreachable = ["/inj"];
+  assert.match(renderGraph(model), /injected skills dir unreadable: \/inj/, "an unreadable injected dir says so (OQ-022's badge must not silently vanish)");
 });

@@ -125,8 +125,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Why**: BullMQ supplies priorities, a rate limiter, a dedup window, and stalled-job recovery with a
   retry policy — each of which is an independent requirement here, not a bonus. Building four mechanisms
   to avoid one dependency is precisely how a solo-maintainer project drowns in maintenance. Its Bull
-  Board dashboard was a fifth draw; `DES-ADMIN-VIA-PI-EXTENSION` drops the web surface entirely, so the
-  case now stands on the four queue mechanisms alone. Redis persistence (AOF) is what makes
+  Board dashboard was a fifth draw; `DES-ADMIN-VIA-PI-EXTENSION` drops the **served** web surface
+  entirely (the graph HTML artifact is a static file the operator's own browser opens — nothing serves
+  it, nothing listens), so the case now stands on the four queue mechanisms alone. Redis persistence (AOF) is what makes
   `REQ-QUEUE-BURST-NO-DROP` survive a reboot; an in-memory queue would lose the wait-list on the first
   restart.
 - **Evidence (upstream)**: BullMQ is MIT (`taskforcesh/bullmq → LICENSE`, © BullForce Labs AB)
@@ -902,7 +903,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   TRIGGER_DETAIL drill by raw file index. The graph data path is the **strictest** of the three view
   policies: fetched on entry and on `r` only, NEVER on the poll tick, because the enumeration spawns
   git per folder — heavier than even the costs scan, and topology changes when the operator edits
-  things, not per second. The unframed degrade reuses `renderGraph` whole. The
+  things, not per second. The unframed degrade reuses `renderGraph` whole. `graph html`
+  (`REQ-GRAPH-HTML-EXPORT`) additionally renders the same model as a **self-contained HTML artifact**
+  (inline SVG/CSS/JS, zero external requests, works over `file://`) written **atomically to the stable
+  path** `<graphDir>/graph.html` (tmp+rename — stable so re-running updates an already-open tab
+  through the page's own Reload/auto-reload controls, atomic so that tab's reload never reads half a
+  file), then prints the `file://` URL **first** and best-effort opens the platform browser through
+  the worker's shared opener — skipped and said over SSH or without a display, `--no-open` always. The
+  extension still **binds no network port at all**: a file with no server is not a surface — nothing
+  listens, nothing off-machine gained reachability — so this stays strictly narrower than the
+  superseded `127.0.0.1` panel. The artifact carries **run-record fields and operator-authored
+  trigger/skill strings only, never `.log` bytes and never a host path beyond the folder's basename**
+  — the same placement boundary as everything else here, applied to a file that outlives the session. The
   LLM-callable tools are reads (`status`/`runs`/`triggers`/`costs` — `dispatch_costs` returns the fold as
   JSON whose every monetary value carries its `class`, so a model consuming it cannot launder an estimate
   into a fact), `pause`/`resume`, the gated `dispatch_run`
@@ -991,6 +1003,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     named: an operator on a divergent pi version gets no admin surface and falls back to direct Valkey and
     file inspection, rather than a silently degraded one.
 - **Rejected**:
+  - *A served graph page (a localhost listener for the HTML view, or live data via a socket)* — the
+    exact surface this entry removed, re-proposed with a prettier face; the socket→file substitution
+    `DES-JOB-OUTBOX-CHAINING` canonised applies symmetrically here, so the browser view is a written
+    artifact and refresh is the page reloading a re-written file, never a connection.
+  - *Raw `.log` bytes in the HTML artifact* — the `.log` is untrusted, PII-bearing text whose boundary
+    is placement (overlay-viewer-only), not filtering; an escaped copy in a durable file outside the
+    overlay would trade that structural defence for an HTML-escaping promise, the one trade this
+    design refuses everywhere else.
   - *The web panel + Bull Board* — an entire localhost web app for a solo, terminal-native operator. The
     superseded `DES-PANEL-SEPARATE-FROM-RECEIVER` holds the full original reasoning; it was correct for a
     networked panel and is removed because the network surface is removed.
@@ -1922,6 +1942,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (the HTML export — the slice #54's own text ruled out, landed by narrowing what was actually ruled out). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: `graph html` writes a self-contained HTML artifact (inline SVG/CSS/JS, `file://`, zero external requests) atomically to the stable `<graphDir>/graph.html` and best-effort opens the browser via the worker's shared opener, printed-URL-first, skip-and-say over SSH/headless. The Why this row exists: issue #54 said "no web/HTML surface — the admin binds no port; that property is load-bearing", and the property survives INTACT, because the property was always the **port**. A file with no server is not a surface: nothing listens, nothing off-machine gained reachability, and the socket→file substitution is the same one `DES-JOB-OUTBOX-CHAINING` canonised for the outbox. `DES-QUEUE-BULLMQ-OVER-CUSTOM`'s "drops the web surface entirely" line — the one a reviewer would quote against this — is REWORDED to "drops the SERVED web surface" rather than argued around. Two new Rejected entries record the real lines: a served graph page (the removed surface re-proposed with a prettier face) and raw `.log` bytes in the artifact (the placement boundary does not become an escaping promise in a durable file). Content rule: run-record fields and operator-authored strings only; folder basenames, never host paths. The write is the writeTriggers idiom (atomic, named path, fail-loud); the spawn seam is `index.ts`'s, the dashboard stays I/O-free, USED_API stays four members. New `OQ-024` records the opener-spawn WATCH residual. |
 | 2026-08-11 | Issue #54 (the GRAPH view). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: the overlay gains its sixth view, **GRAPH** (`g`) — the topology from the same assembled model as `/dispatch graph`, so the two surfaces cannot disagree (`DES-GRAPH-EDGE-DERIVATION` stays the one home of the edge rules). The data path is stricter than COSTS on purpose: fetch on entry and on `r` only, never on the poll tick, because `fetchGraph` spawns git per enumerated folder — pinned by a test that runs a real 10ms poll and counts fetches. The LIST footer absorbed `g graph` by merging the pause/resume pair into one `p/r pause` hint and dropping `↵` from the nav hint — still exactly 76 visible columns at width 80, ellipsis-free, pinned. Two overdue postures landed with the view: `PI_DISPATCH_ASCII=1` now flips the OVERLAY styler too (`makeStyler`'s per-instance `ascii`, threaded from the same resolved paths as the `setGlyphs` funnel — the half-ASCII gap the 2026-08-01 row's "at extension load" phrasing papered over), and the graph rows' glyphs (`arrowRight`/`foldOpen`/`foldClosed`/`rearm`) join the styler twin tables width-identical, so the 80-col invariant holds on ASCII terminals. The unframed degrade reuses `renderGraph` whole (uncollapsed, the everything-else-failed rendering). The fs ban UNCHANGED, checked — `fetchGraph` is a `createDashboardDeps` seam over read-model functions like every other byte the overlay renders. The tool surface UNCHANGED, checked (no `dispatch_graph`; the count pin stands). |
 | 2026-08-11 | Issue #54 (`/dispatch graph`). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: `graph` joins the slash-command list — an operator-typed, ungated read on the `runs`/`costs` tier, rendering `renderGraph(assembleGraph(...))` into the admin channel with `triggerTurn` never set. The subcommand is deliberately NOT an LLM-callable tool (the enumeration spawns git per folder; the tool-count pin stands). The USAGE string and KNOWN_SUBCOMMANDS array are now pinned to agree member-for-member by a wiring test, closing a drift class this amendment would otherwise have widened. The dashboard's source-regex fs ban UNCHANGED, checked; the five-views count UNCHANGED for now (the GRAPH view is the next slice and will amend the Decision when it lands). |
 | 2026-08-11 | Issue #54 (the model assembler). **NEW `DES-GRAPH-EDGE-DERIVATION`**: the graph's edge honesty rules, in one pure fold (`buildGraphModel`). Four evidence classes (`config`/`observed`/`potential`/`cron-rearm`, a closed test-pinned vocabulary), the two OQ-009 structural prohibitions (no forge-parent chain edges, no cross-folder chain edges — the harness makes both unrepresentable, so drawing either would draw a lie), precise dangling (`no-skill` only where enumeration succeeded; unverified is not dangling; `charset-invalid` is its own flag because the gate's `deny` proves nothing about existence), three-way orphanhood, caps and honesty counters on every model. The interesting rejections are recorded: an all-pairs gate-eligibility fabric (eligibility is a node badge, a mention is the edge, or the graph is noise) and first-match resolution of ambiguous observed-edge targets (dropped-and-counted beats pinning real history onto the wrong folder). **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked** (the graph consumes its record fields and caps; nothing about collection moves). **DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (same scan, second consumer, still fold-time-derived and never stored). |

@@ -53,7 +53,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // pinned-extension-api.test.mjs and must keep its exact shape. VERSION is the HOST's pi version --
 // build.mjs keeps pi external, so this resolves against whatever pi actually loaded the extension.
 import { VERSION } from "@earendil-works/pi-coding-agent";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "typebox";
 import {
   resolvePaths,
@@ -82,6 +82,8 @@ import {
   collectGraphInputs,
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
+import { buildGraphHtml } from "./graph-html.mjs";
+import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
 // (the operator's env always wins), so resolvePaths stays env-only by contract while every one of its
@@ -922,6 +924,17 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       return;
     }
     case "graph": {
+      // `graph html` writes the self-contained artifact and best-effort opens the browser
+      // (REQ-GRAPH-HTML-EXPORT); bare `graph` stays the plain-text render. The positional sub-verb is
+      // the `costs whatif` convention, not a flag on the base command.
+      if (tokens[1] === "html") {
+        await graphHtmlCommand(paths, tokens, notify);
+        return;
+      }
+      if (tokens.length > 1) {
+        notify?.(GRAPH_USAGE, "warning");
+        return;
+      }
       // Operator-typed read, ungated (DES-CLI-SURFACE: typing it is the approval); renders the same
       // model the GRAPH view draws, as plain text into the admin channel. Deliberately NOT an
       // LLM-callable tool: the folder enumeration spawns git per folder, and the text is a topology
@@ -1056,11 +1069,74 @@ async function assembleGraph(paths: any): Promise<any> {
     schedulers: Array.isArray(schedulers) ? schedulers : [],
     ...collectGraphInputs({ triggers: triggerList }),
     cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
-    runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count }),
+    runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count, triggerTypes: Object.fromEntries(triggerList.map((t: any) => [t.index, t.type])) }),
     chainEdges: observedChainEdges({ records: recs }),
     caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
     nowMs,
   });
+}
+
+const GRAPH_USAGE = "usage: /dispatch graph [html [--no-open]]";
+
+/** The real side-effect deps for graphHtmlCommand; tests inject fakes for every one of them. */
+function realGraphHtmlDeps(): any {
+  return { fs: nodeFs, openBrowser, env: process.env, now: () => Date.now(), platform: process.platform };
+}
+
+/**
+ * Why the spawn is skipped, or null when opening locally can work. Exported for its tests: the SSH
+ * check is deliberately first (a Mac over SSH has no DISPLAY either, but the reason the operator
+ * should see is the session, not the variable), and only linux gates on DISPLAY/WAYLAND_DISPLAY --
+ * darwin and win32 have openers that need no display variable.
+ */
+export function isHeadlessEnv(env: any, platform: string): string | null {
+  if (env?.SSH_CONNECTION || env?.SSH_TTY) return "SSH session";
+  if (platform === "linux" && !env?.DISPLAY && !env?.WAYLAND_DISPLAY) return "no display";
+  return null;
+}
+
+/**
+ * `/dispatch graph html [--no-open]` (REQ-GRAPH-HTML-EXPORT): assemble the same model as everything
+ * else, render the self-contained artifact, write it ATOMICALLY to the STABLE path
+ * `<graphDir>/graph.html` (tmp+rename, the writeTriggers idiom -- stable so re-running the command
+ * updates an already-open tab through its Reload/auto-reload controls, and atomic so that tab's
+ * reload never reads half a file), then print the file:// URL and best-effort open the browser.
+ *
+ * The print comes FIRST and unconditionally -- the setup-github doctrine: the URL is the contract,
+ * the spawn is a convenience, and over SSH or without a display the spawn is skipped AND SAID, never
+ * silently. A write failure notifies and never opens: opening a stale artifact after a failed write
+ * would show the operator yesterday's topology as today's. Exported for its tests.
+ */
+export async function graphHtmlCommand(paths: any, tokens: string[], notify: Notify, deps: any = realGraphHtmlDeps()): Promise<void> {
+  const rest = tokens.slice(2);
+  const noOpen = rest.includes("--no-open");
+  if (rest.some((t) => t !== "--no-open")) {
+    notify?.(GRAPH_USAGE, "warning");
+    return;
+  }
+  const model = await assembleGraph(paths);
+  const html = buildGraphHtml(model, { now: deps.now() });
+  const file = `${paths.graphDir}/graph.html`;
+  try {
+    deps.fs.mkdirSync(paths.graphDir, { recursive: true });
+    const tmp = `${file}.tmp`;
+    deps.fs.writeFileSync(tmp, html, { mode: 0o644 });
+    deps.fs.renameSync(tmp, file);
+  } catch (err: any) {
+    notify?.(`graph html: could not write ${file} (${err?.message ?? err})`, "error");
+    return;
+  }
+  // pathToFileURL, not concatenation (review finding): an operator-set PI_GRAPH_DIR with a space
+  // would otherwise print a URL that truncates in terminals and breaks the opener spawn.
+  const url = pathToFileURL(file).href;
+  notify?.(`graph written: ${url}`, "info");
+  if (noOpen) return;
+  const headless = isHeadlessEnv(deps.env, deps.platform);
+  if (headless) {
+    notify?.(`not opening a browser (${headless}): open the URL on this machine's desktop, or scp the file there`, "info");
+    return;
+  }
+  deps.openBrowser(url);
 }
 
 /**
@@ -1651,6 +1727,11 @@ function completeArguments(prefix: string) {
     const items = ["7d", "30d", "mtd", "whatif"]
       .filter((w) => w.startsWith(partial))
       .map((w) => ({ value: `costs ${w}`, label: w }));
+    return items.length > 0 ? items : null;
+  }
+  if (parts[0] === "graph" && parts.length === 2) {
+    const partial = parts[1];
+    const items = ["html"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `graph ${w}`, label: w }));
     return items.length > 0 ? items : null;
   }
   if ((parts[0] === "set" || parts[0] === "unset") && parts.length === 2) {

@@ -439,7 +439,8 @@ export function renderGraph(model) {
   if (trunc.folders) out.push("folder scan truncated (cap reached): unlisted folders are not empty, they are unscanned");
   if (trunc.skills) out.push("skill enumeration truncated or partly unread");
   if (trunc.edges) out.push("observed edges truncated (cap reached)");
-  if ((m.meta?.droppedObservedEdges ?? 0) > 0) out.push(`${m.meta.droppedObservedEdges} observed edges dropped (no unique folder to attach them to)`);
+  if ((m.meta?.droppedObservedEdges ?? 0) > 0) out.push(`${m.meta.droppedObservedEdges} observed edges dropped (no unique readable folder to attach them to)`);
+  if ((m.meta?.injectedUnreachable ?? []).length > 0) out.push(`injected skills dir unreadable: ${m.meta.injectedUnreachable.join(", ")}`);
   out.push("edges: -> configured, observed xN (from records), mention (potential; a mention is not a promise)");
   out.push(capsLine(m.caps));
   return out.join("\n");

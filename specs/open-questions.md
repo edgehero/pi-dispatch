@@ -760,10 +760,31 @@ adversarial passes did.
 
 ---
 
+## OQ-024 — the graph export's browser spawn is verified by reading, not by running everywhere
+
+- **Question**: `graph html` best-effort spawns the platform opener (`open`/`xdg-open`/`cmd start`)
+  through the worker's shared `open-browser` module. The argv table is pinned per platform by unit
+  test and the module is the same one `setup github` has shipped since issue #81 — but no CI runs a
+  desktop session on all three platforms, so "the browser actually appears" is verified by reading
+  and by field use, not by an automated end-to-end.
+- **Status**: WATCH, on the `OQ-016` precedent (the sandbox `docker run -it` spawn carries the same
+  shape of residual): the failure mode is cosmetic and self-announcing — the printed `file://` URL is
+  the contract, the spawn a convenience, and a missing opener is swallowed by design with the URL
+  already on screen.
+- **What bounds it**: the spawn is skipped entirely (and said) over SSH and on display-less linux;
+  `--no-open` removes it; a swallowed spawn failure costs the operator one manual click on a URL they
+  already have.
+- **What would close it**: a per-platform desktop CI job, which this project will not buy for a
+  convenience spawn.
+- **Raised by**: issue #54, while landing `REQ-GRAPH-HTML-EXPORT`.
+
+---
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (`REQ-GRAPH-HTML-EXPORT`). Added **OQ-024** (`WATCH`, the `OQ-016` shape): the graph export's browser spawn is verified by reading and by the pinned per-platform argv table, not by a desktop CI on three platforms this project will not buy for a convenience spawn; the printed `file://` URL is the contract and the failure mode is one manual click. **OQ-008 and OQ-009 pointers already in place from the earlier #54 slices, UNCHANGED, checked**: the export re-reads the triggers file per run like every other graph consumer, and draws no forge-parent or cross-folder chain edge because the model it renders cannot contain one. |
 | 2026-08-09 | Follow-up audit after issue #60. Added **`OQ-023`**: a prepare-stage refusal posts no comment on the issue, so a requester sees a label applied and then nothing. True of `sha-gone` since it shipped and now true of six reasons, because #60 added five. Recorded rather than fixed, and recorded as NOTICED rather than designed: the ordering that makes these refusals free is what puts them past the point the processor's `comment` seam is wired for, so the silence is a consequence of `CONST-BUDGET-BEFORE-TOKENS` rather than a judgement about what is worth saying. What bounds it is that every one is in the run record with its own reason token and that `doctor` reports the `skills-dir-*` causes before anything fires. What would close it is threading the `comment` seam into the policy branch, which carries one real question: a repo over a cap would then comment on every delivery, so it wants the dedup the spend refusals already have. This entry exists because the #60 plan said it was worth an OQ and then did not write one. |
 | 2026-08-09 | Issue #60 (Gap 2). Added **`OQ-022`**: injected skills are deliberately not AI-reachable, because `DES-AI-TRIGGER-FLOW-GATE` reads the target repo's committed `.pi/skills` at a pinned sha and an injected skill is not there. Recorded as ACCEPTED rather than as a risk row, because it is the fail-CLOSED direction and the residual is an operator SURPRISE rather than a hole: an injected `SKILL.md` carrying `ai-trigger: allow` is never read, so the opt-in is written and nothing honours it, which is why `doctor` now warns. Records what would NOT be an acceptable close -- reading the frontmatter out of the injected tree, since that opt-in is meaningful in a repo only because a merge gated it, and in a runtime-editable directory it would put the authorization inside the content being authorized. `OQ-012` **UNCHANGED, checked**: an operator-built image is unaffected, since the injected root is a worker-side copy into `/job` and needs nothing of the image. `OQ-004` **UNCHANGED in kind**: the injected tier adds instructions, not egress. |
 | 2026-08-08 | Issue #66 (ingest `pull_request_review`). Added **`OQ-020`** (`ACCEPTED RISK`): a review trigger is the first GitHub trigger with no second gate — a comment needs its phrase and a label needs its label, both typed on purpose, while a review needs only that the reviewer clears `author_association` — and the sharper half is that the bot-loop guard compares `sender.id` against **our own** identity alone, so a third-party review bot holding `MEMBER` sits outside it and, if it reviews every push while the armed flow pushes, forms a recursion neither party's guard can see. Accepted rather than closed because the obvious fix (refuse any `sender.type: "Bot"`) needs a new subset field and a new constitutional clause, would refuse an operator whose own review bot is *meant* to start jobs, and is one narrow instrument for the general problem of a spend loop between two automated actors; what bounds it meanwhile is the spend caps, dedup, and the fact that the trigger is opt-in. Added **`OQ-021`** (`ACCEPTED RISK`): a Comment-type review of inline comments only arrives with an empty body and is refused as `no-review-body`, indistinguishable inside a pure filter from a genuinely empty review, because the line comments ride `pull_request_review_comment` (not ingested) and the payload carries no count of them — the narrower fix would need an API call from inside the gate and cost the purity that makes the security decision testable offline. Both rows are named in `SECURITY.md` so an operator meets them before arming rather than on the bill. **`OQ-017` UNCHANGED, checked** — a review-triggered replica set shares the PR head branch exactly as any other pull_request-typed target does, so the row's scope is unchanged by a new way of reaching it. **`OQ-013` UNCHANGED, checked** — GitLab's approval gate is an API lookup and is untouched by GitHub gaining a review action. |

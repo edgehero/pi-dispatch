@@ -688,9 +688,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (a) every trigger naming a `run.flow` renders its config edge — dangling, unverifiable and
   charset-invalid included;
   (b) a cron trigger's run count and last outcome are **exact** over the stated window (the jobId
-  join), and a forge trigger's come **only** from the persisted `triggerIndex` — a record the
-  current file cannot claim renders under an explicit `unattributed` count, never on whatever entry
-  now occupies its row;
+  join), and a forge trigger's come **only** from the persisted `triggerIndex` **and**
+  `triggerType`, both of which must agree with the entry now at that index — a record whose index is
+  out of range, whose row the display dropped, or whose type disagrees renders under an explicit
+  `unattributed` count, never attributed across a type change. The one shift the persisted pair
+  cannot see — two SAME-type entries reordered within range — is beneath an integer-and-enum's
+  resolution, is pinned as a residual by test, and is why every attribution renders under the
+  standing "as of the current triggers file" caveat; closing it would need a persisted entry
+  identity string, which the record's no-attacker-chosen-string posture prices deliberately high;
   (c) an **observed** edge is always labelled with its count and source (records over the window);
   a **potential** edge is always labelled as a mention, with whether it could ever fire (the
   target's `ai-trigger`), and the two vocabularies never mix in one line;
@@ -720,6 +725,37 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   then it renders unverified with no dangling flag; given any output, then the caps line
   (`chain depth`, `per job`, `same folder only`, window) is present; given an observed chain edge,
   then its line carries `observed x<count>`, and no potential line carries a count.
+
+## REQ-GRAPH-HTML-EXPORT
+
+- **Statement**: The harness shall render the assembled topology (`REQ-TOPOLOGY-GRAPH`) as a
+  **self-contained HTML artifact** on operator command: `/dispatch graph html [--no-open]` writes one
+  file — inline SVG/CSS/JS, working over `file://` with **zero external requests** — atomically
+  (tmp+rename) to the **stable path** `<graphDir>/graph.html`, prints its `file://` URL **before any
+  spawn**, and best-effort opens the platform browser. The page carries its own refresh: a Reload
+  control, an off/5s/30s auto-reload, a live staleness stamp, and view state (pan/zoom, selection,
+  the auto-reload setting) that survives its own reloads via the URL hash — so a re-run of the
+  command updates an already-open tab. **No port is ever bound; nothing serves the file.**
+- **Scope**: Display only. The artifact carries run-record fields and operator-authored
+  trigger/skill strings only — **never `.log` bytes, never a host path beyond a folder's basename**.
+  Over SSH or without a display the spawn is skipped and the skip is stated; `--no-open` skips it
+  unconditionally; a write failure notifies the path and never opens. Zero new dependencies.
+- **Why**: The interactivity a topology needs (pan/zoom, hover detail, click-to-trace) needs a
+  browser; it does not need a server. A static file keeps `DES-ADMIN-VIA-PI-EXTENSION`'s load-bearing
+  no-port property intact — the socket→file substitution `DES-JOB-OUTBOX-CHAINING` canonised — and
+  the stable-path atomic overwrite is what turns "a snapshot file" into "a tab that stays current":
+  the page reloads bytes on disk, and tmp+rename means it never reads half of them.
+- **Traces to**: `REQ-TOPOLOGY-GRAPH`, `DES-GRAPH-EDGE-DERIVATION`, `DES-ADMIN-VIA-PI-EXTENSION`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-024`
+- **Acceptance**: Given `/dispatch graph html`, then exactly one artifact lands at
+  `<graphDir>/graph.html` via a `.tmp` rename with mode 0644, the `file://` URL is notified before
+  any opener spawn, and the rendered bytes contain no external `src`/`href`/`url()`/`@import`, no
+  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path; given a
+  second run, the artifact lands at the **same** path; given `SSH_CONNECTION`/`SSH_TTY` (any
+  platform) or linux without `DISPLAY`/`WAYLAND_DISPLAY`, the spawn is skipped and the reason
+  notified; given `--no-open`, no spawn ever; given a write failure, an error names the path and no
+  browser opens; given the page open in a browser, its auto-reload reflects a re-run's changes
+  without resetting the view.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -1191,6 +1227,8 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-11 | Issue #54 (adversarial-review hardening). **REQ-TOPOLOGY-GRAPH (b) AMENDED to a promise the persisted fields can actually keep** — the review CONFIRMED the old sentence over-promised: `joinRunsToTriggers` guarded only the index RANGE, so deleting a cron above a comment trigger slid the comment's run history onto whatever entry occupied its row, exactly the lie the sentence forbade. The join now also requires TYPE agreement with the entry currently at that index (the persisted `triggerType` was sitting unused), which catches every cross-type shift; the same-type-reorder residual is named in the requirement, pinned by a test, and priced honestly (closing it needs a persisted identity string, against the record's posture). Also folder-scoped the `chainRefused` counters (same-folder-only chaining makes two folders' same-named flows different flows; a flat counter blurred 2+5 into one number nobody could place), dropped-and-counted observed edges whose folder is unreachable (they minted phantom "[missing at HEAD]" endpoints off a read that never happened), gave a folderless cron entry its config edge on a "(no folder)" group ("every trigger gets its edge, ALWAYS" admits no exception for the broken entries an operator most needs to see), surfaced unreadable injected dirs in meta (the OQ-022 badge must not silently vanish), wired `collectGraphInputs`' folder-cap flag into `meta.truncated.folders` (hardcoded false meant the cap banner could never fire), and made the mention heuristic test EVERY occurrence for vocabulary distance. |
+| 2026-08-11 | Issue #54 (the HTML export). **NEW `REQ-GRAPH-HTML-EXPORT`**: the topology as a self-contained `file://` artifact with its own refresh loop (Reload, off/5s/30s auto-reload, hash-persisted view state), atomically overwritten at one stable path so an open tab stays current across re-runs. The acceptance pins the postures that make this spec-clean rather than spec-adjacent: no port, no server, no external requests, no `.log` bytes, no host paths, printed-URL-before-spawn, skip-and-say when headless. **REQ-TOPOLOGY-GRAPH AMENDED implicitly completed**: its "the HTML export remains a later slice" note is discharged by this row. **REQ-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (`graph` was already in the command list; `html` is its sub-verb, the `costs whatif` shape). |
 | 2026-08-11 | Issue #54 (the GRAPH view). **REQ-TOPOLOGY-GRAPH AMENDED** as its own prior row promised: the GRAPH dashboard view (sixth view, `g`) joins the Statement beside the command; the honesty rules bind both surfaces because both render the one assembled model. The refresh posture is part of the requirement's spirit made concrete: entry and `r` only, never the poll tick (the enumeration spawns git per folder). **REQ-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (the command list already named `graph`; the view is the same surface's overlay half). The HTML export remains a later slice. |
 | 2026-08-11 | Issue #54 (`/dispatch graph`). **NEW `REQ-TOPOLOGY-GRAPH`**: the trigger/flow topology as one assembled model with the honesty rules written as requirements, on the `REQ-COST-ANALYTICS` precedent — the estimate-never-mislabeled-as-truth discipline applied to topology (a mention must never read like history, a stale index must never land on today's row, a capped scan must never read as complete coverage, the chain caps render on every output). Display-only and deliberately NOT a model-callable tool: the enumeration spawns git per folder, and the topology is for the operator's eyes (`DES-CLI-SURFACE`'s operator-typed ungated tier; the registered-tool count is untouched, pinned by test). **REQ-ADMIN-VIA-PI-EXTENSION AMENDED**: `graph` joins the observability command list. **REQ-COST-ANALYTICS UNCHANGED, checked** (same scan, sibling consumer). The GRAPH dashboard view and the HTML export are later slices and will amend this entry when they land. |
 | 2026-08-09 | Issue #60 (Gap 3). **NEW `REQ-PER-TRIGGER-INSTRUCTION`**: the three webhook types may carry one line of operator standing text, rendered into the user prompt's envelope above the fenced data region. Refused on cron, and that is a decision rather than a gap: a local job's prompt IS `run.task`, with no envelope and no fence, so there is no standing region distinct from the task for a second field to occupy, and two fields writing one region with an undefined order would both appear to work. Capped at 2000 characters and refused rather than truncated, with the reasoning recorded because the obvious one does not hold -- the cap is not about caching, it bounds a context overflow inside a PAID container that has no pre-spend signal, and keeps the field in its lane. **REQ-PER-TRIGGER-SKILLS UNCHANGED, checked**: the two fields are independent and a trigger may set either, neither or both. |

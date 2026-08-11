@@ -484,6 +484,13 @@ Stated openly rather than discovered later:
   of that package and every transitive dependency would run AS YOU, ON YOUR HOST**, at install time, which is
   a host compromise and not a job one. So: no port, no harness credential, and still the same trust as shell
   access, which is where `/dispatch setup` stops being theoretical.
+- **The graph export writes one static HTML file, on your keystroke, to a temp path it names.** What
+  crosses into it: trigger configuration you authored, skill names and frontmatter from the repos you
+  service, and the PII-free run-record fields the panel already shows. What never does: raw job log
+  bytes, issue or task text, session material, or a host path beyond a folder's basename. Nothing
+  listens and nothing serves the file — opening it is a local browser reading local bytes, and the
+  page makes no network request of any kind. The browser spawn is best-effort, skipped and announced
+  over SSH or without a display; the printed `file://` URL is the contract.
 - **The dashboard writes to your terminal's clipboard only on your keystroke.** The `y`/`Y` copy keys in
   the run drill-in emit an OSC 52 sequence — the standard way a terminal application hands text to the
   local clipboard, including over SSH. What crosses is a host-assigned job id or a target URL derived

@@ -247,3 +247,45 @@ test("buildGraphModel: meta carries the honesty counters (unattributed, refusals
   assert.deepEqual(m.meta.truncated, { folders: false, skills: false, edges: false });
   assert.equal(m.meta.generatedAt, 1770000000000);
 });
+
+// ---- review-driven honesty hardening (adversarial + code review findings) ----
+
+test("an observed edge into an UNREACHABLE folder is dropped and counted, never phantom-badged", () => {
+  // Without this, the edge minted skill-missing endpoints off a read that never happened -- a red
+  // "[missing at HEAD]" on a folder whose HEAD was never read -- and the renderers then skipped the
+  // edge row anyway, with droppedObservedEdges still claiming zero (review finding).
+  const inputs = CANNED();
+  inputs.folderSkills["/srv/site"] = { head: null, skills: [], truncated: false, unreachable: "not-a-git-repo" };
+  const m = buildGraphModel(inputs);
+  assert.equal(m.edges.filter((e) => e.kind === "observed").length, 0, "no observed edge hangs on an unreadable folder");
+  assert.equal(m.meta.droppedObservedEdges, 1, "and the drop is counted, not silent");
+  assert.equal(m.nodes.filter((n) => n.kind === "skill-missing").length, 0, "no phantom missing-at-HEAD endpoints");
+});
+
+test("a cron entry with no folder still draws its trigger and config edge, on a group that says so", () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers.push({ type: "cron", index: 3, id: "broken", pattern: "0 5 * * *", folder: null, flow: "f", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false });
+  const m = buildGraphModel(inputs);
+  const group = m.folders.find((f) => f.key === "folder:(none)");
+  assert.equal(group.unreachable, "no-folder", "the broken entry is exactly what an operator needs to see");
+  assert.ok(m.edges.some((e) => e.from === "trigger:3" && e.kind === "config"), "every trigger naming a flow gets its edge, ALWAYS");
+});
+
+test("an unreadable injected skills dir surfaces in meta, so the OQ-022 badge cannot silently vanish", () => {
+  const inputs = CANNED();
+  inputs.injectedSkills["/broken"] = { skills: [], truncated: false, unreachable: "unreadable" };
+  const m = buildGraphModel(inputs);
+  assert.deepEqual(m.meta.injectedUnreachable, ["/broken"]);
+  assert.deepEqual(buildGraphModel(CANNED()).meta.injectedUnreachable, [], "readable dirs report nothing");
+});
+
+test("collectGraphInputs' folder cap flag reaches meta.truncated.folders", () => {
+  // It was hardcoded false, so the cap-reached banner could never fire on any surface (review finding).
+  const m = buildGraphModel({ ...CANNED(), foldersTruncated: true });
+  assert.equal(m.meta.truncated.folders, true);
+});
+
+test("findSiblingMentions marks strong on ANY occurrence near the vocabulary, not only the first", () => {
+  const text = `See the notify skill for background.${" filler".repeat(60)} Then write /outbox/request-1.json with {"flow": "notify"}.`;
+  assert.deepEqual(findSiblingMentions(text, ["notify"]), [{ name: "notify", strong: true }], "an early weak mention must not mask a later strong one");
+});

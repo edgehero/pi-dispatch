@@ -157,7 +157,7 @@ export function createDashboardDeps(paths: any) {
         schedulers: Array.isArray(schedulers) ? schedulers : [],
         ...collectGraphInputs({ triggers: triggerList }),
         cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
-        runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggersView?.count }),
+        runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggersView?.count, triggerTypes: Object.fromEntries(triggerList.map((t) => [t.index, t.type])) }),
         chainEdges: observedChainEdges({ records: recs }),
         caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
         nowMs,
@@ -226,6 +226,10 @@ export function makeDashboard({
   // not per second, and this module does no I/O of its own.
   let detailSandbox: any = null;
   let detailTrigger: any = null; // the trigger opened in TRIGGER_DETAIL (its display record + file index)
+  // Which view TRIGGER_DETAIL returns to on Esc: the drill opens from LIST and from GRAPH, and Esc
+  // pops ONE layer -- landing a graph-entered drill back in LIST would discard the operator's graph
+  // position and force a fresh git-spawning fetch to get back (review finding).
+  let detailReturnTo = "LIST";
   // LIVE_TAIL state, held here in dedicated component fields keyed only by the id-only `activeJobId`. The
   // raw `.log` bytes in `tail` are PII-bearing and untrusted: they live here and reach the TUI overlay via
   // render() alone -- never `snapshot`, never a shared renderer, never `sendMessage` (INT-RUN-HISTORY-FILE-CONTRACT).
@@ -521,7 +525,8 @@ export function makeDashboard({
           return;
         }
         if (matchesKey(data, "escape")) {
-          view = "LIST";
+          // Esc pops ONE layer: back to whichever view opened the drill (LIST or GRAPH).
+          view = detailReturnTo;
           detailTrigger = null;
           tui?.requestRender?.();
           return;
@@ -757,6 +762,7 @@ export function makeDashboard({
             if (!record) return;
             detailTrigger = { record, index: row.node.index };
             pendingDelete = false;
+            detailReturnTo = "GRAPH";
             view = "TRIGGER_DETAIL";
             tui?.requestRender?.();
             return;
@@ -781,6 +787,7 @@ export function makeDashboard({
         if (row.kind === "trigger") {
           detailTrigger = { record: row.trigger, index: row.index };
           pendingDelete = false;
+          detailReturnTo = "LIST";
           view = "TRIGGER_DETAIL";
           tui?.requestRender?.();
         } else if (row.kind === "active") {
@@ -1708,7 +1715,13 @@ function renderGraphView({ graph, graphSel, graphAvailable, framed, width, style
   const model = graph?.model ?? null;
 
   if (!framed) {
-    const plain = model ? renderGraph(model).split("\n") : [graphAvailable ? "loading graph…" : "graph unavailable in this build"];
+    // The error outranks a stale model here too (review finding): a failed refresh at a tiny width
+    // must not render yesterday's topology -- or an eternal "loading" -- as if nothing happened.
+    const plain = graph?.error
+      ? [`graph unreachable (${graph.error})`]
+      : model
+        ? renderGraph(model).split("\n")
+        : [graphAvailable ? "loading graph…" : "graph unavailable in this build"];
     return [styler.stripAnsi(title), "", ...plain, "", "↑↓ move · ↵ open/fold · r refresh · esc back"];
   }
 
@@ -1754,6 +1767,7 @@ function graphCounterLine(model: any, styler: any): string | null {
   if (t.skills) bits.push("skills truncated/unread");
   if (t.edges) bits.push("edges truncated");
   if ((meta.droppedObservedEdges ?? 0) > 0) bits.push(`${meta.droppedObservedEdges} observed edges dropped`);
+  if ((meta.injectedUnreachable ?? []).length > 0) bits.push(`${meta.injectedUnreachable.length} injected dirs unreadable`);
   return bits.length ? styler.fg("warning", bits.join(" · ")) : null;
 }
 
@@ -2131,9 +2145,13 @@ function countdownText(ms: number): string {
  */
 function buildRows(snapshot: any, runSort = "time"): any[] {
   // Triggers lead the selectable list (Enter -> TRIGGER_DETAIL), then the optional ACTIVE row, then runs.
-  // A trigger row carries its file `index` so a CRUD action can target the right entry in triggers.json.
-  // The ACTIVE row stays pinned above the runs whatever the sort: it is the one row that is not history.
-  const triggers = (snapshot?.triggers?.triggers ?? []).map((t: any, i: number) => ({ kind: "trigger", trigger: t, index: i }));
+  // A trigger row carries its RAW file `index` -- the one every display record now carries (issue #54)
+  // -- so a CRUD action targets the right entry in triggers.json even when the display dropped an
+  // unusable row above it. The display POSITION this used before was a live-fire wrong-delete: one
+  // garbage entry at row 0 and `x`+`y` on the visible trigger deleted the garbage while the real
+  // trigger kept firing, reported as deleted (review finding). Falls back to the position only for a
+  // record predating the field, where it is the best available claim.
+  const triggers = (snapshot?.triggers?.triggers ?? []).map((t: any, i: number) => ({ kind: "trigger", trigger: t, index: Number.isInteger(t?.index) ? t.index : i }));
   const active = snapshot?.activeJobId ? [{ kind: "active", jobId: snapshot.activeJobId }] : [];
   const runs = (Array.isArray(snapshot?.runs) ? snapshot.runs : []).map((record: any) => ({ kind: "run", record }));
   return [...triggers, ...active, ...sortRuns(runs, runSort)];
