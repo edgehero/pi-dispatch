@@ -11,7 +11,9 @@
  * The in-component views sharing this one overlay: LIST -- a framed panel of status, spend, the unified
  * TRIGGERS pane and an interactive runs list; RUN_DETAIL -- a drill-in of one run's PII-free `.json`
  * fields; LIVE_TAIL -- a tail of a running job's `.log`; TRIGGER_DETAIL -- one trigger's trust model;
- * and COSTS (issue #53) -- the read-time cost fold over the run sidecars and declared subscriptions.
+ * COSTS (issue #53) -- the read-time cost fold over the run sidecars and declared subscriptions; and
+ * GRAPH (issue #54) -- the trigger/flow topology, rendered from the same assembled model as
+ * `/dispatch graph`, refreshed only on entry and on `r` (the enumeration spawns git per folder).
  *
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): LIST and RUN_DETAIL surface only
  * PII-free run records, counts, budget, schedulers and the settings overlay. LIVE_TAIL renders tail bytes
@@ -28,8 +30,9 @@ import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 // injected seams (`fetchCosts`/`listPricedModels`/`whatIf`), never the façade, so tests stay fully
 // canned and the one worker/pricing coupling sits beside the queue and redis this module already owns.
 import * as pricing from "@edgehero/pi-dispatch/pricing";
-import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords } from "./read-model.mjs";
-import { renderStatus, renderBudget, renderTriggers, renderSettingsView } from "./render.mjs";
+import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords, GRAPH_LIMITS, cronRunStats, joinRunsToTriggers, observedChainEdges, collectGraphInputs } from "./read-model.mjs";
+import { renderStatus, renderBudget, renderTriggers, renderSettingsView, renderGraph } from "./render.mjs";
+import { buildGraphModel } from "./graph-model.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, fmtUsd, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -59,6 +62,12 @@ const DRILL_WIDTH = 70;
 // is open a poll tick refreshes the fold only once the last fetch is older than this.
 const COSTS_WINDOWS = ["7d", "30d", "mtd"];
 const COSTS_STALE_MS = 10_000;
+// GRAPH: the cursor-following row window, on the RUNS_VIEWPORT/TAIL_VIEWPORT precedent -- a fixed
+// bound with no height dependency, so an unknown terminal height changes nothing. The graph REFRESHES
+// only on entry and on `r`, never on the poll tick: fetchGraph spawns git per enumerated folder, a
+// heavier read than even the costs scan, and topology changes when the operator edits things, not per
+// second.
+const GRAPH_VIEWPORT = 16;
 
 /** Left-pad each line to center a `blockWidth`-wide frame within the `overlayWidth` overlay. */
 function centerBlock(lines: string[], overlayWidth: number, blockWidth: number): string[] {
@@ -130,6 +139,29 @@ export function createDashboardDeps(paths: any) {
       const subscriptions = Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [];
       const fold = foldCosts({ records, subscriptions, pricing, nowMs, piAiPin: pricing.piAiVersion() });
       return { fold, records, subscriptions };
+    },
+    /**
+     * One GRAPH read (issue #54): triggers FRESH (OQ-008 -- a cached topology is a stale topology),
+     * one bounded record scan, the folder/injected enumerations, and the pure fold. Schedulers ride
+     * in from the caller's snapshot so this seam opens no second queue read. All fs/git access lives
+     * in the read-model functions this calls; this module still touches nothing itself.
+     */
+    fetchGraph({ schedulers }: any = {}) {
+      const nowMs = Date.now();
+      const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+      const triggerList: any[] = Array.isArray(triggersView?.triggers) ? triggersView.triggers : [];
+      const records: any = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
+      const recs: any[] = Array.isArray(records) ? records : [];
+      return buildGraphModel({
+        triggers: triggersView,
+        schedulers: Array.isArray(schedulers) ? schedulers : [],
+        ...collectGraphInputs({ triggers: triggerList }),
+        cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
+        runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggersView?.count }),
+        chainEdges: observedChainEdges({ records: recs }),
+        caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
+        nowMs,
+      });
     },
     /** The priced-model catalog for the what-if `/` filter -- the façade stays behind this seam. */
     listPricedModels() {
@@ -230,6 +262,12 @@ export function makeDashboard({
   let costs: any = { data: null, windowKey: "mtd", fetchedAt: 0, table: "flow", whatIf: null };
   let costsSel = 0;
   let costsFetching = false;
+  // GRAPH (issue #54): the last fetched model, its error, and the view's own cursor/folds. `folded`
+  // holds folder keys the operator collapsed with Enter; it survives a refresh on purpose -- a refresh
+  // answers "what changed", not "start over".
+  let graph: any = { model: null, error: null, fetchedAt: 0, folded: new Set() };
+  let graphSel = 0;
+  let graphFetching = false;
 
   const refresh = async () => {
     if (fetching || disposed) return;
@@ -280,6 +318,24 @@ export function makeDashboard({
       costs.fetchedAt = Date.now();
       costsFetching = false;
       if (costs.whatIf) computeWhatIf(); // fresh records re-price an open estimate
+      tui?.requestRender?.();
+    }
+  };
+
+  // GRAPH refresh policy: on entry and on `r`, NEVER on the poll tick -- the strictest of the three
+  // view policies, because fetchGraph spawns git per enumerated folder. Errors degrade to an in-frame
+  // message; an in-flight fetch suppresses the next so a slow enumeration cannot stack spawns.
+  const fetchGraphNow = async () => {
+    if (typeof deps?.fetchGraph !== "function" || graphFetching || disposed) return;
+    graphFetching = true;
+    try {
+      graph.model = await deps.fetchGraph({ schedulers: snapshot?.schedulers ?? [] });
+      graph.error = null;
+    } catch (err: any) {
+      graph.error = err?.message ?? String(err);
+    } finally {
+      graph.fetchedAt = Date.now();
+      graphFetching = false;
       tui?.requestRender?.();
     }
   };
@@ -341,6 +397,10 @@ export function makeDashboard({
       if (view === "COSTS" && costsSel > costsTableRows(costs).length - 1) {
         costsSel = Math.max(0, costsTableRows(costs).length - 1);
       }
+      // And for the GRAPH cursor: a refresh (or a fold) can shrink the row list under it.
+      if (view === "GRAPH" && graphSel > graphRows(graph.model, graph.folded).length - 1) {
+        graphSel = Math.max(0, graphRows(graph.model, graph.folded).length - 1);
+      }
       return renderPanel(snapshot, width, {
         view,
         selected,
@@ -361,6 +421,9 @@ export function makeDashboard({
         costs,
         costsSel,
         costsAvailable: typeof deps?.fetchCosts === "function",
+        graph,
+        graphSel,
+        graphAvailable: typeof deps?.fetchGraph === "function",
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
         // Height through the injected seam, read per frame (a resize changes it): null (seam absent, or
@@ -663,6 +726,50 @@ export function makeDashboard({
         // Everything else -- including q/p/r -- is inert in COSTS; leaving is Esc's job alone.
         return;
       }
+      if (view === "GRAPH") {
+        // Esc pops one layer to LIST; everything else the view does not own is inert (the COSTS rule).
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "up") || matchesKey(data, "down")) {
+          const step = matchesKey(data, "up") ? -1 : 1;
+          graphSel = Math.min(Math.max(0, graphRows(graph.model, graph.folded).length - 1), Math.max(0, graphSel + step));
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "\r" || data === "\n") {
+          const row = graphRows(graph.model, graph.folded)[graphSel];
+          if (!row) return;
+          if (row.kind === "folder") {
+            // Enter on a group header folds/unfolds it; the fold set survives a refresh on purpose.
+            if (graph.folded.has(row.key)) graph.folded.delete(row.key);
+            else graph.folded.add(row.key);
+            tui?.requestRender?.();
+            return;
+          }
+          if (row.kind === "gtrigger") {
+            // The graph's trigger rows reuse the existing drill: the display record comes from the
+            // snapshot by RAW index (the identity both sides carry), so TRIGGER_DETAIL behaves exactly
+            // as it does from LIST -- same editor, same delete confirm, same trust model.
+            const record = (snapshot?.triggers?.triggers ?? []).find((t: any) => t?.index === row.node.index);
+            if (!record) return;
+            detailTrigger = { record, index: row.node.index };
+            pendingDelete = false;
+            view = "TRIGGER_DETAIL";
+            tui?.requestRender?.();
+            return;
+          }
+          return;
+        }
+        // `r` refreshes the model -- the ONLY re-read path besides entry; the poll tick never does.
+        if (data === "r" || data === "R") {
+          void fetchGraphNow();
+          return;
+        }
+        return;
+      }
       if (matchesKey(data, "escape") || data === "q" || data === "Q") {
         void dispose().finally(() => done(undefined));
         return;
@@ -711,6 +818,16 @@ export function makeDashboard({
         costsSel = 0;
         costs.whatIf = null;
         void fetchCostsNow();
+        tui?.requestRender?.();
+        return;
+      }
+      // `g` -- the GRAPH view (issue #54): the trigger/flow topology from the same assembled model as
+      // /dispatch graph. Fetch on entry; the fold set survives re-entry (same reason the costs window
+      // does -- an operator flipping back is asking the same question).
+      if (data === "g" || data === "G") {
+        view = "GRAPH";
+        graphSel = 0;
+        void fetchGraphNow();
         tui?.requestRender?.();
         return;
       }
@@ -805,7 +922,7 @@ function budgetMeters(budget: any, settings: any, width: number): string[] {
  * the same content with `box`, its inner column count driving every meter and clip.
  */
 function renderPanel(snapshot: any, width: number, state: any, styler: any): string[] {
-  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, runSort, costs, costsSel, costsAvailable, copiedNote, copyAvailable, terminalRows } = state;
+  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, runSort, costs, costsSel, costsAvailable, graph, graphSel, graphAvailable, copiedNote, copyAvailable, terminalRows } = state;
   const framed = Number.isFinite(width) && Math.trunc(width) >= MIN_WIDTH;
   const inner = Math.trunc(width) - 4;
   const title = "pi-dispatch";
@@ -845,6 +962,10 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
 
   if (view === "COSTS") {
     return renderCosts({ costs, costsSel, costsAvailable, framed, width: Math.trunc(width), styler, availableRows: terminalRows });
+  }
+
+  if (view === "GRAPH") {
+    return renderGraphView({ graph, graphSel, graphAvailable, framed, width: Math.trunc(width), styler });
   }
 
   if (snapshot === null) {
@@ -1448,7 +1569,202 @@ function triggerDetailHints(inner: number, styler: any, pendingDelete = false): 
  * by the dashboard test, so a new hint here must pay for itself in label characters. */
 function keyHints(inner: number, styler: any): string {
   const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
-  const hints = [k("↑↓↵", "open"), k("a", "add"), k("w", "pauses"), k("l", "logs"), k("c", "costs"), k("p", "pause"), k("r", "resume"), k("q", "quit")].join(styler.fg("dim", " · "));
+  // Exactly 76 visible columns -- the width-80 frame's whole inner row -- and the arithmetic is the
+  // review gate: labels 55 + seven separators × 3 = 76. `g graph` (issue #54) paid for itself by
+  // merging the pause/resume pair into one hint (both keys still work; the pair shares a label the
+  // way ↑↓/↵ share "open") and dropping ↵ from the nav hint. A new hint here must again say what it
+  // shortened, or the footer clips and a key silently disappears.
+  const hints = [k("↑↓", "open"), k("a", "add"), k("w", "pauses"), k("l", "logs"), k("c", "costs"), k("g", "graph"), k("p/r", "pause"), k("q", "quit")].join(styler.fg("dim", " · "));
+  return fitLine(hints, inner, styler);
+}
+
+// ── GRAPH view (issue #54): the topology as a folder-grouped tree, one node per row ────────────────────
+
+/**
+ * Flatten the graph model into the view's selectable rows: a folder header per group (foldable), its
+ * trigger nodes, its skills with their outgoing edges as annotation rows, then the injected skills.
+ * Pure over (model, folded) so handleInput and render() cannot disagree about what the cursor is on.
+ * Unverified flow nodes are skipped here exactly as renderGraph skips them -- their fact (the config
+ * edge) is already on the trigger row, and a second row would double-count the same string.
+ */
+function graphRows(model: any, folded: any): any[] {
+  if (!model) return [];
+  const nodeById = new Map((model.nodes ?? []).map((n: any) => [n.id, n]));
+  const flagsByNode = new Map<string, string[]>();
+  for (const f of model.flags ?? []) {
+    if (!flagsByNode.has(f.nodeId)) flagsByNode.set(f.nodeId, []);
+    flagsByNode.get(f.nodeId)!.push(f.flag);
+  }
+  const rows: any[] = [];
+  for (const group of model.folders ?? []) {
+    if ((group.triggerIds?.length ?? 0) === 0 && (group.skillIds?.length ?? 0) === 0) continue;
+    const isFolded = folded?.has?.(group.key) === true;
+    rows.push({ kind: "folder", key: group.key, group, folded: isFolded });
+    if (isFolded) continue;
+    for (const id of group.triggerIds ?? []) {
+      const node: any = nodeById.get(id);
+      if (node) rows.push({ kind: "gtrigger", node, flags: flagsByNode.get(id) ?? [] });
+    }
+    for (const id of group.skillIds ?? []) {
+      const node: any = nodeById.get(id);
+      if (!node || node.kind === "skill-unverified") continue;
+      rows.push({ kind: "gskill", node, flags: flagsByNode.get(id) ?? [] });
+      for (const e of model.edges ?? []) {
+        if (e.from !== id || e.kind === "cron-rearm") continue;
+        rows.push({ kind: "gedge", edge: e, target: nodeById.get(e.to) });
+      }
+    }
+  }
+  for (const n of model.nodes ?? []) {
+    if (n.kind === "injected") rows.push({ kind: "ginjected", node: n, flags: flagsByNode.get(n.id) ?? [] });
+  }
+  return rows;
+}
+
+/** One graph row as a colored line of exactly `inner` visible columns. `cursor` prefixes the LIST `›`. */
+function graphRowLine(row: any, cursor: boolean, inner: number, styler: any): string {
+  const G = styler.glyphs;
+  const pre = cursor ? styler.fg("accent", "› ") : "  ";
+  if (row.kind === "folder") {
+    const g = row.group;
+    const fold = styler.fg("accent", row.folded ? G.foldClosed : G.foldOpen);
+    const label = g.kind === "forge" ? `forge ${g.label}` : `folder ${g.path ?? g.label}`;
+    const state = g.unreachable ? styler.fg("warning", ` · ${g.kind === "forge" ? "skills unverifiable from this host" : g.unreachable}`) : g.head ? styler.fg("dim", ` · HEAD ${String(g.head).slice(0, 7)}`) : "";
+    return fitLine(pre + fold + " " + styler.fg("accent", label) + state, inner, styler);
+  }
+  if (row.kind === "gtrigger") {
+    const t = row.node;
+    const kind = styler.cell(t.onType, KIND_WIDTH, { color: KIND_COLOR[t.onType] ?? "text" });
+    const stats = t.runs > 0 ? `runs ${t.runs}${t.lastOutcome ? ` · last ${t.lastOutcome}` : ""}` : "no runs in window";
+    const statColor = t.lastOutcome === "completed" ? "success" : t.lastOutcome ? "warning" : "dim";
+    const badges = graphBadges(row.flags, styler);
+    const left = pre + kind + styler.stripAnsi(t.label ?? "") + " " + styler.fg("dim", G.arrowRight) + " " + (t.flow ?? "(no flow)") + (t.replicas ? styler.fg("warning", ` x${t.replicas}`) : "") + badges;
+    const right = styler.fg(statColor, stats);
+    return joinEnds(left, right, inner, styler);
+  }
+  if (row.kind === "gskill") {
+    const s = row.node;
+    const missing = s.kind === "skill-missing";
+    const name = missing ? styler.fg("error", s.name) : s.name;
+    const marks: string[] = [];
+    if (missing) marks.push(styler.fg("error", "[missing at HEAD]"));
+    if (s.isSub) marks.push(styler.fg("dim", `[sub of ${s.group}]`));
+    if (s.aiTrigger) marks.push(styler.fg("success", "[chainable]"));
+    const badges = graphBadges(row.flags, styler);
+    return fitLine(pre + styler.fg("dim", "skill ") + name + (marks.length ? " " + marks.join(" ") : "") + badges, inner, styler);
+  }
+  if (row.kind === "gedge") {
+    const e = row.edge;
+    const name = row.target?.name ?? "(unknown)";
+    const label =
+      e.kind === "observed"
+        ? styler.fg("accent", `observed x${e.count}`)
+        : e.kind === "potential"
+          ? styler.fg("dim", `mention (potential${e.strong ? ", strong" : ""}; ${e.eligible ? "could fire" : "can never fire"})`)
+          : styler.fg("dim", e.kind);
+    return fitLine(pre + "  " + styler.fg("dim", `${G.bl} ${G.arrowRight} `) + name + "  " + label, inner, styler);
+  }
+  if (row.kind === "ginjected") {
+    const warn = row.flags.includes("injected-ai-trigger") ? " " + styler.fg("error", "[ai-trigger is a silent no-op here]") : "";
+    return fitLine(pre + styler.fg("dim", "injected ") + row.node.name + styler.fg("dim", ` (${row.node.dir})`) + warn, inner, styler);
+  }
+  return fitLine(pre, inner, styler);
+}
+
+/** The flag badges every graph row shares, colored by severity; the vocabulary is graph-model's. */
+function graphBadges(flags: string[], styler: any): string {
+  const parts: string[] = [];
+  for (const flag of flags ?? []) {
+    if (flag === "no-skill") parts.push(styler.fg("error", "[no-skill]"));
+    else if (flag === "charset-invalid") parts.push(styler.fg("error", "[invalid name]"));
+    else if (flag === "orphan") parts.push(styler.fg("warning", "[orphan]"));
+    else if (flag === "ai-reachable-no-trigger") parts.push(styler.fg("warning", "[AI-reachable, no trigger]"));
+    else if (flag === "unread") parts.push(styler.fg("warning", "[unread]"));
+    else if (flag === "pr-spend-loop-risk") parts.push(styler.fg("error", "[spend-loop risk]"));
+  }
+  return parts.length ? " " + parts.join(" ") : "";
+}
+
+/** Left content + right-aligned tail in exactly `inner` visible columns (clips the left, never the right). */
+function joinEnds(left: string, right: string, inner: number, styler: any): string {
+  const rightLen = styler.visibleLen(right);
+  const leftMax = Math.max(0, inner - rightLen - 2);
+  const leftFit = styler.visibleLen(left) > leftMax ? styler.cell(styler.stripAnsi(left), leftMax) : left + " ".repeat(leftMax - styler.visibleLen(left));
+  return leftFit + "  " + right;
+}
+
+/**
+ * The GRAPH panel: a cursor-following GRAPH_VIEWPORT window over graphRows (the RUNS_VIEWPORT
+ * precedent -- a fixed bound, no height dependency), the honesty counters, and the caps line, which
+ * renders ALWAYS (DES-GRAPH-EDGE-DERIVATION: edges without their bounds invite extrapolating an
+ * unbounded chain fabric). The unframed degrade reuses renderGraph -- the same model through the same
+ * pure renderer `/dispatch graph` prints, whole and uncollapsed.
+ */
+function renderGraphView({ graph, graphSel, graphAvailable, framed, width, styler }: any): string[] {
+  // The title's rule glyphs come from the styler's twin table, not a literal, so the ascii overlay
+  // stays pure ASCII in its border line too.
+  const title = `pi-dispatch ${styler.glyphs.h}${styler.glyphs.h} GRAPH · triggers and flows`;
+  const inner = width - 4;
+  const model = graph?.model ?? null;
+
+  if (!framed) {
+    const plain = model ? renderGraph(model).split("\n") : [graphAvailable ? "loading graph…" : "graph unavailable in this build"];
+    return [styler.stripAnsi(title), "", ...plain, "", "↑↓ move · ↵ open/fold · r refresh · esc back"];
+  }
+
+  const lines: any[] = [];
+  if (graph?.error) {
+    lines.push(fitLine(styler.fg("error", `graph unreachable (${graph.error})`), inner, styler));
+  } else if (model === null) {
+    lines.push(fitLine(styler.fg("dim", graphAvailable ? "loading graph…" : "graph unavailable in this build"), inner, styler));
+  } else if (model.meta?.triggersMissing) {
+    lines.push(fitLine(styler.fg("warning", "no triggers file found"), inner, styler));
+  } else if (typeof model.meta?.triggersInvalid === "string" && model.meta.triggersInvalid !== "") {
+    lines.push(fitLine(styler.fg("error", `triggers file invalid: ${model.meta.triggersInvalid}`), inner, styler));
+  } else {
+    const rows = graphRows(model, graph.folded);
+    if (rows.length === 0) {
+      lines.push(fitLine(styler.fg("dim", "no triggers configured"), inner, styler));
+    } else {
+      const top = Math.max(0, Math.min(graphSel - GRAPH_VIEWPORT + 1, rows.length - GRAPH_VIEWPORT));
+      if (top > 0) lines.push(fitLine(styler.fg("dim", `… ${top} above`), inner, styler));
+      rows.slice(top, top + GRAPH_VIEWPORT).forEach((row, i) => {
+        lines.push(graphRowLine(row, top + i === graphSel, inner, styler));
+      });
+      const below = rows.length - (top + GRAPH_VIEWPORT);
+      if (below > 0) lines.push(fitLine(styler.fg("dim", `… ${below} below`), inner, styler));
+    }
+    const counters = graphCounterLine(model, styler);
+    lines.push(RULE);
+    if (counters) lines.push(fitLine(counters, inner, styler));
+    lines.push(fitLine(styler.fg("dim", capsLineText(model.caps)), inner, styler));
+  }
+  return frame(styler, { title, width, lines, footer: graphHints(inner, styler) });
+}
+
+/** The one-line honesty counters, or null when there is nothing to say (the caps line still renders). */
+function graphCounterLine(model: any, styler: any): string | null {
+  const bits: string[] = [];
+  const meta = model?.meta ?? {};
+  if ((meta.unattributedRuns ?? 0) > 0) bits.push(`${meta.unattributedRuns} runs unattributed`);
+  const refused = Object.values(meta.chainRefusals ?? {}).reduce((a: number, n: any) => a + (Number(n) || 0), 0);
+  if (refused > 0) bits.push(`${refused} chain requests refused`);
+  const t = meta.truncated ?? {};
+  if (t.folders) bits.push("folders truncated");
+  if (t.skills) bits.push("skills truncated/unread");
+  if (t.edges) bits.push("edges truncated");
+  if ((meta.droppedObservedEdges ?? 0) > 0) bits.push(`${meta.droppedObservedEdges} observed edges dropped`);
+  return bits.length ? styler.fg("warning", bits.join(" · ")) : null;
+}
+
+/** The caps sentence every render carries, from the model's own caps (never a second literal). */
+function capsLineText(caps: any): string {
+  return `caps: chain depth <= ${caps?.chainDepthMax ?? "?"} · <= ${caps?.chainMaxPerJob ?? "?"} per job · same folder only · window ${caps?.windowDays ?? "?"}d`;
+}
+
+function graphHints(inner: number, styler: any): string {
+  const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+  const hints = [k("↑↓", "move"), k("↵", "open/fold"), k("r", "refresh"), k("esc", "back")].join(styler.fg("dim", " · "));
   return fitLine(hints, inner, styler);
 }
 

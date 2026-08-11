@@ -63,7 +63,7 @@ test("renders every section from the last snapshot, reusing the command renderer
   assert.match(out, /5\/25/, "the day spend meter shows reserved/cap");
   assert.match(out, /j1/, "last runs");
   assert.match(out, /model claude-x/, "settings summary");
-  assert.match(out, /p pause/, "key hints");
+  assert.match(out, /p\/r pause/, "key hints (the merged pause\/resume pair, issue #54)");
   assert.match(out, /q quit/, "key hints");
 });
 
@@ -450,7 +450,7 @@ test("Enter on a run opens its detail dump, and Esc backs out to the list withou
   await flush();
   const back = comp.render(80).join("\n");
   await comp.dispose();
-  assert.match(back, /p pause/, "Esc returns to the interactive list");
+  assert.match(back, /p\/r pause/, "Esc returns to the interactive list");
   assert.equal(closed, 0, "Esc from a sub-view never closes the overlay");
 });
 
@@ -1778,4 +1778,193 @@ test("the viewport, markers and badges keep every colored line at exactly the fr
   const lines = comp.render(80);
   await comp.dispose();
   for (const l of lines) assert.equal(visibleLen(l), 80, `every line is exactly 80 visible cols: ${JSON.stringify(l)}`);
+});
+
+// ── GRAPH view (issue #54): the COSTS suite's skeleton over the topology ───────────────────────────────
+
+import { buildGraphModel } from "../src/graph-model.mjs";
+
+const GRAPH_SNAPSHOT_TRIGGERS = [
+  { type: "cron", index: 0, id: "nightly", pattern: "0 3 * * *", folder: "/srv/site", flow: "build-report", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false },
+  { type: "label", index: 1, any: ["ai"], all: [], none: [], flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+];
+
+const CANNED_GRAPH_MODEL = () =>
+  buildGraphModel({
+    triggers: { count: 2, triggers: GRAPH_SNAPSHOT_TRIGGERS },
+    schedulers: [],
+    folderSkills: {
+      "/srv/site": {
+        head: "abc1234def",
+        truncated: false,
+        unreachable: null,
+        skills: [
+          { name: "build-report", isSub: false, group: null, aiTrigger: true, meta: null, mentions: [{ name: "notify", strong: true }], unread: false },
+          { name: "notify", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false },
+          { name: "old-import", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false },
+        ],
+      },
+    },
+    injectedSkills: {},
+    cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" } } },
+    runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "failed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
+    chainEdges: { edges: [{ parentFlow: "build-report", childFlow: "notify", target: "local:site", count: 3, lastEndedAt: null }], refusals: {}, truncated: false },
+    caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 },
+    nowMs: 1770000000000,
+  });
+
+function graphDeps(over = {}) {
+  return cannedDeps({
+    fetchSnapshot: async () => ({ ...SNAPSHOT, triggers: { count: 2, triggers: GRAPH_SNAPSHOT_TRIGGERS } }),
+    fetchGraph: async () => CANNED_GRAPH_MODEL(),
+    ...over,
+  });
+}
+
+async function openGraph(deps, width = 80) {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+  comp.handleInput("g");
+  await flush();
+  return comp;
+}
+
+test("'g' opens GRAPH, the footer advertises it unclipped at 80, and Esc pops one layer", async () => {
+  const deps = graphDeps();
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });
+  await flush();
+
+  const footer = comp.render(80).map(stripAnsi).find((l) => l.includes("q quit"));
+  assert.ok(footer, "the LIST footer renders");
+  assert.match(footer, /g graph/, "the graph key is advertised");
+  assert.ok(!footer.includes("…"), "the width-80 footer fits with no ellipsis glyph");
+
+  comp.handleInput("g");
+  await flush();
+  const out = stripAnsi(comp.render(80).join("\n"));
+  assert.match(out, /GRAPH · triggers and flows/, "the frame titles the view");
+
+  comp.handleInput("\x1b");
+  await flush();
+  const back = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(back, /RUNS /, "Esc returns to the LIST frame");
+});
+
+test("the canned model renders: folder heads, trigger stats, skill badges, evidence-labelled edges, caps always", async () => {
+  const comp = await openGraph(graphDeps());
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+
+  assert.match(out, /folder \/srv\/site · HEAD abc1234/, "the folder header carries the short HEAD");
+  assert.match(out, /cron\s+nightly 0 3 \* \* \*/, "the cron trigger row");
+  assert.match(out, /runs 41 · last completed/, "cron stats joined by id");
+  assert.match(out, /runs 12 · last failed/, "forge stats joined by the persisted index");
+  assert.match(out, /forge github/, "the forge group renders");
+  assert.match(out, /skills unverifiable/, "and says why its flows are unverified");
+  assert.match(out, /observed x3/, "an observed edge carries its count");
+  assert.match(out, /mention \(potential, strong; can never fire\)/, "a potential edge says whether it could ever fire");
+  assert.match(out, /\[orphan\]/, "the orphan badge renders");
+  assert.match(out, /2 runs unattributed/, "the honesty counters render");
+  assert.match(out, /caps: chain depth <= 1 · <= 2 per job · same folder only · window 30d/, "the caps line renders");
+
+  for (const line of stripAnsi(comp.render(80).join("\n")).split("\n").filter((l) => l.includes("mention (potential"))) {
+    assert.ok(!/observed/.test(line), "a potential row never borrows observed's vocabulary");
+  }
+});
+
+test("the caps line renders even on an empty model -- there is no capless graph", async () => {
+  const comp = await openGraph(graphDeps({ fetchGraph: async () => buildGraphModel({ caps: { chainDepthMax: 1, chainMaxPerJob: 2, windowDays: 30 } }) }));
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(out, /no triggers configured/);
+  assert.match(out, /caps: chain depth <= 1/, "caps render on the empty model too (DES-GRAPH-EDGE-DERIVATION)");
+});
+
+test("the graph fetches on entry and on r, and the poll tick NEVER re-fetches", async () => {
+  let fetches = 0;
+  const deps = graphDeps({
+    fetchGraph: async () => {
+      fetches++;
+      return CANNED_GRAPH_MODEL();
+    },
+  });
+  // A REAL 10ms poll interval: if the tick piggybacked a graph fetch (the costs pattern), fetches
+  // would climb while we wait. The graph is stricter than costs on purpose -- git spawns per folder.
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 10, deps });
+  await flush();
+  comp.handleInput("g");
+  await flush();
+  assert.equal(fetches, 1, "one fetch on entry");
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(fetches, 1, "the poll tick must not re-enumerate folders");
+  comp.handleInput("r");
+  await flush();
+  await comp.dispose();
+  assert.equal(fetches, 2, "r is the one manual refresh");
+});
+
+test("Enter folds a folder group and unfolds it; Enter on a trigger row opens TRIGGER_DETAIL", async () => {
+  const comp = await openGraph(graphDeps());
+  const before = stripAnsi(comp.render(80).join("\n"));
+  assert.match(before, /skill build-report/, "the folder's rows are visible");
+
+  comp.handleInput("\r"); // cursor starts on the first folder header
+  await flush();
+  const folded = stripAnsi(comp.render(80).join("\n"));
+  assert.doesNotMatch(folded, /skill build-report/, "folding hides the group's rows");
+  assert.match(folded, /folder \/srv\/site/, "the header itself stays");
+
+  comp.handleInput("\r");
+  await flush();
+  assert.match(stripAnsi(comp.render(80).join("\n")), /skill build-report/, "unfolding restores them");
+
+  comp.handleInput("\x1b[B"); // down: onto the cron trigger row
+  comp.handleInput("\r");
+  await flush();
+  const detail = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(detail, /trigger · cron/, "the graph reuses the existing trigger drill");
+});
+
+test("a throwing fetchGraph degrades to an in-frame message, never a crash", async () => {
+  const comp = await openGraph(graphDeps({ fetchGraph: async () => { throw new Error("enumeration blew up"); } }));
+  const out = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(out, /graph unreachable \(enumeration blew up\)/);
+});
+
+test("GRAPH under a real-SGR theme keeps every line at exactly 80 visible columns", async () => {
+  const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, theme, deps: graphDeps() });
+  await flush();
+  comp.handleInput("g");
+  await flush();
+  const lines = comp.render(80);
+  await comp.dispose();
+  assert.ok(lines.some((l) => l.includes("\x1b[")), "the view is colored");
+  for (const l of lines) {
+    assert.equal(visibleLen(l), 80, `every framed line is exactly 80 visible cols: ${JSON.stringify(stripAnsi(l))}`);
+  }
+});
+
+test("GRAPH degrades to plain unframed lines at a tiny width, reusing the /dispatch graph renderer whole", async () => {
+  const comp = await openGraph(graphDeps());
+  const lines = comp.render(4).map(stripAnsi);
+  await comp.dispose();
+  const joined = lines.join("\n");
+  assert.match(joined, /Graph: triggers and flows/, "the unframed body IS renderGraph's output");
+  assert.match(joined, /caps: chain depth <= 1/, "caps included, uncollapsed");
+  assert.ok(!joined.includes("┌"), "no frame at a width the frame cannot hold");
+});
+
+test("GRAPH in ascii mode leaks no box-drawing or graph glyphs", async () => {
+  const comp = makeDashboard({ paths: { asciiGlyphs: true }, done() {}, tui: fakeTui(), intervalMs: 100000, deps: graphDeps() });
+  await flush();
+  comp.handleInput("g");
+  await flush();
+  const joined = comp.render(80).join("\n");
+  await comp.dispose();
+  assert.ok(!/[┌┐└┘├┤│─▾▸↻▶]/.test(joined), "the ascii graph is pure ASCII, frame and rows alike");
+  assert.match(stripAnsi(joined), /-> build-report/, "the ascii arrow twin renders");
 });

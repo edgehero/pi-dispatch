@@ -6,6 +6,15 @@ serviced repo's `.pi/skills/` tree holds what exists and what opts into being ch
 surface assembles that topology in one place (`REQ-TOPOLOGY-GRAPH`, `DES-GRAPH-EDGE-DERIVATION`). It
 informs; it changes nothing — no port, no database, no new dependency.
 
+## The GRAPH view
+
+Press `g` on the dashboard (`/dispatch`). The view is a folder-grouped tree: each group header folds
+with `↵`, trigger rows carry their joined run stats on the right, skill rows carry their badges, and
+a skill's outgoing edges render as indented annotation rows labelled by evidence class. `↵` on a
+trigger row opens the same trigger detail the LIST offers. `r` refreshes the model — the only
+re-read besides entry, because assembling the graph enumerates each folder's committed skills with
+git, and topology changes when you edit things, not per second. `Esc` returns to the LIST.
+
 ## `/dispatch graph`
 
 ```
