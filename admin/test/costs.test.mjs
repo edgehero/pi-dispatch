@@ -308,6 +308,34 @@ test("sinceMs edge cases: a future edge clamps to a 1-day window, and an empty r
   assert.deepEqual(empty.daily, []);
 });
 
+// ---- dailyByFlow (issue #181, the line charts) ----
+
+test("dailyByFlow: every flow gap-padded over the SHARED span, mixed days demoted, keys beside labels", () => {
+  const nowMs = Date.parse("2026-07-08T12:00:00.000Z");
+  const fixA = rec({ jobId: "a", flow: "fix", endedAt: "2026-07-05T10:00:00.000Z", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const fixB = rec({ jobId: "b", flow: "fix", endedAt: "2026-07-07T10:00:00.000Z", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const noflow = rec({ jobId: "c", flow: null, endedAt: "2026-07-06T10:00:00.000Z", tokens: tok(0), usage: usage([row("zai", "glm-4.7", { cost: 0 })]), provider: "zai", model: "glm-4.7" });
+  const f = fold([fixA, fixB, noflow], { nowMs });
+
+  assert.deepEqual(f.dailyByFlow.map((r) => [r.flow, r.flowKey]), [["fix", "fix"], ["(no flow)", null]], "window total desc; machine key beside the label, null for the no-flow bucket");
+  const days = (r) => r.days.map((d) => d.day);
+  assert.deepEqual(days(f.dailyByFlow[0]), ["2026-07-05", "2026-07-06", "2026-07-07", "2026-07-08"], "the shared cursor span");
+  assert.deepEqual(days(f.dailyByFlow[1]), days(f.dailyByFlow[0]), "EVERY flow shares the x-domain -- multiples are only comparable on one axis");
+  const fix = f.dailyByFlow[0];
+  assert.deepEqual(fix.days.map((d) => d.runs), [1, 0, 1, 0], "a flow's quiet day is a zero-run entry, exactly as the global series keeps it");
+  assert.deepEqual(fix.days[1].cost, { usd: 0, class: "metered", floor: false }, "an empty bucket is vacuously metered $0");
+  assert.deepEqual(f.dailyByFlow[1].days[1].cost.class, "estimated", "a zero-rated day demotes like anywhere else");
+});
+
+test("dailyByFlow: empty fold folds to [] and the series shares daily's first-run origin", () => {
+  assert.deepEqual(fold([]).dailyByFlow, []);
+  const sinceMs = NOW - 30 * 24 * 60 * 60 * 1000;
+  const one = rec({ jobId: "o", flow: "fix", endedAt: "2026-07-14T10:00:00.000Z", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const f = fold([one], { sinceMs });
+  assert.equal(f.dailyByFlow[0].days[0].day, f.daily[0].day, "same origin as the global series: no month of leading zero cells");
+  assert.equal(f.dailyByFlow[0].days.length, f.daily.length, "same span too");
+});
+
 // ---- byFlow ----
 
 test("byFlow groups on flow with '(no flow)' for null, sorts by cost desc, and re-prices covered rows into apiEquiv", () => {

@@ -777,7 +777,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   opens. The page unifies the
   assembled topology (`REQ-TOPOLOGY-GRAPH` — its honesty counters, edge recency, schedule tips and
   spend badges per its (h)) with the cost fold (`REQ-COST-ANALYTICS`) rendered as **hand-rolled
-  inline SVG charts**: KPI tiles, plan verdict cards, a daily spend column chart, and the four
+  inline SVG charts**: KPI tiles, a **budget panel** (the caps are the operator's one real lever on
+  cost, so the page that prices everything shows the dial beside the spend: reserved-vs-cap facts
+  for the day/week/month job-slot windows and the daily token counter, states computed by the
+  worker's own classifier and carried in the payload as words, the lever named — `/dispatch set …`,
+  the panel's `s`), plan verdict cards, a daily spend column chart with a **cumulative mini-chart**
+  beneath it, **per-flow daily spend as small multiples** (top flows, one panel each), and the four
   breakdown bar lists (flow / trigger / model / repo). Every labeling rule of `REQ-COST-ANALYTICS`
   (a)-(g) applies to this surface verbatim, plus the visual clauses this surface adds:
   (a) an estimated figure renders dashed and translucent beside its `~ est.` text — hue is never
@@ -788,8 +793,19 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (d) the page states **both windows** — the operator's spend window and the topology's fixed
   record window — and the retention/scan-cap sentence, so a screenshot cannot conflate them;
   (e) gap days render as zero entries, never compressed away;
-  (f) a fold assembled without a trigger join renders "not computed", never an empty table.
-  Degrades are total: an unreachable cost scan still writes the page with its banner, and junk
+  (f) a fold assembled without a trigger join renders "not computed", never an empty table;
+  (g) the budget panel renders **used-vs-cap facts only**: an overlay-unset cap renders "cap
+  unknown" (day) or "off" (week/month with nothing reserved) with **no bar and no percentage** —
+  `REQ-COST-ANALYTICS` (e)'s no-invented-denominator rule applied to caps this process cannot read
+  authoritatively — the window state is a WORD with color only reinforcing it, slots and tokens are
+  counts that never route through the money formatter, and the display is GET-only: observing the
+  budget never consumes a slot (`CONST-BUDGET-BEFORE-TOKENS`);
+  (h) a line's estimated days render as **dashed segments** (the same honesty encoding as the
+  columns — a segment touching an estimated day wears the estimate, and a cumulative line is
+  demoted permanently from its first estimated day), and series identity is carried by **text**
+  (the panel title), never by hue alone.
+  Degrades are total: an unreachable cost scan still writes the page with its banner, an
+  unreachable budget read leaves the caps as facts with the absence stated, and junk
   input yields a valid page, never a stack trace. **No port is ever bound; nothing serves the
   file; no new model-callable tool exists for it** (the topology assembly spawns git per folder,
   `REQ-TOPOLOGY-GRAPH` Scope).
@@ -825,7 +841,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   burn-down renders; given a hostile flow name or plan id, then the page contains exactly one
   script element and the string renders entity-escaped; given the same payload and instant twice,
   then the bytes are identical, permuted input arrays included; given an unreachable cost scan,
-  then the page still renders the topology with a cost banner.
+  then the page still renders the topology with a cost banner; given an overlay-unset cap, then the
+  budget row says unknown or off, draws no bar, and `/remaining/i` matches nowhere on the page;
+  given a window past its soft-hold floor, then the row carries the word `soft-hold`; given a flow
+  series whose day is estimated, then the segments touching it are dashed and its point tip carries
+  `~ est.`; given a fold without the per-flow series, then the section is absent, never an empty
+  grid.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -1297,6 +1318,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-12 | Issue #181 (the budget lever and the trend lines). **REQ-INSIGHTS-HTML-EXPORT AMENDED**: the page gains a **budget panel** — the caps are the operator's one real lever on cost, so the page that prices everything shows the dial beside the spend — with new clause (g): used-vs-cap FACTS only, an overlay-unset cap rendering as unknown/off with no bar and no percentage (the no-invented-denominator rule applied to caps this process cannot read authoritatively), states computed assembler-side by the worker's own `windowState` (and the token rule the old dashboard token line used) and carried in the payload as WORDS the page never derives — the artifact builder cannot load the worker, and duplicating threshold arithmetic behind a parity test would put policy in two places — and the lever named in the panel. Display stays GET-only: `readBudget` gains the token counter as a fourth plain GET plus a synchronous junk-URL parse guard, and never INCR/EXPIREs (CONST-BUDGET-BEFORE-TOKENS). And the page gains its **trend lines** with new clause (h): per-flow daily spend as SMALL MULTIPLES (one panel per top flow, one shared dollar scale, identity carried by the panel title — the palette has one non-reserved data hue and dashes already mean estimated, so overlaid lines could only be told apart by a channel the class system already spent) plus a cumulative mini-chart with its OWN scale under the daily columns (a running total dwarfs daily bars; a second axis on one plot is the dual-axis lie), dashed segments wherever an estimated day touches and a cumulative line demoted permanently from its first estimated day. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked** (a display-only consumer of the same classifier its panel-meter-amber clause already names). **REQ-TOKEN-ACCOUNTING-AND-CAPS UNCHANGED, checked** (a new display of the daily counter; enforcement untouched). **REQ-COST-ANALYTICS UNCHANGED, checked** (the fold gained `dailyByFlow`, a series over facts it already held — recorded on DES-COST-FOLD-BY-SCAN). |
 | 2026-08-12 | Issue #181 (insights becomes the ONE analytics surface). **REQ-INSIGHTS-HTML-EXPORT AMENDED**: the command is the bare `/dispatch insights [7d\|30d\|mtd] [--no-open] [--full-paths]` — no `html` verb to remember, and the removed verb answers usage on purpose (a dead verb that half-works is drift); the overlay's `i` key runs the same command between overlays; the entry absorbs, verbatim, every normative clause REQ-GRAPH-HTML-EXPORT carried (atomic stable path, URL-before-spawn, the page's own refresh loop and hash view state, headless skip-and-say, the content bans and the `--full-paths` opt-in, no port); the what-if sentence inverts to "the what-if is the `insights whatif` command". **REQ-GRAPH-HTML-EXPORT SUPERSEDED** — the ID stays as a permanent address, the artifact and its command are gone, the discipline lives on. **REQ-COST-ANALYTICS AMENDED**: the surfaces become the insights page, `dispatch_costs`, and `insights whatif`; the COSTS view (fifth view, `c`) and `/dispatch costs` leave the Statement; the lettered labeling rules (a)-(g) stand untouched; the `(no flow)` what-if acceptance row rewords to the fold grain (the null-key match stays pinned in costs.test.mjs — the interactive layer that exercised it is gone) and the no-TTY plain-text row leaves with the command (the artifact writes and prints its URL even headless, and `dispatch_costs` is the machine path). **REQ-TOPOLOGY-GRAPH AMENDED**: the surface is the insights artifact's topology pane; the GRAPH view (sixth view, `g`) and `/dispatch graph` leave the Statement; the honesty rules (a)-(h) stand, with (h) retargeted to the page's tips and badges — and the removal EXPOSED that (h)'s next/overdue facts had no artifact surface (the TUI and text renderers carried them alone), so the scene's trigger tips now render `next`/`overdue` against the page's own generation instant, landed in the same PR that removed their last other home. **REQ-ADMIN-VIA-PI-EXTENSION AMENDED**: the command list drops `costs` and `graph` for `insights`; the model-callable tool list is UNCHANGED, checked (`dispatch_costs` stays — it returns the cost fold only, and topology stays non-model-callable). **INT-* UNCHANGED, checked** (no interface names the removed commands; verified by grep). |
 | 2026-08-12 | Issue #175 (the insights artifact, the fourth slice). **NEW `REQ-INSIGHTS-HTML-EXPORT`**: `/dispatch insights html [7d|30d|mtd]` writes `<graphDir>/insights.html` — the topology scene (spend-badged per REQ-TOPOLOGY-GRAPH (h)) beside the cost fold drawn as hand-rolled inline SVG charts, under REQ-GRAPH-HTML-EXPORT's write/open/headless discipline verbatim and REQ-COST-ANALYTICS' labeling rules verbatim, plus the visual clauses (dashed/translucent = estimated with hue never the sole encoding; a plan-covered bucket draws a chip and NO dollar bar; `≥` on charts; both windows stated; gap days present; null byTrigger renders "not computed"). Default window 30d, deliberately not costs' mtd — the topology half is pinned at a 30d record window and one page's halves should agree. No port, no served page, no new model-callable tool, no charting dependency (a supply chain riding a security posture). **REQ-COST-ANALYTICS AMENDED**, one sentence: the insights artifact joins the named surfaces; rules (a)-(g) unchanged. **REQ-GRAPH-HTML-EXPORT UNCHANGED, checked** — `graph html` stays the lighter topology-only export, not an alias. **REQ-TOPOLOGY-GRAPH UNCHANGED, checked** (its Scope's no-tool clause now covers two commands). |
 | 2026-08-12 | Issue #175 (spend and schedule on the graph, the third insights slice). **REQ-TOPOLOGY-GRAPH AMENDED** with (h): cron rows render next-fire/overdue from the resident scheduler — `next` and `overdueMs` were computed by the model's first slice and rendered by nothing, a design-to-data gap of exactly the kind the #54 delivery lesson names — and trigger nodes may carry the window's typed spend (`foldTriggerCosts`, keyed by the node id), fmtCost-rendered so a plan-covered trigger never reads `$0.00`. Spend and schedule are node FACTS: the closed edge/flag vocabularies are unchanged on purpose, pinned by test. **REQ-GRAPH-HTML-EXPORT AMENDED**: the artifact now states the chain-refusal and injected-unreachable honesty counters the text and TUI surfaces always stated (the allowlist dropped them, so three surfaces of one model disagreed), and an observed edge's label carries its recency beside its count when the fold recorded one. Node spend deliberately does NOT ride graph.html: the page may not use the `from` clause, a duplicated money formatter is a parity liability, and the insights artifact (next slice) renders spend through the real shared formatter instead. **REQ-COST-ANALYTICS UNCHANGED, checked** (foldTriggerCosts gained consumers, not semantics). |

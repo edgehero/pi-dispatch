@@ -86,6 +86,9 @@ import {
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
+// The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
+// insights payload carries are words the page never derives and the panel and enforcement cannot drift.
+import { windowState } from "@edgehero/pi-dispatch/budget";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
 // (the operator's env always wins), so resolvePaths stays env-only by contract while every one of its
@@ -1094,11 +1097,63 @@ const INSIGHTS_USAGE =
  * window -- the artifact states both windows, and a badge whose window differed from the table
  * beside it would be the quiet inconsistency this surface exists to kill.
  */
+/** A positive integer or null -- the shape every overlay cap takes on its way into the payload. */
+function posIntOrNull(v: any): number | null {
+  return Number.isInteger(v) && v > 0 ? v : null;
+}
+
+/**
+ * The budget slice of the insights payload (issue #181): reserved-vs-cap FACTS for the three job-slot
+ * windows and the daily token counter, with the per-window state computed HERE by the worker's own
+ * `windowState` (and the token rule the old dashboard token line used: `>=` cap, `>` the soft-hold
+ * floor -- tokens are a running count, not a reservation, so equality is already over). States ride
+ * the payload as WORDS the page never derives: the artifact builder cannot load the worker
+ * (its import allowlist is the two pure siblings), and duplicating threshold arithmetic behind a
+ * parity test would put policy in two places. Caps come from the settings overlay ALONE -- a cap the
+ * overlay does not set is null, "unknown", because the worker resolves it from env/defaults this
+ * process cannot read authoritatively, and the page must render that as absence, never a guess.
+ * `readBudget` is GET-only (CONST-BUDGET-BEFORE-TOKENS: observing the budget spends nothing).
+ */
+async function assembleBudgetView(paths: any): Promise<any> {
+  const raw: any = await readBudget({ url: paths.valkeyUrl });
+  const view: any = readSettingsView({ settingsFile: paths.settingsFile });
+  const overlay = view && !view.invalid && view.overlay ? view.overlay : {};
+  const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;
+  const unreachable = raw?.unreachable ? String(raw.unreachable) : null;
+  const slotWindow = (key: string, capKey: string) => {
+    const cap = posIntOrNull(overlay[capKey]);
+    const reserved = unreachable === null ? Number(raw[key] ?? 0) : null;
+    const state = cap !== null && reserved !== null ? windowState(reserved, cap, pct) : "ok";
+    return { reserved, cap, state };
+  };
+  const tokensSpent = unreachable === null ? Number(raw.tokensToday ?? 0) : null;
+  const tokenCap = posIntOrNull(overlay.dailyTokenCap);
+  const tokenState =
+    tokenCap !== null && tokensSpent !== null
+      ? tokensSpent >= tokenCap
+        ? "over"
+        : pct !== null && tokensSpent > Math.floor((tokenCap * pct) / 100)
+          ? "soft-hold"
+          : "ok"
+      : "ok";
+  return {
+    unreachable,
+    softHoldPct: pct,
+    day: slotWindow("day", "dailyCap"),
+    week: slotWindow("week", "weeklyCap"),
+    month: slotWindow("month", "monthlyCap"),
+    tokens: { spent: tokensSpent, cap: tokenCap, state: tokenState, maxTokens: posIntOrNull(overlay.maxTokens) },
+  };
+}
+
 async function assembleInsights(paths: any, window: string): Promise<any> {
   const graph = await assembleGraph(paths);
   const costs = assembleCosts(paths, window);
+  // The budget slice rides BOTH return shapes: the caps are the operator's one real lever on cost,
+  // and the lever does not depend on the spend scan being readable.
+  const budget = await assembleBudgetView(paths);
   if (costs?.unreachable) {
-    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null };
+    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null, budget };
   }
   const fold = costs?.fold ?? null;
   // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
@@ -1113,7 +1168,7 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
     const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
     costByTrigger = foldTriggerCosts({ records, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing: PRICING, triggerJoin });
   }
-  return { graph, fold, costsUnreachable: null, window, costByTrigger };
+  return { graph, fold, costsUnreachable: null, window, costByTrigger, budget };
 }
 
 /**

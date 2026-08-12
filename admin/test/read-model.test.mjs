@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dayKey, weekKey, monthKey } from "@edgehero/pi-dispatch/budget";
+import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import {
   resolvePaths,
   readQueueState,
@@ -266,9 +266,9 @@ test("readLogTail returns the last N lines, dropping the trailing-newline segmen
   assert.deepEqual(rec.lines, ["l4", "l5"]);
 });
 
-test("readBudget GETs the day/week/month keys and never mutates", async () => {
+test("readBudget GETs the day/week/month/token keys and never mutates", async () => {
   const commands = [];
-  const values = { [dayKey()]: "7", [weekKey()]: "20", [monthKey()]: "55" };
+  const values = { [dayKey()]: "7", [weekKey()]: "20", [monthKey()]: "55", [tokenDayKey()]: "123456" };
   const redis = {
     async get(key) {
       commands.push(["get", key]);
@@ -279,14 +279,26 @@ test("readBudget GETs the day/week/month keys and never mutates", async () => {
     },
   };
   const res = await readBudget({ url: "redis://x", redisFn: () => redis });
-  assert.deepEqual(res, { day: 7, week: 20, month: 55 });
+  assert.deepEqual(res, { day: 7, week: 20, month: 55, tokensToday: 123456 });
   const ops = commands.filter((c) => c[0] !== "disconnect");
   assert.deepEqual(new Set(ops.map((c) => c[0])), new Set(["get"]), "only GET -- never INCR/EXPIRE");
   assert.deepEqual(
     new Set(ops.map((c) => c[1])),
-    new Set([dayKey(), weekKey(), monthKey()]),
-    "GETs the worker's own day/week/month keys",
+    new Set([dayKey(), weekKey(), monthKey(), tokenDayKey()]),
+    "GETs the worker's own day/week/month/token keys",
   );
+});
+
+test("readBudget degrades SYNCHRONOUSLY on a junk URL -- the client is never even constructed", async () => {
+  // Without the parse guard, "not-a-url" buffers the GETs until the 2.5s timeout on EVERY canned
+  // command-test invocation, plus stray ioredis error events landing on whichever test runs next.
+  const res = await readBudget({
+    url: "not-a-url",
+    redisFn: () => {
+      throw new Error("must not construct a client for a junk URL");
+    },
+  });
+  assert.ok(typeof res.unreachable === "string" && res.unreachable !== "", "degrades to a stated absence");
 });
 
 test("readBudget returns { unreachable } when the client errors", async () => {

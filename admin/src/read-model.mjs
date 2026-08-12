@@ -21,7 +21,7 @@ import { execFileSync } from "node:child_process";
 import { defaultLogsDir, defaultSandboxDir, defaultGraphDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
-import { dayKey, weekKey, monthKey } from "@edgehero/pi-dispatch/budget";
+import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
@@ -505,19 +505,23 @@ export function mapSchedulers(list, nowMs) {
 }
 
 /**
- * Read the reserved counts for all three spend windows with plain, side-effect-free GETs of the worker's own
- * `dayKey()` / `weekKey()` / `monthKey()` -- NEVER an INCR/EXPIRE, so observing the budget cannot consume a
- * slot. Returns `{ day, week, month }` reserved counts (the caps live in the settings overlay, resolved by
- * the renderer). `makeRedisClient` has no failFast option and would otherwise buffer the GETs forever while
- * disconnected, so the read is bounded by a timeout that degrades to `{ unreachable }`; the client is
- * force-disconnected in `finally`.
+ * Read the reserved counts for all three spend windows, plus the daily token counter, with plain,
+ * side-effect-free GETs of the worker's own `dayKey()` / `weekKey()` / `monthKey()` / `tokenDayKey()` --
+ * NEVER an INCR/EXPIRE, so observing the budget cannot consume a slot or a token. Returns
+ * `{ day, week, month, tokensToday }` (the caps live in the settings overlay, resolved by the
+ * renderer). `makeRedisClient` has no failFast option and would otherwise buffer the GETs forever while
+ * disconnected, so the read is bounded by a timeout that degrades to `{ unreachable }` -- and a junk URL
+ * degrades SYNCHRONOUSLY through the same parse `readSchedulers` fails fast on, because burning the full
+ * timeout on an unparseable URL is how a canned "not-a-url" test fixture turns into 2.5 wasted seconds
+ * per invocation. The client is force-disconnected in `finally`.
  */
 export async function readBudget({ url, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
   let redis;
   try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
-    const settled = Promise.all([redis.get(dayKey()), redis.get(weekKey()), redis.get(monthKey())]).then(
-      ([day, week, month]) => ({ day: Number(day ?? 0), week: Number(week ?? 0), month: Number(month ?? 0) }),
+    const settled = Promise.all([redis.get(dayKey()), redis.get(weekKey()), redis.get(monthKey()), redis.get(tokenDayKey())]).then(
+      ([day, week, month, tokens]) => ({ day: Number(day ?? 0), week: Number(week ?? 0), month: Number(month ?? 0), tokensToday: Number(tokens ?? 0) }),
       (err) => ({ unreachable: err?.message ?? String(err) }),
     );
     return await withTimeout(settled, timeoutMs, { unreachable: "timed out reaching the queue" });

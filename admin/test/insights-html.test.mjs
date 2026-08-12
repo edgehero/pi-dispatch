@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildInsightsHtml, layoutDailyChart, layoutBarList, INSIGHTS_COST_CLASSES } from "../src/insights-html.mjs";
+import { buildInsightsHtml, layoutDailyChart, layoutBarList, layoutFlowLines, layoutCumulative, INSIGHTS_COST_CLASSES } from "../src/insights-html.mjs";
 import { buildGraphModel } from "../src/graph-model.mjs";
 import { COST_CLASSES } from "../src/costs.mjs";
 
@@ -61,6 +61,26 @@ const CANNED_FOLD = () => ({
     { day: "2026-07-29", cost: usd(1.1, "metered"), runs: 3 },
     { day: "2026-07-30", cost: usd(0, "metered"), runs: 0 }, // the gap day: zero runs, never compressed away
     { day: "2026-07-31", cost: usd(3.1, "estimated", { coverage: 0.5, floor: true }), runs: 4 },
+  ],
+  dailyByFlow: [
+    {
+      flow: "fix",
+      flowKey: "fix",
+      days: [
+        { day: "2026-07-29", cost: usd(0.9, "metered"), runs: 2 },
+        { day: "2026-07-30", cost: usd(0, "metered"), runs: 0 },
+        { day: "2026-07-31", cost: usd(2.4, "estimated", { coverage: 0.5, floor: true }), runs: 3 },
+      ],
+    },
+    {
+      flow: "tidy",
+      flowKey: "tidy",
+      days: [
+        { day: "2026-07-29", cost: usd(0.2, "metered"), runs: 1 },
+        { day: "2026-07-30", cost: usd(0, "metered"), runs: 0 },
+        { day: "2026-07-31", cost: usd(0.7, "metered"), runs: 1 },
+      ],
+    },
   ],
   byFlow: [
     { flow: "fix", flowKey: "fix", runs: 12, tokens: 5400000, cost: usd(0, "plan", { planId: "kimi" }), apiEquiv: usd(44.49, "estimated") },
@@ -121,6 +141,15 @@ const CANNED_FOLD = () => ({
   },
 });
 
+const CANNED_BUDGET = () => ({
+  unreachable: null,
+  softHoldPct: 20,
+  day: { reserved: 3, cap: 25, state: "ok" },
+  week: { reserved: 4, cap: null, state: "ok" }, // cap in the worker's env, unknown to the admin
+  month: { reserved: 9, cap: 40, state: "soft-hold" },
+  tokens: { spent: 5400000, cap: 8000000, state: "ok", maxTokens: 200000 },
+});
+
 const CANNED_PAYLOAD = () => ({
   graph: buildGraphModel(CANNED()),
   fold: CANNED_FOLD(),
@@ -130,6 +159,7 @@ const CANNED_PAYLOAD = () => ({
     "trigger:0": { cost: usd(0, "plan", { planId: "kimi" }), runs: 9 },
     "trigger:1": { cost: usd(1.25, "estimated", { coverage: 0.5 }), runs: 3 },
   },
+  budget: CANNED_BUDGET(),
 });
 
 const cannedHtml = () => buildInsightsHtml(CANNED_PAYLOAD(), { now: NOW });
@@ -200,6 +230,9 @@ test("same payload + same now is byte-identical, and every input array order is 
   p.graph.flags.reverse();
   p.graph.folders.reverse();
   p.costByTrigger = Object.fromEntries(Object.entries(p.costByTrigger).reverse());
+  p.fold.dailyByFlow.reverse();
+  for (const r of p.fold.dailyByFlow) r.days.reverse();
+  p.budget = Object.fromEntries(Object.entries(p.budget).reverse());
   assert.equal(buildInsightsHtml(p, { now: NOW }), base, "normalisation re-sorts everything; a permuted payload may not move a byte");
 });
 
@@ -496,4 +529,118 @@ test("null payload, unreachable costs, missing joins and junk all degrade to a s
     const page = buildInsightsHtml(junk, { now: NOW });
     assert.ok(page.includes("<svg"), "malformed input still yields a page, never a throw");
   }
+});
+
+// ---- 13. the budget panel (issue #181): facts only, states as words, the lever named ----
+
+test("budget rows render used-vs-cap FACTS: known caps get a bar, unknown caps get words and nothing else", () => {
+  const out = cannedHtml();
+  assert.ok(out.includes("reserved 3 / cap 25 (overlay)"), "the day window's facts, byte for byte");
+  assert.ok(out.includes("reserved 4 / cap unknown (worker env/default)"), "an overlay-unset cap is UNKNOWN, never guessed");
+  assert.ok(out.includes("reserved 9 / cap 40 (overlay)"), "the month window's facts");
+  assert.ok(out.includes(">soft-hold</span>"), "the state is a WORD; color only reinforces it");
+  assert.ok(out.includes("5400000 / cap 8000000 tok"), "the token counter vs its overlay cap -- counts, never dollars");
+  assert.ok(out.includes("per-job maxTokens 200000"), "the per-job budget rides the token row");
+  assert.ok(out.includes("soft-hold band: 20% of each cap"), "the band caption renders only because pct is set");
+  assert.ok(out.includes("adjust: /dispatch set dailyCap|weeklyCap|monthlyCap|dailyTokenCap|softHoldPct"), "the lever is named -- the panel exists to point at it");
+  assert.ok(!/remaining/i.test(out), "used-vs-cap facts only; room-left arithmetic is the burn-down lie");
+
+  // The unknown-cap row draws NO bar: count meter tracks (aria-hidden 220-wide svgs) -- one per
+  // known-cap row (day, month, tokens), none for the week row.
+  const meters = (out.match(/<svg width="220" height="12" aria-hidden="true">/g) ?? []).length;
+  assert.equal(meters, 3, "three known caps, three meter tracks; the unknown-cap week row draws none");
+});
+
+test("budget degrades: off windows, an unreachable queue, junk states, and a missing slice", () => {
+  const offPayload = CANNED_PAYLOAD();
+  offPayload.budget.week = { reserved: 0, cap: null, state: "ok" };
+  const off = buildInsightsHtml(offPayload, { now: NOW });
+  assert.ok(off.includes("off · no cap set"), "week/month with no cap and nothing reserved is OFF, not zero");
+
+  const downPayload = CANNED_PAYLOAD();
+  downPayload.budget.unreachable = "timed out reaching the queue";
+  downPayload.budget.day = { reserved: null, cap: 25, state: "ok" };
+  downPayload.budget.tokens = { spent: null, cap: 8000000, state: "ok", maxTokens: null };
+  const down = buildInsightsHtml(downPayload, { now: NOW });
+  assert.ok(down.includes("budget unreachable: timed out reaching the queue"), "the banner states the absence");
+  assert.ok(down.includes("cap 25 (overlay) · reserved unavailable (queue unreachable)"), "caps stay facts; reserved does not invent a zero");
+
+  const junkPayload = CANNED_PAYLOAD();
+  junkPayload.budget.day.state = "critical!!";
+  const junk = buildInsightsHtml(junkPayload, { now: NOW });
+  assert.ok(!junk.includes("critical"), "a junk state degrades toward SILENCE -- it can hide an alarm, never invent one");
+
+  const bare = CANNED_PAYLOAD();
+  delete bare.budget;
+  assert.ok(buildInsightsHtml(bare, { now: NOW }).includes("no budget data in this payload"), "a missing slice is a stated absence");
+});
+
+// ---- 14. the line charts (issue #181): shared scales, dashed estimates, honest gaps ----
+
+test("layoutFlowLines: one scale across panels, band-center x, dashed segments where an estimated day touches", () => {
+  const lay = layoutFlowLines(CANNED_FOLD().dailyByFlow, {});
+  assert.equal(lay.panels.length, 2);
+  const [fix, tidy] = lay.panels;
+  assert.equal(fix.flow, "fix", "window total desc: fix outspends tidy");
+  for (const panel of lay.panels) {
+    for (let i = 1; i < panel.points.length; i += 1) {
+      assert.ok(panel.points[i].x > panel.points[i - 1].x, "monotone x");
+    }
+    for (const pt of panel.points) {
+      assert.ok(pt.x >= panel.plot.x - 0.001 && pt.x <= panel.plot.x + panel.plot.w + 0.001, "inside the plot in x");
+      assert.ok(pt.y >= panel.plot.y - 0.001 && pt.y <= panel.plot.y + panel.plot.h + 0.001, "inside the plot in y");
+    }
+  }
+  assert.deepEqual(fix.points.map((p) => p.x), tidy.points.map((p) => p.x), "the SAME band centers: one x-domain across multiples");
+  assert.deepEqual(fix.segments.map((s) => s.dashed), [false, true], "the segment touching the estimated day wears the estimate");
+  assert.deepEqual(tidy.segments.map((s) => s.dashed), [false, false], "an all-metered flow stays solid, gap day included");
+  const zeroDay = fix.points[1];
+  assert.equal(zeroDay.y, fix.plot.y + fix.plot.h, "a zero-run day sits ON the baseline -- a $0 day is a measured fact");
+  assert.ok(lay.scaleMax > 0);
+  assert.equal(fix.yTicks.length, 2, "two gridlines; four in a 96px panel is noise");
+});
+
+test("layoutFlowLines: top-N cut aggregates the rest honestly, junk never throws", () => {
+  const rows = CANNED_FOLD().dailyByFlow;
+  const lay = layoutFlowLines(rows, { top: 1 });
+  assert.equal(lay.panels.length, 1);
+  assert.equal(lay.restCount, 1);
+  assert.equal(lay.restAgg.class, "estimated", "an aggregate over heterogeneous rows is at best an estimate");
+  assert.deepEqual(layoutFlowLines(null, {}).panels, []);
+  assert.deepEqual(layoutFlowLines([{ flow: 7, days: "x" }], {}).panels.length, 1, "junk rows normalize instead of throwing");
+});
+
+test("layoutCumulative: monotone running total, demoted from the first estimated day onward, typed end label", () => {
+  const lay = layoutCumulative(CANNED_FOLD().daily, {});
+  assert.equal(lay.points.length, 3);
+  for (let i = 1; i < lay.points.length; i += 1) {
+    assert.ok(lay.points[i].total >= lay.points[i - 1].total, "a running total never goes down");
+    assert.ok(lay.points[i].y <= lay.points[i - 1].y + 0.001, "so the line never rises in SVG y");
+  }
+  assert.deepEqual(lay.points.map((p) => p.demoted), [false, false, true], "the estimate enters on the estimated day and never leaves");
+  assert.deepEqual(lay.segments.map((s) => s.dashed), [false, true]);
+  assert.deepEqual(lay.endTotal, { usd: 4.2, class: "estimated", floor: true }, "the end label is the running TYPED total");
+  assert.deepEqual(layoutCumulative([], {}).points, []);
+  assert.deepEqual(layoutCumulative(null, {}).points, []);
+});
+
+test("the flow panels render with text-borne identity; an absent series is an absent section", () => {
+  const out = cannedHtml();
+  assert.ok(out.includes("daily spend by flow"), "the section renders when the fold carries the series");
+  assert.ok(/aria-label="daily spend · fix"/.test(out), "each panel is labelled by its flow -- identity by TEXT, never hue");
+  assert.ok(out.includes(">cumulative</div>"), "the cumulative mini-chart rides under the daily columns");
+
+  const bare = CANNED_PAYLOAD();
+  delete bare.fold.dailyByFlow;
+  const page = buildInsightsHtml(bare, { now: NOW });
+  assert.ok(!page.includes("daily spend by flow"), "a fold that predates the series gets NO section -- absence, never an empty grid");
+});
+
+test("a hostile flow name in the series stays entity-escaped in panel titles and aria labels", () => {
+  const p = CANNED_PAYLOAD();
+  p.fold.dailyByFlow[0].flow = '"><script>alert(1)</script>';
+  p.fold.dailyByFlow[0].flowKey = "x";
+  const out = buildInsightsHtml(p, { now: NOW });
+  assert.equal((out.match(/<script/g) ?? []).length, 1, "still exactly one script element");
+  assert.ok(out.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "the hostile name renders as entities");
 });

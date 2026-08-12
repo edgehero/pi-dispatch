@@ -265,6 +265,9 @@ export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = nu
     // gap-day discipline covers interior quiet days, but a month of leading zeros on a young
     // deployment would compress the visible history into the last few cells.
     daily: buildDaily(runs, firstRunMs ?? fromMs, toMs),
+    // The per-flow daily series shares daily's origin and span, so the flow multiples and the
+    // global columns describe the same days (issue #181).
+    dailyByFlow: buildDailyByFlow(runs, firstRunMs ?? fromMs, toMs),
     byFlow: buildByFlow(runs, subs, pricing),
     byModel: buildByModel(runs),
     // null, not [], without a join: "not computed" and "nothing attributed" are different sentences,
@@ -296,12 +299,58 @@ function buildDaily(runs, fromMs, toMs) {
   return daily;
 }
 
-/** Per-flow rollup, sorted by metered cost descending. A null flow reads "(no flow)" -- a display
- * label, not an id, so it can never collide with a real skill-charset flow name. */
+/** One label rule for both flow folds: a null/empty flow reads "(no flow)" -- a display label, not
+ * an id, so it can never collide with a real skill-charset flow name. Extracted so buildByFlow and
+ * buildDailyByFlow cannot drift on what a flow is called. */
+function flowLabelOf(record) {
+  return typeof record.flow === "string" && record.flow !== "" ? record.flow : "(no flow)";
+}
+
+/**
+ * Per-flow DAILY series (issue #181, the line charts): the same composite facts buildDaily and
+ * buildByFlow fold separately, folded together -- Map<flow, Map<day, contribs>> over the one sorted
+ * runs pass. Every flow is gap-padded over the SAME span (the shared cursor loop), because small
+ * multiples are only comparable when they share an x-domain; a flow's quiet day is a zero-run entry
+ * exactly as the global series keeps it. Rows sort by window total descending then label, the
+ * byFlow comparator applied to the sum, so "top N flows" means the same flows in both tables.
+ */
+function buildDailyByFlow(runs, fromMs, toMs) {
+  if (runs.length === 0) return [];
+  const byFlow = new Map();
+  for (const r of runs) {
+    const flow = flowLabelOf(r.record);
+    if (!byFlow.has(flow)) byFlow.set(flow, new Map());
+    const days = byFlow.get(flow);
+    const day = utcDay(r.at);
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push(r.contribution);
+  }
+  const rows = [];
+  for (const [flow, buckets] of byFlow) {
+    const days = [];
+    for (let cursor = Math.floor(fromMs / DAY_MS) * DAY_MS; cursor <= toMs; cursor += DAY_MS) {
+      const day = utcDay(cursor);
+      const contribs = buckets.get(day) ?? [];
+      days.push({ day, cost: combineContributions(contribs), runs: contribs.length });
+    }
+    rows.push({
+      flow,
+      // The machine key beside the display label -- the byFlow lesson (issue #175) held here too.
+      flowKey: flow === "(no flow)" ? null : flow,
+      days,
+    });
+  }
+  return rows.sort((a, b) => {
+    const sum = (row) => row.days.reduce((acc, d) => acc + d.cost.usd, 0);
+    return sum(b) - sum(a) || a.flow.localeCompare(b.flow);
+  });
+}
+
+/** Per-flow rollup, sorted by metered cost descending. The label rule is flowLabelOf's. */
 function buildByFlow(runs, subs, pricing) {
   const groups = new Map();
   for (const r of runs) {
-    const flow = typeof r.record.flow === "string" && r.record.flow !== "" ? r.record.flow : "(no flow)";
+    const flow = flowLabelOf(r.record);
     if (!groups.has(flow)) groups.set(flow, []);
     groups.get(flow).push(r);
   }

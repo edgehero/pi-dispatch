@@ -51,6 +51,28 @@ const LIST_ROW_H = 22;
 const LIST_LABEL_W = 150;
 const LIST_VALUE_W = 110;
 const LIST_TOP = 8; // rows per breakdown list before the "(+K more)" tail takes over
+// The per-flow small multiples (issue #181): half the daily chart's width so two panels share a row,
+// a short panel (two gridlines, not four -- four in 96px is noise), and the top-N cut before the
+// aggregate tail line takes over. One panel per flow because series identity must be carried by
+// TEXT (the panel title): the palette has one non-reserved data hue, and dashes already mean
+// "estimated", so N overlaid lines could only be told apart by a channel this page refuses to load.
+const FLOW_W = 452;
+const FLOW_H = 96;
+const FLOW_ML = 46;
+const FLOW_MR = 8;
+const FLOW_MT = 12;
+const FLOW_MB = 16;
+const LINES_TOP = 4;
+// The cumulative mini-chart under the daily columns: its OWN plot with its OWN scale -- a running
+// total dwarfs daily bars, and a second y-axis on one plot is the classic dual-axis lie.
+const CUM_H = 84;
+// Budget meter geometry: the panel `meter` idiom in SVG -- a fixed track the fill clamps inside
+// (overflow is carried by the state WORD, never by geometry past the track).
+const METER_W = 220;
+
+// The states the worker's own windowState emits; junk degrades to "ok" -- toward SILENCE, the
+// NO_BASELINE direction: a malformed payload may hide an alarm but can never invent one.
+const BUDGET_STATES = Object.freeze(["ok", "soft-hold", "over"]);
 
 function finOr(v, fallback) {
   return Number.isFinite(v) ? v : fallback;
@@ -252,7 +274,71 @@ function normFold(fold) {
     piAiPin: typeof prov.piAiPin === "string" ? clip(prov.piAiPin, 20) : null,
   };
 
-  return { window, daily: normDailyEntries(fold.daily), byFlow, byModel, byTrigger, byRepo, plans, provenance };
+  return {
+    window,
+    daily: normDailyEntries(fold.daily),
+    // null when the fold predates the series (absence, never an empty grid that looks exhaustive).
+    dailyByFlow: Array.isArray(fold.dailyByFlow) ? normFlowSeries(fold.dailyByFlow) : null,
+    byFlow,
+    byModel,
+    byTrigger,
+    byRepo,
+    plans,
+    provenance,
+  };
+}
+
+/** The per-flow daily series rows, allowlisted like every fold arm: label clipped, machine key kept
+ * beside it, days through the same normDailyEntries the global series uses (day-regex drop, total
+ * sort), rows re-sorted by window total so "top N flows" survives a permuted payload byte-identically. */
+function normFlowSeries(v) {
+  const rows = [];
+  for (const r of Array.isArray(v) ? v : []) {
+    if (r === null || typeof r !== "object") continue;
+    rows.push({
+      flow: clip(strOr(r.flow, "(no flow)"), 60),
+      flowKey: typeof r.flowKey === "string" ? clip(r.flowKey, 60) : null,
+      days: normDailyEntries(r.days),
+    });
+  }
+  rows.sort((a, b) => {
+    const sum = (x) => x.days.reduce((s, d) => s + d.cost.usd, 0);
+    return sum(b) - sum(a) || cmpStr(a.flow, b.flow);
+  });
+  return rows;
+}
+
+/** One budget window's allowlist: reserved a non-negative integer or null (never an invented zero --
+ * an unreachable queue rides as null), cap a positive integer or null (an overlay-unset cap is
+ * UNKNOWN, the no-invented-denominator rule), state one of the worker's own words else "ok". */
+function normBudgetWindow(v) {
+  const o = v !== null && v !== undefined && typeof v === "object" ? v : {};
+  return {
+    reserved: Number.isInteger(o.reserved) && o.reserved >= 0 ? o.reserved : null,
+    cap: Number.isInteger(o.cap) && o.cap > 0 ? o.cap : null,
+    state: BUDGET_STATES.includes(o.state) ? o.state : "ok",
+  };
+}
+
+/** The budget slice's allowlist. Null payload -> null section ("no budget data in this payload"),
+ * the stated-absence idiom every other missing slice uses. States arrive as WORDS the assembler
+ * computed with the worker's own classifier; this page never re-derives a threshold. */
+function normBudget(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  const t = v.tokens !== null && v.tokens !== undefined && typeof v.tokens === "object" ? v.tokens : {};
+  return {
+    unreachable: typeof v.unreachable === "string" && v.unreachable !== "" ? clip(v.unreachable, 160) : null,
+    softHoldPct: Number.isInteger(v.softHoldPct) && v.softHoldPct >= 1 && v.softHoldPct <= 100 ? v.softHoldPct : null,
+    day: normBudgetWindow(v.day),
+    week: normBudgetWindow(v.week),
+    month: normBudgetWindow(v.month),
+    tokens: {
+      spent: Number.isInteger(t.spent) && t.spent >= 0 ? t.spent : null,
+      cap: Number.isInteger(t.cap) && t.cap > 0 ? t.cap : null,
+      state: BUDGET_STATES.includes(t.state) ? t.state : "ok",
+      maxTokens: Number.isInteger(t.maxTokens) && t.maxTokens > 0 ? t.maxTokens : null,
+    },
+  };
 }
 
 /** costByTrigger: keys are the graph's own trigger ids -- server-side join vocabulary only, they
@@ -397,6 +483,109 @@ export function layoutBarList(rows, { width } = {}) {
   });
 }
 
+/**
+ * Pure geometry for the per-flow small multiples (issue #181). ONE scale across every panel -- the
+ * shared-scale rule that makes multiples comparable -- with the same band-center x math as the daily
+ * columns, so a flow panel and the global chart place the same day at the same relative position.
+ * A segment is dashed when EITHER endpoint day is non-metered: the line touching an estimated day
+ * wears the estimate (a zero-run gap day folds to metered $0, so quiet days stay solid at the
+ * baseline -- a $0 day is a measured fact here). Exported so the invariants are testable as numbers.
+ */
+export function layoutFlowLines(dailyByFlow, { width, height, top } = {}) {
+  const w = Number.isFinite(width) && width > 100 ? width : FLOW_W;
+  const h = Number.isFinite(height) && height > 40 ? height : FLOW_H;
+  const rows = normFlowSeries(dailyByFlow);
+  const take = Number.isInteger(top) && top > 0 ? top : LINES_TOP;
+  const chosen = rows.slice(0, take);
+  const rest = rows.slice(take);
+  const plot = { x: FLOW_ML, y: FLOW_MT, w: w - FLOW_ML - FLOW_MR, h: h - FLOW_MT - FLOW_MB };
+  let maxUsd = 0;
+  for (const r of chosen) for (const d of r.days) maxUsd = Math.max(maxUsd, d.cost.usd);
+  const step = niceStep(maxUsd / 4);
+  const scaleMax = step * 4;
+  const panels = chosen.map((r) => {
+    const n = r.days.length;
+    const slot = n > 0 ? plot.w / n : plot.w;
+    const points = r.days.map((d, i) => ({
+      x: plot.x + i * slot + slot / 2,
+      y: plot.y + plot.h - (scaleMax > 0 ? (Math.max(0, d.cost.usd) / scaleMax) * plot.h : 0),
+      day: d.day,
+      usd: d.cost.usd,
+      runs: d.runs,
+      cls: d.cost.class,
+      floor: d.cost.floor === true && d.runs > 0,
+    }));
+    const segments = [];
+    for (let i = 1; i < points.length; i += 1) {
+      segments.push({
+        x1: points[i - 1].x,
+        y1: points[i - 1].y,
+        x2: points[i].x,
+        y2: points[i].y,
+        dashed: points[i - 1].cls !== "metered" || points[i].cls !== "metered",
+      });
+    }
+    const yTicks = scaleMax > 0 ? [2, 4].map((k) => ({ y: plot.y + plot.h - (k / 4) * plot.h, label: fmtUsd(step * k) })) : [];
+    const every = n > 0 ? Math.ceil(n / 4) : 1;
+    const xLabels = [];
+    for (let i = 0; i < n; i += every) {
+      xLabels.push({ x: plot.x + i * slot + slot / 2, label: r.days[i].day.slice(5) });
+    }
+    return { flow: r.flow, flowKey: r.flowKey, plot, points, segments, yTicks, xLabels };
+  });
+  const restAgg =
+    rest.length > 0
+      ? {
+          usd: rest.reduce((s, r) => s + r.days.reduce((a, d) => a + d.cost.usd, 0), 0),
+          class: "estimated",
+          floor: rest.some((r) => r.days.some((d) => d.cost.floor === true)),
+        }
+      : null;
+  return { panels, restCount: rest.length, restAgg, scaleMax, width: w, height: h };
+}
+
+/**
+ * Pure geometry for the cumulative window-spend line. Its OWN plot with its OWN nice scale under the
+ * daily columns -- never a second axis on the columns plot. A prefix sum is demoted PERMANENTLY by
+ * its first non-metered day (once an estimate enters a running total it never leaves), so the line
+ * is dashed from that day onward and the end label is the running TYPED total -- which converges, by
+ * construction, to the provenance total the KPI tile shows.
+ */
+export function layoutCumulative(daily, { width, height } = {}) {
+  const w = Number.isFinite(width) && width > 100 ? width : DAILY_W;
+  const h = Number.isFinite(height) && height > 40 ? height : CUM_H;
+  const entries = normDailyEntries(daily);
+  const plot = { x: DAILY_ML, y: 8, w: w - DAILY_ML - DAILY_MR, h: h - 8 - DAILY_MB };
+  let running = 0;
+  let demoted = false;
+  let floor = false;
+  const raw = entries.map((e) => {
+    running += Math.max(0, e.cost.usd);
+    if (e.runs > 0 && e.cost.class !== "metered") demoted = true;
+    if (e.cost.floor === true) floor = true;
+    return { day: e.day, total: running, demoted, floor, runs: e.runs };
+  });
+  const step = niceStep(running / 2);
+  const scaleMax = step * 2;
+  const n = raw.length;
+  const slot = n > 0 ? plot.w / n : plot.w;
+  const points = raw.map((r, i) => ({
+    x: plot.x + i * slot + slot / 2,
+    y: plot.y + plot.h - (scaleMax > 0 ? (r.total / scaleMax) * plot.h : 0),
+    day: r.day,
+    total: r.total,
+    demoted: r.demoted,
+    floor: r.floor,
+  }));
+  const segments = [];
+  for (let i = 1; i < points.length; i += 1) {
+    segments.push({ x1: points[i - 1].x, y1: points[i - 1].y, x2: points[i].x, y2: points[i].y, dashed: points[i].demoted });
+  }
+  const yTicks = scaleMax > 0 ? [1, 2].map((k) => ({ y: plot.y + plot.h - (k / 2) * plot.h, label: fmtUsd(step * k) })) : [];
+  const endTotal = n > 0 ? { usd: points[n - 1].total, class: points[n - 1].demoted ? "estimated" : "metered", floor } : null;
+  return { points, segments, yTicks, endTotal, scaleMax, width: w, height: h, plot };
+}
+
 // ---- HTML emission (server-side strings; the page script only ever assigns them as text) ----
 
 function dailyChartHtml(daily, tips) {
@@ -432,6 +621,173 @@ function dailyChartHtml(daily, tips) {
   }
   parts.push("</svg>");
   return parts.join("");
+}
+
+/** Group consecutive same-dash segments into <path> runs -- one element per run, `d` built from
+ * fmt output alone so the well-formedness path grammar holds by construction. */
+function segmentPaths(points, segments, stroke) {
+  if (points.length === 0) return "";
+  if (points.length === 1) {
+    return `<circle cx="${fmt(points[0].x)}" cy="${fmt(points[0].y)}" r="2" fill="${stroke}"/>`;
+  }
+  const parts = [];
+  let i = 0;
+  while (i < segments.length) {
+    const dashed = segments[i].dashed;
+    let d = `M ${fmt(segments[i].x1)} ${fmt(segments[i].y1)}`;
+    while (i < segments.length && segments[i].dashed === dashed) {
+      d += ` L ${fmt(segments[i].x2)} ${fmt(segments[i].y2)}`;
+      i += 1;
+    }
+    parts.push(`<path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.5"${dashed ? ' stroke-dasharray="4,3"' : ""}/>`);
+  }
+  return parts.join("");
+}
+
+/** The chart frame every line panel shares: spine, baseline, gridlines with fmtUsd labels. */
+function axisFrame(plot, yTicks) {
+  const parts = [];
+  parts.push(`<line x1="${fmt(plot.x)}" y1="${fmt(plot.y)}" x2="${fmt(plot.x)}" y2="${fmt(plot.y + plot.h)}" stroke="${PAGE_THEME.border}"/>`);
+  parts.push(`<line x1="${fmt(plot.x)}" y1="${fmt(plot.y + plot.h)}" x2="${fmt(plot.x + plot.w)}" y2="${fmt(plot.y + plot.h)}" stroke="${PAGE_THEME.border}"/>`);
+  for (const t of yTicks) {
+    parts.push(`<line x1="${fmt(plot.x)}" y1="${fmt(t.y)}" x2="${fmt(plot.x + plot.w)}" y2="${fmt(t.y)}" stroke="${PAGE_THEME.border}" stroke-width="0.5"/>`);
+    parts.push(`<text x="${fmt(plot.x - 6)}" y="${fmt(t.y + 3)}" text-anchor="end" font-size="9" fill="${PAGE_THEME.dim}">${escapeHtml(t.label)}</text>`);
+  }
+  return parts.join("");
+}
+
+function cumulativeHtml(daily, tips) {
+  const lay = layoutCumulative(daily, {});
+  if (lay.points.length === 0) return "";
+  const parts = [`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="cumulative window spend">`];
+  parts.push(axisFrame(lay.plot, lay.yTicks));
+  if (lay.scaleMax === 0) {
+    parts.push(`<text x="${fmt(lay.plot.x + lay.plot.w / 2)}" y="${fmt(lay.plot.y + lay.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no spend recorded</text>`);
+  } else {
+    parts.push(segmentPaths(lay.points, lay.segments, PAGE_THEME.accent));
+    for (const pt of lay.points) {
+      const idx = tips.push(`${pt.day} · cumulative ${fmtCost({ usd: pt.total, class: pt.demoted ? "estimated" : "metered", floor: pt.floor })}`) - 1;
+      parts.push(`<circle data-tip="${fmt(idx)}" cx="${fmt(pt.x)}" cy="${fmt(pt.y)}" r="2" fill="${PAGE_THEME.accent}"${pt.demoted ? ' fill-opacity=".45" stroke="' + PAGE_THEME.accent + '"' : ""}/>`);
+    }
+    const last = lay.points[lay.points.length - 1];
+    // Direct end-of-line label: the running typed total, which converges to the KPI's provenance total.
+    parts.push(`<text x="${fmt(Math.min(last.x + 6, lay.width - 4))}" y="${fmt(Math.max(10, last.y - 4))}" font-size="9" fill="${PAGE_THEME.dim}">${escapeHtml(fmtCost(lay.endTotal))}</text>`);
+  }
+  parts.push("</svg>");
+  return `<div class="dim small">cumulative</div>${parts.join("")}`;
+}
+
+function flowLinesHtml(nf, tips) {
+  if (nf.dailyByFlow === null) return null; // absence: the fold predates the series, so no section at all
+  const lay = layoutFlowLines(nf.dailyByFlow, {});
+  if (lay.panels.length === 0) return '<div class="dim">no runs in the spend window</div>';
+  const totalsByFlow = new Map(nf.byFlow.map((r) => [r.flow, r.cost]));
+  const panels = lay.panels.map((panel) => {
+    const parts = [`<div class="bl"><h3>${escapeHtml(panel.flow)} <span class="dim">${escapeHtml(fmtCost(totalsByFlow.get(panel.flow) ?? null))}</span></h3>`];
+    parts.push(`<svg width="${fmt(lay.width)}" height="${fmt(lay.height)}" role="img" aria-label="daily spend · ${escapeHtml(panel.flow)}">`);
+    parts.push(axisFrame(panel.plot, panel.yTicks));
+    if (lay.scaleMax === 0) {
+      parts.push(`<text x="${fmt(panel.plot.x + panel.plot.w / 2)}" y="${fmt(panel.plot.y + panel.plot.h / 2)}" text-anchor="middle" font-size="11" fill="${PAGE_THEME.dim}">no spend recorded</text>`);
+    } else {
+      parts.push(segmentPaths(panel.points, panel.segments, PAGE_THEME.accent));
+      for (const pt of panel.points) {
+        const idx = tips.push(`${pt.day} · ${panel.flow} · ${fmtCost({ usd: pt.usd, class: pt.cls, floor: pt.floor })} · ${fmt(pt.runs)} runs`) - 1;
+        const estim = pt.runs > 0 && pt.cls !== "metered";
+        parts.push(`<circle data-tip="${fmt(idx)}" cx="${fmt(pt.x)}" cy="${fmt(pt.y)}" r="2" fill="${PAGE_THEME.accent}"${estim ? ' fill-opacity=".45" stroke="' + PAGE_THEME.accent + '"' : ""}/>`);
+        if (pt.floor) {
+          parts.push(`<text x="${fmt(pt.x)}" y="${fmt(pt.y - 5)}" text-anchor="middle" font-size="9" fill="${PAGE_THEME.amber}">≥</text>`);
+        }
+      }
+      for (const xl of panel.xLabels) {
+        parts.push(`<text x="${fmt(xl.x)}" y="${fmt(panel.plot.y + panel.plot.h + 12)}" text-anchor="middle" font-size="8" fill="${PAGE_THEME.dim}">${escapeHtml(xl.label)}</text>`);
+      }
+    }
+    parts.push("</svg></div>");
+    return parts.join("");
+  });
+  let tail = "";
+  if (lay.restCount > 0) {
+    tail = `<div class="dim small">(+${fmt(lay.restCount)} more flows · ${escapeHtml(fmtCost(lay.restAgg))})</div>`;
+  }
+  return `<div id="flows">${panels.join("")}</div>${tail}`;
+}
+
+/** The decorative used-vs-cap bar beside a budget row's text facts: drawn ONLY when both numbers are
+ * known, fill clamped inside the track (overflow is the WORD's job), the soft-hold band as an amber
+ * tick. aria-hidden -- the text row beside it carries every fact. */
+function budgetBarSvg(reserved, cap, state, pct) {
+  const fillW = reserved > 0 ? Math.max(1, Math.round((Math.min(reserved, cap) / cap) * METER_W)) : 0;
+  const fill = state === "over" ? PAGE_THEME.danger : state === "soft-hold" ? PAGE_THEME.amber : PAGE_THEME.accent;
+  const parts = [`<svg width="${fmt(METER_W)}" height="12" aria-hidden="true">`];
+  parts.push(`<rect x="0" y="2" width="${fmt(METER_W)}" height="8" rx="2" fill="none" stroke="${PAGE_THEME.border}"/>`);
+  if (fillW > 0) parts.push(`<rect x="0" y="2" width="${fmt(fillW)}" height="8" rx="2" fill="${fill}"/>`);
+  if (pct !== null) {
+    const tx = Math.round((Math.floor((cap * pct) / 100) / cap) * METER_W);
+    parts.push(`<rect x="${fmt(tx)}" y="0" width="1" height="12" fill="${PAGE_THEME.amber}"/>`);
+  }
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+/** A budget state as a WORD (omitted when "ok"): monochrome must still say soft-hold or over. */
+function stateWord(state) {
+  if (state === "ok") return "";
+  return ` <span class="state${state === "over" ? " over" : ""}">${escapeHtml(state)}</span>`;
+}
+
+/**
+ * The budget panel (issue #181): the caps are the operator's ONE real lever on cost, so the page
+ * that prices everything shows the dial beside the spend and names how to turn it. FACTS ONLY, the
+ * meter doctrine throughout: an overlay-unset cap is unknown (day) or off (week/month with nothing
+ * reserved) -- no bar, no percentage, no derived room; an unreachable queue leaves the caps as facts
+ * and states the absence; slots and tokens are counts, never dollars, so nothing here touches
+ * fmtCost. Renders even when the cost fold is null: the lever does not depend on the spend scan.
+ */
+function budgetSectionHtml(nb) {
+  if (nb === null) return '<div class="dim">no budget data in this payload</div>';
+  const rows = [];
+  const slotRow = (label, wdw) => {
+    if (wdw.cap === null && (wdw.reserved === null || wdw.reserved === 0) && label !== "day") {
+      rows.push(`<div class="row"><span class="wl">${escapeHtml(label)}</span><span class="dim">off · no cap set</span></div>`);
+      return;
+    }
+    if (nb.unreachable !== null) {
+      const capText = wdw.cap !== null ? `cap ${fmt(wdw.cap)} (overlay)` : "cap unknown (worker env/default)";
+      rows.push(`<div class="row"><span class="wl">${escapeHtml(label)}</span><span class="dim">${escapeHtml(capText)} · reserved unavailable (queue unreachable)</span></div>`);
+      return;
+    }
+    const reserved = wdw.reserved ?? 0;
+    if (wdw.cap === null) {
+      rows.push(`<div class="row"><span class="wl">${escapeHtml(label)}</span><span>${escapeHtml(`reserved ${fmt(reserved)} / cap unknown (worker env/default)`)}</span></div>`);
+      return;
+    }
+    rows.push(
+      `<div class="row"><span class="wl">${escapeHtml(label)}</span><span>${escapeHtml(`reserved ${fmt(reserved)} / cap ${fmt(wdw.cap)} (overlay)`)}</span>${stateWord(wdw.state)}${budgetBarSvg(reserved, wdw.cap, wdw.state, nb.softHoldPct)}</div>`,
+    );
+  };
+  slotRow("day", nb.day);
+  slotRow("week", nb.week);
+  slotRow("month", nb.month);
+
+  const t = nb.tokens;
+  const perJob = t.maxTokens !== null ? ` · per-job maxTokens ${fmt(t.maxTokens)}` : " · per-job budget off";
+  if (nb.unreachable !== null) {
+    const capText = t.cap !== null ? `cap ${fmt(t.cap)} tok (overlay)` : "daily cap off";
+    rows.push(`<div class="row"><span class="wl">tokens today</span><span class="dim">${escapeHtml(capText + " · spent unavailable (queue unreachable)" + perJob)}</span></div>`);
+  } else if (t.cap === null) {
+    rows.push(`<div class="row"><span class="wl">tokens today</span><span>${escapeHtml(`${fmt(t.spent ?? 0)} tok · daily cap off${perJob}`)}</span></div>`);
+  } else {
+    rows.push(
+      `<div class="row"><span class="wl">tokens today</span><span>${escapeHtml(`${fmt(t.spent ?? 0)} / cap ${fmt(t.cap)} tok`)}</span>${stateWord(t.state)}${budgetBarSvg(t.spent ?? 0, t.cap, t.state, nb.softHoldPct)}<span class="dim small">${escapeHtml(perJob)}</span></div>`,
+    );
+  }
+
+  if (nb.softHoldPct !== null) {
+    rows.push(`<div class="dim small">soft-hold band: ${fmt(nb.softHoldPct)}% of each cap (the amber tick)</div>`);
+  }
+  // The lever, named: what the whole panel exists to point at.
+  rows.push('<div class="lever">adjust: /dispatch set dailyCap|weeklyCap|monthlyCap|dailyTokenCap|softHoldPct &lt;n&gt; · or press s in the /dispatch panel</div>');
+  return `<div id="budget">${rows.join("")}</div>`;
 }
 
 function barListSvg(rows, aria, tips) {
@@ -600,9 +956,10 @@ function footerHtml(nf, windowLabel) {
   return `<div id="prov">${lines.map((l) => `<div>${escapeHtml(l)}</div>`).join("")}</div>`;
 }
 
-function costBannersHtml(p, nf) {
+function costBannersHtml(p, nf, nb) {
   const banners = [];
   if (typeof p.costsUnreachable === "string" && p.costsUnreachable !== "") banners.push(`costs unreachable: ${clip(p.costsUnreachable, 160)}`);
+  if (nb !== null && nb !== undefined && nb.unreachable !== null) banners.push(`budget unreachable: ${nb.unreachable}`);
   if (nf !== null && nf.provenance.runsTotal === 0) banners.push("no runs in the spend window");
   // Only with the caller's explicit flag: an empty plans array alone also means "operator declared
   // nothing", and accusing a missing file on that evidence would be wrong half the time.
@@ -641,7 +998,14 @@ h3{font-size:12px;color:${PAGE_THEME.dim};margin:0 0 4px}
 .badge{font-weight:700;font-size:11px}
 .badge.good{color:${PAGE_THEME.green}}
 .badge.bad{color:${PAGE_THEME.amber}}
-#grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+#grid,#flows{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+#budget{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:10px 12px;font-size:12px;max-width:820px}
+#budget .row{display:flex;align-items:center;gap:8px;margin:3px 0}
+#budget .row span{white-space:nowrap}
+#budget .wl{color:${PAGE_THEME.dim};min-width:86px}
+#budget .state{color:${PAGE_THEME.amber};font-weight:600}
+#budget .state.over{color:${PAGE_THEME.danger}}
+#budget .lever{margin-top:8px;color:${PAGE_THEME.dim};font-size:11px}
 .bl{background:${PAGE_THEME.panel};border:1px solid ${PAGE_THEME.border};border-radius:6px;padding:8px 10px;overflow:hidden}
 .rowlink{cursor:pointer}
 #wrap{position:relative;border:1px solid ${PAGE_THEME.border};border-radius:6px}
@@ -740,6 +1104,14 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
     nf = null;
     spend = null;
   }
+  let nb;
+  try {
+    // Its own try: the budget slice is independent of the spend scan (the lever does not depend on
+    // the fold), so a hostile fold must not take the budget panel down with it, or vice versa.
+    nb = normBudget(p.budget);
+  } catch {
+    nb = null;
+  }
 
   const windowLabel = p.window === "7d" ? "last 7d" : p.window === "30d" ? "last 30d" : p.window === "mtd" ? "month to date" : "—";
   const windowDays = scene.norm.caps.windowDays ?? "?";
@@ -770,12 +1142,17 @@ export function buildInsightsHtml(payload, { now, fullPaths } = {}) {
   bodyParts.push(`<span id="windows">${escapeHtml(dualWindow)}</span>`);
   bodyParts.push("</div>");
   bodyParts.push(bannersHtml(scene.norm));
-  bodyParts.push(costBannersHtml(p, nf));
+  bodyParts.push(costBannersHtml(p, nf, nb));
 
+  if (nf !== null) bodyParts.push(`<section>${kpisHtml(nf)}</section>`);
+  // Budget sits SECOND, beside the headline spend and above everything it can act on: the caps are
+  // the operator's one real lever on cost, and it renders whether or not the spend scan was readable.
+  bodyParts.push(`<section><h2>budget</h2>${budgetSectionHtml(nb)}</section>`);
   if (nf !== null) {
-    bodyParts.push(`<section>${kpisHtml(nf)}</section>`);
     if (nf.plans.length > 0) bodyParts.push(`<section><h2>plans</h2>${planCardsHtml(nf.plans)}</section>`);
-    bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}</section>`);
+    bodyParts.push(`<section><h2>daily spend</h2>${dailyChartHtml(nf.daily, tips)}${cumulativeHtml(nf.daily, tips)}</section>`);
+    const flows = flowLinesHtml(nf, tips);
+    if (flows !== null) bodyParts.push(`<section><h2>daily spend by flow</h2>${flows}</section>`);
     bodyParts.push(`<section><h2>breakdown</h2>${breakdownHtml(nf, minted, tips)}</section>`);
   } else {
     bodyParts.push('<section><div class="dim">no cost data in this payload</div></section>');

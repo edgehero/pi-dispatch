@@ -201,3 +201,19 @@ test("isHeadlessEnv: SSH wins over the display check, and only linux gates on DI
   assert.equal(mod.isHeadlessEnv({}, "darwin"), null, "darwin's opener needs no display variable");
   assert.equal(mod.isHeadlessEnv({}, "win32"), null);
 });
+
+test("the page carries the budget panel: unreachable canned queue stated as a banner, the lever named", async () => {
+  const sink = [];
+  const deps = {
+    fs: { mkdirSync: () => {}, writeFileSync: (_p, data) => sink.push(String(data)), renameSync: () => {} },
+    openBrowser: () => {},
+    env: {},
+    platform: "darwin",
+    now: () => 1770000000000,
+  };
+  await mod.insightsCommand(cannedPaths(), ["insights", "--no-open"], () => {}, deps);
+  const page = sink[0];
+  assert.ok(page.includes("<h2>budget</h2>"), "the budget panel renders even with the canned dead queue");
+  assert.ok(page.includes("budget unreachable:"), "the absence is a banner, not a silent gap");
+  assert.ok(page.includes("adjust: /dispatch set dailyCap"), "the lever is named -- the panel exists to point at it");
+});
