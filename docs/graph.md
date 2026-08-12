@@ -8,7 +8,7 @@ informs; it changes nothing — no port, no database, no new dependency.
 
 ## Where it renders
 
-![The topology pane: triggers wired to their flows Node-RED style, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.12.0)
+![The topology pane: triggers wired to their flows Node-RED style, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.11.0)
 
 The topology is the lower half of the **insights page** ([`insights.md`](insights.md)):
 `/dispatch insights` writes one self-contained HTML file and opens your browser, and the topology

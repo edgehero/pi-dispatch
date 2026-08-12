@@ -55,14 +55,14 @@ Four forges: GitHub, GitLab, Forgejo (and Gitea), Azure DevOps. **Who may fire a
 One command puts a live TUI over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=0.12.0" alt="The /dispatch panel: status, spend meters, triggers, runs, and settings" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=0.11.0" alt="The /dispatch panel: status, spend meters, triggers, runs, and settings" width="820">
 </p>
 
 - **Status and spend.** Queue and worker state, day/week/month spend meters, a daily token counter, and a run-history table with per-job tokens and cost.
 - **Insights, the one analytics page.** Press `i` on the panel (or type `/dispatch insights`) and a single self contained page opens in your browser: the budget dials (the one lever that actually changes what all of this costs), per-plan verdicts against API rates, daily, cumulative and per-flow spend charts, the four breakdowns (flow, trigger, model, repo), and the whole trigger and flow topology with spend badged onto the triggers that earned it. Every dollar carries its class: a plan-covered run never renders as $0.00, and an estimate is always marked as one. Design your agent loops as triggers and skills, see the loops you actually built, and see what each one costs, all in one place ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=0.12.0" alt="The insights page: KPI tiles, a plan verdict card, the daily spend chart, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=0.11.0" alt="The insights page: KPI tiles, a plan verdict card, the daily spend chart, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** cron, label, comment and pull_request triggers with colored drill-ins showing what fires each one, what it runs, and its trust model. Added, edited and deleted without a restart. Triggers that run third-party code or a custom image are badged; opting in or out of either stays an edit to the reviewed `triggers.json`, which neither the console nor a model-callable tool will make for you.

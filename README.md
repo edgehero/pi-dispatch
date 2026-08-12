@@ -13,7 +13,7 @@ did and what it spent, and shuts the container down. A durable queue absorbs bur
 checked before a single token is spent, and a live admin panel shows everything and can turn the whole
 thing off.
 
-![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.12.0)
+![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.11.0)
 
 ![Transcript of /dispatch status, runs, and triggers: queue counts, the run-history table with per-job token and cost accounting, and the unified {on,run} triggers list](docs/images/dispatch-commands.svg?v=0.5.0)
 
@@ -57,7 +57,7 @@ trigger and flow costs, whether a subscription pays off, drawn as charts beside 
 single file your browser opens from disk, budget dials included, because the caps are the one lever
 that actually changes what all of this costs:
 
-![The insights page: KPI tiles, the budget dials, a plan verdict card, the daily and cumulative spend charts, per-flow trend panels, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the trigger/flow topology with spend badged onto the triggers that earned it](docs/images/insights-view.png?v=0.12.0)
+![The insights page: KPI tiles, the budget dials, a plan verdict card, the daily and cumulative spend charts, per-flow trend panels, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the trigger/flow topology with spend badged onto the triggers that earned it](docs/images/insights-view.png?v=0.11.0)
 
 ## Quickstart
 
@@ -414,7 +414,7 @@ orphan skills and dangling triggers flagged, each cron's next fire or overdue st
 onto the triggers that earned it ([`docs/graph.md`](docs/graph.md) explains every edge;
 [`docs/insights.md`](docs/insights.md) the page, shown [above](#when-to-use-it)).
 
-![The topology pane of the insights page: cron and forge triggers wired to their flows, an observed chain edge carrying its run count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters](docs/images/graph-view.png?v=0.12.0)
+![The topology pane of the insights page: cron and forge triggers wired to their flows, an observed chain edge carrying its run count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters](docs/images/graph-view.png?v=0.11.0)
 
 ```bash
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
