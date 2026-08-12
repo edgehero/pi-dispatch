@@ -1964,6 +1964,32 @@ async function openGraph(deps, width = 80) {
   return comp;
 }
 
+test("GRAPH trigger rows say next/overdue and typed spend when the model carries them (issue #175)", async () => {
+  const model = CANNED_GRAPH_MODEL();
+  const cron = model.nodes.find((n) => n.id === "trigger:0");
+  cron.next = (model.meta.generatedAt ?? 0) + 4 * 3600_000;
+  cron.cost = { usd: 0, class: "plan", floor: false, planId: "kimi" };
+  const comp = await openGraph(graphDeps({ fetchGraph: async () => model }));
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(out, /next 4h/, "the countdown against the model's own generatedAt, never a live clock");
+  assert.match(out, /plan:kimi/, "spend through styler.fmtCost: a plan-covered trigger never reads $0.00");
+  assert.doesNotMatch(out, /\$0\.00/);
+
+  const overdueModel = CANNED_GRAPH_MODEL();
+  const c2 = overdueModel.nodes.find((n) => n.id === "trigger:0");
+  c2.overdueMs = 2 * 3600_000;
+  const comp2 = await openGraph(graphDeps({ fetchGraph: async () => overdueModel }));
+  const out2 = stripAnsi(comp2.render(100).join("\n"));
+  await comp2.dispose();
+  assert.match(out2, /overdue 2h/, "the money backstop's own signal, finally on the row");
+
+  const bare = await openGraph(graphDeps());
+  const out3 = stripAnsi(bare.render(100).join("\n"));
+  await bare.dispose();
+  assert.doesNotMatch(out3, /next |overdue /, "no scheduler match: no claim, not a guess");
+});
+
 test("'g' opens GRAPH, the footer advertises it unclipped at 80, and Esc pops one layer", async () => {
   const deps = graphDeps();
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps });

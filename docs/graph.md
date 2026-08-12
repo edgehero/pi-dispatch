@@ -39,7 +39,7 @@ highlight what it triggers and what reaches it.
 Graph: triggers and flows
 
 folder /srv/site, HEAD abc1234
-  cron nightly 0 3 * * * -> build-report  (runs 41, last completed)
+  cron nightly 0 3 * * * -> build-report  (runs 41, last completed, next 4h, spend ~$4.05 est.)
   skill build-report  [chainable]
     -> notify  observed x3
   skill notify  [chainable] [AI-reachable, no trigger]
@@ -60,8 +60,14 @@ Every edge is labelled by its **evidence class**, and the classes never mix:
 | edge | evidence |
 |---|---|
 | `->` on a trigger line | configuration: the triggers file names this flow, today |
-| `observed xN` | history: N runs in the window actually chained here (`parentJobId` joins) |
+| `observed xN` | history: N runs in the window actually chained here (`parentJobId` joins); the browser view adds how recently, when the records say |
 | `mention (potential …)` | text: this skill's `SKILL.md` names a sibling skill; whether it *could* fire depends on the target's own `ai-trigger: allow`, which the line states |
+
+A trigger row also states its schedule and its money, when the model knows them: a cron trigger
+shows `next 4h` (counted from the moment the model was assembled) or `overdue 2h` (from the resident
+scheduler, the money backstop's own signal), and any trigger that spent in the window shows its
+typed spend through the costs formatter, so a plan-covered trigger reads `plan:<id>` here too, never
+`$0.00`. See [`costs.md`](costs.md) for what the spend classes mean.
 
 A mention is not a promise: chains are agent-requested at runtime, so a potential edge says "the
 skill talks about it", never "this happens". An observed edge says "this happened N times", never

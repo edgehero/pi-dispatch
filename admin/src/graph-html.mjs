@@ -181,6 +181,17 @@ function normalizeModel(model) {
       skills: m.meta?.truncated?.skills === true,
       edges: m.meta?.truncated?.edges === true,
     },
+    // The two honesty counters the text and TUI renderers always carried and this allowlist
+    // dropped (issue #175): three surfaces of one model must not disagree about what was refused
+    // or unreadable. Sorted and clipped like every other array on this page.
+    chainRefusals: (m.meta?.chainRefusals && typeof m.meta.chainRefusals === "object" ? Object.entries(m.meta.chainRefusals) : [])
+      .flatMap(([scope, count]) => (typeof scope === "string" && intOr(count, 0) > 0 ? [{ scope: clip(scope, 80), count: intOr(count, 0) }] : []))
+      .sort((a, b) => cmpStr(a.scope, b.scope)),
+    injectedUnreachable: (Array.isArray(m.meta?.injectedUnreachable) ? m.meta.injectedUnreachable : [])
+      .filter((d) => typeof d === "string")
+      .map((d) => clip(d, 120))
+      .sort()
+      .slice(0, 8),
   };
 
   const folders = [];
@@ -248,6 +259,9 @@ function normalizeModel(model) {
       strong: e.strong === true,
       eligible: e.eligible === true,
       label: typeof e.label === "string" ? e.label : null,
+      // Observed-edge recency (issue #175), the node-side lastEndedAt sanitizer: "chained 3 times,
+      // last 2d ago" and "chained 3 times, months back" are different topologies to a reader.
+      lastEndedAt: typeof e.lastEndedAt === "string" || Number.isFinite(e.lastEndedAt) ? e.lastEndedAt : null,
     });
   }
   edges.sort((a, b) => cmpStr(a.kind, b.kind) || cmpStr(a.from, b.from) || cmpStr(a.to, b.to) || cmpStr(a.label ?? "", b.label ?? "") || (a.count ?? -1) - (b.count ?? -1) || (a.strong ? 1 : 0) - (b.strong ? 1 : 0));
@@ -833,14 +847,17 @@ function wireStyle(w) {
   return { stroke: CHIP_FILL.cron, width: 2, dash: "4,3" }; // cron-rearm: dashed in the trigger's own hue
 }
 
-function wireSvg(w) {
+function wireSvg(w, nowMs) {
   const s = wireStyle(w);
   const parts = [`<g class="gwire" id="${w.id}">`];
   parts.push(`<path d="${w.d}" fill="none" stroke="${s.stroke}" stroke-width="${fmt(s.width)}"${s.dash !== null ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
   let label = null;
   let fill = PAGE_DIM;
   if (w.kind === "observed" && w.edge.count !== null) {
-    label = `(${w.edge.count}×)`;
+    // Recency beside the count when the fold recorded it: relTime against the injected instant,
+    // so the byte-determinism guarantee holds -- same model + same now, same label.
+    const ago = relTime(nowMs, w.edge.lastEndedAt);
+    label = ago !== null ? `(${w.edge.count}× · ${ago})` : `(${w.edge.count}×)`;
     fill = WIRE_OBSERVED;
   } else if (w.kind === "potential") {
     label = "mention";
@@ -913,6 +930,10 @@ function legendHtml(norm) {
   if (norm.meta.truncated.skills) honesty.push("skill enumeration truncated or partly unread");
   if (norm.meta.truncated.edges) honesty.push("observed edges truncated (cap reached)");
   if (norm.meta.droppedObservedEdges > 0) honesty.push(`${norm.meta.droppedObservedEdges} observed edges dropped (no unique folder)`);
+  // The counters the text and TUI surfaces already state (issue #175): the page joins them.
+  const refused = norm.meta.chainRefusals.reduce((a, r) => a + r.count, 0);
+  if (refused > 0) honesty.push(`${refused} chain requests refused (caps or gate)`);
+  if (norm.meta.injectedUnreachable.length > 0) honesty.push(`injected skills dir unreadable: ${norm.meta.injectedUnreachable.join(", ")}`);
   for (const line of honesty) rows.push(`<div class="honesty">${escapeHtml(line)}</div>`);
   return `<div id="legend">${rows.join("")}</div>`;
 }
@@ -1198,7 +1219,7 @@ export function buildGraphHtml(model, { now, fullPaths } = {}) {
   const svgBody = [
     layout.groups.map((g) => groupSvg(g, fullPaths)).join(""),
     layout.skillGroups.map(skillGroupSvg).join(""),
-    layout.wires.map(wireSvg).join(""),
+    layout.wires.map((w) => wireSvg(w, nowMs)).join(""),
     nodeParts.join(""),
   ].join("");
   const vb = layout.viewBox;

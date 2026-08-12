@@ -494,6 +494,25 @@ test("renderGraph renders folders, triggers with stats, skills with badges, and 
   }
 });
 
+test("renderGraph trigger lines carry next/overdue and typed spend when the model does (issue #175)", () => {
+  const model = GRAPH_MODEL();
+  const t = model.nodes.find((n) => n.kind === "trigger");
+  t.next = (model.meta.generatedAt ?? 0) + 4 * 3600_000;
+  t.cost = { usd: 4.05, class: "estimated", floor: false };
+  const out = renderGraph(model);
+  assert.match(out, /next 4h/, "the schedule fact the model always computed finally renders");
+  assert.match(out, /spend ~\$4\.05 est\./, "spend through fmtCost: an estimate wears its provisional dress in text too");
+
+  const overdue = GRAPH_MODEL();
+  const t2 = overdue.nodes.find((n) => n.kind === "trigger");
+  t2.overdueMs = 2 * 3600_000;
+  t2.next = (overdue.meta.generatedAt ?? 0) + 60_000; // overdue outranks a stale next
+  assert.match(renderGraph(overdue), /overdue 2h/, "overdue owns the line; a countdown beside it would read as two clocks");
+
+  const plain = renderGraph(GRAPH_MODEL());
+  assert.doesNotMatch(plain, /next |overdue |spend /, "no scheduler match and no cost map: no claim, not a guess");
+});
+
 test("renderGraph: empty model and degraded inputs render exact, honest strings", () => {
   assert.equal(renderGraph({ meta: { triggersMissing: true } }), "Graph: no triggers file found");
   assert.equal(renderGraph({ meta: { triggersInvalid: "not valid JSON" } }), "Graph: triggers file invalid: not valid JSON");

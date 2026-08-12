@@ -327,7 +327,10 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
   // mention): those two chips plus the one legend swatch carry the disabled treatment, and the
   // exact count is the negative claim -- no non-orphan chip may wear it.
   assert.equal((out.match(/stroke-dasharray="8,3"/g) ?? []).length, 3, "two orphan chips and the one legend swatch, nothing else");
-  assert.equal((out.match(/\(\d+×\)/g) ?? []).length, 1, "one observed edge, one count label; a potential wire NEVER carries a count");
+  // The observed label carries the count and, when the fold recorded one, the recency (issue #175):
+  // "chained 2 times, 2d ago" and "chained 2 times, months back" are different topologies to a reader.
+  assert.equal((out.match(/\(\d+×( · \d+[smhd] ago)?\)/g) ?? []).length, 1, "one observed edge, one count label; a potential wire NEVER carries a count");
+  assert.match(out, /\(\d+× · \d+[smhd] ago\)/, "the canned observed edge has a lastEndedAt, so its label says how fresh it is");
   assert.ok(out.includes(">mention</text>"), "a potential wire is labelled mention instead");
   assert.ok(out.includes("chains: depth ≤ 1 · ≤ 2 per job · same folder only · window 30d"), "the caps line renders the model's exact digits");
   assert.ok(out.includes("2 runs unattributed"), "honesty counters render when set");
@@ -335,6 +338,13 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
   const dropped = buildGraphModel(CANNED());
   dropped.meta.droppedObservedEdges = 4;
   assert.ok(buildGraphHtml(dropped, { now: NOW }).includes("4 observed edges dropped"), "dropped-edge counter renders when set");
+
+  // The two counters the text and TUI surfaces always stated and this page dropped (issue #175):
+  // three surfaces of one model must not disagree about what was refused or unreadable.
+  assert.ok(out.includes("1 chain requests refused (caps or gate)"), "the canned refusals reach the legend");
+  const unreadable = buildGraphModel(CANNED());
+  unreadable.meta.injectedUnreachable = ["/inj"];
+  assert.ok(buildGraphHtml(unreadable, { now: NOW }).includes("injected skills dir unreadable: /inj"), "the unreadable-dir counter renders when set");
 });
 
 // ---- 10. refresh features ----

@@ -304,6 +304,23 @@ test("findLoopHints reads iteration phrases from the BODY, never the frontmatter
   assert.deepEqual(findLoopHints(null), []);
 });
 
+test("triggerCosts is a node FACT: the mapped typed cost rides its trigger node, absence is null (issue #175)", () => {
+  const withCosts = buildGraphModel({
+    ...CANNED(),
+    triggerCosts: { "trigger:0": { cost: { usd: 4.05, class: "estimated", floor: false }, runs: 41 } },
+  });
+  assert.deepEqual(
+    withCosts.nodes.find((n) => n.id === "trigger:0").cost,
+    { usd: 4.05, class: "estimated", floor: false },
+    "the typed dollar rides whole -- usd, class, floor -- so renderers keep the fmtCost discipline",
+  );
+  assert.equal(withCosts.nodes.find((n) => n.id === "trigger:1").cost, null, "no map entry, no claim");
+  assert.equal(buildGraphModel(CANNED()).nodes.find((n) => n.id === "trigger:0").cost, null, "no map wired at all, same null");
+  // Spend is a fact, not a flag or an edge: the closed vocabularies must not have grown for it.
+  assert.deepEqual([...GRAPH_EDGE_KINDS], ["config", "observed", "potential", "cron-rearm"]);
+  assert.ok(!GRAPH_FLAGS.includes("spend"), "no spend flag exists");
+});
+
 test("skill nodes carry their loops, and forge groups carry their record-derived repos", () => {
   const inputs = CANNED();
   inputs.folderSkills["/srv/site"].skills[0].loops = [{ hint: "until the report renders right" }];

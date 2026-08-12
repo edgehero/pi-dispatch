@@ -160,7 +160,7 @@ export const GRAPH_FLAGS = Object.freeze([
  * Total function: absent or malformed inputs degrade to an empty-but-well-formed model, never a
  * throw (the read-model's viewer doctrine, one layer up).
  */
-export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, forgeRepos, cronStats, runJoin, chainEdges, caps, nowMs } = {}) {
+export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, forgeRepos, cronStats, runJoin, chainEdges, caps, nowMs, triggerCosts } = {}) {
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulerList = Array.isArray(schedulers) ? schedulers : [];
   const folders = folderSkills && typeof folderSkills === "object" ? folderSkills : {};
@@ -168,6 +168,10 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
   const statsById = cronStats?.byId && typeof cronStats.byId === "object" ? cronStats.byId : {};
   const statsByIndex = runJoin?.byIndex && typeof runJoin.byIndex === "object" ? runJoin.byIndex : {};
   const observed = Array.isArray(chainEdges?.edges) ? chainEdges.edges : [];
+  // The per-trigger spend map (costs.mjs foldTriggerCosts), keyed by this module's own node ids.
+  // Spend is a node FACT like runs/lastOutcome -- no new edge kind, no new flag: the closed
+  // vocabularies stay closed, and a fold that wires no costs simply grows no badges.
+  const spendByNode = triggerCosts && typeof triggerCosts === "object" ? triggerCosts : {};
 
   const model = {
     folders: [],
@@ -345,6 +349,9 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       lastEndedAt: stats?.lastEndedAt ?? null,
       next: sched?.next ?? null,
       overdueMs: sched?.overdueMs ?? null,
+      // The window's typed spend for this trigger, or null when none was wired/attributed. Carried
+      // whole (usd/class/floor) so every renderer keeps the fmtCost labeling discipline.
+      cost: spendByNode[id]?.cost ?? null,
     };
     model.nodes.push(node);
     if (group) group.triggerIds.push(id);

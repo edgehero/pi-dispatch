@@ -98,7 +98,7 @@ import { applyDeploymentPointer, pointerPath, readPointer, takePointerNotice } f
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
-import { COSTS_WINDOWS, costsSinceMs, foldCosts, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
@@ -1063,6 +1063,9 @@ async function assembleGraph(paths: any): Promise<any> {
   const schedulers: any = await readSchedulers({ url: paths.valkeyUrl });
   const records: any = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
   const recs: any[] = Array.isArray(records) ? records : [];
+  // Spend badges (issue #175): the dashboard seam's twin -- one subscriptions read, two pure folds.
+  const subsView: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
+  const triggerJoin = attributeRunsToTriggers({ records: recs, triggers: triggerList });
   return buildGraphModel({
     triggers,
     schedulers: Array.isArray(schedulers) ? schedulers : [],
@@ -1073,6 +1076,7 @@ async function assembleGraph(paths: any): Promise<any> {
     forgeRepos: forgeRepoTargets({ records: recs }),
     caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
     nowMs,
+    triggerCosts: foldTriggerCosts({ records: recs, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing: PRICING, triggerJoin }),
   });
 }
 

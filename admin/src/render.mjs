@@ -427,7 +427,7 @@ export function renderGraph(model) {
     out.push("", groupHeading(group));
     for (const id of group.triggerIds ?? []) {
       const t = nodeById.get(id);
-      if (t) out.push(`  ${graphTriggerLine(t, flagsByNode.get(id) ?? [])}`);
+      if (t) out.push(`  ${graphTriggerLine(t, flagsByNode.get(id) ?? [], m.meta?.generatedAt ?? null)}`);
     }
     for (const id of group.skillIds ?? []) {
       const s = nodeById.get(id);
@@ -477,14 +477,34 @@ function groupHeading(group) {
   return `folder ${group.path ?? group.label}${head}${state}`;
 }
 
-function graphTriggerLine(t, flags) {
-  const stats = t.runs > 0 ? `runs ${t.runs}${t.lastOutcome ? `, last ${t.lastOutcome}` : ""}` : "no runs in window";
+function graphTriggerLine(t, flags, generatedAt = null) {
+  // The schedule and spend facts join the stats parens (issue #175): overdue from the model's own
+  // overdueMs, next as a countdown against generatedAt (never a clock -- this renderer is pure),
+  // spend through fmtCost so a plan-covered trigger reads plan:<id> in text too.
+  const bits = [t.runs > 0 ? `runs ${t.runs}${t.lastOutcome ? `, last ${t.lastOutcome}` : ""}` : "no runs in window"];
+  if (Number.isFinite(t.overdueMs) && t.overdueMs > 0) bits.push(`overdue ${relDuration(t.overdueMs)}`);
+  else {
+    const nextMs = typeof t.next === "number" ? t.next : typeof t.next === "string" ? Date.parse(t.next) : NaN;
+    if (Number.isFinite(nextMs) && Number.isFinite(generatedAt) && nextMs > generatedAt) bits.push(`next ${relDuration(nextMs - generatedAt)}`);
+  }
+  if (t.cost) bits.push(`spend ${fmtCost(t.cost)}`);
   const badges = [];
   if (flags.includes("no-skill")) badges.push("[no-skill: flow absent at HEAD]");
   if (flags.includes("charset-invalid")) badges.push("[invalid flow name: can never materialise]");
   if (flags.includes("pr-spend-loop-risk")) badges.push("[spend-loop risk: fires on opened/synchronize]");
   const replicas = t.replicas ? ` x${t.replicas}` : "";
-  return `${t.onType} ${t.label} -> ${t.flow ?? "(no flow)"}${replicas}  (${stats})${badges.length ? ` ${badges.join(" ")}` : ""}`;
+  return `${t.onType} ${t.label} -> ${t.flow ?? "(no flow)"}${replicas}  (${bits.join(", ")})${badges.length ? ` ${badges.join(" ")}` : ""}`;
+}
+
+/** A coarse duration for the graph's schedule facts: minutes under an hour, else hours, else days. */
+function relDuration(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "<1m";
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return "<1m";
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
 }
 
 function graphSkillLine(s, flags) {

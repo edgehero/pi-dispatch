@@ -36,7 +36,7 @@ import { buildGraphModel } from "./graph-model.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, fmtUsd, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
-import { COSTS_WINDOWS, costsSinceMs, foldCosts, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, whatIfFlow } from "./costs.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
 // Fetch the read-model's full window (listRuns clamps at 50) but render a cursor-following viewport of
@@ -161,6 +161,10 @@ export function createDashboardDeps(paths: any) {
       const triggerList: any[] = Array.isArray(triggersView?.triggers) ? triggersView.triggers : [];
       const records: any = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
       const recs: any[] = Array.isArray(records) ? records : [];
+      // Spend badges (issue #175): one more FILE read (subscriptions) and two pure folds over the
+      // scan this seam already paid for -- no new spawn, so the entry+`r`-only policy is untouched.
+      const subsView: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
+      const triggerJoin = attributeRunsToTriggers({ records: recs, triggers: triggerList });
       return buildGraphModel({
         triggers: triggersView,
         schedulers: Array.isArray(schedulers) ? schedulers : [],
@@ -171,6 +175,7 @@ export function createDashboardDeps(paths: any) {
         forgeRepos: forgeRepoTargets({ records: recs }),
         caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },
         nowMs,
+        triggerCosts: foldTriggerCosts({ records: recs, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing, triggerJoin }),
       });
     },
     /** The priced-model catalog for the what-if `/` filter -- the façade stays behind this seam. */
@@ -1623,7 +1628,9 @@ function graphRows(model: any, folded: any): any[] {
     if (isFolded) continue;
     for (const id of group.triggerIds ?? []) {
       const node: any = nodeById.get(id);
-      if (node) rows.push({ kind: "gtrigger", node, flags: flagsByNode.get(id) ?? [] });
+      // generatedAt rides on the row so graphRowLine can phrase `next` as a countdown without a
+      // clock of its own -- render() stays a pure read of component state.
+      if (node) rows.push({ kind: "gtrigger", node, flags: flagsByNode.get(id) ?? [], generatedAt: model.meta?.generatedAt ?? null });
     }
     for (const id of group.skillIds ?? []) {
       const node: any = nodeById.get(id);
@@ -1661,8 +1668,17 @@ function graphRowLine(row: any, cursor: boolean, inner: number, styler: any): st
     const stats = t.runs > 0 ? `runs ${t.runs}${t.lastOutcome ? ` · last ${t.lastOutcome}` : ""}` : "no runs in window";
     const statColor = t.lastOutcome === "completed" ? "success" : t.lastOutcome ? "warning" : "dim";
     const badges = graphBadges(row.flags, styler);
+    // The schedule fact the model always computed and no surface rendered (issue #175): overdue in
+    // the error color -- the money backstop's own signal -- else the next fire as a countdown against
+    // the model's generatedAt (never a live clock; a stale model shows its stale countdown honestly).
+    const parts: string[] = [styler.fg(statColor, stats)];
+    const schedule = triggerScheduleText(t, row.generatedAt);
+    if (schedule) parts.push(styler.fg(schedule.startsWith("overdue") ? "error" : "dim", schedule));
+    // Window spend, typed: fmtCost is the only money renderer, so a plan-covered trigger reads
+    // plan:<id> here too, never $0.00.
+    if (t.cost) parts.push(styler.fmtCost(t.cost));
     const left = pre + kind + styler.stripAnsi(t.label ?? "") + " " + styler.fg("dim", G.arrowRight) + " " + (t.flow ?? "(no flow)") + (t.replicas ? styler.fg("warning", ` x${t.replicas}`) : "") + badges;
-    const right = styler.fg(statColor, stats);
+    const right = parts.join(styler.fg("dim", " · "));
     return joinEnds(left, right, inner, styler);
   }
   if (row.kind === "gskill") {
@@ -1693,6 +1709,19 @@ function graphRowLine(row: any, cursor: boolean, inner: number, styler: any): st
     return fitLine(pre + styler.fg("dim", "injected ") + row.node.name + styler.fg("dim", ` (${row.node.dir})`) + warn, inner, styler);
   }
   return fitLine(pre, inner, styler);
+}
+
+/** A cron trigger's schedule phrase: "overdue 2h" from the model's own overdueMs, else "next 4h"
+ * counted from the model's generatedAt (the scheduler's `next` is ms in production and ISO in older
+ * fixtures -- both parse). Empty for non-cron triggers and for anything unparseable: a schedule badge
+ * that guesses is worse than none. */
+function triggerScheduleText(t: any, generatedAt: any): string {
+  if (Number.isFinite(t?.overdueMs) && t.overdueMs > 0) return `overdue ${humanizeMs(t.overdueMs) || "<1m"}`;
+  const nextMs = typeof t?.next === "number" ? t.next : typeof t?.next === "string" ? Date.parse(t.next) : NaN;
+  if (!Number.isFinite(nextMs) || !Number.isFinite(generatedAt)) return "";
+  const inMs = nextMs - generatedAt;
+  if (inMs <= 0) return ""; // due-but-not-overdue noise; the overdue branch owns the alarm
+  return `next ${humanizeMs(inMs) || "<1m"}`;
 }
 
 /** The flag badges every graph row shares, colored by severity; the vocabulary is graph-model's. */
