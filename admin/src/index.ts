@@ -84,7 +84,6 @@ import {
   forgeRepoTargets,
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
-import { buildGraphHtml } from "./graph-html.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
@@ -107,7 +106,7 @@ import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } f
 import { setGlyphs } from "./panel.mjs";
 import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderCosts, renderWhatIf, renderGraph } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -163,7 +162,7 @@ const REBUILT_NOTICE = (reason: string) =>
   `replaced invalid settings file (${reason}) — other keys were lost`;
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|costs|graph|insights|triggers|settings|set|unset|setup>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -173,8 +172,6 @@ const KNOWN_SUBCOMMANDS = [
   "runs",
   "logs",
   "budget",
-  "costs",
-  "graph",
   "insights",
   "triggers",
   "settings",
@@ -219,10 +216,11 @@ export default function admin(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("dispatch", {
-    // The operator-visible summary; `graph` was missing from it once while USAGE carried it, which
-    // is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three in step.
+    // The operator-visible summary; a subcommand once went missing from it while USAGE carried it,
+    // which is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three
+    // in step.
     description:
-      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|costs|graph|insights|triggers|settings|set|unset|setup",
+      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup",
     getArgumentCompletions: (prefix) => completeArguments(prefix),
     handler: async (args, ctx) => dispatch(pi, args, ctx),
   });
@@ -822,7 +820,7 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const sub = tokens[0] ?? "";
   const paths = resolvePaths(process.env);
-  // Glyph posture BEFORE any rendering: every /dispatch surface (the overlay, the costs view's sparkline)
+  // Glyph posture BEFORE any rendering: every /dispatch surface (the overlay, the insights surfaces)
   // draws through panel.mjs' active table, and this is the one funnel all subcommands pass through. The
   // dashboard's own styler opts in per instance (makeStyler's `ascii`, threaded from these same paths in
   // makeDashboard), so PI_DISPATCH_ASCII now flips the overlay frame too, not only panel.mjs (issue #54).
@@ -925,38 +923,16 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       send(pi, renderSettingsView(readSettingsView({ settingsFile: paths.settingsFile })));
       return;
     }
-    case "costs": {
-      costsCommand(pi, paths, tokens, notify);
-      return;
-    }
-    case "graph": {
-      // `graph html` writes the self-contained artifact and best-effort opens the browser
-      // (REQ-GRAPH-HTML-EXPORT); bare `graph` stays the plain-text render. The positional sub-verb is
-      // the `costs whatif` convention, not a flag on the base command.
-      if (tokens[1] === "html") {
-        await graphHtmlCommand(paths, tokens, notify);
-        return;
-      }
-      if (tokens.length > 1) {
-        notify?.(GRAPH_USAGE, "warning");
-        return;
-      }
-      // Operator-typed read, ungated (DES-CLI-SURFACE: typing it is the approval); renders the same
-      // model the GRAPH view draws, as plain text into the admin channel. Deliberately NOT an
-      // LLM-callable tool: the folder enumeration spawns git per folder, and the text is a topology
-      // the operator reads, not a fold a model consumes.
-      send(pi, renderGraph(await assembleGraph(paths)));
-      return;
-    }
     case "insights": {
-      // `insights html` is the only verb: the artifact IS the feature (issue #175), and a bare
-      // `insights` answering usage beats it silently aliasing either half's text renderer. Same
-      // no-LLM-tool posture as `graph`: the assembly spawns git per folder.
-      if (tokens[1] === "html") {
-        await insightsHtmlCommand(paths, tokens, notify);
+      // The ONE analytics surface (issue #181). `whatif` keeps the CLI estimator (the interactive
+      // layer died with the COSTS view); anything else writes AND opens the artifact -- the artifact
+      // IS the feature, so the bare command does the whole job with no `html` verb to remember.
+      // Still deliberately not an LLM-callable tool: the topology assembly spawns git per folder.
+      if (tokens[1] === "whatif") {
+        insightsWhatIf(pi, paths, tokens, notify);
         return;
       }
-      notify?.(INSIGHTS_USAGE, "warning");
+      await insightsCommand(paths, tokens, notify);
       return;
     }
     case "run": {
@@ -1022,11 +998,9 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
   }
 }
 
-// ---- the costs command surface (issue #53) ----
+// ---- the insights command surface (issues #53/#54/#175, unified by #181) ----
 // COSTS_WINDOWS and costsSinceMs live in costs.mjs beside the fold: proration denominates on the
 // requested window, so the scan cutoff and the fold's sinceMs must come from the one function.
-
-const COSTS_USAGE = "usage: /dispatch costs [7d|30d|mtd] | /dispatch costs whatif <provider/model> --flow <flow>";
 
 // The pricing façade in the injectable shape the pure fold expects (costs.mjs takes `pricing` as an
 // argument by contract; the tests hand it a canned fake, this object is the real one).
@@ -1062,10 +1036,8 @@ function assembleCosts(paths: any, window: string, flow?: string): any {
   return { fold };
 }
 
-// ---- the graph command surface (issue #54) ----
-
 /**
- * Assemble the trigger/flow graph model exactly as the dashboard's seam will: a FRESH triggers read
+ * Assemble the trigger/flow graph model for the insights payload: a FRESH triggers read
  * every call (the file live-reloads, OQ-008 -- a cached topology is a stale topology), the resident
  * schedulers, one bounded record scan for the window, the folder/injected enumerations through
  * `collectGraphInputs`, and the pure fold. All I/O lives in the read-model; this function only
@@ -1095,10 +1067,8 @@ async function assembleGraph(paths: any): Promise<any> {
   });
 }
 
-const GRAPH_USAGE = "usage: /dispatch graph [html [--no-open] [--full-paths]]";
-
-/** The real side-effect deps for graphHtmlCommand; tests inject fakes for every one of them. */
-function realGraphHtmlDeps(): any {
+/** The real side-effect deps for insightsCommand; tests inject fakes for every one of them. */
+function realArtifactDeps(): any {
   return { fs: nodeFs, openBrowser, env: process.env, now: () => Date.now(), platform: process.platform };
 }
 
@@ -1114,55 +1084,8 @@ export function isHeadlessEnv(env: any, platform: string): string | null {
   return null;
 }
 
-/**
- * `/dispatch graph html [--no-open]` (REQ-GRAPH-HTML-EXPORT): assemble the same model as everything
- * else, render the self-contained artifact, write it ATOMICALLY to the STABLE path
- * `<graphDir>/graph.html` (tmp+rename, the writeTriggers idiom -- stable so re-running the command
- * updates an already-open tab through its Reload/auto-reload controls, and atomic so that tab's
- * reload never reads half a file), then print the file:// URL and best-effort open the browser.
- *
- * The print comes FIRST and unconditionally -- the setup-github doctrine: the URL is the contract,
- * the spawn is a convenience, and over SSH or without a display the spawn is skipped AND SAID, never
- * silently. A write failure notifies and never opens: opening a stale artifact after a failed write
- * would show the operator yesterday's topology as today's. Exported for its tests.
- */
-export async function graphHtmlCommand(paths: any, tokens: string[], notify: Notify, deps: any = realGraphHtmlDeps()): Promise<void> {
-  const rest = tokens.slice(2);
-  const noOpen = rest.includes("--no-open");
-  // Full local folder paths are an explicit OPT-IN (REQ-GRAPH-HTML-EXPORT): the artifact defaults to
-  // basename-only because it is a durable, shareable file, but "which folder is this" is a fair
-  // question on a multi-folder deployment, and the paths are the operator's own reviewed config.
-  const fullPaths = rest.includes("--full-paths");
-  if (rest.some((t) => t !== "--no-open" && t !== "--full-paths")) {
-    notify?.(GRAPH_USAGE, "warning");
-    return;
-  }
-  const model = await assembleGraph(paths);
-  const html = buildGraphHtml(model, { now: deps.now(), fullPaths });
-  const file = `${paths.graphDir}/graph.html`;
-  try {
-    deps.fs.mkdirSync(paths.graphDir, { recursive: true });
-    const tmp = `${file}.tmp`;
-    deps.fs.writeFileSync(tmp, html, { mode: 0o644 });
-    deps.fs.renameSync(tmp, file);
-  } catch (err: any) {
-    notify?.(`graph html: could not write ${file} (${err?.message ?? err})`, "error");
-    return;
-  }
-  // pathToFileURL, not concatenation (review finding): an operator-set PI_GRAPH_DIR with a space
-  // would otherwise print a URL that truncates in terminals and breaks the opener spawn.
-  const url = pathToFileURL(file).href;
-  notify?.(`graph written: ${url}`, "info");
-  if (noOpen) return;
-  const headless = isHeadlessEnv(deps.env, deps.platform);
-  if (headless) {
-    notify?.(`not opening a browser (${headless}): open the URL on this machine's desktop, or scp the file there`, "info");
-    return;
-  }
-  deps.openBrowser(url);
-}
-
-const INSIGHTS_USAGE = "usage: /dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]";
+const INSIGHTS_USAGE =
+  "usage: /dispatch insights [7d|30d|mtd] [--no-open] [--full-paths] | /dispatch insights whatif <provider/model> --flow <flow>";
 
 /**
  * Assemble the unified insights payload: the graph model and the cost fold the two existing
@@ -1194,20 +1117,30 @@ async function assembleInsights(paths: any, window: string): Promise<any> {
 }
 
 /**
- * `/dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]` (REQ-INSIGHTS-HTML-EXPORT):
- * graphHtmlCommand's structural twin -- assemble, render the self-contained artifact, write it
- * ATOMICALLY to the STABLE path `<graphDir>/insights.html`, print the file:// URL FIRST, then
- * best-effort open unless headless/--no-open. A cost-side degrade (scan unreachable) still writes
- * the page with its banner: the artifact is total, never a stack trace. Default window 30d, NOT
- * costs' mtd: the topology half is pinned at a 30d record window, and the one page's two halves
- * should describe the same period unless the operator asks otherwise. Exported for its tests.
+ * `/dispatch insights [7d|30d|mtd] [--no-open] [--full-paths]` (REQ-INSIGHTS-HTML-EXPORT): the bare
+ * command does the whole job -- assemble, render the self-contained artifact, write it ATOMICALLY to
+ * the STABLE path `<graphDir>/insights.html` (tmp+rename, the writeTriggers idiom -- stable so
+ * re-running updates an already-open tab through its Reload/auto-reload controls, atomic so that
+ * tab's reload never reads half a file), print the file:// URL FIRST (the URL is the contract, the
+ * spawn a convenience; over SSH or without a display the spawn is skipped AND SAID), then best-effort
+ * open unless headless/--no-open. A cost-side degrade (scan unreachable) still writes the page with
+ * its banner: the artifact is total, never a stack trace. A write failure notifies and never opens --
+ * opening a stale artifact after a failed write would show yesterday's deployment as today's.
+ * Default window 30d, NOT the old costs mtd: the topology half is pinned at a 30d record window, and
+ * the one page's two halves should describe the same period unless the operator asks otherwise.
+ * Exported for its tests.
  */
-export async function insightsHtmlCommand(paths: any, tokens: string[], notify: Notify, deps: any = realGraphHtmlDeps()): Promise<void> {
-  const rest = tokens.slice(2);
+export async function insightsCommand(paths: any, tokens: string[], notify: Notify, deps: any = realArtifactDeps()): Promise<void> {
+  const rest = tokens.slice(1);
   const noOpen = rest.includes("--no-open");
+  // Full local folder paths are an explicit OPT-IN: the artifact defaults to basename-only because
+  // it is a durable, shareable file, but "which folder is this" is a fair question on a multi-folder
+  // deployment, and the paths are the operator's own reviewed config.
   const fullPaths = rest.includes("--full-paths");
   const positional = rest.filter((t) => t !== "--no-open" && t !== "--full-paths");
   const window = positional.length > 0 ? positional[0] : "30d";
+  // The removed `html` verb lands here as a junk positional and answers usage on purpose: a dead
+  // verb that half-works is drift, and the usage string is what teaches the new grammar.
   if (positional.length > 1 || !COSTS_WINDOWS.includes(window)) {
     notify?.(INSIGHTS_USAGE, "warning");
     return;
@@ -1221,9 +1154,11 @@ export async function insightsHtmlCommand(paths: any, tokens: string[], notify: 
     deps.fs.writeFileSync(tmp, html, { mode: 0o644 });
     deps.fs.renameSync(tmp, file);
   } catch (err: any) {
-    notify?.(`insights html: could not write ${file} (${err?.message ?? err})`, "error");
+    notify?.(`insights: could not write ${file} (${err?.message ?? err})`, "error");
     return;
   }
+  // pathToFileURL, not concatenation (review finding): an operator-set PI_GRAPH_DIR with a space
+  // would otherwise print a URL that truncates in terminals and breaks the opener spawn.
   const url = pathToFileURL(file).href;
   notify?.(`insights written: ${url}`, "info");
   if (noOpen) return;
@@ -1236,42 +1171,19 @@ export async function insightsHtmlCommand(paths: any, tokens: string[], notify: 
 }
 
 /**
- * `/dispatch costs [7d|30d|mtd]` renders the fold; `costs whatif …` estimates one flow at another model's
- * rates. Both send PII-free text into the admin channel -- the same records `runs` already sends,
- * aggregated -- while usage mistakes go to notify, never into model context.
+ * `insights whatif <provider/model> --flow <flow>`. The target splits on the FIRST "/" -- model ids
+ * carry dots and colons, never the provider separator -- and `--flow` is required because whatIfFlow
+ * scores one flow's median run, not a portfolio. An unknown model answers with the closest priced ids
+ * by a cheap contains-filter over the façade's catalog: that reply IS the long-tail model picker now
+ * that no interactive filter exists.
  */
-function costsCommand(pi: ExtensionAPI, paths: any, tokens: string[], notify: Notify): void {
-  if (tokens[1] === "whatif") {
-    costsWhatIf(pi, paths, tokens, notify);
-    return;
-  }
-  const window = tokens[1] ?? "mtd";
-  if (!COSTS_WINDOWS.includes(window)) {
-    notify?.(COSTS_USAGE, "warning");
-    return;
-  }
-  const res = assembleCosts(paths, window);
-  if (res.unreachable) {
-    notify?.(`costs: ${res.unreachable}`, "error");
-    return;
-  }
-  send(pi, renderCosts(res.fold, { window }));
-}
-
-/**
- * `costs whatif <provider/model> --flow <flow>`. The target splits on the FIRST "/" -- model ids carry
- * dots and colons, never the provider separator -- and `--flow` is required because whatIfFlow scores one
- * flow's median run, not a portfolio. An unknown model answers with the closest priced ids by a cheap
- * contains-filter over the façade's catalog: that reply IS the long-tail model picker the TUI deliberately
- * does not grow a widget for.
- */
-function costsWhatIf(pi: ExtensionAPI, paths: any, tokens: string[], notify: Notify): void {
+function insightsWhatIf(pi: ExtensionAPI, paths: any, tokens: string[], notify: Notify): void {
   const target = tokens[2] ?? "";
   const slash = target.indexOf("/");
   const flowAt = tokens.indexOf("--flow");
   const flow = flowAt >= 0 ? tokens[flowAt + 1] : undefined;
   if (slash <= 0 || slash === target.length - 1 || !flow) {
-    notify?.(COSTS_USAGE, "warning");
+    notify?.(INSIGHTS_USAGE, "warning");
     return;
   }
   const provider = target.slice(0, slash);
@@ -1289,7 +1201,7 @@ function costsWhatIf(pi: ExtensionAPI, paths: any, tokens: string[], notify: Not
   // runs at its own 92-day ceiling rather than a display window.
   const records = scanRunRecords({ logsDir: paths.logsDir, nowMs: Date.now() });
   if (!Array.isArray(records)) {
-    notify?.(`costs: ${(records as any).unreachable}`, "error");
+    notify?.(`insights: ${(records as any).unreachable}`, "error");
     return;
   }
   const result = whatIfFlow({ records, flow, target: { provider, id }, pricing: PRICING });
@@ -1332,7 +1244,7 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
         copyText: (text: string) => {
           process.stdout.write(`\x1b]52;c;${Buffer.from(String(text)).toString("base64")}\x07`);
         },
-        // The terminal's row count for the LIST/COSTS collapse budget. Null -- not a guess -- when stdout
+        // The terminal's row count for the LIST collapse budget. Null -- not a guess -- when stdout
         // is not a TTY (rows undefined), which renders the full panel exactly as before.
         terminalRows: () => process.stdout.rows ?? null,
       },
@@ -1800,8 +1712,9 @@ function makeLogViewer(jobId: string, tail: { lines?: string[]; missing?: boolea
 
 /**
  * Argument completion: the first token completes against the subcommand names; `logs <partial>` completes
- * against the run ids present on disk; `costs <partial>` against the three windows plus `whatif`. Returns
- * null (not []) when there is nothing to offer.
+ * against the run ids present on disk; `insights <partial>` against the three windows plus `whatif`, and
+ * `insights whatif <partial>` against the priced catalog -- the long-tail model picker, now that no
+ * interactive filter exists. Returns null (not []) when there is nothing to offer.
  */
 function completeArguments(prefix: string) {
   const parts = prefix.trimStart().split(/\s+/);
@@ -1818,26 +1731,19 @@ function completeArguments(prefix: string) {
       .map((id) => ({ value: `logs ${id}`, label: id }));
     return items.length > 0 ? items : null;
   }
-  if (parts[0] === "costs" && parts.length === 2) {
+  if (parts[0] === "insights" && parts.length === 2) {
     const partial = parts[1];
     const items = ["7d", "30d", "mtd", "whatif"]
       .filter((w) => w.startsWith(partial))
-      .map((w) => ({ value: `costs ${w}`, label: w }));
+      .map((w) => ({ value: `insights ${w}`, label: w }));
     return items.length > 0 ? items : null;
   }
-  if (parts[0] === "graph" && parts.length === 2) {
-    const partial = parts[1];
-    const items = ["html"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `graph ${w}`, label: w }));
-    return items.length > 0 ? items : null;
-  }
-  if (parts[0] === "insights" && parts.length === 2) {
-    const partial = parts[1];
-    const items = ["html"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `insights ${w}`, label: w }));
-    return items.length > 0 ? items : null;
-  }
-  if (parts[0] === "insights" && parts[1] === "html" && parts.length === 3) {
+  if (parts[0] === "insights" && parts[1] === "whatif" && parts.length === 3) {
     const partial = parts[2];
-    const items = ["7d", "30d", "mtd"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `insights html ${w}`, label: w }));
+    const items = listPricedModels()
+      .map((m: any) => `${m.provider}/${m.id}`)
+      .filter((t: string) => t.startsWith(partial))
+      .map((t: string) => ({ value: `insights whatif ${t}`, label: t }));
     return items.length > 0 ? items : null;
   }
   if ((parts[0] === "set" || parts[0] === "unset") && parts.length === 2) {

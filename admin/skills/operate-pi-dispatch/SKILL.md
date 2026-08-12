@@ -18,9 +18,9 @@ Observe (no approval needed):
   daily buckets, per-flow and per-model rollups, subscription plan verdicts, provenance (`flow` filters to
   one flow). Every dollar in the result is typed `{ usd, class, ... }` — quote the class with the number
   (`metered` is measured, `estimated`/`seeded` are not), and never present an estimate as an exact spend.
-  The operator sees the same fold in the terminal via `/dispatch costs [7d|30d|mtd]`, and
-  `/dispatch costs whatif <provider/model> --flow <flow>` estimates what a flow would cost per run on
-  another model's rates.
+  The operator sees the same fold drawn as charts on the insights page (`/dispatch insights
+  [7d|30d|mtd]` writes and opens it), and `/dispatch insights whatif <provider/model> --flow <flow>`
+  estimates what a flow would cost per run on another model's rates.
 - `dispatch_triggers` — the configured triggers with their array `index` (needed to edit/delete one).
 
 Control (no approval needed — reversible and money-safe):

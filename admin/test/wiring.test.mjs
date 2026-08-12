@@ -390,47 +390,56 @@ test("runs renders into the pi-dispatch-admin channel with triggerTurn unset", a
   assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
 });
 
-test("costs renders into the pi-dispatch-admin channel with triggerTurn unset", async () => {
+test("insights whatif routes its reply into the pi-dispatch-admin channel with triggerTurn unset", async () => {
+  // The unknown-model path is offline-deterministic: the REAL pricing façade answers null for a
+  // model no catalog carries, and the reply (the long-tail picker) goes through send() like every
+  // other read. Only the first line is pinned -- the closest-ids shortlist depends on the live
+  // catalog and pinning it would couple this suite to pi-ai's model list.
   const { calls, def } = await loadRegistered();
-  await def.handler("costs", fakeCtx().ctx);
+  await def.handler("insights whatif nosuch/model-x --flow tidy", fakeCtx().ctx);
   assert.equal(calls.sendMessage.length, 1);
   const [message, options] = calls.sendMessage[0];
   assert.equal(message.customType, "pi-dispatch-admin");
   assert.equal(message.display, true);
-  assert.match(message.content, /Costs \(/, "the costs view text is the message");
+  assert.match(message.content, /^unknown model: nosuch\/model-x/, "the estimator's reply is the message");
   assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
 });
 
-test("graph renders into the pi-dispatch-admin channel with triggerTurn unset, caps line always", async () => {
-  // Offline-deterministic on purpose: an UNPARSEABLE VALKEY_URL degrades the scheduler read
-  // synchronously ({ unreachable: "Invalid URL" }) without ever creating a redis client -- a dead
-  // PORT would degrade too, but the failFast client emits a stray async error event the test runner
-  // attributes to this test, which is exactly why this suite never opens real connections. The
-  // trigger's folder does not exist, so the enumeration degrades to not-a-git-repo -- the graph must
-  // still render, with its caps line, because degrade never means silent (DES-GRAPH-EDGE-DERIVATION).
-  const dir = mkdtempSync(join(tmpdir(), "admin-graph-wiring-"));
+test("bare insights writes the artifact through the real deps, and the headless skip is said", async () => {
+  // The end-to-end coverage the removed graph-channel test carried, retargeted at the umbrella:
+  // real fs into a temp PI_GRAPH_DIR, an UNPARSEABLE VALKEY_URL (degrades the scheduler read
+  // synchronously; a dead PORT would leak a stray async error event into the runner, which is why
+  // this suite never opens real connections), a triggers file whose folder does not exist (the
+  // enumeration degrades, the page still renders), and SSH_CONNECTION set so the browser spawn is
+  // skipped AND SAID on any box this suite runs on.
+  const dir = mkdtempSync(join(tmpdir(), "admin-insights-wiring-"));
   const triggersPath = join(dir, "triggers.json");
   writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: join(dir, "absent"), flow: "tidy", task: "t" } }] }));
-  const prevTriggers = process.env.PI_TRIGGERS_FILE;
-  const prevValkey = process.env.VALKEY_URL;
+  const graphDir = join(dir, "artifacts");
+  const prev = { triggers: process.env.PI_TRIGGERS_FILE, valkey: process.env.VALKEY_URL, graph: process.env.PI_GRAPH_DIR, ssh: process.env.SSH_CONNECTION };
   process.env.PI_TRIGGERS_FILE = triggersPath;
   process.env.VALKEY_URL = "not-a-url";
+  process.env.PI_GRAPH_DIR = graphDir;
+  process.env.SSH_CONNECTION = "10.0.0.1 22";
   try {
     const { calls, def } = await loadRegistered();
-    await def.handler("graph", fakeCtx().ctx);
-    assert.equal(calls.sendMessage.length, 1);
-    const [message, options] = calls.sendMessage[0];
-    assert.equal(message.customType, "pi-dispatch-admin");
-    assert.equal(message.display, true);
-    assert.match(message.content, /^Graph: triggers and flows/, "the graph text is the message");
-    assert.match(message.content, /caps: chain depth <= \d+, <= \d+ per job, same folder only/, "the caps line renders even on a degraded model");
-    assert.match(message.content, /not-a-git-repo/, "an unreadable folder says so instead of inventing dangling flags");
-    assert.ok(!options || !options.triggerTurn, "must never trigger a paid turn to observe state");
+    const view = fakeCtx({ withCustom: true });
+    await def.handler("insights", view.ctx);
+    assert.equal(calls.sendMessage.length, 0, "the artifact path sends nothing into model context");
+    assert.ok(existsSync(join(graphDir, "insights.html")), "the artifact landed at the stable path");
+    const writtenAt = view.notes.findIndex((n) => /insights written: file:\/\//.test(n[0]));
+    const skippedAt = view.notes.findIndex((n) => /SSH session/.test(n[0]));
+    assert.ok(writtenAt >= 0, "the file:// URL is notified");
+    assert.ok(skippedAt > writtenAt, "the spawn skip is said, after the URL -- never silently");
   } finally {
-    if (prevTriggers === undefined) delete process.env.PI_TRIGGERS_FILE;
-    else process.env.PI_TRIGGERS_FILE = prevTriggers;
-    if (prevValkey === undefined) delete process.env.VALKEY_URL;
-    else process.env.VALKEY_URL = prevValkey;
+    if (prev.triggers === undefined) delete process.env.PI_TRIGGERS_FILE;
+    else process.env.PI_TRIGGERS_FILE = prev.triggers;
+    if (prev.valkey === undefined) delete process.env.VALKEY_URL;
+    else process.env.VALKEY_URL = prev.valkey;
+    if (prev.graph === undefined) delete process.env.PI_GRAPH_DIR;
+    else process.env.PI_GRAPH_DIR = prev.graph;
+    if (prev.ssh === undefined) delete process.env.SSH_CONNECTION;
+    else process.env.SSH_CONNECTION = prev.ssh;
   }
 });
 
@@ -550,33 +559,43 @@ test("argument completion offers subcommands then run ids", async () => {
   assert.ok(Array.isArray(subs) && subs.some((i) => i.value === "status" || i.value === "settings"));
   assert.ok(subs.some((i) => i.value === "setup"), "setup completes as a first token");
   assert.deepEqual(await def.getArgumentCompletions("setu"), [{ value: "setup", label: "setup" }]);
-  assert.deepEqual(await def.getArgumentCompletions("gra"), [{ value: "graph", label: "graph" }], "graph completes as a first token (issue #54)");
+  assert.deepEqual(await def.getArgumentCompletions("insi"), [{ value: "insights", label: "insights" }], "insights completes as a first token (issue #181)");
   // Empty logs dir -> no ids to complete -> null (not []).
   assert.equal(await def.getArgumentCompletions("logs "), null);
   // No subcommand matches -> null.
   assert.equal(await def.getArgumentCompletions("zzz"), null);
 });
 
-test("argument completion offers the costs windows and whatif", async () => {
+test("argument completion offers the insights windows, whatif, then the priced catalog", async () => {
   const { def } = await loadRegistered();
-  const all = await def.getArgumentCompletions("costs ");
-  assert.deepEqual(all.map((i) => i.value), ["costs 7d", "costs 30d", "costs mtd", "costs whatif"]);
-  const m = await def.getArgumentCompletions("costs m");
-  assert.deepEqual(m, [{ value: "costs mtd", label: "mtd" }]);
-  assert.equal(await def.getArgumentCompletions("costs zzz"), null);
+  const all = await def.getArgumentCompletions("insights ");
+  assert.deepEqual(all.map((i) => i.value), ["insights 7d", "insights 30d", "insights mtd", "insights whatif"]);
+  const m = await def.getArgumentCompletions("insights m");
+  assert.deepEqual(m, [{ value: "insights mtd", label: "mtd" }]);
+  assert.equal(await def.getArgumentCompletions("insights zzz"), null);
+  // The third level is the priced catalog -- the long-tail model picker now that no interactive
+  // filter exists. The catalog is pi-ai's, so pin only the shape of one known-stable prefix hit.
+  const targets = await def.getArgumentCompletions("insights whatif anthropic/");
+  assert.ok(Array.isArray(targets) && targets.length > 0, "the catalog completes provider/id targets");
+  assert.ok(targets.every((i) => /^insights whatif anthropic\//.test(i.value)), "prefix-filtered on the typed provider");
 });
 
-test("insights completes as a first token, then html, then the windows; bare insights answers usage (issue #175)", async () => {
-  const { def } = await loadRegistered();
-  assert.deepEqual(await def.getArgumentCompletions("insi"), [{ value: "insights", label: "insights" }]);
-  assert.deepEqual(await def.getArgumentCompletions("insights "), [{ value: "insights html", label: "html" }]);
-  assert.deepEqual(
-    (await def.getArgumentCompletions("insights html ")).map((i) => i.value),
-    ["insights html 7d", "insights html 30d", "insights html mtd"],
-  );
-  const view = fakeCtx({ withCustom: true });
-  await def.handler("insights", view.ctx);
-  assert.match(view.notes[0][0], /usage: \/dispatch insights html/, "the artifact is the feature; bare insights points at it");
+test("junk insights arguments answer usage with zero side effects; the removed verbs stay removed", async () => {
+  // The new-grammar teaching path: a bad window, a bare whatif, a whatif with no --flow, and the
+  // removed `html` verb all answer INSIGHTS_USAGE and neither write nor send. And the removed
+  // subcommands are unknown at the router, not silent aliases.
+  const { calls, def } = await loadRegistered();
+  for (const line of ["insights 12d", "insights whatif", "insights whatif foo/bar", "insights html"]) {
+    const view = fakeCtx({ withCustom: true });
+    await def.handler(line, view.ctx);
+    assert.match(view.notes[0][0], /usage: \/dispatch insights/, `${line} answers the insights usage`);
+    assert.equal(calls.sendMessage.length, 0, `${line} sends nothing`);
+  }
+  for (const line of ["costs", "graph"]) {
+    const view = fakeCtx({ withCustom: true });
+    await def.handler(line, view.ctx);
+    assert.match(view.notes[0][0], /unknown subcommand/, `${line} is gone from the router`);
+  }
 });
 
 test("argument completion offers the known settings keys for `set`/`unset`", async () => {
