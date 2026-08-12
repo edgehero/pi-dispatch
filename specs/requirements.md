@@ -400,8 +400,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The admin surface shall ship as a pi extension in `admin/`, loaded into the operator's
   interactive pi session. It provides operator slash commands for observability (`status`, `runs`, `logs`,
-  `budget`, `triggers`, `costs` — the last with a `whatif` form, `REQ-COST-ANALYTICS` — and `graph`,
-  `REQ-TOPOLOGY-GRAPH`), queue on/off
+  `budget`, `triggers`, and `insights` — the one analytics surface, writing and opening the artifact of
+  `REQ-INSIGHTS-HTML-EXPORT`, with a `whatif` form per `REQ-COST-ANALYTICS`), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
@@ -629,10 +629,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-COST-ANALYTICS
 
-- **Statement**: The harness shall make recorded spend **analyzable**: a **COSTS view** in the admin
-  dashboard (fifth view, `c`), a `/dispatch costs` command for the degraded path, and a `dispatch_costs`
-  read tool, and the browser surface `REQ-INSIGHTS-HTML-EXPORT` — all rendering ONE retention-bounded
-  fold (`DES-COST-FOLD-BY-SCAN`) of the run-history
+- **Statement**: The harness shall make recorded spend **analyzable**: the browser surface
+  `REQ-INSIGHTS-HTML-EXPORT` (the operator's one analytics view), the `dispatch_costs` read tool (the
+  machine-readable path), and the `/dispatch insights whatif` command (the re-pricing estimator) — all
+  rendering ONE retention-bounded fold (`DES-COST-FOLD-BY-SCAN`) of the run-history
   sidecars: spend per **flow**, per **model**, per **day**, per **trigger** (attributed under
   `REQ-TOPOLOGY-GRAPH` (b)'s index-and-type join, with chained/manual/unattributed runs as explicit
   buckets pinned to the table's tail, never blended into a trigger's number), and per **repository
@@ -670,20 +670,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-SUBSCRIPTIONS-FILE-CONTRACT`, `INT-PRICING-EXPORT-CONTRACT`,
   `DES-COST-FOLD-BY-SCAN`, `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`,
   `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `CONST-BUDGET-BEFORE-TOKENS`, `OQ-002`, `OQ-011`
-- **Acceptance**: Given ledgered runs across two models and a declared plan, when the COSTS view opens,
-  then per-flow and per-model spend render over the window, the plan's runs show `plan:<id>` (never
-  `$0.00`), and the plan block shows amortized $/run and the API-equivalent comparison marked `~ est.`;
-  given a window with `limit: null`, then no burn-down renders anywhere; given a what-if on a flow with
-  ledgered history, then the estimate derives from repriced recorded quads, is marked estimated, names
-  its rates version, and reports coverage; given a flow with no ledgered history, then the only offer is
-  the labeled `unmeasured (OQ-002)` band; given `/dispatch costs` with no TTY, then the same fold renders
-  plain with identical labeling; given `dispatch_costs`, then every monetary value in the returned JSON
+- **Acceptance**: Given ledgered runs across two models and a declared plan, when the insights page
+  renders, then per-flow and per-model spend render over the window, the plan's runs show `plan:<id>`
+  (never `$0.00`), and the plan card shows amortized $/run and the API-equivalent comparison marked
+  `~ est.`; given a window with `limit: null`, then no burn-down renders anywhere; given
+  `insights whatif` on a flow with ledgered history, then the estimate derives from repriced recorded
+  quads, is marked estimated, names its rates version, and reports coverage; given a flow with no
+  ledgered history, then the only offer is the labeled `unmeasured (OQ-002)` band; given
+  `dispatch_costs`, then every monetary value in the returned JSON
   carries its `class`; given a run recorded under an older pi-ai pin, then it is counted as
   rates-drifted, and its stored cost is never rewritten; given a sparse window, then plan proration
   denominates on the **requested** window, never the observed run span; given a run whose ledger folded
   rows into `other` past the meter's row cap (`usage.truncated`), then the provenance line counts it as
-  a truncated ledger; given the `(no flow)` bucket, when a what-if opens on it, then the estimate
-  filters records by the null flow key (the display label names no record); given the ledger's
+  a truncated ledger; given records whose flow is null, then the fold's what-if matches them by the
+  null flow key, never by the `(no flow)` display label (pinned at the fold grain — the interactive
+  layer that once exercised it left with the COSTS view); given the ledger's
   `other/other` overflow row, then it is never offered as a what-if target; given a forge run whose
   persisted index+type pair disagrees with the current triggers file, then its spend lands under an
   explicit `(unattributed)` bucket, never under a trigger and never under `(manual/local)`; given a
@@ -692,10 +693,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-TOPOLOGY-GRAPH
 
-- **Statement**: The harness shall make the trigger/flow **topology** visible: a **GRAPH view** in the
-  admin dashboard (sixth view, `g`) and a `/dispatch graph` command for the degraded path, both
-  rendering one assembled model (`DES-GRAPH-EDGE-DERIVATION`) of every trigger, every
-  enumerated skill, and every edge between them, grouped by folder. The screen informs; it changes
+- **Statement**: The harness shall make the trigger/flow **topology** visible: the topology pane of the
+  insights artifact (`REQ-INSIGHTS-HTML-EXPORT`, the one analytics surface) renders one assembled model
+  (`DES-GRAPH-EDGE-DERIVATION`) of every trigger, every
+  enumerated skill, and every edge between them, grouped by folder. The surface informs; it changes
   nothing — no port, no database, no new dependency, all fs/redis access in the read-model. The
   **honesty rules are requirements, not conventions**:
   (a) every trigger naming a `run.flow` renders its config edge — dangling, unverifiable and
@@ -723,13 +724,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (f) the chain caps and the record window render on **every** output, and every truncation or
   dropped edge says so — a capped scan must never read as complete coverage;
   (g) an unreachable folder renders **unverified** and produces no dangling flags;
-  (h) a cron trigger row renders its resident scheduler's **next fire** as a countdown against the
-  model's own `generatedAt` (never a live clock) and its **overdue** state from the scheduler's
-  `overdueMs` — the facts the model computed from its first slice and no surface rendered — and a
-  trigger node may carry the window's **typed spend** (`foldTriggerCosts`, keyed by the node id),
-  rendered only through the shared cost formatter so a plan-covered trigger never reads `$0.00`;
-  spend and schedule are node **facts**: no new edge kind, no new flag, the closed vocabularies
-  stay closed.
+  (h) a cron trigger's tip renders its resident scheduler's **next fire** as a countdown against
+  the page's own generation instant (never a live clock — a stale page shows its stale countdown
+  honestly) and its **overdue** state from the scheduler's `overdueMs`, and a trigger carries the
+  window's **typed spend** badge (`foldTriggerCosts`, keyed by the node id), rendered only through
+  the shared cost formatter so a plan-covered trigger never reads `$0.00`; spend and schedule are
+  node **facts**: no new edge kind, no new flag, the closed vocabularies stay closed.
 - **Scope**: Display only, from the operator's session. The graph triggers nothing, writes nothing,
   and is deliberately **not** a model-callable tool: the enumeration spawns git per folder, and the
   topology is for the operator's eyes (`DES-CLI-SURFACE`'s ungated operator-typed tier).
@@ -741,8 +741,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `DES-GRAPH-EDGE-DERIVATION`, `DES-ADMIN-VIA-PI-EXTENSION`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-008`, `OQ-009`, `OQ-022`
 - **Acceptance**: Given a triggers file with a cron trigger whose folder enumeration succeeds and a
-  label trigger, when `/dispatch graph` runs, then the cron trigger shows exact run counts joined by
-  jobId, the label trigger shows counts joined by `triggerIndex` only, and both config edges render;
+  label trigger, when the insights artifact renders, then the cron trigger shows exact run counts
+  joined by jobId, the label trigger shows counts joined by `triggerIndex` only, and both config
+  edges render;
   given a record whose `triggerIndex` exceeds the current file, then it counts as unattributed and
   attributes to no row; given a folder whose skills include one no trigger names, with no
   `ai-trigger` and no mention, then it flags `orphan`; given a trigger whose flow is absent at HEAD
@@ -753,55 +754,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-GRAPH-HTML-EXPORT
 
-- **Statement**: The harness shall render the assembled topology (`REQ-TOPOLOGY-GRAPH`) as a
-  **self-contained HTML artifact** on operator command: `/dispatch graph html [--no-open]` writes one
-  file — inline SVG/CSS/JS, working over `file://` with **zero external requests** — atomically
-  (tmp+rename) to the **stable path** `<graphDir>/graph.html`, prints its `file://` URL **before any
-  spawn**, and best-effort opens the platform browser. The page carries its own refresh: a Reload
-  control, an off/5s/30s auto-reload, a live staleness stamp, and view state (pan/zoom, selection,
-  the auto-reload setting) that survives its own reloads via the URL hash — so a re-run of the
-  command updates an already-open tab. **No port is ever bound; nothing serves the file.** The page
-  states the same honesty counters the text and TUI surfaces state — chain refusals, unreadable
-  injected dirs, truncations, dropped and unattributed counts — and an observed edge's label carries
-  its recency beside its count when the fold recorded one: three surfaces of one model never
-  disagree about what was refused, unread, or how fresh an observation is.
-- **Scope**: Display only. The artifact carries run-record fields and operator-authored
-  trigger/skill strings only — **never `.log` bytes, and a host path beyond a folder's basename only
-  under the explicit `--full-paths` opt-in** (the paths are the operator's own reviewed
-  `triggers.json` config, and "which folder is this" is a fair question on a multi-folder
-  deployment; the default stays basename-only because the artifact is a durable, shareable file).
-  Over SSH or without a display the spawn is skipped and the skip is stated; `--no-open` skips it
-  unconditionally; a write failure notifies the path and never opens. Zero new dependencies.
-- **Why**: The interactivity a topology needs (pan/zoom, hover detail, click-to-trace) needs a
-  browser; it does not need a server. A static file keeps `DES-ADMIN-VIA-PI-EXTENSION`'s load-bearing
-  no-port property intact — the socket→file substitution `DES-JOB-OUTBOX-CHAINING` canonised — and
-  the stable-path atomic overwrite is what turns "a snapshot file" into "a tab that stays current":
-  the page reloads bytes on disk, and tmp+rename means it never reads half of them.
-- **Traces to**: `REQ-TOPOLOGY-GRAPH`, `DES-GRAPH-EDGE-DERIVATION`, `DES-ADMIN-VIA-PI-EXTENSION`,
-  `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-024`
-- **Acceptance**: Given `/dispatch graph html`, then exactly one artifact lands at
-  `<graphDir>/graph.html` via a `.tmp` rename with mode 0644, the `file://` URL is notified before
-  any opener spawn, and the rendered bytes contain no external `src`/`href`/`url()`/`@import`, no
-  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path — unless
-  `--full-paths` was passed, in which case exactly the configured `run.folder` paths appear; given a
-  second run, the artifact lands at the **same** path; given `SSH_CONNECTION`/`SSH_TTY` (any
-  platform) or linux without `DISPLAY`/`WAYLAND_DISPLAY`, the spawn is skipped and the reason
-  notified; given `--no-open`, no spawn ever; given a write failure, an error names the path and no
-  browser opens; given the page open in a browser, its auto-reload reflects a re-run's changes
-  without resetting the view.
+- **SUPERSEDED** (2026-08-12, issue #181): the topology-only artifact and its `/dispatch graph html`
+  command are removed; every normative clause this entry carried — the self-contained one-file
+  posture, the atomic stable-path write, URL-before-spawn, the page's own refresh loop and hash view
+  state, the no-port property, the `.log`/host-path content bans with the `--full-paths` opt-in, and
+  the headless skip-and-say — now lives verbatim in `REQ-INSIGHTS-HTML-EXPORT`, whose artifact
+  carries the same topology as one of its panes. The ID stays because spec IDs are permanent
+  addresses; the history of what this entry required is in the Revision History rows that built it.
 
 ## REQ-INSIGHTS-HTML-EXPORT
 
-- **Statement**: The harness shall render the **unified insights artifact** on operator command:
-  `/dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]` writes one self-contained HTML
-  file — inline SVG/CSS/JS, `file://`, zero external requests — atomically to the stable path
-  `<graphDir>/insights.html`, prints its URL before any spawn, and best-effort opens the browser,
-  all under `REQ-GRAPH-HTML-EXPORT`'s write/open/headless discipline verbatim. The page unifies the
-  assembled topology (`REQ-TOPOLOGY-GRAPH`, the same scene the graph artifact draws, spend badges
-  added per its (h)) with the cost fold (`REQ-COST-ANALYTICS`) rendered as **hand-rolled inline SVG
-  charts**: KPI tiles, plan verdict cards, a daily spend column chart, and the four breakdown bar
-  lists (flow / trigger / model / repo). Every labeling rule of `REQ-COST-ANALYTICS` (a)-(g) applies
-  to this surface verbatim, plus the visual clauses this surface adds:
+- **Statement**: The harness shall render the **unified insights artifact** — the operator's ONE
+  analytics surface — on the bare command: `/dispatch insights [7d|30d|mtd] [--no-open]
+  [--full-paths]` writes one self-contained HTML file — inline SVG/CSS/JS, `file://`, **zero
+  external requests** — atomically (tmp+rename) to the **stable path** `<graphDir>/insights.html`,
+  prints its `file://` URL **before any spawn**, and best-effort opens the platform browser; the
+  overlay's `i` key runs the same command between overlays. The page carries its own refresh: a
+  Reload control, an off/5s/30s auto-reload, a live staleness stamp, and view state that survives
+  its own reloads via the URL hash — so a re-run updates an already-open tab, and tmp+rename means
+  the tab never reads half a file. Over SSH or without a display the spawn is skipped and the skip
+  is stated; `--no-open` skips it unconditionally; a write failure notifies the path and never
+  opens. The page unifies the
+  assembled topology (`REQ-TOPOLOGY-GRAPH` — its honesty counters, edge recency, schedule tips and
+  spend badges per its (h)) with the cost fold (`REQ-COST-ANALYTICS`) rendered as **hand-rolled
+  inline SVG charts**: KPI tiles, plan verdict cards, a daily spend column chart, and the four
+  breakdown bar lists (flow / trigger / model / repo). Every labeling rule of `REQ-COST-ANALYTICS`
+  (a)-(g) applies to this surface verbatim, plus the visual clauses this surface adds:
   (a) an estimated figure renders dashed and translucent beside its `~ est.` text — hue is never
   the sole encoding of a cost class;
   (b) a plan-covered bucket draws a `plan:<id>` chip and **no dollar bar** — a zero-length bar is
@@ -815,29 +793,39 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   input yields a valid page, never a stack trace. **No port is ever bound; nothing serves the
   file; no new model-callable tool exists for it** (the topology assembly spawns git per folder,
   `REQ-TOPOLOGY-GRAPH` Scope).
-- **Scope**: Display only. The artifact carries what its two parents already carry — never `.log`
-  bytes, host paths only under `--full-paths`. The default window is **30d**, not costs' mtd,
-  because the topology half is pinned at a 30-day record window and one page's two halves should
-  describe the same period unless the operator asks otherwise. The what-if stays a TUI/CLI feature;
-  `seeded` dollars never render here.
-- **Why**: The COSTS frame communicates 76 columns at a time; a human reading "what is this
+- **Scope**: Display only. The artifact carries run-record fields and operator-authored
+  trigger/skill strings only — never `.log` bytes, and a host path beyond a folder's basename only
+  under the explicit `--full-paths` opt-in (the paths are the operator's own reviewed config; the
+  default stays basename-only because the artifact is a durable, shareable file). The default
+  window is **30d**, not the old costs mtd, because the topology half is pinned at a 30-day record
+  window and one page's two halves should describe the same period unless the operator asks
+  otherwise. The what-if is the `insights whatif` command; `seeded` dollars never render on the
+  page. Zero new dependencies.
+- **Why**: A terminal frame communicates 76 columns at a time; a human reading "what is this
   deployment doing and what does it cost" reads a chart faster than a table and a topology faster
-  than either — and the two questions answer each other, so they belong on one page (issue #175).
-  The chart grammar is hand-rolled for the same reason the graph's layout is: the page must work
-  over `file://` with zero external requests, and a charting dependency is a supply chain riding a
-  security posture.
-- **Traces to**: `REQ-GRAPH-HTML-EXPORT`, `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`,
-  `DES-COST-FOLD-BY-SCAN`, `DES-ADMIN-VIA-PI-EXTENSION`, `OQ-024`
-- **Acceptance**: Given `/dispatch insights html`, then exactly one artifact lands at
-  `<graphDir>/insights.html` via tmp+rename with its URL notified first; given a plan-covered
+  than either — and the two questions answer each other, so they belong on one page, and one page
+  beats five overlapping surfaces answering it (issue #181). A static file keeps
+  `DES-ADMIN-VIA-PI-EXTENSION`'s load-bearing no-port property intact — the socket→file
+  substitution `DES-JOB-OUTBOX-CHAINING` canonised — and the chart grammar is hand-rolled for the
+  same reason the topology layout is: the page must work over `file://` with zero external
+  requests, and a charting dependency is a supply chain riding a security posture.
+- **Traces to**: `REQ-COST-ANALYTICS`, `REQ-TOPOLOGY-GRAPH`, `REQ-GRAPH-HTML-EXPORT` (superseded
+  into this entry), `DES-COST-FOLD-BY-SCAN`, `DES-ADMIN-VIA-PI-EXTENSION`, `OQ-024`
+- **Acceptance**: Given `/dispatch insights`, then exactly one artifact lands at
+  `<graphDir>/insights.html` via a `.tmp` rename with mode 0644, its URL notified before any
+  opener spawn, and the rendered bytes contain no external `src`/`href`/`url()`/`@import`, no
+  `fetch`/`XMLHttpRequest`, no `innerHTML`, no `.log` content, and no absolute host path unless
+  `--full-paths` was passed; given a second run, the artifact lands at the **same** path; given
+  `SSH_CONNECTION`/`SSH_TTY` (any platform) or linux without `DISPLAY`/`WAYLAND_DISPLAY`, the
+  spawn is skipped and the reason notified; given `insights html` or any junk positional, then the
+  command answers usage and writes nothing; given a plan-covered
   breakdown row, then the page shows `plan:<id>` and draws no bar, and `$0.00` appears nowhere;
   given an estimated day, then its column is dashed/translucent and its tooltip carries `~ est.`;
   given a window with `limit: null`, then the card says "limit undisclosed by vendor" and no
   burn-down renders; given a hostile flow name or plan id, then the page contains exactly one
   script element and the string renders entity-escaped; given the same payload and instant twice,
   then the bytes are identical, permuted input arrays included; given an unreachable cost scan,
-  then the page still renders the topology with a cost banner; given `12d`, then the command
-  answers usage and writes nothing.
+  then the page still renders the topology with a cost banner.
 
 ## REQ-SCOPED-PAUSE-WINDOWS
 
@@ -1309,6 +1297,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-12 | Issue #181 (insights becomes the ONE analytics surface). **REQ-INSIGHTS-HTML-EXPORT AMENDED**: the command is the bare `/dispatch insights [7d\|30d\|mtd] [--no-open] [--full-paths]` — no `html` verb to remember, and the removed verb answers usage on purpose (a dead verb that half-works is drift); the overlay's `i` key runs the same command between overlays; the entry absorbs, verbatim, every normative clause REQ-GRAPH-HTML-EXPORT carried (atomic stable path, URL-before-spawn, the page's own refresh loop and hash view state, headless skip-and-say, the content bans and the `--full-paths` opt-in, no port); the what-if sentence inverts to "the what-if is the `insights whatif` command". **REQ-GRAPH-HTML-EXPORT SUPERSEDED** — the ID stays as a permanent address, the artifact and its command are gone, the discipline lives on. **REQ-COST-ANALYTICS AMENDED**: the surfaces become the insights page, `dispatch_costs`, and `insights whatif`; the COSTS view (fifth view, `c`) and `/dispatch costs` leave the Statement; the lettered labeling rules (a)-(g) stand untouched; the `(no flow)` what-if acceptance row rewords to the fold grain (the null-key match stays pinned in costs.test.mjs — the interactive layer that exercised it is gone) and the no-TTY plain-text row leaves with the command (the artifact writes and prints its URL even headless, and `dispatch_costs` is the machine path). **REQ-TOPOLOGY-GRAPH AMENDED**: the surface is the insights artifact's topology pane; the GRAPH view (sixth view, `g`) and `/dispatch graph` leave the Statement; the honesty rules (a)-(h) stand, with (h) retargeted to the page's tips and badges — and the removal EXPOSED that (h)'s next/overdue facts had no artifact surface (the TUI and text renderers carried them alone), so the scene's trigger tips now render `next`/`overdue` against the page's own generation instant, landed in the same PR that removed their last other home. **REQ-ADMIN-VIA-PI-EXTENSION AMENDED**: the command list drops `costs` and `graph` for `insights`; the model-callable tool list is UNCHANGED, checked (`dispatch_costs` stays — it returns the cost fold only, and topology stays non-model-callable). **INT-* UNCHANGED, checked** (no interface names the removed commands; verified by grep). |
 | 2026-08-12 | Issue #175 (the insights artifact, the fourth slice). **NEW `REQ-INSIGHTS-HTML-EXPORT`**: `/dispatch insights html [7d|30d|mtd]` writes `<graphDir>/insights.html` — the topology scene (spend-badged per REQ-TOPOLOGY-GRAPH (h)) beside the cost fold drawn as hand-rolled inline SVG charts, under REQ-GRAPH-HTML-EXPORT's write/open/headless discipline verbatim and REQ-COST-ANALYTICS' labeling rules verbatim, plus the visual clauses (dashed/translucent = estimated with hue never the sole encoding; a plan-covered bucket draws a chip and NO dollar bar; `≥` on charts; both windows stated; gap days present; null byTrigger renders "not computed"). Default window 30d, deliberately not costs' mtd — the topology half is pinned at a 30d record window and one page's halves should agree. No port, no served page, no new model-callable tool, no charting dependency (a supply chain riding a security posture). **REQ-COST-ANALYTICS AMENDED**, one sentence: the insights artifact joins the named surfaces; rules (a)-(g) unchanged. **REQ-GRAPH-HTML-EXPORT UNCHANGED, checked** — `graph html` stays the lighter topology-only export, not an alias. **REQ-TOPOLOGY-GRAPH UNCHANGED, checked** (its Scope's no-tool clause now covers two commands). |
 | 2026-08-12 | Issue #175 (spend and schedule on the graph, the third insights slice). **REQ-TOPOLOGY-GRAPH AMENDED** with (h): cron rows render next-fire/overdue from the resident scheduler — `next` and `overdueMs` were computed by the model's first slice and rendered by nothing, a design-to-data gap of exactly the kind the #54 delivery lesson names — and trigger nodes may carry the window's typed spend (`foldTriggerCosts`, keyed by the node id), fmtCost-rendered so a plan-covered trigger never reads `$0.00`. Spend and schedule are node FACTS: the closed edge/flag vocabularies are unchanged on purpose, pinned by test. **REQ-GRAPH-HTML-EXPORT AMENDED**: the artifact now states the chain-refusal and injected-unreachable honesty counters the text and TUI surfaces always stated (the allowlist dropped them, so three surfaces of one model disagreed), and an observed edge's label carries its recency beside its count when the fold recorded one. Node spend deliberately does NOT ride graph.html: the page may not use the `from` clause, a duplicated money formatter is a parity liability, and the insights artifact (next slice) renders spend through the real shared formatter instead. **REQ-COST-ANALYTICS UNCHANGED, checked** (foldTriggerCosts gained consumers, not semantics). |
 | 2026-08-12 | Issue #175 (per-trigger and per-repo spend, the second insights slice). **REQ-COST-ANALYTICS AMENDED**: the fold's rollup list gains per **trigger** and per **repository target**, and the COSTS view's `f` key cycles four tables (flow / model / trigger / repo) with the footer hint renamed to `[f] table` so it still fits width 80 whole. Trigger attribution is REQ-TOPOLOGY-GRAPH (b)'s own index-and-type join, produced by the read-model (`attributeRunsToTriggers`) and passed INTO the fold — the doctrine is not re-derived, and the fold stays fs-free. Chained runs are their own explicit bucket, deliberately NOT rolled up to the ancestor trigger: a parent chain walked across the retention boundary attributes partially, and a partial rollup wearing a trigger's name would lie. Two acceptance rows added (the disagreeing-pair bucket; null byTrigger renders as absence). The per-trigger spend map (`foldTriggerCosts`) is keyed by the graph node id `trigger:<index>` for the topology surfaces the next slices add. `dispatch_costs` returns the same fold, so its JSON gains the two arrays — additive, and every dollar still carries its class. **REQ-TOPOLOGY-GRAPH UNCHANGED, checked** (its join doctrine gained a second consumer, not a second definition). |

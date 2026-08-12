@@ -248,6 +248,10 @@ function normalizeModel(model) {
       runs: intOr(n.runs, 0),
       lastOutcome: typeof n.lastOutcome === "string" ? n.lastOutcome : null,
       lastEndedAt: typeof n.lastEndedAt === "string" || Number.isFinite(n.lastEndedAt) ? n.lastEndedAt : null,
+      // Schedule facts (issue #181): with the terminal views gone this page is the last surface
+      // REQ-TOPOLOGY-GRAPH (h) has, so the facts the model always computed ride the tip here.
+      next: typeof n.next === "string" || Number.isFinite(n.next) ? n.next : null,
+      overdueMs: Number.isFinite(n.overdueMs) && n.overdueMs > 0 ? n.overdueMs : null,
       isSub: n.isSub === true,
       group: typeof n.group === "string" ? n.group : null,
       // Prose-loop hints from the SKILL.md body; capped and clipped so a hostile skill cannot
@@ -738,6 +742,17 @@ function relTime(nowMs, v) {
 // The hover tooltip content, prebuilt here so the page script never assembles markup: the client
 // assigns these strings via textContent only, which is what makes "no innerHTML anywhere" testable
 // as a plain substring ban.
+/** A coarse duration for the schedule facts: minutes under an hour, hours under two days, else days. */
+function relSpan(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "<1m";
+  const mn = Math.floor(ms / 60000);
+  if (mn < 1) return "<1m";
+  if (mn < 60) return `${mn}m`;
+  const h = Math.floor(mn / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 function buildTip(n, flags, groupLabel, nowMs) {
   const lines = [];
   if (n.kind === "trigger") {
@@ -761,6 +776,13 @@ function buildTip(n, flags, groupLabel, nowMs) {
       lines.push(`runs: ${n.runs}${n.lastOutcome !== null ? ` · last ${n.lastOutcome}${rel !== null ? ` ${rel}` : ""}` : ""}`);
     } else {
       lines.push("no runs in window");
+    }
+    // Overdue outranks a stale countdown; next counts against the injected instant, never a clock,
+    // so a stale page shows its stale countdown honestly (and byte-determinism holds).
+    if (n.overdueMs !== null) lines.push(`overdue ${relSpan(n.overdueMs)}`);
+    else {
+      const nextMs = typeof n.next === "number" ? n.next : typeof n.next === "string" ? Date.parse(n.next) : NaN;
+      if (Number.isFinite(nextMs) && Number.isFinite(nowMs) && nextMs > nowMs) lines.push(`next ${relSpan(nextMs - nowMs)}`);
     }
   }
   if (n.aiTrigger) lines.push("chainable: ai-trigger allow");

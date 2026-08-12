@@ -339,6 +339,14 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
   dropped.meta.droppedObservedEdges = 4;
   assert.ok(buildGraphHtml(dropped, { now: NOW }).includes("4 observed edges dropped"), "dropped-edge counter renders when set");
 
+  // Schedule facts in the tips (issue #181): with the terminal views gone this page is the last
+  // surface REQ-TOPOLOGY-GRAPH (h) has. The canned scheduler's next fire sits 191 days past NOW.
+  assert.ok(out.includes("next 191d"), "a cron tip counts down to the resident scheduler's next fire");
+  const overdue = buildGraphModel(CANNED());
+  const cron = overdue.nodes.find((n) => n.id === "trigger:0");
+  cron.overdueMs = 2 * 3600_000;
+  assert.ok(buildGraphHtml(overdue, { now: NOW }).includes("overdue 2h"), "overdue outranks the countdown");
+
   // The two counters the text and TUI surfaces always stated and this page dropped (issue #175):
   // three surfaces of one model must not disagree about what was refused or unreadable.
   assert.ok(out.includes("1 chain requests refused (caps or gate)"), "the canned refusals reach the legend");

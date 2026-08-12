@@ -126,7 +126,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   retry policy — each of which is an independent requirement here, not a bonus. Building four mechanisms
   to avoid one dependency is precisely how a solo-maintainer project drowns in maintenance. Its Bull
   Board dashboard was a fifth draw; `DES-ADMIN-VIA-PI-EXTENSION` drops the **served** web surface
-  entirely (the graph HTML artifact is a static file the operator's own browser opens — nothing serves
+  entirely (the insights HTML artifact is a static file the operator's own browser opens — nothing serves
   it, nothing listens), so the case now stands on the four queue mechanisms alone. Redis persistence (AOF) is what makes
   `REQ-QUEUE-BURST-NO-DROP` survive a reboot; an in-memory queue would lose the wait-list on the first
   restart.
@@ -859,8 +859,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Decision**: The admin surface is a **pi extension** shipped in an `admin/` workspace, loaded into the
   operator's own interactive pi session (via `-e`, `~/.pi/agent/extensions`, or a trust-gated
   `.pi/extensions`). It provides operator-only slash commands
-  (`/dispatch status|pause|resume|runs|logs|budget|triggers|costs|graph|settings|set|unset`) and one
-  self-refreshing TUI overlay component with **six in-component views**: **LIST** — a framed,
+  (`/dispatch status|pause|resume|runs|logs|budget|triggers|insights|settings|set|unset`) and one
+  self-refreshing TUI overlay component with **four in-component views**: **LIST** — a framed,
   **theme-colored** panel (color via pi's injected `Theme`, applied post-layout so pi's ANSI-aware
   `visibleWidth` still frames it) carrying a status header, day/week/month **SPEND meters** (colored by the
   same `windowState` the worker enforces) plus a daily **token** counter, a unified **TRIGGERS** pane whose
@@ -883,33 +883,21 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   job's `.log` **inside the overlay** through an injected `deps.tailLog` seam whose `fs` read lives in
   `index.ts` (the log CONTENT stays `clip`-stripped and uncolored — only the chrome is themed), opening
   **pinned to the bottom in follow mode**: scrolling up pauses following, reaching the bottom re-arms it,
-  and the footer names the state (`follow`/`paused`) so stale lines cannot pass as live; and **COSTS**
-  (`c`, `REQ-COST-ANALYTICS`) — verdict-first cost analytics over one retention-bounded fold
-  (`DES-COST-FOLD-BY-SCAN`): per-plan SAVING/LOSING verdicts with the API-rate comparison, a daily spend
-  sparkline, by-flow/by-model tables whose every money cell funnels through the typed-cost formatter,
-  plan blocks showing amortized $/run and peak-window **facts** (never an invented burn-down), a
-  provenance footer naming the pi-ai pin and the unmetered/not-repriceable counts, and a keyboard
-  **what-if** (`w` cycles a shortlist of models seen in history plus declared counterfactual targets;
-  `/` type-to-filters the full priced catalog through the line-input primitive) whose estimates are
-  always marked, name their rates version, and carry the cross-provider tokenizer caveat when the
-  target's provider differs. The costs data path is lazy and throttled: fetched on view entry and window
-  change, refreshed on the poll tick only when stale — the fold is cheap, but a per-second full-directory
-  scan is the kind of quiet load a dashboard must not add. And **GRAPH** (`g`, `REQ-TOPOLOGY-GRAPH`,
-  issue #54) — the trigger/flow topology from the same assembled model as `/dispatch graph`
-  (`DES-GRAPH-EDGE-DERIVATION` is the one place its edge rules live): a folder-grouped tree with
-  foldable group headers, trigger rows carrying joined run stats and dangling badges, skill rows with
-  reachability badges and their outgoing edges as evidence-labelled annotation rows, the honesty
-  counters, and the caps line on every render. Enter on a trigger row reuses the existing
-  TRIGGER_DETAIL drill by raw file index. The graph data path is the **strictest** of the three view
-  policies: fetched on entry and on `r` only, NEVER on the poll tick, because the enumeration spawns
-  git per folder — heavier than even the costs scan, and topology changes when the operator edits
-  things, not per second. The unframed degrade reuses `renderGraph` whole. `graph html`
-  (`REQ-GRAPH-HTML-EXPORT`) additionally renders the same model as a **self-contained HTML artifact**
-  (inline SVG/CSS/JS, zero external requests, works over `file://`) written **atomically to the stable
-  path** `<graphDir>/graph.html` (tmp+rename — stable so re-running updates an already-open tab
-  through the page's own Reload/auto-reload controls, atomic so that tab's reload never reads half a
-  file), then prints the `file://` URL **first** and best-effort opens the platform browser through
-  the worker's shared opener — skipped and said over SSH or without a display, `--no-open` always. The
+  and the footer names the state (`follow`/`paused`) so stale lines cannot pass as live. Analytics
+  live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
+  "what is this deployment wired to do and what does it cost": bare `/dispatch insights` (and the
+  overlay's `i` key, which resolves the overlay with a done-action so `index.ts` writes and opens
+  the page between overlays — the addTrigger route, no dep seam, no TUI suspend bracket) writes the
+  self-contained page **atomically to the stable path** `<graphDir>/insights.html` (tmp+rename —
+  stable so re-running updates an already-open tab through the page's own Reload/auto-reload
+  controls, atomic so that tab's reload never reads half a file), prints the `file://` URL **first**
+  and best-effort opens the platform browser through the worker's shared opener — skipped and said
+  over SSH or without a display, `--no-open` always; `insights whatif` keeps the re-pricing
+  estimator as a command (its reply goes through the admin channel like every read). The dashboard
+  itself carries **no analytics fetch paths at all** anymore: the two per-view refresh policies the
+  removed COSTS/GRAPH views needed (the stale-gated tick piggyback; entry-plus-`r`-only around the
+  git-spawning enumeration) left with them, and the overlay is back to one snapshot poll plus the
+  tail read. The
   extension still **binds no network port at all**: a file with no server is not a surface — nothing
   listens, nothing off-machine gained reachability — so this stays strictly narrower than the
   superseded `127.0.0.1` panel. The artifact carries **run-record fields and operator-authored
@@ -1957,6 +1945,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-12 | Issue #181 (insights becomes the ONE analytics surface). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: six in-component views become FOUR — the COSTS and GRAPH views leave the overlay for the insights artifact, taking their two per-view refresh policies with them (the stale-gated tick piggyback and the entry-plus-`r`-only posture existed for those fetch paths; the overlay is back to one snapshot poll plus the tail read); the slash-command list drops `costs` and `graph` for `insights`; the graph-html paragraph re-homes onto the bare `insights` command; the LIST footer's `c costs`/`g graph` pair becomes `i insights` (51+18=69 of 76 columns, the arithmetic comment re-run), and the `i` key resolves the overlay with a done-action so index.ts writes and opens the page between overlays — the addTrigger route, deliberately not a dep seam and not a TUI suspend bracket, and deliberately BEFORE the dialog guard (the action needs no dialogs, and an older pi without them must still reach the one analytics surface). `DES-QUEUE-BULLMQ-OVER-CUSTOM`'s parenthetical names the insights artifact now. The dashboard's fs ban is UNCHANGED, checked, and dashboard.ts drops its pricing/costs/graph-model imports entirely. **DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (the fold and its joins are what the page is made of; nothing about them moved). **DES-GRAPH-EDGE-DERIVATION UNCHANGED, checked** (the edge rules' one home; the model gained no vocabulary). |
 | 2026-08-12 | Issue #175 (the insights artifact, the fourth slice). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: `insights html` joins the slash-command list (bare `insights` answers usage — the artifact IS the feature), completion covers `insights html <window>`, and the artifact lands beside `graph.html` under the one `graphDir` (a second directory would churn resolvePaths and the wizard for zero capability). The no-port property (:913) and the served-page rejection (the #54 row) are not reopened: this is a second `file://` artifact, same socket-to-file substitution. The factoring facts are load-bearing and recorded here: `graph-html.mjs` may be a source of exports for a sibling pure emitter, it may never load one itself — its purity pin is substring-level and directional, which is exactly what makes the reuse safe — so `buildGraphScene` (the normalize+layout+SVG-emission half of `buildGraphHtml`, a behavior-preserving extraction) is what `insights-html.mjs` composes, and the money strings come from the REAL `panel.mjs` formatter (zero own module loads there), not a hand-copied twin. Rejected: a shared third emitter module (impossible under the substring ban without weakening it); duplicating the layout/escaping (an escapeHtml drift between two artifacts is an XSS waiting); folding costs into `graph.html` in place (an operator sharing topology should not be forced to share spend); a charting library (the file:// posture forbids external requests, and hand-rolled rectangles need no supply chain). **DES-GRAPH-EDGE-DERIVATION UNCHANGED, checked. DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (the artifact consumes the fold; the fold learned nothing new). |
 | 2026-08-12 | Issue #175 (spend and schedule on the graph, the third insights slice). **DES-GRAPH-EDGE-DERIVATION AMENDED**, one clause: a trigger node may carry `cost` (the typed spend `foldTriggerCosts` mapped onto its node id) — spend is a node fact beside runs/lastOutcome, NOT a new edge kind and NOT a flag, so the closed vocabularies and their pins stand byte-identical; the assemblers wire it with one extra file read (subscriptions) and two pure folds over the scan they already paid for, which is why the GRAPH view's entry-plus-`r`-only refresh policy is untouched (the real-poll pin proves it). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: gtrigger rows phrase `next` as a countdown against the model's own `generatedAt`, never a live clock — a stale model shows its stale countdown honestly, and render() stays a pure read of state. graph.html's normalizeModel allowlist gains `meta.chainRefusals`, `meta.injectedUnreachable` and observed-edge `lastEndedAt`; node `cost` is deliberately NOT allowlisted there (the page cannot use the `from` clause, and a hand-copied money formatter pinned by parity test is a cost the insights artifact avoids by taking the real formatter). **DES-COST-FOLD-BY-SCAN UNCHANGED, checked.** |
 | 2026-08-12 | Issue #175 (per-trigger and per-repo spend, the second insights slice). **DES-COST-FOLD-BY-SCAN AMENDED**: the fold gains `byTrigger`/`byRepo` rollups and the `foldTriggerCosts` node-id-keyed spend map, with the join passed IN (`attributeRunsToTriggers`, new in the read-model beside `joinRunsToTriggers`, whose index+type doctrine and cron jobId grammar it reuses verbatim — `triggerMatchLabel` is now exported from graph-model so the label vocabulary has one home); "the fold re-deriving the join" joins the Rejected list. `repoOfTarget` moves the target-stripping grammar into costs.mjs and `forgeRepoTargets` now calls it, so the graph's repo list and the cost fold's repo table can never disagree on what a repo is. **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: the COSTS view's `f` cycles four tables; the trigger join adds one FILE read (readTriggers) to fetchCosts — no spawn, so the 10s stale-gated poll piggyback policy stands and the GRAPH view's entry-plus-`r` posture is untouched. **DES-GRAPH-EDGE-DERIVATION UNCHANGED, checked.** |

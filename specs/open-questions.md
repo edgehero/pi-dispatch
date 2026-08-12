@@ -760,9 +760,10 @@ adversarial passes did.
 
 ---
 
-## OQ-024 — the graph export's browser spawn is verified by reading, not by running everywhere
+## OQ-024 — the insights export's browser spawn is verified by reading, not by running everywhere
 
-- **Question**: `graph html` best-effort spawns the platform opener (`open`/`xdg-open`/`cmd start`)
+- **Question**: `/dispatch insights` (originally `graph html`, whose artifact issue #181 folded into
+  the insights page) best-effort spawns the platform opener (`open`/`xdg-open`/`cmd start`)
   through the worker's shared `open-browser` module. The argv table is pinned per platform by unit
   test and the module is the same one `setup github` has shipped since issue #81 — but no CI runs a
   desktop session on all three platforms, so "the browser actually appears" is verified by reading
@@ -776,7 +777,8 @@ adversarial passes did.
   already have.
 - **What would close it**: a per-platform desktop CI job, which this project will not buy for a
   convenience spawn.
-- **Raised by**: issue #54, while landing `REQ-GRAPH-HTML-EXPORT`.
+- **Raised by**: issue #54, while landing `REQ-GRAPH-HTML-EXPORT`; rescoped to the insights export
+  by issue #181, which superseded that entry into `REQ-INSIGHTS-HTML-EXPORT`.
 
 ---
 
@@ -784,6 +786,7 @@ adversarial passes did.
 
 | Date | Change |
 |---|---|
+| 2026-08-12 | Issue #181. **OQ-024 RESCOPED** from the graph export to the insights export: `graph html` is gone (REQ-GRAPH-HTML-EXPORT superseded into REQ-INSIGHTS-HTML-EXPORT) and the bare `/dispatch insights` is now the one command carrying the browser spawn; the question, the WATCH posture, the bounds (`--no-open`, the SSH/display skip, the printed URL as the contract) and what-would-close-it are all unchanged — only the surface name moved. |
 | 2026-08-11 | Issue #54 (`REQ-GRAPH-HTML-EXPORT`). Added **OQ-024** (`WATCH`, the `OQ-016` shape): the graph export's browser spawn is verified by reading and by the pinned per-platform argv table, not by a desktop CI on three platforms this project will not buy for a convenience spawn; the printed `file://` URL is the contract and the failure mode is one manual click. **OQ-008 and OQ-009 pointers already in place from the earlier #54 slices, UNCHANGED, checked**: the export re-reads the triggers file per run like every other graph consumer, and draws no forge-parent or cross-folder chain edge because the model it renders cannot contain one. |
 | 2026-08-09 | Follow-up audit after issue #60. Added **`OQ-023`**: a prepare-stage refusal posts no comment on the issue, so a requester sees a label applied and then nothing. True of `sha-gone` since it shipped and now true of six reasons, because #60 added five. Recorded rather than fixed, and recorded as NOTICED rather than designed: the ordering that makes these refusals free is what puts them past the point the processor's `comment` seam is wired for, so the silence is a consequence of `CONST-BUDGET-BEFORE-TOKENS` rather than a judgement about what is worth saying. What bounds it is that every one is in the run record with its own reason token and that `doctor` reports the `skills-dir-*` causes before anything fires. What would close it is threading the `comment` seam into the policy branch, which carries one real question: a repo over a cap would then comment on every delivery, so it wants the dedup the spend refusals already have. This entry exists because the #60 plan said it was worth an OQ and then did not write one. |
 | 2026-08-09 | Issue #60 (Gap 2). Added **`OQ-022`**: injected skills are deliberately not AI-reachable, because `DES-AI-TRIGGER-FLOW-GATE` reads the target repo's committed `.pi/skills` at a pinned sha and an injected skill is not there. Recorded as ACCEPTED rather than as a risk row, because it is the fail-CLOSED direction and the residual is an operator SURPRISE rather than a hole: an injected `SKILL.md` carrying `ai-trigger: allow` is never read, so the opt-in is written and nothing honours it, which is why `doctor` now warns. Records what would NOT be an acceptable close -- reading the frontmatter out of the injected tree, since that opt-in is meaningful in a repo only because a merge gated it, and in a runtime-editable directory it would put the authorization inside the content being authorized. `OQ-012` **UNCHANGED, checked**: an operator-built image is unaffected, since the injected root is a worker-side copy into `/job` and needs nothing of the image. `OQ-004` **UNCHANGED in kind**: the injected tier adds instructions, not egress. |
