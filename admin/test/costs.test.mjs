@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts } from "../src/costs.mjs";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/costs.mjs", import.meta.url)), "utf8");
@@ -345,6 +345,93 @@ test("byModel attribution ladder: ledger rows, whole-run fallback via record.pro
   assert.deepEqual(unknown.cost, { usd: 0.125, class: "metered", floor: false }, "a legacy record with no provider/model attributes to ('unknown','unknown'), never to a guess");
   assert.deepEqual(kimi.cost, { usd: 0, class: "plan", floor: false, planId: "kimi" });
   assert.deepEqual(zai.cost, { usd: 0, class: "zero-rated", floor: false }, "zero-rated, not 'free'");
+});
+
+// ---- byTrigger / byRepo / foldTriggerCosts (issue #175) ----
+
+test("byTrigger buckets on the passed-in join; chained/manual/unattributed are explicit and pinned to the tail", () => {
+  const cronRun = rec({ jobId: "repeat:nightly:1752480000000", flow: "fix", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const forgeRun = rec({ jobId: "gh-1", kind: "github", target: "acme/api#12", flow: "triage", outcome: "failed", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const refusedJoin = rec({ jobId: "gh-2", kind: "github", target: "acme/api#13", flow: "triage", tokens: tok(0.05), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.05 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const chained = rec({ jobId: "ch-1", parentJobId: "repeat:nightly:1752480000000", flow: "fix", tokens: tok(0.1), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.1 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const manual = rec({ jobId: "loc-1", tokens: tok(0.02), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.02 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  // The join is the read-model's job (attributeRunsToTriggers); the fold's contract is this SHAPE.
+  const triggerJoin = {
+    byJobId: {
+      "repeat:nightly:1752480000000": { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *" },
+      "gh-1": { key: "trigger:2", index: 2, type: "label", label: "any[dispatch]" },
+      "gh-2": { key: "unattributed", index: null, type: null, label: null },
+    },
+  };
+  const f = foldCosts({ records: [manual, chained, refusedJoin, forgeRun, cronRun], subscriptions: [], pricing: cannedPricing(), nowMs: NOW, triggerJoin });
+
+  assert.deepEqual(
+    f.byTrigger.map((t) => t.key),
+    ["trigger:0", "trigger:2", "chained", "manual", "unattributed"],
+    "real triggers by cost desc, then the honesty tail in its fixed order however the dollars compare",
+  );
+  const [nightly, label, chainedRow, manualRow, unattributed] = f.byTrigger;
+  assert.equal(nightly.label, "nightly 0 3 * * *");
+  assert.deepEqual(nightly.outcomes, { completed: 1, policy: 0, failed: 0 });
+  assert.equal(nightly.failedCost, null, "no failed member, no failed figure -- null, not $0.00");
+  assert.deepEqual(nightly.cost, { usd: 0.5, class: "metered", floor: false });
+  assert.deepEqual(label.outcomes, { completed: 0, policy: 0, failed: 1 });
+  assert.deepEqual(label.failedCost, { usd: 0.25, class: "metered", floor: false }, "what the trigger's failures cost, typed like every dollar");
+  assert.equal(chainedRow.label, "(chained runs)");
+  assert.equal(manualRow.label, "(manual/local)");
+  assert.equal(unattributed.label, "(unattributed)");
+  assert.equal(unattributed.runs, 1, "a refused join stays visible, never blended into manual");
+
+  assert.equal(fold([cronRun]).byTrigger, null, "no join wired -> null, because 'not computed' and 'nothing attributed' are different sentences");
+});
+
+test("byRepo groups on the stripped target; local targets ride whole and a missing target is its own stated bucket", () => {
+  const gh1 = rec({ jobId: "r1", kind: "github", target: "acme/api#12", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const gh2 = rec({ jobId: "r2", kind: "github", target: "acme/api#34", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const gl = rec({ jobId: "r3", kind: "gitlab", target: "group/proj!3", tokens: tok(0.1), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.1 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const local = rec({ jobId: "r4", target: "local:site", tokens: tok(0.05), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.05 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const bare = rec({ jobId: "r5", target: null, tokens: tok(0.01), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.01 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const f = fold([gh1, gh2, gl, local, bare]);
+  assert.deepEqual(
+    f.byRepo.map((r) => [r.label, r.runs, r.kind]),
+    [
+      ["acme/api", 2, "github"],
+      ["group/proj", 1, "gitlab"],
+      ["local:site", 1, "local"],
+      ["(no target)", 1, "local"],
+    ],
+    "cost desc; the issue/MR tail stripped; a target-less record is stated, not dropped",
+  );
+  assert.equal(f.byRepo[0].cost.usd, 0.75);
+  assert.equal(f.byRepo[3].key, null, "machine key null for the no-target bucket -- the flowKey lesson");
+});
+
+test("repoOfTarget strips exactly the forge issue/MR tail and nothing else", () => {
+  assert.equal(repoOfTarget("acme/api#12"), "acme/api");
+  assert.equal(repoOfTarget("group/proj!3"), "group/proj");
+  assert.equal(repoOfTarget("local:site"), "local:site", "no numeric tail: rides through whole");
+  assert.equal(repoOfTarget("acme/api"), "acme/api");
+  assert.equal(repoOfTarget(""), null);
+  assert.equal(repoOfTarget(null), null);
+  assert.equal(repoOfTarget("#12"), null, "a bare tail strips to nothing and nothing is null, not an empty-string bucket");
+});
+
+test("foldTriggerCosts maps ONLY real triggers, keyed by the graph node id", () => {
+  const cronRun = rec({ jobId: "repeat:nightly:1752480000000", tokens: tok(0.5), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const cronRun2 = rec({ jobId: "repeat:nightly:1752483600000", tokens: tok(0.25), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const manual = rec({ jobId: "loc-1", tokens: tok(1), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 1 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const refused = rec({ jobId: "gh-2", kind: "github", tokens: tok(1), usage: usage([row("anthropic", "claude-sonnet-4", { cost: 1 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const triggerJoin = {
+    byJobId: {
+      "repeat:nightly:1752480000000": { key: "trigger:3", index: 3, type: "cron", label: "nightly 0 3 * * *" },
+      "repeat:nightly:1752483600000": { key: "trigger:3", index: 3, type: "cron", label: "nightly 0 3 * * *" },
+      "gh-2": { key: "unattributed", index: null, type: null, label: null },
+    },
+  };
+  const map = foldTriggerCosts({ records: [cronRun, cronRun2, manual, refused], subscriptions: [], pricing: cannedPricing(), triggerJoin });
+  assert.deepEqual(Object.keys(map), ["trigger:3"], "honesty buckets have no node to badge and stay out of the map");
+  assert.equal(map["trigger:3"].runs, 2);
+  assert.deepEqual(map["trigger:3"].cost, { usd: 0.75, class: "metered", floor: false });
 });
 
 // ---- plans ----

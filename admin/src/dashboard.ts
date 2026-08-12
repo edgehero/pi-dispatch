@@ -30,7 +30,7 @@ import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 // injected seams (`fetchCosts`/`listPricedModels`/`whatIf`), never the façade, so tests stay fully
 // canned and the one worker/pricing coupling sits beside the queue and redis this module already owns.
 import * as pricing from "@edgehero/pi-dispatch/pricing";
-import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords, GRAPH_LIMITS, cronRunStats, joinRunsToTriggers, observedChainEdges, collectGraphInputs, forgeRepoTargets } from "./read-model.mjs";
+import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages, readSubscriptions, scanRunRecords, GRAPH_LIMITS, cronRunStats, joinRunsToTriggers, attributeRunsToTriggers, observedChainEdges, collectGraphInputs, forgeRepoTargets } from "./read-model.mjs";
 import { renderStatus, renderBudget, renderTriggers, renderSettingsView, renderGraph } from "./render.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -62,6 +62,9 @@ const DRILL_WIDTH = 70;
 // full-directory read is the kind of quiet load a dashboard must not add, so while the view is open a
 // poll tick refreshes the fold only once the last fetch is older than this.
 const COSTS_STALE_MS = 10_000;
+// The rollup tables `f` cycles through (issue #175 added trigger and repo -- the joins the graph
+// already owned, finally answering "which trigger burns the most" and "what does repo X cost").
+const COSTS_TABLES = ["flow", "model", "trigger", "repo"];
 // GRAPH: the cursor-following row window, on the RUNS_VIEWPORT/TAIL_VIEWPORT precedent -- a fixed
 // bound with no height dependency, so an unknown terminal height changes nothing. The graph REFRESHES
 // only on entry and on `r`, never on the poll tick: fetchGraph spawns git per enumerated folder, a
@@ -138,7 +141,12 @@ export function createDashboardDeps(paths: any) {
       if (!Array.isArray(records)) return { unreachable: (records as any)?.unreachable ?? "scan failed" };
       const subsView: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
       const subscriptions = Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [];
-      const fold = foldCosts({ records, subscriptions, pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs });
+      // The trigger join behind byTrigger: one FILE read (readTriggers, the fetchSnapshot kind) plus a
+      // pure fold -- no git spawn anywhere on this path, so the 10s stale-gated poll piggyback stays
+      // exactly as cheap as it was. The graph's entry+`r`-only policy is about spawns, not reads.
+      const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+      const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
+      const fold = foldCosts({ records, subscriptions, pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs, triggerJoin });
       return { fold, records, subscriptions };
     },
     /**
@@ -694,7 +702,7 @@ export function makeDashboard({
           return;
         }
         if (data === "f" || data === "F") {
-          costs.table = costs.table === "flow" ? "model" : "flow";
+          costs.table = COSTS_TABLES[(COSTS_TABLES.indexOf(costs.table) + 1) % COSTS_TABLES.length];
           costsSel = 0;
           tui?.requestRender?.();
           return;
@@ -1802,10 +1810,12 @@ function costsWindowLabel(windowKey: string): string {
   return `${MONTHS[now.getUTCMonth()]} ${now.getUTCFullYear()} (mtd)`;
 }
 
-/** The active COSTS table's rows -- the array `costsSel` and ↑↓ span. */
+/** The active COSTS table's rows -- the array `costsSel` and ↑↓ span. byTrigger may be null (the
+ * seam wired no triggers): the empty array degrades the table to its stated empty line. */
 function costsTableRows(costs: any): any[] {
   const fold = costs?.data?.fold;
-  const rows = costs?.table === "model" ? fold?.byModel : fold?.byFlow;
+  const rows =
+    costs?.table === "model" ? fold?.byModel : costs?.table === "trigger" ? fold?.byTrigger : costs?.table === "repo" ? fold?.byRepo : fold?.byFlow;
   return Array.isArray(rows) ? rows : [];
 }
 
@@ -2008,6 +2018,51 @@ function costsTableLines(fold: any, table: string, costsSel: number, inner: numb
     });
     return out;
   }
+  if (table === "trigger") {
+    // The per-trigger rollup (issue #175): the FAIL column and the failed-spend suffix exist because
+    // a trigger whose spend is mostly failures is a different problem than an expensive one. The
+    // suffix rides inside the flexible COST column only when nonzero, so the row count (and with it
+    // the collapse budget) never depends on outcomes.
+    const wName = 24;
+    const wFail = 4;
+    const wCost = Math.max(8, inner - 2 - wName - wRuns - wFail - wTok - 4 * gap.length);
+    out.push(fitLine("  " + [head("TRIGGER", wName), head("RUNS", wRuns, "right"), head("FAIL", wFail, "right"), head("TOKENS", wTok, "right"), head("COST", wCost)].join(gap), inner, styler));
+    const rows = Array.isArray(fold.byTrigger) ? fold.byTrigger : [];
+    if (rows.length === 0) return [...out, fitLine(styler.fg("dim", "  (no runs in this window)"), inner, styler)];
+    rows.forEach((r: any, i: number) => {
+      const failed = r.outcomes?.failed ?? 0;
+      const costCell =
+        r.failedCost && failed > 0
+          ? styler.fmtCost(r.cost) + styler.fg("dim", ` (failed `) + styler.fmtCost(r.failedCost) + styler.fg("dim", `)`)
+          : styler.fmtCost(r.cost, wCost);
+      const cells = [
+        styler.cell(r.label ?? r.key ?? "-", wName),
+        styler.cell(String(r.runs ?? 0), wRuns, { align: "right" }),
+        styler.cell(failed > 0 ? String(failed) : "·", wFail, { align: "right" }),
+        styler.cell(fmtTokens(r.tokens ?? 0), wTok, { align: "right" }),
+        costCell,
+      ];
+      out.push(fitLine(cursor(i === costsSel) + " " + cells.join(gap), inner, styler));
+    });
+    return out;
+  }
+  if (table === "repo") {
+    const wName = 30;
+    const wCost = Math.max(8, inner - 2 - wName - wRuns - wTok - 3 * gap.length);
+    out.push(fitLine("  " + [head("REPO/TARGET", wName), head("RUNS", wRuns, "right"), head("TOKENS", wTok, "right"), head("COST", wCost)].join(gap), inner, styler));
+    const rows = Array.isArray(fold.byRepo) ? fold.byRepo : [];
+    if (rows.length === 0) return [...out, fitLine(styler.fg("dim", "  (no runs in this window)"), inner, styler)];
+    rows.forEach((r: any, i: number) => {
+      const cells = [
+        styler.cell(r.label ?? "-", wName),
+        styler.cell(String(r.runs ?? 0), wRuns, { align: "right" }),
+        styler.cell(fmtTokens(r.tokens ?? 0), wTok, { align: "right" }),
+        styler.fmtCost(r.cost, wCost),
+      ];
+      out.push(fitLine(cursor(i === costsSel) + " " + cells.join(gap), inner, styler));
+    });
+    return out;
+  }
   const wFlow = 18;
   const wCost = 14;
   const wApi = Math.max(8, inner - 2 - wFlow - wRuns - wTok - wCost - 4 * gap.length);
@@ -2107,10 +2162,11 @@ function provenanceLine(fold: any, inner: number, styler: any): string {
   return fitLine(styler.fg("dim", text), inner, styler);
 }
 
-/** The COSTS footer hints -- one line, every layer's keys named. */
+/** The COSTS footer hints -- one line, every layer's keys named. `[f] table` names the cycle rather
+ * than enumerating four table names into a footer that must fit width 80 whole. */
 function costsHints(inner: number, styler: any): string {
   const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
-  return fitLine([k("[↑↓]", "row"), k("[f]", "flow/model"), k("[t]", "7d/30d/mtd"), k("[w]", "what-if"), k("[esc]", "back")].join(" "), inner, styler);
+  return fitLine([k("[↑↓]", "row"), k("[f]", "table"), k("[t]", "7d/30d/mtd"), k("[w]", "what-if"), k("[esc]", "back")].join(" "), inner, styler);
 }
 
 /** ms until the next UTC midnight / Monday 00:00 UTC / month-1 00:00 UTC. */

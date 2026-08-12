@@ -40,7 +40,8 @@ import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/mat
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
-import { parseSkillMeta, findSiblingMentions, findLoopHints } from "./graph-model.mjs";
+import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
+import { repoOfTarget } from "./costs.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -926,6 +927,50 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
 }
 
 /**
+ * Per-jobId trigger attribution over one scanned window -- the COST fold's join (issue #175),
+ * produced HERE so the index+type agreement doctrine (joinRunsToTriggers above) and the raw
+ * `repeat:<id>:<millis>` jobId grammar (cronRunStats above) are never re-derived by a second module;
+ * costs.mjs stays fs-free and worker-import-free by taking this result as an argument. Pure over its
+ * inputs. Returns `{ byJobId: { [jobId]: { key, index, type, label } } }` where `key` for a joined
+ * run IS the graph node id (`trigger:<index>` -- graph-model mints exactly this), so a spend map
+ * keyed by it lands on topology nodes with no second join vocabulary. A FORGE record whose persisted
+ * index+type pair disagrees with the current file gets the explicit `key: "unattributed"` entry --
+ * the fold cannot ask isForgeKind itself, and silence would let it misfile a refused join under
+ * "manual". Records that match nothing get no entry; the fold classifies the remainder
+ * (chained/manual) from record facts it already holds.
+ */
+export function attributeRunsToTriggers({ records, triggers } = {}) {
+  const byJobId = {};
+  if (!Array.isArray(records) || !Array.isArray(triggers)) return { byJobId };
+  const cronRes = triggers
+    .filter((t) => t?.type === "cron" && typeof t.id === "string" && t.id !== "" && Number.isInteger(t.index))
+    .map((t) => ({ t, re: new RegExp(`^repeat:${escapeRegExp(t.id)}:(\\d+)$`) }));
+  const byIndex = new Map(triggers.filter((t) => Number.isInteger(t?.index)).map((t) => [t.index, t]));
+  for (const record of records) {
+    const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : null;
+    if (jobId === null) continue;
+    // Cron first: the raw repeat jobId names its scheduler outright, digits-tail disambiguated.
+    const cron = cronRes.find(({ re }) => re.test(jobId));
+    if (cron) {
+      byJobId[jobId] = { key: `trigger:${cron.t.index}`, index: cron.t.index, type: "cron", label: triggerMatchLabel(cron.t) };
+      continue;
+    }
+    if (!isForgeKind(record?.kind)) continue;
+    const idx = record?.triggerIndex;
+    // A forge record with no persisted index (pre-#54) or a disagreeing index+type pair is
+    // UNATTRIBUTED, never silent: it was forge-triggered, so letting the fold default it to
+    // "manual" would misfile it -- the same accounting joinRunsToTriggers keeps for the graph.
+    const t = Number.isInteger(idx) ? byIndex.get(idx) : undefined;
+    if (!t || t.type !== record.triggerType) {
+      byJobId[jobId] = { key: "unattributed", index: null, type: null, label: null };
+      continue;
+    }
+    byJobId[jobId] = { key: `trigger:${idx}`, index: idx, type: t.type, label: triggerMatchLabel(t) };
+  }
+  return { byJobId };
+}
+
+/**
  * The OBSERVED flow->flow chain edges: child records joined to their parent via `parentJobId` over
  * one already-scanned window, folded per (parentFlow, childFlow, folder basename). Observed means
  * exactly that -- an edge exists here because a run actually spawned another, never because a skill
@@ -1151,8 +1196,9 @@ export function forgeRepoTargets({ records } = {}) {
   if (!Array.isArray(records)) return byKind;
   for (const record of records) {
     if (!isForgeKind(record?.kind) || typeof record?.target !== "string") continue;
-    const repo = record.target.replace(/[#!]\d+$/, "");
-    if (repo === "" || repo === record.target) continue; // no numeric tail: not a repo-shaped target
+    // One stripping grammar, shared with the cost fold's byRepo (costs.mjs repoOfTarget).
+    const repo = repoOfTarget(record.target);
+    if (repo === null || repo === record.target) continue; // no numeric tail: not a repo-shaped target
     (byKind[record.kind] ??= new Set()).add(repo);
   }
   return Object.fromEntries(

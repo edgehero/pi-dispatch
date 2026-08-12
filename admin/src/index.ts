@@ -78,6 +78,7 @@ import {
   GRAPH_LIMITS,
   cronRunStats,
   joinRunsToTriggers,
+  attributeRunsToTriggers,
   observedChainEdges,
   collectGraphInputs,
   forgeRepoTargets,
@@ -1030,6 +1031,10 @@ function assembleCosts(paths: any, window: string, flow?: string): any {
   if (!Array.isArray(records)) return records; // { unreachable }
   const subs: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const scoped = typeof flow === "string" && flow !== "" ? records.filter((r: any) => (r?.flow ?? null) === flow) : records;
+  // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
+  // the same file-read-plus-pure-fold path the dashboard seam takes.
+  const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+  const triggerJoin = attributeRunsToTriggers({ records: scoped, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
   const fold = foldCosts({
     records: scoped,
     subscriptions: Array.isArray(subs?.subscriptions) ? subs.subscriptions : [],
@@ -1037,6 +1042,7 @@ function assembleCosts(paths: any, window: string, flow?: string): any {
     nowMs,
     piAiPin: piAiVersion(),
     sinceMs, // the same instant the scan cut at -- proration denominates on the requested window
+    triggerJoin,
   });
   return { fold };
 }

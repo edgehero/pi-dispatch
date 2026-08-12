@@ -349,6 +349,27 @@ test("renderCosts: header, verdicts, sparkline, tables, peak facts, provenance â
   assert.ok(!/free/i.test(out), "'free' is a claim no renderer may make");
 });
 
+test("renderCosts: byTrigger and byRepo tables render when the fold carries them, and a null byTrigger is absence", () => {
+  const fold = structuredClone(CANNED_FOLD);
+  fold.byTrigger = [
+    { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *", runs: 3, tokens: 90_000, cost: typedCost(1.2, "metered"), outcomes: { completed: 2, policy: 0, failed: 1 }, failedCost: typedCost(0.4, "metered") },
+    { key: "manual", index: null, type: null, label: "(manual/local)", runs: 1, tokens: 1_000, cost: typedCost(0, "zero-rated"), outcomes: { completed: 1, policy: 0, failed: 0 }, failedCost: null },
+  ];
+  fold.byRepo = [{ key: "acme/api", label: "acme/api", kind: "github", runs: 2, tokens: 50_000, cost: typedCost(0.9, "metered") }];
+  const out = renderCosts(fold, { window: "mtd" });
+  assert.match(out, /By trigger:/);
+  assert.match(out, /TRIGGER {2}.*RUNS {2}.*FAIL {2}.*TOKENS {2}.*COST/s);
+  assert.match(out, /nightly 0 3 \* \* \*\s+3\s+1\s+90000\s+\$1\.20/);
+  assert.match(out, /\(manual\/local\)/);
+  assert.match(out, /By repo:/);
+  assert.match(out, /acme\/api\s+2\s+50000\s+\$0\.90/);
+
+  const withoutJoin = structuredClone(CANNED_FOLD);
+  withoutJoin.byTrigger = null;
+  const bare = renderCosts(withoutJoin, { window: "mtd" });
+  assert.doesNotMatch(bare, /By trigger:/, "null means not computed -- absence, never an empty table that looks exhaustive");
+});
+
 test("renderCosts verdict wording covers LOSING and WOULD_SAVE too", () => {
   const fold = structuredClone(CANNED_FOLD);
   fold.plans[0].verdict = { kind: "LOSING", usd: typedCost(40, "estimated") };

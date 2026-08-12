@@ -460,8 +460,10 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
   return model;
 }
 
-/** The display label for a trigger's match side, mirroring render.mjs's triggerLine vocabulary. */
-function triggerMatchLabel(t) {
+/** The display label for a trigger's match side, mirroring render.mjs's triggerLine vocabulary.
+ * Exported for the read-model's cost attribution (issue #175): one vocabulary for what a trigger is
+ * called, however many tables call it. */
+export function triggerMatchLabel(t) {
   switch (t?.type) {
     case "cron":
       return `${t.id ?? "-"} ${t.pattern ?? "-"}`;

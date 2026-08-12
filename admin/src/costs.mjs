@@ -235,7 +235,7 @@ function repriceRows(rows, counterfactual, pricing, { extraExcluded = 0 } = {}) 
  * read-model the costs view renders. Everything below is derived per call and thrown away -- nothing
  * classified here is ever written anywhere.
  */
-export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = null, sinceMs = null }) {
+export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = null, sinceMs = null, triggerJoin = null }) {
   const subs = Array.isArray(subscriptions) ? subscriptions : [];
   const runs = [];
   for (const record of Array.isArray(records) ? records : []) {
@@ -267,6 +267,10 @@ export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = nu
     daily: buildDaily(runs, firstRunMs ?? fromMs, toMs),
     byFlow: buildByFlow(runs, subs, pricing),
     byModel: buildByModel(runs),
+    // null, not [], without a join: "not computed" and "nothing attributed" are different sentences,
+    // and a caller that wired no triggers must not render an empty table that looks exhaustive.
+    byTrigger: triggerJoin ? buildByTrigger(runs, triggerJoin) : null,
+    byRepo: buildByRepo(runs),
     plans: buildPlans(runs, subs, pricing, days),
     provenance: buildProvenance(runs, piAiPin),
   };
@@ -329,6 +333,130 @@ function buildByFlow(runs, subs, pricing) {
     });
   }
   return byFlow.sort((a, b) => b.cost.usd - a.cost.usd || a.flow.localeCompare(b.flow));
+}
+
+// The honesty buckets a run lands in when no trigger claims it, pinned to the table's tail in this
+// order however the dollars compare: a bucket named "(unattributed)" sorting above real triggers on
+// cost would read as the biggest spender when it is really the biggest unknown.
+const TRIGGER_TAIL = ["chained", "manual", "unattributed"];
+const TRIGGER_TAIL_LABELS = { chained: "(chained runs)", manual: "(manual/local)", unattributed: "(unattributed)" };
+
+/**
+ * Per-trigger rollup over the attribution the read-model passed IN (`attributeRunsToTriggers` --
+ * the index+type agreement doctrine and the raw cron jobId grammar live there and are not re-derived
+ * by this fold). Every run lands somewhere: a joined run under its trigger's graph node id
+ * (`trigger:<index>`), a forge run the join refused under "unattributed", a run with a parentJobId
+ * under "chained" (not rolled up to the ancestor trigger: walking parent chains across the retention
+ * boundary would attribute partially, and a partial rollup wearing a trigger's name is a lie), and
+ * everything else under "manual". `key` is the machine key, `label` display-only -- the byFlow
+ * lesson. The outcome split rides along because "what did failed runs cost" is a per-trigger
+ * question: a trigger whose spend is mostly failures is a different problem than an expensive one.
+ */
+function buildByTrigger(runs, triggerJoin) {
+  const byJobId = triggerJoin?.byJobId && typeof triggerJoin.byJobId === "object" ? triggerJoin.byJobId : {};
+  const groups = new Map();
+  for (const r of runs) {
+    const record = r.record;
+    const entry = typeof record.jobId === "string" ? byJobId[record.jobId] : undefined;
+    let bucket;
+    if (entry && entry.key !== "unattributed") {
+      bucket = { key: entry.key, index: entry.index ?? null, type: entry.type ?? null, label: entry.label ?? entry.key };
+    } else if (entry) {
+      bucket = { key: "unattributed", index: null, type: null, label: TRIGGER_TAIL_LABELS.unattributed };
+    } else if (typeof record.parentJobId === "string" && record.parentJobId !== "") {
+      bucket = { key: "chained", index: null, type: null, label: TRIGGER_TAIL_LABELS.chained };
+    } else {
+      bucket = { key: "manual", index: null, type: null, label: TRIGGER_TAIL_LABELS.manual };
+    }
+    if (!groups.has(bucket.key)) groups.set(bucket.key, { ...bucket, members: [] });
+    groups.get(bucket.key).members.push(r);
+  }
+  const rows = [];
+  for (const g of groups.values()) {
+    const outcomes = { completed: 0, policy: 0, failed: 0 };
+    for (const m of g.members) {
+      const o = m.record.outcome;
+      if (o === "completed" || o === "policy" || o === "failed") outcomes[o] += 1;
+    }
+    const failedMembers = g.members.filter((m) => m.record.outcome === "failed");
+    rows.push({
+      key: g.key,
+      index: g.index,
+      type: g.type,
+      label: g.label,
+      runs: g.members.length,
+      tokens: g.members.reduce((sum, m) => sum + (m.record.tokens?.total ?? 0), 0),
+      cost: combineContributions(g.members.map((m) => m.contribution)),
+      outcomes,
+      failedCost: failedMembers.length > 0 ? combineContributions(failedMembers.map((m) => m.contribution)) : null,
+    });
+  }
+  return rows.sort((a, b) => {
+    const tailA = TRIGGER_TAIL.indexOf(a.key);
+    const tailB = TRIGGER_TAIL.indexOf(b.key);
+    if (tailA !== -1 || tailB !== -1) return tailA === -1 ? -1 : tailB === -1 ? 1 : tailA - tailB;
+    return b.cost.usd - a.cost.usd || a.label.localeCompare(b.label);
+  });
+}
+
+/** A target's repo shape: the forge issue/MR tail stripped (`repo#12` -> `repo`, `proj!3` -> `proj`);
+ * targets without a numeric tail (local:<basename>) ride through whole; null stays null. The one
+ * grammar forgeRepoTargets (read-model) also strips by -- shared so the two can never disagree. */
+export function repoOfTarget(target) {
+  if (typeof target !== "string" || target === "") return null;
+  const repo = target.replace(/[#!]\d+$/, "");
+  return repo === "" ? null : repo;
+}
+
+/** Per-repo/target rollup. `key` null (with the "(no target)" display label) for records carrying no
+ * target at all; `kind` is the records' uniform kind or null when a repo saw mixed kinds. */
+function buildByRepo(runs) {
+  const groups = new Map();
+  for (const r of runs) {
+    const repo = repoOfTarget(r.record.target);
+    const mapKey = repo ?? "\u0000none";
+    if (!groups.has(mapKey)) groups.set(mapKey, { key: repo, label: repo ?? "(no target)", kinds: new Set(), members: [] });
+    const g = groups.get(mapKey);
+    if (typeof r.record.kind === "string") g.kinds.add(r.record.kind);
+    g.members.push(r);
+  }
+  const rows = [];
+  for (const g of groups.values()) {
+    rows.push({
+      key: g.key,
+      label: g.label,
+      kind: g.kinds.size === 1 ? [...g.kinds][0] : null,
+      runs: g.members.length,
+      tokens: g.members.reduce((sum, m) => sum + (m.record.tokens?.total ?? 0), 0),
+      cost: combineContributions(g.members.map((m) => m.contribution)),
+    });
+  }
+  return rows.sort((a, b) => b.cost.usd - a.cost.usd || a.label.localeCompare(b.label));
+}
+
+/**
+ * The per-trigger spend map for the topology surfaces, keyed by GRAPH NODE ID (`trigger:<index>` --
+ * graph-model mints exactly this, so a badge lands on its node with no second join vocabulary).
+ * Only real triggers appear: the chained/manual/unattributed honesty buckets have no node to badge
+ * and live in byTrigger instead.
+ */
+export function foldTriggerCosts({ records, subscriptions, pricing, triggerJoin }) {
+  const subs = Array.isArray(subscriptions) ? subscriptions : [];
+  const byJobId = triggerJoin?.byJobId && typeof triggerJoin.byJobId === "object" ? triggerJoin.byJobId : {};
+  const groups = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || typeof record !== "object") continue;
+    if (recordMs(record) === null) continue; // the fold's own bucketing rule: unplaceable records are dropped
+    const entry = typeof record.jobId === "string" ? byJobId[record.jobId] : undefined;
+    if (!entry || entry.key === "unattributed" || !entry.key.startsWith("trigger:")) continue;
+    if (!groups.has(entry.key)) groups.set(entry.key, []);
+    groups.get(entry.key).push(runContribution(record, subs, pricing));
+  }
+  const out = {};
+  for (const [key, contribs] of groups) {
+    out[key] = { cost: combineContributions(contribs), runs: contribs.length };
+  }
+  return out;
 }
 
 /** Per-(provider,model) rollup from the attribution rows, sorted by cost descending. A run appears in

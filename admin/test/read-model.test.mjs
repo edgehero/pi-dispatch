@@ -30,6 +30,7 @@ import {
   GRAPH_LIMITS,
   cronRunStats,
   joinRunsToTriggers,
+  attributeRunsToTriggers,
   observedChainEdges,
   readFolderSkills,
   readInjectedSkills,
@@ -1299,6 +1300,55 @@ test("joinRunsToTriggers degrades on bad input", () => {
   assert.deepEqual(joinRunsToTriggers({}), { byIndex: {}, unattributed: 0 });
   assert.deepEqual(joinRunsToTriggers(), { byIndex: {}, unattributed: 0 });
   assert.deepEqual(joinRunsToTriggers({ records: [runRec({ triggerIndex: 0 })], triggerCount: null }), { byIndex: {}, unattributed: 1 });
+});
+
+// ---- attributeRunsToTriggers (issue #175): the cost fold's per-jobId join ----
+
+const displayTrigger = (over = {}) => ({ index: 0, type: "label", any: ["dispatch"], ...over });
+
+test("attributeRunsToTriggers: cron via the raw repeat jobId, forge via the agreeing index+type pair, keys ARE graph node ids", () => {
+  const triggers = [
+    displayTrigger({ index: 0, type: "cron", id: "nightly", pattern: "0 3 * * *" }),
+    displayTrigger({ index: 2, type: "label" }),
+  ];
+  const records = [
+    runRec({ jobId: "repeat:nightly:1752480000000", kind: "local", target: "local:proj" }),
+    runRec({ jobId: "gh-1", triggerIndex: 2, triggerType: "label" }),
+    runRec({ jobId: "loc-1", kind: "local", triggerIndex: null }), // manual local: no entry, the fold's business
+  ];
+  const { byJobId } = attributeRunsToTriggers({ records, triggers });
+  assert.deepEqual(byJobId["repeat:nightly:1752480000000"], { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *" });
+  assert.deepEqual(byJobId["gh-1"], { key: "trigger:2", index: 2, type: "label", label: "any[dispatch]" });
+  assert.equal(byJobId["loc-1"], undefined, "a manual local run makes no claim, so there is nothing to enter OR refuse");
+});
+
+test("attributeRunsToTriggers: the cron id join keeps the digits-tail disambiguator, so scheduler `a` never swallows `a:1`", () => {
+  const triggers = [displayTrigger({ index: 0, type: "cron", id: "a", pattern: "* * * * *" })];
+  const { byJobId } = attributeRunsToTriggers({
+    records: [runRec({ jobId: "repeat:a:123", kind: "local" }), runRec({ jobId: "repeat:a:1:456", kind: "local" })],
+    triggers,
+  });
+  assert.ok(byJobId["repeat:a:123"], "the all-digits tail attributes");
+  assert.equal(byJobId["repeat:a:1:456"], undefined, "a foreign id segment is not a millis tail");
+});
+
+test("attributeRunsToTriggers: a disagreeing or missing index on a FORGE record is an explicit unattributed entry, never silence", () => {
+  const triggers = [displayTrigger({ index: 0, type: "comment", phrase: "fix it" })];
+  const records = [
+    runRec({ jobId: "gh-1", triggerIndex: 0, triggerType: "label" }), // type shifted under the row (the OQ-008 drift)
+    runRec({ jobId: "gh-2", triggerIndex: 7, triggerType: "label" }), // index out of range
+    runRec({ jobId: "gh-3" }), // pre-#54 forge record: forge-triggered, unplaceable
+  ];
+  const { byJobId } = attributeRunsToTriggers({ records, triggers });
+  for (const id of ["gh-1", "gh-2", "gh-3"]) {
+    assert.deepEqual(byJobId[id], { key: "unattributed", index: null, type: null, label: null }, `${id}: silence would let the fold misfile a forge run under manual`);
+  }
+});
+
+test("attributeRunsToTriggers degrades on bad input", () => {
+  assert.deepEqual(attributeRunsToTriggers({}), { byJobId: {} });
+  assert.deepEqual(attributeRunsToTriggers(), { byJobId: {} });
+  assert.deepEqual(attributeRunsToTriggers({ records: [runRec()], triggers: null }), { byJobId: {} });
 });
 
 test("observedChainEdges folds child->parent joins per (parentFlow, childFlow, target), self-chains included", () => {

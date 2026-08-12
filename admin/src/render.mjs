@@ -276,6 +276,22 @@ export function renderCosts(fold, { window } = {}) {
     for (const line of tableLines(["MODEL", "RUNS", "TOKENS", "COST"], rows)) out.push(`  ${line}`);
   }
 
+  // byTrigger is null when the assembler wired no triggers: "not computed" renders as absence, never
+  // as an empty table that looks exhaustive. The honesty buckets ride at the fold's own tail order.
+  const byTrigger = Array.isArray(fold.byTrigger) ? fold.byTrigger : [];
+  if (byTrigger.length > 0) {
+    out.push("", "By trigger:");
+    const rows = byTrigger.map((t) => [cell(t.label), cell(t.runs), cell(t.outcomes?.failed ?? 0), cell(t.tokens), fmtCost(t.cost)]);
+    for (const line of tableLines(["TRIGGER", "RUNS", "FAIL", "TOKENS", "COST"], rows)) out.push(`  ${line}`);
+  }
+
+  const byRepo = Array.isArray(fold.byRepo) ? fold.byRepo : [];
+  if (byRepo.length > 0) {
+    out.push("", "By repo:");
+    const rows = byRepo.map((r) => [cell(r.label), cell(r.runs), cell(r.tokens), fmtCost(r.cost)]);
+    for (const line of tableLines(["REPO/TARGET", "RUNS", "TOKENS", "COST"], rows)) out.push(`  ${line}`);
+  }
+
   if (plans.length > 0) {
     out.push("", "Plans:");
     for (const p of plans) {

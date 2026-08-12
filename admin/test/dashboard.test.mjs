@@ -1203,6 +1203,15 @@ const CANNED_FOLD = {
     ratesDrifted: 1,
     piAiPin: "0.9.7",
   },
+  byTrigger: [
+    { key: "trigger:1", index: 1, type: "cron", label: "nightly 0 3 * * *", runs: 9, tokens: 4_000_000, cost: usd(0, "plan", { planId: "kimi" }), outcomes: { completed: 9, policy: 0, failed: 0 }, failedCost: null },
+    { key: "trigger:3", index: 3, type: "label", label: "any[dispatch]", runs: 3, tokens: 90_000, cost: usd(1.25, "metered"), outcomes: { completed: 2, policy: 0, failed: 1 }, failedCost: usd(0.4, "metered") },
+    { key: "manual", index: null, type: null, label: "(manual/local)", runs: 4, tokens: 1_310_000, cost: usd(0, "zero-rated"), outcomes: { completed: 4, policy: 0, failed: 0 }, failedCost: null },
+  ],
+  byRepo: [
+    { key: "acme/api", label: "acme/api", kind: "github", runs: 12, tokens: 5_400_000, cost: usd(0, "plan", { planId: "kimi" }) },
+    { key: "local:site", label: "local:site", kind: "local", runs: 4, tokens: 91_000, cost: usd(1.25, "metered") },
+  ],
 };
 
 /** The records behind that fold, as far as the view reads them: the flow "fix" is dominated by
@@ -1347,6 +1356,48 @@ test("'f' toggles the by-flow and by-model tables; the zero-rated model row says
   assert.match(model, /zai\/glm-4\.7/);
   assert.match(model, /\$0 \(unrated\)/, "a zero-rated row says a table rated it zero");
   assert.doesNotMatch(model, /free/, "'free' is a claim no money surface here can make");
+});
+
+test("'f' cycles on through trigger and repo and wraps to flow; w stays flow-table-only (issue #175)", async () => {
+  const comp = await openCosts(costsDeps());
+  comp.handleInput("f"); // model
+  comp.handleInput("f"); // trigger
+  await flush();
+  const trigger = stripAnsi(comp.render(100).join("\n"));
+  assert.match(trigger, /TRIGGER\s+RUNS\s+FAIL\s+TOKENS\s+COST/, "the by-trigger header");
+  assert.match(trigger, /nightly 0 3 \* \* \*/, "a cron trigger row speaks the trigger vocabulary");
+  assert.match(trigger, /plan:kimi/, "trigger spend is typed like every dollar");
+  assert.match(trigger, /any\[dispatch\].*1.*90k.*\$1\.25.*\(failed \$0\.40\)/, "the FAIL count and the failed-spend suffix on the row that earned them");
+  assert.match(trigger, /\(manual\/local\)/, "the honesty bucket is stated, at the tail");
+
+  comp.handleInput("w");
+  await flush();
+  assert.doesNotMatch(stripAnsi(comp.render(100).join("\n")), /WHAT-IF/, "what-if targets flows; on the trigger table the key is inert");
+
+  comp.handleInput("f"); // repo
+  await flush();
+  const repo = stripAnsi(comp.render(100).join("\n"));
+  assert.match(repo, /REPO\/TARGET\s+RUNS\s+TOKENS\s+COST/, "the by-repo header");
+  assert.match(repo, /acme\/api/);
+  assert.match(repo, /local:site/);
+
+  comp.handleInput("f"); // wraps to flow
+  await flush();
+  const flow = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(flow, /FLOW\s+RUNS\s+TOKENS\s+COST\s+API-EQUIV/, "the cycle wraps back to the flow table");
+});
+
+test("a fold whose byTrigger is null degrades the trigger table to its stated empty line", async () => {
+  const noJoin = { ...CANNED_FOLD, byTrigger: null };
+  const comp = await openCosts(costsDeps({ fetchCosts: async () => ({ fold: noJoin, records: CANNED_COST_RECORDS, subscriptions: CANNED_SUBS }) }));
+  comp.handleInput("f");
+  comp.handleInput("f"); // trigger
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(out, /TRIGGER\s+RUNS/, "the header still names the table");
+  assert.match(out, /\(no runs in this window\)/, "null degrades to the stated empty line, never a crash");
 });
 
 test("'w' opens the what-if on the selected flow, cycles targets, and the caveat is cross-provider only", async () => {
@@ -1534,6 +1585,19 @@ test("COSTS under a real-SGR theme at 80: every line, filter input and all, is e
   for (const l of lines) {
     assert.equal(visibleLen(l), 80, `every framed line is exactly 80 visible cols: ${JSON.stringify(stripAnsi(l))}`);
   }
+});
+
+test("all four COSTS tables under a real-SGR theme at 80 stay exactly 80 visible cols", async () => {
+  const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
+  const comp = await openCosts(costsDeps(), { theme });
+  for (const table of ["flow", "model", "trigger", "repo"]) {
+    for (const l of comp.render(80)) {
+      assert.equal(visibleLen(l), 80, `${table} table: every framed line is exactly 80 visible cols: ${JSON.stringify(stripAnsi(l))}`);
+    }
+    comp.handleInput("f");
+    await flush();
+  }
+  await comp.dispose();
 });
 
 test("COSTS degrades to plain unframed lines at a tiny width", async () => {

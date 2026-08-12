@@ -21,13 +21,21 @@ Press `c` on the dashboard (`/dispatch`). The view is verdict-first:
 │ plans   kimi-allegro $99/mo · 28 runs · ~$3.54 est./run amortized               │
 │         peak 5h rolling window: 9 runs, 12.4M tok — limit undisclosed by vendor │
 │ ~ estimates at pi-ai 0.80.7 · 2 runs unmetered · 3 not repriceable              │
-│ [↑↓] row [f] flow/model [t] 7d/30d/mtd [w] what-if [esc] back                   │
+│ [↑↓] row [f] table [t] 7d/30d/mtd [w] what-if [esc] back                        │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Keys: `t` cycles the window (7d / 30d / month-to-date), `f` toggles the by-flow / by-model table,
-`w` opens the what-if on the selected flow (press again to cycle candidate models; `/` type-to-filters
-the full priced catalog), `Esc` backs out one layer at a time.
+Keys: `t` cycles the window (7d / 30d / month-to-date), `f` cycles the rollup table (by flow, by
+model, by trigger, by repo), `w` opens the what-if on the selected flow (press again to cycle
+candidate models; `/` type-to-filters the full priced catalog), `Esc` backs out one layer at a time.
+
+The **by-trigger** table answers "which trigger burns the most" and "what did its failures cost":
+each row is a `triggers.json` entry (attributed by the same persisted index-and-type join the graph
+view uses), with a FAIL count and, when failures spent anything, the failed share beside the total.
+Runs no trigger claims stay visible as their own rows, never blended in: `(chained runs)` for
+children spawned by another run, `(manual/local)` for CLI dispatches, `(unattributed)` for forge runs
+whose recorded trigger no longer matches the current file. The **by-repo** table groups spend by the
+target repository (issue and MR numbers stripped), with `local:<folder>` targets as their own rows.
 
 ## How to read the numbers
 
