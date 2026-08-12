@@ -13,9 +13,7 @@ did and what it spent, and shuts the container down. A durable queue absorbs bur
 checked before a single token is spent, and a live admin panel shows everything and can turn the whole
 thing off.
 
-![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.5.0)
-
-![The COSTS view, verdict-first cost analytics: per-plan SAVING/LOSING verdicts against API rates, a daily spend sparkline, per-flow, per-trigger, per-model and per-repo spend, subscription amortization with peak-window facts, and a what-if that re-prices a flow under another model, every estimate visibly marked](docs/images/costs-view.svg?v=0.11.0)
+![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.12.0)
 
 ![Transcript of /dispatch status, runs, and triggers: queue counts, the run-history table with per-job token and cost accounting, and the unified {on,run} triggers list](docs/images/dispatch-commands.svg?v=0.5.0)
 
@@ -25,9 +23,9 @@ README, no permission system. pi-dispatch is exactly that missing operational la
 - **The container is the boundary.** Every job runs `--cap-drop=ALL`, non-root, ephemeral, with its
   instructions mounted read-only. That is pi's missing permission system, enforced by Docker.
 - **Spend is bounded before a container starts**: a per-job turn budget plus daily, weekly and monthly
-  caps, checked before a single token is spent. And analyzed after: the panel's COSTS view shows spend
-  per flow, trigger, model, day and repo, what a subscription actually saves, and what a flow would
-  cost on another model ([`docs/costs.md`](docs/costs.md)).
+  caps, checked before a single token is spent. And analyzed after: the insights page shows spend
+  per flow, trigger, model, day and repo, what a subscription actually saves, what a flow would
+  cost on another model, and the budget dials themselves ([`docs/costs.md`](docs/costs.md)).
 - **The image is yours to shape.** Bake a project's toolchain into [`image/Dockerfile`](image/Dockerfile);
   it ships Playwright and Chromium, so a flow can build a frontend, screenshot it, and iterate on the
   rendered result. Any trigger can name its own image with `run.image`
@@ -55,10 +53,11 @@ here it is just how the pieces fit). You **design** loops as triggers plus commi
 **graph** shows the loops you actually built (what triggers what, what chained to what, where a skill's
 own text says it might loop, [`docs/graph.md`](docs/graph.md)); and **insights** prices them (what each
 trigger and flow costs, whether a subscription pays off, drawn as charts beside that same topology,
-[`docs/insights.md`](docs/insights.md)). One `/dispatch insights html` gives you the whole picture as a
-single file your browser opens from disk:
+[`docs/insights.md`](docs/insights.md)). One `/dispatch insights` gives you the whole picture as a
+single file your browser opens from disk, budget dials included, because the caps are the one lever
+that actually changes what all of this costs:
 
-![The insights page: KPI tiles, a plan verdict card, the daily spend chart, per-flow/per-trigger/per-model/per-repo breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the trigger/flow topology with spend badged onto the triggers that earned it](docs/images/insights-view.png?v=0.11.0)
+![The insights page: KPI tiles, the budget dials, a plan verdict card, the daily and cumulative spend charts, per-flow trend panels, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the trigger/flow topology with spend badged onto the triggers that earned it](docs/images/insights-view.png?v=0.12.0)
 
 ## Quickstart
 
@@ -407,16 +406,15 @@ Steer the running worker without stopping it, from any terminal:
 ## The admin panel
 
 The dashboard shown at the top of this README is a **pi extension**: it loads into your own interactive
-pi session. No daemon, no web app, no network port. Beside the dashboard, `/dispatch graph` renders the
-whole trigger and flow topology: what triggers what, what chained to what in the recorded runs, what a
-skill's own text says it might chain to, plus orphan skills and dangling triggers. It comes as a
-dashboard view (`g`), as plain text, and as `/dispatch graph html`, a self contained page your browser
-opens from disk (still no server and no port) with the topology drawn Node-RED style
-([`docs/graph.md`](docs/graph.md)). Trigger rows carry their schedule (next fire, or overdue) and
-their window spend, and `/dispatch insights html` combines this topology with the cost analytics on
-one page ([`docs/insights.md`](docs/insights.md), shown [above](#when-to-use-it)).
+pi session. No daemon, no web app, no network port. Analytics live on the insights page: pressing `i`
+(or typing `/dispatch insights`) writes one self contained file and opens your browser (still no
+server and no port), with the whole trigger and flow topology drawn Node-RED style, what triggers
+what, what chained to what in the recorded runs, what a skill's own text says it might chain to,
+orphan skills and dangling triggers flagged, each cron's next fire or overdue state, and spend badged
+onto the triggers that earned it ([`docs/graph.md`](docs/graph.md) explains every edge;
+[`docs/insights.md`](docs/insights.md) the page, shown [above](#when-to-use-it)).
 
-![The trigger and flow graph as /dispatch graph html draws it: cron and forge triggers wired to their flows, an observed chain edge carrying its run count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters](docs/images/graph-view.png?v=0.11.0)
+![The topology pane of the insights page: cron and forge triggers wired to their flows, an observed chain edge carrying its run count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters](docs/images/graph-view.png?v=0.12.0)
 
 ```bash
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
@@ -436,13 +434,13 @@ banner: setup is offered when there is nothing, never over an outage.
 
 Inside the panel: `p`/`r` pause and resume the queue, arrows and `Enter` drill into triggers and runs,
 `a`/`e`/`x` add, edit and delete triggers (validated, atomic, reloaded live by both services), `s` edits
-a limit, `w` manages quiet hours, `c` opens the COSTS view (its `f` key cycles spend by flow, model,
-trigger and repo). `Enter` on a run opens its full record:
+a limit, `w` manages quiet hours, `i` opens the insights page. `Enter` on a run opens its full
+record:
 
 ![The RUN_DETAIL drill-in, a colored post-mortem of one run's PII-free record: outcome, target, timing with duration, turns/exit/budget slot, tokens and cost, and a chain line naming spawned children](docs/images/dispatch-run-detail.svg)
 
-The same surface exists as plain commands (`/dispatch status | runs | logs | budget | triggers | costs |
-graph | insights | run | pause | resume | set | unset`), all local, no model involvement.
+The same surface exists as plain commands (`/dispatch status | runs | logs | budget | triggers |
+insights | run | pause | resume | set | unset`), all local, no model involvement.
 
 ### Operating pi-dispatch from your AI
 
@@ -525,7 +523,7 @@ Same machinery, per-forge correctness differences, each with a full setup doc:
 
 Every job writes a durable, id-only record under `PI_LOGS_DIR` (never issue or comment text; raw logs
 are opt-in via `PI_CAPTURE_JOB_LOGS=1` and stay host-side). Each record carries a per-model **usage
-ledger**, which is what the COSTS view, `/dispatch costs`, and the what-if re-pricing fold over. Declare
+ledger**, which is what the insights page, `dispatch_costs`, and the what-if re-pricing fold over. Declare
 what your subscriptions cost in `subscriptions.json` and the screen shows whether they actually save
 money; without it, zero-rate runs show `$0 (unrated)`, never "free" ([`docs/costs.md`](docs/costs.md)).
 

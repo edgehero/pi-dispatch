@@ -12,15 +12,16 @@ recipe; it needs a real terminal, so it's yours to run (the panel can't be drive
    `pi -e admin/src/index.ts`; the published extension's entry point is its built `./dist/index.mjs`.)
 2. `↵` on a trigger → the MATCHES / RUNS / TRUST MODEL drill-in.
 3. `↵` on a run → the colored post-mortem.
-4. `c` → the COSTS view: the verdict line, the daily sparkline, the by-flow table, `t` to cycle
-   7d / 30d / mtd, `w` for the what-if on the selected flow. `Esc` backs out.
+4. `i` → the insights page opens in the browser: the budget lever, the plan verdicts, the spend
+   charts and the topology, one page. (In a pure-terminal recording, skip this beat or show the
+   printed `file://` URL instead.)
 5. (optional) `w` on the dashboard → the pause-window dialogs: a three-way select (add / edit / delete a
    pause window), then seven prompts for an add. Watch a PAUSE WINDOWS row flip to
    `● paused · resumes in …`.
 6. `q` to close.
 
 The footer is the shot list, in order:
-`↑↓↵ open · a add · w pauses · l logs · c costs · p pause · r resume · q quit`
+`↑↓ open · a add · w pauses · l logs · i insights · p/r pause · q quit`
 
 If the recording is for **onboarding** rather than for the README, lead with `/dispatch setup` instead: the
 guided wizard is the front door now, and a panel that opens already configured is the payoff shot.
@@ -53,7 +54,7 @@ Type "/dispatch"  Enter
 Sleep 3s
 Enter  Sleep 3s   Escape Sleep 1s                      # a trigger drill-in (selection starts on trigger 1)
 Tab  Sleep 500ms  Enter  Sleep 3s  Escape Sleep 1s     # a run post-mortem (Tab jumps triggers <-> runs)
-Type "c"  Sleep 3s  Type "t"  Sleep 2s  Escape Sleep 1s   # the COSTS view, one window flip
+Type "i"  Sleep 4s                                        # the insights page opens (browser beat)
 Type "q"
 Sleep 1s
 ```

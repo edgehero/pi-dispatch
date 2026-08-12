@@ -1,41 +1,24 @@
 # Cost analytics
 
 Every run records what it spent (`docs`: run history; `specs`: `REQ-TOKEN-ACCOUNTING-AND-CAPS`). The
-costs surface makes that history analyzable: what a flow costs, what a month costs per model, what a
+cost analytics make that history analyzable: what a flow costs, what a month costs per model, what a
 subscription is actually saving, and what a flow *would* cost on a different model. It informs; it
 changes nothing — no auto-switching, no vendor API calls, no database (`REQ-COST-ANALYTICS`,
 `DES-COST-FOLD-BY-SCAN`).
 
-## The COSTS view
+The surface is the **insights page** ([`insights.md`](insights.md)): `/dispatch insights` writes and
+opens one self-contained file with the plan verdicts, the daily and cumulative spend charts, the
+per-flow trend panels, and the four breakdowns (by flow, by trigger, by model, by repo) — beside the
+trigger/flow topology those numbers come from. This document explains the semantics behind every
+dollar that page draws.
 
-Press `c` on the dashboard (`/dispatch`). The view is verdict-first:
-
-```
-┌ pi-dispatch ── COSTS · Aug 2026 (mtd) ──────────────────────────────────────────┐
-│ VERDICT  kimi-allegro is SAVING ~$4.89 est. this month                          │
-│   plan price (prorated) $99.00 → $39.60 · plan runs @ API ~$44.49 est.          │
-│ daily  ▁▁▂▃▂▅▇▃▂▁·▁▂▂▃█▄▂▁▁▂▃▂▁▁▂▄▃▂▁  Σ ≥$12.41 · max $3.10/d                  │
-│   FLOW              RUNS  TOKENS  COST           API-EQUIV                      │
-│ › triage             41   12.4M  ≥$8.02         —                               │
-│   nightly-sync       28    6.1M  plan:kimi      ~$3.90 est.                     │
-│ plans   kimi-allegro $99/mo · 28 runs · ~$3.54 est./run amortized               │
-│         peak 5h rolling window: 9 runs, 12.4M tok — limit undisclosed by vendor │
-│ ~ estimates at pi-ai 0.80.7 · 2 runs unmetered · 3 not repriceable              │
-│ [↑↓] row [f] table [t] 7d/30d/mtd [w] what-if [esc] back                        │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Keys: `t` cycles the window (7d / 30d / month-to-date), `f` cycles the rollup table (by flow, by
-model, by trigger, by repo), `w` opens the what-if on the selected flow (press again to cycle
-candidate models; `/` type-to-filters the full priced catalog), `Esc` backs out one layer at a time.
-
-The **by-trigger** table answers "which trigger burns the most" and "what did its failures cost":
-each row is a `triggers.json` entry (attributed by the same persisted index-and-type join the graph
-view uses), with a FAIL count and, when failures spent anything, the failed share beside the total.
-Runs no trigger claims stay visible as their own rows, never blended in: `(chained runs)` for
-children spawned by another run, `(manual/local)` for CLI dispatches, `(unattributed)` for forge runs
-whose recorded trigger no longer matches the current file. The **by-repo** table groups spend by the
-target repository (issue and MR numbers stripped), with `local:<folder>` targets as their own rows.
+The **by-trigger** breakdown answers "which trigger burns the most" and "what did its failures
+cost": each row is a `triggers.json` entry (attributed by the persisted index-and-type join the
+topology uses). Runs no trigger claims stay visible as their own rows, never blended in:
+`(chained runs)` for children spawned by another run, `(manual/local)` for CLI dispatches,
+`(unattributed)` for forge runs whose recorded trigger no longer matches the current file. The
+**by-repo** breakdown groups spend by the target repository (issue and MR numbers stripped), with
+`local:<folder>` targets as their own rows.
 
 ## How to read the numbers
 
@@ -100,17 +83,17 @@ second caveat too: same token profile, different tokenizers — directional only
 history gets one offer: the `$0.5–$5/job` band recorded at `OQ-002`, scaled by the flow's run count and
 labeled `unmeasured (OQ-002)`.
 
-## Without the TUI
+## The surfaces
 
-- `/dispatch insights html` — the browser surface: the same fold drawn as charts (daily spend,
-  the four breakdowns, plan verdict cards) beside the trigger/flow topology, in one self-contained
-  file ([`insights.md`](insights.md)).
-- `/dispatch costs [7d|30d|mtd]` — the same fold, plain text, same labels.
-- `/dispatch costs whatif <provider>/<model> --flow <flow>` — scripting-friendly what-if; unknown
-  models get closest-match suggestions (this is the full-catalog path). `--flow` is **required**: the
-  estimate scores one flow's median run, not a portfolio, so the command refuses without it.
+- `/dispatch insights [7d|30d|mtd]` — the page: the fold drawn as charts beside the trigger/flow
+  topology, in one self-contained file your browser opens from disk ([`insights.md`](insights.md)).
+  Over SSH the file still writes and its URL still prints.
+- `/dispatch insights whatif <provider>/<model> --flow <flow>` — the what-if: re-prices a flow's
+  recorded token profiles under another model. Unknown models get closest-match suggestions, and
+  tab completion offers the full priced catalog. `--flow` is **required**: the estimate scores one
+  flow's median run, not a portfolio, so the command refuses without it.
 - The `dispatch_costs` tool returns the fold as JSON in which **every monetary value carries its
-  `class`** — a model reading it can no more launder an estimate into a fact than the screen can.
+  `class`** — a model reading it can no more launder an estimate into a fact than the page can.
 
 ## Environment
 

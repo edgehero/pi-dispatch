@@ -262,7 +262,7 @@ Working title: **"Giving a coding agent an off-switch: containers, spend caps, a
 
 <!--
 TEMPLATE, NOT the current release. This block is v0.2.0-era copy and its feature list predates the GitLab,
-Forgejo and Azure DevOps arms, the resurrectable sandbox, run.replicas, resumable sessions, the COSTS view,
+Forgejo and Azure DevOps arms, the resurrectable sandbox, run.replicas, resumable sessions, the cost analytics,
 the setup wizard, polling mode and `setup github`. Re-cut it per release against that release's own changes,
 keeping the shape (Admin / AI-operable / feature area / Docs & safety / the maturity footer) and nothing
 else. Versions at the time of writing: root 0.8.0, @edgehero/pi-dispatch 0.1.2,

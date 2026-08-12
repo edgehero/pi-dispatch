@@ -7,11 +7,12 @@ fastest next to the topology those numbers came from — spend per day, per flow
 model, per repo, plan verdicts, and the graph with spend badged onto the triggers that earned it.
 
 ```
-/dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]
+/dispatch insights [7d|30d|mtd] [--no-open] [--full-paths]
 ```
 
 writes **one self-contained HTML file** to `<graph dir>/insights.html` (the same directory
-`graph html` uses, `PI_GRAPH_DIR`), prints its `file://` URL, and opens your browser. No server, no
+`PI_GRAPH_DIR` names, defaulting under the OS temp dir), prints its `file://` URL, and opens your
+browser. No server, no
 port, no external requests: the page is inline SVG/CSS/JS and works from the file system, over
 `scp`, or attached to a ticket. Re-running the command overwrites the same path atomically, so a
 tab you keep open picks the new fold up through its Reload/auto-reload controls.
@@ -27,10 +28,18 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
   burn-down. No counterfactual declared reads exactly that.
 - **Daily spend**: a column per UTC day. Quiet days render as quiet baseline ticks, never compressed
   away. A dashed, translucent column is an estimate; a `≥` marks a floor.
-- **Breakdowns**: by flow, by trigger, by model, by repo — the same four tables the COSTS view
-  cycles, drawn as bars. Clicking a trigger row highlights its node in the topology below.
-- **Topology**: the same graph `graph html` exports, pan/zoom/hover and all, with one addition: a
-  spend badge under every trigger that spent in the window.
+- **Budget**: the operator's one real lever on cost, beside the spend it limits — reserved vs cap
+  for the day/week/month job-slot windows and the daily token counter, states as words
+  (`soft-hold`, `over`), an overlay-unset cap shown as unknown or off with no bar and no invented
+  denominator, and the lever named (`/dispatch set …`, the panel's `s` key).
+- **Trend lines**: a cumulative window-spend line under the daily columns (dashed from the first
+  estimated day onward — once an estimate enters a running total it never leaves), and per-flow
+  daily spend as small panels on one shared scale, dashed wherever an estimated day touches.
+- **Breakdowns**: spend by flow, by trigger, by model, by repo, drawn as bars. Clicking a trigger
+  row highlights its node in the topology below.
+- **Topology**: the trigger/flow graph, pan/zoom/hover and all ([`graph.md`](graph.md) explains
+  every edge and badge), with spend badged under every trigger that spent in the window and each
+  cron's next fire or overdue state in its tip.
 - **Footer**: the provenance ledger — which pi-ai priced the numbers, what was unmetered,
   unledgered, truncated, or drifted — plus the graph's own honesty counters in the legend.
 
@@ -64,5 +73,5 @@ always printed first. `scp` the file to your desktop and open it there.
   control re-reads the file so an open tab follows your re-runs.
 - Everything the [`costs.md`](costs.md) honest-limits section says holds here too: totals are
   floors, pre-ledger runs are counted rather than guessed at, and history is never re-priced.
-- The what-if stays in the terminal (`/dispatch costs whatif`, or `w` in the COSTS view): an
-  interactive estimate belongs where the full priced catalog is one keystroke away.
+- The what-if is the `/dispatch insights whatif <provider/model> --flow <flow>` command: an
+  estimate wants the full priced catalog, and tab completion offers it.

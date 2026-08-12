@@ -6,56 +6,22 @@ serviced repo's `.pi/skills/` tree holds what exists and what opts into being ch
 surface assembles that topology in one place (`REQ-TOPOLOGY-GRAPH`, `DES-GRAPH-EDGE-DERIVATION`). It
 informs; it changes nothing — no port, no database, no new dependency.
 
-## The GRAPH view
+## Where it renders
 
-Press `g` on the dashboard (`/dispatch`). The view is a folder-grouped tree: each group header folds
-with `↵`, trigger rows carry their joined run stats on the right, skill rows carry their badges, and
-a skill's outgoing edges render as indented annotation rows labelled by evidence class. `↵` on a
-trigger row opens the same trigger detail the LIST offers. `r` refreshes the model — the only
-re-read besides entry, because assembling the graph enumerates each folder's committed skills with
-git, and topology changes when you edit things, not per second. `Esc` returns to the LIST.
+![The topology pane: triggers wired to their flows Node-RED style, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.12.0)
 
-## `/dispatch graph html`: the browser view
+The topology is the lower half of the **insights page** ([`insights.md`](insights.md)):
+`/dispatch insights` writes one self-contained HTML file and opens your browser, and the topology
+renders there as a Node-RED-style diagram — trigger nodes wired to their flows, observed chain edges
+with their counts and recency, potential (mentioned) edges dashed, folders as group boxes, orphans
+dimmed and dashed, dangling triggers flagged, spend badged onto the triggers that earned it. Pan by
+dragging, zoom with the wheel, hover a node for its details (a cron's tip counts down to its next
+fire, or says how overdue it is), click one to highlight what it triggers and what reaches it. The
+page is a snapshot with its own refresh loop, overwritten atomically at a stable path, so the
+workflow is: keep the tab open, re-run `/dispatch insights` after editing triggers or skills, and
+the tab picks up the new topology within the auto-reload interval.
 
-![The graph page: triggers wired to their flows Node-RED style, an observed chain edge with its count, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=0.9.1)
-
-`/dispatch graph html` renders the same model as a Node-RED-style diagram: trigger nodes wired to
-their flows, observed chain edges with their counts, potential (mentioned) edges dashed, folders as
-group boxes, orphans dimmed and dashed, dangling triggers flagged. It writes **one self-contained
-HTML file** (inline SVG/CSS/JS, no network requests of any kind) to a stable temp path
-(`PI_GRAPH_DIR` override) and opens your browser; the `file://` URL is always printed first, so over
-SSH you copy the file instead (`--no-open` skips the browser unconditionally).
-
-The page is a snapshot with its own refresh loop: a Reload button, an auto-reload toggle (off, 5s,
-30s) and a "generated N ago" stamp. Because the command overwrites the **same file atomically**,
-the workflow is: keep the tab open, re-run `/dispatch graph html` after editing triggers or skills,
-and the tab picks up the new topology within the auto-reload interval — pan/zoom and selection
-survive the reload. Pan by dragging, zoom with the wheel, hover a node for its details, click one to
-highlight what it triggers and what reaches it.
-
-`/dispatch insights html` writes a sibling artifact to the same directory: the same topology with
-spend badged onto its triggers, beside the cost analytics drawn as charts ([`insights.md`](insights.md)).
-`graph html` stays the lighter topology-only export (no subscriptions read, no second scan).
-
-## `/dispatch graph`
-
-```
-Graph: triggers and flows
-
-folder /srv/site, HEAD abc1234
-  cron nightly 0 3 * * * -> build-report  (runs 41, last completed, next 4h, spend ~$4.05 est.)
-  skill build-report  [chainable]
-    -> notify  observed x3
-  skill notify  [chainable] [AI-reachable, no trigger]
-  skill old-import  [orphan: no trigger, no ai-trigger, no mention]
-
-forge github (skills unverifiable from the admin host)
-  label any[ai] -> triage  (runs 12, last completed)
-
-2 runs unattributed (triggers file changed since they ran, or they predate attribution)
-edges: -> configured, observed xN (from records), mention (potential; a mention is not a promise)
-caps: chain depth <= 1, <= 2 per job, same folder only, window 30d
-```
+This document explains the semantics behind what that pane draws.
 
 ## How to read an edge
 
@@ -85,9 +51,8 @@ There is no structured loop construct anywhere in this system: a "loop inside a 
 in `SKILL.md` telling the agent to iterate ("iterate until it renders right", "for each page…").
 The graph scans each skill's body for that vocabulary and shows what it finds **inside the skill's
 own node**, because everything a loop does happens inside that one job, one container, one budget
-slot. In the browser view a skill with loop hints becomes a group box: the skill chip, a `⟳` marker
-per detected phrase, and the loop wire, all visibly contained in the skill. In the TUI and text
-views the hints ride the skill's row as `[loop: "…"]` badges. Like potential edges, a hint is text
+slot. A skill with loop hints becomes a group box: the skill chip, a `⟳` marker
+per detected phrase, and the loop wire, all visibly contained in the skill. Like potential edges, a hint is text
 evidence, not a promise; the frontmatter is excluded from the scan so a `description: repeat daily`
 never reads as a loop. The other two loop shapes have their own visuals: a cron trigger's re-arm is
 the dashed self-loop labelled with its schedule, and a flow that chained to itself shows as an
@@ -95,9 +60,9 @@ observed self-edge with its count.
 
 ## Which repos and folders
 
-A local folder group is headed by its `run.folder` (the TUI and `/dispatch graph` show the full
-path; the HTML artifact shows the basename unless you pass `--full-paths`, since the file is durable
-and shareable while your terminal is not). A forge group's triggers name no repository in
+A local folder group is headed by its `run.folder`, shown as a basename unless you pass
+`--full-paths` — the file is durable and shareable, and full host paths are the operator's explicit
+opt-in. A forge group's triggers name no repository in
 `triggers.json` (routing belongs to the forge app installation), so the group instead lists the
 repositories its **recorded runs** actually hit in the window, labelled as record-derived: history
 answering a question configuration cannot.
