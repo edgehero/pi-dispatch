@@ -4,26 +4,30 @@
 
 # pi-dispatch
 
-**Run the [pi](https://github.com/earendil-works/pi) coding agent as a service. It lives in the background
-and, on a schedule or on an issue, comment or pull request from GitHub, GitLab, Forgejo or Azure DevOps,
-opens a container, runs your flow against the repo, and shuts the container down. Every job runs behind a
-durable queue, a spend cap, and a live admin panel you can turn the whole thing off from.**
+**Let a coding agent work on your repositories while you are not watching, without surprise bills and
+without giving it the keys to your machine.** pi-dispatch runs the
+[pi](https://github.com/earendil-works/pi) coding agent as a self hosted background service: on a
+schedule, or when an issue, comment or pull request arrives from GitHub, GitLab, Forgejo or Azure
+DevOps, it opens a locked down container, lets the agent do one job against the repo, records what it
+did and what it spent, and shuts the container down. A durable queue absorbs bursts, spend caps are
+checked before a single token is spent, and a live admin panel shows everything and can turn the whole
+thing off.
 
 ![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=0.5.0)
 
-![The COSTS view, verdict-first cost analytics: per-plan SAVING/LOSING verdicts against API rates, a daily spend sparkline, per-flow spend with API equivalents, subscription amortization with peak-window facts, and a what-if that re-prices a flow under another model, every estimate visibly marked](docs/images/costs-view.svg?v=0.5.0)
+![The COSTS view, verdict-first cost analytics: per-plan SAVING/LOSING verdicts against API rates, a daily spend sparkline, per-flow, per-trigger, per-model and per-repo spend, subscription amortization with peak-window facts, and a what-if that re-prices a flow under another model, every estimate visibly marked](docs/images/costs-view.svg?v=0.11.0)
 
 ![Transcript of /dispatch status, runs, and triggers: queue counts, the run-history table with per-job token and cost accounting, and the unified {on,run} triggers list](docs/images/dispatch-commands.svg?v=0.5.0)
 
-pi has no job queue, no concurrency control, no spend limit, and, by its own README, no permission
-system. pi-dispatch is exactly that missing operational layer, and nothing else:
+pi itself is a superb agent with no job queue, no concurrency control, no spend limit, and, by its own
+README, no permission system. pi-dispatch is exactly that missing operational layer, and nothing else:
 
 - **The container is the boundary.** Every job runs `--cap-drop=ALL`, non-root, ephemeral, with its
   instructions mounted read-only. That is pi's missing permission system, enforced by Docker.
 - **Spend is bounded before a container starts**: a per-job turn budget plus daily, weekly and monthly
   caps, checked before a single token is spent. And analyzed after: the panel's COSTS view shows spend
-  per flow, model and day, what a subscription actually saves, and what a flow would cost on another
-  model ([`docs/costs.md`](docs/costs.md)).
+  per flow, trigger, model, day and repo, what a subscription actually saves, and what a flow would
+  cost on another model ([`docs/costs.md`](docs/costs.md)).
 - **The image is yours to shape.** Bake a project's toolchain into [`image/Dockerfile`](image/Dockerfile);
   it ships Playwright and Chromium, so a flow can build a frontend, screenshot it, and iterate on the
   rendered result. Any trigger can name its own image with `run.image`
@@ -32,6 +36,29 @@ system. pi-dispatch is exactly that missing operational layer, and nothing else:
   same panel. The full trigger reference is the [next section](#triggers).
 - **Your project steers it** through pi's native `.pi/skills` and persona, from your committed files,
   over a small immutable safety floor the agent cannot remove.
+
+## When to use it
+
+Reach for pi-dispatch when the work is **recurring or event driven**, the kind of agent loop you want
+running without you:
+
+- a nightly job that triages new issues, updates a report, or tidies a backlog;
+- "label an issue `ai` and a fix PR appears", for your team's everyday small fixes;
+- a follow up loop that answers review comments on the PRs the agent itself opened;
+- several repos and several such loops, sharing one queue, one budget, one panel.
+
+For a one off interactive session on your own machine, plain pi is enough; pi-dispatch earns its keep
+the moment an agent runs while nobody is watching the terminal.
+
+Running agents this way is a design, observe, tune loop (some call it workflow or context engineering;
+here it is just how the pieces fit). You **design** loops as triggers plus committed skills; the
+**graph** shows the loops you actually built (what triggers what, what chained to what, where a skill's
+own text says it might loop, [`docs/graph.md`](docs/graph.md)); and **insights** prices them (what each
+trigger and flow costs, whether a subscription pays off, drawn as charts beside that same topology,
+[`docs/insights.md`](docs/insights.md)). One `/dispatch insights html` gives you the whole picture as a
+single file your browser opens from disk:
+
+![The insights page: KPI tiles, a plan verdict card, the daily spend chart, per-flow/per-trigger/per-model/per-repo breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the trigger/flow topology with spend badged onto the triggers that earned it](docs/images/insights-view.png?v=0.11.0)
 
 ## Quickstart
 
@@ -385,9 +412,11 @@ whole trigger and flow topology: what triggers what, what chained to what in the
 skill's own text says it might chain to, plus orphan skills and dangling triggers. It comes as a
 dashboard view (`g`), as plain text, and as `/dispatch graph html`, a self contained page your browser
 opens from disk (still no server and no port) with the topology drawn Node-RED style
-([`docs/graph.md`](docs/graph.md)).
+([`docs/graph.md`](docs/graph.md)). Trigger rows carry their schedule (next fire, or overdue) and
+their window spend, and `/dispatch insights html` combines this topology with the cost analytics on
+one page ([`docs/insights.md`](docs/insights.md), shown [above](#when-to-use-it)).
 
-![The trigger and flow graph as /dispatch graph html draws it: cron and forge triggers wired to their flows, an observed chain edge carrying its run count, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps](docs/images/graph-view.png?v=0.9.1)
+![The trigger and flow graph as /dispatch graph html draws it: cron and forge triggers wired to their flows, an observed chain edge carrying its run count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops with their schedules, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters](docs/images/graph-view.png?v=0.11.0)
 
 ```bash
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
@@ -407,12 +436,13 @@ banner: setup is offered when there is nothing, never over an outage.
 
 Inside the panel: `p`/`r` pause and resume the queue, arrows and `Enter` drill into triggers and runs,
 `a`/`e`/`x` add, edit and delete triggers (validated, atomic, reloaded live by both services), `s` edits
-a limit, `w` manages quiet hours, `c` opens the COSTS view. `Enter` on a run opens its full record:
+a limit, `w` manages quiet hours, `c` opens the COSTS view (its `f` key cycles spend by flow, model,
+trigger and repo). `Enter` on a run opens its full record:
 
 ![The RUN_DETAIL drill-in, a colored post-mortem of one run's PII-free record: outcome, target, timing with duration, turns/exit/budget slot, tokens and cost, and a chain line naming spawned children](docs/images/dispatch-run-detail.svg)
 
 The same surface exists as plain commands (`/dispatch status | runs | logs | budget | triggers | costs |
-run | pause | resume | set | unset`), all local, no model involvement.
+graph | insights | run | pause | resume | set | unset`), all local, no model involvement.
 
 ### Operating pi-dispatch from your AI
 

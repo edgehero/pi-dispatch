@@ -4,7 +4,7 @@
 
 # pi-dispatch: run the pi coding agent as a self-hosted service
 
-**[pi](https://github.com/earendil-works/pi) is a superb coding agent, but it has no job queue, no spend limit, and, by its own README, no permission system.** pi-dispatch adds exactly those, so you can run pi unattended and safely: on a cron schedule, on your repo's issues and PRs, or straight from the CLI. Every job runs in an isolated container, with spend bounded before a single token is spent.
+**Let a coding agent work on your repositories while you are not watching, without surprise bills and without giving it the keys to your machine.** [pi](https://github.com/earendil-works/pi) is a superb coding agent, but it has no job queue, no spend limit, and, by its own README, no permission system. pi-dispatch adds exactly those, so you can run pi unattended and safely: on a cron schedule, on your repo's issues and PRs, or straight from the CLI. Every job runs in an isolated container, spend is bounded before a single token is spent, and everything the agent did (and what it cost) is recorded, graphed and priced for you.
 
 > This npm package, **`@edgehero/pi-dispatch-admin`**, is the **operator console** (a pi extension). The service itself is `@edgehero/pi-dispatch` (worker + CLI) and `@edgehero/pi-dispatch-receiver` (the webhook edge); the [main repo](https://github.com/edgehero/pi-dispatch) has the container image, docs, and SECURITY.md.
 
@@ -59,16 +59,22 @@ One command puts a live TUI over the whole deployment:
 </p>
 
 - **Status and spend.** Queue and worker state, day/week/month spend meters, a daily token counter, and a run-history table with per-job tokens and cost.
-- **Costs, analyzed honestly.** The COSTS view (`c`) shows spend per flow, model and day, what each declared subscription actually saves against API rates, and a what-if that re-prices a flow under another model. Every dollar carries its class: a plan-covered run never renders as $0.00, and an estimate is always marked as one.
+- **Costs, analyzed honestly.** The COSTS view (`c`) shows spend per flow, model, trigger, repo and day, what each declared subscription actually saves against API rates, and a what-if that re-prices a flow under another model. Every dollar carries its class: a plan-covered run never renders as $0.00, and an estimate is always marked as one.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/costs-view.png?v=0.5.0" alt="The COSTS view: per-plan verdicts against API rates, a daily spend sparkline, per-flow spend with API equivalents, and subscription amortization" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/costs-view.png?v=0.11.0" alt="The COSTS view: per-plan verdicts against API rates, a daily spend sparkline, spend by flow, trigger, model and repo, and subscription amortization" width="820">
 </p>
 
-- **The topology, as a graph.** The GRAPH view (`g`) and `/dispatch graph` show what triggers what, what chained to what in the recorded runs, and what a skill's own text says it might chain to, with orphan skills and dangling triggers flagged. `/dispatch graph html` draws the same picture Node-RED style in your browser, from one self contained file on disk: no server, no port, and the page reloads itself when you regenerate it.
+- **The topology, as a graph.** The GRAPH view (`g`) and `/dispatch graph` show what triggers what, what chained to what in the recorded runs, and what a skill's own text says it might chain to, with orphan skills and dangling triggers flagged, each cron's next fire or overdue state, and each trigger's window spend. `/dispatch graph html` draws the same picture Node-RED style in your browser, from one self contained file on disk: no server, no port, and the page reloads itself when you regenerate it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/graph-view.png?v=0.9.1" alt="The trigger and flow graph: triggers wired to their flows, an observed chain edge with its count, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/graph-view.png?v=0.11.0" alt="The trigger and flow graph: triggers wired to their flows, an observed chain edge with its count and recency, a potential mention, a skill with its prose loop grouped inside it, cron re-arm loops, an orphan skill dimmed, the forge group naming the repos its runs hit, and the legend stating the chain caps and honesty counters" width="820">
+</p>
+
+- **One page for both questions.** `/dispatch insights html` writes a single self contained page: the topology with spend badged onto its triggers, beside the cost analytics drawn as charts (daily spend, the four breakdowns, plan verdict cards). Design your agent loops as triggers and skills, see the loops you actually built, and see what each one costs, all in one place ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=0.11.0" alt="The insights page: KPI tiles, a plan verdict card, the daily spend chart, the four breakdowns with plan-covered buckets drawn as chips instead of dollar bars, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** cron, label, comment and pull_request triggers with colored drill-ins showing what fires each one, what it runs, and its trust model. Added, edited and deleted without a restart. Triggers that run third-party code or a custom image are badged; opting in or out of either stays an edit to the reviewed `triggers.json`, which neither the console nor a model-callable tool will make for you.
