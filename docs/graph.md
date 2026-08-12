@@ -33,6 +33,10 @@ and the tab picks up the new topology within the auto-reload interval — pan/zo
 survive the reload. Pan by dragging, zoom with the wheel, hover a node for its details, click one to
 highlight what it triggers and what reaches it.
 
+`/dispatch insights html` writes a sibling artifact to the same directory: the same topology with
+spend badged onto its triggers, beside the cost analytics drawn as charts ([`insights.md`](insights.md)).
+`graph html` stays the lighter topology-only export (no subscriptions read, no second scan).
+
 ## `/dispatch graph`
 
 ```

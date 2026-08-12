@@ -85,6 +85,7 @@ import {
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildGraphHtml } from "./graph-html.mjs";
+import { buildInsightsHtml } from "./insights-html.mjs";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
@@ -162,7 +163,7 @@ const REBUILT_NOTICE = (reason: string) =>
   `replaced invalid settings file (${reason}) — other keys were lost`;
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|costs|graph|triggers|settings|set|unset|setup>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|costs|graph|insights|triggers|settings|set|unset|setup>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -174,6 +175,7 @@ const KNOWN_SUBCOMMANDS = [
   "budget",
   "costs",
   "graph",
+  "insights",
   "triggers",
   "settings",
   "set",
@@ -217,8 +219,10 @@ export default function admin(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("dispatch", {
+    // The operator-visible summary; `graph` was missing from it once while USAGE carried it, which
+    // is exactly the drift the USAGE/KNOWN_SUBCOMMANDS pin exists to catch -- keep all three in step.
     description:
-      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|costs|triggers|settings|set|unset|setup",
+      "pi-dispatch admin: status|pause|resume|run|runs|logs|budget|costs|graph|insights|triggers|settings|set|unset|setup",
     getArgumentCompletions: (prefix) => completeArguments(prefix),
     handler: async (args, ctx) => dispatch(pi, args, ctx),
   });
@@ -944,6 +948,17 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       send(pi, renderGraph(await assembleGraph(paths)));
       return;
     }
+    case "insights": {
+      // `insights html` is the only verb: the artifact IS the feature (issue #175), and a bare
+      // `insights` answering usage beats it silently aliasing either half's text renderer. Same
+      // no-LLM-tool posture as `graph`: the assembly spawns git per folder.
+      if (tokens[1] === "html") {
+        await insightsHtmlCommand(paths, tokens, notify);
+        return;
+      }
+      notify?.(INSIGHTS_USAGE, "warning");
+      return;
+    }
     case "run": {
       const folder = tokens[1];
       const flow = tokens[2];
@@ -1138,6 +1153,79 @@ export async function graphHtmlCommand(paths: any, tokens: string[], notify: Not
   // would otherwise print a URL that truncates in terminals and breaks the opener spawn.
   const url = pathToFileURL(file).href;
   notify?.(`graph written: ${url}`, "info");
+  if (noOpen) return;
+  const headless = isHeadlessEnv(deps.env, deps.platform);
+  if (headless) {
+    notify?.(`not opening a browser (${headless}): open the URL on this machine's desktop, or scp the file there`, "info");
+    return;
+  }
+  deps.openBrowser(url);
+}
+
+const INSIGHTS_USAGE = "usage: /dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]";
+
+/**
+ * Assemble the unified insights payload: the graph model and the cost fold the two existing
+ * assemblers already build, plus the per-trigger spend map keyed by graph node id. The spend map is
+ * derived from the SPEND window's records (the operator's question), not the graph's fixed record
+ * window -- the artifact states both windows, and a badge whose window differed from the table
+ * beside it would be the quiet inconsistency this surface exists to kill.
+ */
+async function assembleInsights(paths: any, window: string): Promise<any> {
+  const graph = await assembleGraph(paths);
+  const costs = assembleCosts(paths, window);
+  if (costs?.unreachable) {
+    return { graph, fold: null, costsUnreachable: String(costs.unreachable), window, costByTrigger: null };
+  }
+  const fold = costs?.fold ?? null;
+  // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
+  // scanned; scanning again here costs one directory pass and keeps the two assemblers untouched.
+  const nowMs = Date.now();
+  const sinceMs = costsSinceMs(window, nowMs);
+  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
+  let costByTrigger: any = null;
+  if (Array.isArray(records)) {
+    const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+    const subsView: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
+    const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
+    costByTrigger = foldTriggerCosts({ records, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing: PRICING, triggerJoin });
+  }
+  return { graph, fold, costsUnreachable: null, window, costByTrigger };
+}
+
+/**
+ * `/dispatch insights html [7d|30d|mtd] [--no-open] [--full-paths]` (REQ-INSIGHTS-HTML-EXPORT):
+ * graphHtmlCommand's structural twin -- assemble, render the self-contained artifact, write it
+ * ATOMICALLY to the STABLE path `<graphDir>/insights.html`, print the file:// URL FIRST, then
+ * best-effort open unless headless/--no-open. A cost-side degrade (scan unreachable) still writes
+ * the page with its banner: the artifact is total, never a stack trace. Default window 30d, NOT
+ * costs' mtd: the topology half is pinned at a 30d record window, and the one page's two halves
+ * should describe the same period unless the operator asks otherwise. Exported for its tests.
+ */
+export async function insightsHtmlCommand(paths: any, tokens: string[], notify: Notify, deps: any = realGraphHtmlDeps()): Promise<void> {
+  const rest = tokens.slice(2);
+  const noOpen = rest.includes("--no-open");
+  const fullPaths = rest.includes("--full-paths");
+  const positional = rest.filter((t) => t !== "--no-open" && t !== "--full-paths");
+  const window = positional.length > 0 ? positional[0] : "30d";
+  if (positional.length > 1 || !COSTS_WINDOWS.includes(window)) {
+    notify?.(INSIGHTS_USAGE, "warning");
+    return;
+  }
+  const payload = await assembleInsights(paths, window);
+  const html = buildInsightsHtml(payload, { now: deps.now(), fullPaths });
+  const file = `${paths.graphDir}/insights.html`;
+  try {
+    deps.fs.mkdirSync(paths.graphDir, { recursive: true });
+    const tmp = `${file}.tmp`;
+    deps.fs.writeFileSync(tmp, html, { mode: 0o644 });
+    deps.fs.renameSync(tmp, file);
+  } catch (err: any) {
+    notify?.(`insights html: could not write ${file} (${err?.message ?? err})`, "error");
+    return;
+  }
+  const url = pathToFileURL(file).href;
+  notify?.(`insights written: ${url}`, "info");
   if (noOpen) return;
   const headless = isHeadlessEnv(deps.env, deps.platform);
   if (headless) {
@@ -1740,6 +1828,16 @@ function completeArguments(prefix: string) {
   if (parts[0] === "graph" && parts.length === 2) {
     const partial = parts[1];
     const items = ["html"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `graph ${w}`, label: w }));
+    return items.length > 0 ? items : null;
+  }
+  if (parts[0] === "insights" && parts.length === 2) {
+    const partial = parts[1];
+    const items = ["html"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `insights ${w}`, label: w }));
+    return items.length > 0 ? items : null;
+  }
+  if (parts[0] === "insights" && parts[1] === "html" && parts.length === 3) {
+    const partial = parts[2];
+    const items = ["7d", "30d", "mtd"].filter((w) => w.startsWith(partial)).map((w) => ({ value: `insights html ${w}`, label: w }));
     return items.length > 0 ? items : null;
   }
   if ((parts[0] === "set" || parts[0] === "unset") && parts.length === 2) {

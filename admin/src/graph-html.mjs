@@ -93,6 +93,22 @@ const STATUS_OTHER = "#6e7681";
 const BADGE_ORANGE = "#db6d28";
 const BADGE_GREEN = "#3fb950";
 const DANGER = "#f85149";
+
+// The page palette as one frozen bag, for the sibling artifact builder (insights-html.mjs): this
+// module may be a source of truth for other pure emitters, it may just never load one itself --
+// the purity test's ban is directional on purpose.
+export const PAGE_THEME = Object.freeze({
+  canvas: PAGE_CANVAS,
+  panel: PAGE_PANEL,
+  border: PAGE_BORDER,
+  fg: PAGE_FG,
+  dim: PAGE_DIM,
+  accent: PAGE_ACCENT,
+  amber: PAGE_AMBER,
+  danger: DANGER,
+  green: STATUS_COMPLETED,
+  chipStroke: CHIP_STROKE,
+});
 const GROUP_FILL = "#E6E0F8";
 const WIRE_OBSERVED = "#999";
 const WIRE_CONFIG = "#6e7681";
@@ -114,14 +130,14 @@ const GLYPH = Object.freeze({
 // The 5-entity escape, byte-for-byte the worker's buildFormPage helper: every string interpolated
 // into markup goes through this, operator-authored or not, because "charset-bound upstream" is an
 // assumption and an entity is a guarantee.
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // JSON destined for the inline script: `<` becomes < so no value can spell `</script>` and
 // break out of the script element, and U+2028/2029 become escapes because they are line
 // terminators to a JS parser while being invisible to JSON.
-function embedJson(value) {
+export function embedJson(value) {
   return JSON.stringify(value)
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
@@ -130,7 +146,7 @@ function embedJson(value) {
 
 // Every number that reaches markup goes through this: a non-finite value becomes 0 rather than
 // serialising as one of the three words the well-formedness test bans outright.
-function fmt(v) {
+export function fmt(v) {
   const n = Number.isFinite(v) ? Math.round(v * 10) / 10 : 0;
   return String(n);
 }
@@ -908,7 +924,7 @@ function legendSwatch(inner) {
   return `<svg width="16" height="12" aria-hidden="true">${inner}</svg>`;
 }
 
-function legendHtml(norm) {
+export function legendHtml(norm) {
   const rows = [];
   const row = (sample, text) => rows.push(`<div class="row">${sample}<span>${escapeHtml(text)}</span></div>`);
   rows.push("<h2>edges</h2>");
@@ -938,7 +954,7 @@ function legendHtml(norm) {
   return `<div id="legend">${rows.join("")}</div>`;
 }
 
-function bannersHtml(norm) {
+export function bannersHtml(norm) {
   const banners = [];
   if (!norm.ok) banners.push("no graph model supplied; the page has nothing to draw");
   if (norm.meta.triggersMissing) banners.push("no triggers file found");
@@ -976,7 +992,7 @@ svg.canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
 // sit inside one), and with three hard rules the tests pin: no fetching of any kind, no markup
 // assembly on the client (textContent only), and the clock read spelled without the static
 // accessor this module's purity regex bans.
-const PAGE_JS = `
+export const PAGE_JS = `
 (function () {
   "use strict";
   var svg = document.getElementById("graph");
@@ -1166,7 +1182,15 @@ const PAGE_JS = `
  * the available outcomes. `now` is the injected generation instant (ms epoch); the module never
  * reads a clock of its own, so the same model and the same now are byte-identical forever.
  */
-export function buildGraphHtml(model, { now, fullPaths } = {}) {
+/**
+ * The scene half of the page: normalize, lay out, and emit the SVG body plus the per-node data the
+ * page script needs. Split from buildGraphHtml so a sibling artifact (insights-html.mjs) can place
+ * the same topology inside a larger document without a second layout engine or a second escaping
+ * discipline. The layout's placed nodes still hold their normalised node objects (original ids and
+ * all) -- that is server-side composition state for the caller; only `svgBody`/`graphData` strings
+ * belong in a page, and they carry minted ordinals alone.
+ */
+export function buildGraphScene(model, { now, fullPaths } = {}) {
   let norm;
   try {
     norm = normalizeModel(model);
@@ -1222,7 +1246,11 @@ export function buildGraphHtml(model, { now, fullPaths } = {}) {
     layout.wires.map((w) => wireSvg(w, nowMs)).join(""),
     nodeParts.join(""),
   ].join("");
-  const vb = layout.viewBox;
+  return { norm, layout, svgBody, viewBox: layout.viewBox, graphData, nowMs };
+}
+
+export function buildGraphHtml(model, { now, fullPaths } = {}) {
+  const { norm, svgBody, viewBox: vb, graphData, nowMs } = buildGraphScene(model, { now, fullPaths });
   const svgEl = [
     `<svg id="graph" class="canvas" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow graph" preserveAspectRatio="xMidYMid meet">`,
     `<g id="root">${svgBody}</g>`,

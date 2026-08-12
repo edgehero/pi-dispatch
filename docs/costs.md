@@ -102,6 +102,9 @@ labeled `unmeasured (OQ-002)`.
 
 ## Without the TUI
 
+- `/dispatch insights html` — the browser surface: the same fold drawn as charts (daily spend,
+  the four breakdowns, plan verdict cards) beside the trigger/flow topology, in one self-contained
+  file ([`insights.md`](insights.md)).
 - `/dispatch costs [7d|30d|mtd]` — the same fold, plain text, same labels.
 - `/dispatch costs whatif <provider>/<model> --flow <flow>` — scripting-friendly what-if; unknown
   models get closest-match suggestions (this is the full-catalog path). `--flow` is **required**: the

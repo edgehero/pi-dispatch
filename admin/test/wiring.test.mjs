@@ -566,6 +566,19 @@ test("argument completion offers the costs windows and whatif", async () => {
   assert.equal(await def.getArgumentCompletions("costs zzz"), null);
 });
 
+test("insights completes as a first token, then html, then the windows; bare insights answers usage (issue #175)", async () => {
+  const { def } = await loadRegistered();
+  assert.deepEqual(await def.getArgumentCompletions("insi"), [{ value: "insights", label: "insights" }]);
+  assert.deepEqual(await def.getArgumentCompletions("insights "), [{ value: "insights html", label: "html" }]);
+  assert.deepEqual(
+    (await def.getArgumentCompletions("insights html ")).map((i) => i.value),
+    ["insights html 7d", "insights html 30d", "insights html mtd"],
+  );
+  const view = fakeCtx({ withCustom: true });
+  await def.handler("insights", view.ctx);
+  assert.match(view.notes[0][0], /usage: \/dispatch insights html/, "the artifact is the feature; bare insights points at it");
+});
+
 test("argument completion offers the known settings keys for `set`/`unset`", async () => {
   const { def } = await loadRegistered();
   // "da" prefixes both dailyCap and dailyTokenCap, in KNOWN_KEYS order.
