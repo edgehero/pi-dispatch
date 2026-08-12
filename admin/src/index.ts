@@ -1349,6 +1349,12 @@ function splitWords(s: string | undefined): string[] {
 export async function handleDashboardAction(result: any, paths: any, ctx: any): Promise<void> {
   const ui = ctx?.ui;
   const notify: Notify = ui?.notify?.bind(ui);
+  // The `i` key (issue #181): write and open the insights page between overlays, then the caller's
+  // loop reopens the panel. BEFORE the dialog guard on purpose -- this action needs no dialogs, and
+  // an older pi without them must still reach the one analytics surface.
+  if (result.action === "openInsights") {
+    return insightsCommand(paths, ["insights"], notify);
+  }
   if (typeof ui?.input !== "function" || typeof ui?.select !== "function" || typeof ui?.confirm !== "function") {
     notify?.("editing needs a newer pi (no input/select/confirm dialogs)", "warning");
     return;
