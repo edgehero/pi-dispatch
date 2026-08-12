@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, matchesGlob, classifyRow, foldCosts, whatIfFlow } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow } from "../src/costs.mjs";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/costs.mjs", import.meta.url)), "utf8");
@@ -177,8 +177,8 @@ function sub(over = {}) {
 
 const NOW = Date.parse("2026-07-16T00:00:00.000Z");
 
-function fold(records, { subscriptions = [], nowMs = NOW, piAiPin = "1.2.3" } = {}) {
-  return foldCosts({ records, subscriptions, pricing: cannedPricing(), nowMs, piAiPin });
+function fold(records, { subscriptions = [], nowMs = NOW, piAiPin = "1.2.3", sinceMs = null } = {}) {
+  return foldCosts({ records, subscriptions, pricing: cannedPricing(), nowMs, piAiPin, sinceMs });
 }
 
 // ---- classification ----
@@ -262,16 +262,50 @@ test("daily: UTC dayKey buckets over endedAt -- 23:59Z and 00:01Z land on differ
   assert.deepEqual(f.daily[0].cost, { usd: 0.5, class: "metered", floor: false });
   assert.deepEqual(f.daily[1].cost, { usd: 0.25, class: "metered", floor: false });
   assert.deepEqual(f.daily[2].cost, { usd: 0, class: "metered", floor: false }, "a gap day is a zero-run ENTRY, so a sparkline renders quiet days as quiet");
-  assert.deepEqual(f.window, { fromMs: Date.parse("2026-07-05T23:59:00.000Z"), toMs: nowMs, days: 3 });
+  assert.deepEqual(f.window, { fromMs: Date.parse("2026-07-05T23:59:00.000Z"), toMs: nowMs, days: 3, firstRunMs: Date.parse("2026-07-05T23:59:00.000Z") });
 });
 
 test("an empty window folds to the empty shape, not an error", () => {
   const f = fold([]);
-  assert.deepEqual(f.window, { fromMs: NOW, toMs: NOW, days: 0 });
+  assert.deepEqual(f.window, { fromMs: NOW, toMs: NOW, days: 0, firstRunMs: null });
   assert.deepEqual(f.daily, []);
   assert.deepEqual(f.byFlow, []);
   assert.deepEqual(f.byModel, []);
   assert.deepEqual(f.provenance.total, { usd: 0, class: "metered", floor: false }, "vacuously metered: $0, fully measured");
+});
+
+// ---- the requested window (issue #175) ----
+
+test("COSTS_WINDOWS and costsSinceMs: the one window vocabulary, 7d/30d spans and the UTC month edge", () => {
+  assert.deepEqual([...COSTS_WINDOWS], ["7d", "30d", "mtd"]);
+  const nowMs = Date.parse("2026-07-16T09:30:00.000Z");
+  assert.equal(costsSinceMs("7d", nowMs), nowMs - 7 * 24 * 60 * 60 * 1000);
+  assert.equal(costsSinceMs("30d", nowMs), nowMs - 30 * 24 * 60 * 60 * 1000);
+  assert.equal(costsSinceMs("mtd", nowMs), Date.parse("2026-07-01T00:00:00.000Z"));
+});
+
+test("sinceMs denominates proration on the REQUESTED window: the same sparse records flip SAVING to LOSING", () => {
+  // One covered run on 2026-07-01, NOW 2026-07-16. Under the first-run derivation days=15, prorated
+  // 90*15/30=45 < apiEquiv 60 -> SAVING (the previous test pins that path, sinceMs null). Under the
+  // 30d window the operator actually asked about, days=30, prorated 90 > 60 -> LOSING $30. Same runs,
+  // same plan: only the denominator got honest.
+  const covered = { ...planCovered, endedAt: "2026-07-01T00:00:00.000Z" };
+  const sinceMs = NOW - 30 * 24 * 60 * 60 * 1000;
+  const f = fold([covered], { subscriptions: [sub()], sinceMs });
+  assert.deepEqual(f.window, { fromMs: sinceMs, toMs: NOW, days: 30, firstRunMs: Date.parse("2026-07-01T00:00:00.000Z") });
+  assert.equal(f.plans[0].verdict.kind, "LOSING");
+  assert.deepEqual(f.plans[0].verdict.usd, { usd: 30, class: "estimated", floor: false }, "90 prorated - 60 api-equivalent");
+  // The daily series still starts at the FIRST RUN, not the requested edge: leading zero cells would
+  // compress a young deployment's history; firstRunMs lets a renderer pad if it wants the full window.
+  assert.equal(f.daily[0].day, "2026-07-01");
+});
+
+test("sinceMs edge cases: a future edge clamps to a 1-day window, and an empty requested window keeps its span", () => {
+  const future = fold([], { sinceMs: NOW + 5 * 24 * 60 * 60 * 1000 });
+  assert.deepEqual(future.window, { fromMs: NOW, toMs: NOW, days: 1, firstRunMs: null });
+  const empty = fold([], { sinceMs: NOW - 7 * 24 * 60 * 60 * 1000 });
+  assert.equal(empty.window.days, 7, "the operator asked about 7 days; that nothing ran does not shrink the question");
+  assert.deepEqual(empty.daily, []);
 });
 
 // ---- byFlow ----
@@ -279,6 +313,9 @@ test("an empty window folds to the empty shape, not an error", () => {
 test("byFlow groups on flow with '(no flow)' for null, sorts by cost desc, and re-prices covered rows into apiEquiv", () => {
   const f = fold([ledgeredMetered, planCovered, zeroRatedUnmatched], { subscriptions: [sub()] });
   assert.deepEqual(f.byFlow.map((x) => x.flow), ["fix", "(no flow)"]);
+  // flowKey is the machine key beside the display label: null for the no-flow bucket, so a what-if
+  // filter matching `flow ?? null` can target it -- the display label matches no record (issue #175).
+  assert.deepEqual(f.byFlow.map((x) => x.flowKey), ["fix", null]);
   const fix = f.byFlow[0];
   assert.equal(fix.runs, 2);
   assert.equal(fix.tokens, 1500 + 6_000_000);
@@ -431,6 +468,17 @@ test("provenance: run tallies, and ratesDrifted counts records priced by a diffe
   assert.equal(f.provenance.piAiPin, "1.2.3");
   const unpinned = fold([drifted], { piAiPin: null });
   assert.equal(unpinned.provenance.ratesDrifted, 0, "an unknown pin cannot accuse a record of drifting");
+});
+
+test("provenance: runsLedgerTruncated counts runs whose ledger folded rows into `other` past the 8-row cap", () => {
+  const truncated = {
+    ...ledgeredMetered,
+    jobId: "trunc-1",
+    usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.5 }), row("other", "other", { cost: 0.1 })], { truncated: 3 }),
+  };
+  const f = fold([ledgeredMetered, truncated]);
+  assert.equal(f.provenance.runsLedgerTruncated, 1, "the run's per-model attribution is partly anonymous and the fold says so");
+  assert.equal(fold([ledgeredMetered]).provenance.runsLedgerTruncated, 0);
 });
 
 // ---- whatIfFlow ----

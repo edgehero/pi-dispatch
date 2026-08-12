@@ -97,7 +97,7 @@ import { applyDeploymentPointer, pointerPath, readPointer, takePointerNotice } f
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
-import { foldCosts, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
@@ -1007,24 +1007,14 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
 }
 
 // ---- the costs command surface (issue #53) ----
-
-const COSTS_WINDOWS = ["7d", "30d", "mtd"];
+// COSTS_WINDOWS and costsSinceMs live in costs.mjs beside the fold: proration denominates on the
+// requested window, so the scan cutoff and the fold's sinceMs must come from the one function.
 
 const COSTS_USAGE = "usage: /dispatch costs [7d|30d|mtd] | /dispatch costs whatif <provider/model> --flow <flow>";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 // The pricing façade in the injectable shape the pure fold expects (costs.mjs takes `pricing` as an
 // argument by contract; the tests hand it a canned fake, this object is the real one).
 const PRICING = { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion };
-
-/** A window's inclusive start: 7d/30d count back from now; mtd is the start of the current UTC month. */
-function costsSinceMs(window: string, nowMs: number): number {
-  if (window === "7d") return nowMs - 7 * DAY_MS;
-  if (window === "30d") return nowMs - 30 * DAY_MS;
-  const now = new Date(nowMs);
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-}
 
 /**
  * Assemble the costs fold exactly as the dashboard view does: scan the run records for the window, read
@@ -1035,7 +1025,8 @@ function costsSinceMs(window: string, nowMs: number): number {
  */
 function assembleCosts(paths: any, window: string, flow?: string): any {
   const nowMs = Date.now();
-  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: costsSinceMs(window, nowMs), nowMs });
+  const sinceMs = costsSinceMs(window, nowMs);
+  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
   if (!Array.isArray(records)) return records; // { unreachable }
   const subs: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const scoped = typeof flow === "string" && flow !== "" ? records.filter((r: any) => (r?.flow ?? null) === flow) : records;
@@ -1045,6 +1036,7 @@ function assembleCosts(paths: any, window: string, flow?: string): any {
     pricing: PRICING,
     nowMs,
     piAiPin: piAiVersion(),
+    sinceMs, // the same instant the scan cut at -- proration denominates on the requested window
   });
   return { fold };
 }

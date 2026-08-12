@@ -12,8 +12,8 @@ Press `c` on the dashboard (`/dispatch`). The view is verdict-first:
 
 ```
 ┌ pi-dispatch ── COSTS · Aug 2026 (mtd) ──────────────────────────────────────────┐
-│ VERDICT  kimi-allegro is SAVING ~$41.30 est. this month                         │
-│   plan price (prorated) $99.00 → $3.19 · plan runs @ API ~$44.49 est.           │
+│ VERDICT  kimi-allegro is SAVING ~$4.89 est. this month                          │
+│   plan price (prorated) $99.00 → $39.60 · plan runs @ API ~$44.49 est.          │
 │ daily  ▁▁▂▃▂▅▇▃▂▁·▁▂▂▃█▄▂▁▁▂▃▂▁▁▂▄▃▂▁  Σ ≥$12.41 · max $3.10/d                  │
 │   FLOW              RUNS  TOKENS  COST           API-EQUIV                      │
 │ › triage             41   12.4M  ≥$8.02         —                               │
@@ -49,7 +49,9 @@ floor and demotes it to `est.` with coverage, so nothing renders as an unclassif
 
 Metered numbers are pi-ai's computed prices, not invoices. The series is bounded by run-history
 retention (`PI_LOG_RETENTION_DAYS`, default 30 days; the scan hard-caps at 92 days even when retention
-is the keep-forever `0`), and the screen says which window it shows.
+is the keep-forever `0`), and the screen says which window it shows. Plan proration denominates on the
+window you asked about, not on when the runs happened to land: a quiet fortnight does not shrink a
+plan's share of the month, and verdicts do not read SAVING just because the deployment is young.
 
 ## Declaring subscriptions
 
@@ -114,5 +116,9 @@ labeled `unmeasured (OQ-002)`.
   retried job's sidecar keeps only the last attempt's spend.
 - Runs recorded before the per-model ledger landed cannot be re-priced; they are counted and named in
   the provenance line, never guessed at.
+- A run that fans out past the meter's 8-row ledger cap folds the overflow into an `other/other` row:
+  its per-model attribution is partly anonymous, the provenance line counts it ("ledgers truncated"),
+  and the overflow row is never offered as a what-if target — it is an aggregation artifact, not a
+  model anything can re-price.
 - Rates provenance is pinned: each ledgered run remembers the pi-ai version that priced it, and a later
   pin bump shows up as "priced under older rates" — history is never silently repriced.

@@ -331,6 +331,9 @@ function windowFacts(w) {
 function provenanceCounts(prov) {
   const parts = [`unmetered ${prov.runsUnmetered ?? 0}`, `no ledger (not re-priceable) ${prov.runsUnledgered ?? 0}`];
   if ((prov.ratesDrifted ?? 0) > 0) parts.push(`rates drifted ${prov.ratesDrifted}`);
+  // Only when it happened (the drift pattern): runs whose ledger folded rows into `other` past the
+  // 8-row cap -- their per-model attribution is partly anonymous, and silence would claim otherwise.
+  if ((prov.runsLedgerTruncated ?? 0) > 0) parts.push(`ledgers truncated ${prov.runsLedgerTruncated}`);
   return parts.join(" · ");
 }
 

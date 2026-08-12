@@ -30,6 +30,23 @@ export const COST_CLASSES = ["metered", "plan", "zero-rated", "estimated", "seed
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
+/** The spend windows every costs surface offers, in `t`-cycle order. */
+export const COSTS_WINDOWS = ["7d", "30d", "mtd"];
+
+/**
+ * A window's inclusive start: 7d/30d count back from now; mtd is the start of the current UTC month.
+ * This lives HERE, beside the fold, because proration denominates on the requested window: the scan
+ * cutoff and the fold's `sinceMs` must be the same instant, and two implementations of "where does
+ * mtd start" (the drift this module's dayKey import already guards against at day grain) once let the
+ * command and the view disagree by a whole month edge.
+ */
+export function costsSinceMs(windowKey, nowMs) {
+  if (windowKey === "7d") return nowMs - 7 * DAY_MS;
+  if (windowKey === "30d") return nowMs - 30 * DAY_MS;
+  const now = new Date(nowMs);
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+}
+
 /** The ledger row fields that form a reprice quad -- the full cache split, exactly as recorded. */
 const QUAD_KEYS = ["input", "output", "cacheRead", "cacheWrite", "cacheWrite1h"];
 
@@ -218,7 +235,7 @@ function repriceRows(rows, counterfactual, pricing, { extraExcluded = 0 } = {}) 
  * read-model the costs view renders. Everything below is derived per call and thrown away -- nothing
  * classified here is ever written anywhere.
  */
-export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = null }) {
+export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = null, sinceMs = null }) {
   const subs = Array.isArray(subscriptions) ? subscriptions : [];
   const runs = [];
   for (const record of Array.isArray(records) ? records : []) {
@@ -229,13 +246,25 @@ export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = nu
   }
   runs.sort((a, b) => a.at - b.at);
 
-  const fromMs = runs.length > 0 ? runs[0].at : nowMs;
+  // The window the caller ASKED about versus the window the records happen to span. Proration must
+  // denominate on the requested window (`sinceMs`, the same instant the caller cut the scan at):
+  // deriving days from the first observed run understates plan cost on any sparse window -- two runs
+  // yesterday against a month-to-date question made every verdict read SAVING -- so that derivation
+  // survives only for callers that fold an arbitrary record set with no window to ask about.
+  const firstRunMs = runs.length > 0 ? runs[0].at : null;
+  const requested = Number.isFinite(sinceMs);
+  const fromMs = requested ? Math.min(sinceMs, nowMs) : (firstRunMs ?? nowMs);
   const toMs = nowMs;
-  const days = runs.length > 0 ? Math.max(1, Math.ceil((toMs - fromMs) / DAY_MS)) : 0;
+  const days = requested || runs.length > 0 ? Math.max(1, Math.ceil((toMs - fromMs) / DAY_MS)) : 0;
 
   return {
-    window: { fromMs, toMs, days },
-    daily: buildDaily(runs, fromMs, toMs),
+    // `firstRunMs` rides along (null when nothing ran) so a renderer can pad or trim the daily series
+    // against the requested edge without re-deriving what the fold already knows.
+    window: { fromMs, toMs, days, firstRunMs },
+    // Daily buckets still start at the first observed run, NOT the requested edge: the sparkline's
+    // gap-day discipline covers interior quiet days, but a month of leading zeros on a young
+    // deployment would compress the visible history into the last few cells.
+    daily: buildDaily(runs, firstRunMs ?? fromMs, toMs),
     byFlow: buildByFlow(runs, subs, pricing),
     byModel: buildByModel(runs),
     plans: buildPlans(runs, subs, pricing, days),
@@ -288,6 +317,11 @@ function buildByFlow(runs, subs, pricing) {
     }
     byFlow.push({
       flow,
+      // The machine key beside the display label: null for the no-flow bucket, the raw flow name
+      // otherwise. The display label once leaked into the what-if filter, where `"(no flow)"` matches
+      // no record and a fully ledgered bucket rendered the seeded band -- key and label never share a
+      // field again (issue #175).
+      flowKey: flow === "(no flow)" ? null : flow,
       runs: members.length,
       tokens: members.reduce((sum, m) => sum + (m.record.tokens?.total ?? 0), 0),
       cost: combineContributions(members.map((m) => m.contribution)),
@@ -488,11 +522,16 @@ function peakWindow(w, attributed) {
 function buildProvenance(runs, piAiPin) {
   let runsUnmetered = 0;
   let runsUnledgered = 0;
+  let runsLedgerTruncated = 0;
   let ratesDrifted = 0;
   for (const { record } of runs) {
     if (!record.tokens) runsUnmetered += 1;
     // An empty ledger degrades exactly like an absent one -- the flat totals are all the reader has.
     else if (!(record.usage && Array.isArray(record.usage.models) && record.usage.models.length > 0)) runsUnledgered += 1;
+    // The meter caps the ledger at 8 named rows and folds the rest into `other` (usage.truncated,
+    // INT-RUN-HISTORY-FILE-CONTRACT). Such a run's per-model attribution is partly anonymous, and a
+    // fold that states unmetered and unledgered runs but not this one would be selectively honest.
+    if ((record.usage?.truncated ?? 0) > 0) runsLedgerTruncated += 1;
     const piAi = record.usage?.piAi ?? null;
     // Drift needs BOTH versions: an unknown pin cannot accuse a record of having been priced elsewhere.
     if (piAi !== null && piAiPin !== null && piAi !== piAiPin) ratesDrifted += 1;
@@ -502,6 +541,7 @@ function buildProvenance(runs, piAiPin) {
     runsTotal: runs.length,
     runsUnmetered,
     runsUnledgered,
+    runsLedgerTruncated,
     ratesDrifted,
     piAiPin,
   };

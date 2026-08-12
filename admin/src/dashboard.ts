@@ -36,7 +36,7 @@ import { buildGraphModel } from "./graph-model.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, fmtUsd, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
-import { foldCosts, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, whatIfFlow } from "./costs.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
 // Fetch the read-model's full window (listRuns clamps at 50) but render a cursor-following viewport of
@@ -56,11 +56,11 @@ const MIN_WIDTH = 8;
 // Drill-in views (TRIGGER_DETAIL, RUN_DETAIL) are small; they frame to a compact width and center within
 // the wider overlay rather than stretching a handful of key/value lines across the full LIST width.
 const DRILL_WIDTH = 70;
-// COSTS: the spend windows `t` cycles through, and the staleness bound the poll tick refreshes against.
-// The fold itself is cheap, but the scan behind fetchCosts reads EVERY run sidecar in the window -- a
-// per-second full-directory read is the kind of quiet load a dashboard must not add, so while the view
-// is open a poll tick refreshes the fold only once the last fetch is older than this.
-const COSTS_WINDOWS = ["7d", "30d", "mtd"];
+// COSTS: the staleness bound the poll tick refreshes against (the `t`-cycled windows themselves are
+// costs.mjs' COSTS_WINDOWS -- one list beside the fold whose proration they denominate). The fold is
+// cheap, but the scan behind fetchCosts reads EVERY run sidecar in the window -- a per-second
+// full-directory read is the kind of quiet load a dashboard must not add, so while the view is open a
+// poll tick refreshes the fold only once the last fetch is older than this.
 const COSTS_STALE_MS = 10_000;
 // GRAPH: the cursor-following row window, on the RUNS_VIEWPORT/TAIL_VIEWPORT precedent -- a fixed
 // bound with no height dependency, so an unknown terminal height changes nothing. The graph REFRESHES
@@ -133,11 +133,12 @@ export function createDashboardDeps(paths: any) {
      */
     fetchCosts({ windowKey }: any) {
       const nowMs = Date.now();
-      const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: costsWindowSinceMs(windowKey, nowMs), nowMs });
+      const sinceMs = costsSinceMs(windowKey, nowMs);
+      const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
       if (!Array.isArray(records)) return { unreachable: (records as any)?.unreachable ?? "scan failed" };
       const subsView: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
       const subscriptions = Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [];
-      const fold = foldCosts({ records, subscriptions, pricing, nowMs, piAiPin: pricing.piAiVersion() });
+      const fold = foldCosts({ records, subscriptions, pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs });
       return { fold, records, subscriptions };
     },
     /**
@@ -353,7 +354,7 @@ export function makeDashboard({
     wi.target = wi.targets[wi.index] ?? null;
     wi.result =
       wi.target !== null && typeof deps?.whatIf === "function"
-        ? deps.whatIf({ records: costs.data?.records ?? [], flow: wi.flow, target: wi.target })
+        ? deps.whatIf({ records: costs.data?.records ?? [], flow: wi.flowKey, target: wi.target })
         : null;
   };
 
@@ -716,7 +717,10 @@ export function makeDashboard({
           const row = (costs.data?.fold?.byFlow ?? [])[costsSel];
           const targets = whatIfTargets(costs.data);
           if (!row || targets.length === 0) return;
-          costs.whatIf = { flow: row.flow, targets, index: 0, filter: false, input: null };
+          // flowKey is the MACHINE key (null for the no-flow bucket -- whatIfFlow matches `flow ?? null`,
+          // and the "(no flow)" display label matches no record); flowLabel is what the header prints.
+          // The `in` check keeps a fold without flowKey working: for real flows the two are identical.
+          costs.whatIf = { flowKey: "flowKey" in row ? row.flowKey : row.flow, flowLabel: row.flow, targets, index: 0, filter: false, input: null };
           computeWhatIf();
           tui?.requestRender?.();
           return;
@@ -1789,17 +1793,6 @@ function graphHints(inner: number, styler: any): string {
 
 // ── COSTS view (issue #53): full-width like LIST, every body line exactly `inner` visible columns ──────
 
-/** The scan cutoff for a COSTS window key: a fixed span for "7d"/"30d", the start of the current UTC
- * month for "mtd" -- the calendar month is the unit subscriptions are priced in, so "how is this month
- * going" needs the month's own left edge, not a sliding 30 days. */
-function costsWindowSinceMs(windowKey: string, nowMs: number): number {
-  const day = 24 * 60 * 60 * 1000;
-  if (windowKey === "7d") return nowMs - 7 * day;
-  if (windowKey === "30d") return nowMs - 30 * day;
-  const now = new Date(nowMs);
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-}
-
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** The frame-title window label: `Aug 2026 (mtd)` for the calendar window, `last 7d`/`last 30d` else. */
@@ -1825,6 +1818,9 @@ function whatIfTargets(data: any): any[] {
   const add = (provider: any, id: any) => {
     if (typeof provider !== "string" || typeof id !== "string") return;
     if (provider === "unknown" || id === "unknown") return;
+    // The ledger's 8-row overflow bucket is an aggregation artifact, not a model: getPricedModel of
+    // ("other","other") is null, so offering it would silently degrade the estimate to the seeded band.
+    if (provider === "other" && id === "other") return;
     const key = `${provider}/${id}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -2043,7 +2039,7 @@ function costsTableLines(fold: any, table: string, costsSel: number, inner: numb
 function whatIfLines(wi: any, data: any, inner: number, styler: any): string[] {
   const out: string[] = [];
   const t = wi.target;
-  const header = styler.bold(styler.fg("accent", `WHAT-IF ${wi.flow} → ${t ? `${t.provider}/${t.id}` : "?"}`)) +
+  const header = styler.bold(styler.fg("accent", `WHAT-IF ${wi.flowLabel} → ${t ? `${t.provider}/${t.id}` : "?"}`)) +
     styler.fg("dim", `  (${wi.index + 1}/${wi.targets.length} · w next · / search)`);
   out.push(fitLine(header, inner, styler));
   const r = wi.result;
@@ -2054,11 +2050,11 @@ function whatIfLines(wi: any, data: any, inner: number, styler: any): string[] {
     // like an answer. The note names the tracking id so the band cannot pass as a measurement.
     out.push(fitLine(styler.fg("warning", `~~${fmtUsd(r.low)}–${fmtUsd(r.high)} seeded`) + styler.fg("dim", ` · ${r.note ?? "unmeasured (OQ-002)"}`), inner, styler));
   } else {
-    const current = (data?.fold?.byFlow ?? []).find((x: any) => x.flow === wi.flow)?.cost?.usd;
+    const current = (data?.fold?.byFlow ?? []).find((x: any) => x.flow === wi.flowLabel)?.cost?.usd;
     const delta = typeof current === "number" ? r.usd - current : null;
     const deltaPart = delta === null ? "" : ` (${delta <= 0 ? "−" : "+"}${fmtUsd(Math.abs(delta))} vs current)`;
     out.push(fitLine(styler.fmtCost({ usd: r.usd, class: "estimated", floor: false }) + styler.fg("dim", `${deltaPart} · rates@${r.ratesVersion ?? "?"}`), inner, styler));
-    const dom = dominantProvider(data?.records, wi.flow);
+    const dom = dominantProvider(data?.records, wi.flowKey);
     if (t && dom !== null && t.provider !== dom) {
       out.push(fitLine(styler.fg("dim", "cross-provider: same token profile, tokenizers differ — directional only"), inner, styler));
     }
@@ -2105,6 +2101,9 @@ function provenanceLine(fold: any, inner: number, styler: any): string {
   const prov = fold.provenance ?? {};
   let text = `~ estimates at pi-ai ${prov.piAiPin ?? "?"} · ${prov.runsUnmetered ?? 0} runs unmetered · ${prov.runsUnledgered ?? 0} not repriceable`;
   if ((prov.ratesDrifted ?? 0) > 0) text += ` · ${prov.ratesDrifted} priced under older rates`;
+  // Only when it happened, like the drift counter: a fanout past the 8-row ledger cap loses per-model
+  // attribution, and the by-model table must not look complete while rows hide inside `other`.
+  if ((prov.runsLedgerTruncated ?? 0) > 0) text += ` · ${prov.runsLedgerTruncated} ledgers truncated`;
   return fitLine(styler.fg("dim", text), inner, styler);
 }
 

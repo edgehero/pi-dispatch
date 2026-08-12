@@ -1450,6 +1450,77 @@ test("a flow no ledgered run ever measured renders the seeded band, named as unm
   assert.doesNotMatch(out, /coverage \d+%/, "a band has no coverage to claim");
 });
 
+test("the '(no flow)' bucket what-ifs by its MACHINE key: the seam receives flow null, never the display label", async () => {
+  // The regression this pins (issue #175): the display label went into whatIfFlow's `(r.flow ?? null)`
+  // filter, matched no record, and a fully ledgered bucket rendered the seeded band.
+  const noFlowFold = {
+    ...CANNED_FOLD,
+    byFlow: [{ flow: "(no flow)", flowKey: null, runs: 2, tokens: 90_000, cost: usd(1.25, "metered"), apiEquiv: null }],
+  };
+  const calls = [];
+  const deps = costsDeps({
+    fetchCosts: async () => ({ fold: noFlowFold, records: CANNED_COST_RECORDS, subscriptions: CANNED_SUBS }),
+    whatIf: (args) => {
+      calls.push(args);
+      return { class: "estimated", usd: 4.05, perRun: 0.34, coverage: 0.83, excluded: 2, ratesVersion: "1.2.3" };
+    },
+  });
+  const comp = await openCosts(deps);
+  comp.handleInput("w");
+  await flush();
+  const out = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].flow, null, "the machine key, so whatIfFlow's `flow ?? null` match can actually hit the records");
+  assert.match(out, /WHAT-IF \(no flow\) →/, "the header still speaks the display label");
+});
+
+test("the ledger's other/other overflow row is never offered as a what-if target", async () => {
+  const withOverflow = {
+    ...CANNED_FOLD,
+    byModel: [
+      ...CANNED_FOLD.byModel,
+      // The 8-row-cap overflow bucket: an aggregation artifact, not a model -- unpriceable, so offering
+      // it silently degrades the estimate to the seeded band.
+      { provider: "other", model: "other", runs: 2, calls: 4, input: 1_000, output: 500, cacheRead: 0, cacheWrite: 0, tokens: 1_500, cost: usd(0.05, "metered") },
+    ],
+  };
+  const deps = costsDeps({ fetchCosts: async () => ({ fold: withOverflow, records: CANNED_COST_RECORDS, subscriptions: CANNED_SUBS }) });
+  const comp = await openCosts(deps);
+  comp.handleInput("w");
+  await flush();
+  const seen = [];
+  // One full cycle through the shortlist: 3 byModel targets minus the overflow, the counterfactual dedups.
+  for (let i = 0; i < 4; i++) {
+    const header = stripAnsi(comp.render(100).join("\n")).match(/WHAT-IF \S+ → (\S+)/)?.[1];
+    if (header) seen.push(header);
+    comp.handleInput("w");
+    await flush();
+  }
+  await comp.dispose();
+  assert.ok(seen.length > 0, "the cycle rendered targets");
+  assert.ok(!seen.includes("other/other"), `other/other must not enter the w cycle (saw: ${seen.join(", ")})`);
+});
+
+test("the provenance line counts truncated ledgers only when it happened", async () => {
+  // ratesDrifted zeroed so the line fits the 100-col frame whole: with every counter firing at once
+  // the tail clips under fitLine's ellipsis like any over-long line, which is the width contract, not
+  // a rendering bug -- this test pins the counter's presence, not the clipping.
+  const truncatedFold = {
+    ...CANNED_FOLD,
+    provenance: { ...CANNED_FOLD.provenance, ratesDrifted: 0, runsLedgerTruncated: 2 },
+  };
+  const c1 = await openCosts(costsDeps({ fetchCosts: async () => ({ fold: truncatedFold, records: CANNED_COST_RECORDS, subscriptions: CANNED_SUBS }) }));
+  const out1 = stripAnsi(c1.render(100).join("\n"));
+  await c1.dispose();
+  assert.match(out1, /· 2 ledgers truncated/, "a fanout past the 8-row ledger cap is named beside the other honesty counts");
+
+  const c2 = await openCosts(costsDeps());
+  const out2 = stripAnsi(c2.render(100).join("\n"));
+  await c2.dispose();
+  assert.doesNotMatch(out2, /ledgers truncated/, "silent when nothing truncated -- the drift-counter pattern");
+});
+
 test("COSTS under a real-SGR theme at 80: every line, filter input and all, is exactly 80 visible cols", async () => {
   const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
   const comp = await openCosts(costsDeps(), { theme });
