@@ -49,6 +49,23 @@ function capture() {
 	const buf = [];
 	return { out: (s) => buf.push(s), text: () => buf.join("") };
 }
+/**
+ * Drop the issue #189 flow-resolution lines (label + the → fix line under it). They name "staged
+ * packages" as a TIER, so the package-feature no-op pins below keep their deliberately broad
+ * /package/i needle by asserting on everything else.
+ */
+function stripFlowLines(output) {
+	const lines = output.split("\n");
+	const kept = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (/Trigger flow /.test(lines[i])) {
+			if (lines[i + 1]?.startsWith("    →")) i++;
+			continue;
+		}
+		kept.push(lines[i]);
+	}
+	return kept.join("\n");
+}
 const green = { "docker info": 0, "docker image": 0 };
 // A classic-token `gh auth status` (newer gh quotes each scope; the parser also accepts unquoted).
 const ghStatusOutput = [
@@ -132,15 +149,32 @@ test("doctor: a missing .env is a warning, not a hard failure", async () => {
 // `packages` is the stage manifest's entry list; each entry's dir is created alongside it UNLESS the entry
 // carries `stage: false` (the manifest-names-a-dir-that-is-gone case). `packagesNoManifest` creates the
 // packages/ dir with no packages.json in it — staged bytes nothing knows the names of.
-function overlay({ auth = false, models, extensions = false, packages, packagesNoManifest = false } = {}) {
+function overlay({ auth = false, models, extensions = false, packages, packagesNoManifest = false, skills } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-overlay-"));
 	if (auth) writeFileSync(join(dir, "auth.json"), "{}");
 	if (models !== undefined) writeFileSync(join(dir, "models.json"), models);
 	if (extensions) mkdirSync(join(dir, "extensions", "x"), { recursive: true });
+	// The overlay's own skills/ tier (issue #189): `<overlay>/skills/<name>/SKILL.md`.
+	for (const s of skills ?? []) {
+		mkdirSync(join(dir, "skills", s), { recursive: true });
+		writeFileSync(join(dir, "skills", s, "SKILL.md"), `---\ndescription: overlay ${s}\n---\n`);
+	}
 	if (packages || packagesNoManifest) {
 		const pkgDir = join(dir, "packages");
 		mkdirSync(pkgDir, { recursive: true });
-		for (const p of packages ?? []) if (p.stage !== false) mkdirSync(join(pkgDir, p.dir), { recursive: true });
+		for (const p of packages ?? []) {
+			if (p.stage === false) continue;
+			mkdirSync(join(pkgDir, p.dir), { recursive: true });
+			// package.json only when the entry declares skills or a pi manifest, so every pre-#189
+			// fixture stays byte-identical (readStagedSkills skips a package it cannot read, as pi would).
+			if (p.skills !== undefined || p.pi !== undefined) {
+				writeFileSync(join(pkgDir, p.dir, "package.json"), JSON.stringify({ name: p.name, version: p.version, ...(p.pi !== undefined ? { pi: p.pi } : {}) }));
+			}
+			for (const s of p.skills ?? []) {
+				mkdirSync(join(pkgDir, p.dir, "skills", s), { recursive: true });
+				writeFileSync(join(pkgDir, p.dir, "skills", s, "SKILL.md"), `---\ndescription: pkg ${s}\n---\n`);
+			}
+		}
 		if (!packagesNoManifest) {
 			const entries = (packages ?? []).map(({ name, version, dir: d }) => ({ name, version, dir: d }));
 			writeFileSync(join(pkgDir, "packages.json"), JSON.stringify({ stagedAt: "2026-07-28T00:00:00.000Z", packages: entries }));
@@ -152,9 +186,9 @@ function overlay({ auth = false, models, extensions = false, packages, packagesN
 // Doctor counts armed triggers with the SHARED parseTriggers, so the fixture must write a file that really
 // validates — a stub `{triggers:[{run:{packages:true}}]}` would be swallowed by the never-throw guard and
 // silently count 0, making every ARMED assertion pass for the wrong reason.
-function triggersFile(packages, image) {
+function triggersFile(packages, image, extra = {}) {
 	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-")), "triggers.json");
-	const run = { kind: "local", folder: "/srv/repo", flow: "review", task: "nightly review", ...(packages === undefined ? {} : { packages }), ...(image === undefined ? {} : { image }) };
+	const run = { kind: "local", folder: "/srv/repo", flow: "review", task: "nightly review", ...(packages === undefined ? {} : { packages }), ...(image === undefined ? {} : { image }), ...extra };
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] }));
 	return path;
 }
@@ -370,7 +404,7 @@ test("doctor: run.packages: false with nothing staged is a NO-OP, not a failure"
 	const { out, text } = capture();
 	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile(false) }), overlayDeps(out));
 	assert.equal(code, 0);
-	assert.doesNotMatch(text(), /package/i, "nothing staged and nothing wanted: nothing to say");
+	assert.doesNotMatch(stripFlowLines(text()), /package/i, "nothing staged and nothing wanted: nothing to say");
 });
 
 test("doctor: a deployment with no packages and no trigger flag prints no package line at all", async () => {
@@ -378,7 +412,7 @@ test("doctor: a deployment with no packages and no trigger flag prints no packag
 	const { out, text } = capture();
 	const code = await runDoctor(overlayEnv(clean, { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
 	assert.equal(code, 0);
-	assert.doesNotMatch(text(), /package/i, "a non-adopter's output is unchanged by this feature");
+	assert.doesNotMatch(stripFlowLines(text()), /package/i, "a non-adopter's output is unchanged by this feature");
 });
 
 // PI_AUTH_FROM_PI: the provider key may live in pi's auth.json, not the env — doctor reads it (real fs).
@@ -1327,4 +1361,109 @@ test("doctor --fix doctrine: a missing manifest offers restage; overridden image
 	const req = c2.find((c) => /require staged packages/.test(c.label));
 	assert.ok(req && !req.ok);
 	assert.equal(req.fixAction, undefined, "which packages a flow needs is a semantic decision, never guessed");
+});
+
+// -- per-trigger flow resolution (issue #189): one line per flow, naming the resolving tier ----------
+
+const gitKey = (folder, sub) => `git -c core.hooksPath=/dev/null -c core.fsmonitor=false --no-pager -C ${folder} ${sub}`;
+
+test("doctor: a deployment with no triggers file adds no flow line at all", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({})), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.doesNotMatch(text(), /Trigger flow/, "no triggers means byte-identical output");
+});
+
+test("doctor: a cron flow found at HEAD of its folder is a ✓ naming the repo tier", async () => {
+	const sha = "a".repeat(40);
+	const plan = {
+		...green,
+		[gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${sha}\n` },
+		[gitKey("/srv/repo", "ls-tree")]: { code: 0, output: `100644 blob ${"b".repeat(40)}\t.pi/skills/review/SKILL.md\u0000` },
+	};
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out, { spawn: fakeSpawn(plan) }));
+	assert.equal(code, 0);
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": repo \.pi\/skills at HEAD of \/srv\/repo\)/);
+});
+
+test("doctor: a symlink SKILL.md at HEAD is absent, not present -- the gate and the materialiser both refuse it", async () => {
+	const sha = "a".repeat(40);
+	const plan = {
+		...green,
+		[gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${sha}\n` },
+		[gitKey("/srv/repo", "ls-tree")]: { code: 0, output: `120000 blob ${"b".repeat(40)}\t.pi/skills/review/SKILL.md\u0000` },
+	};
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out, { spawn: fakeSpawn(plan) }));
+	assert.equal(code, 0, "warn, never fail");
+	assert.match(text(), /⚠ Trigger flow "review" resolves in NO tier visible here/);
+	assert.match(text(), /checked: repo \.pi\/skills at HEAD/);
+});
+
+test("doctor: a flow resolving in NO visible tier is a ⚠ naming checked vs not-checkable, never a ✗", async () => {
+	// The green plan has no git keys, so the repo probe degrades to unknown -- the existing fixture's
+	// /srv/repo does not exist, and a probe that crashed or guessed here would be the bug.
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
+	assert.equal(code, 0, "warn, never fail");
+	assert.match(text(), /⚠ Trigger flow "review" resolves in NO tier visible here \(cron "nightly"\)/);
+	assert.match(text(), /not checkable here: repo \(\/srv\/repo is not readable as a git repo here\)/);
+	assert.match(text(), /the runner logs flow_not_loaded/, "the fix line names the in-container half");
+});
+
+test("doctor: a flow resolving only in run.skillsDir is a ✓ naming the injected tier", async () => {
+	const skillsDir = mkdtempSync(join(tmpdir(), "pi-skills-"));
+	mkdirSync(join(skillsDir, "review"), { recursive: true });
+	writeFileSync(join(skillsDir, "review", "SKILL.md"), "---\ndescription: injected\n---\n");
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { skillsDir }) }), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": injected run\.skillsDir /);
+});
+
+test("doctor: a flow resolving only in the overlay skills/ is a ✓ naming the overlay tier", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({ skills: ["review"] }), { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": the overlay skills\/\)/);
+});
+
+test("doctor: a flow resolving only in a staged package is a plain ✓ naming the package, not a ⚠", async () => {
+	// Issue #189's acceptance names this case: staged-package-only resolution is legal steady state.
+	const dir = overlay({ packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["review"] }] });
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": staged package wf-tools\)/);
+});
+
+test("doctor: run.packages: false withholds the staged tier, and the fix line says so", async () => {
+	// The same package ships the skill; the trigger opted out, so the ⚠ is correct and must name the
+	// withholding rather than pretend the tier was searched and found empty.
+	const dir = overlay({ packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["review"] }] });
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile(false) }), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /⚠ Trigger flow "review" resolves in NO tier visible here/);
+	assert.match(text(), /staged packages \(withheld: run\.packages false\)/);
+});
+
+test("doctor: a manifest with glob patterns makes the package not-enumerable, reported rather than guessed", async () => {
+	// Patterns can also DISABLE files, so enumerating around them risks a wrong ✓ -- the one direction
+	// an advisory line must never err in.
+	const dir = overlay({ packages: [{ name: "globby", version: "1.0.0", dir: "globby", pi: { skills: ["skills/*"] } }] });
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /⚠ Trigger flow "review" resolves in NO tier visible here/);
+	assert.match(text(), /staged package\(s\) globby \(manifest patterns, not enumerable here\)/);
+});
+
+test("doctor: a flow that fails the skill charset is its own ⚠ -- no tier could ever hold it", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(overlayEnv(overlay({}), { PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { flow: "Not A Skill" }) }), overlayDeps(out));
+	assert.equal(code, 0, "warn, never fail");
+	assert.match(text(), /⚠ Trigger flow "Not A Skill" fails the skill name charset \(cron "nightly"\)/);
+	assert.doesNotMatch(text(), /resolves in NO tier/, "the charset finding replaces the tier probe, not stacks on it");
 });

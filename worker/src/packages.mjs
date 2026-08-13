@@ -24,8 +24,8 @@
  *     manifest must degrade to "no staged packages", not crash the worker mid-queue.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { configError } from "./config.mjs";
 // ENTRY_NAME_RE / ADMIN_RE are import-pi's -- imported rather than re-declared so the staged dir charset
 // and the admin block cannot drift between the stager and this validator (doctor.mjs sets the precedent
@@ -267,6 +267,89 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
 	} catch {
 		return null; // missing, unreadable, or garbage -- all mean "nothing staged"
 	}
+}
+
+/**
+ * Enumerate the skills the staged packages would contribute to a job (issue #189). Returns
+ * `{ skills: [{ name, package, dir }], unenumerable: [packageName...] }`, and NEVER throws --
+ * readStageManifest's policy, because the consumers are advisory (doctor's per-trigger flow lines,
+ * and issue #188's topology) and a half-staged tree must degrade to "nothing visible", not a crash.
+ *
+ * The semantics mirror pi's collectPackageResources at the 0.80.7 pin EXACTLY, because an enumerator
+ * that agrees with pi by hand is how doctor comes to report a tier pi then ignores:
+ *   - a `pi` manifest object means its `skills` entries are the ONLY sources -- a manifest WITHOUT a
+ *     `skills` key contributes NO skills and gets NO convention fallback (readPiManifest short-circuits
+ *     before the dir walk);
+ *   - no `pi` key at all falls through to the convention `skills/` dir (RESOURCE_DIRS);
+ *   - a manifest entry may be a SKILL.md file, a skill dir, or a dir of skill dirs -- pi walks
+ *     recursively, so this walks the same shape (bounded, it is host-advisory);
+ *   - a glob (`*`/`?`) or override (`!`/`+`/`-` prefix) entry makes the whole package UNENUMERABLE
+ *     rather than guessed at: patterns can also DISABLE files, and a wrong ✓ (a skill reported that pi
+ *     filters out) is the direction an advisory line must never err in. Reported, not silently skipped.
+ *
+ * Names are DIR basenames (or the SKILL.md's parent dir), which is pi's fallback naming rule; a
+ * frontmatter `name:` rename is invisible here. That approximation is deliberate and one-directional:
+ * it can only turn a would-be ✓ into a ⚠, and the runner's flow_not_loaded check compares against the
+ * names pi actually loaded (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS).
+ */
+export function readStagedSkills({ globalPiDir, readFile = readFileSync, fileExists = existsSync, readDir = readdirSync } = {}) {
+	const out = { skills: [], unenumerable: [] };
+	const manifest = readStageManifest({ globalPiDir, readFile, fileExists });
+	if (!manifest) return out;
+
+	for (const pkg of manifest.packages) {
+		const root = join(globalPiDir, PACKAGES_SUBDIR, pkg.dir);
+		let sources;
+		try {
+			const parsed = JSON.parse(readFile(join(root, "package.json"), "utf8"));
+			const pi = parsed !== null && typeof parsed === "object" && parsed.pi !== null && typeof parsed.pi === "object" ? parsed.pi : null;
+			if (pi) {
+				const entries = Array.isArray(pi.skills) ? pi.skills.filter((e) => typeof e === "string") : [];
+				if (entries.some((e) => e.startsWith("!") || e.startsWith("+") || e.startsWith("-") || e.includes("*") || e.includes("?"))) {
+					out.unenumerable.push(pkg.name);
+					continue;
+				}
+				// `..`-carrying entries are dropped rather than resolved: the stager never writes one, and
+				// following one would make an advisory reader walk outside the staged tree. A segment
+				// test, not a prefix test, so it holds on Windows separators too (parsePackagePaths' rule).
+				sources = entries.filter((e) => !e.split(/[\\/]/).includes("..")).map((e) => resolve(root, e));
+			} else {
+				sources = [join(root, "skills")];
+			}
+		} catch {
+			continue; // no readable package.json: pi would skip it too
+		}
+		for (const source of sources) {
+			for (const skillFile of walkSkillFiles(source, fileExists, readDir)) {
+				out.skills.push({ name: basename(dirname(skillFile)), package: pkg.name, dir: pkg.dir });
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * The SKILL.md files under one manifest source, the shapes pi's collectFilesFromPaths accepts: the file
+ * itself, a dir holding SKILL.md, or a tree of skill dirs (walked to a small fixed depth -- pi recurses
+ * unbounded, but a host-advisory reader stops where real layouts stop). Never throws.
+ */
+function walkSkillFiles(source, fileExists, readDir, depth = 3) {
+	if (basename(source) === "SKILL.md") return fileExists(source) ? [source] : [];
+	const found = [];
+	const own = join(source, "SKILL.md");
+	if (fileExists(own)) found.push(own);
+	if (depth === 0) return found;
+	let children;
+	try {
+		children = readDir(source, { withFileTypes: true });
+	} catch {
+		return found; // absent or unreadable: nothing visible here
+	}
+	for (const child of children) {
+		if (!child.isDirectory?.()) continue;
+		found.push(...walkSkillFiles(join(source, child.name), fileExists, readDir, depth - 1));
+	}
+	return found;
 }
 
 /**

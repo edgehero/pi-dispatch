@@ -236,6 +236,12 @@ deliberately, so the staged set is the set your jobs get. `doctor` shows you wha
 triggers have opted out: a count, never their names, so which flow it was is a question for the triggers
 file.
 
+`doctor` also answers, per trigger, **whether its `run.flow` resolves anywhere** -- the serviced repo's
+`.pi/skills` at HEAD, an injected `run.skillsDir`, the overlay's `skills/`, or a staged package -- and warns
+(never fails) when it resolves in no tier this host can see: such a job runs without the flow it names, logs
+`flow_not_loaded` in the container, and still exits 0. A flow that resolves only in a staged package is a
+plain checkmark naming the package.
+
 `doctor` also compares your **host** against the overlay, and all four of these are warnings rather than
 failures, because running a narrower set on a deployment than on your laptop is a legitimate choice:
 

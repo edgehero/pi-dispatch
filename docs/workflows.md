@@ -200,7 +200,10 @@ skills, prompts and themes** at once.
 
 `doctor` reports the staged set by `name@version`, fails when a declared directory is missing, fails when a
 trigger says `"packages": true` and nothing is staged (that flow would run without its tools and still
-exit 0), and fails when a trigger requires packages while `PI_GLOBAL_PI_DIR` is unset.
+exit 0), and fails when a trigger requires packages while `PI_GLOBAL_PI_DIR` is unset. It also prints one
+line per trigger flow naming the skill tier that resolves it (a staged package counts, by name), and warns
+when a flow resolves in no tier visible on the worker host -- the same silent no-op, caught before the
+trigger fires instead of after.
 
 **One knob does not cover this, and the distinction matters.** `PI_GLOBAL_ALLOW_EXTENSIONS=0` makes the
 overlay's own `extensions/` directory dormant. It is not the off switch for staged packages: those are

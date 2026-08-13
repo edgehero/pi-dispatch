@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTAINER_PACKAGES_ROOT, containerPackagePaths, mergeHostPackages, normalizeDiscoveredPackage, parsePackagesFile, readStageManifest, stagedDirName } from "../src/packages.mjs";
+import { CONTAINER_PACKAGES_ROOT, containerPackagePaths, mergeHostPackages, normalizeDiscoveredPackage, parsePackagesFile, readStagedSkills, readStageManifest, stagedDirName } from "../src/packages.mjs";
 
 // parsePackagesFile is pure over the file TEXT -- no fs (mirrors triggers.test.mjs).
 const PATH = "/pi-packages.json";
@@ -229,4 +229,120 @@ test("normalizeDiscoveredPackage returns a reason instead of throwing, and never
 	assert.equal(seen.size, 0, "a refused candidate must not reserve a dir the next one could have used");
 	assert.deepEqual(normalizeDiscoveredPackage({ name: "x", version: "1.0.0" }, seen).entry, { name: "x", version: "1.0.0", dir: "x" });
 	assert.equal(seen.get("x"), "x");
+});
+
+// --- readStagedSkills: what a stage would contribute (issue #189) ---
+
+const OVERLAY = "/opt/overlay";
+const WF_MANIFEST = JSON.stringify({ stagedAt: null, packages: [{ name: "@a/wf", version: "1.0.0", dir: "a__wf" }] });
+const WF_ROOT = "/opt/overlay/packages/a__wf";
+
+/** An in-memory tree for the reader's three seams: `files` maps absolute paths to text. */
+function stagedFs(files) {
+	const dirSet = new Set();
+	for (const f of Object.keys(files)) {
+		let d = f;
+		while ((d = d.slice(0, d.lastIndexOf("/"))) && d.length > 1) dirSet.add(d);
+	}
+	return {
+		globalPiDir: OVERLAY,
+		readFile: (p) => {
+			if (p in files) return files[p];
+			throw new Error(`ENOENT: ${p}`);
+		},
+		fileExists: (p) => p in files || dirSet.has(p),
+		readDir: (p) => {
+			if (!dirSet.has(p)) throw new Error(`ENOENT: ${p}`);
+			const children = new Map();
+			for (const f of [...Object.keys(files), ...dirSet]) {
+				if (f !== p && f.startsWith(`${p}/`)) {
+					const name = f.slice(p.length + 1).split("/")[0];
+					children.set(name, dirSet.has(`${p}/${name}`));
+				}
+			}
+			return [...children.entries()].map(([name, isDir]) => ({ name, isDirectory: () => isDir }));
+		},
+	};
+}
+
+test("readStagedSkills enumerates the convention skills/ dir when there is no pi manifest", () => {
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0" }),
+		[`${WF_ROOT}/skills/review/SKILL.md`]: "---\ndescription: r\n---\n",
+		[`${WF_ROOT}/skills/deploy/SKILL.md`]: "---\ndescription: d\n---\n",
+	}));
+	assert.deepEqual(got.unenumerable, []);
+	assert.deepEqual(
+		got.skills.map((s) => s.name).sort(),
+		["deploy", "review"],
+	);
+	assert.equal(got.skills[0].package, "@a/wf", "the hit is attributed to the package, for the doctor line");
+});
+
+test("readStagedSkills follows pi manifest entries: a dir of skills, and a SKILL.md file directly", () => {
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0", pi: { skills: ["lib/skills", "extra/one/SKILL.md"] } }),
+		[`${WF_ROOT}/lib/skills/wf/SKILL.md`]: "---\ndescription: w\n---\n",
+		[`${WF_ROOT}/extra/one/SKILL.md`]: "---\ndescription: o\n---\n",
+	}));
+	assert.deepEqual(got.skills.map((s) => s.name).sort(), ["one", "wf"]);
+});
+
+test("a pi manifest WITHOUT a skills key contributes NO skills and gets NO convention fallback", () => {
+	// The pin's exact behaviour (collectPackageResources short-circuits on readPiManifest): the
+	// convention dir is only consulted when there is no manifest AT ALL. An enumerator that fell back
+	// anyway would print a ✓ for a skill pi never loads -- the wrong direction for an advisory line.
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0", pi: { extensions: ["ext/index.js"] } }),
+		[`${WF_ROOT}/skills/review/SKILL.md`]: "---\ndescription: r\n---\n",
+	}));
+	assert.deepEqual(got.skills, []);
+	assert.deepEqual(got.unenumerable, []);
+});
+
+test("a glob or override pattern makes the package unenumerable, reported rather than guessed", () => {
+	// Patterns can DISABLE files too (the `!`/`+`/`-` forms), so enumerating the plain entries around
+	// them could report a skill pi filters out. The whole package is declared unreadable instead.
+	for (const entry of ["skills/*", "!skills/internal", "+skills/extra", "-skills/old", "skills/a?c"]) {
+		const got = readStagedSkills(stagedFs({
+			[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+			[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0", pi: { skills: [entry, "skills/plain"] } }),
+			[`${WF_ROOT}/skills/plain/SKILL.md`]: "---\ndescription: p\n---\n",
+		}));
+		assert.deepEqual(got.skills, [], `entry ${JSON.stringify(entry)} must not be enumerated around`);
+		assert.deepEqual(got.unenumerable, ["@a/wf"], `entry ${JSON.stringify(entry)} must mark the package unenumerable`);
+	}
+});
+
+test("a ..-carrying manifest entry is dropped, never followed out of the staged tree", () => {
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0", pi: { skills: ["../../../etc"] } }),
+	}));
+	assert.deepEqual(got.skills, []);
+	assert.deepEqual(got.unenumerable, [], "an escape is dropped, not reported as a pattern");
+});
+
+test("a package with no readable package.json is skipped -- pi would skip it too", () => {
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/skills/review/SKILL.md`]: "---\ndescription: r\n---\n",
+	}));
+	assert.deepEqual(got, { skills: [], unenumerable: [] });
+});
+
+test("garbage package.json is a skipped package; a missing or garbage manifest is an empty stage; nothing throws", () => {
+	assert.deepEqual(
+		readStagedSkills(stagedFs({
+			[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+			[`${WF_ROOT}/package.json`]: "not json {",
+		})),
+		{ skills: [], unenumerable: [] },
+	);
+	assert.deepEqual(readStagedSkills(stagedFs({})), { skills: [], unenumerable: [] });
+	assert.deepEqual(readStagedSkills({ globalPiDir: null }), { skills: [], unenumerable: [] });
+	assert.deepEqual(readStagedSkills(), { skills: [], unenumerable: [] });
 });

@@ -53,8 +53,9 @@ import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
-import { PACKAGES_SUBDIR, readStageManifest } from "./packages.mjs";
+import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
+import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -251,7 +252,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, images, skillsDirs, forges, repositories } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, images, skillsDirs, forges, repositories, flows } = readTriggerFacts(env, fileExists, cwd);
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -322,6 +323,80 @@ export async function collectChecks(env, seams) {
 				label: `${chainable.length} injected skill(s) under ${dir} set ai-trigger: allow, which is NEVER read`,
 				fix: "injected skills are trigger-reachable but not AI-reachable: the gate reads the target repo's committed .pi/skills at the pinned sha, so chain and dispatch_run requests for these flows are refused. Commit the flow to the repo if a model must be able to start it",
 			});
+		}
+	}
+
+	// REQ-PER-TRIGGER-SKILLS (issue #189). One line per distinct (flow, folder, skillsDir, packages)
+	// question: does the flow this trigger names resolve in ANY tier this host can see? Probed in the
+	// loader's own precedence order (repo > injected > overlay > staged packages), first hit wins the
+	// line. ⚠ and NEVER ✗ when nothing resolves -- a forge trigger's repo is not on this host and
+	// mid-setup is legal -- and no fixAction (triggers content is the never tier). The runner's
+	// flow_not_loaded line is the exact, in-container half of the same answer
+	// (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS): these probes read dir names, and a frontmatter
+	// `name:` rename is invisible to them, so a ⚠ here can be wrong in only the loud direction.
+	// A deployment with no triggers adds no lines at all, so its output is byte-identical.
+	if (flows.length > 0) {
+		// One stage read for the whole run; each tuple's staged probe is a lookup on its result.
+		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: (p) => readFileSync(p, "utf8"), fileExists });
+		const groups = new Map();
+		for (const f of flows) {
+			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages]);
+			if (!groups.has(key)) groups.set(key, { ...f, labels: [] });
+			groups.get(key).labels.push(f.label);
+		}
+		for (const g of groups.values()) {
+			const at = g.labels.join(", ");
+			// The charset pre-check doubles as the interpolation guard for the git probe below, and it is
+			// a finding of its own: a name the skill charset refuses can never materialise in ANY tier
+			// (materialize and copy-tree enforce the same RE on the way in).
+			if (!SKILL_NAME_RE.test(g.flow)) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `Trigger flow ${JSON.stringify(g.flow)} fails the skill name charset (${at})`,
+					fix: "a flow name must match the skill charset (lowercase alphanumerics, - and _, 64 max), or no tier can ever hold it -- fix run.flow",
+				});
+				continue;
+			}
+			let resolved = null;
+			const checked = [];
+			const unknown = [];
+			if (g.folder) {
+				const state = await repoFlowAtHead(spawn, g.folder, g.flow);
+				if (state === "present") resolved = `repo .pi/skills at HEAD of ${g.folder}`;
+				else if (state === "absent") checked.push("repo .pi/skills at HEAD");
+				else unknown.push(`repo (${g.folder} is not readable as a git repo here)`);
+			} else {
+				unknown.push("repo (a forge clone, not on this host)");
+			}
+			if (!resolved && g.skillsDir) {
+				if (fileExists(join(g.skillsDir, g.flow, "SKILL.md"))) resolved = `injected run.skillsDir ${g.skillsDir}`;
+				else checked.push("injected run.skillsDir");
+			}
+			if (!resolved && env.PI_GLOBAL_PI_DIR) {
+				if (fileExists(join(env.PI_GLOBAL_PI_DIR, "skills", g.flow, "SKILL.md"))) resolved = "the overlay skills/";
+				else checked.push("overlay skills/");
+			}
+			if (!resolved) {
+				if (!g.packages) {
+					checked.push("staged packages (withheld: run.packages false)");
+				} else {
+					const hit = staged.skills.find((s) => s.name === g.flow);
+					if (hit) resolved = `staged package ${hit.package}`;
+					else if (staged.unenumerable.length > 0) unknown.push(`staged package(s) ${staged.unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
+					else checked.push("staged packages");
+				}
+			}
+			if (resolved) {
+				checks.push({ ok: true, label: `Trigger flow "${g.flow}" resolves (${at}: ${resolved})` });
+			} else {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `Trigger flow "${g.flow}" resolves in NO tier visible here (${at})`,
+					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
+				});
+			}
 		}
 	}
 
@@ -1191,8 +1266,37 @@ function aiTriggerNames(dir) {
 	return names;
 }
 
+/**
+ * Does `.pi/skills/<flow>/SKILL.md` exist at HEAD of a local folder? "present" | "absent" | "unknown".
+ *
+ * Deliberately NOT readFlowGate: that module answers WHO may fire a flow (the ai-trigger frontmatter,
+ * at a caller-pinned sha) and its catch collapses ANY git failure into deny -- fail-closed is right
+ * for a gate and exactly wrong here, where deny-because-git-broke would print a confident wrong
+ * answer on an advisory line. Doctor resolving HEAD itself is also fine: the gate's no-ref rule
+ * defends against an agent self-authorizing mid-run, and a host-side preflight has no agent. What IS
+ * the gate's, verbatim, is the ls-tree read, the 100644-blob requirement and the hardening flags --
+ * copied so the two readers cannot disagree about what "a committed skill file" means, and so a
+ * hostile repo config cannot run code during the read (flow-gate.mjs's defaultGit, restated).
+ */
+const GIT_READ_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager"];
+async function repoFlowAtHead(spawn, folder, flow) {
+	if (!SKILL_NAME_RE.test(flow)) return "unknown"; // the caller pre-checks; belt against interpolation
+	const head = await runCmdCapture(spawn, "git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"]);
+	const sha = head.code === 0 ? head.output.trim() : null;
+	if (!sha || !/^[0-9a-f]{40,64}$/.test(sha)) return "unknown";
+	const tree = await runCmdCapture(spawn, "git", [...GIT_READ_FLAGS, "-C", folder, "ls-tree", "-z", sha, `.pi/skills/${flow}/SKILL.md`]);
+	if (tree.code !== 0) return "unknown";
+	const record = tree.output.split("\0").find((r) => r);
+	if (!record) return "absent"; // valid sha, path absent at that commit
+	const tab = record.indexOf("\t");
+	const [mode, type] = tab === -1 ? [] : record.slice(0, tab).split(/\s+/);
+	// A symlink/gitlink entry is "absent" for this question too: the gate would refuse it, and the
+	// materialiser never copies it, so nothing downstream treats it as a skill file.
+	return mode === "100644" && type === "blob" ? "present" : "absent";
+}
+
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, images: [], skillsDirs: [], forges: [], repositories: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [] };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1224,6 +1328,21 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// would report all-green and never mention that the credential it needs was never looked for.
 			forges: [...new Set(triggers.map((t) => t.run.kind).filter(isForgeKind))].sort(),
 			repositories: [...new Set(triggers.filter((t) => t.run.kind === "github" && typeof t.run.repository === "string").map((t) => t.run.repository))].sort(),
+			// REQ-PER-TRIGGER-SKILLS (issue #189). Per-trigger TUPLES, unlike every deduped set above,
+			// because a flow-resolution answer depends on the trigger's own folder/skillsDir/packages --
+			// two triggers naming the same flow with different skillsDirs are two different questions.
+			// The label is how a line names its trigger: cron entries by their id, id-less webhook
+			// entries by raw file position (the admin's trigger:<index> identity).
+			flows: triggers
+				.map((t, index) => ({
+					label: t.on.type === "cron" ? `cron "${t.on.id}"` : `${t.on.type} trigger #${index}`,
+					flow: t.run.flow,
+					kind: t.run.kind,
+					folder: typeof t.run.folder === "string" ? t.run.folder : null,
+					skillsDir: typeof t.run.skillsDir === "string" ? t.run.skillsDir : null,
+					packages: t.run.packages !== false,
+				}))
+				.filter((f) => typeof f.flow === "string"),
 		};
 	} catch {
 		return none;
