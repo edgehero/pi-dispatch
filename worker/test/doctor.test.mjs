@@ -649,6 +649,33 @@ test("doctor: a deployment with no run.replicas anywhere prints no replica line 
 	assert.doesNotMatch(text(), /run\.replicas/, "a deployment that does not use the feature is not told about it");
 });
 
+// -- run.command triggers (issue #189): one advisory line, and no flow-tier probe ---------------------
+
+/** A triggers file with one cron command trigger, through the SHARED parseTriggers -- a stub the parser
+ *  rejects would be swallowed by readTriggerFacts' never-throw guard and silently count 0, making the
+ *  advisory assertion below pass for the wrong reason (the catch-zeroes-counts trap named at triggersFile). */
+function commandTriggersFile() {
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-cmd-")), "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", command: "wf run" } }] }));
+	return path;
+}
+
+test("doctor: a command trigger prints ONE advisory line, and the flow-tier block prints nothing for it", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: commandTriggersFile() }), imgDeps(out, green));
+	assert.equal(code, 0, "advisory only -- a command is not host-verifiable, so nothing may fail on it");
+	assert.match(text(), /✓ 1 command trigger\(s\): a command is only verifiable in-container -- the runner refuses an unregistered one pre-spend \(command-unregistered\)/);
+	// A command trigger carries no run.flow, so the flow-resolution probes must drop it naturally rather
+	// than warn about a "flow" that was never named.
+	assert.doesNotMatch(text(), /Trigger flow/, "the flow-tier block prints NO line for a command trigger");
+});
+
+test("doctor: a deployment with no command triggers prints no command line at all", async () => {
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile() }), imgDeps(out, green));
+	assert.doesNotMatch(text(), /command trigger/, "a deployment that does not use the feature is not told about it");
+});
+
 // -- the scaffolded pause-windows file the worker never reads (issue #99, REQ-SCOPED-PAUSE-WINDOWS) ----
 
 /**

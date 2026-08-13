@@ -175,3 +175,70 @@ test("a PR rule matches on Forgejo's OWN action word, the one the trigger file n
 	assert.equal(r.job.trigger.matched.index, 2, "the label_updated rule, not the synchronized one");
 	assert.equal(r.job.trigger.matched.action, "label_updated", "the matched record names the forge's own word, so it lines up with the triggers file");
 });
+
+// --- run.command rules (issue #189): the matched rule dispatches a registered pi extension command ---
+
+// Grouped exactly as loadReceiverConfig emits command rules: `flow`/`defaultFlow` are own-keys holding
+// undefined (config.mjs enumerates every field by name), `command` is the line the worker forwards as
+// PI_COMMAND. Deliberately MIXED with a flow rule: the channel is decided per RULE, by whichever matched.
+const cmdTriggersRaw = {
+	label: [
+		{ index: 1, predicate: { any: ["pi:standup"] }, flow: undefined, command: "standup" },
+		{ index: 0, predicate: { any: ["pi:go"] }, flow: "fix", command: undefined },
+	],
+	comment: { index: 2, phrase: "@pi", defaultFlow: undefined, command: "wf run nightly" },
+	pullRequest: [{ index: 3, actions: new Set(["synchronized"]), predicate: null, flow: undefined, command: "check" }],
+};
+const runCmd = (eventName, payload) => filterForgejo(eventName, parseForgejoSubset(payload), cmdTriggersRaw, knownFlows, SELF_ID, true, "fj-cmd");
+
+test("a comment command rule fires on the phrase alone -- command on the JOB, no flow key anywhere", () => {
+	// defaultFlow undefined plus a bare phrase is EXACTLY what routeComment refuses as `no-flow` on a flow
+	// rule. On a command rule that refusal must be unreachable -- there is no flow to resolve.
+	const r = runCmd("issue_comment", commentPayload({ comment: { body: "@pi" } }));
+	assert.equal(r.enqueue, true, "no-flow must be unreachable for a command rule");
+	assert.equal(r.job.command, "wf run nightly");
+	assert.equal("flow" in r.job, false, "a command job carries NO flow key -- absent, not present-and-undefined");
+	assert.deepEqual(Object.keys(r.job), ["repo", "target", "command", "trigger"]);
+	assert.deepEqual(r.job.trigger.matched, { index: 2, type: "comment", phrase: "@pi" });
+});
+
+test("the `<phrase> <word>` override channel is INERT on a command rule -- trailing words neither retarget nor veto", () => {
+	// "fix" IS a known flow here. On a flow rule this comment would run `fix`; on a command rule it must
+	// not -- an authorized collaborator may INVOKE the trigger, never re-aim it at a flow its author did
+	// not name.
+	const retarget = runCmd("issue_comment", commentPayload({ comment: { body: "@pi fix" } }));
+	assert.equal(retarget.enqueue, true);
+	assert.equal(retarget.job.command, "wf run nightly");
+	assert.equal("flow" in retarget.job, false, "a known flow name after the phrase must not turn a command job into a flow job");
+
+	// And an unknown trailing word must not SUPPRESS the command via the no-flow arm: trailing text is
+	// data, riding trigger.comment into /job/event.json for the handler to read.
+	const noise = runCmd("issue_comment", commentPayload({ comment: { body: "@pi nonesuch entirely" } }));
+	assert.equal(noise.enqueue, true, "a trailing non-flow word must not become a no-flow refusal");
+	assert.equal(noise.job.command, "wf run nightly");
+	assert.deepEqual(noise.job.trigger.comment, { body: "@pi nonesuch entirely" });
+});
+
+test("label and pull_request command rules enqueue command jobs -- command at JOB level, never inside trigger", () => {
+	const labeled = runCmd("issues", issuePayload({ issue: { number: 7, title: "T", body: "B", labels: [label("pi:standup")] } }));
+	assert.equal(labeled.enqueue, true);
+	assert.equal(labeled.job.command, "standup");
+	assert.equal("flow" in labeled.job, false);
+	assert.equal("command" in labeled.job.trigger, false, "an execution knob, never inside trigger/event.json");
+	assert.deepEqual(labeled.job.trigger.matched, { index: 1, type: "label", label: "pi:standup" });
+
+	const pr = runCmd("pull_request", prPayload({ action: "synchronized" }));
+	assert.equal(pr.enqueue, true);
+	assert.equal(pr.job.command, "check");
+	assert.equal("flow" in pr.job, false);
+	assert.equal("command" in pr.job.trigger, false);
+	assert.deepEqual(pr.job.trigger.matched, { index: 3, type: "pull_request", action: "synchronized" });
+});
+
+test("a mixed group routes per rule: the flow label rule still emits a byte-identical flow job beside the command rules", () => {
+	const r = runCmd("issues", issuePayload());
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "fix");
+	assert.equal("command" in r.job, false, "a flow job grows no command key -- its enqueued bytes must not change");
+	assert.deepEqual(Object.keys(r.job), ["repo", "target", "flow", "trigger"]);
+});

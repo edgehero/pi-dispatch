@@ -126,8 +126,8 @@ receiver (forges), and editable from the panel:
 ### The four trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and
-**`run` is the skill it runs** (`flow` names a `.pi/skills/<flow>` in the target repo: see
-[Flows](#flows-the-custom-prompt-a-trigger-runs) for what that file is, and
+**`run` is what it runs**, either a flow or a registered command (`flow` names a `.pi/skills/<flow>` in
+the target repo: see [Flows](#flows-the-custom-prompt-a-trigger-runs) for what that file is, and
 [Multi-stage workflows](#multi-stage-workflows-and-third-party-pi-extensions) for chaining skills or
 staging a workflow extension).
 
@@ -138,16 +138,23 @@ staging a workflow extension).
 | `comment` | a comment containing your phrase | `phrase`, for example `@pi` | the phrase, and **one comment trigger per forge** | the comment body plus the issue title and body |
 | `pull_request` | a PR or MR event, including a submitted GitHub review | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState` | the PR title and body, plus the review body when a review fired it |
 
-Every type also needs `run.kind` (`local` for cron, else the forge) and `run.flow`. Cron additionally
+One variation changes that last column for every type: a trigger that names `run.command` instead of
+`run.flow` gives the agent exactly `/command args` as its whole prompt, and the issue, comment or PR text
+waits in `/job/event.json` for the command's handler to read (see
+[Multi-stage workflows](#multi-stage-workflows-and-third-party-pi-extensions)).
+
+Every type also needs `run.kind` (`local` for cron, else the forge) and exactly one of `run.flow` or
+`run.command` (naming both, or neither, refuses to load in both services). Cron additionally
 needs `folder` (a host path the worker checks exists when it loads the file; make it absolute, since a
-relative path resolves against the worker's own directory) and `task`. Azure `label` and `comment`
-triggers need `run.repository`, because a work item belongs to a project and names no repository.
+relative path resolves against the worker's own directory) and, with `flow`, a `task`. Azure `label` and
+`comment` triggers need `run.repository`, because a work item belongs to a project and names no repository.
 
 Two matching behaviours worth knowing before you arm a paid trigger:
 
 - **A comment can choose the flow.** `<phrase> <flow>` in the comment body overrides the trigger's
   `run.flow` whenever that word matches another trigger's flow in the same file, so `run.flow` is a
-  default rather than a fixed pairing.
+  default rather than a fixed pairing. On a rule that names `run.command` this channel is inert: trailing
+  words never retarget or suppress the command, and reach the job only as data in `/job/event.json`.
 - **Label triggers match differently per forge.** GitHub and Forgejo match the issue's **whole current
   label set**, so reopening an already-labelled issue, or adding an unrelated label to one, fires
   again. GitLab and Azure match only the labels **that event added**, which is exactly why they do not
@@ -193,6 +200,13 @@ permission check, dedup, quiet hours, the image preflight, branch protection, an
 Each is a deliberate file-only edit (no panel key, no AI tool, because each one changes what code runs
 or what it costs):
 
+- `"command"` replaces `flow` (exactly one of the two, on any trigger type): the job dispatches a
+  registered pi extension command headlessly, its whole prompt being `/command args`. Arguments are fixed
+  in the reviewed file; the event text reaches the handler only as `/job/event.json`, which it reads
+  itself. A command is never AI-triggerable: job chaining refuses any request naming one, and
+  `dispatch_run` cannot express one ([`docs/workflows.md`](docs/workflows.md)). The job image must declare
+  the `commands` capability (the shipped image does); a command job on an image that does not is refused
+  before it costs anything.
 - `"image"` names the container image for that trigger's jobs; absent means `PI_JOB_IMAGE`. The image
   decides what is in the box, never what the box can do: the isolation flags are the worker's, always
   ([`docs/job-image.md`](docs/job-image.md)).
@@ -282,17 +296,19 @@ in every job container**, pinned to an exact version and present offline.
 runs inside the one job the trigger produced:
 
 ```text
-label / comment / PR / cron  ->  one job, one container  ->  run.flow (a skill)  ->  the skills it calls,
-                                                                                     or a workflow extension
+label / comment / PR / cron  ->  one job, one container  ->  run.flow | run.command  ->  the skills it calls,
+                                                                                         or a workflow extension
 ```
 
 Four basics follow from that shape:
 
-- **`run.flow` is the only entry point.** A trigger names a flow, never a workflow. Which stages run, and
-  in what order, is decided inside the job by that skill.
+- **`run.flow` and `run.command` are the two entry points.** A trigger names a flow or a registered
+  command, never a workflow. In a flow job, which stages run is decided inside the job by that skill; in a
+  command job, the named command dispatches directly, with its arguments fixed in the reviewed file.
 - **A job is not an interactive session.** The container hands pi one assembled prompt and reads the exit
-  line, so a workflow extension's slash command (`/wf`, in the example below) has nobody to type it. In a
-  job a workflow starts because the flow's instructions drive it, or because you also staged a small
+  line. That one prompt can be a slash command: `"command": "wf"` on a trigger dispatches a workflow
+  extension's `/wf` (in the example below) exactly as a typed one would, with no model turn in between. In
+  a flow job a workflow starts because the flow's instructions drive it, or because you also staged a small
   extension that calls the workflow API from a lifecycle hook.
 - **One trigger is one job, one budget slot, one turn budget.** Ten stages share the same `PI_MAX_TURNS`
   and the same per-job token budget; exhausting either aborts the job as a policy refusal that is never

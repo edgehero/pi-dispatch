@@ -371,7 +371,8 @@ function registerTools(pi: ExtensionAPI): void {
       "Enqueues a PAID pi-dispatch agent run against a local folder, editing it in place with no undo. " +
       "Only folders under the operator's PI_DISPATCH_RUN_ROOTS, and only flows whose .pi/skills/<flow>/SKILL.md " +
       "(at HEAD) sets ai-trigger: allow, can be started. Refuses a dirty git working tree — no force option. " +
-      "Rate-limited per hour.",
+      "Rate-limited per hour. Flows only: a registered extension command (a run.command trigger) is never " +
+      "AI-triggerable and a /name flow is refused.",
     executionMode: "sequential",
     parameters: Type.Object({ folder: Type.String(), flow: Type.String(), task: Type.String() }),
     async execute(_toolCallId, params) {

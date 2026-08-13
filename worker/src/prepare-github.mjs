@@ -190,6 +190,15 @@ export async function prepareGithubWorkspace(
 		const session = job.resume === true ? resolveSession(job, { jobDir, resolved, piVersion }) : null;
 
 		// Issue text is DATA: it enters the USER prompt (buildGithubPrompt), never a system prompt.
+		//
+		// A command job (issue #189) skips the per-forge envelope entirely: the prompt is the slash
+		// invocation `/${job.command}` and nothing else -- no data heading, no quoted issue text, and NO
+		// trailing newline, because pi hands everything after the first space to the handler as its
+		// argument string verbatim. CONST-ISSUE-TEXT-IS-DATA is preserved and arguably STRENGTHENED:
+		// payload text reaches a command job only as event.json below, a file the handler chooses to
+		// parse, never interpolated into prompt prose at all. The envelope's never-merge discipline is
+		// not lost either -- that discipline addresses MODEL prose, and a command handler is
+		// operator-staged code, the same trust tier extensions hold generally.
 		writeFile(
 			join(jobDir, "prompt.md"),
 			// `replica`/`replicas` (REQ-REPLICA-RUNS) are host-assigned integers off job.data, so they are safe
@@ -198,7 +207,9 @@ export async function prepareGithubWorkspace(
 			// them away -- harmless, and always undefined while replicas are github-only.
 			// `review` rides beside `comment` and, like `replica`/`replicas`, is destructured away by the
 			// gitlab/forgejo/azure builders -- harmless, and always undefined while reviews are github-only.
-			buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions }),
+			job.command
+				? `/${job.command}`
+				: buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions }),
 			{ mode: 0o444 },
 		);
 

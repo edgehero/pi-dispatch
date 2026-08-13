@@ -67,11 +67,11 @@ list exists.
 | The loader flags in `image/runner/src/loader.mjs` | **Security posture is per-image.** A deployment that turned repo-file discovery off for multi-tenancy in one image **has not turned it off in another** | **silent** |
 | Label `dev.pi-dispatch.pi-version` = the pi the image actually carries | The worker reads it pre-spend and treats an absent one as **"never resume"**, the safe direction. Every `run.resume` job then cold-starts: correct, paid for in full, and invisible | **silent** (deliberately) |
 | Label `dev.pi-dispatch.forges` = the forges this image can serve | An **exclusion** list. A label that omits a forge refuses that forge's jobs pre-spend (`job-image-forge-unsupported`); a label naming a forge whose CLI is *not* installed is worse than none, turning that refusal into a paid container that fails at step 3 | loud, pre-spend |
-| Label `dev.pi-dispatch.capabilities` = the optional features it honours (`replicas`) | An **inclusion** list. An image without the label is refused **every** replica job pre-spend (`job-image-replicas-unsupported`), because a floor that hard-codes `pi/issue-<n>` would make both replicas converge on one branch | loud, pre-spend |
+| Label `dev.pi-dispatch.capabilities` = the optional features it honours (`replicas`, `commands`) | An **inclusion** list. An image without the label is refused **every** replica job pre-spend (`job-image-replicas-unsupported`), because a floor that hard-codes `pi/issue-<n>` would make both replicas converge on one branch — and **every** `run.command` job pre-spend (`job-image-commands-unsupported`), because a runner that does not understand `PI_COMMAND` would feed `/name args` to the model as prose or die retryable on `no-terminal-message` | loud, pre-spend |
 
 The two list labels have **opposite polarities**, deliberately: `forges` excludes, so no claim excludes
 nothing and an unlabelled image is admitted everywhere; `capabilities` includes, so no claim includes nothing
-and an unlabelled image is refused every replica job. One rule underlies both, that an image declaring
+and an unlabelled image is refused every replica or command job. One rule underlies both, that an image declaring
 nothing gets no benefit of the doubt about what it contains, and neither costs an ordinary job anything.
 `image/Dockerfile` declares all three, so a layer built on top of it inherits all three.
 

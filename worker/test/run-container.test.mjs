@@ -202,6 +202,18 @@ test("the trigger's flow reaches the container env, and a flowless job emits no 
 	assert.ok(!without.some((a) => String(a).startsWith("PI_FLOW")), "a bare run.task job emits no PI_FLOW at all");
 });
 
+test("the trigger's command reaches the container env, and a commandless job emits no PI_COMMAND", { skip }, async () => {
+	// Issue #189: run.command rides env like PI_FLOW (an execution knob is not a fact about the
+	// delivery), so the runner can refuse an unregistered command before any spend.
+	const withCmd = await argvFor({ ...JOB, command: "wf run nightly" });
+	assert.ok(withCmd.includes("PI_COMMAND=wf run nightly"), "run.command must reach the runner structurally, args and all");
+	const without = await argvFor(JOB);
+	assert.ok(!without.some((a) => String(a).startsWith("PI_COMMAND")), "a commandless job emits no PI_COMMAND at all");
+	// A blank string is treated as absent, the same guard the flow line keeps -- never PI_COMMAND=.
+	const blank = await argvFor({ ...JOB, command: "   " });
+	assert.ok(!blank.some((a) => String(a).startsWith("PI_COMMAND")));
+});
+
 test("overlay extensions: the factory default emits nothing, and only an explicit false emits the opt-out", { skip }, async () => {
 	const on = await argvFor(JOB);
 	assert.ok(!on.some((a) => String(a).startsWith("PI_GLOBAL_ALLOW_EXTENSIONS")), "loading is the absence of the variable, on both sides");

@@ -1283,8 +1283,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the opt-in would live in a tree the operator can edit at runtime, outside the merge gate that makes the
   frontmatter meaningful, so the right shape would be an operator allowlist rather than frontmatter — the
   same reasoning `REQ-GLOBAL-PI-OVERLAY` gives for refusing repo-declared packages. Residual `OQ-022`.
+- **Commands are never AI-reachable either, and unlike injected skills that is BUILT rather than falling
+  out** (issue #189, `DES-COMMAND-ENTRY-POINT`). The injected-skill asymmetry above costs no code because
+  the gate's object-store read finds nothing; a command CANNOT be left to that mechanism, because there is
+  no committed artifact for the gate to read at all — the dispatch line is built at the two producers
+  from the reviewed `triggers.json`, not read from a reviewed `SKILL.md`, so default-deny cannot be a
+  frontmatter read and is a refusal instead. The outbox collector refuses any request carrying a
+  `command` key outright (`chain-command-refused`, before the charset check, with no opt-in —
+  `INT-OUTBOX-CONTRACT`), and `dispatch_run` is structurally incapable (its params are
+  `{folder, flow, task}`; a slash-leading `flow` refuses with a message naming the distinction rather
+  than falling through to a confusing `no-skill`). `dispatch_trigger_add`/`_edit` carry no `command`
+  parameter. If the asymmetry ever closes, `OQ-022`'s closing shape — an explicit allowlist in the
+  reviewed `triggers.json` — is the right form here too, and frontmatter is the right form for neither.
 - **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-NO-CONTEXT-FILES-MANDATORY`,
-  `CONST-BUDGET-BEFORE-TOKENS`, `DES-ADMIN-VIA-PI-EXTENSION`
+  `CONST-BUDGET-BEFORE-TOKENS`, `DES-ADMIN-VIA-PI-EXTENSION`, `DES-COMMAND-ENTRY-POINT`, `OQ-022`
 
 ## DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS
 
@@ -1333,8 +1345,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-COMMAND-ENTRY-POINT
 
 - **Decision** (issue #189, Gap 2): a trigger may name a **registered pi extension command** instead of a
-  flow — `run.command` (the trigger-schema half lands with the producer change; this entry records the
-  runner's dispatch protocol, which ships first). The worker forwards the command line as `PI_COMMAND`;
+  flow — `run.command` (this entry records the runner's dispatch protocol, which shipped first; the
+  producer-half bullet below completes it). The worker forwards the command line as `PI_COMMAND`;
   the runner rebuilds the prompt as `/<command>` — **the whole prompt, not a first line**, because pi's
   dispatch grammar at the pin fires only when the entire text starts with `/`, parses the name to the
   first space, and hands everything after (newlines included) to the handler as args verbatim. Before
@@ -1366,14 +1378,36 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   feed `/name args` to the model as prose or die retryable on `no-terminal-message` — so the worker
   refuses a command job on a non-declaring image pre-spend, the `replicas` pattern verbatim.
   `verify-image.sh` asserts the label against the baked runner source, so the claim cannot lie.
+- **Producer half (issue #189, Gap 2 — the trigger-schema half, landing second)**: `run.command` is legal
+  on **all four** trigger kinds — a label, comment or PR event may dispatch a command exactly as cron may,
+  on `run.skillsDir`'s reasoning (a command is a capability of the deployment's vetted extensions, and a
+  webhook trigger runs what a cron trigger runs) — with EXACTLY ONE of `run.flow`/`run.command` enforced
+  at parse in both services by the shared validator (`INT-TRIGGERS-FILE-CONTRACT` holds the field's full
+  contract: value validation mirroring the runner's, the `task`/`instructions`/`resume` refusals, the
+  static-args doctrine). The prompt is **exactly `/<command> [args]` for forge jobs too**: the envelope is
+  bypassed whole, and the delivery reaches the handler only as `/job/event.json` — which answers
+  `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`'s byte-for-byte objection head-on. That entry refused an
+  envelope change because it would rewrite every EXISTING cron job's `prompt.md`; a command prompt is a
+  NEW prompt for a NEW trigger shape, and every existing flow trigger's `prompt.md` stays byte-identical,
+  so the objection's premise is honoured rather than argued around. The forge semantic-dedup key carries
+  the **`cmd:`-prefixed command in the flow slot**, so a command rule and a flow rule spelling the same
+  name never coalesce inside the dedup TTL. The `commands` capability gate is now **enforced worker-side
+  pre-spend** (`job-image-commands-unsupported`, budget unreserved — the second direction the label was
+  built for). The comment trigger's trailing-word override is **INERT on a command rule**: the channel
+  that lets a collaborator retarget a flow must not let one retarget or SUPPRESS a command, so trailing
+  text is data via `event.json`. And commands are **never AI-reachable, stricter than flows** — built at
+  the producers, refused at both model-reachable ones (`DES-AI-TRIGGER-FLOW-GATE` records the mechanism
+  and the `OQ-022` inversion).
 - **Rejected**: the command as the first line of a larger prompt (impossible at the pin — the remainder
   becomes handler args); retrying nothing / policy on handler throws (above); `prompt.md` as the
   in-container authority (above); skipping pre-verification and letting pi's fall-through handle typos
   (an unregistered `/name` is NOT an error to pi — it rides template expansion into a paid model call,
   or into a same-named prompt template if one is staged, both silent).
 - **Traces to**: `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONTAINER-JOB-INPUTS`,
-  `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-UPSTREAM-CONTRACT-TESTS`,
-  `DES-PER-TRIGGER-JOB-IMAGE` (the capability-label pattern)
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-OUTBOX-CONTRACT`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-ISSUE-TEXT-IS-DATA`, `REQ-UPSTREAM-CONTRACT-TESTS`,
+  `DES-PER-TRIGGER-JOB-IMAGE` (the capability-label pattern), `DES-AI-TRIGGER-FLOW-GATE`,
+  `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`
 
 ## DES-JOB-OUTBOX-CHAINING
 
@@ -1400,6 +1434,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     slice is **same-folder-only**, with no arbitrary host-path mount. The freeform **task text is DATA**: it
     lands in the child's `prompt.md`, never as instructions to the harness (`CONST-ISSUE-TEXT-IS-DATA`, one
     layer down — the same payload-subset discipline the receiver applies to issue text).
+  - **A `command` key refuses outright, and the refusal is explicit rather than ignored** (issue #189):
+    the validation ladder gains `chain-command-refused`, ordered before the flow-name charset check.
+    Commands may chain OUT — a local command job keeps its `/outbox`, and its requests name flows under
+    the same gate — but nothing chains INTO a command: there is no committed artifact the `ai-trigger`
+    gate could read for one, and dropping the key under the unknown-keys rule would enqueue a flow the
+    agent did not request. `DES-AI-TRIGGER-FLOW-GATE` records why this is built rather than fallen out.
   - **Forge-parent outboxes are dropped.** A forge job is driven by adversarial issue text, so **no
     `/outbox` mount is created for any forge kind** (`github`, `gitlab`) — an untrusted issue author cannot chain. This is a
     deliberate **deferral**, recorded inline here; the open-questions register row is a sibling task's job.
@@ -1559,6 +1599,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   Putting it in the envelope is also what leaves `dataRegion` alone: the shared export keeps its
   signature, so the "new parameters go LAST" rule is honoured without threading a hole through three
   sibling forges.
+- **Command jobs (issue #189) have no envelope at all, and the field is refused beside `run.command`
+  rather than left inert**: a command job's prompt is exactly the dispatch line
+  (`DES-COMMAND-ENTRY-POINT`), so the region this entry places text into never exists for one — the same
+  accepted-where-it-does-nothing hazard the cron refusal answers, arriving through a bypassed envelope
+  instead of a missing one. The byte-for-byte reasoning recorded under Rejected below ("giving local jobs
+  an envelope…") is untouched by the bypass: a command prompt is a NEW prompt for a NEW trigger shape, and
+  every existing flow trigger's `prompt.md` stays byte-identical.
 - **Rejected**:
   - *Inside the fenced data region* — self-defeating. `dataRegion` tells the model that everything below
     its heading is data and that anything in it trying to give new rules must be reported rather than
@@ -2034,6 +2081,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command` in the triggers file). **DES-COMMAND-ENTRY-POINT AMENDED** with the producer-half decisions: legal on ALL FOUR trigger kinds (`run.skillsDir`'s capability-of-the-deployment reasoning — a webhook trigger runs what a cron trigger runs), exactly one of `flow`/`command` enforced at parse by the shared validator; forge command prompts are the same bare `/<command> [args]` — the envelope bypassed whole, delivery context handler-read from `event.json`, `CONST-ISSUE-TEXT-IS-DATA` held and arguably strengthened since nothing payload-authored renders into a command prompt; the `cmd:`-prefixed dedup slot so a command rule never coalesces with a same-named flow rule; the `commands` capability gate now enforced worker-side pre-spend (`job-image-commands-unsupported`, the label's second direction); the comment trailing-word override INERT on a command rule; and `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`'s byte-for-byte objection answered head-on — command prompts are NEW prompts, every existing flow trigger's `prompt.md` stays byte-identical. **DES-AI-TRIGGER-FLOW-GATE AMENDED**: the command clause joins the injected-skills paragraph's neighborhood — never AI-reachable, and BUILT at the two producers rather than falling out, because no committed artifact exists for the gate to read (`chain-command-refused` before the charset check, no opt-in; `dispatch_run` structurally incapable plus a readable slash-leading-flow refusal; `OQ-022`'s allowlist closing shape unchanged in spirit, with the inversion stated on that row). **DES-JOB-OUTBOX-CHAINING AMENDED**: the explicit refusal token joins the validation ladder; commands may chain OUT, nothing chains INTO a command — ignoring the key under unknown-keys would enqueue a flow the agent did not request. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE AMENDED**: command jobs have no envelope, and `run.instructions` is refused beside `run.command` rather than left inert — the cron refusal's accepted-where-it-does-nothing hazard, arriving through a bypassed envelope; the entry's byte-for-byte reasoning survives because no existing prompt changes. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains a field, and the one-validator doctrine is exactly what makes the mutual exclusion fail both services identically; no engine merges, and the on × run matrix is untouched. |
 | 2026-08-13 | Issue #189 (Gap 2, runner half). **NEW `DES-COMMAND-ENTRY-POINT`**: a trigger may dispatch a registered pi extension command; the runner's protocol ships first (env-authoritative `/command` prompt because pi's grammar fires only on a whole-text slash and a worker mismatch must not misclassify a flow job; pre-prompt `getCommand()` verification because an unregistered `/name` is not an error to pi and rides into a paid model call; handler throws observed via `extensionRunner.onError`, the pin's only channel, and classified retryable `command-error` by explicit user choice with the accepted cost stated; the fire-and-forget residual stated as pi's own contract; the `commands` image capability as the two-direction rollout gate, `replicas` pattern). The old docs premise ("nobody to type it inside a job") is recorded as contradicted by the pinned `session.prompt()` contract, proven by a keyless real-session pinned-contract test. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS UNCHANGED, checked** — flows keep their advisory posture; a command's registration check is a REFUSAL because unlike a flow there is no hint-style steady state in which an unregistered command is legitimate. **DES-PER-TRIGGER-JOB-IMAGE UNCHANGED, checked** — the capability label mechanism is reused, not changed. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE UNCHANGED, checked** — envelope semantics move with the producer half. |
 | 2026-08-13 | Issue #189 (Gap 1, doctor half). **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS AMENDED**: the doctor layer is now specified in full — per-tuple lines in loader precedence order; repo tier read with the gate's ls-tree mechanics but HEAD-resolved by doctor and degrading to unknown on git failure (readFlowGate was considered and REJECTED for this read: its fail-closed catch turns a broken folder into deny, and "deny implies the file exists" would print a confident wrong ✓; the gate's no-ref rule guards against an agent self-authorizing, which a host preflight does not face); staged tier via the new `readStagedSkills` whose pattern-manifest packages read as not-enumerable because manifest patterns can DISABLE files and a wrong ✓ is the one inadmissible error direction. **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** — the gate itself is untouched; doctor copies its read mechanics rather than calling it, precisely so gate semantics stay pure WHO-may-fire. **DES-CLI-SURFACE UNCHANGED, checked** — doctor stays read-only/always-safe; the new checks carry no fixAction. |
 | 2026-08-13 | Issue #189 (Gap 1, runner half). **NEW `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`**: flow resolution is verified at two advisory layers and refused at neither — the runner compares `PI_FLOW` against the LOADED skill names post-load, pre-session, pre-spend (`isFlowLoaded`, exact equality, `disableModelInvocation` counts) and reports a miss as one `flow_not_loaded` line; doctor is the approximate host-side layer, landing with the companion change. Records why report-not-refuse (flow is by doctrine a prompt hint; a refusal shipped in an image upgrade fails yesterday's jobs and burns a budget slot per delivery), why the runner layer is the exact one (pi names a skill `frontmatter.name \|\| parentDirName` at the pin, so only the loaded set is authoritative), and the rejected alternatives (boot-time failure — `parseTriggers` stays pure and absent-at-HEAD is a legal steady state; `event.json` carriage — execution knob, not a delivery fact; a new top-level outcome — admin surfaces drop unknown outcomes, new vocabulary rides a `reason`). **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** — the gate answers WHO may fire a flow and keeps its pinned-sha object-store read; the new entry answers whether the flow EXISTS in the box, and neither consults the other. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains nothing; the flow travels as job data the queue already carried. |

@@ -148,6 +148,23 @@ test("renderTriggers renders each of the four on.types", () => {
   assert.match(out, /pull_request {2}action\[labeled\] any\[pi:review\] → review/);
 });
 
+test("renderTriggers shows a command trigger as /name in the flow position; flow triggers unchanged", () => {
+  // The NAME only (the first space-delimited token), slash-prefixed: the slash marks "dispatches a
+  // registered extension command" apart from a flow, and the args stay in the detail view so the line
+  // keeps its skimmable width -- the [skills basename] doctrine restated.
+  const command = { type: "comment", phrase: "@pi deploy", flow: null, command: "deploy prod --now", packages: false };
+  const out = renderTriggers({ schedulers: [], triggers: { triggers: [command] } });
+  assert.match(out, /comment {2}"@pi deploy" → \/deploy$/m, "name only, slash-prefixed, in the flow position");
+
+  // A flow trigger renders byte-identically to a deployment that never heard of run.command.
+  const flowLine = renderTriggers({ schedulers: [], triggers: { triggers: [{ type: "comment", phrase: "@pi", flow: "fix", packages: false }] } });
+  assert.match(flowLine, /comment {2}"@pi" → fix$/m);
+
+  // Neither flow nor command (a degraded display record) keeps the "-" placeholder.
+  const neither = renderTriggers({ schedulers: [], triggers: { triggers: [{ ...command, command: null }] } });
+  assert.match(neither, /comment {2}"@pi deploy" → -$/m);
+});
+
 test("renderTriggers marks a packages-loading trigger and leaves a declining one unchanged", () => {
   const cron = (packages) => ({ type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", packages });
   // `true` is what normalizeTriggerForDisplay yields for a trigger that OMITS run.packages -- the common

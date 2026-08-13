@@ -694,3 +694,196 @@ test("a whitespace-only run.instructions is refused; surrounding whitespace in r
 	assert.throws(() => parse([{ ...LABEL, run: { ...LABEL.run, instructions: "   " } }]), isConfigError);
 	assert.equal(parse([{ ...LABEL, run: { ...LABEL.run, instructions: "prefer X\n" } }])[0].run.instructions, "prefer X\n");
 });
+
+// --- run.command (issue #189): dispatch a registered pi extension command instead of a flow ---
+
+// Swap the fixture's flow for a command. `task` is shed too, which only matters on CRON: a command job's
+// prompt IS the /name args line, so validateCommand refuses run.task beside one -- the removal here is
+// the fixture obeying the rule under test (pinned below), not dodging it.
+const withCommand = (entry, command = "wf run") => {
+	const { flow, task, ...rest } = entry.run;
+	return { ...entry, run: { ...rest, command } };
+};
+// The full `at` prefix a kind's messages carry -- cron names its id, the rest their raw-file index --
+// so the pins below can be COMPLETE message strings per the action-vocabulary test's doctrine.
+const cmdAt = (kind) => (kind === "cron" ? `cron trigger "nightly-tidy"` : "trigger at index 0");
+
+test("run.command survives normalization on all four trigger kinds, in run.flow's place", () => {
+	// The whole run, not the one field: a command trigger's normalized shape is pinned here once, so a
+	// normalizer that grew or dropped a key fails this test rather than surfacing downstream in `data`.
+	const [c] = parse([withCommand(CRON)]);
+	assert.deepEqual(c.run, { kind: "local", folder: "/proj", flow: undefined, task: undefined, provider: undefined, model: undefined, maxTurns: undefined, github: undefined, packages: undefined, image: undefined, resume: undefined, command: "wf run" });
+	for (const entry of [LABEL, COMMENT, PR_LABELED, PR_AUTO]) {
+		const [t] = parse([withCommand(entry)]);
+		assert.deepEqual(t.run, { kind: "github", flow: undefined, packages: undefined, image: undefined, resume: undefined, replicas: undefined, command: "wf run" }, `${entry.on.type} must carry the command`);
+	}
+});
+
+test("run.command absent stays ABSENT -- an unflagged file normalizes byte-identically to before the feature", () => {
+	// Full shapes, keys and values: the conditional spread must not leave a present-and-undefined
+	// `command` behind, because `data` is built by spreading these runs and every stored repeatable
+	// would grow a key the operator never wrote.
+	assert.deepEqual(parse([CRON])[0].run, { kind: "local", folder: "/proj", flow: "tidy", task: "run the tidy pass", provider: undefined, model: undefined, maxTurns: undefined, github: undefined, packages: undefined, image: undefined, resume: undefined });
+	assert.deepEqual(parse([LABEL])[0].run, { kind: "github", flow: "frontend-fix", packages: undefined, image: undefined, resume: undefined, replicas: undefined });
+	assert.deepEqual(parse([COMMENT])[0].run, { kind: "github", flow: "fix", packages: undefined, image: undefined, resume: undefined, replicas: undefined });
+	assert.deepEqual(parse([PR_LABELED])[0].run, { kind: "github", flow: "review", packages: undefined, image: undefined, resume: undefined, replicas: undefined });
+	for (const entry of [CRON, LABEL, COMMENT, PR_LABELED, PR_AUTO]) {
+		assert.equal("command" in parse([entry])[0].run, false, `${entry.on.type} must not grow a command key`);
+	}
+});
+
+test("run.command that is not a non-empty string is a config error naming the trigger, on all four kinds", () => {
+	// One shared validator serves all four normalizers, so every case runs on every kind: a normalizer
+	// that forgot the call would pass three and fail exactly one. Whitespace-only refuses as EMPTY, not
+	// as surrounding-whitespace -- it is a field the operator believes they set.
+	for (const { kind, entry } of KINDS) {
+		for (const bad of [5, null, "", "   "]) {
+			assert.throws(
+				() => parse([withCommand(entry, bad)]),
+				(e) => isConfigError(e) && e.message.includes(`${cmdAt(kind)}: run.command must be a non-empty string -- the registered command name, optionally followed by its arguments: ${PATH}`),
+				`${kind} must refuse command=${JSON.stringify(bad)}`,
+			);
+		}
+	}
+});
+
+test("run.flow beside run.command refuses as exactly-one on all four kinds, BEFORE any flow check", () => {
+	for (const { kind, entry } of KINDS) {
+		assert.throws(
+			() => parse([withRun(entry, { command: "wf run" })]),
+			(e) => isConfigError(e) && e.message.includes(`${cmdAt(kind)}: exactly one of run.flow or run.command must be set -- a trigger dispatches either a flow or a registered command, and with both present the file does not say which one runs: ${PATH}`),
+			`${kind} must refuse flow+command as ambiguous, not as a field error`,
+		);
+	}
+	// The ordering half of the contract: an EMPTY flow beside a command must still get the exclusion
+	// message, never "run.flow must be a non-empty string" -- the entry's problem is ambiguity, and a
+	// fix that deletes the empty string would flip a flow trigger into a command trigger unreviewed.
+	assert.throws(
+		() => parse([withRun(withCommand(LABEL), { flow: "" })]),
+		(e) => isConfigError(e) && e.message.includes("exactly one of run.flow or run.command") && !e.message.includes("non-empty"),
+	);
+	// And a command-only entry never sees the flow-required message at all: it simply loads.
+	assert.doesNotThrow(() => parse([withCommand(LABEL)]));
+});
+
+test("neither flow nor command still refuses as flow-required, now naming the alternative -- full strings, all four kinds", () => {
+	// FULL amended messages, not prefixes: a prefix pin would keep passing after the "(or use
+	// run.command)" amendment silently vanished, which is the exact drift the :372 doctrine refuses.
+	const cases = [
+		[{ ...CRON, run: { kind: "local", folder: "/proj", task: "t" } }, `cron trigger "nightly-tidy": run.flow must be a non-empty string (or use run.command): ${PATH}`],
+		[{ ...LABEL, run: { kind: "github" } }, `trigger at index 0: label trigger run.flow must be a non-empty string (or use run.command): ${PATH}`],
+		[{ ...COMMENT, run: { kind: "github" } }, `trigger at index 0: comment trigger run.flow (the default flow) must be a non-empty string (or use run.command): ${PATH}`],
+		[{ ...PR_AUTO, run: { kind: "github" } }, `trigger at index 0: pull_request trigger run.flow must be a non-empty string (or use run.command): ${PATH}`],
+	];
+	for (const [entry, message] of cases) {
+		assert.throws(
+			() => parse([entry]),
+			(e) => isConfigError(e) && e.message.includes(message),
+			`${entry.on.type}: the flow-required message must acknowledge run.command`,
+		);
+	}
+});
+
+test("run.command and run.task on a cron trigger refuse together, naming BOTH fields", () => {
+	// validateReplicas' cross-field posture: two prompts written for one job, with only one ever sent,
+	// and the one that is dropped would be the one the operator wrote prose into.
+	assert.throws(
+		() => parse([{ ...CRON, run: { kind: "local", folder: "/proj", command: "wf run", task: "t" } }]),
+		(e) => isConfigError(e) && e.message.includes(`cron trigger "nightly-tidy": run.command and run.task cannot be combined -- a command job's prompt IS the /name args line, so there is no task text for the runner to render; put the arguments in run.command: ${PATH}`),
+	);
+});
+
+test("run.command and run.instructions refuse together on each webhook kind -- nothing would render them", () => {
+	// Instructions land in the prompt ENVELOPE, which a command job bypasses entirely: accepted here,
+	// the field would sit in the file looking configured while every dispatch ignored it.
+	for (const entry of [LABEL, COMMENT, PR_AUTO]) {
+		assert.throws(
+			() => parse([withRun(withCommand(entry), { instructions: "prefer X" })]),
+			(e) => isConfigError(e) && e.message.includes(`trigger at index 0: run.command and run.instructions cannot be combined -- instructions render into the prompt envelope, and a command job's prompt is the exact /name args line with no envelope, so nothing would render them: ${PATH}`),
+			`${entry.on.type} must refuse the pair`,
+		);
+	}
+});
+
+test("run.command and run.resume: true refuse as NOT YET COVERED, on cron and on a forge kind", () => {
+	// validateResumeFlag's vocabulary on purpose: what a resumed session should do with a re-dispatched
+	// command is undesigned, which is a different fact from impossible, and an operator planning work
+	// needs the right one. On cron this message wins over the resume-on-cron one -- validateCommand runs
+	// first -- so the operator hears about the pair they wrote, not only the half that is also wrong.
+	const message = (at) => `${at}: combining run.command and run.resume is not yet covered -- what a resumed session should do with a re-dispatched command is undesigned, so this is a gap to close, not a limit: ${PATH}`;
+	assert.throws(() => parse([withRun(withCommand(CRON), { resume: true })]), (e) => isConfigError(e) && e.message.includes(message(cmdAt("cron"))));
+	assert.throws(() => parse([withRun(withCommand(LABEL), { resume: true })]), (e) => isConfigError(e) && e.message.includes(message(cmdAt("label"))));
+	// resume: false is the documented default, not the combination -- it keeps loading beside a command
+	// exactly as it does beside a flow, or the refusal would punish writing today's behaviour down.
+	const [ok] = parse([withRun(withCommand(LABEL), { resume: false })]);
+	assert.equal(ok.run.command, "wf run");
+	assert.equal(ok.run.resume, false);
+});
+
+test('run.command with a leading "/" is refused -- the runner adds the slash itself', () => {
+	// A written slash would dispatch "//name": a command no registry holds, refused only after review
+	// already passed the entry, inside the paid path instead of here.
+	assert.throws(
+		() => parse([withCommand(LABEL, "/wf run")]),
+		(e) => isConfigError(e) && e.message.includes(`trigger at index 0: run.command must not start with "/" -- the runner prepends the slash when it builds the /name args prompt, so a written one would dispatch "//name" (got "/wf run"): ${PATH}`),
+	);
+});
+
+test("run.command with surrounding whitespace is REFUSED rather than trimmed -- the arguments are verbatim", () => {
+	// validateImageRef's rule, sharpened: a trim here would not merely mis-describe the file, it would
+	// CHANGE the argv the handler receives, because the runner passes the args through untouched.
+	assert.throws(
+		() => parse([withCommand(CRON, " wf run ")]),
+		(e) => isConfigError(e) && e.message.includes(`cron trigger "nightly-tidy": run.command must not have leading or trailing whitespace -- the arguments reach the command handler verbatim, so trimming here would make the reviewed file disagree with what runs (got " wf run "): ${PATH}`),
+	);
+});
+
+test("run.command containing a control character is refused -- a newline would smuggle a second command line", () => {
+	// "\u001b[1m" is ESC opening an ANSI SGR sequence and "a\nb" a mid-string newline; both are spelled
+	// as escapes so THIS file carries no literal control byte either, the same reviewability argument
+	// the validator makes for refusing the whole class rather than the newline alone.
+	for (const bad of ["\u001b[1m", "a\nb"]) {
+		assert.throws(
+			() => parse([withCommand(COMMENT, bad)]),
+			(e) => isConfigError(e) && e.message.includes(`trigger at index 0: run.command must not contain control characters -- a newline would smuggle a second line into what the operator reviewed as one command line (got ${JSON.stringify(bad)}): ${PATH}`),
+			`${JSON.stringify(bad)} must refuse at load`,
+		);
+	}
+});
+
+test("run.command is orthogonal to packages/image/skillsDir on all four kinds -- each survives beside it", () => {
+	// The :311 block's shape, both directions from one parse: declining the packages must not cost the
+	// command, and naming a command must not re-arm the packages or drop the image and skills.
+	for (const { kind, entry } of KINDS) {
+		const [t] = parse([withRun(withCommand(entry), { packages: false, image: "my-python:1.2.0", skillsDir: "/srv/skills" })]);
+		assert.equal(t.run.command, "wf run", `${kind}: the container fields must not cost the command`);
+		assert.equal(t.run.packages, false, `${kind}: a command must not re-arm the packages`);
+		assert.equal(t.run.image, "my-python:1.2.0", `${kind}: a command job still picks its image`);
+		assert.equal(t.run.skillsDir, "/srv/skills", `${kind}: a command job still carries its skills`);
+	}
+});
+
+test("run.command beside run.replicas, run.github, and an azure run.repository all load -- container fields, not prompt fields", () => {
+	const [r] = parse([withRun(withCommand(LABEL), { replicas: 2 })]);
+	assert.equal(r.run.replicas, 2, "a command race is still a race");
+	assert.equal(r.run.command, "wf run");
+	const [g] = parse([withRun(withCommand(CRON), { github: true })]);
+	assert.equal(g.run.github, true, "a command cron job can still opt into the scoped token");
+	assert.equal(g.run.command, "wf run");
+	// The azure cross-requirement is untouched: a command label trigger still must (and may) name the
+	// repository, because the work item still names only a project.
+	const [z] = parse([{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "azure", command: "wf run", repository: "repo" } }]);
+	assert.equal(z.run.repository, "repo");
+	assert.equal(z.run.command, "wf run");
+});
+
+test("a comment command trigger loads with no default-flow refusal", () => {
+	// run.flow is "the default flow" in this normalizer's message because the receiver's
+	// `<phrase> <flow>` comment override can replace it. A command rule has no default flow to replace,
+	// so the override token is inert -- enforced in the receiver's filter, which is the only place that
+	// ever sees the adversarial comment text carrying it; this validator only proves the shape loads.
+	const [t] = parse([{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", command: "wf run" } }]);
+	assert.equal(t.run.command, "wf run");
+	assert.equal(t.run.flow, undefined);
+	assert.deepEqual(t.on, { type: "comment", phrase: "@pi" });
+});

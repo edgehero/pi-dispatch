@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadReceiverConfig, reloadTriggers, triggersFilePath } from "../src/config.mjs";
+import { filter } from "../src/filter.mjs";
 import { FORGE_KINDS } from "@edgehero/pi-dispatch/triggers";
 
 // A valid unified triggers file, injected: exists and parses to one of each webhook type. The exhaustive
@@ -46,7 +47,7 @@ test("a valid secret + triggers file yields conservative defaults and grouped we
 
 	// the single comment trigger. `packages` is asserted present-and-undefined: the grouper builds the key
 	// by construction and this whole-object deepEqual (assert/strict) counts an own undefined-valued key.
-	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", packages: undefined, image: undefined, skillsDir: undefined, instructions: undefined, resume: undefined, replicas: undefined, repository: undefined });
+	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", command: undefined, packages: undefined, image: undefined, skillsDir: undefined, instructions: undefined, resume: undefined, replicas: undefined, repository: undefined });
 
 	// pull_request rules: actions is a Set, predicate carries the label selectors.
 	assert.equal(c.triggers.github.pullRequest.length, 1);
@@ -165,6 +166,118 @@ test("an unflagged triggers file groups packages as undefined on every rule -- t
 	assert.equal(c.triggers.github.label[0].packages, undefined);
 	assert.equal(c.triggers.github.comment.packages, undefined);
 	assert.equal(c.triggers.github.pullRequest[0].packages, undefined);
+});
+
+// -- run.command triggers (issue #189): a rule may dispatch a registered pi extension command ------
+
+test("each grouped webhook rule carries its own run.command through to the filter", () => {
+	// Deliberately MIXED with a flow rule, per the packages/image template: `command` rides the RULE, so a
+	// file where rules disagree must group them disagreeing -- the filter resolves it from whichever rule
+	// matched, never from a file-wide default.
+	const json = JSON.stringify({
+		triggers: [
+			{ on: { type: "label", any: ["pi:standup"] }, run: { kind: "github", command: "standup" } },
+			{ on: { type: "comment", phrase: "@pi-run" }, run: { kind: "github", command: "wf run nightly" } },
+			{ on: { type: "pull_request", action: ["labeled"], any: ["pi:check"] }, run: { kind: "github", command: "check" } },
+			{ on: { type: "label", any: ["pi:docs"] }, run: { kind: "github", flow: "docs" } },
+		],
+	});
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => json });
+	assert.equal(c.triggers.github.label[0].command, "standup");
+	assert.equal(c.triggers.github.label[0].flow, undefined, "a command rule resolves no flow -- the exclusivity is parse-enforced");
+	assert.equal(c.triggers.github.comment.command, "wf run nightly");
+	assert.equal(c.triggers.github.comment.defaultFlow, undefined, "a command comment rule has no default flow to fall back to");
+	assert.equal(c.triggers.github.pullRequest[0].command, "check");
+	assert.equal(c.triggers.github.pullRequest[0].flow, undefined);
+	assert.equal(c.triggers.github.label[1].command, undefined, "a flow rule in the same file grows no command");
+	assert.equal(c.triggers.github.label[1].flow, "docs");
+});
+
+test("a command trigger adds NOTHING to knownFlows -- and the flow triggers' override vocabulary survives beside it", () => {
+	// The failure this guards: `knownFlows.add(run.flow)` on a command trigger is `Set.add(undefined)`,
+	// quietly poisoning the comment `<phrase> <flow>` override allowlist with a non-name. The set must
+	// hold exactly the flow rules' names -- nothing more, nothing missing.
+	const json = JSON.stringify({
+		triggers: [
+			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage" } },
+			{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "github", flow: "frontend-fix" } },
+			{ on: { type: "label", any: ["pi:standup"] }, run: { kind: "github", command: "standup" } },
+		],
+	});
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => json });
+	assert.deepEqual([...c.triggers.knownFlows].sort(), ["frontend-fix", "triage"], "exactly the flow rules' names");
+	assert.equal(c.triggers.knownFlows.has(undefined), false, "Set.add(undefined) is the poisoning this pins out");
+
+	// The consequence, driven through the real filter with the loaded config: the OTHER (flow) comment
+	// trigger's `<phrase> <flow>` override still resolves a known flow, command trigger present or not.
+	const subset = {
+		action: "created",
+		sender: { id: 7 },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 42, title: "T", body: "B", pull_request: false },
+		comment: { author_association: "OWNER", body: "@pi frontend-fix please" },
+	};
+	const r = filter("issue_comment", subset, c, 999, "d-cmd-vocab");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "frontend-fix", "the flow comment trigger's override channel must keep working");
+	assert.equal("command" in r.job, false);
+});
+
+test("a command trigger on EVERY forge the schema accepts groups without throwing", () => {
+	// The same loop-over-the-table shape as the flow variant above: a forge whose command rule vanished
+	// in grouping would fail HERE, at load, instead of inside a live reload that swallows it.
+	const json = JSON.stringify({
+		triggers: FORGE_KINDS.map((kind) => ({
+			on: { type: "label", any: ["pi:go"] },
+			run: { kind, command: "standup", ...(kind === "azure" ? { repository: "widgets" } : {}) },
+		})),
+	});
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => json });
+	for (const kind of FORGE_KINDS) {
+		assert.equal(c.triggers[kind].label.length, 1, `${kind}: its command rule must reach the filter, not vanish`);
+		assert.equal(c.triggers[kind].label[0].command, "standup");
+	}
+	assert.equal(c.triggers.knownFlows.size, 0, "an all-command file has an EMPTY flow vocabulary, not a set of undefineds");
+});
+
+test("a mixed file's comment triggers keep their own channels: github resolves flows, gitlab dispatches its command", () => {
+	// One comment trigger per forge (the shared parser's cap), different phrases: the flow one and the
+	// command one must group onto their own forges with their own field, so neither gate can read the
+	// other's dispatch mode -- a command bleeding into a flow group would skip flow resolution for a
+	// trigger whose author asked for it.
+	const json = JSON.stringify({
+		triggers: [
+			{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage" } },
+			{ on: { type: "comment", phrase: "@pi-run" }, run: { kind: "gitlab", command: "wf run" } },
+		],
+	});
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => json });
+	assert.equal(c.triggers.github.comment.phrase, "@pi");
+	assert.equal(c.triggers.github.comment.defaultFlow, "triage");
+	assert.equal(c.triggers.github.comment.command, undefined);
+	assert.equal(c.triggers.gitlab.comment.phrase, "@pi-run");
+	assert.equal(c.triggers.gitlab.comment.command, "wf run");
+	assert.equal(c.triggers.gitlab.comment.defaultFlow, undefined);
+	assert.deepEqual([...c.triggers.knownFlows], ["triage"], "only the flow trigger names a flow");
+});
+
+test("a cron command trigger is still the worker's: skipped by the receiver, and it keeps its raw index", () => {
+	// Same contract as the cron-flow variant above -- the index is the entry's identity IN THE FILE, so a
+	// skipped cron command entry must shift the webhook rules' indices, never compact them.
+	const json = JSON.stringify({
+		triggers: [
+			// No run.task beside the command: a command job's prompt IS the /name args line, and the shared
+			// parser refuses the combination outright.
+			{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", command: "standup" } },
+			{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } },
+			{ on: { type: "comment", phrase: "@pi-run" }, run: { kind: "github", command: "wf run" } },
+		],
+	});
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => json });
+	assert.equal(c.triggers.github.label.length, 1, "the cron entry grouped nowhere");
+	assert.equal(c.triggers.github.label[0].index, 1);
+	assert.equal(c.triggers.github.comment.index, 2);
+	assert.deepEqual([...c.triggers.knownFlows], ["fix"], "neither command trigger -- cron or webhook -- joins the vocabulary");
 });
 
 test("RECEIVER_PORT and RECEIVER_BIND overrides are honored", () => {

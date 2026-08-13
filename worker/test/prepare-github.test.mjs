@@ -425,6 +425,46 @@ test("a PR job with no review emits NO review key -- absent, not present-and-und
 	assert.equal("review" in event, false, "an unreviewed PR job's event.json must stay byte-identical to pre-#66");
 });
 
+// -- run.command (issue #189): the prompt is the slash invocation; event.json stays the data channel --
+
+test("a command job's prompt.md is EXACTLY /name args -- no envelope, no trailing newline", async () => {
+	// Strict byte equality is the whole assertion: everything after the first space becomes the
+	// handler's argument string verbatim, so a trailing newline (or any envelope prose) would land
+	// inside the args. The issue text therefore reaches this job ONLY via event.json below --
+	// CONST-ISSUE-TEXT-IS-DATA preserved, arguably strengthened: payload text is a file the handler
+	// chooses to parse, never interpolated into prompt prose at all.
+	const git = fakeGit();
+	const h = harness({ git });
+	const { flow, ...rest } = JOB; // command XOR flow (parse-enforced) -- the fixture honours it
+	await prepareGithubWorkspace({ ...rest, command: "wf args" }, TOKEN, h.deps);
+
+	const prompt = readFileSync(join(h.jobDir, "prompt.md"), "utf8");
+	assert.equal(prompt, "/wf args");
+
+	// event.json is UNCHANGED and still written -- it is the handler's data channel, and skipping the
+	// envelope must not skip the webhook subset.
+	const event = JSON.parse(readFileSync(join(h.jobDir, "event.json"), "utf8"));
+	assert.deepEqual(event, {
+		event: "issues",
+		action: "labeled",
+		delivery: "guid-123",
+		repository: { full_name: "owner/name" },
+		sender: { id: 42 },
+		issue: { number: 7, title: JOB.target.title, body: JOB.target.body },
+		matched: { index: 2, type: "label", label: "bug" },
+	});
+});
+
+test("a flow job's prompt keeps the full envelope -- the command arm changes nothing when unused", async () => {
+	const git = fakeGit();
+	const h = harness({ git });
+	await prepareGithubWorkspace(JOB, TOKEN, h.deps);
+	const prompt = readFileSync(join(h.jobDir, "prompt.md"), "utf8");
+	assert.ok(prompt.includes('Use the "frontend-fix" skill'), "the envelope's flow hint survives");
+	assert.ok(prompt.includes(JOB.target.body), "and the issue text still arrives as prompt DATA");
+	assert.notEqual(prompt[0], "/", "a flow prompt is never a slash invocation");
+});
+
 test("instructions reach prompt.md and never event.json", async () => {
 	// event.json is an explicit literal of webhook body fields plus `matched`, so a job-level knob has no
 	// route into it. Pinned rather than trusted: the operator's standing text is theirs, but the file is

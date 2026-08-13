@@ -108,7 +108,12 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 	const job = {
 		repo: subset.repository?.full_name,
 		target: resolved.target,
-		flow: resolved.flow,
+		// EXACTLY ONE of flow/command, decided by the matched rule (issue #189; the shared parser enforces
+		// the exclusivity at load). A command rule dispatches a registered pi extension command instead of
+		// resolving a flow, and its job must carry NO flow key at all -- a present-and-undefined flow would
+		// change the enqueued bytes for every consumer that serializes the job. The spread keeps a flow
+		// rule's literal byte-identical to what it always was.
+		...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
@@ -156,7 +161,8 @@ function routeIssueLabel(subset, triggers) {
 	}
 	return {
 		enqueue: true,
-		flow: rule.flow,
+		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
 		skillsDir: rule.skillsDir,
@@ -183,15 +189,26 @@ function routeComment(subset, triggers, knownFlows) {
 	if (typeof phrase !== "string" || typeof body !== "string" || !body.includes(phrase)) {
 		return { enqueue: false, reason: "no-trigger-phrase" };
 	}
-	// Default to the configured flow; an explicit `<phrase> <flow>` overrides only when `<flow>` is a
-	// known flow name, so a comment cannot summon an unlisted flow.
-	let flow = triggers.comment?.defaultFlow;
-	const match = body.match(new RegExp(escapeRegExp(phrase) + "\\s+(\\S+)"));
-	if (match && knownFlows?.has(match[1])) {
-		flow = match[1];
-	}
-	if (flow === null || flow === undefined || flow === "") {
-		return { enqueue: false, reason: "no-flow" };
+	// On a COMMAND rule (issue #189) the whole flow-resolution block below -- default flow, the `<phrase>
+	// <flow>` trailing-word override, and the `no-flow` refusal -- is deliberately UNREACHABLE: the phrase
+	// alone fires the command, and everything after it is comment DATA (the handler can read the full
+	// delivery via /job/event.json), never a flow lookup. Routing trailing words through the override
+	// would hand any collaborator two levers this trigger's author never granted: retarget the command
+	// trigger onto a known flow by appending its name, or suppress it outright (the `no-flow` arm) with a
+	// word that resolves nowhere. Which flows exist is the operator's file's business, not the commenter's.
+	const command = triggers.comment.command;
+	let flow;
+	if (command === undefined) {
+		// Default to the configured flow; an explicit `<phrase> <flow>` overrides only when `<flow>` is a
+		// known flow name, so a comment cannot summon an unlisted flow.
+		flow = triggers.comment.defaultFlow;
+		const match = body.match(new RegExp(escapeRegExp(phrase) + "\\s+(\\S+)"));
+		if (match && knownFlows?.has(match[1])) {
+			flow = match[1];
+		}
+		if (flow === null || flow === undefined || flow === "") {
+			return { enqueue: false, reason: "no-flow" };
+		}
 	}
 	// An issue_comment on a PR carries issue.pull_request; its issue.number IS the PR number and the
 	// issue title/body are the PR's. Route it as a pull_request target so the flow gets PR context and
@@ -200,7 +217,7 @@ function routeComment(subset, triggers, knownFlows) {
 	const isPR = subset.issue?.pull_request === true;
 	return {
 		enqueue: true,
-		flow,
+		...(command !== undefined ? { command } : { flow }),
 		// The single comment trigger IS the matched rule here, so its opt-in is the job's. A `<phrase>
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
@@ -296,7 +313,8 @@ function routePullRequest(subset, triggers, action) {
 		}
 		return {
 			enqueue: true,
-			flow: rule.flow,
+			// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
+			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image,
 			skillsDir: rule.skillsDir,

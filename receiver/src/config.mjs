@@ -226,11 +226,13 @@ function loadAzureConfig(env) {
  * The shared `parseTriggers` validates the WHOLE file (including the on x run matrix and cron entries the
  * worker owns); this loader keeps only the webhook types and groups them PER FORGE, so `cfg.triggers` is
  * `{ github: <group>, gitlab: <group>, knownFlows }` where each group is:
- *   - `label`:       ordered `{ index, predicate, flow, packages, image }` rules (first match wins in the filter).
- *   - `comment`:     the single `{ index, phrase, defaultFlow, packages, image }` (or null when no comment trigger is configured).
- *   - `pullRequest`: ordered `{ index, actions:Set, predicate, flow, packages, image }` rules.
+ *   - `label`:       ordered `{ index, predicate, flow, command, packages, image }` rules (first match wins in the filter).
+ *   - `comment`:     the single `{ index, phrase, defaultFlow, command, packages, image }` (or null when no comment trigger is configured).
+ *   - `pullRequest`: ordered `{ index, actions:Set, predicate, flow, command, packages, image }` rules.
  * and `knownFlows` is every webhook `run.flow`, so a comment's `<phrase> <flow>` override cannot summon an
- * unlisted flow.
+ * unlisted flow. A rule carries EITHER `flow` or `command` (issue #189; the shared parser enforces the
+ * exclusivity): a command rule's match dispatches a registered pi extension command in the container, so
+ * it resolves no flow and contributes nothing to the flow vocabulary.
  *
  * Grouping by forge FIRST is what keeps each forge's gate reading only its own rules: a GitLab delivery
  * can never match a rule an operator wrote for GitHub, even when both name the same label. `knownFlows`
@@ -272,16 +274,22 @@ function loadTriggers(env, readFile, fileExists) {
 
 	for (const [index, { on, run }] of parsed.entries()) {
 		if (on.type === "cron") continue; // the worker owns cron; the receiver never fires it -- but it keeps its index
-		knownFlows.add(run.flow);
+		// Guarded because a command trigger (issue #189) has NO run.flow, and `Set.add(undefined)` would put
+		// undefined into the comment `<phrase> <flow>` override allowlist. That set exists to bound which
+		// names a collaborator's comment may summon; polluting it with a non-name is how a later loose
+		// membership test (or a `[...set]` enumeration in a message) starts treating "no flow" as a flow.
+		if (typeof run.flow === "string") {
+			knownFlows.add(run.flow);
+		}
 		const group = groups[run.kind];
 		if (on.type === "label") {
-			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository });
+			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository });
 		} else if (on.type === "comment") {
-			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
+			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
 			// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
 			// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
-			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas });
+			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas });
 		}
 	}
 

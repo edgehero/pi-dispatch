@@ -746,6 +746,32 @@ test("a replica job on an image that does not declare replica support refuses pr
 	assert.ok(posted[0]?.includes("Rebuild"), "and names the fix, not merely the symptom");
 });
 
+test("a command job on an image that does not declare command support refuses pre-spend, pre-reserve", async () => {
+	// The replica gate's twin (issue #189). The image is PRESENT but its runner predates run.command: it
+	// reads no PI_COMMAND, so the bare `/name args` prompt reaches the model as prose -- no handler, an
+	// improvised run, a clean exit 0 the queue records as success. The runner-side refusal
+	// (command-unregistered) does not exist on such an image, which is why the host refuses first.
+	const redis = fakeRedis();
+	const posted = [];
+	const { deps: d, calls } = deps({
+		redis,
+		comment: async (_j, t) => posted.push(t),
+		imagePreflight: async () => ({ commandUnsupported: "pi-job:stale", declared: [] }),
+	});
+	const r = await runJob({ kind: "local", folder: "/proj", command: "wf run", provider: "anthropic", model: "m", maxTurns: 5 }, d);
+	assert.equal(r.outcome, "policy", "a policy RETURN, never a throw -- determinate refusals do not retry");
+	assert.equal(r.reason, "job-image-commands-unsupported");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(r.exitCode, null);
+	assert.equal(r.turns, null);
+	assert.equal(r.tokens, null);
+	assert.equal(redis.incrCalls, 0, "a stale image must not burn a cap slot to find out");
+	assert.ok(!calls.includes("prepare"), "no clone for a job that cannot run correctly");
+	assert.ok(!calls.includes("run-container"), "no container -- this is the whole point of a pre-spend gate");
+	assert.ok(posted[0]?.includes("dev.pi-dispatch.capabilities"), "the message names the label so it can be grepped for");
+	assert.ok(posted[0]?.includes("Rebuild"), "and names the fix, not merely the symptom");
+});
+
 // ---- REQ-PER-TRIGGER-SKILLS: a trigger that named a skills dir the worker cannot see.
 
 test("an absent run.skillsDir refuses BEFORE the mint, the clone and the budget", async () => {

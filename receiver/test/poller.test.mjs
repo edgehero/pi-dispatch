@@ -142,7 +142,7 @@ function fakeRedis() {
  * Boot the poller with everything faked and run exactly `cycles` cycles: the injected sleep counts
  * cycle boundaries, advances the fake clock, and calls stop() after the last one.
  */
-async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], redis = fakeRedis(), selfId = SELF } = {}) {
+async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], redis = fakeRedis(), selfId = SELF, fsDeps = FS } = {}) {
 	const queued = [];
 	const out = [];
 	const sleeps = [];
@@ -161,7 +161,7 @@ async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [],
 		random: () => 0.5,
 		selfIdFn: async () => selfId,
 		tokenFn: async () => "poll-token",
-		fsDeps: FS,
+		fsDeps,
 		sleep: async (ms) => {
 			sleeps.push(ms);
 			clock.ms += ms;
@@ -503,6 +503,41 @@ test("bot-loop guard holds end-to-end: a comment authored by selfId is dropped b
 		out.some((o) => o.event === "dropped" && o.reason === "self" && o.delivery === "poll-c400"),
 		"the drop is the filter's own `self` verdict, observable per delivery",
 	);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// run.command triggers through the polling producer (issue #189)
+// ---------------------------------------------------------------------------------------------------
+
+test("a comment command trigger fires through the poller: command on the job, no flow key, override inert end-to-end", async () => {
+	// The SAME filter serves both producers, so a command rule must ride the polled feed exactly as it
+	// rides a webhook. The comment's trailing words are "fix this" -- and `fix` IS a known flow (the label
+	// rule's) -- which makes this the end-to-end retarget pin: through config loading, the poller's comment
+	// feed and the shared gate, the trailing known-flow word must stay DATA and the job must stay a
+	// command job.
+	const cmdTriggers = JSON.stringify({
+		triggers: [
+			{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+			{ on: { type: "comment", phrase: "@pi-run" }, run: { kind: "github", command: "wf run nightly" } },
+		],
+	});
+	const cmdComment = { id: 350, user: { id: 5 }, author_association: "OWNER", body: "@pi-run fix this", created_at: "2026-08-02T12:00:30Z", updated_at: "2026-08-02T12:00:30Z", issue_url: "https://api.github.com/repos/o/r/issues/7" };
+	const routes = [
+		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [cmdComment])] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/issues/7", replies: [ghResponse(200, ISSUE7)] },
+	];
+	const { queued, out } = await runPoller({ cycles: 2, routes, fsDeps: { fileExists: () => true, readFile: () => cmdTriggers } });
+	assertNoRepoFailure(out);
+
+	assert.equal(queued.length, 1, "cycle 1 arms; cycle 2 delivers exactly the command comment");
+	const job = queued[0];
+	assert.equal(job.trigger.deliveryId, "poll-c350");
+	assert.equal(job.command, "wf run nightly");
+	assert.equal("flow" in job, false, "a trailing known-flow word must not turn the command job into a flow job (or into a no-flow drop)");
+	assert.deepEqual(job.trigger.matched, { index: 1, type: "comment", phrase: "@pi-run" });
+	assert.equal(job.trigger.comment.body, "@pi-run fix this", "the trailing words ride as data for the handler, via event.json");
 });
 
 // ---------------------------------------------------------------------------------------------------

@@ -93,10 +93,19 @@ export function makePrepareWorkspace({
 			// flow can discover the trigger context (mirroring the github prompt, which names the same
 			// file); nothing in-container reads it otherwise. The pointer sits AFTER the flow hint and
 			// BEFORE the operator's task, which stays verbatim (CONST-ISSUE-TEXT-IS-DATA).
+			//
+			// A command job (issue #189) bypasses ALL of that: the prompt is the slash invocation itself,
+			// `/name args`, and nothing else -- no pointer line, no task, and critically NO trailing
+			// newline, because pi hands everything after the first space to the handler as its argument
+			// string verbatim, so a newline appended here would land inside the args. The pointer is
+			// prose addressed to a MODEL reading instructions; a command handler is code, and its context
+			// channel is /job/event.json itself, which prepare-local already writes for every local job.
 			const pointer = "Context about this run -- its trigger and schedule -- is in /job/event.json.\n\n";
-			const task = job.flow
-				? `Use the "${job.flow}" skill for this task.\n\n${pointer}${job.task ?? ""}`
-				: `${pointer}${job.task ?? ""}`;
+			const task = job.command
+				? `/${job.command}`
+				: job.flow
+					? `Use the "${job.flow}" skill for this task.\n\n${pointer}${job.task ?? ""}`
+					: `${pointer}${job.task ?? ""}`;
 			const event = localEventContext(job, queueJobId, findPreviousRun);
 			return discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event }), sandbox), jobDir);
 		}

@@ -252,7 +252,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, images, skillsDirs, forges, repositories, flows } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, commands, images, skillsDirs, forges, repositories, flows } = readTriggerFacts(env, fileExists, cwd);
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -398,6 +398,17 @@ export async function collectChecks(env, seams) {
 				});
 			}
 		}
+	}
+
+	// run.command triggers (issue #189): ONE advisory line, deliberately WITHOUT the per-tier probes the
+	// flow block above runs. A command is registered by extension CODE at pi startup -- repo .pi/, the
+	// overlay and staged packages all contribute, and none is enumerable host-side without executing the
+	// extension, which doctor must never do. The honest line names where the real check lives instead;
+	// unlike a missing flow, the failure there is LOUD (a refusal, not a clean exit 0), which is why this
+	// is advisory and carries no fixAction (triggers content is the never tier). A deployment with no
+	// command triggers adds no line at all, so its output is byte-identical.
+	if (commands > 0) {
+		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one pre-spend (command-unregistered)` });
 	}
 
 	// Issue #41: every DISTINCT image a trigger names in run.image, minus the deployment default already
@@ -1296,7 +1307,7 @@ async function repoFlowAtHead(spawn, folder, flow) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [] };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1313,6 +1324,10 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// REQ-REPLICA-RUNS. `> 1` rather than `!== undefined` because the loader already refuses anything
 			// else -- this counts triggers that will actually multiply spend, which is the only reason to say so.
 			replicating: triggers.filter((t) => t.run.replicas > 1).length,
+			// run.command triggers (issue #189), counted for the one advisory line below. The `flows`
+			// tuple list already filters to `typeof f.flow === "string"`, so a command trigger drops out
+			// of the flow-tier probes naturally -- no exclusion needed there.
+			commands: triggers.filter((t) => typeof t.run.command === "string").length,
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,

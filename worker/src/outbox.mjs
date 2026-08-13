@@ -119,6 +119,20 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					continue;
 				}
 
+				// Commands are NEVER AI-reachable (issue #189): a request naming one refuses outright,
+				// with no opt-in to widen. The flow gate below reads a COMMITTED artifact -- the target
+				// repo's SKILL.md frontmatter at the pinned sha, merge-gated and reviewable -- but a
+				// command is an operator-staged pi extension with no committed artifact a gate could
+				// read, so there is nothing to gate ON and fail-closed is the only honest answer. First
+				// in the semantic ladder, before the charset check: which field the request used is
+				// decided before any opinion about its spelling. A completed command job's OWN /outbox
+				// may still chain INTO flows through the unchanged gate below; nothing chains into a
+				// command.
+				if (req.command !== undefined) {
+					refuse("chain-command-refused", i);
+					continue;
+				}
+
 				// Explicit property reads ONLY -- `req` is never spread into job data.
 				const flow = req.flow;
 				const task = req.task;

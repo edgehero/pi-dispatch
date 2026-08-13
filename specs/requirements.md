@@ -203,7 +203,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `pull_request_review` event's `submitted` action) is gated by the **reviewer's**
   `review.author_association ∈ {OWNER, MEMBER, COLLABORATOR}`, never the PR author's. All three are
   hard-coded in the filter, never config-optional. A comment carrying `issue.pull_request` is a PR-context
-  comment and enqueues a pull_request target. A `review_submitted` rule may carry an optional
+  comment and enqueues a pull_request target. On a comment rule that names `run.command` (issue #189), the
+  `<phrase> <flow>` trailing-word flow override is **inert**: trailing text neither retargets nor
+  suppresses the command and reaches the job only as data (`/job/event.json`), and the receiver's
+  known-flows set is built from flow-carrying rules only, so a command name is never summonable by
+  comment (`INT-TRIGGERS-FILE-CONTRACT`). A `review_submitted` rule may carry an optional
   `on.reviewState` narrowing which verdicts fire (`INT-TRIGGERS-FILE-CONTRACT`); an unlisted verdict drops
   as `review-state-not-matched`. A `commented` review with an empty body drops as `no-review-body` rather
   than starting a run on nothing; an empty-bodied `approved` or `changes_requested` still fires.
@@ -240,7 +244,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   reading the wrong field. Given a `commented` review whose body is empty or whitespace, 204 and zero
   jobs; given an `approved` review whose body is empty, one job. Given a review whose verdict is outside a
   configured `on.reviewState`, 204 and zero jobs. Given a review whose `sender.id` is our own identity,
-  204 and zero jobs.
+  204 and zero jobs. Given `@pi review` from a collaborator matching a comment rule that names
+  `run.command`, exactly one job running that rule's own command, the trailing word carried as data and
+  never as a flow override or a suppression.
 
 ## REQ-JOB-TIMEOUT-30M
 
@@ -371,6 +377,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     is admissible.
   - Given a scheduled occurrence that fails (including an infra fault), when the tick concludes, then the
     occurrence is **not** retried within the tick — the schedule's own cadence is the retry.
+  - Given a cron entry naming `run.command` instead of `run.flow` (issue #189), when the config loads,
+    then it loads in **both services** (the shared validator, `DES-TRIGGERS-UNIFIED-FILE`), and when it
+    fires, then the emitted job dispatches the command **headlessly** — the container prompt is exactly
+    `/<command> [args]`, no model turn required for the dispatch (`DES-COMMAND-ENTRY-POINT`).
+  - Given an entry carrying both `run.flow` and `run.command`, or neither, on any of the four kinds, when
+    the config loads, then **both services** throw a parse-time `piDispatchConfig` error naming both
+    fields (`INT-TRIGGERS-FILE-CONTRACT`).
+  - Given a scheduled command job whose image's loaded extensions register no such command, when the
+    runner preflights, then the job refuses as `command-unregistered` (exit 2, pre-work, never retried)
+    before any model call (`INT-RUNNER-EXIT-CODE-PROTOCOL`).
 
 ## REQ-DURABLE-RUN-HISTORY
 
@@ -470,7 +486,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   model-callable `dispatch_run` tool (with its operator `/dispatch run` command) and a completed job's
   `/outbox`, collected by the worker — each subject to a **per-flow default-deny gate**: the flow's
   `.pi/skills/<flow>/SKILL.md` must carry `ai-trigger: allow` frontmatter read at a **pre-agent SHA**. A
-  flowless AI trigger is refused. The `dispatch_run` tool's folder is confined to `PI_DISPATCH_RUN_ROOTS`;
+  flowless AI trigger is refused. **Commands are never AI-triggerable, and there is no opt-in** (issue
+  #189): an outbox request carrying a `command` key is refused outright (`chain-command-refused`, before
+  the flow-name charset check), and `dispatch_run` speaks flows only — its parameters are
+  `{folder, flow, task}`, and a slash-leading `flow` refuses with a message naming the distinction rather
+  than falling through to `no-skill` (`DES-AI-TRIGGER-FLOW-GATE`, `DES-COMMAND-ENTRY-POINT`).
+  The `dispatch_run` tool's folder is confined to `PI_DISPATCH_RUN_ROOTS`;
   chaining is bounded by depth, count, and rate caps (`PI_CHAIN_DEPTH_MAX`, `PI_CHAIN_MAX_PER_JOB`,
   `PI_DISPATCH_RUN_PER_HOUR`). Budget is unchanged: a chained or enqueued job passes `reserveBudget`
   consumer-side like any other local job.
@@ -491,7 +512,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   folder outside `PI_DISPATCH_RUN_ROOTS`, when invoked, then it is refused; given a dirty working tree,
   when `dispatch_run` fires, then it refuses with no force option; given a chain request exceeding
   `PI_CHAIN_DEPTH_MAX` or `PI_CHAIN_MAX_PER_JOB`, when collected, then it is refused loudly and the
-  parent's own outcome is unchanged; given an operator-typed `/dispatch run`, when invoked, then no gate
+  parent's own outcome is unchanged; given a `request-<n>.json` carrying a `command` key (any value, even
+  beside a valid flow), when collected, then it is refused as `chain-command-refused` before any charset
+  or gate read, nothing is enqueued, and no budget is touched; given a `dispatch_run` whose `flow` begins
+  with `/`, when invoked, then it refuses with a readable message and enqueues nothing; given an
+  operator-typed `/dispatch run`, when invoked, then no gate
   applies.
 
 ## REQ-RUNTIME-SETTINGS-PICKUP
@@ -1337,6 +1362,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command`, the second trigger entry point). **REQ-AI-TRIGGERED-RUNS AMENDED**: commands are never AI-triggerable and there is no opt-in — the statement gains the outbox `command`-key refusal (`chain-command-refused`, ordered before the charset check) and `dispatch_run`'s structural incapability (`{folder, flow, task}` params; a slash-leading flow refuses with a readable message naming the distinction rather than falling through to `no-skill`); acceptance pins both as free, nothing-enqueued, no-budget-touched refusals. **REQ-CRON-SCHEDULED-JOBS AMENDED**: acceptance gains the entry-point clauses it is the end-to-end home for — a `run.command` trigger loads in BOTH services (the shared validator) and its emitted job dispatches headlessly with the prompt exactly `/<command> [args]`; both-or-neither of `flow`/`command` is a parse-time `piDispatchConfig` error in both services; an unregistered command refuses `command-unregistered` (exit 2, pre-work, never retried) before any model call. **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the comment `<phrase> <flow>` trailing-word override is INERT on a command rule — trailing text neither retargets nor suppresses the command, riding only as `event.json` data — and the known-flows set is built from flow-carrying rules only, so a command name is never summonable by comment; acceptance pins the collaborator `@pi review` case running the rule's own command. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — doctor REPORTS command triggers (a count plus one in-container-verifiability advisory line) and fixes nothing; the closed fix tiers are untouched. |
 | 2026-08-13 | Issue #189 (Gap 1, doctor half: per-trigger flow-tier resolution lines). **REQ-PER-TRIGGER-SKILLS AMENDED**: acceptance gains the doctor clause — one line per distinct (flow, folder, skillsDir, packages) question naming the resolving tier, probed in loader precedence order (repo at HEAD via the gate's own ls-tree read but HEAD-resolved and degrading to unknown, injected dir, overlay `skills/`, staged packages), ⚠ never ✗ and never a fixAction when none resolves, tiers-checked vs not-checkable named, charset failures their own ⚠, comment triggers checked on the default flow only, zero triggers zero lines. **REQ-GLOBAL-PI-OVERLAY AMENDED**: the overlay `skills/` and staged-package tiers join doctor's obligations; staged-only resolution is a plain ✓ naming the package; `readStagedSkills` (worker/src/packages.mjs, never-throws, shared with issue #188's topology) mirrors pi's manifest-vs-convention rule at the pin including the manifest-without-skills-key null case, and pattern manifests read as not-enumerable rather than guessed. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new checks are warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |
 | 2026-08-13 | Issue #189 (Gap 1, runner half: a `run.flow` that resolves in no skill tier is a silent exit-0 no-op). **REQ-PER-TRIGGER-SKILLS AMENDED**: acceptance gains the runner clause — given a job whose `run.flow` names a skill no loaded tier materialised, the runner emits one `flow_not_loaded` line (flow name and a loaded-skill count, never task content) before any session exists, so the silent-exit-0 shape becomes a failing test; the job proceeds, and the report-not-refuse choice with its rejected alternatives is recorded on the new `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`. This entry owns the clause because its tier stack (repo > injected > overlay, packages barred from their names) is exactly the set the check verifies the union of. **REQ-GLOBAL-PI-OVERLAY UNCHANGED, checked** — tier precedence, staging and the overlay gates are untouched; the check reads the loader's OUTPUT after every tier and override has spoken. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — no doctor change in this half (the doctor layer is the companion change), and nothing here grows a fix tier. |
 | 2026-08-12 | Issue #181 (the budget lever and the trend lines). **REQ-INSIGHTS-HTML-EXPORT AMENDED**: the page gains a **budget panel** — the caps are the operator's one real lever on cost, so the page that prices everything shows the dial beside the spend — with new clause (g): used-vs-cap FACTS only, an overlay-unset cap rendering as unknown/off with no bar and no percentage (the no-invented-denominator rule applied to caps this process cannot read authoritatively), states computed assembler-side by the worker's own `windowState` (and the token rule the old dashboard token line used) and carried in the payload as WORDS the page never derives — the artifact builder cannot load the worker, and duplicating threshold arithmetic behind a parity test would put policy in two places — and the lever named in the panel. Display stays GET-only: `readBudget` gains the token counter as a fourth plain GET plus a synchronous junk-URL parse guard, and never INCR/EXPIREs (CONST-BUDGET-BEFORE-TOKENS). And the page gains its **trend lines** with new clause (h): per-flow daily spend as SMALL MULTIPLES (one panel per top flow, one shared dollar scale, identity carried by the panel title — the palette has one non-reserved data hue and dashes already mean estimated, so overlaid lines could only be told apart by a channel the class system already spent) plus a cumulative mini-chart with its OWN scale under the daily columns (a running total dwarfs daily bars; a second axis on one plot is the dual-axis lie), dashed segments wherever an estimated day touches and a cumulative line demoted permanently from its first estimated day. **REQ-SPEND-CAPS-MULTI-WINDOW UNCHANGED, checked** (a display-only consumer of the same classifier its panel-meter-amber clause already names). **REQ-TOKEN-ACCOUNTING-AND-CAPS UNCHANGED, checked** (a new display of the daily counter; enforcement untouched). **REQ-COST-ANALYTICS UNCHANGED, checked** (the fold gained `dailyByFlow`, a series over facts it already held — recorded on DES-COST-FOLD-BY-SCAN). |

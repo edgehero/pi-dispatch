@@ -33,6 +33,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { unavailable: image} -- docker itself did not answer              => INFRA, retry
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { replicaUnsupported }-- present, but does not declare replica support for a replica job => POLICY
+ *   { commandUnsupported }-- present, but does not declare command support for a command job => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -86,6 +87,14 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			// job actually carries a replica index.
 			if (job?.replica !== undefined && !(capabilities ?? []).includes("replicas")) {
 				return { replicaUnsupported: wanted, declared: capabilities ?? [] };
+			}
+			// Same inclusion-list polarity as `replicas` directly above, and the same class of stale-image
+			// failure it guards (issue #189): a runner that predates run.command reads no PI_COMMAND, so
+			// the bare `/name args` prompt reaches the model as PROSE -- no handler runs, the agent
+			// improvises, and the queue records a clean exit 0. Unreachable for a commandless job, so the
+			// existing fleet pays nothing for it.
+			if (job?.command !== undefined && !(capabilities ?? []).includes("commands")) {
+				return { commandUnsupported: wanted, declared: capabilities ?? [] };
 			}
 			return { ok: true, image: wanted, piVersion };
 		}

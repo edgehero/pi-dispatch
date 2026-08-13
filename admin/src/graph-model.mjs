@@ -342,6 +342,11 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       pattern: isCron ? (t.pattern ?? null) : null,
       label: triggerMatchLabel(t),
       flow: t.flow ?? null,
+      // A command trigger's dispatched extension command (issue #189), flow's mutually-exclusive
+      // sibling. Carried on the node so the display half (issue #188) has the fact to render; nothing
+      // in THIS module consumes it -- a command names no SKILL.md, so the config-edge machinery below
+      // (guarded on `typeof t.flow === "string"`) correctly draws nothing for it.
+      command: t.command ?? null,
       replicas: t.replicas ?? null,
       folderKey: group?.key ?? null,
       runs: Number.isInteger(stats?.runs) ? stats.runs : 0,

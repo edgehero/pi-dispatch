@@ -230,6 +230,67 @@ test("enqueueGitHubJob puts image on data only when supplied, and never inside t
 	assert.deepEqual(Object.keys(captured.data), ["kind", "repo", "target", "flow", "trigger", "provider", "model", "maxTurns"]);
 });
 
+// --- run.command (issue #189): the command rides job data, and both dedup keys stay collision-free ---
+
+test("enqueueLocalJob: a command named X and a flow named X on the same folder produce DIFFERENT ids", async () => {
+	// The command fills the flow slot of the dedup key as `cmd:<command>` -- without the prefix a
+	// command X would hash identically to a bare flow X and one would silently swallow the other within
+	// the minute window. `:` is outside the skill-name charset, so no real flow can spell the prefixed form.
+	const { enqueueLocalJob } = await import("../src/queue.mjs");
+	const seen = [];
+	const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+	const now = new Date("2026-07-16T12:00:00Z");
+
+	const cmdId = await enqueueLocalJob(fakeQueue, { folder: "/proj", command: "wf", provider: "anthropic", model: "m", maxTurns: 5, now });
+	const flowId = await enqueueLocalJob(fakeQueue, { folder: "/proj", flow: "wf", provider: "anthropic", model: "m", maxTurns: 5, now });
+	assert.notEqual(cmdId, flowId, "a command must never coalesce against a flow spelling the same name");
+
+	// And two DIFFERENT commands on one folder in one minute are two jobs, not one.
+	const otherId = await enqueueLocalJob(fakeQueue, { folder: "/proj", command: "wf nightly", provider: "anthropic", model: "m", maxTurns: 5, now });
+	assert.notEqual(cmdId, otherId);
+	assert.equal(seen[0].data.command, "wf", "the command rides job data");
+});
+
+test("enqueueLocalJob puts command on data only when supplied -- a commandless job keeps exactly today's keys", async () => {
+	const { enqueueLocalJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	const base = { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now: new Date("2026-07-16T12:00:00Z") };
+
+	await enqueueLocalJob(fakeQueue, base);
+	assert.equal("command" in captured.data, false, "a flow job's data is byte-identical to before the feature");
+	assert.deepEqual(Object.keys(captured.data), NON_CHAINED_KEYS);
+
+	await enqueueLocalJob(fakeQueue, { ...base, flow: undefined, task: undefined, command: "wf run" });
+	assert.equal(captured.data.command, "wf run");
+});
+
+test("enqueueForgeJob: the dedup key's flow slot becomes cmd:<command> -- command X and flow X never coalesce", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const seen = [];
+	const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	};
+
+	await enqueueGitHubJob(fakeQueue, { ...base, command: "wf", trigger: { event: "issues", action: "labeled", deliveryId: "guid-cmd", sender: { id: 1 } } });
+	await enqueueGitHubJob(fakeQueue, { ...base, flow: "wf", trigger: { event: "issues", action: "labeled", deliveryId: "guid-flow", sender: { id: 1 } } });
+
+	// The `cmd:` prefix is the whole point: without it both keys would read `owner/repo#7:wf` and the
+	// second delivery would coalesce into the first's 10-minute window and never run.
+	assert.equal(seen[0].opts.deduplication.id, "owner/repo#7:cmd:wf");
+	assert.equal(seen[1].opts.deduplication.id, "owner/repo#7:wf");
+	assert.notEqual(seen[0].opts.deduplication.id, seen[1].opts.deduplication.id);
+
+	assert.equal(seen[0].data.command, "wf", "the command rides job data");
+	assert.equal("command" in seen[0].data.trigger, false, "an execution knob must not leak into the descriptive trigger");
+	assert.equal("command" in seen[1].data, false, "a flow job's data keeps exactly today's keys");
+});
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";

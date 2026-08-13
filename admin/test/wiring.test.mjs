@@ -301,9 +301,14 @@ test("dispatch_run advertises PAID/ai-trigger/no-force, is sequential, and takes
   assert.match(run.description, /PAID/, "flags that the run is paid");
   assert.match(run.description, /ai-trigger/, "names the committed opt-in gate");
   assert.match(run.description, /no force/, "states there is no force option for a dirty tree");
+  assert.match(run.description, /run\.command/, "says commands (issue #189) are never AI-triggerable via this tool");
   assert.equal(run.executionMode, "sequential");
   const props = run.parameters.properties ?? {};
+  // Exactly {folder, flow, task}: the command exclusion (issue #189) is STRUCTURAL here -- there is no
+  // `command` param to misuse, and the slash-leading-flow refusal in enqueueDispatchRun is only the
+  // backstop for a command smuggled into the flow field.
   assert.deepEqual(Object.keys(props).sort(), ["flow", "folder", "task"], "exactly the three job inputs");
+  assert.ok(!("command" in props), "no command param: commands stay structurally out of dispatch_run's reach");
   for (const knob of ["model", "maxTurns", "dailyCap", "weeklyCap", "monthlyCap", "concurrency", "softHoldPct"]) {
     assert.ok(!(knob in props), `no spend-knob param: ${knob}`);
   }

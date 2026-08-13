@@ -10,8 +10,9 @@ skills, or a pi extension that orchestrates them.
 
 | Term | What it is | Who owns it |
 |---|---|---|
-| **trigger** | one `{ on, run }` entry in `triggers.json`: what fires, and which flow it runs | you, in a reviewed file |
+| **trigger** | one `{ on, run }` entry in `triggers.json`: what fires, and which flow or command it runs | you, in a reviewed file |
 | **flow** | the skill a trigger names, at `.pi/skills/<flow>/SKILL.md` on the target repo's **default branch** | the target repo |
+| **command trigger** | a trigger whose `run.command` names a registered extension command instead of a flow; the job's whole prompt is the dispatch line `/command args` | you, in a reviewed file |
 | **skill** | pi's unit of instruction; a flow is just the entry one. The whole directory travels, not only `SKILL.md` | the target repo, or the overlay |
 | **workflow extension** | a pi extension that chains skills into stages, with its own state and routing | a third party, staged by you |
 | **staged package** | the pinned directory a workflow extension lives in, inside the global overlay | `import-pi --with-packages` |
@@ -29,32 +30,43 @@ label / comment / PR / cron        one delivery, one dedup key
 one job, one container            one budget slot, one turn budget, one transcript
         |
         v
-run.flow                          the skill the trigger names, read from the default branch
-        |
+run.flow | run.command            the skill the trigger names, read from the default branch --
+        |                         or the registered command it dispatches, as `/command args`
         v
 the skills it calls, or a staged workflow extension
 ```
 
 Four properties of that chain decide what is possible inside it.
 
-**`run.flow` is the only entry point.** There is no `run.workflow` and there is not going to be one. Which
-stages run is a property of the repo's own skill, which the repo changes by merging; the trigger stays a
-reviewed pairing of an event with a flow name. `run.skillsDir` does not change that and is worth being
-precise about why: it supplies **where a flow comes from**, never **which stages run**. The trigger still
-names one flow, and what that flow does is still the skill's business. That split is the same one the whole trigger schema rests
-on: this service decides *when* and *in what box*, the repo decides *what*.
+**`run.flow` and `run.command` are the two entry points.** There is still no `run.workflow`: which stages
+run is a property of what the entry point does, which the repo changes by merging a skill or you change by
+staging an extension, and the trigger stays a reviewed pairing of an event with one name. `run.command` is
+worth being precise about in the same way `run.skillsDir` is: it supplies **which registered command
+dispatches**, never new code. The extension that registers the command still arrives the way extensions
+arrive -- staged into the overlay, committed to the serviced repo, or shipped in the image -- and every
+trust gate on that path is unchanged; the trigger picks a command from what the deployment already vetted,
+exactly as `run.flow` picks a skill from what the repo already merged. Its arguments are static too: they
+come from the reviewed file, and the delivery (which issue, which comment) waits in `/job/event.json` for
+the handler to read, so nothing from the event ever rides the dispatch line. That split is the same one the
+whole trigger schema rests on: this service decides *when* and *in what box*, the entry point decides
+*what*.
 
-**A job is not an interactive session.** The runner assembles one prompt, calls pi once, and reads the exit
-line. So an extension that registers a **slash command** has nobody to type it inside a job.
-`@juicesharp/rpiv-workflow` names that distinction in its own trigger taxonomy: `command` for a typed
-`/wf`, `programmatic` for an embedder that calls the API, `external` for a webhook or cron source. **A
-pi-dispatch job is the programmatic case**, and it is reached one of two ways:
+**A job is not an interactive session, and no longer needs to pretend otherwise.** The runner assembles one
+prompt, calls pi once, and reads the exit line. This file used to conclude that an extension registering a
+**slash command** therefore has nobody to type it inside a job -- refuted at the pin: `session.prompt()`
+dispatches a whole-text `/name` to the extension handler itself, before any model or auth work, so the one
+prompt a job gets can *be* the command. `@juicesharp/rpiv-workflow` names the distinction in its own
+trigger taxonomy: `command` for a typed `/wf`, `programmatic` for an embedder that calls the API,
+`external` for a webhook or cron source. **A pi-dispatch flow job is the programmatic case, and a
+`run.command` job is the command case, reached headlessly**: `"command": "wf run nightly"` on a trigger
+dispatches the registered command with those exact args, no model turn deciding anything. The two
+flow-side routes remain as alternatives:
 
 - the flow's `SKILL.md` tells the agent to use the workflow's skills, which needs nothing but prose, and
   leaves the decision to start a workflow with the model; or
 - you stage a second small extension of your own that imports the package and starts a run from a lifecycle
-  hook. That is the embedding route the package documents, and it is the only way to start a workflow
-  *without* the model choosing to.
+  hook. That is the embedding route the package documents; before `run.command`, it was the only way to
+  start a workflow *without* the model choosing to.
 
 **One trigger is one job, one budget slot, and one turn budget.** Every stage runs inside the container that
 one delivery produced, so ten stages share the `PI_MAX_TURNS` ceiling and the per-job token budget, and
@@ -109,6 +121,10 @@ text no longer fits on a screen, it is a flow, and it belongs in a file someone 
 
 Cron triggers do not take it, and use `task` instead. That is not an omission: a scheduled job's whole
 prompt IS its `task`, so a second field would write the same region with no defined order between them.
+
+A command trigger takes neither. Its whole prompt is the dispatch line `/command args`, so there is no
+envelope for `instructions` and no task region for `task`, and both are refused when the file loads rather
+than accepted where they would do nothing.
 
 ## The structured case: stage a workflow extension
 
@@ -203,7 +219,9 @@ trigger says `"packages": true` and nothing is staged (that flow would run witho
 exit 0), and fails when a trigger requires packages while `PI_GLOBAL_PI_DIR` is unset. It also prints one
 line per trigger flow naming the skill tier that resolves it (a staged package counts, by name), and warns
 when a flow resolves in no tier visible on the worker host -- the same silent no-op, caught before the
-trigger fires instead of after.
+trigger fires instead of after. Command triggers get a count and one advisory line instead: whether a
+command is registered is only knowable inside the container, where the runner refuses an unregistered one
+before any model call.
 
 **One knob does not cover this, and the distinction matters.** `PI_GLOBAL_ALLOW_EXTENSIONS=0` makes the
 overlay's own `extensions/` directory dormant. It is not the off switch for staged packages: those are
@@ -230,7 +248,8 @@ Two supported ways to continue work **across** jobs:
   no store is configured. Read [`sessions.md`](sessions.md) first.
 - **Job chaining** through `/outbox`: a finished job may request a follow-up job. It is **local jobs only**
   (a forge parent gets no `/outbox` mount), depth-bounded, and gated on the target flow carrying
-  `ai-trigger: allow`. `/dispatch insights` shows the whole picture: configured trigger edges, observed
+  `ai-trigger: allow`; a request naming a `command` is refused outright, with no opt-in.
+  `/dispatch insights` shows the whole picture: configured trigger edges, observed
   chain edges from the run records, and potential ones a skill's text names ([`graph.md`](graph.md)).
 
 ## What is not supported
@@ -244,6 +263,9 @@ Two supported ways to continue work **across** jobs:
   cost nothing.
 - **Editing the packages flag from the panel or an AI tool.** Both deliberately refuse: the panel displays
   each trigger's packages state and the staged `name@version` set, and changing it stays a file edit.
+- **A model starting a command.** Job chaining refuses any `/outbox` request naming a `command`, and
+  `dispatch_run` cannot express one -- its parameters speak flows only. A command dispatches from the
+  reviewed `triggers.json` alone, and unlike a flow there is no `ai-trigger`-style opt-in to widen that.
 - **GitHub Actions, GitLab CI, Azure Pipelines.** pi-dispatch is the trigger and the box; CI stays your
   repo's business. If you meant a CI workflow rather than a pi workflow, nothing here applies.
 

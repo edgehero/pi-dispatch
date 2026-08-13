@@ -146,6 +146,25 @@ test("github and packages reach the scheduler data independently -- neither opt-
 	assert.equal(g.data.packages, undefined, "a token opt-in must not smuggle in third-party code");
 });
 
+test("run.command rides the cron data; flow/task hold undefined and drop at serialization", () => {
+	// Issue #189. A command trigger carries no flow/task at all (the validator enforces the XOR), so the
+	// normalizer's unconditional flow/task keys hold undefined here and JSON serialization drops them --
+	// the stored repeatable's data is exactly kind/folder/command plus the shared fields.
+	const CMD = { on: { type: "cron", id: "nightly-cmd", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/proj", command: "wf run nightly" } };
+	const [s] = load([CMD]);
+	assert.equal(s.data.command, "wf run nightly");
+	assert.equal(s.data.flow, undefined);
+	assert.equal(s.data.task, undefined);
+	assert.equal(s.data.folder, "/proj");
+});
+
+test("a flow trigger's data grows NO command key -- byte-identical to before the feature", () => {
+	// `in` rather than an undefined compare: the conditional spread must not even create the key, or a
+	// present-and-undefined command would survive the whole-object deepEqual pin above by accident.
+	const [s] = load([CRON]);
+	assert.equal("command" in s.data, false);
+});
+
 test("multiple valid cron entries with distinct ids all normalize in order", () => {
 	const result = load([CRON, { ...CRON, on: { type: "cron", id: "weekly-audit", pattern: "0 4 * * 0" } }]);
 	assert.equal(result.length, 2);

@@ -178,6 +178,47 @@ test("a cron job with a missing or unparseable queueJobId gets null scheduledFor
 	}
 });
 
+test("a command job's prompt is EXACTLY /name args -- no pointer line, no task, no trailing newline", async () => {
+	// Issue #189. prepareLocalWorkspace writes `task` to prompt.md verbatim (String(task)), so strict
+	// equality here IS the written-bytes pin: a trailing newline would ride into the handler's argument
+	// string (everything after the first space is args, verbatim), and the pointer sentence would too.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const arg = await dispatchLocal(jobsDir, { kind: "local", folder: "/some/folder", command: "wf run nightly" }, {});
+		assert.equal(arg.task, "/wf run nightly");
+		assert.deepEqual(arg.event, { source: "manual" }, "event.json is untouched -- it is the handler's context channel");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a cron command job still gets the full cron event -- the command changes the prompt, never the context", async () => {
+	// The handler's data channel is /job/event.json, which is exactly why the prompt may stay bare: the
+	// trigger/scheduledFor facts must keep arriving there unchanged.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const trigger = { id: "t", pattern: "0 3 * * *" };
+		const arg = await dispatchLocal(jobsDir, { kind: "local", folder: "/some/folder", command: "wf run", trigger }, { queueJobId: "repeat:t:1758868620000", findPreviousRun: () => null });
+		assert.equal(arg.task, "/wf run");
+		assert.equal(arg.event.source, "cron");
+		assert.deepEqual(arg.event.trigger, trigger);
+	} finally {
+		cleanup();
+	}
+});
+
+test("a flow job's prompt composition is byte-identical when the command feature is unused", async () => {
+	// The command arm sits FIRST in the ternary, so this pins that an absent command falls through to
+	// exactly the flow-hint + pointer + task string the pre-#189 dispatcher built.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const arg = await dispatchLocal(jobsDir, { kind: "local", folder: "/some/folder", flow: "tidy", task: "clean up" }, {});
+		assert.equal(arg.task, 'Use the "tidy" skill for this task.\n\nContext about this run -- its trigger and schedule -- is in /job/event.json.\n\nclean up');
+	} finally {
+		cleanup();
+	}
+});
+
 test("throws on an unknown job kind", async () => {
 	const { jobsDir, cleanup } = withJobsDir();
 	try {

@@ -159,6 +159,23 @@ export async function runJob(job, deps) {
 			log("refused_image_replicas_unsupported", { image: img.replicaUnsupported, declared: img.declared });
 			return { outcome: "policy", reason: "job-image-replicas-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
+		if (img.commandUnsupported) {
+			// The image is present and does not declare command support (issue #189), so its runner
+			// predates run.command: it reads no PI_COMMAND, and the bare `/name args` prompt reaches the
+			// model as PROSE -- no handler runs, the agent improvises, and the queue records a clean exit
+			// 0. The in-container half of the gate (the runner's own command-unregistered refusal) does
+			// not exist on such an image, which is exactly why the host must refuse first.
+			//
+			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this
+			// gets better by running. Like the replica branch above, the message names the FIX rather
+			// than the label that noticed it.
+			await comment(
+				job,
+				`Refused: the job image "${img.commandUnsupported}" does not declare command support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its runner would not dispatch \`run.command\`. Rebuild the image from a version that has this feature. Not run.`,
+			);
+			log("refused_image_commands_unsupported", { image: img.commandUnsupported, declared: img.declared });
+			return { outcome: "policy", reason: "job-image-commands-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
 		if (img.unavailable) {
 			// docker itself did not answer -- transient infra, NOT a determinate refusal. THROWN so BullMQ
 			// retries (CONST-RETRY-INFRA-ONLY). `container-never-started` is literally true here, and it reuses

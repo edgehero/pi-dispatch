@@ -320,6 +320,19 @@ test("PI_FLOW is emitted only when the job carries a flow, and never as an empty
 	assert.equal(buildContainerEnv({ ...args, flow: "review" }).PI_FLOW, "review");
 });
 
+test("PI_COMMAND is emitted only when the job carries a command, and never as an empty string", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	// Mirrors PI_FLOW directly above, and for the same reasons: absent means "not a command job", and
+	// the variable is omitted entirely rather than emitted empty -- an empty value is a third state the
+	// two sides of the mount need not agree on.
+	for (const command of [undefined, null, ""]) {
+		assert.equal(buildContainerEnv({ ...args, command }).PI_COMMAND, undefined, `command ${JSON.stringify(command)} must not become a value`);
+	}
+	// Verbatim, args and all: parseTriggers already validated the reviewed file (trimmed, no leading
+	// slash, no control chars), and the runner's registry lookup is what gives the value meaning.
+	assert.equal(buildContainerEnv({ ...args, command: "wf run nightly" }).PI_COMMAND, "wf run nightly");
+});
+
 test("a job kind with no table entry refuses, rather than inheriting the github token names", { skip }, () => {
 	// This was an `if gitlab / else github`, and the `else` was the hazard: any kind the table did not name
 	// -- a forge wired up everywhere but here, a typo that survived validation -- got its credential

@@ -95,7 +95,11 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		repo: subset.project?.path,
 		projectId: subset.project?.id,
 		target: resolved.target,
-		flow: resolved.flow,
+		// EXACTLY ONE of flow/command, decided by the matched rule (issue #189; the shared parser enforces
+		// the exclusivity at load). A command rule dispatches a registered pi extension command instead of
+		// resolving a flow, and its job must carry NO flow key at all. The spread keeps a flow rule's
+		// literal byte-identical to what it always was -- the same move filter.mjs makes.
+		...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
@@ -134,7 +138,8 @@ function routeLabel(subset, triggers, targetType) {
 	if (!rule) return { enqueue: false, reason: "no-allowlisted-label" };
 	return {
 		enqueue: true,
-		flow: rule.flow,
+		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
@@ -193,7 +198,8 @@ function routeMergeRequest(subset, triggers) {
 function mrResult(subset, rule, matched) {
 	return {
 		enqueue: true,
-		flow: rule.flow,
+		// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
@@ -218,18 +224,28 @@ function routeNote(subset, triggers, knownFlows) {
 	if (typeof phrase !== "string" || typeof body !== "string" || !body.includes(phrase)) {
 		return { enqueue: false, reason: "no-trigger-phrase" };
 	}
-	// Default to the configured flow; an explicit `<phrase> <flow>` overrides only when `<flow>` is a
-	// known flow name, so a comment cannot summon an unlisted flow.
-	let flow = triggers.comment?.defaultFlow;
-	const match = body.match(new RegExp(escapeLiteral(phrase) + "\\s+(\\S+)"));
-	if (match && knownFlows?.has(match[1])) flow = match[1];
-	if (flow === null || flow === undefined || flow === "") {
-		return { enqueue: false, reason: "no-flow" };
+	// On a COMMAND rule (issue #189) the flow-resolution block below -- default flow, the `<phrase> <flow>`
+	// trailing-word override, and the `no-flow` refusal -- is deliberately UNREACHABLE: the phrase alone
+	// fires, and trailing note text stays DATA (the handler reads the delivery via /job/event.json). An
+	// active override would hand any authorized member two levers the trigger's author never granted:
+	// retarget the command onto a known flow by appending its name, or veto it (the `no-flow` arm) with a
+	// word that resolves nowhere. Same rationale, same shape as filter.mjs's routeComment.
+	const command = triggers.comment.command;
+	let flow;
+	if (command === undefined) {
+		// Default to the configured flow; an explicit `<phrase> <flow>` overrides only when `<flow>` is a
+		// known flow name, so a comment cannot summon an unlisted flow.
+		flow = triggers.comment?.defaultFlow;
+		const match = body.match(new RegExp(escapeLiteral(phrase) + "\\s+(\\S+)"));
+		if (match && knownFlows?.has(match[1])) flow = match[1];
+		if (flow === null || flow === undefined || flow === "") {
+			return { enqueue: false, reason: "no-flow" };
+		}
 	}
 	const targetType = subset.noteableType === "MergeRequest" ? "pull_request" : "issue";
 	return {
 		enqueue: true,
-		flow,
+		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,

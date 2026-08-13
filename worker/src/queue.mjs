@@ -16,11 +16,16 @@ export function makeQueue(connection) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, { folder, flow, task, provider, model, maxTurns, image, skillsDir, chainDepth, parentJobId, jobId, now = new Date() }) {
+export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, skillsDir, chainDepth, parentJobId, jobId, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
-	// minute-windowed localJobId is the dedup key.
-	const id = jobId ?? localJobId({ folder, flow, task, minute });
+	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
+	// `cmd:<command>` rather than leaving it empty: a command trigger carries no flow/task, so without it
+	// two DIFFERENT commands on one folder in one minute would hash identically and the second would
+	// vanish silently -- and the `cmd:` prefix keeps a command named X from colliding with a flow named X
+	// (`:` is outside the skill-name charset, so no real flow can spell the prefixed form). A flow job's
+	// key is byte-identical to before the feature.
+	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute });
 	// image/chainDepth/parentJobId land on `data` only when present, so a plain non-chained job's data is
 	// byte-identical. `image` is the container image this job runs in (INT-TRIGGERS-FILE-CONTRACT); absent
 	// resolves the deployment default at job start, never a value frozen here.
@@ -29,6 +34,10 @@ export async function enqueueLocalJob(queue, { folder, flow, task, provider, mod
 		folder,
 		flow,
 		task,
+		// The registered pi command this job dispatches instead of a flow (issue #189). Conditional like
+		// `image`, so a flow job's data keeps exactly the keys it has today; the parse-level XOR means a
+		// job carrying it has flow/task undefined, which JSON serialization drops.
+		...(command !== undefined && { command }),
 		provider,
 		model,
 		maxTurns,
@@ -115,7 +124,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -132,6 +141,11 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		...(azure !== undefined && { azure }),
 		target,
 		flow,
+		// The registered pi command this trigger dispatches instead of a flow (issue #189). Conditional
+		// like `packages`/`image` below, so an unflagged trigger's job data is byte-identical -- and at
+		// JOB level, never inside `trigger`, for their reason too: an execution knob is not a fact about
+		// the delivery, and `trigger` is copied verbatim into /job/event.json.
+		...(command !== undefined && { command }),
 		trigger,
 		provider,
 		model,
@@ -156,7 +170,13 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 	};
 	await queue.add(kind, data, {
 		jobId,
-		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flow}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
+		// A command job (issue #189) fills the semantic key's flow slot with `cmd:<command>`: a command
+		// trigger carries no flow, so the slot would otherwise read `undefined` for every command and one
+		// command's 10-minute window would swallow a different command's delivery on the same target. The
+		// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
+		// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
+		// stays byte-identical to before the feature.
+		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${command !== undefined ? `cmd:${command}` : flow}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 		attempts: 2,
 		backoff: { type: "exponential", delay: 60_000 },
 		removeOnComplete: { age: 31 * 24 * 3600 }, // age in seconds -- do not cross units with the ms ttl above

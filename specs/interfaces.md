@@ -1345,30 +1345,34 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
     { "on": { "type": "cron", "id": "<[A-Za-z0-9._-]+, no ':' , unique>",
               "pattern": "<5 or 6 space-separated fields>" },
       "run": { "kind": "local", "folder": "<absolute HOST path, must exist>", "flow": "<flow name>",
-               "task": "<operator-authored prompt text — DATA, lands in /job/prompt.md>",
+               "command": "<registered pi command [args] — EXACTLY ONE of flow/command, every kind>",
+               "task": "<operator-authored prompt text — DATA, lands in /job/prompt.md; NOT beside command>",
                "provider": "<optional passthrough>", "model": "<optional>", "maxTurns": <optional>,
                "github": <optional boolean>, "packages": <optional boolean>,
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
                "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>" } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
-      "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
+      "run": { "kind": "github", "flow": "<flow name>",
+               "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
-               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron>",
+               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
-      "run": { "kind": "github", "flow": "<default flow>", "packages": <optional boolean>,
+      "run": { "kind": "github", "flow": "<default flow>",
+               "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
-               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron>",
+               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; github only> } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
               "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
                                                                     // and only beside review_submitted
               "any": [...], "all": [...], "none": [...] },
-      "run": { "kind": "github", "flow": "<flow name>", "packages": <optional boolean>,
+      "run": { "kind": "github", "flow": "<flow name>",
+               "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
-               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron>",
+               "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; github only> } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
@@ -1376,6 +1380,59 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   job, never a local one. Off-matrix throws a `piDispatchConfig` error — a `cron` trigger has no webhook
   delivery, issue/PR number, title, or body to supply a forge run, and a webhook trigger is adversarial
   input that always produces a forge job.
+- **`run.command` (ALL FOUR trigger kinds) — the second entry point, and the file's one either/or pair:
+  EXACTLY ONE of `run.flow` or `run.command`, refused at parse in both services when both are present and
+  when neither is** (`DES-COMMAND-ENTRY-POINT`; the shared validator is what makes the refusal identical
+  on both sides, `DES-TRIGGERS-UNIFIED-FILE`). The value names a **registered pi extension command**,
+  optionally followed by arguments — `"wf run nightly"` dispatches as pi's own `/wf run nightly`.
+  **Validated at parse exactly as the runner validates `PI_COMMAND`**, so a value that loads never
+  refuses in-container: a non-empty string with **no leading slash** (the slash is dispatch syntax, added
+  by the runner — a written one would dispatch `//name`), **no surrounding whitespace** (`run.image`'s
+  reason: the reviewed file must not disagree with what runs, and pi's grammar reads the name to the
+  first space), and **no control characters** (everything after the first space reaches the handler
+  verbatim as args, so a control byte would ride into the handler unseen).
+  **The prompt is EXACTLY `/<command> [args]`** — no envelope, no numbered steps, no data heading, no
+  pointer at `event.json`, no trailing newline — **for local AND forge command jobs alike**
+  (`DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE` records why the bypass changes no existing prompt).
+  Delivery context rides `/job/event.json`, which the handler parses itself; the payload therefore
+  reaches a command job **only as a file the handler chooses to read**, which preserves
+  `CONST-ISSUE-TEXT-IS-DATA` and arguably strengthens it — nothing attacker-authored is rendered into
+  the prompt at all.
+  **Args are static, and that is doctrine rather than a limitation**: they come only from the reviewed
+  file, so WHAT dispatches is decided entirely by the operator's edit; the dynamic channel is
+  `event.json`. A command that must react to the delivery reads the file; interpolating payload text
+  into args would put attacker text on the dispatch line.
+  **Three fields are refused beside it, each for its own reason.** `run.task` (cron), because a command
+  job's prompt is exactly the dispatch line — the task would render nowhere, the
+  accepted-where-it-does-nothing hazard. `run.instructions` (webhook), because the envelope it renders
+  into is bypassed. `run.resume: true`, as *not yet covered* on cron-`resume`'s precedent: a resumed
+  session replays a transcript into a job whose prompt must be exactly the dispatch line, and nothing has
+  decided what that means. `replicas`/`image`/`packages`/`skillsDir`/`repository`/`github` stay
+  orthogonal — they configure the box, not the entry point.
+  **The comment trigger's `<phrase> <flow>` trailing-word override is INERT on a command rule.** That
+  channel lets a collaborator retarget a flow trigger; a collaborator must not retarget or SUPPRESS a
+  command by appending words, so on a command rule trailing text is data like the rest of the comment,
+  reaching the handler only via `event.json`. The receiver's `knownFlows` set is built from
+  flow-carrying triggers only, so a command name never becomes summonable by comment either; grouped
+  rules carry `command` through to the filter, and an enqueued command job's `data` carries `command`
+  and no `flow`.
+  **Never AI-reachable, and stricter than flows**: a chain request carrying a `command` key refuses
+  outright (`chain-command-refused`, `INT-OUTBOX-CONTRACT` — before the charset check, with no opt-in,
+  unlike injected skills' fallen-out unreachability, because a command prompt is BUILT at the producers
+  and there is no committed artifact a gate could read; `OQ-022`, with the inversion stated there);
+  `dispatch_run` refuses a slash-leading flow with a readable message and is otherwise structurally
+  incapable (its params are `{folder, flow, task}`), and `dispatch_trigger_add`/`_edit` carry no
+  `command` parameter — `run.image`'s "deliberately no model-callable path" clause, applied to the entry
+  point itself.
+  **Worker mechanics, named here because the file's reader meets them first**: the command line rides
+  `PI_COMMAND` (omit-when-absent, `INT-CONTAINER-JOB-INPUTS`); the forge semantic-dedup key carries the
+  `cmd:`-prefixed command in the flow slot, so a command rule and a flow rule spelling the same name
+  never coalesce; the image preflight refuses a command job **pre-spend** on an image whose capability
+  label does not declare `commands` (`job-image-commands-unsupported`, budget unreserved — the
+  `replicas` pattern), because an older runner would feed `/name args` to the model as prose; and
+  `doctor` reports the file's command-trigger count with one advisory line, because registration is
+  verifiable only in-container — the runner's `command-unregistered` refusal is the exact layer, and a
+  host-side preflight cannot load the image's extensions.
 - **`run.skillsDir` (optional, all four kinds)** names a directory of operator-authored skills on the
   WORKER host, in the `<name>/SKILL.md` layout `~/.pi/agent/skills` already uses. Its contents are COPIED
   into the per-job dir and reach the container at `/job/trigger-skills`, layered between the repo's own
@@ -1637,6 +1694,16 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   redelivery of that same GUID enqueues **nothing further**. Given a failure enqueueing replica *k*, then
   the receiver answers **503** with replicas `1..k-1` already queued — the retry converges on exactly *n*
   jobs, never more, because the queued ones dedup on their own now-taken ids.
+  The byte-match admits `command` on `flow`'s own terms: a command trigger's `data` carries `command` and
+  **no `flow` key at all** (never an empty one), and a flow trigger's `data` is byte-identical to the
+  pre-`command` shape. Given an entry naming both `run.flow` and `run.command`, or neither, on any of the
+  four kinds, when the config loads, then **both services throw** a `piDispatchConfig` error naming both
+  fields. Given a `run.command` that is empty, leads with `/`, carries surrounding whitespace, or contains
+  a control character, then both services throw. Given `run.task` beside a cron `run.command`,
+  `run.instructions` beside a webhook `run.command`, or `run.resume: true` beside `run.command` on any
+  kind, then both services throw. Given a comment delivery `@pi review` matching a command rule, then the
+  enqueued job runs the rule's own command with the trailing word untouched as data — never a flow
+  override, never a suppression.
 
 ## INT-PI-PACKAGES-FILE-CONTRACT
 
@@ -1962,12 +2029,21 @@ validator rather than a second copy of it.
     "task": "<freeform text>" }            // optional -- DATA, lands in the child's prompt.md
   ```
   The `folder` field is **ignored** — the child folder is forced to the parent's own folder, so this slice
-  is **same-folder-only**; unknown keys are ignored. `task` is agent-authored **DATA**
+  is **same-folder-only**. Unknown keys are ignored, with ONE read-and-refused exception (issue #189): a
+  request carrying a **`command`** key — any value, even beside a valid `flow` — is refused outright as
+  **`chain-command-refused`**, before the flow-name charset check and with no opt-in. Chaining is
+  flow-only by construction: a command prompt is BUILT at the two host-side producers rather than read
+  from any committed artifact, so there is nothing a default-deny gate could consult
+  (`DES-AI-TRIGGER-FLOW-GATE` reads frontmatter, and a command has none), and silently ignoring the key
+  under the unknown-keys rule would enqueue a flow the agent did not request — the believed-on-while-off
+  shape. Commands may chain OUT — a local command job keeps its `/outbox`, its requests naming flows
+  under the same gate — but nothing chains INTO a command. `task` is agent-authored **DATA**
   (`CONST-ISSUE-TEXT-IS-DATA`, one layer down): it becomes the child's `/job/prompt.md` user prompt and
   **never** enters the run-history `.json` record.
 - **Validation order** (host-side, fail-closed at the first miss): count cap (`PI_CHAIN_MAX_PER_JOB`) →
   per-file size cap (4 KiB) → regular-file-only (a symlink, directory, or device is rejected) → JSON
-  parse → flow-name charset (the skill charset) → depth cap (host-computed `parent.chainDepth + 1` against
+  parse → `command`-key refusal (`chain-command-refused`) → flow-name charset (the skill charset) → depth
+  cap (host-computed `parent.chainDepth + 1` against
   `PI_CHAIN_DEPTH_MAX`, **never** read from the outbox) → `ai-trigger` gate at the **parent's pre-agent
   SHA** (`DES-AI-TRIGGER-FLOW-GATE`) → enqueue.
 - **Retry-idempotent child id**: `parent id + content-hash(flow, task)`, so a retried parent re-enqueues
@@ -1984,11 +2060,13 @@ validator rather than a second copy of it.
   guarantee (`INT-RUN-HISTORY-FILE-CONTRACT`), and enqueued children pass `reserveBudget` consumer-side
   like any local job (`CONST-BUDGET-BEFORE-TOKENS`).
 - **Traces to**: `DES-JOB-OUTBOX-CHAINING`, `DES-AI-TRIGGER-FLOW-GATE`, `CONST-ISSUE-TEXT-IS-DATA`,
-  `CONST-BUDGET-BEFORE-TOKENS`, `INT-RUN-HISTORY-FILE-CONTRACT`
+  `CONST-BUDGET-BEFORE-TOKENS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-COMMAND-ENTRY-POINT`, `OQ-022`
 - **Acceptance**: Given a completed local parent with a valid `request-1.json`, when the worker collects
   `/outbox`, then exactly one child is enqueued on the parent's own folder with `chainDepth = parent + 1`;
   given a request over the count or depth cap, or whose flow fails the `ai-trigger` gate, when collected,
-  then it is refused and no child is enqueued; given a **github** parent, when it exits, then no `/outbox`
+  then it is refused and no child is enqueued; given a request carrying a `command` key, when validated,
+  then it is refused as `chain-command-refused` before any charset or gate read and no child is enqueued;
+  given a **github** parent, when it exits, then no `/outbox`
   exists to collect; given a symlink or an oversize `request-<n>.json`, when validated, then it is
   rejected; given a **retried** parent, when its outbox is re-collected, then the idempotent child id
   dedups and no second child is enqueued.
@@ -2277,6 +2355,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command` in the triggers file, and the chain refusal). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: `run.command` joins all four entry shapes as the second entry point — EXACTLY ONE of `run.flow`/`run.command`, refused at parse in both services in both directions (both present, neither present); the value validated at parse exactly as the runner validates `PI_COMMAND` (non-empty, no leading slash, no surrounding whitespace, no control characters), so a value that loads never refuses in-container; the prompt contracted as EXACTLY `/<command> [args]` for local AND forge jobs (no envelope, no pointer, no trailing newline), delivery context reaching the handler only via `event.json` — `CONST-ISSUE-TEXT-IS-DATA` held and arguably strengthened, since nothing payload-authored renders into a command prompt at all; args STATIC from the reviewed file with `event.json` the dynamic channel; `run.task`, `run.instructions` and `run.resume: true` each refused beside it for its own recorded reason while the box-configuring fields stay orthogonal; the comment `<phrase> <flow>` override INERT on a command rule and `knownFlows` built from flow-carrying rules only; never AI-reachable (`chain-command-refused`; `dispatch_run` structurally incapable plus a readable slash-leading-flow refusal; no `command` parameter on `dispatch_trigger_add`/`_edit` — `run.image`'s no-model-callable-path clause applied to the entry point itself); the forge dedup key `cmd:`-prefixed in the flow slot; the `commands` capability enforced worker-side pre-spend (`job-image-commands-unsupported`, the `replicas` pattern); doctor reports command counts advisory-only. **INT-OUTBOX-CONTRACT AMENDED**: the `command` key becomes the ONE read-and-refused exception to unknown-keys-ignored — refused as `chain-command-refused` before the charset check, no opt-in, because a command prompt is BUILT at the producers and no committed artifact exists for a gate to read; commands may chain OUT, nothing chains INTO a command. **INT-CONTAINER-JOB-INPUTS previously amended (runner half), re-checked** — `PI_COMMAND`'s omit-when-absent shape and its strict validation are exactly what the new parse-time rules guarantee never fires; nothing further crosses the boundary. **INT-RUNNER-EXIT-CODE-PROTOCOL previously amended (runner half), re-checked** — the three command reasons stand untouched; this half's new vocabulary (`chain-command-refused`, `job-image-commands-unsupported`) is host-side refusal reasons, never exit classifications. |
 | 2026-08-13 | Issue #189 (Gap 2, runner half: dispatch a registered extension command headlessly). **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: three named reasons under the EXISTING codes, never a new code or worker outcome — `command-unregistered` (2, pre-prompt `getCommand()` refusal, foreclosing pi's fall-through of an unregistered `/name` into a paid model call), `command-completed` (0, a clean headless return that was previously the retryable `no-terminal-message` shape re-billing a success), `command-error` (1, a handler throw pi swallows and only `extensionRunner.onError` surfaces; retryable BY EXPLICIT CHOICE, recorded with its accepted cost on the new `DES-COMMAND-ENTRY-POINT`); a handler-driven terminal keeps its ordinary stopReason verdict, and budget aborts keep first position. **INT-CONTAINER-JOB-INPUTS AMENDED**: `PI_COMMAND` joins the worker-passed env (omit-when-absent; strictly validated runner-side — no leading slash, no surrounding whitespace, no control characters — because dispatch grammar passes everything after the first space verbatim as args); the runner rebuilds the prompt from THIS variable, `prompt.md` staying the byte-identical human record. The `commands` capability joins the image label so the worker can refuse a command job on an older runner pre-spend (the `replicas` pattern; worker-side gate lands with the producer change). **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked** — `run.command` itself is the producer half and lands with it; nothing here reads the triggers file. |
 | 2026-08-13 | Issue #189 (Gap 1, doctor half: per-trigger flow-tier resolution lines). **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked** — no new trigger field and no validation change; doctor reads the parsed file it already read, now carrying per-trigger (flow, folder, skillsDir, packages) tuples instead of only deduped sets. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — nothing new crosses the container boundary; the doctor lines are host-side only. **INT-PI-PACKAGES-FILE-CONTRACT UNCHANGED, checked** — the stage manifest's shape is untouched; `readStagedSkills` layers a never-throws skills enumeration over `readStageManifest` without reading any new field. |
 | 2026-08-13 | Issue #189 (Gap 1, runner half: a `run.flow` that resolves in no skill tier is a silent exit-0 no-op). **INT-CONTAINER-JOB-INPUTS AMENDED**: the worker-passed env gains `PI_FLOW` — the trigger's `run.flow` verbatim, forwarded ONLY when the job carries a flow, omitted for a bare `run.task` cron job, never an empty string (the `PI_PACKAGES`/`PI_SESSION_FILE` omission shape). It is the flow's STRUCTURAL copy beside the existing prompt prose, read by the runner to compare against the loaded skill set and emit `flow_not_loaded` on a miss; it rides env and not `event.json` because an execution knob is not a fact about the delivery (the `run.replicas` line), and the runner takes no charset opinion on it (compared and logged, never interpolated — a runner stricter than the shared validator would fail yesterday's jobs on an image upgrade). **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** — the miss is one advisory log line before any session exists; no new exit code, no new reason, and the job proceeds (`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS` records why report-not-refuse). **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked** — no new trigger field; `run.flow`'s validation is untouched. **INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked** — the variable carries operator config, never payload text. |

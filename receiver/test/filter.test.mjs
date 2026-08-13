@@ -826,3 +826,83 @@ test("an unflagged rule emits no replicas key at all -- absent, not present-and-
 		assert.equal("replicas" in r.job, false, `${event} must emit no replicas key`);
 	}
 });
+
+// -- run.command rules (issue #189): the matched rule dispatches a registered pi extension command --
+
+// Grouped exactly as loadReceiverConfig emits command rules: `flow`/`defaultFlow` are own-keys holding
+// undefined (the explicit literals in config.mjs enumerate every field by name), `command` is the line the
+// worker forwards as PI_COMMAND. Deliberately MIXED with flow rules in the same group: the channel is
+// decided per RULE, by whichever one matched.
+const cmdCfgRaw = {
+	triggers: {
+		label: [
+			{ index: 1, predicate: { any: ["pi:standup"] }, flow: undefined, command: "standup" },
+			{ index: 5, predicate: { any: ["pi:docs"] }, flow: "docs", command: undefined },
+		],
+		comment: { index: 2, phrase: "@pi", defaultFlow: undefined, command: "wf run nightly" },
+		pullRequest: [{ index: 3, actions: new Set(["labeled"]), predicate: { any: ["pi:check"] }, flow: undefined, command: "check" }],
+		knownFlows: new Set(["docs"]),
+	},
+};
+const cmdCfg = forgeCfg(cmdCfgRaw);
+
+test("a comment command rule fires on the phrase alone -- command on the JOB, no flow key anywhere", () => {
+	// The sharp half of this pin is the config's shape: defaultFlow undefined and a bare phrase is EXACTLY
+	// the shape routeComment refuses as `no-flow` on a flow rule. On a command rule that refusal must be
+	// unreachable -- there is no flow to resolve, so its absence cannot be a reason to drop.
+	const r = filter("issue_comment", commentSubset({ comment: { author_association: "OWNER", body: "@pi" } }), cmdCfg, SELF_ID, "d-cmd-bare");
+	assert.equal(r.enqueue, true, "no-flow must be unreachable for a command rule");
+	assert.equal(r.job.command, "wf run nightly");
+	assert.equal("flow" in r.job, false, "a command job carries NO flow key -- absent, not present-and-undefined");
+	assert.deepEqual(Object.keys(r.job), ["repo", "target", "command", "trigger"]);
+	assert.deepEqual(r.job.trigger.matched, { index: 2, type: "comment", phrase: "@pi" });
+	assert.deepEqual(r.job.trigger.comment, { body: "@pi", author_association: "OWNER" });
+});
+
+test("the `<phrase> <word>` override channel is INERT on a command rule -- trailing words neither retarget nor veto", () => {
+	// "docs" IS a known flow here (the label flow rule's). On a flow comment rule this comment would run
+	// `docs`; on a command rule it must not -- a collaborator may INVOKE the trigger, never re-aim it at a
+	// flow the trigger's author did not name.
+	const retarget = filter("issue_comment", commentSubset({ comment: { author_association: "MEMBER", body: "@pi docs" } }), cmdCfg, SELF_ID, "d-cmd-known");
+	assert.equal(retarget.enqueue, true);
+	assert.equal(retarget.job.command, "wf run nightly");
+	assert.equal("flow" in retarget.job, false, "a known flow name after the phrase must not turn a command job into a flow job");
+
+	// And an unknown trailing word must not SUPPRESS the command: on a defaultFlow-less flow rule this
+	// exact shape is the `no-flow` refusal, so an active override channel would let anyone veto the
+	// trigger by appending a word that resolves nowhere. Trailing text is data, riding trigger.comment
+	// into /job/event.json for the handler to read.
+	const noise = filter("issue_comment", commentSubset({ comment: { author_association: "OWNER", body: "@pi somethingelse entirely" } }), cmdCfg, SELF_ID, "d-cmd-noise");
+	assert.equal(noise.enqueue, true, "a trailing non-flow word must not become a no-flow refusal");
+	assert.equal(noise.job.command, "wf run nightly");
+	assert.equal("flow" in noise.job, false);
+	assert.deepEqual(noise.job.trigger.comment, { body: "@pi somethingelse entirely", author_association: "OWNER" });
+	assert.deepEqual(noise.job.trigger.matched, { index: 2, type: "comment", phrase: "@pi" });
+});
+
+test("label and pull_request command rules enqueue command jobs -- command at JOB level, never inside trigger", () => {
+	// `trigger` is copied verbatim into /job/event.json; which command the harness dispatches is an
+	// execution decision like flow/packages/image, not webhook-described fact, so it stays at job level.
+	const labeled = filter("issues", labeledSubset(["pi:standup"]), cmdCfg, SELF_ID, "d-cmd-label");
+	assert.equal(labeled.enqueue, true);
+	assert.equal(labeled.job.command, "standup");
+	assert.equal("flow" in labeled.job, false);
+	assert.equal("command" in labeled.job.trigger, false);
+	assert.deepEqual(labeled.job.trigger.matched, { index: 1, type: "label", label: "pi:standup" });
+	assert.deepEqual(Object.keys(labeled.job), ["repo", "target", "command", "trigger"]);
+
+	const pr = filter("pull_request", prSubset({ action: "labeled", labels: ["pi:check"] }), cmdCfg, SELF_ID, "d-cmd-pr");
+	assert.equal(pr.enqueue, true);
+	assert.equal(pr.job.command, "check");
+	assert.equal("flow" in pr.job, false);
+	assert.equal("command" in pr.job.trigger, false);
+	assert.deepEqual(pr.job.trigger.matched, { index: 3, type: "pull_request", action: "labeled" });
+});
+
+test("a mixed group routes per rule: the flow label rule still emits a byte-identical flow job beside the command rules", () => {
+	const r = filter("issues", labeledSubset(["pi:docs"]), cmdCfg, SELF_ID, "d-cmd-mixed");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "docs");
+	assert.equal("command" in r.job, false, "a flow job grows no command key -- its enqueued bytes must not change");
+	assert.deepEqual(Object.keys(r.job), ["repo", "target", "flow", "trigger"]);
+});

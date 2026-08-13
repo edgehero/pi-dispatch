@@ -167,7 +167,12 @@ export function renderTriggers({ schedulers, triggers } = {}) {
  * suffix is empty and appended last.
  */
 function triggerLine(t) {
-  const flow = t?.flow ?? "-";
+  // A command trigger (issue #189, `run.command`) shows `/name` in the flow position: the shared parser
+  // makes flow and command mutually exclusive, so the column never has to hold both, and the slash marks
+  // "dispatches a registered extension command" apart from a flow at a glance. The NAME only (the first
+  // space-delimited token) so the line stays skimmable, the [skills basename] doctrine restated; the args
+  // belong in the detail view.
+  const flow = t?.flow ?? (typeof t?.command === "string" && t.command.trim() !== "" ? `/${t.command.trim().split(/\s+/)[0]}` : "-");
   const forge = t?.forge && t.forge !== "github" ? `  [${t.forge}]` : "";
   const pkgs = t?.packages === true ? "  [packages]" : "";
   const img = t?.image ? `  [image ${t.image}]` : "";

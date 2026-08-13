@@ -208,6 +208,19 @@ export async function enqueueDispatchRun({
     return { refused: "no flow — a flow is required to trigger a run" };
   }
 
+  // A slash-leading "flow" is a registered extension command (issue #189, `run.command`), refused on
+  // BOTH paths deliberately: commands are never AI-reachable (no chain, no dispatch_run, no opt-in --
+  // stricter than flows, because no committed SKILL.md exists for a gate to read), and an operator
+  // typing `/dispatch run /wf` is a user error that deserves this message, not a garbage-prose enqueue
+  // of a job the runner would refuse. Everywhere else the exclusion is STRUCTURAL, not a check:
+  // dispatch_run's params are exactly {folder, flow, task} and dispatch_trigger_add/_edit carry no
+  // command parameter, so this refusal exists only to catch a command smuggled into the flow field.
+  if (flow.trim().startsWith("/")) {
+    return {
+      refused: `flow '${flow}' names a command, not a flow — commands are not AI-triggerable; a registered extension command runs only from a reviewed triggers.json entry (run.command)`,
+    };
+  }
+
   const { valkeyUrl, dispatchRunRoots, dispatchRunPerHour } = resolvePaths(env);
 
   // 2. aiInvoked ONLY -- fail-closed folder allowlist (realpath + containment). Default roots [] refuses all.
@@ -722,6 +735,11 @@ export function normalizeTriggerForDisplay(entry) {
   if (on === null || typeof on !== "object") return null;
   const run = entry.run !== null && typeof entry.run === "object" ? entry.run : {};
   const flow = typeof run.flow === "string" ? run.flow : null;
+  // `run.command` (issue #189) -- flow's mutually-exclusive sibling: the trigger dispatches a registered
+  // pi extension command instead of a flow. Carried with flow's exact fail-soft test (a string passes,
+  // junk degrades to null) because the shared parser refuses everything else fail-loud at load, and a
+  // display that "corrected" the value would disagree with the job that actually runs.
+  const command = typeof run.command === "string" ? run.command : null;
   const packages = run.packages !== false;
   const image = typeof run.image === "string" && run.image.trim() !== "" ? run.image : null;
   // The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS, issue #60). Carried on all four kinds like
@@ -751,6 +769,7 @@ export function normalizeTriggerForDisplay(entry) {
         pattern: typeof on.pattern === "string" ? on.pattern : null,
         folder: typeof run.folder === "string" ? run.folder : null,
         flow,
+        command,
         // Optional per-cron model override (passthrough into job.data); null when the entry resolves the
         // deployment default. Surfaced so the drill-in shows which schedules pin their own model.
         model: typeof run.model === "string" ? run.model : null,
@@ -761,9 +780,9 @@ export function normalizeTriggerForDisplay(entry) {
         resume,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, packages, image, skillsDir, instructions, resume, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, skillsDir, instructions, resume, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, packages, image, skillsDir, instructions, resume, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, skillsDir, instructions, resume, replicas, forge };
     case "pull_request":
       return {
         type: "pull_request",
@@ -772,6 +791,7 @@ export function normalizeTriggerForDisplay(entry) {
         all: normalizeSelector(on.all),
         none: normalizeSelector(on.none),
         flow,
+        command,
         packages,
         image,
         skillsDir,

@@ -77,6 +77,10 @@ export function makeRunContainer({
 			// Issue #189: the flow name, structurally, so the runner can verify it against the loaded
 			// skill set. Off `job` like maxTurns; absent (a bare run.task cron job) emits no variable.
 			flow: typeof job.flow === "string" && job.flow.trim() !== "" ? job.flow : undefined,
+			// Issue #189: the command name, structurally, so the runner can refuse an unregistered one
+			// before any spend (command-unregistered). Same guard shape as `flow` directly above, and
+			// mutually exclusive with it by parse -- a job carries one or the other, never both.
+			command: typeof job.command === "string" && job.command.trim() !== "" ? job.command : undefined,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 		});
 

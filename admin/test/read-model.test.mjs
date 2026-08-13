@@ -87,6 +87,22 @@ test("writeTriggers rejects an off-diagonal result (cron -> github) and leaves t
   assert.equal(fs.files[T_PATH], orig, "an invalid write never touches the file (fail-closed)");
 });
 
+test("writeTriggers refuses an edit that carries both run.flow and run.command, and leaves the file unchanged", () => {
+  // The mutual exclusion lives in the SHARED parseTriggers (issue #189), so the admin can never write
+  // a file the worker/receiver loaders would refuse to boot on. The crud dialogs offer no command
+  // field, so a both-fields entry can only arrive by hand-mutation -- exactly the shape the validated
+  // write exists to catch.
+  const orig = JSON.stringify({ triggers: [labelTrigger] });
+  const fs = triggerFs({ [T_PATH]: orig });
+  const res = writeTriggers({
+    triggersPath: T_PATH,
+    fs,
+    mutate: (list) => list.map((t) => ({ ...t, run: { ...t.run, command: "deploy prod" } })),
+  });
+  assert.ok(res.invalid, "flow+command on one entry is refused through the shared parser");
+  assert.equal(fs.files[T_PATH], orig, "an invalid write never touches the file (fail-closed)");
+});
+
 test("writeTriggers edits a flow and deletes an entry", () => {
   const fs = triggerFs({ [T_PATH]: JSON.stringify({ triggers: [labelTrigger, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "review" } }] }) });
   writeTriggers({ triggersPath: T_PATH, fs, mutate: (l) => l.map((t, i) => (i === 0 ? { ...t, run: { ...t.run, flow: "frontend-fix" } } : t)) });
@@ -482,10 +498,10 @@ test("readTriggers normalizes each on.type into its discriminated display record
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
   // `index` is the RAW file position (issue #54), attached by readTriggers, not the normalizer.
   assert.deepEqual(res.triggers, [
-    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, index: 0 },
-    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 1 },
-    { type: "comment", phrase: "@pi", flow: "fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 2 },
-    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 3 },
+    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", command: null, model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, index: 0 },
+    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", command: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 1 },
+    { type: "comment", phrase: "@pi", flow: "fix", command: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 2 },
+    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", command: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 3 },
   ]);
 });
 
@@ -538,6 +554,33 @@ test("normalizeTriggerForDisplay carries run.image on all four kinds, with null 
   }
 });
 
+test("normalizeTriggerForDisplay carries run.command on all four kinds, fail-soft like flow", () => {
+  const entries = [
+    { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/p", command: "report weekly" } },
+    { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "github", command: "triage" } },
+    { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", command: "deploy prod" } },
+    { on: { type: "pull_request", action: ["labeled"] }, run: { kind: "github", command: "review strict" } },
+  ];
+  assert.deepEqual(
+    entries.map((e) => normalizeTriggerForDisplay(e).command),
+    ["report weekly", "triage", "deploy prod", "review strict"],
+    "every kind can dispatch a registered extension command, so every kind must display it",
+  );
+  assert.deepEqual(
+    entries.map((e) => normalizeTriggerForDisplay(e).flow),
+    [null, null, null, null],
+    "a command trigger names no flow -- the shared parser makes the two mutually exclusive",
+  );
+
+  // Fail-soft with flow's EXACT test (a string passes, junk degrades to null): the shared parser
+  // refuses anything else fail-loud at load, so the display mirrors the worker rather than inventing
+  // a state the running system cannot be in -- the packages/image doctrine restated.
+  for (const command of [undefined, 42, null, {}, ["x"]]) {
+    const rec = normalizeTriggerForDisplay({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "fix", command } });
+    assert.equal(rec.command, null, `run.command ${JSON.stringify(command)} degrades to null`);
+  }
+});
+
 test("readTriggers skips an entry that is not a usable { on, run } object (viewer degrades)", () => {
   const files = {
     "triggers.json": JSON.stringify({
@@ -550,7 +593,7 @@ test("readTriggers skips an entry that is not a usable { on, run } object (viewe
     }),
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
-  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 0 }]);
+  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", command: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github", index: 0 }]);
 });
 
 test("readTriggers returns { invalid } when there is no triggers array", () => {
@@ -841,6 +884,24 @@ test("enqueueDispatchRun refuses a flowless trigger (flow required, both paths)"
   const { fakes } = dispatchFakes();
   const res = await enqueueDispatchRun({ folder: "/any", flow: "", task: "t", aiInvoked: true, ...fakes });
   assert.match(res.refused, /no flow/);
+});
+
+test("enqueueDispatchRun refuses a slash-leading flow (a command, not a flow) on BOTH paths, message pinned in full", async () => {
+  // The FULL string is the pin (the vocabulary-append lesson: a prefix match stays silently green
+  // through a wording drift). Both the dispatch_run tool error and the operator's `/dispatch run`
+  // notice surface it verbatim, and everywhere else the command exclusion is structural (no command
+  // param exists), so this message is the one place the refusal explains itself.
+  const refusal =
+    "flow '/wf run' names a command, not a flow — commands are not AI-triggerable; a registered extension command runs only from a reviewed triggers.json entry (run.command)";
+  for (const aiInvoked of [true, false]) {
+    const { fakes, added } = dispatchFakes();
+    const res = await enqueueDispatchRun({ folder: "/any", flow: "/wf run", task: "t", aiInvoked, ...fakes });
+    assert.equal(res.refused, refusal, `aiInvoked:${aiInvoked} refuses with the readable message`);
+    assert.equal(added.length, 0, "nothing was enqueued");
+  }
+  // The check reads the TRIMMED form, so leading whitespace cannot smuggle a command past it.
+  const ws = await enqueueDispatchRun({ folder: "/any", flow: "  /wf", task: "t", aiInvoked: false, ...dispatchFakes().fakes });
+  assert.match(ws.refused, /names a command, not a flow/);
 });
 
 test("enqueueDispatchRun (aiInvoked) refuses a folder outside PI_DISPATCH_RUN_ROOTS (default [] fails closed)", async () => {

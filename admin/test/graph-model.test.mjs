@@ -137,6 +137,23 @@ test("buildGraphModel: config edges always, cron joins by id, forge joins by per
   assert.equal(forgeFlow.kind, "skill-unverified", "an unverified flow is a DIFFERENT kind from skill-missing, on purpose");
 });
 
+test("buildGraphModel: a command trigger draws its node carrying command, with no config edge and no dangling flag", () => {
+  const inputs = CANNED();
+  // A command trigger (issue #189) names no flow: `flow: null, command: "..."` is what the display
+  // normalizer yields for a `run.command` entry.
+  inputs.triggers.triggers.push({ type: "comment", index: 3, phrase: "@pi deploy", flow: null, command: "deploy prod", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" });
+  const m = buildGraphModel(inputs); // must not throw -- a command names no SKILL.md to resolve
+  const node = m.nodes.find((n) => n.id === "trigger:3");
+  assert.equal(node.kind, "trigger");
+  assert.equal(node.command, "deploy prod", "the node carries the command, so issue #188's display half has the fact");
+  assert.equal(node.flow, null);
+  // The config-edge machinery is guarded on `typeof t.flow === "string"`: a command trigger draws no
+  // config edge and mints no skill-missing endpoint -- a command is not a dangling flow.
+  assert.equal(m.edges.filter((e) => e.kind === "config" && e.from === "trigger:3").length, 0, "no flow, no config edge");
+  assert.ok(!m.nodes.some((n) => n.id === "skill:forge:github:deploy"), "no skill-missing node is minted for a command");
+  assert.ok(!m.flags.some((f) => f.nodeId === "trigger:3"), "no no-skill/charset-invalid flag on a command trigger");
+});
+
 test("buildGraphModel: dangling is precise -- no-skill only where enumeration SUCCEEDED", () => {
   const m = buildGraphModel(CANNED());
   const flags = m.flags.filter((f) => f.flag === "no-skill");

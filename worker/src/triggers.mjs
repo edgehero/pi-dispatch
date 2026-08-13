@@ -191,13 +191,20 @@ function normalizeCron(on, run, index, path, state) {
 		throw configError(`cron trigger "${id}": on.pattern must have 5 or 6 space-separated fields, got ${fieldCount}: ${path}`);
 	}
 
+	// FIRST among the run checks (all four normalizers do this), so a command-only entry is never told to
+	// add the flow it deliberately does not have, and a flow+command entry gets the exclusion message
+	// rather than whichever single-field check happens to run first.
+	const command = validateCommand(run, `cron trigger "${id}"`, path, { onType: "cron" });
+
 	if (!isNonEmptyString(run.folder)) {
 		throw configError(`cron trigger "${id}": run.folder must be a non-empty string: ${path}`);
 	}
-	if (!isNonEmptyString(run.flow)) {
-		throw configError(`cron trigger "${id}": run.flow must be a non-empty string: ${path}`);
+	if (command === undefined && !isNonEmptyString(run.flow)) {
+		throw configError(`cron trigger "${id}": run.flow must be a non-empty string (or use run.command): ${path}`);
 	}
-	if (!isNonEmptyString(run.task)) {
+	// Gated on the flow path only: a command job's prompt IS the command line, and validateCommand has
+	// already refused any run.task written beside one.
+	if (command === undefined && !isNonEmptyString(run.task)) {
 		throw configError(`cron trigger "${id}": run.task must be a non-empty string: ${path}`);
 	}
 
@@ -229,7 +236,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(skillsDir !== undefined && { skillsDir }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }) },
 	};
 }
 
@@ -451,6 +458,85 @@ function validateInstructions(run, at, path, { cron = false } = {}) {
 }
 
 /**
+ * `run.command` (issue #189): dispatch a REGISTERED pi extension command headlessly, instead of a flow.
+ * The runner half is already merged: it exports the name via PI_COMMAND, refuses pre-spend when
+ * `getCommand` does not know it, and prompts with the exact `/name args` line and nothing else, so the
+ * arguments reach the command handler precisely as written here. Shared by all four normalizers so both
+ * services refuse the same file identically; the runner re-validates at the paid boundary regardless.
+ *
+ * EXACTLY ONE of run.flow / run.command, and the exclusion is checked BEFORE every normalizer's
+ * flow-required check on purpose: the two mistakes need their own messages. A flow+command entry no
+ * longer says which one runs and must hear that, not whichever single-field complaint fires first; a
+ * command-only entry must never be told to add the flow it deliberately does not have.
+ *
+ * The value rules each refuse something specific:
+ *   - no leading "/": the runner PREPENDS the slash when it builds the prompt, so a written one would
+ *     dispatch "//name" -- a command no registry holds, refused only after review already passed it.
+ *   - surrounding whitespace is REFUSED, never trimmed (validateImageRef's rule): the arguments pass to
+ *     the handler verbatim, so a silent trim is the reviewed file disagreeing with what runs.
+ *   - no control characters. A newline would smuggle a SECOND line into what the operator reviewed as
+ *     one command line, and the whole class is refused rather than the newline alone because every
+ *     member is invisible in review, which is the hazard. The regex is spelled in \u escapes for the
+ *     same reason: a literal ESC in this source would be exactly the unreviewable byte it refuses.
+ *
+ * Cross-field refusals, validateReplicas' posture (a field accepted where it does nothing is one an
+ * operator sets and then trusts):
+ *   - run.task on cron: a command job's prompt IS the `/name args` line, so there is no task text for
+ *     the runner to render -- two prompts written for one job, with only one ever sent.
+ *   - run.instructions on the webhook kinds: instructions land in the prompt ENVELOPE, which a command
+ *     job bypasses entirely, so nothing would render them. (Cron refuses instructions already, with its
+ *     own run.task message, and that refusal stays the one a cron entry gets.)
+ *   - run.resume: true on any kind: what a resumed session should do with a re-dispatched command is
+ *     UNDESIGNED -- "not yet covered", validateResumeFlag's own vocabulary, because it is a gap to
+ *     close and not a limit. Only `true` is refused; `false` is the documented default and refusing it
+ *     would refuse an operator for writing down the behaviour they already have.
+ *
+ * Everything else stays orthogonal on purpose -- replicas, image, packages, skillsDir, repository,
+ * github. Those gate the CONTAINER a job runs in, and a command job runs in the same container a flow
+ * job does.
+ *
+ * A COMMENT command trigger has no default flow, which leaves the receiver's `<phrase> <flow>` comment
+ * override with nothing to override. That token is made inert by the receiver's FILTER, not refused
+ * here: the override lives in adversarial comment text, which this file-shape validator never sees.
+ *
+ * `at` is the caller's message prefix, `onType` selects the cross-field set. Returns the command,
+ * undefined when absent, and the callers spread it conditionally: a flow trigger must not grow the key
+ * at all, so an unflagged file normalizes byte-identically to today's (deepEqual pins depend on it).
+ */
+function validateCommand(run, at, path, { onType }) {
+	const raw = run.command;
+	if (run.flow !== undefined && raw !== undefined) {
+		throw configError(`${at}: exactly one of run.flow or run.command must be set -- a trigger dispatches either a flow or a registered command, and with both present the file does not say which one runs: ${path}`);
+	}
+	if (raw === undefined) return undefined;
+	if (!isNonEmptyString(raw)) {
+		throw configError(`${at}: run.command must be a non-empty string -- the registered command name, optionally followed by its arguments: ${path}`);
+	}
+	if (raw !== raw.trim()) {
+		throw configError(`${at}: run.command must not have leading or trailing whitespace -- the arguments reach the command handler verbatim, so trimming here would make the reviewed file disagree with what runs (got ${JSON.stringify(raw)}): ${path}`);
+	}
+	if (raw.startsWith("/")) {
+		throw configError(`${at}: run.command must not start with "/" -- the runner prepends the slash when it builds the /name args prompt, so a written one would dispatch "//name" (got ${JSON.stringify(raw)}): ${path}`);
+	}
+	// The class is the RUNNER's (parseCommand, image/runner/src/config.mjs), DEL included: the two
+	// must refuse identically, or a value that loads here refuses in-container with the budget
+	// slot already burned -- the drift INT-TRIGGERS-FILE-CONTRACT promises cannot happen.
+	if (/[\u0000-\u001F\u007F]/.test(raw)) {
+		throw configError(`${at}: run.command must not contain control characters -- a newline would smuggle a second line into what the operator reviewed as one command line (got ${JSON.stringify(raw)}): ${path}`);
+	}
+	if (onType === "cron" && run.task !== undefined) {
+		throw configError(`${at}: run.command and run.task cannot be combined -- a command job's prompt IS the /name args line, so there is no task text for the runner to render; put the arguments in run.command: ${path}`);
+	}
+	if (onType !== "cron" && run.instructions !== undefined) {
+		throw configError(`${at}: run.command and run.instructions cannot be combined -- instructions render into the prompt envelope, and a command job's prompt is the exact /name args line with no envelope, so nothing would render them: ${path}`);
+	}
+	if (run.resume === true) {
+		throw configError(`${at}: combining run.command and run.resume is not yet covered -- what a resumed session should do with a re-dispatched command is undesigned, so this is a gap to close, not a limit: ${path}`);
+	}
+	return raw;
+}
+
+/**
  * Validate an `{any, all, none}` label predicate. Selectors are validated as arrays of non-empty strings
  * BEFORE the positive-selector count, because `.length` is truthy on a string too -- a string selector
  * that reached the pure `matchesRule` in the receiver would throw there, breaking the gate's never-throw
@@ -553,8 +639,10 @@ function validateReplicas(run, at, path) {
 function normalizeLabel(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 	const predicate = validatePredicate(on, index, path, true);
-	if (!isNonEmptyString(run.flow)) {
-		throw configError(`${at}: label trigger run.flow must be a non-empty string: ${path}`);
+	// First among the run checks, before the flow-required check -- validateCommand says why.
+	const command = validateCommand(run, at, path, { onType: "label" });
+	if (command === undefined && !isNonEmptyString(run.flow)) {
+		throw configError(`${at}: label trigger run.flow must be a non-empty string (or use run.command): ${path}`);
 	}
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
@@ -565,7 +653,7 @@ function normalizeLabel(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -574,8 +662,12 @@ function normalizeComment(on, run, index, path, state) {
 	if (!isNonEmptyString(on.phrase)) {
 		throw configError(`${at}: comment trigger on.phrase must be a non-empty string: ${path}`);
 	}
-	if (!isNonEmptyString(run.flow)) {
-		throw configError(`${at}: comment trigger run.flow (the default flow) must be a non-empty string: ${path}`);
+	// First among the run checks, before the flow-required check -- validateCommand says why. A command
+	// trigger has NO default flow for the `<phrase> <flow>` comment override to replace; making that
+	// token inert is the receiver filter's job, not a shape this validator can see.
+	const command = validateCommand(run, at, path, { onType: "comment" });
+	if (command === undefined && !isNonEmptyString(run.flow)) {
+		throw configError(`${at}: comment trigger run.flow (the default flow) must be a non-empty string (or use run.command): ${path}`);
 	}
 	// At most one comment trigger PER FORGE. The cap exists because the receiver holds one comment rule
 	// per forge and a second would be silently unreachable -- so it is a cap on ambiguity, not on count,
@@ -593,7 +685,7 @@ function normalizeComment(on, run, index, path, state) {
 	const replicas = validateReplicas(run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
 	};
 }
 
@@ -634,8 +726,10 @@ function normalizePullRequest(on, run, index, path) {
 		throw configError(`${at}: an azure pull_request trigger cannot carry a label predicate -- Azure DevOps attaches tags to work items, never to pull requests, so any/all/none could never match: ${path}`);
 	}
 	const predicate = validatePredicate(on, index, path, requirePositive);
-	if (!isNonEmptyString(run.flow)) {
-		throw configError(`${at}: pull_request trigger run.flow must be a non-empty string: ${path}`);
+	// First among the run checks, before the flow-required check -- validateCommand says why.
+	const command = validateCommand(run, at, path, { onType: "pull_request" });
+	if (command === undefined && !isNonEmptyString(run.flow)) {
+		throw configError(`${at}: pull_request trigger run.flow must be a non-empty string (or use run.command): ${path}`);
 	}
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
@@ -655,7 +749,7 @@ function normalizePullRequest(on, run, index, path) {
 			all: predicate.all,
 			none: predicate.none,
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }) },
 	};
 }
 

@@ -110,7 +110,7 @@ function resolveEnvName(provider, cred) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, authFromPi = false, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, command = null, authFromPi = false, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a pre-spend refusal.
@@ -154,6 +154,14 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 		// the delivery (see prepare-github.mjs on replicas). Absent means "no flow to verify" (a bare
 		// run.task cron job), never an empty string, for PI_PACKAGES' reason.
 		PI_FLOW: flow || undefined,
+		// The trigger's run.command, STRUCTURALLY (issue #189) -- PI_FLOW's twin: the runner compares it
+		// against the commands that actually registered and refuses an unregistered one before any spend,
+		// where the prompt's bare `/name` would otherwise read as prose and run to a clean exit 0. It
+		// rides env and NOT event.json for the same reason PI_FLOW does. Absent means "not a command
+		// job", never an empty string, for PI_PACKAGES' reason. PI_FLOW and PI_COMMAND are mutually
+		// exclusive by parse (command XOR flow); that is deliberately NOT re-enforced here -- a second
+		// validator is a second place to disagree with the first.
+		PI_COMMAND: command || undefined,
 		// Kill switch for job-time package installation, UNCONDITIONAL for every job. pi's resolver shells out
 		// to a REAL `npm install` for any npm:/git: source unless offline mode is on, and `~/.pi/agent` IS
 		// writable in the container. We emit only local paths, so nothing should reach that branch -- this

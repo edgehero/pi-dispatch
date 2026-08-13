@@ -309,6 +309,39 @@ test("gate deny and no-skill both refuse with no enqueue", async () => {
 	}
 });
 
+test("a request naming a command refuses as chain-command-refused -- commands are never AI-reachable", async () => {
+	// Issue #189, and unlike the flow gate there is no opt-in to widen: the gate reads a committed
+	// SKILL.md at a pinned sha, and a command is an operator-staged extension with no committed artifact
+	// to read. Fires even when the request ALSO carries a perfectly valid flow, and BEFORE the charset
+	// check -- which field the request used is decided before any opinion about its spelling.
+	const fs = makeFakeFs({
+		files: {
+			"request-1.json": { content: req({ command: "wf run", flow: "ok", task: "x" }) },
+			"request-2.json": { content: req({ command: "wf run", flow: "../evil", task: "x" }) },
+		},
+	});
+	const cap = makeCapture();
+	const gate = makeGate();
+	const logs = [];
+	const collect = makeCollectChain({
+		queue: cap.queue,
+		enqueue: cap.enqueue,
+		readFlowGate: gate.gate,
+		config: { chainMaxPerJob: 4, chainDepthMax: 1 },
+		fs,
+		log: (event, fields) => logs.push({ event, fields }),
+	});
+
+	const res = await collect({ job: localJob(), prepared: PREPARED });
+
+	assert.deepEqual(res, { enqueued: 0, refused: 2 });
+	assert.ok(logs.some((l) => l.event === "chain-command-refused"), "the refusal is its own log-stream event");
+	assert.ok(!logs.some((l) => l.event === "chain-bad-flow-name"), "the command refusal outranks the charset check -- request-2's bad flow never gets an opinion");
+	assert.equal(gate.calls.length, 0, "the gate is never consulted -- there is no opt-in for a command");
+	assert.equal(cap.enqueued.length, 0, "a valid flow riding beside the command buys nothing");
+	assert.ok(!JSON.stringify(logs).includes("wf run"), "the refusal log carries jobId/reason/index only, never the command text");
+});
+
 test("retry-idempotent: two collects on the same parent+requests produce identical child ids", async () => {
 	const files = { "request-1.json": { content: req({ flow: "ok", task: "same" }) } };
 	const run = async () => {

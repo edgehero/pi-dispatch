@@ -243,3 +243,80 @@ test("the same actor hashes to the same id, and a different one does not", () =>
 test("a pull-request job still carries the GUID verbatim -- it is already opaque", () => {
 	assert.equal(run(pullRequest()).job.trigger.sender.id, MEMBER);
 });
+
+// --- run.command rules (issue #189): the matched rule dispatches a registered pi extension command ---
+
+// Grouped exactly as loadReceiverConfig emits command rules: `flow`/`defaultFlow` are own-keys holding
+// undefined (config.mjs enumerates every field by name), `command` is the line the worker forwards as
+// PI_COMMAND. `repository` still rides the work-item rules: a command job clones like any other, and the
+// loader requires the field on azure label/comment triggers whatever the dispatch channel.
+const cmdTriggers = {
+	label: [{ index: 0, predicate: { any: ["pi:go"] }, flow: undefined, command: "standup", repository: "widgets" }],
+	comment: { index: 1, phrase: "@pi", defaultFlow: undefined, command: "wf run nightly", repository: "widgets" },
+	pullRequest: [{ index: 2, actions: new Set(["created"]), predicate: null, flow: undefined, command: "check" }],
+};
+const runCmd = (payload) => filterAzure(parseAzureSubset(payload), cmdTriggers, knownFlows, SELF, true, "delivery-guid");
+
+/** A `workitem.commented` delivery carrying `body` as the comment text. */
+const commented = (body) => workItem({
+	eventType: "workitem.commented",
+	resource: {
+		id: 7,
+		fields: { "System.ChangedBy": "Dev Person <dev@example.com>", "System.History": body },
+		revision: { fields: { "System.Title": "T", "System.Description": "B", "System.TeamProject": "Fabrikam" } },
+	},
+});
+
+test("a comment command rule fires on the phrase alone -- command on the JOB, no flow key anywhere", () => {
+	// defaultFlow undefined plus a bare phrase is EXACTLY what routeComment refuses as `no-flow` on a flow
+	// rule. On a command rule that refusal must be unreachable -- there is no flow to resolve.
+	const r = runCmd(commented("@pi"));
+	assert.equal(r.enqueue, true, "no-flow must be unreachable for a command rule");
+	assert.equal(r.job.command, "wf run nightly");
+	assert.equal("flow" in r.job, false, "a command job carries NO flow key -- absent, not present-and-undefined");
+	assert.deepEqual(Object.keys(r.job), ["repo", "azure", "target", "command", "trigger"]);
+	assert.deepEqual(r.job.trigger.matched, { index: 1, type: "comment", phrase: "@pi" });
+});
+
+test("the `<phrase> <word>` override channel is INERT on a command rule -- trailing words neither retarget nor veto", () => {
+	// "fix" IS a known flow here. On a flow rule this comment would run `fix`; on a command rule it must
+	// not -- an authorized member may INVOKE the trigger, never re-aim it at a flow its author did not name.
+	const retarget = runCmd(commented("@pi fix"));
+	assert.equal(retarget.enqueue, true);
+	assert.equal(retarget.job.command, "wf run nightly");
+	assert.equal("flow" in retarget.job, false, "a known flow name after the phrase must not turn a command job into a flow job");
+
+	// And an unknown trailing word must not SUPPRESS the command via the no-flow arm: trailing text is
+	// data, riding trigger.comment into /job/event.json for the handler to read.
+	const noise = runCmd(commented("@pi nonesuch entirely"));
+	assert.equal(noise.enqueue, true, "a trailing non-flow word must not become a no-flow refusal");
+	assert.equal(noise.job.command, "wf run nightly");
+	assert.deepEqual(noise.job.trigger.comment, { body: "@pi nonesuch entirely" });
+});
+
+test("tag and pull_request command rules enqueue command jobs -- command at JOB level, never inside trigger", () => {
+	const tagged = runCmd(workItem());
+	assert.equal(tagged.enqueue, true);
+	assert.equal(tagged.job.command, "standup");
+	assert.equal("flow" in tagged.job, false);
+	assert.equal("command" in tagged.job.trigger, false, "an execution knob, never inside trigger/event.json");
+	assert.equal(tagged.job.repo, "Fabrikam/widgets", "run.repository still resolves the clone scope for a command job");
+	assert.deepEqual(tagged.job.trigger.matched, { index: 0, type: "label", label: "pi:go" });
+
+	const pr = runCmd(pullRequest());
+	assert.equal(pr.enqueue, true);
+	assert.equal(pr.job.command, "check");
+	assert.equal("flow" in pr.job, false);
+	assert.equal("command" in pr.job.trigger, false);
+	assert.deepEqual(pr.job.trigger.matched, { index: 2, type: "pull_request", action: "created" });
+});
+
+test("a flow rule still emits a byte-identical flow job -- no command key, same key order as always", () => {
+	// The original flow fixtures, untouched by the feature: the conditional spread must leave their
+	// enqueued bytes exactly as they were.
+	const r = run(workItem());
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "fix");
+	assert.equal("command" in r.job, false, "a flow job grows no command key");
+	assert.deepEqual(Object.keys(r.job), ["repo", "azure", "target", "flow", "trigger"]);
+});
