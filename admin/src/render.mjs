@@ -167,12 +167,7 @@ export function renderTriggers({ schedulers, triggers } = {}) {
  * suffix is empty and appended last.
  */
 function triggerLine(t) {
-  // A command trigger (issue #189, `run.command`) shows `/name` in the flow position: the shared parser
-  // makes flow and command mutually exclusive, so the column never has to hold both, and the slash marks
-  // "dispatches a registered extension command" apart from a flow at a glance. The NAME only (the first
-  // space-delimited token) so the line stays skimmable, the [skills basename] doctrine restated; the args
-  // belong in the detail view.
-  const flow = t?.flow ?? (typeof t?.command === "string" && t.command.trim() !== "" ? `/${t.command.trim().split(/\s+/)[0]}` : "-");
+  const flow = t?.flow ?? commandSlashLabel(t) ?? "-";
   const forge = t?.forge && t.forge !== "github" ? `  [${t.forge}]` : "";
   const pkgs = t?.packages === true ? "  [packages]" : "";
   const img = t?.image ? `  [image ${t.image}]` : "";
@@ -208,6 +203,19 @@ function triggerLine(t) {
     default:
       return "(unknown trigger)";
   }
+}
+
+/**
+ * The `/name` display token for a command trigger (issue #189, `run.command`), or null when the entry
+ * carries no command. It renders in the flow position: the shared parser makes flow and command mutually
+ * exclusive, so the column never has to hold both, and the slash marks "dispatches a registered extension
+ * command" apart from a flow at a glance. The NAME only (the first space-delimited token, pi's own
+ * dispatch grammar) so the line stays skimmable, the [skills basename] doctrine restated; the args belong
+ * in the detail view. Exported as the one vocabulary (issue #188): the list line here, the TUI's target
+ * column and the drill-in header must not drift on what a command trigger is called.
+ */
+export function commandSlashLabel(t) {
+  return typeof t?.command === "string" && t.command.trim() !== "" ? `/${t.command.trim().split(/\s+/)[0]}` : null;
 }
 
 function ruleClauses(rule) {

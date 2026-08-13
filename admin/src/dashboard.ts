@@ -25,7 +25,7 @@ import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages } from "./read-model.mjs";
-import { renderStatus, renderBudget, renderTriggers, renderSettingsView } from "./render.mjs";
+import { renderStatus, renderBudget, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -935,7 +935,10 @@ function matchColored(t: any, styler: any): string {
 
 function targetColored(t: any, styler: any): string {
   const arrow = styler.fg("dim", "→");
-  const flow = styler.bold(styler.fg("text", t?.flow ?? "-"));
+  // A command trigger shows its `/name` in the flow position, through render.mjs's one exported
+  // vocabulary (issue #188): before this fallback the row rendered a bare "-", as if the trigger
+  // targeted nothing.
+  const flow = styler.bold(styler.fg("text", t?.flow ?? commandSlashLabel(t) ?? "-"));
   if (t?.type === "cron") {
     // A local/cron trigger runs its flow against a folder — show `local <folder>/<flow>` so the target
     // (not just the flow name) is visible; github triggers get their repo from the webhook, so none there.
@@ -1077,7 +1080,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
 
   // Header: kind badge -> flow, plus a health marker for cron (✔ healthy / ⚠ overdue) derived from the
   // scheduler's overdueMs. A trigger with no matching scheduler shows no health marker rather than a guess.
-  let header = styler.fg(KIND_COLOR[t.type] ?? "muted", t.type ?? "?") + "  " + styler.bold(styler.fg("text", `→ ${t.flow ?? "-"}`));
+  let header = styler.fg(KIND_COLOR[t.type] ?? "muted", t.type ?? "?") + "  " + styler.bold(styler.fg("text", `→ ${t.flow ?? commandSlashLabel(t) ?? "-"}`));
   if (t.type === "cron" && sched) {
     const healthy = !sched.overdueMs;
     header += "   " + (healthy ? styler.fg("success", "✔ healthy") : styler.fg("warning", `⚠ overdue ${formatDuration(sched.overdueMs)}`));
@@ -1123,6 +1126,11 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     out.push(kv("target", forgeTargetLabel(t?.forge), "accent"));
     out.push(kv("model", "deployment default", "dim"));
   }
+  // A command trigger's full `/name args` line (issue #189): the list and header show the name only,
+  // and this drill-in is where the args belong -- the reviewed file staged them, the operator's own
+  // session shows them. Rendered only when armed, on both branches, because all four kinds can carry
+  // a command; a flow trigger's pane stays byte-identical.
+  if (typeof t.command === "string" && t.command.trim() !== "") out.push(kv("command", `/${t.command.trim()}`, "accent"));
   // Same shape as the model row -- a per-trigger override of a deployment default -- and rendered on BOTH
   // branches, because unlike model, all four kinds can carry an image. The dim "deployment default" is
   // deliberate rather than an omitted row: a missing row would read as "I don't know", this reads as

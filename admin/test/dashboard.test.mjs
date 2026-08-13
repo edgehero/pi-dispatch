@@ -768,6 +768,16 @@ async function renderTrigger(trigger) {
   return { list, detail: stripAnsi(comp.render(100).join("\n")) };
 }
 
+test("a command trigger's target and drill-in show /name, and the full staged line lives in the detail", async () => {
+  // Before this, both surfaces rendered a bare "-" for a command trigger, as if it targeted nothing
+  // (issue #188's display half). The /name comes from render.mjs's one exported vocabulary.
+  const { list, detail } = await renderTrigger({ type: "comment", forge: "github", phrase: "@pi deploy", flow: null, command: "deploy prod --now", packages: false, image: null, skillsDir: null, instructions: false, resume: false, replicas: null });
+  assert.ok(list.includes("/deploy"), "the target column shows the slash name, not '-'");
+  assert.equal(list.includes("deploy prod --now"), false, "the args stay out of the list row");
+  assert.ok(detail.includes("→ /deploy"), "the drill-in header names the command the way it names a flow");
+  assert.ok(detail.includes("/deploy prod --now"), "the full staged line belongs in the detail, the operator's own session");
+});
+
 test("a trigger's row names its forge ONCE -- the target says it, so no badge repeats it", async () => {
   // The badge existed because the target read `-> github` for every forge, so a gitlab row contradicted its
   // own badge. Fixing the target removed the badge's REASON to exist, not merely its wrongness. render.mjs

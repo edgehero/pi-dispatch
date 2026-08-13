@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderWhatIf } from "../src/render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel } from "../src/render.mjs";
 
 test("render.mjs has no path to raw .log content", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/render.mjs", import.meta.url)), "utf8");
@@ -163,6 +163,16 @@ test("renderTriggers shows a command trigger as /name in the flow position; flow
   // Neither flow nor command (a degraded display record) keeps the "-" placeholder.
   const neither = renderTriggers({ schedulers: [], triggers: { triggers: [{ ...command, command: null }] } });
   assert.match(neither, /comment {2}"@pi deploy" → -$/m);
+});
+
+test("commandSlashLabel is the one /name vocabulary every surface shares (issue #188)", () => {
+  // Exported so the list line here, the TUI's target column and the drill-in header cannot drift on
+  // what a command trigger is called: three renderings, one token rule.
+  assert.equal(commandSlashLabel({ command: "deploy prod --now" }), "/deploy");
+  assert.equal(commandSlashLabel({ command: "  wf  run " }), "/wf", "surrounding whitespace never reaches the token");
+  assert.equal(commandSlashLabel({ command: "" }), null);
+  assert.equal(commandSlashLabel({ flow: "fix" }), null, "a flow trigger has no slash label");
+  assert.equal(commandSlashLabel(null), null);
 });
 
 test("renderTriggers marks a packages-loading trigger and leaves a declining one unchanged", () => {
