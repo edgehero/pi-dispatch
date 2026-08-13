@@ -1330,6 +1330,51 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `DES-AI-TRIGGER-FLOW-GATE` (a WHAT-exists question, deliberately distinct from its WHO-may-fire gate),
   `CONST-BUDGET-BEFORE-TOKENS`
 
+## DES-COMMAND-ENTRY-POINT
+
+- **Decision** (issue #189, Gap 2): a trigger may name a **registered pi extension command** instead of a
+  flow — `run.command` (the trigger-schema half lands with the producer change; this entry records the
+  runner's dispatch protocol, which ships first). The worker forwards the command line as `PI_COMMAND`;
+  the runner rebuilds the prompt as `/<command>` — **the whole prompt, not a first line**, because pi's
+  dispatch grammar at the pin fires only when the entire text starts with `/`, parses the name to the
+  first space, and hands everything after (newlines included) to the handler as args verbatim. Before
+  prompting, the runner verifies the name via `session.extensionRunner.getCommand()` and refuses an
+  unregistered one as `command-unregistered` (exit 2, pre-spend). A handler throw — which pi SWALLOWS,
+  resolving `prompt()` cleanly — is observed via the public `extensionRunner.onError` channel, the only
+  place it surfaces at the pin, and classified `command-error`. A clean headless return is
+  `command-completed`, exit 0. The docs' old premise ("an extension that registers a slash command has
+  nobody to type it inside a job") is contradicted by the pinned contract itself: `session.prompt()`
+  "Handles extension commands immediately", and the pinned-contract test drives a REAL session through
+  all of it, keylessly — dispatch happens before any model or auth validation.
+- **Why env-authoritative rather than prompt.md-authoritative**: one in-container authority. If the
+  runner read `prompt.md` and classified by `PI_COMMAND`, a worker bug writing mismatched halves would
+  classify a flow job as `command-completed` — a wrong exit 0. Rebuilt from the env var, the prompt and
+  the classification cannot disagree; `prompt.md` stays the byte-identical human record.
+- **Why `command-error` is retryable (exit 1), by explicit choice**: pi hands the runner a message
+  string, so transient-vs-deterministic is undecidable at the only observation point that exists. The
+  chosen direction pays to retry a deterministic extension bug until the queue's attempts run out; the
+  alternative (policy, no retry) silently drops work on a transient fault a retry would have absorbed.
+  Recorded rather than argued around: `CONST-RETRY-INFRA-ONLY` classifies by failure MODE, and an
+  unattributable failure was ruled to default to the retryable side. Genuinely transient provider
+  errors inside a handler-driven turn never depended on this choice — they surface as
+  `stopReason: "error"` on a real terminal message and stay retryable through the ordinary path.
+- **Documented residual**: a handler that fires async work and returns without `waitForIdle()`
+  classifies `command-completed` at return and the session is disposed — that is `prompt()`'s own
+  contract, not this project's to repair.
+- **The `commands` image capability** is what makes shipping the runner ahead of the trigger field safe
+  in both directions: an older runner handed `PI_COMMAND` would ignore it, read `prompt.md`, and either
+  feed `/name args` to the model as prose or die retryable on `no-terminal-message` — so the worker
+  refuses a command job on a non-declaring image pre-spend, the `replicas` pattern verbatim.
+  `verify-image.sh` asserts the label against the baked runner source, so the claim cannot lie.
+- **Rejected**: the command as the first line of a larger prompt (impossible at the pin — the remainder
+  becomes handler args); retrying nothing / policy on handler throws (above); `prompt.md` as the
+  in-container authority (above); skipping pre-verification and letting pi's fall-through handle typos
+  (an unregistered `/name` is NOT an error to pi — it rides template expansion into a paid model call,
+  or into a same-named prompt template if one is staged, both silent).
+- **Traces to**: `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-CONTAINER-JOB-INPUTS`,
+  `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-UPSTREAM-CONTRACT-TESTS`,
+  `DES-PER-TRIGGER-JOB-IMAGE` (the capability-label pattern)
+
 ## DES-JOB-OUTBOX-CHAINING
 
 - **Decision**: An agent inside a local job requests follow-up flows by writing `request-<n>.json` to a
@@ -1989,6 +2034,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #189 (Gap 2, runner half). **NEW `DES-COMMAND-ENTRY-POINT`**: a trigger may dispatch a registered pi extension command; the runner's protocol ships first (env-authoritative `/command` prompt because pi's grammar fires only on a whole-text slash and a worker mismatch must not misclassify a flow job; pre-prompt `getCommand()` verification because an unregistered `/name` is not an error to pi and rides into a paid model call; handler throws observed via `extensionRunner.onError`, the pin's only channel, and classified retryable `command-error` by explicit user choice with the accepted cost stated; the fire-and-forget residual stated as pi's own contract; the `commands` image capability as the two-direction rollout gate, `replicas` pattern). The old docs premise ("nobody to type it inside a job") is recorded as contradicted by the pinned `session.prompt()` contract, proven by a keyless real-session pinned-contract test. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS UNCHANGED, checked** — flows keep their advisory posture; a command's registration check is a REFUSAL because unlike a flow there is no hint-style steady state in which an unregistered command is legitimate. **DES-PER-TRIGGER-JOB-IMAGE UNCHANGED, checked** — the capability label mechanism is reused, not changed. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE UNCHANGED, checked** — envelope semantics move with the producer half. |
 | 2026-08-13 | Issue #189 (Gap 1, doctor half). **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS AMENDED**: the doctor layer is now specified in full — per-tuple lines in loader precedence order; repo tier read with the gate's ls-tree mechanics but HEAD-resolved by doctor and degrading to unknown on git failure (readFlowGate was considered and REJECTED for this read: its fail-closed catch turns a broken folder into deny, and "deny implies the file exists" would print a confident wrong ✓; the gate's no-ref rule guards against an agent self-authorizing, which a host preflight does not face); staged tier via the new `readStagedSkills` whose pattern-manifest packages read as not-enumerable because manifest patterns can DISABLE files and a wrong ✓ is the one inadmissible error direction. **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** — the gate itself is untouched; doctor copies its read mechanics rather than calling it, precisely so gate semantics stay pure WHO-may-fire. **DES-CLI-SURFACE UNCHANGED, checked** — doctor stays read-only/always-safe; the new checks carry no fixAction. |
 | 2026-08-13 | Issue #189 (Gap 1, runner half). **NEW `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`**: flow resolution is verified at two advisory layers and refused at neither — the runner compares `PI_FLOW` against the LOADED skill names post-load, pre-session, pre-spend (`isFlowLoaded`, exact equality, `disableModelInvocation` counts) and reports a miss as one `flow_not_loaded` line; doctor is the approximate host-side layer, landing with the companion change. Records why report-not-refuse (flow is by doctrine a prompt hint; a refusal shipped in an image upgrade fails yesterday's jobs and burns a budget slot per delivery), why the runner layer is the exact one (pi names a skill `frontmatter.name \|\| parentDirName` at the pin, so only the loaded set is authoritative), and the rejected alternatives (boot-time failure — `parseTriggers` stays pure and absent-at-HEAD is a legal steady state; `event.json` carriage — execution knob, not a delivery fact; a new top-level outcome — admin surfaces drop unknown outcomes, new vocabulary rides a `reason`). **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** — the gate answers WHO may fire a flow and keeps its pinned-sha object-store read; the new entry answers whether the flow EXISTS in the box, and neither consults the other. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains nothing; the flow travels as job data the queue already carried. |
 | 2026-08-12 | Issue #181 (the budget lever and the trend lines). **DES-COST-FOLD-BY-SCAN AMENDED**: the fold gains `dailyByFlow` — the composite (day, flow) fold at the same loop `buildDaily` and `buildByFlow` already walk separately, gap-padded per flow over the SHARED span (small multiples are only comparable on one x-domain) with the machine-key/display-label split held (`flowLabelOf` extracted so the two flow folds cannot drift on what a flow is called). The series shares `daily`'s first-run origin for the same sparkline-density reason recorded on the `sinceMs` row. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked** — `readBudget`'s GET-only posture now covers the token counter too, and the new junk-URL parse guard degrades synchronously (the `readSchedulers` failFast posture; without it a canned "not-a-url" fixture burns the full timeout per test). **DES-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (the dashboard's budget meters and `/dispatch budget` are untouched; the page ADDS a display, replaces nothing — the "no replacement on that" ruling). |

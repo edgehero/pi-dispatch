@@ -37,6 +37,10 @@ export function parseRunnerEnv(env) {
 		// compare it against the loaded skill names. `null` when the job carries no flow (a bare
 		// run.task cron job), which skips the check entirely.
 		flow: parseFlowName(env, "PI_FLOW"),
+		// INT-CONTAINER-JOB-INPUTS (issue #189): the trigger's run.command -- the registered extension
+		// command this job dispatches instead of a prompt. `null` (the overwhelmingly common state)
+		// means a prompt job, byte-identical to every job before the feature.
+		command: parseCommand(env, "PI_COMMAND"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -153,6 +157,47 @@ function parseFlowName(env, name) {
 	const raw = env[name];
 	if (raw === undefined || raw === "") return null;
 	return raw;
+}
+
+/**
+ * Parse the command a run.command trigger dispatches (issue #189). Unset or empty is `null` -- a
+ * prompt job, the default. Unlike PI_FLOW this one IS validated, strictly, because the value is not
+ * merely compared: run-job rebuilds the prompt as `/<value>` and hands it to session.prompt(), whose
+ * dispatch grammar at the pin reads the command NAME up to the first space and passes EVERYTHING
+ * after it -- including a newline and whatever follows -- as args. So:
+ *   - a leading "/" is refused: the runner adds the slash, and accepting one here would make
+ *     "//name" -- a prompt, silently, since no command named "/name" can register;
+ *   - surrounding whitespace is refused rather than trimmed: a trailing space changes the args a
+ *     handler receives, and normalizing here would make the container disagree with the reviewed
+ *     file about what runs;
+ *   - control characters are refused outright: a newline would smuggle a second line into what the
+ *     operator reviewed as one command line.
+ * All deterministic misconfigurations: configError, exit 2, never retried.
+ */
+function parseCommand(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return null;
+	if (raw.startsWith("/")) {
+		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (no leading "/" -- the runner adds it)`);
+	}
+	if (raw !== raw.trim()) {
+		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (no surrounding whitespace)`);
+	}
+	// Every C0 control plus DEL, written as escapes so the source itself carries no control byte.
+	if (/[\u0000-\u001f\u007f]/.test(raw)) {
+		throw configError(`invalid ${name}: contains a control character (a newline or tab would change what dispatches)`);
+	}
+	return raw;
+}
+
+/**
+ * The command NAME inside a run.command string -- pi's own parse, verbatim (text to the first space,
+ * dist/core/agent-session.js _tryExecuteExtensionCommand). Exported so run-job's pre-prompt
+ * getCommand() verification and the tests read the string the same way pi will.
+ */
+export function commandName(command) {
+	const spaceIndex = command.indexOf(" ");
+	return spaceIndex === -1 ? command : command.slice(0, spaceIndex);
 }
 
 /**

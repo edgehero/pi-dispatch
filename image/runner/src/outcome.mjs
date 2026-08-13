@@ -17,10 +17,13 @@ export const STOP_REASONS = ["stop", "length", "toolUse", "error", "aborted"];
  * retryable. Tagging the error with its exit code is more robust than pattern-matching the
  * message: classifyThrow honours the tag before it ever consults pi's error vocabulary.
  */
-export function configError(message) {
+export function configError(message, reason = "config") {
 	const error = new Error(message);
 	error.piDispatchExit = EXIT_POLICY;
-	error.piDispatchReason = "config";
+	// The optional reason (issue #189) rides the exit log line through classifyThrow, so a distinct
+	// deterministic refusal -- an unregistered run.command -- stays greppable without a new exit code.
+	// The default keeps every pre-existing caller byte-identical.
+	error.piDispatchReason = reason;
 	return error;
 }
 
@@ -82,12 +85,30 @@ export function captureTerminal(previous, event) {
  * and names WHICH cap fired. The turn budget is checked before the token budget only for a stable
  * order; in practice one abort ends the run, so at most one flag is set.
  */
-export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal }) {
+export function decideExit({ budgetAborted, budgetTurns, tokenAborted, terminal, command = null }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
 	if (tokenAborted) {
 		return { code: EXIT_POLICY, reason: "token_budget" };
+	}
+	// A command job (issue #189, run.command): session.prompt("/name args") dispatches a registered
+	// extension command and returns with NO assistant message, so the no-terminal branch below would
+	// classify a clean headless run as infra and pay to retry a success. Three rules, in order:
+	//   - a handler that THREW wins over everything it produced: pi swallows the throw (the runner
+	//     observes it via extensionRunner.onError, the only channel pi offers at the pin) and a
+	//     stop-reason that claimed success would be the swallow reaching the exit code. `command-error`
+	//     is EXIT_INFRA -- retryable, by explicit choice: pi hands us only a message string, so
+	//     transient-vs-deterministic is undecidable, and the accepted cost is that a deterministic
+	//     extension bug retries until the queue's attempts run out (DES-COMMAND-ENTRY-POINT).
+	//   - a handler that drove the model (sendUserMessage/waitForIdle) produced a terminal message,
+	//     and its verdict is real -- a provider 429 inside a handler-driven turn must stay retryable.
+	//   - otherwise the command ran headlessly to completion: exit 0, named `command-completed`.
+	// Budget aborts stay FIRST, above: a handler-driven fanout is bounded by both budgets.
+	if (command) {
+		if (command.failed) return { code: EXIT_INFRA, reason: "command-error" };
+		if (terminal) return classifyStopReason(terminal);
+		return { code: EXIT_COMPLETED, reason: "command-completed" };
 	}
 	return classifyStopReason(terminal);
 }

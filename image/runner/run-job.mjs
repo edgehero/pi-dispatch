@@ -6,7 +6,7 @@ import {
 	ModelRegistry,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { assertPackagePathsExist, assertSessionMountReady, enforceOfflineMode, parseRunnerEnv } from "./src/config.mjs";
+import { assertPackagePathsExist, assertSessionMountReady, commandName, enforceOfflineMode, parseRunnerEnv } from "./src/config.mjs";
 import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import {
 	captureTerminal,
@@ -65,7 +65,14 @@ async function main() {
 	// can influence. Idempotent and only ever tightening. INT-SDK-SESSION-OPTIONS.
 	enforceOfflineMode(process.env);
 
-	const prompt = readPrompt(PROMPT_PATH);
+	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
+	// authority, so a worker bug that wrote a prompt.md disagreeing with the env var cannot make the
+	// classification below (command-completed on a promptless return) misread a flow job. pi's
+	// dispatch grammar demands it anyway -- a command dispatches only when the ENTIRE prompt starts
+	// with "/", and everything after the first space becomes the handler's args, so there is no such
+	// thing as a command line "at the top of" a larger prompt. prompt.md still carries the same bytes
+	// as the human record of what ran (INT-CONTAINER-JOB-INPUTS).
+	const prompt = cfg.command ? `/${cfg.command}` : readPrompt(PROMPT_PATH);
 
 	const agentDir = getAgentDir();
 
@@ -226,6 +233,36 @@ async function main() {
 	// leaving the first call of an extension-provided model unmetered.
 	usageMeter.arm();
 
+	// A command job dispatches BEFORE any spend, so verify the command is actually registered first
+	// (issue #189). pi's fallthrough is the hazard being closed: an unregistered "/name" is not an
+	// error to session.prompt() -- it falls through to prompt-template expansion and then to the
+	// MODEL as literal text, a full paid turn for a config typo, or (with a same-named template
+	// staged) whatever that template does. Extensions have registered by createAgentSession time, so
+	// getCommand() is authoritative here. commandName() is pi's own first-space parse, imported so
+	// the verification reads the string exactly as dispatch will.
+	if (cfg.command) {
+		const name = commandName(cfg.command);
+		if (!session.extensionRunner.getCommand(name)) {
+			throw configError(
+				`run.command names "${name}" but no loaded extension registers it -- stage the package that ships it, or fix the trigger`,
+				"command-unregistered",
+			);
+		}
+		log("command_dispatch", { command: name });
+	}
+
+	// A throwing command handler is SWALLOWED by pi -- emitError, handled=true, prompt() resolves
+	// cleanly -- and the extension runner's error channel is the only place it surfaces at the pin
+	// (never the session event bus). Subscribe before prompt so decideExit can tell a failed command
+	// from a completed one; scoped to command jobs because that is the only path whose success would
+	// otherwise be decided by an event that cannot arrive.
+	let commandFailed = false;
+	const unsubscribeCommandErrors = cfg.command
+		? session.extensionRunner.onError((extensionError) => {
+				if (extensionError?.event === "command") commandFailed = true;
+			})
+		: null;
+
 	// prompt() returns Promise<void>, so this subscription is the ONLY channel through which the
 	// outcome arrives. captureTerminal handles both event shapes (agent_end carries messages[],
 	// turn_end carries message).
@@ -258,6 +295,7 @@ async function main() {
 		// the session it was metering is exactly the kind of thing that becomes one.
 		usageMeter.uninstall();
 		unsubscribeTerminal();
+		unsubscribeCommandErrors?.();
 		// Runs the cleanup callbacks providers register via registerSessionResourceCleanup. Every
 		// official SDK example disposes; skipping it can leak a provider transport and hang the
 		// container until the 30-minute timeout -- a completed job turned into a timeout failure.
@@ -271,6 +309,8 @@ async function main() {
 		// same reason:"token_budget" / exit 2.
 		tokenAborted: usageMeter.ok ? meter.state.breached : tokenBudget.state.aborted,
 		terminal,
+		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
+		command: cfg.command ? { failed: commandFailed } : null,
 	});
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
 	classifyStopReason,
 	classifyThrow,
+	configError,
 	decideExit,
 	EXIT_COMPLETED,
 	EXIT_INFRA,
@@ -90,4 +91,64 @@ test("no abort defers to the stopReason classification", () => {
 	const outcome = decideExit({ budgetAborted: false, tokenAborted: false, terminal: { stopReason: "stop" } });
 	assert.equal(outcome.code, EXIT_COMPLETED);
 	assert.equal(outcome.reason, "stop");
+});
+
+// --- decideExit for command jobs (issue #189, run.command) ---
+
+test("a headless command run exits 0 as command-completed -- not retried as no-terminal-message", () => {
+	// session.prompt("/name args") dispatches the handler and resolves with NO assistant message.
+	// Before run.command, that shape was the retryable no-terminal branch: a SUCCESSFUL command job
+	// would be re-run and re-billed by the queue until attempts ran out.
+	const outcome = decideExit({ budgetAborted: false, tokenAborted: false, terminal: undefined, command: { failed: false } });
+	assert.deepEqual(outcome, { code: EXIT_COMPLETED, reason: "command-completed" });
+});
+
+test("a throwing handler exits 1 as command-error, and wins over a success-claiming terminal", () => {
+	// pi swallows the throw (emitError, handled=true), so the ONLY evidence is the extension error
+	// channel -- and a handler that drove the model before throwing may have left a stopReason that
+	// claims success. The throw must win, or the swallow reaches the exit code.
+	// Exit 1 retryable is the DELIBERATE choice (DES-COMMAND-ENTRY-POINT): pi hands us a message
+	// string, transient-vs-deterministic is undecidable, and the accepted cost is that a
+	// deterministic extension bug retries until the queue's attempts run out.
+	const failed = decideExit({ budgetAborted: false, tokenAborted: false, terminal: undefined, command: { failed: true } });
+	assert.deepEqual(failed, { code: EXIT_INFRA, reason: "command-error" });
+	const failedWithTerminal = decideExit({ budgetAborted: false, tokenAborted: false, terminal: { stopReason: "stop" }, command: { failed: true } });
+	assert.deepEqual(failedWithTerminal, { code: EXIT_INFRA, reason: "command-error" });
+});
+
+test("a handler that drove the model gets the terminal's real verdict -- a 429 inside stays retryable", () => {
+	const outcome = decideExit({
+		budgetAborted: false,
+		tokenAborted: false,
+		terminal: { stopReason: "error", errorMessage: "429" },
+		command: { failed: false },
+	});
+	assert.equal(outcome.code, EXIT_INFRA);
+	assert.equal(outcome.reason, "error");
+	const clean = decideExit({ budgetAborted: false, tokenAborted: false, terminal: { stopReason: "stop" }, command: { failed: false } });
+	assert.deepEqual(clean, { code: EXIT_COMPLETED, reason: "stop" });
+});
+
+test("budget aborts still win over the command outcome -- a handler-driven fanout is bounded", () => {
+	const turns = decideExit({ budgetAborted: true, budgetTurns: 31, tokenAborted: false, terminal: undefined, command: { failed: false } });
+	assert.equal(turns.reason, "turn_budget");
+	const tokens = decideExit({ budgetAborted: false, tokenAborted: true, terminal: undefined, command: { failed: true } });
+	assert.equal(tokens.reason, "token_budget");
+});
+
+test("a prompt job's decision tree is byte-identical with command absent, null, or omitted", () => {
+	for (const command of [undefined, null]) {
+		assert.deepEqual(
+			decideExit({ budgetAborted: false, tokenAborted: false, terminal: undefined, command }),
+			{ code: EXIT_INFRA, reason: "no-terminal-message" },
+		);
+	}
+});
+
+test("configError's optional reason rides classifyThrow onto the exit line; the default stays config", () => {
+	const tagged = classifyThrow(configError("no such command", "command-unregistered"));
+	assert.equal(tagged.code, EXIT_POLICY, "an unregistered command is deterministic: never retried");
+	assert.equal(tagged.reason, "command-unregistered");
+	const plain = classifyThrow(configError("missing env"));
+	assert.deepEqual({ code: plain.code, reason: plain.reason }, { code: EXIT_POLICY, reason: "config" });
 });

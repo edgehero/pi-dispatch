@@ -224,7 +224,14 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # replica job. Both follow one rule -- an image that declares nothing gets no benefit of the doubt about what
 # it contains -- and both leave an UNFLAGGED job reading no label at all. `verify-image.sh` asserts this list
 # against the baked guardrails, so it cannot lie any more than `forges` can.
-LABEL dev.pi-dispatch.capabilities="replicas"
+# `commands` (issue #189) tells the worker this runner understands PI_COMMAND: it dispatches the
+# registered extension command, refuses an unregistered one pre-spend, and classifies a headless
+# command run as command-completed. An older runner handed PI_COMMAND would ignore the variable, read
+# prompt.md, and either feed "/name args" to the model as prose or exit 1 no-terminal-message and be
+# retried as infra -- paid retries of a job that can never classify. The label is how the worker
+# refuses that pairing pre-spend (image-preflight.mjs), which is what makes shipping the runner ahead
+# of the trigger field safe in both directions.
+LABEL dev.pi-dispatch.capabilities="replicas,commands"
 
 USER pi
 WORKDIR /workspace

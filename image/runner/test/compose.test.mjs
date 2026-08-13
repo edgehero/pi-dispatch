@@ -119,3 +119,27 @@ test("run-job.mjs verifies the flow against the LOADED skill set, unconditionall
 		"the flow check must sit at the pre-spend moment",
 	);
 });
+
+test("run-job.mjs wires the command path: env-authoritative prompt, pre-spend verification, observed throws", () => {
+	// Same source-guard tactic as the pins above. Five facts, each of which fails silently if unwired:
+	// (1) the prompt is rebuilt from PI_COMMAND, never read from prompt.md, for a command job -- one
+	//     in-container authority, and pi's grammar demands the whole text start with "/";
+	// (2) the command is verified against extensionRunner.getCommand BEFORE session.prompt -- an
+	//     unregistered "/name" is not an error to pi, it falls through toward a paid model call;
+	// (3) the verification failure is the tagged command-unregistered refusal (exit 2, pre-spend);
+	// (4) a swallowed handler throw is observed via extensionRunner.onError before the prompt;
+	// (5) decideExit receives the command outcome, null for every prompt job.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /cfg\.command \? `\/\$\{cfg\.command\}` : readPrompt\(/, "the prompt must be env-authoritative for command jobs");
+	assert.ok(
+		src.indexOf("extensionRunner.getCommand") < src.indexOf("await session.prompt("),
+		"getCommand verification must run before the prompt is sent",
+	);
+	assert.match(src, /"command-unregistered"/, "the refusal must carry its own greppable reason");
+	assert.ok(
+		src.indexOf("extensionRunner.onError") < src.indexOf("await session.prompt("),
+		"the error-channel subscription must exist before the prompt, or a fast throw is missed",
+	);
+	assert.match(src, /command: cfg\.command \? \{ failed: commandFailed \} : null/, "decideExit must receive the command outcome");
+	assert.match(src, /log\("command_dispatch", \{ command: name \}\)/, "the dispatch line carries the NAME only, never args");
+});

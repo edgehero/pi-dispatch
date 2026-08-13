@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertPackagePathsExist, enforceOfflineMode, parseRunnerEnv } from "../src/config.mjs";
+import { assertPackagePathsExist, commandName, enforceOfflineMode, parseRunnerEnv } from "../src/config.mjs";
 import { EXIT_POLICY } from "../src/outcome.mjs";
 
 const base = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-x", PI_MAX_TURNS: "20" };
@@ -222,4 +222,32 @@ test("PI_FLOW parses to the exact string, with no charset opinion", () => {
 	// accepted (parseTriggers pins non-empty string, nothing narrower) would start failing
 	// yesterday's jobs on an image upgrade. The comparison simply misses, and the miss is the report.
 	assert.equal(parseRunnerEnv({ ...base, PI_FLOW: "Not A Skill Name" }).flow, "Not A Skill Name");
+});
+
+test("PI_COMMAND is optional: unset or empty is null, so a prompt job is byte-identical to today", () => {
+	assert.equal(parseRunnerEnv(base).command, null);
+	assert.equal(parseRunnerEnv({ ...base, PI_COMMAND: "" }).command, null);
+});
+
+test("PI_COMMAND parses a bare name and a name with args, verbatim", () => {
+	assert.equal(parseRunnerEnv({ ...base, PI_COMMAND: "wf" }).command, "wf");
+	assert.equal(parseRunnerEnv({ ...base, PI_COMMAND: "wf run nightly" }).command, "wf run nightly");
+});
+
+test("PI_COMMAND refuses a leading slash, surrounding whitespace, and control characters -- exit 2", () => {
+	// Dispatch grammar at the pin: the runner prepends "/", the name runs to the first space, and
+	// EVERYTHING after -- a newline included -- becomes handler args. Each refusal below is a value
+	// that would silently change what dispatches rather than fail.
+	for (const bad of ["/wf", " wf", "wf ", "wf run\nnightly", "wf\trun", "wf \u001b[1m"]) {
+		assert.throws(
+			() => parseRunnerEnv({ ...base, PI_COMMAND: bad }),
+			(e) => e.piDispatchExit === EXIT_POLICY,
+			`PI_COMMAND=${JSON.stringify(bad)} must refuse pre-spend, not silently reshape the dispatch`,
+		);
+	}
+});
+
+test("commandName reads the string exactly as pi's dispatch will: text to the first space", () => {
+	assert.equal(commandName("wf"), "wf");
+	assert.equal(commandName("wf run nightly"), "wf");
 });

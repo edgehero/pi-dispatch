@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -765,6 +765,82 @@ test("pi names a skill frontmatter `name` || its parent dir -- the premise the f
 	assert.ok(names.includes("dir-named"), `no frontmatter name -> the dir names the skill; got ${JSON.stringify(names)}`);
 	assert.ok(names.includes("renamed"), "a frontmatter name must win over the dir name");
 	assert.ok(!names.includes("some-dir"), "the renamed skill's dir must NOT also be a loaded name");
+});
+
+test("run.command's dispatch contract at the pin: headless commands, swallowed throws, verbatim args", { skip }, async () => {
+	// Issue #189 Gap 2 rests on four pin facts, each asserted here against a REAL session so a pi bump
+	// that moves any of them fails this test instead of a paid container. No provider key exists in
+	// this test, which is itself part of the proof: command dispatch happens before any validation.
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const f = fixture();
+	const record = join(f.workspace, "probe-record.txt");
+	mkdirSync(join(f.jobPi, "extensions"), { recursive: true });
+	writeFileSync(
+		join(f.jobPi, "extensions", "index.js"),
+		[
+			`import { writeFileSync } from "node:fs";`,
+			`export default function (api) {`,
+			`	api.registerCommand("probe-ok", { description: "records its args", handler: async (args) => { writeFileSync(${JSON.stringify(record)}, args); } });`,
+			`	api.registerCommand("probe-throw", { description: "throws", handler: async () => { throw new Error("handler boom"); } });`,
+			`}`,
+		].join("\n"),
+	);
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+	});
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
+	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const settingsManager = pi.SettingsManager.inMemory({});
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, authStorage, modelRegistry, settingsManager, resourceLoader: loader });
+	try {
+		const sessionEvents = [];
+		const offSession = session.subscribe((event) => sessionEvents.push(event.type));
+		const extensionErrors = [];
+		const offErrors = session.extensionRunner.onError((extensionError) => extensionErrors.push(extensionError));
+
+		// Fact 1: args pass to the handler VERBATIM, newline included, and prompt() resolves with no
+		// agent run -- the shape decideExit classifies as command-completed.
+		await session.prompt("/probe-ok one two\nthree");
+		assert.equal(readFileSync(record, "utf8"), "one two\nthree", "everything after the first space is args, verbatim");
+		assert.deepEqual(extensionErrors, [], "a clean handler emits nothing on the error channel");
+
+		// Fact 2: a throwing handler is SWALLOWED -- prompt() resolves cleanly -- and the extension
+		// runner's error channel is the only place it surfaces. This is what run-job's onError
+		// subscription exists to observe.
+		await session.prompt("/probe-throw");
+		assert.equal(extensionErrors.length, 1, "the throw must surface on the extension error channel");
+		assert.equal(extensionErrors[0].event, "command");
+		assert.equal(extensionErrors[0].extensionPath, "command:probe-throw");
+		assert.match(String(extensionErrors[0].error), /handler boom/);
+
+		// Fact 3: the session event bus never sees any of it -- no assistant message, no error event --
+		// which is why captureTerminal alone cannot classify a command job.
+		assert.deepEqual(
+			sessionEvents.filter((type) => type === "turn_end" || type === "agent_end"),
+			[],
+			"no terminal-bearing event arrives for a handled command",
+		);
+
+		// Fact 4: getCommand is the pre-dispatch discriminator, and it is exact -- a registered name
+		// resolves, a near-miss resolves to undefined. run-job's pre-check rests on this, because an
+		// UNREGISTERED "/name" is NOT an error to pi: the command branch simply misses and the text
+		// falls through toward skill/template expansion and a model call. That fall-through is
+		// deliberately NOT executed here -- on a host with a provider key in env it would be a real
+		// paid call, which is the very hazard the pre-check forecloses; its mechanics are pinned by
+		// the dispatch-grammar facts above (a handled command returns before any validation ran).
+		assert.ok(session.extensionRunner.getCommand("probe-ok"), "a registered command resolves");
+		assert.equal(session.extensionRunner.getCommand("probe-okx"), undefined, "a near-miss is undefined, not fuzzy-matched");
+		assert.equal(session.extensionRunner.getCommand("no-such-command"), undefined);
+
+		offSession();
+		offErrors();
+	} finally {
+		session.dispose();
+	}
 });
 
 // --- enforceProtectedSkillPrecedence, decided on injected input (no skills tree, no collisions) ---
