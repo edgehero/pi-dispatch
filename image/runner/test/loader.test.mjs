@@ -996,3 +996,104 @@ test("a staged package cannot shadow an INJECTED skill either", { skip }, async 
 	const skill = loader.getSkills().skills.find((s) => s.name === "injected-only");
 	assert.ok(skill.description.includes(INJECTED_SENTINEL), "the INJECTED skill must be put back in force");
 });
+
+// --- package prompt templates: precedence and the overlay channel (issue #189, OQ-019 (b)) ---
+
+/** A staged package that also ships a prompt template through its pi manifest. */
+function fixturePackageWithPrompt({ promptName = "review" } = {}) {
+	const dir = fixturePackage();
+	mkdirSync(join(dir, "prompts"), { recursive: true });
+	writeFileSync(join(dir, "prompts", `${promptName}.md`), `PKG-PROMPT-SENTINEL body of /${promptName}\n`);
+	const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+	pkg.pi.prompts = [`prompts/${promptName}.md`];
+	writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, "\t")}\n`);
+	return dir;
+}
+
+test("a package prompt that takes a repo template's name is put back -- repo wins, with a diagnostic", { skip }, async () => {
+	// The same inversion skillsOverride closes for skills: pi merges package prompt paths FIRST and
+	// dedupePrompts is first-wins, so without the override the package's /review replaces the repo's.
+	// Worse than the skill case in one way: the run.command pre-dispatch getCommand() check forecloses
+	// an unregistered /name falling through to a TEMPLATE, but a template shadowing a protected one is
+	// invisible to it -- this is the second half of that hazard's closure.
+	const pkg = fixturePackageWithPrompt({ promptName: "review" });
+	const f = fixture();
+	mkdirSync(join(f.workspace, ".pi", "prompts"), { recursive: true });
+	writeFileSync(join(f.workspace, ".pi", "prompts", "review.md"), "REPO-PROMPT-SENTINEL the repo's own /review\n");
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+		packagePaths: [pkg],
+	});
+	const { prompts, diagnostics } = loader.getPrompts();
+	const review = prompts.filter((p) => p.name === "review");
+	assert.equal(review.length, 1, "one /review in force, not two");
+	assert.ok(review[0].filePath.startsWith(join(f.workspace, ".pi", "prompts")), "the repo's template must be the one in force");
+	assert.ok(
+		diagnostics.some((d) => d?.collision?.resourceType === "prompt" && d.message.includes("protected root wins")),
+		"the enforcement must leave its own diagnostic beside pi's",
+	);
+});
+
+test("overlay prompt templates load, and the repo's beats an overlay one of the same name", { skip }, async () => {
+	// Before issue #189 the overlay's prompts/ had no channel at all: skills and extensions loaded,
+	// templates silently did not. The repo-beats-overlay half rides the protected-set ORDER, which is
+	// what the enforcement consults before any package is considered.
+	const pkg = fixturePackage(); // packages staged, so enforcement is live
+	const f = fixture();
+	const overlay = mkdtempSync(join(tmpdir(), "pi-overlay-prompts-"));
+	mkdirSync(join(overlay, "prompts"), { recursive: true });
+	writeFileSync(join(overlay, "prompts", "deploy-notes.md"), "OVERLAY-PROMPT-SENTINEL /deploy-notes\n");
+	writeFileSync(join(overlay, "prompts", "review.md"), "OVERLAY-REVIEW the overlay copy\n");
+	mkdirSync(join(f.workspace, ".pi", "prompts"), { recursive: true });
+	writeFileSync(join(f.workspace, ".pi", "prompts", "review.md"), "REPO-REVIEW the repo copy\n");
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+		globalPiDir: overlay,
+		packagePaths: [pkg],
+	});
+	const { prompts } = loader.getPrompts();
+	assert.ok(prompts.some((p) => p.name === "deploy-notes"), "an overlay-only template must load");
+	const review = prompts.filter((p) => p.name === "review");
+	assert.equal(review.length, 1);
+	assert.ok(review[0].filePath.startsWith(join(f.workspace, ".pi", "prompts")), "repo beats overlay on a name collision");
+});
+
+test("a non-colliding package prompt survives, and a package-less job pays nothing for any of this", { skip }, async () => {
+	const pkg = fixturePackageWithPrompt({ promptName: "pkg-only" });
+	const f = fixture();
+	const withPkg = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+		packagePaths: [pkg],
+	});
+	assert.ok(withPkg.getPrompts().prompts.some((p) => p.name === "pkg-only"), "the override must displace ONLY protected names");
+
+	// No packages: loadProtectedPrompts returns null (no second loader is built), and the override is
+	// the identity -- pinned indirectly by the enforcement helper's own contract test below.
+	const bare = await loaderModule.loadProtectedPrompts({ cwd: f.workspace, packagePaths: [] });
+	assert.equal(bare, null, "the common path must not build a second loader");
+});
+
+test("enforceProtectedPromptPrecedence displaces only package-won protected names", { skip }, () => {
+	const promptRecord = (name, filePath) => ({ name, filePath, sourceInfo: {} });
+	const base = {
+		prompts: [promptRecord("review", "/pkg/prompts/review.md"), promptRecord("pkg-only", "/pkg/prompts/pkg-only.md")],
+		diagnostics: [{ type: "warning", message: "unrelated" }],
+	};
+	const protectedPrompts = new Map([["review", promptRecord("review", "/workspace/.pi/prompts/review.md")]]);
+	const result = loaderModule.enforceProtectedPromptPrecedence(base, { packageRoots: ["/pkg"], protectedPrompts });
+	assert.equal(result.prompts.find((p) => p.name === "review").filePath, "/workspace/.pi/prompts/review.md");
+	assert.equal(result.prompts.find((p) => p.name === "pkg-only").filePath, "/pkg/prompts/pkg-only.md");
+	assert.equal(result.diagnostics.length, 2, "pi's diagnostic kept, the enforcement's appended");
+	// Null map or no packages: identity, so the common path cannot be reshaped by accident.
+	assert.deepEqual(loaderModule.enforceProtectedPromptPrecedence(base, { packageRoots: [], protectedPrompts }), { prompts: base.prompts, diagnostics: base.diagnostics });
+	assert.deepEqual(loaderModule.enforceProtectedPromptPrecedence(base, { packageRoots: ["/pkg"], protectedPrompts: null }), { prompts: base.prompts, diagnostics: base.diagnostics });
+});

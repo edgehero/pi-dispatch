@@ -176,6 +176,11 @@ async function main() {
 				packageRoots: cfg.packages,
 				extensionPaths: resourceLoader.getExtensions().extensions.map((extension) => extension.path),
 				skillPaths: skills.map((skill) => skill.filePath),
+				// The two DATA kinds a manifest contributes (issue #189, OQ-019 (b)): loaded with no
+				// per-root visibility until now, and a package prompt template changes what a /name
+				// dispatches even when it shadows nothing.
+				promptPaths: resourceLoader.getPrompts().prompts.map((prompt) => prompt.filePath),
+				themePaths: resourceLoader.getThemes().themes.map((theme) => theme.filePath),
 			}),
 		});
 	}
@@ -232,6 +237,25 @@ async function main() {
 	// meter would eventually catch it; this closes the window before the first prompt instead of
 	// leaving the first call of an extension-provided model unmetered.
 	usageMeter.arm();
+
+	// The one packages count that cannot ride packages_loaded: a COMMAND exists only once the
+	// ExtensionRunner has executed the factories, which is here, after createAgentSession -- the
+	// loader knows extension paths, never what they registered. Names and roots only (operator-staged
+	// config, the packages_loaded discipline); a staged package whose factory registered nothing still
+	// reports [], which is how an operator learns their run.command has nothing to bind to before the
+	// first job of it refuses command-unregistered.
+	if (cfg.packages.length > 0) {
+		const registered = session.extensionRunner.getRegisteredCommands();
+		log("commands_registered", {
+			packages: cfg.packages.map((root) => ({
+				root,
+				commands: registered
+					.filter((command) => owningRoot(command.sourceInfo?.path, cfg.packages) === root)
+					.map((command) => command.name)
+					.sort(),
+			})),
+		});
+	}
 
 	// A command job dispatches BEFORE any spend, so verify the command is actually registered first
 	// (issue #189). pi's fallthrough is the hazard being closed: an unregistered "/name" is not an

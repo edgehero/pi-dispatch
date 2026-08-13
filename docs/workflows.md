@@ -209,6 +209,8 @@ skills, prompts and themes** at once.
 |---|---|---|
 | **extension order** | staged package extensions load **last**, after the repo's and the overlay's | first-path-wins, so nothing a package ships can shadow something you wrote |
 | **skill collisions** | the **repo's** skill wins a name collision against a package's | pi puts package skill paths first, so precedence is re-imposed after the load rather than merely asserted |
+| **prompt collisions** | the repo's `.pi/prompts` template wins against a package's, and the overlay's `prompts/` now loads at all | same inversion, same fix: what a `/name` template means stays reviewed content, which also matters because `run.command` dispatches by `/name` |
+| **counting** | the `packages_loaded` log line reports extensions, skills, prompts and themes per package, and `commands_registered` reports what each package actually registered | a package that contributed nothing is otherwise indistinguishable from one that worked |
 | **the recursion guard** | any extension named like the admin console, or registering a `dispatch_*` tool, is **dropped** and logged | a staged package must not be able to hand the agent the deployment's own control surface |
 | **the overlay is `:ro`** | a package that writes beside itself fails | the overlay is deploy-time config mounted into an adversarial-input container |
 | **secrets** | the overlay must hold none; `doctor` fails if it does | `:ro` is not confidentiality, and job input is untrusted |

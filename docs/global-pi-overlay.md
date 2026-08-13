@@ -73,6 +73,13 @@ refines but never removes the one above:
 | `extensions/` — by default; skip with `--no-extensions`, each one printed by name | the admin extension (hard-blocked) |
 | `packages/<dir>/` — only with `--with-packages`: what `pi-packages.json` declares **plus what you installed with `pi install`**, exact-pinned either way, staged from npm on **your host** | any package whose name looks like the dispatch admin (hard-blocked); a package a repo declares (never installed, see [`SECURITY.md`](../SECURITY.md)) |
 
+`prompts/` sits in the never-copied column for `import-pi`, but the RUNTIME channel exists (issue #189):
+a `prompts/` directory you place in the overlay by hand loads in every job as prompt templates, with the
+serviced repo's own `.pi/prompts` winning a name collision -- the same repo-beats-overlay rule skills
+follow, and it is enforced against staged packages too, so what a `/name` template means stays reviewed
+content. `import-pi` still refuses to copy your host prompts for you: OQ-019 records why the enablement
+mirror stops at extensions.
+
 The overlay is mounted **read-only** into a container that runs adversarial input, so it must hold **no
 secret**. `import-pi` refuses a `models.json` with a literal `apiKey`, and equally with a literal value
 under an auth-ish provider **header** (a header name carrying `auth`, `api-key`, `token`, `secret` or

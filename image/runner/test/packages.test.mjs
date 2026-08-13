@@ -171,11 +171,14 @@ test("countPackageResources attributes each loaded path to the root that shipped
 			"/job/pi/skills/bug-fix/SKILL.md",
 			`${PACKAGE_ROOT}/skills/pkg-skill/SKILL.md`,
 		],
+		// The two DATA kinds (issue #189, OQ-019 (b)) ride the same segment-boundary attribution.
+		promptPaths: ["/workspace/.pi/prompts/review.md", `${PACKAGE_ROOT}/prompts/review.md`],
+		themePaths: [`${OTHER_PACKAGE_ROOT}/themes/dark.json`],
 	});
 
 	assert.deepEqual(counts, [
-		{ root: PACKAGE_ROOT, extensions: 2, skills: 1 },
-		{ root: OTHER_PACKAGE_ROOT, extensions: 1, skills: 0 },
+		{ root: PACKAGE_ROOT, extensions: 2, skills: 1, prompts: 1, themes: 0 },
+		{ root: OTHER_PACKAGE_ROOT, extensions: 1, skills: 0, prompts: 0, themes: 1 },
 	]);
 });
 
@@ -189,7 +192,7 @@ test("a root that contributed nothing still reports 0 rather than vanishing", ()
 			extensionPaths: ["/job/pi/extensions/repo-ext.js"],
 			skillPaths: ["/opt/pi-global/skills/house-style/SKILL.md"],
 		}),
-		[{ root: PACKAGE_ROOT, extensions: 0, skills: 0 }],
+		[{ root: PACKAGE_ROOT, extensions: 0, skills: 0, prompts: 0, themes: 0 }],
 	);
 
 	assert.deepEqual(countPackageResources({}), []);

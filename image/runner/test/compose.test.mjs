@@ -143,3 +143,19 @@ test("run-job.mjs wires the command path: env-authoritative prompt, pre-spend ve
 	assert.match(src, /command: cfg\.command \? \{ failed: commandFailed \} : null/, "decideExit must receive the command outcome");
 	assert.match(src, /log\("command_dispatch", \{ command: name \}\)/, "the dispatch line carries the NAME only, never args");
 });
+
+test("run-job.mjs counts all four package resource kinds, and commands after the session exists", () => {
+	// Same source-guard tactic as above. Two facts: (1) packages_loaded feeds prompt and theme paths
+	// into countPackageResources -- the two DATA kinds loaded with no per-root visibility before
+	// issue #189 (OQ-019 (b)); (2) commands_registered fires AFTER createAgentSession, because a
+	// command exists only once the ExtensionRunner has executed the factories -- the loader knows
+	// extension paths, never what they registered.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /promptPaths: resourceLoader\.getPrompts\(\)/, "packages_loaded must count package prompts");
+	assert.match(src, /themePaths: resourceLoader\.getThemes\(\)/, "packages_loaded must count package themes");
+	assert.ok(
+		src.indexOf("createAgentSession") < src.indexOf('log("commands_registered"'),
+		"commands are countable only post-session",
+	);
+	assert.match(src, /getRegisteredCommands\(\)/, "the count must come from the runner's registry, not the manifest");
+});

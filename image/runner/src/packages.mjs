@@ -177,11 +177,19 @@ export function findShadowedSkills(diagnostics, { packageRoots = [], protectedRo
  * (an unbuilt extension, a manifest pointing at files that are not there) is otherwise
  * indistinguishable from one that worked, and the job runs without the tools its flow expects.
  */
-export function countPackageResources({ packageRoots = [], extensionPaths = [], skillPaths = [] } = {}) {
+export function countPackageResources({ packageRoots = [], extensionPaths = [], skillPaths = [], promptPaths = [], themePaths = [] } = {}) {
+	// Prompts and themes joined the counts with issue #189 (OQ-019 deferral (b)): a package manifest
+	// contributes all four kinds, and the two data kinds were loading with no per-root visibility at
+	// all -- a template that shadows nothing still changes what /name dispatches, so a package that
+	// shipped one deserves the same "contributed 0 or N" line the code kinds get. Extension COMMANDS
+	// are deliberately not counted here: they exist only once an ExtensionRunner has executed the
+	// factories, which is after createAgentSession -- run-job logs them separately (commands_registered).
 	return packageRoots.map((root) => ({
 		root,
 		extensions: extensionPaths.filter((path) => isUnderRoot(path, root)).length,
 		skills: skillPaths.filter((path) => isUnderRoot(path, root)).length,
+		prompts: promptPaths.filter((path) => isUnderRoot(path, root)).length,
+		themes: themePaths.filter((path) => isUnderRoot(path, root)).length,
 	}));
 }
 

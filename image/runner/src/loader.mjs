@@ -241,6 +241,11 @@ export function buildResourceLoader({
 	// which is exactly why it must not say the opposite of what a job does.
 	allowGlobalExtensions = true,
 	packagePaths = [],
+	// Map<name, PromptTemplate> of the PROTECTED prompt templates (repo, then overlay), pre-loaded by
+	// buildLoadedResourceLoader because the promptsOverride seam below is synchronous and a loader
+	// cannot reload() inside its own override. `null` -- every job without staged packages -- makes
+	// the override the identity function.
+	protectedPrompts = null,
 	settingsManager,
 	log = defaultLog,
 } = {}) {
@@ -252,6 +257,7 @@ export function buildResourceLoader({
 	const globalPersona = readIfExists(`${globalPiDir}/APPEND_SYSTEM.md`);
 	const globalSkills = `${globalPiDir}/skills`;
 	const globalExtensions = `${globalPiDir}/extensions`;
+	const globalPrompts = `${globalPiDir}/prompts`;
 	// Only a local job carries an /outbox mount; a github job has none, so its prompt never
 	// pays for the protocol. Evaluated ONCE here at loader build, not per message, so the
 	// assembled prompt is byte-identical across turns (CONST-PERSONA-IN-CACHED-PREFIX).
@@ -337,8 +343,102 @@ export function buildResourceLoader({
 				packageRoots: packagePaths,
 				protectedRoots: protectedSkillRoots,
 			}),
+		// The operator's overlay prompt templates (issue #189, OQ-019 deferral (b)): the overlay's
+		// skills and extensions already load, prompts were the kind with no channel at all. Gated like
+		// the overlay skills, and merged AFTER discovery, so the repo's own .pi/prompts still wins a
+		// first-path-wins name collision against the overlay -- the persona layers' most-specific-wins
+		// ordering, applied to the last resource kind that lacked it.
+		additionalPromptTemplatePaths: [...(existsSync(globalPrompts) ? [globalPrompts] : [])],
+		// "Repo wins on conflict" for PROMPT TEMPLATES, the same inversion skillsOverride closes for
+		// skills: pi merges package prompt paths FIRST and dedupePrompts is first-wins, so a staged
+		// package's /review template silently replaces the repo's. That is worse for prompts than for
+		// skills in one specific way: a run.command job's pre-dispatch getCommand() check forecloses an
+		// unregistered command falling through to a same-named TEMPLATE, but a template that shadows a
+		// PROTECTED one is invisible to that check -- this override is the second half of that hazard's
+		// closure (DES-COMMAND-ENTRY-POINT).
+		promptsOverride: (loaded) =>
+			enforceProtectedPromptPrecedence(loaded, {
+				packageRoots: packagePaths,
+				protectedPrompts,
+			}),
 		appendSystemPromptOverride: () => [guardrails, outboxProtocol, globalPersona, projectPersona].filter(Boolean),
 	});
+}
+
+/**
+ * REQ-GLOBAL-PI-OVERLAY's "repo wins on conflict", for prompt templates. The shape is
+ * enforceProtectedSkillPrecedence's; the substitute source differs by necessity: pi exports
+ * loadSkillsFromDir but no per-dir prompt loader (the exports map is closed, so the dist module is
+ * unreachable), which is why the protected set arrives PRE-LOADED as a Map -- read by pi's own
+ * loader machinery in loadProtectedPrompts, never by a second hand-rolled parser of a format we do
+ * not own.
+ *
+ * pi's collision diagnostics from the raw load are left exactly as written; the substitution appends
+ * its own, so both stages are on the record. A job with no packages, or one whose protected roots
+ * held no prompts, passes through untouched.
+ */
+export function enforceProtectedPromptPrecedence(base, { packageRoots = [], protectedPrompts = null } = {}) {
+	const prompts = base?.prompts ?? [];
+	const diagnostics = base?.diagnostics ?? [];
+	if (!protectedPrompts || protectedPrompts.size === 0 || packageRoots.length === 0) return { prompts, diagnostics };
+
+	const enforced = [];
+	const resolved = prompts.map((prompt) => {
+		if (!isUnderAnyRoot(prompt.filePath, packageRoots)) return prompt;
+		const winner = protectedPrompts.get(prompt.name);
+		if (!winner || winner.filePath === prompt.filePath) return prompt;
+		enforced.push({
+			type: "collision",
+			message: `name "/${prompt.name}" collision -- protected root wins (REQ-GLOBAL-PI-OVERLAY)`,
+			path: prompt.filePath,
+			collision: {
+				resourceType: "prompt",
+				name: prompt.name,
+				winnerPath: winner.filePath,
+				loserPath: prompt.filePath,
+			},
+		});
+		return winner;
+	});
+
+	return { prompts: resolved, diagnostics: [...diagnostics, ...enforced] };
+}
+
+/**
+ * Load the PROTECTED prompt templates (the repo's .pi/prompts, then the overlay's prompts/) through a
+ * second, minimal DefaultResourceLoader: everything off except explicit prompt paths. This is pi's own
+ * reader reached through its public surface -- the only alternative was a hand-rolled parser of the
+ * template format, which is how two readers drift (the enforceProtectedSkillPrecedence docstring's
+ * argument, hit harder here because no per-dir prompt loader is exported at the pin).
+ *
+ * Returns null -- enforcement off -- when the job stages no packages (the overwhelmingly common path
+ * pays nothing) or when no protected root exists on disk. Root order is precedence: the Map keeps the
+ * FIRST of each name, so a repo template beats an overlay template before a package is ever consulted.
+ */
+export async function loadProtectedPrompts({ cwd = WORKSPACE, globalPiDir = GLOBAL_PI_DIR, packagePaths = [], settingsManager } = {}) {
+	if (packagePaths.length === 0) return null;
+	const roots = [`${cwd}/.pi/prompts`, `${globalPiDir}/prompts`].filter((dir) => existsSync(dir));
+	if (roots.length === 0) return null;
+
+	const mini = new DefaultResourceLoader({
+		cwd,
+		agentDir: getAgentDir(),
+		settingsManager,
+		noContextFiles: true,
+		noExtensions: true,
+		noSkills: true,
+		// Suppresses DISCOVERY only; the explicit paths below still load (the same contract the main
+		// loader leans on for skills, pinned by the loader tests).
+		noPromptTemplates: true,
+		additionalPromptTemplatePaths: roots,
+	});
+	await mini.reload();
+
+	const byName = new Map();
+	for (const prompt of mini.getPrompts().prompts) {
+		if (!byName.has(prompt.name)) byName.set(prompt.name, prompt);
+	}
+	return byName;
 }
 
 /**
@@ -354,7 +454,11 @@ export function buildResourceLoader({
  * reload() has no early return: it re-runs the entire load every call. Call it once.
  */
 export async function buildLoadedResourceLoader(options = {}) {
-	const loader = buildResourceLoader(options);
+	// The protected prompt set must exist before the loader does: promptsOverride is a synchronous
+	// seam, and a loader cannot reload() a second loader from inside its own reload. Null on the
+	// package-less path, so the common job builds exactly one loader as before.
+	const protectedPrompts = options.protectedPrompts ?? (await loadProtectedPrompts(options));
+	const loader = buildResourceLoader({ ...options, protectedPrompts });
 	await loader.reload();
 	return loader;
 }
