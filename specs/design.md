@@ -1286,6 +1286,41 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-NO-CONTEXT-FILES-MANDATORY`,
   `CONST-BUDGET-BEFORE-TOKENS`, `DES-ADMIN-VIA-PI-EXTENSION`
 
+## DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS
+
+- **Decision** (issue #189): whether a trigger's `run.flow` actually resolves to a skill is verified at two
+  **advisory** layers, and refused at neither. The **runner** is the exact layer: the worker forwards the
+  flow name structurally (`PI_FLOW`, `INT-CONTAINER-JOB-INPUTS`), and after the resource loader builds —
+  before any session or spend — the runner compares it against the **loaded** skill names and emits one
+  `flow_not_loaded` line on a miss (`isFlowLoaded`, exact name equality; a `disableModelInvocation` skill
+  counts, it is invocable even though uncatalogued). **Doctor** is the approximate host-side layer, probing
+  the tier directories per trigger (its own DES half lands with the doctor change). The job itself proceeds.
+- **Why**: the flow reaches the model only as prompt prose (`Use the "X" skill`), and pi never matches
+  prose against loaded skill names — so a flow that materialised in no tier ran to a clean exit 0 without
+  the procedure it was written for, reporting success for work it could not have done. That is this
+  project's branded worst outcome ("a silent no-op"), already refused pre-spend for its sibling
+  (an unmounted package root, `assertPackagePathsExist`). The runner layer is exact where every host-side
+  answer is an approximation: pi names a skill `frontmatter.name || parentDirName` at the pin, so only the
+  loaded set is authoritative — which is also why the check needs `PI_FLOW` rather than re-deriving
+  anything, and why `getSkills()` is read unconditionally rather than only for packaged jobs.
+- **Why report rather than refuse, deliberately**: `run.flow` is by long doctrine a prompt *hint*
+  (`prepare.mjs`), and deployments legitimately run flows as loose hints over repos with no `.pi/skills` —
+  the runner cannot distinguish that steady state from breakage, and a refusal shipped in an image
+  upgrade would fail yesterday's jobs for a value the reviewed file has carried all along (it would also
+  burn the reserved budget slot per refusal, paying for zero work on every delivery of a misconfigured
+  trigger). The check sits at the pre-spend moment anyway, so flipping report to refusal is a one-line
+  change plus a row here. The residual is stated: an advisory line at 03:00 helps only an operator who
+  reads logs; doctor's per-trigger lines are the layer that reaches them earlier.
+- **Rejected**: failing worker/receiver **boot** on an unresolved flow (`parseTriggers` is pure and
+  fs-free by `DES-TRIGGERS-UNIFIED-FILE`, the receiver may run on a host with no repo, and overlay and
+  package tiers make "absent at HEAD" a legal steady state); carrying the flow in `event.json` (an
+  execution knob is not a fact about the delivery — `run.replicas` precedent); a new top-level outcome
+  for the miss (admin surfaces bucket outcomes into a closed set and silently drop unknowns, so new
+  vocabulary must ride a `reason`, and an advisory line needs neither).
+- **Traces to**: `INT-CONTAINER-JOB-INPUTS`, `REQ-PER-TRIGGER-SKILLS`, `REQ-GLOBAL-PI-OVERLAY`,
+  `DES-AI-TRIGGER-FLOW-GATE` (a WHAT-exists question, deliberately distinct from its WHO-may-fire gate),
+  `CONST-BUDGET-BEFORE-TOKENS`
+
 ## DES-JOB-OUTBOX-CHAINING
 
 - **Decision**: An agent inside a local job requests follow-up flows by writing `request-<n>.json` to a
@@ -1945,6 +1980,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #189 (Gap 1, runner half). **NEW `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`**: flow resolution is verified at two advisory layers and refused at neither — the runner compares `PI_FLOW` against the LOADED skill names post-load, pre-session, pre-spend (`isFlowLoaded`, exact equality, `disableModelInvocation` counts) and reports a miss as one `flow_not_loaded` line; doctor is the approximate host-side layer, landing with the companion change. Records why report-not-refuse (flow is by doctrine a prompt hint; a refusal shipped in an image upgrade fails yesterday's jobs and burns a budget slot per delivery), why the runner layer is the exact one (pi names a skill `frontmatter.name \|\| parentDirName` at the pin, so only the loaded set is authoritative), and the rejected alternatives (boot-time failure — `parseTriggers` stays pure and absent-at-HEAD is a legal steady state; `event.json` carriage — execution knob, not a delivery fact; a new top-level outcome — admin surfaces drop unknown outcomes, new vocabulary rides a `reason`). **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** — the gate answers WHO may fire a flow and keeps its pinned-sha object-store read; the new entry answers whether the flow EXISTS in the box, and neither consults the other. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains nothing; the flow travels as job data the queue already carried. |
 | 2026-08-12 | Issue #181 (the budget lever and the trend lines). **DES-COST-FOLD-BY-SCAN AMENDED**: the fold gains `dailyByFlow` — the composite (day, flow) fold at the same loop `buildDaily` and `buildByFlow` already walk separately, gap-padded per flow over the SHARED span (small multiples are only comparable on one x-domain) with the machine-key/display-label split held (`flowLabelOf` extracted so the two flow folds cannot drift on what a flow is called). The series shares `daily`'s first-run origin for the same sparkline-density reason recorded on the `sinceMs` row. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked** — `readBudget`'s GET-only posture now covers the token counter too, and the new junk-URL parse guard degrades synchronously (the `readSchedulers` failFast posture; without it a canned "not-a-url" fixture burns the full timeout per test). **DES-ADMIN-VIA-PI-EXTENSION UNCHANGED, checked** (the dashboard's budget meters and `/dispatch budget` are untouched; the page ADDS a display, replaces nothing — the "no replacement on that" ruling). |
 | 2026-08-12 | Issue #181 (insights becomes the ONE analytics surface). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: six in-component views become FOUR — the COSTS and GRAPH views leave the overlay for the insights artifact, taking their two per-view refresh policies with them (the stale-gated tick piggyback and the entry-plus-`r`-only posture existed for those fetch paths; the overlay is back to one snapshot poll plus the tail read); the slash-command list drops `costs` and `graph` for `insights`; the graph-html paragraph re-homes onto the bare `insights` command; the LIST footer's `c costs`/`g graph` pair becomes `i insights` (51+18=69 of 76 columns, the arithmetic comment re-run), and the `i` key resolves the overlay with a done-action so index.ts writes and opens the page between overlays — the addTrigger route, deliberately not a dep seam and not a TUI suspend bracket, and deliberately BEFORE the dialog guard (the action needs no dialogs, and an older pi without them must still reach the one analytics surface). `DES-QUEUE-BULLMQ-OVER-CUSTOM`'s parenthetical names the insights artifact now. The dashboard's fs ban is UNCHANGED, checked, and dashboard.ts drops its pricing/costs/graph-model imports entirely. **DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (the fold and its joins are what the page is made of; nothing about them moved). **DES-GRAPH-EDGE-DERIVATION UNCHANGED, checked** (the edge rules' one home; the model gained no vocabulary). |
 | 2026-08-12 | Issue #175 (the insights artifact, the fourth slice). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: `insights html` joins the slash-command list (bare `insights` answers usage — the artifact IS the feature), completion covers `insights html <window>`, and the artifact lands beside `graph.html` under the one `graphDir` (a second directory would churn resolvePaths and the wizard for zero capability). The no-port property (:913) and the served-page rejection (the #54 row) are not reopened: this is a second `file://` artifact, same socket-to-file substitution. The factoring facts are load-bearing and recorded here: `graph-html.mjs` may be a source of exports for a sibling pure emitter, it may never load one itself — its purity pin is substring-level and directional, which is exactly what makes the reuse safe — so `buildGraphScene` (the normalize+layout+SVG-emission half of `buildGraphHtml`, a behavior-preserving extraction) is what `insights-html.mjs` composes, and the money strings come from the REAL `panel.mjs` formatter (zero own module loads there), not a hand-copied twin. Rejected: a shared third emitter module (impossible under the substring ban without weakening it); duplicating the layout/escaping (an escapeHtml drift between two artifacts is an XSS waiting); folding costs into `graph.html` in place (an operator sharing topology should not be forced to share spend); a charting library (the file:// posture forbids external requests, and hand-rolled rectangles need no supply chain). **DES-GRAPH-EDGE-DERIVATION UNCHANGED, checked. DES-COST-FOLD-BY-SCAN UNCHANGED, checked** (the artifact consumes the fold; the fold learned nothing new). |

@@ -307,6 +307,19 @@ test("PI_SESSION_FILE is emitted only when the job has a transcript, and never a
 	assert.equal(buildContainerEnv({ ...args, sessionFile: "/session/current.jsonl" }).PI_SESSION_FILE, "/session/current.jsonl");
 });
 
+test("PI_FLOW is emitted only when the job carries a flow, and never as an empty string", { skip }, async () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	// Absent means "no flow to verify" (a bare run.task cron job) and the variable is omitted
+	// entirely rather than emitted empty, for PI_PACKAGES' reason: an empty value is a third state
+	// the two sides of the mount need not agree on. Same shape as PI_SESSION_FILE above.
+	for (const flow of [undefined, null, ""]) {
+		assert.equal(buildContainerEnv({ ...args, flow }).PI_FLOW, undefined, `flow ${JSON.stringify(flow)} must not become a value`);
+	}
+	// Verbatim, no charset opinion on this side either: parseTriggers already validated the reviewed
+	// file, and the runner's comparison is what gives the value meaning.
+	assert.equal(buildContainerEnv({ ...args, flow: "review" }).PI_FLOW, "review");
+});
+
 test("a job kind with no table entry refuses, rather than inheriting the github token names", { skip }, () => {
 	// This was an `if gitlab / else github`, and the `else` was the hazard: any kind the table did not name
 	// -- a forge wired up everywhere but here, a typo that survived validation -- got its credential

@@ -209,3 +209,17 @@ test("PI_SESSION_FILE refuses a relative path, a .. segment, and anything under 
 	// A path merely NAMED like the workspace is fine -- the check is on the path boundary, not a prefix.
 	assert.equal(parseRunnerEnv({ ...base, PI_SESSION_FILE: "/workspace-sessions/s.jsonl" }).sessionFile, "/workspace-sessions/s.jsonl");
 });
+
+test("PI_FLOW is optional: unset or empty is null, so a flowless job is byte-identical to today", () => {
+	assert.equal(parseRunnerEnv(base).flow, null);
+	assert.equal(parseRunnerEnv({ ...base, PI_FLOW: "" }).flow, null);
+});
+
+test("PI_FLOW parses to the exact string, with no charset opinion", () => {
+	assert.equal(parseRunnerEnv({ ...base, PI_FLOW: "review" }).flow, "review");
+	// Deliberately accepted: the value is only compared against loaded skill names and logged, never
+	// interpolated into a path or a shell word, and refusing a shape the worker's own validator
+	// accepted (parseTriggers pins non-empty string, nothing narrower) would start failing
+	// yesterday's jobs on an image upgrade. The comparison simply misses, and the miss is the report.
+	assert.equal(parseRunnerEnv({ ...base, PI_FLOW: "Not A Skill Name" }).flow, "Not A Skill Name");
+});

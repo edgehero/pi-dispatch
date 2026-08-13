@@ -74,6 +74,9 @@ export function makeRunContainer({
 			// The constant is imported rather than re-typed so the mount below and this variable name one
 			// path -- two literals is how they drift with both suites green.
 			sessionFile: prepared.session ? CONTAINER_SESSION_FILE : undefined,
+			// Issue #189: the flow name, structurally, so the runner can verify it against the loaded
+			// skill set. Off `job` like maxTurns; absent (a bare run.task cron job) emits no variable.
+			flow: typeof job.flow === "string" && job.flow.trim() !== "" ? job.flow : undefined,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 		});
 

@@ -193,6 +193,15 @@ test("packages: true with NOTHING staged still yields no PI_PACKAGES (the opt-in
 	assert.ok(!args.some((a) => String(a).startsWith("PI_PACKAGES")), "an empty staged set omits the variable, never PI_PACKAGES=");
 });
 
+test("the trigger's flow reaches the container env, and a flowless job emits no PI_FLOW", { skip }, async () => {
+	// Issue #189: run.flow rides env, not event.json (an execution knob is not a fact about the
+	// delivery), so the runner can compare it against the skill set that actually loaded.
+	const withFlow = await argvFor({ ...JOB, flow: "review" });
+	assert.ok(withFlow.includes("PI_FLOW=review"), "run.flow must reach the runner structurally");
+	const without = await argvFor(JOB);
+	assert.ok(!without.some((a) => String(a).startsWith("PI_FLOW")), "a bare run.task job emits no PI_FLOW at all");
+});
+
 test("overlay extensions: the factory default emits nothing, and only an explicit false emits the opt-out", { skip }, async () => {
 	const on = await argvFor(JOB);
 	assert.ok(!on.some((a) => String(a).startsWith("PI_GLOBAL_ALLOW_EXTENSIONS")), "loading is the absence of the variable, on both sides");

@@ -33,6 +33,10 @@ export function parseRunnerEnv(env) {
 		// path under the per-job /session mount. `null` when the trigger did not arm run.resume, which is
 		// the default and is byte-identical to every job before the feature existed.
 		sessionFile: parseSessionFile(env, "PI_SESSION_FILE"),
+		// INT-CONTAINER-JOB-INPUTS (issue #189): the trigger's run.flow, structurally, so run-job can
+		// compare it against the loaded skill names. `null` when the job carries no flow (a bare
+		// run.task cron job), which skips the check entirely.
+		flow: parseFlowName(env, "PI_FLOW"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -130,6 +134,25 @@ function parsePackagePaths(env, name) {
 		paths.push(entry);
 	}
 	return paths;
+}
+
+/**
+ * Parse the flow name the worker forwarded (issue #189). Unset or empty is `null` -- a job whose
+ * trigger names no flow has nothing to verify, and that is the normal state for a bare run.task
+ * cron job, not a misconfiguration.
+ *
+ * Deliberately NO charset validation here, unlike every sibling parser above. The value is used for
+ * exactly two things -- name-equality against pi's loaded skill set and one log field -- and is
+ * never interpolated into a path or a shell word, so a strange name cannot escape anything. Refusing
+ * a shape the worker's own validator accepted (parseTriggers pins run.flow to a non-empty string,
+ * nothing narrower) would mean an image upgrade starts failing jobs that ran yesterday, for a value
+ * the operator's reviewed file has carried all along. The comparison simply misses and the miss is
+ * reported, which is this variable's whole purpose.
+ */
+function parseFlowName(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return null;
+	return raw;
 }
 
 /**

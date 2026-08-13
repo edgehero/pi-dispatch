@@ -6,6 +6,7 @@ import {
 	countPackageResources,
 	extensionEntryName,
 	findShadowedSkills,
+	isFlowLoaded,
 	isUnderAnyRoot,
 	owningRoot,
 	partitionAdminExtensions,
@@ -312,4 +313,36 @@ test("nothing admin-like means nothing dropped, and no input shape throws", () =
 	assert.equal(adminExtensionReason(undefined), null);
 	// Tools may arrive as plain names too -- the decision must not depend on pi's container type.
 	assert.equal(adminExtensionReason({ path: WORKSPACE_EXT, tools: ["dispatch_run"] }), "admin-tools");
+});
+
+// --- isFlowLoaded (issue #189): the flow-resolves-somewhere check, against the LOADED set ---
+
+test("a flow that names a loaded skill is loaded, and a near-miss is not", () => {
+	const skills = [{ name: "review", filePath: "/job/pi/skills/review/SKILL.md" }, { name: "deploy" }];
+	assert.equal(isFlowLoaded("review", skills), true);
+	// Exact equality, no normalisation: pi's own catalogue is exact-name, so a check that fuzzed
+	// ("revieww", case folds) would report loaded for a skill pi will never surface.
+	assert.equal(isFlowLoaded("revieww", skills), false);
+	assert.equal(isFlowLoaded("Review", skills), false);
+});
+
+test("no flow means nothing to verify: null, undefined and empty all pass without a report", () => {
+	// A bare run.task cron job carries no flow. That is the normal state, not a miss -- reporting it
+	// would teach operators to ignore the line that matters.
+	for (const flow of [null, undefined, ""]) {
+		assert.equal(isFlowLoaded(flow, []), true, `flow ${JSON.stringify(flow)} must not report`);
+	}
+});
+
+test("a disableModelInvocation skill still counts as loaded", () => {
+	// It is absent from the system-prompt catalogue but present in the session (invocable as
+	// /skill:name), so the flow it names is not the silent no-op this check exists to catch.
+	assert.equal(isFlowLoaded("quiet", [{ name: "quiet", disableModelInvocation: true }]), true);
+});
+
+test("malformed skill entries and an absent list are skipped, never a crash", () => {
+	// This runs inside every job; a diagnostic input must not take the job down with it.
+	assert.equal(isFlowLoaded("review", [null, {}, { filePath: "/x" }]), false);
+	assert.equal(isFlowLoaded("review", undefined), false);
+	assert.equal(isFlowLoaded("review", []), false);
 });

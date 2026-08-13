@@ -110,7 +110,7 @@ function resolveEnvName(provider, cred) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, authFromPi = false, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, authFromPi = false, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a pre-spend refusal.
@@ -146,6 +146,14 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 		// an empty string, for PI_PACKAGES' reason: an empty value is a third state neither side reads the
 		// same way, and the one reading a container must not have to infer which was meant.
 		PI_SESSION_FILE: sessionFile || undefined,
+		// The trigger's run.flow, STRUCTURALLY (issue #189). The flow already reaches the container as
+		// prompt prose ("Use the X skill"), but pi never matches prose against loaded skill names, so a
+		// flow that resolves in no tier runs to a clean exit 0 -- the silent no-op this repo brands the
+		// worst outcome available. This variable is what lets the runner compare the name against what
+		// actually loaded. It rides env and NOT event.json because an execution knob is not a fact about
+		// the delivery (see prepare-github.mjs on replicas). Absent means "no flow to verify" (a bare
+		// run.task cron job), never an empty string, for PI_PACKAGES' reason.
+		PI_FLOW: flow || undefined,
 		// Kill switch for job-time package installation, UNCONDITIONAL for every job. pi's resolver shells out
 		// to a REAL `npm install` for any npm:/git: source unless offline mode is on, and `~/.pi/agent` IS
 		// writable in the container. We emit only local paths, so nothing should reach that branch -- this

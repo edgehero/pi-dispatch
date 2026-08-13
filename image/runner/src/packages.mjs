@@ -186,6 +186,26 @@ export function countPackageResources({ packageRoots = [], extensionPaths = [], 
 }
 
 /**
+ * Does the trigger's flow name any skill pi actually loaded? (Issue #189.)
+ *
+ * Exact name equality against the LOADED set, which makes this the one check in the system that is
+ * not an approximation: doctor probes tier directories host-side and a dir name can lie (pi names a
+ * skill `frontmatter.name || parentDirName` at the 0.80.7 pin, skills.js:221), but here the names
+ * come off the skills the loader materialised for THIS job, after every tier and override.
+ *
+ * A `disableModelInvocation` skill still counts as loaded -- it is absent from the system-prompt
+ * catalogue but present in the session, invocable as /skill:name, so the flow it names is not the
+ * silent no-op this check exists to catch.
+ *
+ * `flow` null/empty returns true: no flow, nothing to verify, no line. Malformed skill entries
+ * (no `name`) are skipped rather than crashing a job over a diagnostic input.
+ */
+export function isFlowLoaded(flow, skills) {
+	if (flow === null || flow === undefined || flow === "") return true;
+	return (skills ?? []).some((skill) => skill?.name === flow);
+}
+
+/**
  * Containment by path SEGMENT, not by string prefix -- `/opt/pi-global/packages/tool` must not
  * claim a path under `/opt/pi-global/packages/tools`. Trailing slashes on a root are tolerated
  * because an operator-supplied PI_PACKAGES entry may carry one.

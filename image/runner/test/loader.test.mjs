@@ -743,6 +743,30 @@ test("a staged skill whose name collides with nothing is left completely alone",
 	assert.equal(skill.filePath, join(pkg, "skills", "pkg-skill", "SKILL.md"));
 });
 
+test("pi names a skill frontmatter `name` || its parent dir -- the premise the flow check compares against", { skip }, async () => {
+	// isFlowLoaded (issue #189) does exact equality against these loaded names, and doctor's
+	// host-side tier probes approximate them by DIR name. This pins the naming rule at the pin
+	// (loadSkill: frontmatter.name || basename(dirname)), so a pi bump that changes it fails here
+	// rather than silently turning the runner's check, or doctor's ✓, into a lie.
+	const f = fixture();
+	// No `name:` in frontmatter -> the parent DIR is the name.
+	mkdirSync(join(f.jobPi, "skills", "dir-named"), { recursive: true });
+	writeFileSync(join(f.jobPi, "skills", "dir-named", "SKILL.md"), "---\ndescription: named by its dir\n---\n\nSteps.\n");
+	// Frontmatter `name:` wins over the dir -- the rename case a dir-name probe cannot see.
+	mkdirSync(join(f.jobPi, "skills", "some-dir"), { recursive: true });
+	writeFileSync(join(f.jobPi, "skills", "some-dir", "SKILL.md"), "---\nname: renamed\ndescription: named by frontmatter\n---\n\nSteps.\n");
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+	});
+	const names = loader.getSkills().skills.map((s) => s.name);
+	assert.ok(names.includes("dir-named"), `no frontmatter name -> the dir names the skill; got ${JSON.stringify(names)}`);
+	assert.ok(names.includes("renamed"), "a frontmatter name must win over the dir name");
+	assert.ok(!names.includes("some-dir"), "the renamed skill's dir must NOT also be a loaded name");
+});
+
 // --- enforceProtectedSkillPrecedence, decided on injected input (no skills tree, no collisions) ---
 
 /** A Skill-shaped record; only name and filePath are load-bearing for the precedence decision. */

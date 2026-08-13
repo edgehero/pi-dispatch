@@ -15,7 +15,7 @@ import {
 	decideExit,
 	EXIT_INFRA,
 } from "./src/outcome.mjs";
-import { countPackageResources, findShadowedSkills, owningRoot } from "./src/packages.mjs";
+import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
@@ -107,9 +107,28 @@ async function main() {
 		log,
 	});
 
-	if (cfg.packages.length > 0) {
-		const { skills, diagnostics } = resourceLoader.getSkills();
+	// Read ONCE, unconditionally: the flow check below needs the loaded set whether or not packages
+	// are staged, and the packages diagnostics block reuses the same bindings.
+	const { skills, diagnostics } = resourceLoader.getSkills();
 
+	// REPORT a flow that resolved in NO tier (issue #189). The trigger's run.flow reaches the model
+	// as prompt prose, and pi never matches prose against loaded skill names, so without this line a
+	// flow that materialised nowhere -- repo, injected, overlay or staged package -- runs to a clean
+	// exit 0 without the procedure it was written for and reports success for work it could not have
+	// done. That is the exact outcome assertPackagePathsExist refuses for an unmounted package root,
+	// and the deliberate difference is that this one only REPORTS: run.flow is by long doctrine a
+	// prompt hint (prepare.mjs), deployments legitimately run flows as loose hints over repos with no
+	// .pi/skills, and the runner cannot tell that steady state from breakage. Refusing would break
+	// them on an image upgrade for a value their reviewed file has carried all along. The line sits
+	// at the pre-spend moment anyway, so flipping report to refusal is a one-line change here plus a
+	// spec row (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS records the choice). Doctor's host-side tier
+	// lines are the other advisory layer; this one is exact because it reads what actually loaded.
+	// Flow name, never task content: run.flow is operator config out of the reviewed triggers file.
+	if (!isFlowLoaded(cfg.flow, skills)) {
+		log("flow_not_loaded", { flow: cfg.flow, skills: skills.length });
+	}
+
+	if (cfg.packages.length > 0) {
 		// REPORT a staged package skill that TRIED to shadow a repo or operator-overlay skill.
 		//
 		// pi builds skillPaths as mergePaths(cliEnabledSkills, additionalSkillPaths) -- package paths

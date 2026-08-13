@@ -98,3 +98,24 @@ test("run-job.mjs staples `usage` onto the success-path exit line -- worker pars
 	// The catch-path exit line legitimately omits `usage` for the same reason it omits turns: no meter
 	// exists when a preflight throw kills the run before any session started.
 });
+
+test("run-job.mjs verifies the flow against the LOADED skill set, unconditionally and pre-spend", () => {
+	// Same source-guard tactic as the turns/usage pins above (main() self-runs on import, log is
+	// unexported). Three orderings pinned, each of which failed silently before issue #189:
+	// (1) getSkills() sits OUTSIDE the packages guard -- inside it, the flow check would only run for
+	//     jobs with staged packages, which is exactly the blindness being closed;
+	// (2) the flow_not_loaded line exists and carries the flow -- a flow that resolves in no tier
+	//     must leave a named, greppable trace, so "a silent exit 0 for this case" is a failing test;
+	// (3) the check sits before openSessionManager -- the pre-spend moment, so flipping report to
+	//     refusal (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS) stays a one-line change at this site.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.ok(
+		src.indexOf("resourceLoader.getSkills()") < src.indexOf("if (cfg.packages.length"),
+		"getSkills() must be read before (outside) the packages guard",
+	);
+	assert.match(src, /log\("flow_not_loaded",\s*\{[^}]*flow:/, "the miss must leave a named line carrying the flow");
+	assert.ok(
+		src.indexOf('log("flow_not_loaded"') < src.indexOf("openSessionManager("),
+		"the flow check must sit at the pre-spend moment",
+	);
+});
