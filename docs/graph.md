@@ -79,7 +79,8 @@ count under `runs unattributed`, and never land on whatever entry now occupies t
 
 | badge | meaning |
 |---|---|
-| `[no-skill: flow absent at HEAD]` | the trigger names a flow that does not exist in the folder's committed `.pi/skills/` |
+| `[no-skill]`, red dashed | the flow is absent in **every tier the session could check** — the folder's committed `.pi/skills/` at HEAD, the trigger's own `run.skillsDir`, the overlay `skills/`, the staged packages — and the detail names the tiers checked |
+| `[not at HEAD]`, amber dashed | absent at HEAD, but at least one tier was **not checkable from this session** (no `PI_GLOBAL_PI_DIR` in this session's env, an unreadable listing, a pattern-manifest package); the tip names what went unchecked |
 | `[invalid flow name: can never materialise]` | the flow name fails the skill charset; no commit can ever satisfy it |
 | `[chainable]` | the skill's `SKILL.md` carries `ai-trigger: allow` at HEAD |
 | `[AI-reachable, no trigger]` | no trigger names it, but chaining and `dispatch_run` can reach it; not an orphan |
@@ -88,14 +89,34 @@ count under `runs unattributed`, and never land on whatever entry now occupies t
 | `[SKILL.md unread]` | the enumeration could not read it; the gate is reported closed, not guessed |
 | `[spend-loop risk]` | a `pull_request` trigger on `opened`/`synchronize`: a flow that pushes can loop with another bot (`OQ-020`) |
 | injected skills section | `run.skillsDir` skills are trigger-reachable and never AI-reachable; an injected `ai-trigger: allow` is a silent no-op and says so (`OQ-022`) |
+| overlay / staged package sections | the deployment overlay's `skills/` and each staged package's skills, when the session can see `PI_GLOBAL_PI_DIR`; same trigger-reachable, never-AI-reachable truth as injected |
+
+## Where a flow resolves
+
+`run.flow` is resolved by the container's loader across four tiers — the serviced repo's committed
+`.pi/skills` at HEAD, the trigger's injected `run.skillsDir`, the overlay `skills/`, the staged
+packages, in that precedence order — and the graph resolves each config edge the same way, per
+trigger. A flow living below the repo lands its edge on the tier node that holds it (no flag; the
+flow runs fine), which is why an injected-only or overlay-only flow no longer renders as a red
+missing node. A tier node is claimed only when every tier above it was checked and missed: an edge
+asserts *which file the job loads*, and where a higher tier is unknowable the claim softens to
+`[not at HEAD]` instead of guessing. `doctor` answers the same question more deeply, per trigger and
+per tier, on the worker host; the runner's `flow_not_loaded` log line is the exact in-container
+answer both surfaces approximate.
 
 ## Honesty at the edges of the data
 
-The enumeration reads the git **object store at HEAD**, the same read the worker trusts, never the
-working tree. A folder that cannot be read renders `unverified` and produces **no** dangling flags: a
-read that never happened proves nothing. Forge repos are not on the admin host at all, so their flows
-render under `skills unverifiable from the admin host`. Every cap and truncation states itself: a
-folder scan stopped at its cap says the unlisted folders are unscanned, not empty.
+The repo enumeration reads the git **object store at HEAD**, the same read the worker trusts, never
+the working tree; the injected, overlay and staged tiers are host-side directory reads, labelled by
+their sections. A folder that cannot be read renders `unverified` and produces **no** dangling flags:
+a read that never happened proves nothing — the same rule that softens a dangling claim to
+`[not at HEAD]` when a tier is unreadable, truncated, or simply not visible from the session
+(a wizard-launched console has no `PI_GLOBAL_PI_DIR`; export it to the session if you want the graph
+to see the overlay and staged tiers). Forge repos are not on the admin host at all, so their flows
+render under `skills unverifiable from the admin host` even when an overlay or staged skill shares
+the name: the remote repo outranks every tier this host can read. Every cap and truncation states
+itself: a folder scan stopped at its cap says the unlisted folders are unscanned, not empty, an
+unreadable overlay or a pattern-manifest package banners in the legend.
 
 The display is advisory. The chain gate's truth is read at each run's own pinned commit, before the
 agent runs; the graph shows what the *next* run would see.

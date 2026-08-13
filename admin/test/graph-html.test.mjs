@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphHtml, layoutGraph, GRAPH_HTML_KINDS } from "../src/graph-html.mjs";
-import { buildGraphModel, GRAPH_EDGE_KINDS } from "../src/graph-model.mjs";
+import { buildGraphHtml, layoutGraph, GRAPH_HTML_KINDS, GLYPH } from "../src/graph-html.mjs";
+import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
 
 const NOW = 1770000000000;
 
@@ -34,6 +34,11 @@ const CANNED = () => ({
     },
   },
   injectedSkills: { "/inj": { skills: [{ name: "tidy", aiTrigger: true }], truncated: false, unreachable: null } },
+  // Known-empty tier reads (issue #188), mirroring graph-model.test.mjs: a session that can see the
+  // global pi dir and finds both tiers empty keeps `deleted-flow` a KNOWN miss, so the red dangling
+  // pins below stay meaningful. Absent keys would soften it to the amber not-at-head state.
+  overlaySkills: { skills: [], truncated: false, unreachable: null },
+  stagedSkills: { skills: [], unenumerable: [], truncated: false },
   forgeRepos: { github: ["acme/website", "acme/api"] },
   cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" }, gone: { runs: 0, lastOutcome: null, lastEndedAt: null } } },
   runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
@@ -391,6 +396,111 @@ test("the page script letterbox-maps the cursor, survives a pan without wiping s
   assert.equal((script.match(/GRAPH\.nodes\[/g) ?? []).length, 1, "exactly one raw indexed read of GRAPH.nodes: the one inside the guard");
 
   new Function(script); // parse check: a syntax break in the emitted script goes red here, not in a browser
+});
+
+// ---- 10c. tier rendering (issue #188) ----
+
+// A tier-bearing deployment: the CANNED base plus one trigger resolving in each non-repo tier, and
+// the tier reads that let them resolve.
+const TIERED = () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = { skills: [{ name: "global-flow" }], truncated: false, unreachable: null };
+  inputs.stagedSkills = { skills: [{ name: "pkg-flow", package: "@acme/wf", dir: "wf" }], unenumerable: [], truncated: false };
+  inputs.triggers.triggers.push(
+    { type: "cron", index: 3, id: "inj", pattern: "0 7 * * *", folder: "/srv/site", flow: "tidy", model: null, packages: true, image: null, skillsDir: "/inj", instructions: false, resume: false },
+    { type: "cron", index: 4, id: "glob", pattern: "0 8 * * *", folder: "/srv/site", flow: "global-flow", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false },
+    { type: "cron", index: 5, id: "pkg", pattern: "0 9 * * *", folder: "/srv/site", flow: "pkg-flow", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false },
+  );
+  return inputs;
+};
+
+test("every GRAPH_NODE_KINDS entry except trigger has its own glyph -- the kind-parity anti-drift wire", () => {
+  // graph-html cannot use the `from` clause on graph-model, so this test is where a new node kind
+  // without a drawing arm goes red (the GRAPH_HTML_KINDS pattern, applied to kinds).
+  for (const kind of GRAPH_NODE_KINDS) {
+    if (kind === "trigger") continue; // triggers glyph by onType, pinned by the GLYPH keys below
+    assert.ok(typeof GLYPH[kind] === "string" && GLYPH[kind] !== "", `no glyph for node kind ${kind}`);
+  }
+  for (const onType of ["cron", "label", "comment", "pull_request"]) {
+    assert.ok(typeof GLYPH[onType] === "string", `no glyph for trigger onType ${onType}`);
+  }
+});
+
+test("tier nodes render in their own groups, tips name the tier and stay never-AI-reachable", () => {
+  const out = buildGraphHtml(buildGraphModel(TIERED()), { now: NOW });
+  assert.ok(out.includes("overlay skills (global pi dir)"), "the overlay group renders");
+  assert.ok(out.includes("staged package skills"), "the staged group renders");
+  assert.ok(out.includes("deployment overlay skills/, trigger-reachable, never AI-reachable"), "the overlay tip keeps the reachability half");
+  assert.ok(out.includes("staged pi package, trigger-reachable, never AI-reachable"), "the staged tip too");
+  assert.ok(out.includes("package @acme/wf"), "the staged tip names the owning package");
+  assert.ok(out.includes(">◎</text>") && out.includes(">▣</text>"), "the tier glyphs render in the icon column");
+  // The resolved triggers are NOT dangling: the only red chip is CANNED's own deleted-flow.
+  assert.equal((out.match(/stroke="#f85149" stroke-width="1" stroke-dasharray="10,4"/g) ?? []).length, 2, "deleted-flow's node and its trigger chip stay the only red pair");
+});
+
+test("acceptance (i) end to end: an injected-resolved flow wires trigger to the injected node, unflagged", () => {
+  const layout = layoutGraph(buildGraphModel(TIERED()));
+  const trigger = layout.nodes.find((n) => n.node.id === "trigger:3");
+  const injectedChip = layout.nodes.find((n) => n.node.id === "injected:/inj:tidy");
+  assert.ok(trigger && injectedChip, "both endpoints place");
+  const wire = layout.wires.find((w) => w.kind === "config" && w.from === trigger.id);
+  assert.equal(wire.to, injectedChip.id, "the config edge lands on the injected node that already existed");
+  assert.ok(!layout.nodes.some((n) => n.node.id === "skill:folder:/srv/site:tidy"), "and no red twin is minted");
+});
+
+test("the softened not-at-head state renders amber-dashed with its tiers in the tip; red needs every tier checked", () => {
+  const blind = CANNED();
+  // A session without PI_GLOBAL_PI_DIR (the deployment pointer cannot carry it): both
+  // deployment-wide tiers read as unknown, so deleted-flow softens instead of flagging.
+  delete blind.overlaySkills;
+  delete blind.stagedSkills;
+  const out = buildGraphHtml(buildGraphModel(blind), { now: NOW });
+  assert.ok(out.includes('stroke="#d29922" stroke-width="1" stroke-dasharray="10,4"'), "the amber chip treatment renders");
+  assert.equal((out.match(/stroke="#f85149" stroke-width="1" stroke-dasharray="10,4"/g) ?? []).length, 0, "no chip wears the red missing claim");
+  assert.ok(out.includes("not committed at HEAD"), "the tip states the one thing the session KNOWS");
+  assert.ok(out.includes("not checkable from this session: overlay skills/, staged packages"), "and names what it could not check");
+  assert.ok(out.includes(">⋯</text>"), "the softened glyph renders");
+
+  // The twin: with the tier reads wired and empty (CANNED), the same flow is a checked miss -- red.
+  const checked = cannedHtml();
+  assert.equal((checked.match(/stroke="#f85149" stroke-width="1" stroke-dasharray="10,4"/g) ?? []).length, 2, "deleted-flow's node and its trigger chip carry the red");
+  assert.ok(!checked.includes("not committed at HEAD"), "no softened tip when every tier was checkable");
+});
+
+test("the legend states the tier-aware vocabulary and the tier honesty banners", () => {
+  const out = cannedHtml();
+  assert.ok(out.includes("dangling: absent in every checkable tier or name invalid"), "the dangling row now claims the whole ladder");
+  assert.ok(out.includes("not at HEAD: some skill tiers not checkable from this session"), "the softened state has its legend row");
+
+  const troubled = buildGraphModel(TIERED());
+  troubled.meta.overlayUnreachable = true;
+  troubled.meta.stagedUnenumerable = ["@glob/pkg"];
+  const page = buildGraphHtml(troubled, { now: NOW });
+  assert.ok(page.includes("overlay skills dir unreadable (global pi dir)"), "an unreadable overlay banners");
+  assert.ok(page.includes("staged packages not enumerable (manifest patterns): @glob/pkg"), "pattern manifests banner instead of being guessed at");
+});
+
+test("a command trigger's tip shows the slash command; junk tiersUnknown is filtered at the allowlist", () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers.push({ type: "comment", index: 3, phrase: "@pi deploy", flow: null, command: "deploy prod", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" });
+  const out = buildGraphHtml(buildGraphModel(inputs), { now: NOW });
+  assert.ok(out.includes("command: /deploy prod"), "the tip is the detail surface, so the whole staged line shows");
+
+  const soft = buildGraphModel((() => { const b = CANNED(); delete b.overlaySkills; delete b.stagedSkills; return b; })());
+  const target = soft.nodes.find((n) => n.kind === "skill-not-at-head");
+  target.tiersUnknown = [42, null, "CANARY-TIER-x9"];
+  const page = buildGraphHtml(soft, { now: NOW });
+  assert.ok(page.includes("not checkable from this session: CANARY-TIER-x9"), "string entries survive the allowlist; the junk beside them does not");
+});
+
+test("a permuted tier-bearing model does not move a byte", () => {
+  const model = buildGraphModel(TIERED());
+  const permuted = buildGraphModel(TIERED());
+  permuted.nodes.reverse();
+  permuted.edges.reverse();
+  permuted.flags.reverse();
+  permuted.folders.reverse();
+  assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }));
 });
 
 // ---- 11. degrades ----

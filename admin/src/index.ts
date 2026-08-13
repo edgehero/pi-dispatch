@@ -1060,7 +1060,7 @@ async function assembleGraph(paths: any): Promise<any> {
   return buildGraphModel({
     triggers,
     schedulers: Array.isArray(schedulers) ? schedulers : [],
-    ...collectGraphInputs({ triggers: triggerList }),
+    ...collectGraphInputs({ triggers: triggerList, globalPiDir: paths.globalPiDir }),
     cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
     runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count, triggerTypes: Object.fromEntries(triggerList.map((t: any) => [t.index, t.type])) }),
     chainEdges: observedChainEdges({ records: recs }),

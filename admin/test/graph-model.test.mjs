@@ -72,9 +72,9 @@ test("findSiblingMentions is total: bad inputs yield [], and a self-shaped name 
 
 // ---- buildGraphModel (the assembler; DES-GRAPH-EDGE-DERIVATION's honesty rules live here) ----
 
-import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_FLAGS } from "../src/graph-model.mjs";
+import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_FLAGS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
 
-test("the edge and flag vocabularies are the LITERAL closed sets, frozen", () => {
+test("the edge, flag and node-kind vocabularies are the LITERAL closed sets, frozen", () => {
   // Every consumer switches on these strings; a producer minting a new one without a renderer arm
   // must go red HERE, not render as nothing. Change these on purpose and say why in the commit body.
   assert.deepEqual([...GRAPH_EDGE_KINDS], ["config", "observed", "potential", "cron-rearm"]);
@@ -82,7 +82,13 @@ test("the edge and flag vocabularies are the LITERAL closed sets, frozen", () =>
     [...GRAPH_FLAGS],
     ["no-skill", "charset-invalid", "orphan", "ai-reachable-no-trigger", "injected-ai-trigger", "unread", "pr-spend-loop-risk"],
   );
-  assert.ok(Object.isFrozen(GRAPH_EDGE_KINDS) && Object.isFrozen(GRAPH_FLAGS));
+  // Issue #188 grew the KINDS (tier nodes, the softened state) and closed the set; the edge and flag
+  // vocabularies above are byte-unchanged by it, which is what keeps REQ-TOPOLOGY-GRAPH (h) literally true.
+  assert.deepEqual(
+    [...GRAPH_NODE_KINDS],
+    ["trigger", "skill", "skill-missing", "skill-unverified", "skill-not-at-head", "injected", "overlay", "staged"],
+  );
+  assert.ok(Object.isFrozen(GRAPH_EDGE_KINDS) && Object.isFrozen(GRAPH_FLAGS) && Object.isFrozen(GRAPH_NODE_KINDS));
 });
 
 // One canned deployment the assembler tests share: a local folder with a healthy chain pair, an
@@ -111,6 +117,11 @@ const CANNED = () => ({
     },
   },
   injectedSkills: { "/inj": { skills: [{ name: "tidy", aiTrigger: true }], truncated: false, unreachable: null } },
+  // Known-empty tier reads (issue #188): the session can see the global pi dir and both tiers hold
+  // nothing, so a miss is a KNOWN miss and `deleted-flow` stays red. Null here would mean "tier not
+  // checkable" and soften every dangling assertion below.
+  overlaySkills: { skills: [], truncated: false, unreachable: null },
+  stagedSkills: { skills: [], unenumerable: [], truncated: false },
   cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" }, gone: { runs: 0, lastOutcome: null, lastEndedAt: null } } },
   runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },
   chainEdges: { edges: [{ parentFlow: "build-report", childFlow: "notify", target: "local:site", count: 3, lastEndedAt: "2026-08-10T00:00:00.000Z" }], refusals: { "build-report": 1 }, truncated: false },
@@ -346,4 +357,174 @@ test("skill nodes carry their loops, and forge groups carry their record-derived
   assert.deepEqual(m.nodes.find((n) => n.id === "skill:folder:/srv/site:build-report").loops, [{ hint: "until the report renders right" }]);
   assert.deepEqual(m.folders.find((f) => f.key === "forge:github").repos, ["acme/website"], "the group says which repos it is ABOUT");
   assert.deepEqual(buildGraphModel(CANNED()).folders.find((f) => f.key === "forge:github").repos, [], "no records, no claim");
+});
+
+// ---- tier-aware config-edge resolution (issue #188: repo > injected > overlay > staged) ----
+
+test("a cron flow that resolves only in its injected run.skillsDir lands its edge on the injected node, unflagged", () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers.push({ type: "cron", index: 3, id: "inj", pattern: "0 7 * * *", folder: "/srv/site", flow: "tidy", model: null, packages: true, image: null, skillsDir: "/inj", instructions: false, resume: false });
+  const m = buildGraphModel(inputs);
+  const edge = m.edges.find((e) => e.kind === "config" && e.from === "trigger:3");
+  assert.equal(edge.to, "injected:/inj:tidy", "the true node already exists; the edge lands on it instead of minting a red twin");
+  assert.ok(!m.nodes.some((n) => n.id === "skill:folder:/srv/site:tidy"), "no second, dangling node is minted for the same name");
+  assert.deepEqual(m.flags.filter((f) => f.nodeId === "trigger:3"), [], "a flow that runs fine carries no dangling flag");
+});
+
+test("repo wins: a flow present at HEAD AND in the injected dir resolves to the committed skill node", () => {
+  const inputs = CANNED();
+  inputs.injectedSkills["/inj"].skills.push({ name: "build-report", aiTrigger: false });
+  inputs.triggers.triggers[0].skillsDir = "/inj";
+  const m = buildGraphModel(inputs);
+  const edge = m.edges.find((e) => e.kind === "config" && e.from === "trigger:0");
+  assert.equal(edge.to, "skill:folder:/srv/site:build-report", "loader precedence is repo > injected; the edge says what the job actually loads");
+});
+
+test("a flow that resolves only in the overlay lands on its overlay node; every overlay skill enumerates", () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = { skills: [{ name: "deleted-flow" }, { name: "unrelated" }], truncated: false, unreachable: null };
+  const m = buildGraphModel(inputs);
+  const edge = m.edges.find((e) => e.kind === "config" && e.from === "trigger:2");
+  assert.equal(edge.to, "overlay:deleted-flow");
+  assert.deepEqual(m.flags.filter((f) => f.nodeId === "trigger:2"), [], "resolved in a legal tier: not dangling");
+  assert.ok(m.nodes.some((n) => n.id === "overlay:unrelated" && n.kind === "overlay"), "unreferenced overlay skills still enumerate, the injected-group precedent");
+});
+
+test("a flow that resolves only in a staged package lands on the FIRST manifest-order package's node", () => {
+  const inputs = CANNED();
+  inputs.stagedSkills = {
+    skills: [
+      { name: "deleted-flow", package: "@a/one", dir: "one" },
+      { name: "deleted-flow", package: "@b/two", dir: "two" },
+    ],
+    unenumerable: [],
+    truncated: false,
+  };
+  const m = buildGraphModel(inputs);
+  const edge = m.edges.find((e) => e.kind === "config" && e.from === "trigger:2");
+  assert.equal(edge.to, "staged:one:deleted-flow", "manifest order is loader order; the attribution matches doctor's staged probe");
+  assert.equal(m.nodes.find((n) => n.id === "staged:one:deleted-flow").package, "@a/one");
+  assert.ok(m.nodes.some((n) => n.id === "staged:two:deleted-flow" && n.kind === "staged"), "the shadowed twin still enumerates as its own node");
+  assert.deepEqual(m.flags.filter((f) => f.nodeId === "trigger:2"), []);
+});
+
+test("run.packages: false withholds the staged tier as a KNOWN miss, and the red detail says so", () => {
+  const inputs = CANNED();
+  inputs.stagedSkills = { skills: [{ name: "deleted-flow", package: "@a/one", dir: "one" }], unenumerable: [], truncated: false };
+  inputs.triggers.triggers[2].packages = false;
+  const m = buildGraphModel(inputs);
+  const flag = m.flags.find((f) => f.flag === "no-skill" && f.nodeId === "trigger:2");
+  assert.ok(flag, "the job would not load the tier either: withheld is a known miss, so red stays honest");
+  assert.ok(flag.detail.includes("withheld: run.packages false"), "the detail says why the staged tier could not have saved it");
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "skill:folder:/srv/site:deleted-flow");
+});
+
+test("tiers this session cannot check soften the claim: skill-not-at-head, no flag, tiers named", () => {
+  const inputs = CANNED();
+  // The deployment pointer cannot carry PI_GLOBAL_PI_DIR, so a wizard-launched session reads both
+  // deployment-wide tiers as null -- unknown, never empty.
+  delete inputs.overlaySkills;
+  delete inputs.stagedSkills;
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
+  assert.equal(node.kind, "skill-not-at-head", "absent at HEAD is true; the missing styling is the lie");
+  assert.deepEqual(node.tiersUnknown, ["overlay skills/", "staged packages"]);
+  assert.deepEqual(m.flags.filter((f) => f.flag === "no-skill"), [], "no dangling flag can honestly attach when a tier went unchecked");
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, node.id, "the config edge still draws, ALWAYS");
+});
+
+test("a pattern-manifest package makes a staged miss unknowable: softened, not red", () => {
+  const inputs = CANNED();
+  inputs.stagedSkills = { skills: [], unenumerable: ["@glob/pkg"], truncated: false };
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
+  assert.equal(node.kind, "skill-not-at-head");
+  assert.deepEqual(node.tiersUnknown, ["staged packages"], "only the tier that could not be checked is named");
+  assert.deepEqual(m.meta.stagedUnenumerable, ["@glob/pkg"]);
+});
+
+test("stop-at-unknown: a hit below an unknown higher tier stays soft -- the edge claims identity, not existence", () => {
+  const inputs = CANNED();
+  inputs.injectedSkills["/broken"] = { skills: [], truncated: false, unreachable: "unreadable" };
+  inputs.overlaySkills = { skills: [{ name: "deleted-flow" }], truncated: false, unreachable: null };
+  inputs.triggers.triggers[2].skillsDir = "/broken";
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
+  assert.equal(node.kind, "skill-not-at-head", "the unreadable injected dir may shadow the overlay hit; claiming the overlay node would be the wrong tick");
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, node.id);
+  assert.deepEqual(node.tiersUnknown, ["injected run.skillsDir"], "the tier that blocked the claim is the one named");
+});
+
+test("a truncated injected listing makes its miss unknowable: the name may sit past the cap", () => {
+  const inputs = CANNED();
+  inputs.injectedSkills["/inj"].truncated = true;
+  inputs.triggers.triggers[2].skillsDir = "/inj";
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
+  assert.equal(node.kind, "skill-not-at-head");
+  assert.deepEqual(node.tiersUnknown, ["injected run.skillsDir"]);
+});
+
+test("red and softened claimants share one node: softened kind wins in either arrival order, the red trigger keeps its flag", () => {
+  const red = { type: "cron", index: 3, id: "red", pattern: "0 8 * * *", folder: "/srv/site", flow: "shared-gone", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false };
+  const soft = { type: "cron", index: 4, id: "soft", pattern: "0 9 * * *", folder: "/srv/site", flow: "shared-gone", model: null, packages: true, image: null, skillsDir: "/broken", instructions: false, resume: false };
+  for (const pair of [[red, soft], [soft, red]]) {
+    const inputs = CANNED();
+    inputs.injectedSkills["/broken"] = { skills: [], truncated: false, unreachable: "unreadable" };
+    inputs.triggers.triggers.push(...pair);
+    const m = buildGraphModel(inputs);
+    const node = m.nodes.find((n) => n.name === "shared-gone");
+    assert.equal(node.kind, "skill-not-at-head", "red asserts definitively-nowhere, which the softened claimant's unknown tier refutes");
+    assert.deepEqual(node.tiersUnknown, ["injected run.skillsDir"]);
+    const noSkill = m.flags.filter((f) => f.flag === "no-skill").map((f) => f.nodeId);
+    assert.ok(noSkill.includes("trigger:3"), "the red claimant's flag rides its own trigger node and survives the shared target");
+    assert.ok(!noSkill.includes("trigger:4"), "the softened claimant is not dangling");
+  }
+});
+
+test("a forge trigger's flow matching an overlay name still renders unverified: the remote repo may shadow it", () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = { skills: [{ name: "triage" }], truncated: false, unreachable: null };
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:forge:github:triage");
+  assert.equal(node.kind, "skill-unverified", "dim-with-no-claim stays the honest forge state; the repo tier outranks every checkable one");
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:1").to, node.id);
+});
+
+test("charset-invalid short-circuits the ladder: no tier probe can launder an unmaterialisable name", () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers.push({ type: "cron", index: 3, id: "bad", pattern: "0 5 * * *", folder: "/srv/site", flow: "Tidy/../up", model: null, packages: true, image: null, skillsDir: "/inj", instructions: false, resume: false });
+  const m = buildGraphModel(inputs);
+  assert.ok(m.flags.some((f) => f.flag === "charset-invalid" && f.nodeId === "trigger:3"));
+  assert.ok(!m.nodes.some((n) => n.kind === "skill-not-at-head"), "no softened node for a name that can never materialise");
+});
+
+test("potential edges stay repo-only: a mention of an overlay-resolved name draws nothing", () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = { skills: [{ name: "global-helper" }], truncated: false, unreachable: null };
+  inputs.folderSkills["/srv/site"].skills[0].mentions.push({ name: "global-helper", strong: true });
+  const m = buildGraphModel(inputs);
+  assert.equal(m.edges.filter((e) => e.kind === "potential").length, 1, "only the committed sibling mention draws; the chain gate could never fire an overlay flow");
+});
+
+test("meta carries the tier honesty counters, and tier caps join the skills-truncation bit", () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = { skills: [], truncated: false, unreachable: "unreadable" };
+  inputs.stagedSkills = { skills: [], unenumerable: ["@b/two", "@a/one"], truncated: true };
+  const m = buildGraphModel(inputs);
+  assert.equal(m.meta.overlayUnreachable, true);
+  assert.deepEqual(m.meta.stagedUnenumerable, ["@a/one", "@b/two"], "sorted for determinism");
+  assert.equal(m.meta.truncated.skills, true);
+  const base = buildGraphModel(CANNED());
+  assert.equal(base.meta.overlayUnreachable, false);
+  assert.deepEqual(base.meta.stagedUnenumerable, []);
+});
+
+test("junk tier inputs degrade to unknown-tier behaviour, never a throw", () => {
+  const inputs = CANNED();
+  inputs.overlaySkills = "x";
+  inputs.stagedSkills = 42;
+  const m = buildGraphModel(inputs);
+  const node = m.nodes.find((n) => n.id === "skill:folder:/srv/site:deleted-flow");
+  assert.equal(node.kind, "skill-not-at-head", "a malformed read proves nothing; only a well-formed result can produce a known miss");
 });

@@ -721,11 +721,25 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Statement**: The harness shall make the trigger/flow **topology** visible: the topology pane of the
   insights artifact (`REQ-INSIGHTS-HTML-EXPORT`, the one analytics surface) renders one assembled model
   (`DES-GRAPH-EDGE-DERIVATION`) of every trigger, every
-  enumerated skill, and every edge between them, grouped by folder. The surface informs; it changes
+  enumerated skill, and every edge between them, grouped by folder — and, since issue #188, the three
+  non-repo skill tiers the loader legally resolves from (`REQ-PER-TRIGGER-SKILLS`,
+  `REQ-GLOBAL-PI-OVERLAY`): injected `run.skillsDir` skills, the overlay's `skills/` and the staged
+  packages' skills each render as their own tier-labelled group where this session can enumerate them.
+  The surface informs; it changes
   nothing — no port, no database, no new dependency, all fs/redis access in the read-model. The
   **honesty rules are requirements, not conventions**:
   (a) every trigger naming a `run.flow` renders its config edge — dangling, unverifiable and
   charset-invalid included;
+  (a2) config-edge **resolution is tier-aware** (issue #188), probing the loader's precedence order
+  repo > injected > overlay > staged per trigger: a flow absent at HEAD but present in a lower tier
+  lands its edge on that tier's node with **no flag** (the flow runs fine; the tier node's tip carries
+  the never-AI-reachable half), a tier node is claimed only when every higher applicable tier is a
+  **known** miss (a config edge asserts node identity, and a wrong tick is the one direction an
+  advisory may not err in), a flow missing from every checkable tier while some applicable tier is
+  not checkable from this session renders the **`skill-not-at-head`** state — amber, naming the
+  unchecked tiers, never the red missing claim — and the red `no-skill` flag fires **only** when
+  every applicable tier was checked and missed, its detail naming the tiers checked (a trigger's own
+  `run.packages: false` withholds the staged tier as a known miss and the detail says so);
   (b) a cron trigger's run count and last outcome are **exact** over the stated window (the jobId
   join), and a forge trigger's come **only** from the persisted `triggerIndex` **and**
   `triggerType`, both of which must agree with the entry now at that index — a record whose index is
@@ -754,7 +768,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   honestly) and its **overdue** state from the scheduler's `overdueMs`, and a trigger carries the
   window's **typed spend** badge (`foldTriggerCosts`, keyed by the node id), rendered only through
   the shared cost formatter so a plan-covered trigger never reads `$0.00`; spend and schedule are
-  node **facts**: no new edge kind, no new flag, the closed vocabularies stay closed.
+  node **facts**: no new edge kind, no new flag, the closed vocabularies stay closed. Issue #188
+  honours that sentence literally: the edge and flag vocabularies are byte-unchanged by tier
+  resolution — what grew is the **node kinds** (`overlay`, `staged`, `skill-not-at-head`), which now
+  form their own closed, test-pinned set (`GRAPH_NODE_KINDS`) with a glyph-parity pin so a kind
+  without a renderer arm goes red in a unit test.
 - **Scope**: Display only, from the operator's session. The graph triggers nothing, writes nothing,
   and is deliberately **not** a model-callable tool: the enumeration spawns git per folder, and the
   topology is for the operator's eyes (`DES-CLI-SURFACE`'s ungated operator-typed tier).
@@ -764,6 +782,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   history (`REQ-COST-ANALYTICS`'s estimate-never-mislabeled-as-truth discipline, applied to
   topology).
 - **Traces to**: `DES-GRAPH-EDGE-DERIVATION`, `DES-ADMIN-VIA-PI-EXTENSION`,
+  `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`, `REQ-PER-TRIGGER-SKILLS`, `REQ-GLOBAL-PI-OVERLAY`,
   `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-008`, `OQ-009`, `OQ-022`
 - **Acceptance**: Given a triggers file with a cron trigger whose folder enumeration succeeds and a
   label trigger, when the insights artifact renders, then the cron trigger shows exact run counts
@@ -771,9 +790,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   edges render;
   given a record whose `triggerIndex` exceeds the current file, then it counts as unattributed and
   attributes to no row; given a folder whose skills include one no trigger names, with no
-  `ai-trigger` and no mention, then it flags `orphan`; given a trigger whose flow is absent at HEAD
-  in an enumerated folder, then it flags `no-skill`, and given the folder is unreachable instead,
-  then it renders unverified with no dangling flag; given any output, then the caps line
+  `ai-trigger` and no mention, then it flags `orphan`; given a cron trigger whose flow is absent at
+  HEAD in an enumerated folder **and absent from every checkable applicable tier**, then it flags
+  `no-skill` with the checked tiers in the detail, and given the folder is unreachable instead,
+  then it renders unverified with no dangling flag;
+  given a cron trigger whose flow exists only in its `run.skillsDir`, then the config edge lands on
+  the existing `injected:<dir>:<name>` node, no `no-skill` flag is minted, no second node appears
+  for the name, and the tip still says never AI-reachable; given a flow that resolves only in the
+  overlay `skills/` or only in a staged package, then the edge lands on that tier's node likewise,
+  a staged resolution naming the first manifest-order package (the loader's own shadowing order);
+  given a session whose `PI_GLOBAL_PI_DIR` is not visible (the deployment pointer cannot carry it),
+  an unreadable tier listing, a truncated one, or a pattern-manifest package, then a flow missing
+  from the checkable tiers renders `skill-not-at-head` naming the unchecked tiers, never the red
+  missing claim; given a forge trigger whose flow matches an overlay or staged name, then it still
+  renders unverified — the remote repo outranks every tier this host can read;
+  given any output, then the caps line
   (`chain depth`, `per job`, `same folder only`, window) is present; given an observed chain edge,
   then its line carries `observed x<count>`, and no potential line carries a count.
 
@@ -969,7 +1000,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refused **pre-spend** with `skills-dir-missing`, no token is minted and no budget slot is consumed.
   Given a directory that is empty or over a cap, the job is refused in prepare, before the budget, with
   the cap named. Given a flow that exists ONLY in an injected directory, a chain request or a
-  `dispatch_run` for it is refused, and `doctor` warns that an injected `ai-trigger: allow` is never read.
+  `dispatch_run` for it is refused, `doctor` warns that an injected `ai-trigger: allow` is never read,
+  and (issue #188) the topology lands the trigger's config edge on the injected skill's own node with
+  no dangling flag — the never-AI-reachable badge stays, the false `no-skill` goes
+  (`REQ-TOPOLOGY-GRAPH` (a2)).
   Given a job whose `run.flow` names a skill that NO loaded tier materialised — repo, injected, overlay
   or staged package — the runner emits one `flow_not_loaded` line (flow name and a loaded-skill count,
   never task content) before any session exists, so the silent-exit-0 shape is a failing test rather
@@ -1067,7 +1101,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   package, because staged-only resolution is legal steady state, and a package whose `pi` manifest uses
   glob or override patterns is reported as not enumerable rather than guessed at (`readStagedSkills`
   mirrors pi's own manifest-vs-convention rule at the pin, including that a `pi` manifest without a
-  `skills` key contributes nothing).
+  `skills` key contributes nothing). The topology is the same story's display half (issue #188,
+  `REQ-TOPOLOGY-GRAPH` (a2)): where `PI_GLOBAL_PI_DIR` is visible to the console session, the overlay's
+  `skills/` and the staged packages' skills enumerate as their own tier-labelled node groups (the staged
+  reader shared with doctor, manifest order preserved because it is the loader's shadowing order), and
+  where it is not — the deployment pointer deliberately cannot carry `PI_GLOBAL_PI_DIR` — a dangling
+  claim softens to `skill-not-at-head` naming the unchecked tiers, never a false red.
 - **A third skill tier sits between the overlay and the repo** (`REQ-PER-TRIGGER-SKILLS`, issue #60).
   "Repo wins on conflict" is unchanged and now reads in full as **repo > injected > overlay**: a trigger's
   own `run.skillsDir` refines this deployment-wide overlay, because "for THIS trigger" is the narrower
@@ -1365,6 +1404,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #188 (topology: flows resolved from injected, overlay or staged-package skills rendered as missing). **REQ-TOPOLOGY-GRAPH AMENDED**: the statement gains the three non-repo tier groups and new honesty clause (a2) — config-edge resolution is tier-aware in loader precedence order (repo > injected > overlay > staged, per trigger); a lower-tier resolution lands the edge on the tier node with NO flag; a tier node is claimed only when every higher applicable tier is a KNOWN miss (a config edge asserts node identity, and a wrong tick is the one forbidden direction); unknown tiers soften a dangling claim to the new amber `skill-not-at-head` state naming what this session could not check (the deployment pointer deliberately cannot carry `PI_GLOBAL_PI_DIR`, so wizard-launched sessions soften rather than lie red); red `no-skill` fires only when every applicable tier was checked and missed, its detail naming the tiers, with `run.packages: false` a known withheld miss. Clause (h)'s "the closed vocabularies stay closed" survives LITERALLY: edges and flags are byte-unchanged; node kinds grew (`overlay`, `staged`, `skill-not-at-head`) and became their own closed pinned set (`GRAPH_NODE_KINDS`) with a glyph-parity pin. Acceptance rows reworded/added accordingly, including forge-unchanged (a remote repo outranks every host-readable tier, so forge flows stay unverified). **REQ-PER-TRIGGER-SKILLS AMENDED** (one acceptance clause): an injected-only flow's config edge lands on the injected node, unflagged, badge kept. **REQ-GLOBAL-PI-OVERLAY AMENDED** (one Why clause): the topology is doctor's display half — tier groups where `PI_GLOBAL_PI_DIR` is visible (staged reader shared with doctor, manifest order preserved as loader shadowing order), softened claims where it is not. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — no doctor change; display only. **REQ-AI-TRIGGERED-RUNS UNCHANGED, checked** — tier nodes carry no `aiTrigger`/chainable claim, and `potential`-edge eligibility stays committed-repo-only. |
 | 2026-08-13 | Issue #189 (closing pass: package prompt templates, OQ-019 deferral (b)). **REQ-GLOBAL-PI-OVERLAY AMENDED**: the overlay gains its `prompts/` channel (templates were the one resource kind with none), and "repo wins on conflict" is now stated as ENFORCED for prompt templates through `promptsOverride`, mirroring the skills enforcement, because pi merges package prompt paths first and path order alone cannot carry the promise. Themes stay count-only with the reason recorded on OQ-019. **REQ-PER-TRIGGER-SKILLS UNCHANGED, checked** -- injected skills are a skills-only tier; no prompt analog was added or implied. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** -- no doctor change in this pass. |
 | 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command`, the second trigger entry point). **REQ-AI-TRIGGERED-RUNS AMENDED**: commands are never AI-triggerable and there is no opt-in — the statement gains the outbox `command`-key refusal (`chain-command-refused`, ordered before the charset check) and `dispatch_run`'s structural incapability (`{folder, flow, task}` params; a slash-leading flow refuses with a readable message naming the distinction rather than falling through to `no-skill`); acceptance pins both as free, nothing-enqueued, no-budget-touched refusals. **REQ-CRON-SCHEDULED-JOBS AMENDED**: acceptance gains the entry-point clauses it is the end-to-end home for — a `run.command` trigger loads in BOTH services (the shared validator) and its emitted job dispatches headlessly with the prompt exactly `/<command> [args]`; both-or-neither of `flow`/`command` is a parse-time `piDispatchConfig` error in both services; an unregistered command refuses `command-unregistered` (exit 2, pre-work, never retried) before any model call. **REQ-TRIGGER-AUTHOR-GATE AMENDED**: the comment `<phrase> <flow>` trailing-word override is INERT on a command rule — trailing text neither retargets nor suppresses the command, riding only as `event.json` data — and the known-flows set is built from flow-carrying rules only, so a command name is never summonable by comment; acceptance pins the collaborator `@pi review` case running the rule's own command. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — doctor REPORTS command triggers (a count plus one in-container-verifiability advisory line) and fixes nothing; the closed fix tiers are untouched. |
 | 2026-08-13 | Issue #189 (Gap 1, doctor half: per-trigger flow-tier resolution lines). **REQ-PER-TRIGGER-SKILLS AMENDED**: acceptance gains the doctor clause — one line per distinct (flow, folder, skillsDir, packages) question naming the resolving tier, probed in loader precedence order (repo at HEAD via the gate's own ls-tree read but HEAD-resolved and degrading to unknown, injected dir, overlay `skills/`, staged packages), ⚠ never ✗ and never a fixAction when none resolves, tiers-checked vs not-checkable named, charset failures their own ⚠, comment triggers checked on the default flow only, zero triggers zero lines. **REQ-GLOBAL-PI-OVERLAY AMENDED**: the overlay `skills/` and staged-package tiers join doctor's obligations; staged-only resolution is a plain ✓ naming the package; `readStagedSkills` (worker/src/packages.mjs, never-throws, shared with issue #188's topology) mirrors pi's manifest-vs-convention rule at the pin including the manifest-without-skills-key null case, and pattern manifests read as not-enumerable rather than guessed. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked** — the new checks are warn-tier and carry no `fixAction`, so the tier ladder it defines is untouched. |

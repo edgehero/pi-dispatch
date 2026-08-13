@@ -116,7 +116,9 @@ const WIRE_POTENTIAL = "#8b949e";
 
 // One glyph per node kind for the 30px icon column; characters, not images, because images would
 // need data: URIs and a font would need @font-face, both of which the file:// posture forbids.
-const GLYPH = Object.freeze({
+// Exported for the kind-parity test: this module cannot use the `from` clause, so a test is the
+// anti-drift wire that keeps every GRAPH_NODE_KINDS entry drawable (the GRAPH_HTML_KINDS pattern).
+export const GLYPH = Object.freeze({
   cron: "◷",
   label: "◈",
   comment: "❝",
@@ -124,7 +126,10 @@ const GLYPH = Object.freeze({
   skill: "ƒ",
   "skill-missing": "!",
   "skill-unverified": "?",
+  "skill-not-at-head": "⋯",
   injected: "+",
+  overlay: "◎",
+  staged: "▣",
 });
 
 // The 5-entity escape, byte-for-byte the worker's buildFormPage helper: every string interpolated
@@ -208,6 +213,14 @@ function normalizeModel(model) {
       .map((d) => clip(d, 120))
       .sort()
       .slice(0, 8),
+    // The two tier-honesty counters (issue #188), the injectedUnreachable rule applied to the
+    // deployment-wide tiers: a tier the ladder silently skipped would read as "checked".
+    overlayUnreachable: m.meta?.overlayUnreachable === true,
+    stagedUnenumerable: (Array.isArray(m.meta?.stagedUnenumerable) ? m.meta.stagedUnenumerable : [])
+      .filter((d) => typeof d === "string")
+      .map((d) => clip(d, 80))
+      .sort()
+      .slice(0, 8),
   };
 
   const folders = [];
@@ -243,6 +256,15 @@ function normalizeModel(model) {
       onType: typeof n.onType === "string" ? n.onType : null,
       pattern: typeof n.pattern === "string" ? n.pattern : null,
       flow: typeof n.flow === "string" ? n.flow : null,
+      // A command trigger's slash command (issue #189's node fact, #188's rendering): the tip is the
+      // detail surface, so the full command rides, clipped like every other string on this page.
+      command: typeof n.command === "string" ? clip(n.command, 80) : null,
+      // The staged tier node's owning package, and the softened state's evidence: which tiers this
+      // session could not check. Both clipped/sorted/capped so a hostile model cannot inflate a tip.
+      package: typeof n.package === "string" ? clip(n.package, 80) : null,
+      tiersUnknown: Array.isArray(n.tiersUnknown)
+        ? [...new Set(n.tiersUnknown.filter((t) => typeof t === "string").map((t) => clip(t, 40)))].sort().slice(0, 4)
+        : [],
       replicas: intOr(n.replicas, null),
       folderKey: typeof n.folderKey === "string" ? n.folderKey : null,
       runs: intOr(n.runs, 0),
@@ -350,6 +372,8 @@ function layoutNormalized(norm) {
     placedByOrig.set(n.id, p);
     let g = n.folderKey === null ? null : (groupIndexByKey.get(n.folderKey) ?? null);
     if (!g && n.kind === "injected") g = groupIndexByKey.get("~injected") ?? addGroup("~injected", "injected skills (run.skillsDir)", "local", null, null);
+    if (!g && n.kind === "overlay") g = groupIndexByKey.get("~overlay") ?? addGroup("~overlay", "overlay skills (global pi dir)", "local", null, null);
+    if (!g && n.kind === "staged") g = groupIndexByKey.get("~staged") ?? addGroup("~staged", "staged package skills", "local", null, null);
     if (!g) g = groupIndexByKey.get(n.folderKey ?? "~ungrouped") ?? addGroup(n.folderKey ?? "~ungrouped", "ungrouped", "local", null, null);
     g.members.push(p);
     p.groupId = g.id;
@@ -758,13 +782,27 @@ function buildTip(n, flags, groupLabel, nowMs) {
   if (n.kind === "trigger") {
     lines.push(`trigger · ${n.onType ?? "?"} · ${n.label ?? ""}`.trim());
     if (n.flow !== null) lines.push(`flow: ${n.flow}${n.replicas !== null ? ` ×${n.replicas}` : ""}`);
+    // flow's mutually-exclusive sibling (issue #189): a command trigger dispatches a registered
+    // extension command, so the tip shows the whole /name-and-args line the reviewed file staged.
+    else if (n.command !== null) lines.push(`command: /${n.command}${n.replicas !== null ? ` ×${n.replicas}` : ""}`);
   } else if (n.kind === "injected") {
     lines.push(`injected skill · ${n.name ?? "?"}`);
     lines.push("trigger-reachable via run.skillsDir, never AI-reachable");
+  } else if (n.kind === "overlay") {
+    lines.push(`overlay skill · ${n.name ?? "?"}`);
+    lines.push("deployment overlay skills/, trigger-reachable, never AI-reachable");
+  } else if (n.kind === "staged") {
+    lines.push(`staged skill · ${n.name ?? "?"}${n.package !== null ? ` · package ${n.package}` : ""}`);
+    lines.push("staged pi package, trigger-reachable, never AI-reachable");
   } else if (n.kind === "skill-missing") {
     lines.push(`skill · ${n.name ?? "?"} · missing at HEAD`);
   } else if (n.kind === "skill-unverified") {
     lines.push(`skill · ${n.name ?? "?"} · unverified (repo not readable from this host)`);
+  } else if (n.kind === "skill-not-at-head") {
+    // The softened state (issue #188): absent at HEAD is known TRUE, but a tier this session cannot
+    // check may still hold the name, so neither missing styling nor a dangling flag would be honest.
+    lines.push(`skill · ${n.name ?? "?"} · not committed at HEAD`);
+    if (n.tiersUnknown.length > 0) lines.push(`not checkable from this session: ${n.tiersUnknown.join(", ")}`);
   } else {
     lines.push(`skill · ${n.name ?? "?"}${n.isSub ? " · sub-skill (never a flow)" : ""}`);
   }
@@ -823,6 +861,10 @@ function nodeState(n, flagNames) {
     return { stroke: DANGER, dash: "10,4", faded: false };
   }
   if (n.kind === "skill-unverified") return { stroke: PAGE_DIM, dash: "10,4", faded: false };
+  // Amber, deliberately between red and dim (issue #188): the repo read HAPPENED and came back
+  // absent, but an unchecked tier may hold the name -- a third epistemic state, styled as one.
+  // Safe below the red arm: the dangling flags ride TRIGGER nodes, never this kind.
+  if (n.kind === "skill-not-at-head") return { stroke: PAGE_AMBER, dash: "10,4", faded: false };
   if (flagNames.has("orphan")) return { stroke: CHIP_STROKE, dash: "8,3", faded: true };
   return { stroke: CHIP_STROKE, dash: null, faded: false };
 }
@@ -959,7 +1001,8 @@ export function legendHtml(norm) {
   row(legendSwatch(`<circle cx="8" cy="6" r="5" fill="${BADGE_ORANGE}"/>`), "unread / injected ai-trigger / PR spend-loop risk");
   row(legendSwatch(`<circle cx="8" cy="6" r="4" fill="none" stroke="${BADGE_GREEN}" stroke-width="2"/>`), "chainable: ai-trigger allow");
   row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${CHIP_STROKE}" stroke-dasharray="8,3"/>`), "orphan: no trigger, no ai-trigger, no mention");
-  row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${DANGER}" stroke-dasharray="10,4"/>`), "dangling: flow absent or name invalid");
+  row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${DANGER}" stroke-dasharray="10,4"/>`), "dangling: absent in every checkable tier or name invalid");
+  row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${PAGE_AMBER}" stroke-dasharray="10,4"/>`), "not at HEAD: some skill tiers not checkable from this session");
   row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${PAGE_DIM}" stroke-dasharray="10,4"/>`), "unverified: repo not readable from this host");
   rows.push(`<div class="caps">${escapeHtml(capsLineText(norm.caps))}</div>`);
   const honesty = [];
@@ -972,6 +1015,8 @@ export function legendHtml(norm) {
   const refused = norm.meta.chainRefusals.reduce((a, r) => a + r.count, 0);
   if (refused > 0) honesty.push(`${refused} chain requests refused (caps or gate)`);
   if (norm.meta.injectedUnreachable.length > 0) honesty.push(`injected skills dir unreadable: ${norm.meta.injectedUnreachable.join(", ")}`);
+  if (norm.meta.overlayUnreachable) honesty.push("overlay skills dir unreadable (global pi dir)");
+  if (norm.meta.stagedUnenumerable.length > 0) honesty.push(`staged packages not enumerable (manifest patterns): ${norm.meta.stagedUnenumerable.join(", ")}`);
   for (const line of honesty) rows.push(`<div class="honesty">${escapeHtml(line)}</div>`);
   return `<div id="legend">${rows.join("")}</div>`;
 }

@@ -737,7 +737,10 @@ adversarial passes did.
 - **Status**: ACCEPTED, and it is the fail-CLOSED direction, so the risk of leaving it is nil. What it
   costs is an operator surprise rather than a hole, and the surprise has a sharp edge: an injected
   `SKILL.md` carrying `ai-trigger: allow` is never read, so the operator writes the opt-in and nothing
-  honours it. `doctor` warns when it finds one, which is the only thing that would have told them.
+  honours it. Three surfaces now say so: `doctor` warns when it finds one (originally the only thing
+  that would have told them), the topology badges the skill `injected-ai-trigger` (issue #54), and
+  since issue #188 the config edge of a trigger naming an injected-only flow lands on the injected
+  node itself — whose tip carries "never AI-reachable" — instead of a false red `no-skill`.
 - **The sibling asymmetry, with the inversion stated** (issue #189): `run.command` triggers are ALSO
   trigger-reachable and never AI-reachable — a chain request carrying a `command` key refuses outright
   (`chain-command-refused`, before the charset check) and `dispatch_run` cannot express one — but where
@@ -798,10 +801,55 @@ adversarial passes did.
 
 ---
 
+## OQ-025 — the topology's tier resolution carries the host-side approximation's residuals
+
+- **Question**: Issue #188 made config-edge resolution tier-aware (`REQ-TOPOLOGY-GRAPH` (a2)): the
+  graph now probes injected, overlay and staged tiers where this session can read them, softens to
+  `skill-not-at-head` where it cannot, and reserves red `no-skill` for every-tier-checked misses. The
+  probes are host-side approximations of what the loader will do in a container. Which residuals were
+  accepted, and what would move each?
+- **Status**: ACCEPTED, itemised, all display-only — the runner's `flow_not_loaded` line
+  (`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`) is exact where every entry below approximates, so each
+  residual is bounded by a later, authoritative layer:
+  (1) **dir-basename naming**: every non-repo probe names a skill by its directory, and pi names it
+  `frontmatter.name || parentDirName` at the pin — a frontmatter rename can turn a would-be tier hit
+  into a softened or red claim, never mint a false hit (the one direction that matters). Closing it
+  means parsing frontmatter in three readers for a rename nobody has shipped; the runner line already
+  catches the real thing.
+  (2) **pointer blindness**: `POINTER_ENV_ALLOWLIST` deliberately excludes `PI_GLOBAL_PI_DIR`, so a
+  wizard-launched console softens every overlay/staged question — including on a deployment that has
+  no overlay at all, whose genuinely deleted flows now render amber rather than red. Deliberate: the
+  session cannot distinguish the two nulls, and a false red on a wizard+overlay deployment is the bug
+  class #188 exists to kill. Widening the allowlist is the close, and it is a reviewed policy edit
+  (the pointer is wizard-written; adding a path var lets it aim the console's fs reads), not a bug fix
+  to slip in.
+  (3) **overlay/staged `ai-trigger: allow` is unbadged**: the readers are existence-only, so the
+  OQ-022-shaped silent no-op in those two tiers gets no orange badge — the tier tips carry the
+  categorical "never AI-reachable" instead, which is the user-facing truth. A badge would need either
+  frontmatter parsing plus a reused flag whose name says "injected", or a new flag the closed
+  vocabulary forbids. Doctor stays the deeper surface.
+  (4) **forge flows in non-repo tiers stay unverified**: a forge trigger's repo is unreadable from
+  this host and outranks every readable tier, so even an overlay hit renders dim-unverified — the
+  issue's own NOT-proposed list, restated here as accepted.
+  (5) **malformed stage manifest reads as nothing-staged**: `readStageManifest` yields null for
+  absent and malformed alike, and the display treats both as an empty tier, while the worker's job
+  path keeps last-known-good on a torn read — a transient window where the graph is redder than the
+  jobs. Bounded by the manifest being operator-written and the window being one re-stage.
+  (6) **repo-tier truncation predates**: a folder listing over `maxSkillsPerFolder` can still red a
+  flow past the cap — the pre-#188 behaviour, banner-covered ("skill enumeration truncated"), while
+  the three NEW tiers' truncated listings read as unknown and soften. Aligning the repo tier is a
+  one-line change waiting on anyone actually running 64+ top-level skills in one folder.
+- **What would reopen it**: a real deployment hitting (2) hard enough that operators ask for the
+  pointer to carry the overlay path — that is the allowlist review, not a topology change.
+- **Raised by**: issue #188.
+
+---
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #188 (topology tier resolution). Added **OQ-025** (ACCEPTED, itemised): the six display-side residuals of probing skill tiers from the host — dir-basename naming (false soft possible, false hit impossible), deployment-pointer blindness to `PI_GLOBAL_PI_DIR` (wizard sessions soften rather than lie red; widening the allowlist is a reviewed policy edit, deliberately not done here), overlay/staged `ai-trigger: allow` unbadged (existence-only readers; the closed flag vocabulary stays closed and the tier tips carry the categorical truth), forge flows in non-repo tiers staying unverified (the remote repo outranks every readable tier), malformed stage manifest reading as nothing-staged where the job path keeps last-known-good, and the pre-existing repo-tier truncation false-red (banner-covered; the three new tiers soften on truncation instead). Each bounded by the runner's exact `flow_not_loaded` layer. **OQ-022 AMENDED** (prose correction): doctor's warn is no longer "the only thing that would have told them" — the topology badges `injected-ai-trigger` since issue #54, and since #188 the config edge itself lands on the injected node with its never-AI-reachable tip. **OQ-008 UNCHANGED, checked** — the graph still re-reads the live triggers file per build; tier reads added no cache. **OQ-009 UNCHANGED, checked** — tier nodes join config edges only; no chain edge gained a source or crossed a folder. |
 | 2026-08-13 | Issue #189 (closing pass). **OQ-019 AMENDED**: deferral (b) partially closed -- in-container prompt templates get the skills treatment (overlay channel, enforced precedence, per-root counting; commands counted post-session), themes stay count-only with the no-failure-mode-to-prevent reason stated, and the host-side ENABLEMENT mirror half of (b) still stands on OQ-018's argument. **OQ-018 UNCHANGED, checked** -- no new pi internal is mirrored; the enforcement rides declared loader seams. **OQ-022 UNCHANGED, checked**. |
 | 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command`). **OQ-022 AMENDED**: the command asymmetry joins the row as the built-not-fallen-out sibling — a `run.command` trigger is trigger-reachable and never AI-reachable, refused at both model-reachable producers (`chain-command-refused` before the charset check; `dispatch_run` structurally incapable, its params `{folder, flow, task}` and a slash-leading flow refusing with a readable message) rather than falling out of an object-store miss, because a command has no committed artifact a gate could read: its dispatch line is BUILT from the reviewed `triggers.json`, so default-deny cannot be a frontmatter read and must be a refusal. The row's closing shape ("an explicit allowlist in the reviewed `triggers.json`") is unchanged in spirit and now covers both asymmetries. **OQ-008 UNCHANGED, checked** — command triggers reach the file through the same operator-typed, `parseTriggers`-validated, live-reloaded write path its resolution rests on, and no LLM tool gained a write (`dispatch_trigger_add`/`_edit` carry no `command` parameter). **OQ-019 UNCHANGED, checked, and its (b) stays open** — extension enablement mirroring is untouched by commands: a package the operator disabled registers no command, which now surfaces as the runner's pre-spend `command-unregistered` refusal instead of a job silently modelling the line as prose, so the row's cost/benefit call is if anything cheaper to leave; the skills/prompts/themes half remains deferred on its own terms. **OQ-009 UNCHANGED, checked** — a forge command job gets no `/outbox`, exactly as no forge job does; commands changed what a parent may BE, never who may chain. |
 | 2026-08-12 | Issue #181. **OQ-024 RESCOPED** from the graph export to the insights export: `graph html` is gone (REQ-GRAPH-HTML-EXPORT superseded into REQ-INSIGHTS-HTML-EXPORT) and the bare `/dispatch insights` is now the one command carrying the browser spawn; the question, the WATCH posture, the bounds (`--no-open`, the SSH/display skip, the printed URL as the contract) and what-would-close-it are all unchanged — only the surface name moved. |

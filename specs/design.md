@@ -925,7 +925,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   already-scanned run records into the per-trigger and flow→flow joins (`cronRunStats`,
   `joinRunsToTriggers`, `observedChainEdges`) — all never-throw, degrading per folder, bounded by the
   literal-pinned `GRAPH_LIMITS`, and all inside `read-model.mjs`, so the dashboard's fs ban and the
-  `.log` placement boundary are untouched. The enumeration is **display-advisory**: the chain gate's
+  `.log` placement boundary are untouched. Issue #188 grew the same surface by the two deployment-wide
+  tiers, in the same posture: `readOverlaySkills` (a working-tree readdir of the overlay `skills/`,
+  existence-only — no frontmatter read, because the flag vocabulary is closed and "never AI-reachable"
+  already rides the tip; ENOENT is a legal models-only overlay, so it reads known-empty, while any
+  other failure reads unknown) and `readStagedSkillsList` (the worker's own `readStagedSkills` behind
+  the `readStagedPackages` wrapper doctrine, manifest order preserved because it is the loader's
+  shadowing order), both null — "not checkable from this session", never "empty" — when
+  `PI_GLOBAL_PI_DIR` is not visible, one read each per graph build, capped by the same literal-pinned
+  `GRAPH_LIMITS`. The enumeration is **display-advisory**: the chain gate's
   truth stays `readFlowGate` at a pre-agent sha (`DES-AI-TRIGGER-FLOW-GATE`), and no graph badge is a
   gate decision.
 - **Why**:
@@ -1113,9 +1121,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (`buildGraphModel`, `admin/src/graph-model.mjs`) over the read-model's outputs, and every edge it
   emits is labelled by its **evidence class**, drawn from a closed, test-pinned vocabulary:
   - **`config`** — trigger → flow, from the live triggers file. Every trigger naming a `run.flow`
-    gets exactly one, **always** — dangling, unverifiable and charset-invalid included; a target the
-    enumeration did not find exists as a `skill-missing` (enumerated folder) or `skill-unverified`
-    (forge repo / unreachable folder) node so the edge has a visible end.
+    gets exactly one, **always** — dangling, unverifiable and charset-invalid included. Resolution is
+    **tier-aware** (issue #188): the repo enumeration first, then — for a cron trigger whose folder
+    read succeeded — the trigger's injected `run.skillsDir`, the overlay `skills/` and the staged
+    packages, in the loader's own precedence order, so a flow legally living below the repo lands its
+    edge on the `injected`/`overlay`/`staged` node that tier enumerates instead of a red twin. A
+    target no checkable tier holds exists as a `skill-missing` (every applicable tier checked and
+    missed), `skill-not-at-head` (absent at HEAD, some tier not checkable from this session — amber,
+    `tiersUnknown` named in the tip) or `skill-unverified` (forge repo / unreachable folder) node so
+    the edge has a visible end.
   - **`observed`** — flow → flow, from run records only (`parentJobId` joins), folded per flow pair
     with its **count and last occurrence**. An observed edge exists because a run actually spawned
     another, never because one could. Same-target only; an edge that cannot be hung on exactly one
@@ -1132,10 +1146,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   trigger's flow** (a forge job gets no `/outbox` mount), and **no chain edge ever crosses
   folders** (the child folder is forced to the parent's own) — the harness makes both
   unrepresentable, so the graph never renders either. Dangling is precise: `no-skill` flags only
-  where enumeration **succeeded** and the path is absent at HEAD (the gate's own token); an
+  where **every applicable tier was checked and missed** (issue #188 widened the gate's own token
+  from one enumeration to the whole ladder, and the detail names the tiers checked — a trigger's
+  `run.packages: false` withholds the staged tier as a known miss, worded as such); an
   unreachable or remote folder renders **unverified**, never dangling, and a `run.flow` failing
   `SKILL_NAME_RE` is its own `charset-invalid` flag — the gate would answer `deny` for it, and
-  deny proves nothing about existence. Orphanhood is three distinct facts, not one: `orphan` (no
+  deny proves nothing about existence. The ladder **stops at an unknown tier**, deliberately
+  diverging from doctor: doctor answers the existential "does the name resolve anywhere", which a
+  hit below an unknown tier satisfies regardless of what shadows it, so doctor probes past unknowns
+  (`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`); a config edge asserts node **identity** — "the job
+  loads THIS file" — and claiming a lower-tier node under an unknown higher tier is exactly the
+  wrong tick that spec forbids. An unknown tier (a session without `PI_GLOBAL_PI_DIR` — the
+  deployment pointer deliberately cannot carry it — an unreadable listing, a truncated one whose
+  miss may sit past the cap, a pattern-manifest package) therefore softens the claim to
+  `skill-not-at-head`, never resolves and never flags. Orphanhood is three distinct facts, not one: `orphan` (no
   trigger, no `ai-trigger`, no incoming mention), `ai-reachable-no-trigger` (deliberately
   chain/dispatch_run-reachable), and `injected-ai-trigger` (the `OQ-022` silent no-op, badged
   loudly). Sub-skills are never orphan candidates — the gate's path template has no room for them.
@@ -1162,7 +1186,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     operator to delete a trigger whose skill exists.
   - *Resolving ambiguous observed-edge targets by first match* — pins real history onto the wrong
     folder's skills; dropped-and-counted is honest, guessed is not.
+  - *Claiming a lower-tier node under an unknown higher tier* (issue #188) — doctor's existential ✓
+    survives an unknown above a hit; an identity edge does not, because the unknown tier may shadow
+    the hit at load time and the edge would point at content the job never runs. Softened, not
+    resolved.
+  - *A new flag or edge kind for tier resolution* (issue #188) — `REQ-TOPOLOGY-GRAPH` (h) promises
+    the closed vocabularies stay closed, and resolution honesty fits in node kinds and node facts;
+    the kinds themselves became the third closed pinned set instead of staying an informal literal
+    scatter.
 - **Traces to**: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-JOB-OUTBOX-CHAINING`, `DES-AI-TRIGGER-FLOW-GATE`,
+  `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`, `REQ-GLOBAL-PI-OVERLAY`, `REQ-PER-TRIGGER-SKILLS`,
   `OQ-008`, `OQ-009`, `OQ-022`, `INT-RUN-HISTORY-FILE-CONTRACT`; implemented in
   `admin/src/graph-model.mjs` (`buildGraphModel`) over `admin/src/read-model.mjs`'s graph readers.
 
@@ -1331,7 +1364,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   burn the reserved budget slot per refusal, paying for zero work on every delivery of a misconfigured
   trigger). The check sits at the pre-spend moment anyway, so flipping report to refusal is a one-line
   change plus a row here. The residual is stated: an advisory line at 03:00 helps only an operator who
-  reads logs; doctor's per-trigger lines are the layer that reaches them earlier.
+  reads logs; doctor's per-trigger lines are the layer that reaches them earlier, and (issue #188) the
+  topology renders the same host-side approximation as a third advisory surface — with one deliberate
+  divergence recorded on `DES-GRAPH-EDGE-DERIVATION`: doctor's ✓ is existential and probes past an
+  unknown tier, while a config edge claims node identity and therefore stops at one.
 - **Rejected**: failing worker/receiver **boot** on an unresolved flow (`parseTriggers` is pure and
   fs-free by `DES-TRIGGERS-UNIFIED-FILE`, the receiver may run on a host with no repo, and overlay and
   package tiers make "absent at HEAD" a legal steady state); carrying the flow in `event.json` (an
@@ -2088,6 +2124,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-13 | Issue #188 (topology: tier-aware config-edge resolution). **DES-GRAPH-EDGE-DERIVATION AMENDED**: the config bullet's edge-end fallback set grows the tier nodes and the amber `skill-not-at-head` state; the dangling doctrine is rewritten around the per-trigger precedence ladder (repo > injected > overlay > staged) with `no-skill` demanding every applicable tier checked-and-missed; the stop-at-unknown rule is recorded WITH its doctor divergence (existential ✓ probes past an unknown, identity edge stops at one) as the load-bearing why; Rejected grows *claiming a lower-tier node under an unknown higher tier* and *a new flag or edge kind for tier resolution* (the closed vocabularies stay closed; node kinds became the third closed pinned set instead). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: the graph data surface gains `readOverlaySkills` (existence-only, ENOENT = legal models-only overlay = known-empty, other failures = unknown) and `readStagedSkillsList` (the worker's own reader behind the `readStagedPackages` wrapper doctrine, manifest order preserved as loader shadowing order), both null-means-not-checkable when `PI_GLOBAL_PI_DIR` is invisible (the deployment pointer deliberately cannot supply it), same never-throw/`GRAPH_LIMITS`/display-advisory posture. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS AMENDED** (one sentence): the topology joins doctor as the residual's third advisory surface, divergence cross-referenced. **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** -- AI-reachability stays committed-repo-only; tier nodes carry no `aiTrigger` and no chainable badge, and `potential`-edge eligibility still reads only the repo enumeration. |
 | 2026-08-13 | Issue #189 (closing pass: package prompt templates, OQ-019 deferral (b)). **DES-COMMAND-ENTRY-POINT AMENDED**: the template half of the /name fall-through hazard recorded and closed -- `getCommand()` forecloses the unregistered case, `promptsOverride` forecloses a package template shadowing a protected one, so both halves of what /name runs are pinned to reviewed content. **DES-OPERATOR-GLOBAL-OVERLAY UNCHANGED, checked** -- the overlay's trust class and mount are untouched; it gained a resource kind through the existing mount. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS UNCHANGED, checked** -- skills-tier resolution is untouched by the prompts work. |
 | 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command` in the triggers file). **DES-COMMAND-ENTRY-POINT AMENDED** with the producer-half decisions: legal on ALL FOUR trigger kinds (`run.skillsDir`'s capability-of-the-deployment reasoning — a webhook trigger runs what a cron trigger runs), exactly one of `flow`/`command` enforced at parse by the shared validator; forge command prompts are the same bare `/<command> [args]` — the envelope bypassed whole, delivery context handler-read from `event.json`, `CONST-ISSUE-TEXT-IS-DATA` held and arguably strengthened since nothing payload-authored renders into a command prompt; the `cmd:`-prefixed dedup slot so a command rule never coalesces with a same-named flow rule; the `commands` capability gate now enforced worker-side pre-spend (`job-image-commands-unsupported`, the label's second direction); the comment trailing-word override INERT on a command rule; and `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`'s byte-for-byte objection answered head-on — command prompts are NEW prompts, every existing flow trigger's `prompt.md` stays byte-identical. **DES-AI-TRIGGER-FLOW-GATE AMENDED**: the command clause joins the injected-skills paragraph's neighborhood — never AI-reachable, and BUILT at the two producers rather than falling out, because no committed artifact exists for the gate to read (`chain-command-refused` before the charset check, no opt-in; `dispatch_run` structurally incapable plus a readable slash-leading-flow refusal; `OQ-022`'s allowlist closing shape unchanged in spirit, with the inversion stated on that row). **DES-JOB-OUTBOX-CHAINING AMENDED**: the explicit refusal token joins the validation ladder; commands may chain OUT, nothing chains INTO a command — ignoring the key under unknown-keys would enqueue a flow the agent did not request. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE AMENDED**: command jobs have no envelope, and `run.instructions` is refused beside `run.command` rather than left inert — the cron refusal's accepted-where-it-does-nothing hazard, arriving through a bypassed envelope; the entry's byte-for-byte reasoning survives because no existing prompt changes. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains a field, and the one-validator doctrine is exactly what makes the mutual exclusion fail both services identically; no engine merges, and the on × run matrix is untouched. |
 | 2026-08-13 | Issue #189 (Gap 2, runner half). **NEW `DES-COMMAND-ENTRY-POINT`**: a trigger may dispatch a registered pi extension command; the runner's protocol ships first (env-authoritative `/command` prompt because pi's grammar fires only on a whole-text slash and a worker mismatch must not misclassify a flow job; pre-prompt `getCommand()` verification because an unregistered `/name` is not an error to pi and rides into a paid model call; handler throws observed via `extensionRunner.onError`, the pin's only channel, and classified retryable `command-error` by explicit user choice with the accepted cost stated; the fire-and-forget residual stated as pi's own contract; the `commands` image capability as the two-direction rollout gate, `replicas` pattern). The old docs premise ("nobody to type it inside a job") is recorded as contradicted by the pinned `session.prompt()` contract, proven by a keyless real-session pinned-contract test. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS UNCHANGED, checked** — flows keep their advisory posture; a command's registration check is a REFUSAL because unlike a flow there is no hint-style steady state in which an unregistered command is legitimate. **DES-PER-TRIGGER-JOB-IMAGE UNCHANGED, checked** — the capability label mechanism is reused, not changed. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE UNCHANGED, checked** — envelope semantics move with the producer half. |

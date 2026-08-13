@@ -35,6 +35,10 @@ const CANNED = () => ({
     },
   },
   injectedSkills: { "/inj": { skills: [{ name: "tidy", aiTrigger: true }], truncated: false, unreachable: null } },
+  // Known-empty tier reads (issue #188), mirroring the two graph suites: deleted-flow stays a KNOWN
+  // miss (red), so the topology pane's pins keep their meaning.
+  overlaySkills: { skills: [], truncated: false, unreachable: null },
+  stagedSkills: { skills: [], unenumerable: [], truncated: false },
   forgeRepos: { github: ["acme/website", "acme/api"] },
   cronStats: { byId: { nightly: { runs: 41, lastOutcome: "completed", lastEndedAt: "2026-08-11T00:00:00.000Z" }, gone: { runs: 0, lastOutcome: null, lastEndedAt: null } } },
   runJoin: { byIndex: { 1: { runs: 12, lastOutcome: "completed", lastEndedAt: "2026-08-11T01:00:00.000Z" } }, unattributed: 2 },

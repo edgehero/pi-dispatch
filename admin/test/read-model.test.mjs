@@ -34,6 +34,8 @@ import {
   observedChainEdges,
   readFolderSkills,
   readInjectedSkills,
+  readOverlaySkills,
+  readStagedSkillsList,
   collectGraphInputs,
   forgeRepoTargets,
 } from "../src/read-model.mjs";
@@ -1264,7 +1266,7 @@ test("GRAPH_LIMITS is the LITERAL reviewed numbers, frozen", () => {
   // the numbers on purpose and say why in the commit body.
   assert.deepEqual(
     { ...GRAPH_LIMITS },
-    { maxFoldersScanned: 16, maxSkillsPerFolder: 64, maxSkillBytes: 65536, maxMentionScanBytes: 32768, maxEdges: 200, windowDays: 30, maxReposListed: 5 },
+    { maxFoldersScanned: 16, maxSkillsPerFolder: 64, maxSkillBytes: 65536, maxMentionScanBytes: 32768, maxEdges: 200, windowDays: 30, maxReposListed: 5, maxStagedSkills: 64 },
   );
   assert.ok(Object.isFrozen(GRAPH_LIMITS));
 });
@@ -1631,9 +1633,119 @@ test("collectGraphInputs dedupes folders and skills dirs, caps folders, and says
 });
 
 test("collectGraphInputs degrades on bad input", () => {
-  assert.deepEqual(collectGraphInputs({}), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
-  assert.deepEqual(collectGraphInputs(), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
-  assert.deepEqual(collectGraphInputs({ triggers: "nope" }), { folderSkills: {}, injectedSkills: {}, foldersTruncated: false });
+  const empty = { folderSkills: {}, injectedSkills: {}, overlaySkills: null, stagedSkills: null, foldersTruncated: false };
+  assert.deepEqual(collectGraphInputs({}), empty);
+  assert.deepEqual(collectGraphInputs(), empty);
+  assert.deepEqual(collectGraphInputs({ triggers: "nope" }), empty);
+});
+
+test("collectGraphInputs reads the two deployment-wide tiers once, and only when globalPiDir is visible (issue #188)", () => {
+  const calls = [];
+  const readOverlay = ({ globalPiDir }) => { calls.push(["overlay", globalPiDir]); return { skills: [{ name: "g" }], truncated: false, unreachable: null }; };
+  const readStaged = ({ globalPiDir }) => { calls.push(["staged", globalPiDir]); return { skills: [], unenumerable: [], truncated: false }; };
+  const triggers = [
+    { type: "cron", folder: "/f0", skillsDir: null },
+    { type: "cron", folder: "/f1", skillsDir: null },
+  ];
+  const readFolder = () => ({ head: "h", skills: [], truncated: false, unreachable: null });
+
+  const out = collectGraphInputs({ triggers, globalPiDir: "/gpd", readFolder, readOverlay, readStaged });
+  assert.deepEqual(calls, [["overlay", "/gpd"], ["staged", "/gpd"]], "one read per tier per build, however many triggers");
+  assert.deepEqual(out.overlaySkills, { skills: [{ name: "g" }], truncated: false, unreachable: null });
+  assert.deepEqual(out.stagedSkills, { skills: [], unenumerable: [], truncated: false });
+
+  // Null globalPiDir (the deployment pointer cannot carry PI_GLOBAL_PI_DIR): the tier keys stay
+  // null, meaning "not checkable from this session", NEVER an empty-but-known shape.
+  const blind = collectGraphInputs({ triggers, readFolder, readOverlay, readStaged });
+  assert.equal(blind.overlaySkills, null);
+  assert.equal(blind.stagedSkills, null);
+  const blank = collectGraphInputs({ triggers, globalPiDir: "", readFolder, readOverlay, readStaged });
+  assert.equal(blank.overlaySkills, null, "empty string reads as unset, the resolvePaths || null rule");
+});
+
+test("readOverlaySkills lists the overlay's skills/: charset-filtered, SKILL.md required, existence-only", () => {
+  const dirs = { "/gpd/skills": ["tidy", "plain", "Bad.Name", "empty"] };
+  const present = new Set(["/gpd/skills/tidy/SKILL.md", "/gpd/skills/plain/SKILL.md"]);
+  const fs = {
+    readdirSync: (dir) => dirs[dir] ?? (() => { throw new Error("unrouted"); })(),
+    existsSync: (p) => present.has(p),
+  };
+  const out = readOverlaySkills({ globalPiDir: "/gpd", fs });
+  assert.deepEqual(out, {
+    skills: [{ name: "plain" }, { name: "tidy" }],
+    truncated: false,
+    unreachable: null,
+  }, "Bad.Name fails the charset, empty has no SKILL.md; no frontmatter is read on purpose");
+});
+
+test("readOverlaySkills: ENOENT is a KNOWN-EMPTY overlay, every other failure is unreadable", () => {
+  const enoent = () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); };
+  assert.deepEqual(
+    readOverlaySkills({ globalPiDir: "/gpd", fs: { readdirSync: enoent, existsSync: () => false } }),
+    { skills: [], truncated: false, unreachable: null },
+    "an overlay carrying only models.json is a legal deployment, not an unknown tier",
+  );
+  assert.deepEqual(
+    readOverlaySkills({ globalPiDir: "/gpd", fs: { readdirSync: () => { throw new Error("EACCES"); }, existsSync: () => false } }),
+    { skills: [], truncated: false, unreachable: "unreadable" },
+    "a failed read proves nothing: the ladder must treat this tier as unknown",
+  );
+  assert.deepEqual(readOverlaySkills({}), { skills: [], truncated: false, unreachable: null });
+  assert.deepEqual(readOverlaySkills({ globalPiDir: "" }), { skills: [], truncated: false, unreachable: null });
+});
+
+test("readOverlaySkills caps the listing and says so", () => {
+  const names = Array.from({ length: GRAPH_LIMITS.maxSkillsPerFolder + 1 }, (_, i) => `s${String(i).padStart(3, "0")}`);
+  const fs = { readdirSync: () => names, existsSync: () => true };
+  const out = readOverlaySkills({ globalPiDir: "/gpd", fs });
+  assert.equal(out.skills.length, GRAPH_LIMITS.maxSkillsPerFolder);
+  assert.equal(out.truncated, true, "a truncated listing's miss must read as unknown, so the cap is stated");
+});
+
+test("readStagedSkillsList adapts the worker reader's seams and preserves manifest order", () => {
+  const seen = [];
+  const readStaged = ({ globalPiDir, readFile, fileExists, readDir }) => {
+    // The worker seams must be REAL functions adapted from fs -- the Dirent contract included.
+    assert.equal(globalPiDir, "/gpd");
+    assert.equal(typeof readFile, "function");
+    assert.equal(typeof fileExists, "function");
+    assert.equal(typeof readDir, "function");
+    seen.push("called");
+    return {
+      skills: [
+        { name: "zeta", package: "@a/one", dir: "one" },
+        { name: "alpha", package: "@b/two", dir: "two" },
+        { name: "zeta", package: "@b/two", dir: "two" },
+        { name: "Bad.Name", package: "@b/two", dir: "two" },
+        { name: "dup", package: "@a/one", dir: "one" },
+        { name: "dup", package: "@a/one", dir: "one" },
+      ],
+      unenumerable: ["@z/glob", "@a/glob"],
+    };
+  };
+  const out = readStagedSkillsList({ globalPiDir: "/gpd", readStaged });
+  assert.deepEqual(seen, ["called"]);
+  assert.deepEqual(out.skills, [
+    { name: "zeta", package: "@a/one", dir: "one" },
+    { name: "alpha", package: "@b/two", dir: "two" },
+    { name: "zeta", package: "@b/two", dir: "two" },
+    { name: "dup", package: "@a/one", dir: "one" },
+  ], "manifest order is loader order -- resolution takes the first name match, so this list must not re-sort; per-dir dupes and charset failures drop");
+  assert.deepEqual(out.unenumerable, ["@a/glob", "@z/glob"], "unenumerable is display-only, so it sorts");
+  assert.equal(out.truncated, false);
+});
+
+test("readStagedSkillsList degrades: unset dir, throwing seams, junk shapes, and the cap", () => {
+  const empty = { skills: [], unenumerable: [], truncated: false };
+  assert.deepEqual(readStagedSkillsList({}), empty);
+  assert.deepEqual(readStagedSkillsList({ globalPiDir: "" }), empty);
+  assert.deepEqual(readStagedSkillsList({ globalPiDir: "/gpd", readStaged: () => { throw new Error("boom"); } }), empty);
+  assert.deepEqual(readStagedSkillsList({ globalPiDir: "/gpd", readStaged: () => "junk" }), empty);
+
+  const many = Array.from({ length: GRAPH_LIMITS.maxStagedSkills + 1 }, (_, i) => ({ name: `s${String(i).padStart(3, "0")}`, package: "@a/one", dir: "one" }));
+  const out = readStagedSkillsList({ globalPiDir: "/gpd", readStaged: () => ({ skills: many, unenumerable: [] }) });
+  assert.equal(out.skills.length, GRAPH_LIMITS.maxStagedSkills);
+  assert.equal(out.truncated, true);
 });
 
 test("forgeRepoTargets lists each forge's repos from record targets, capped and sorted", () => {

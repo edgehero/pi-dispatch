@@ -73,5 +73,10 @@ always printed first. `scp` the file to your desktop and open it there.
   control re-reads the file so an open tab follows your re-runs.
 - Everything the [`costs.md`](costs.md) honest-limits section says holds here too: totals are
   floors, pre-ledger runs are counted rather than guessed at, and history is never re-priced.
+- The topology's tier visibility depends on this session's environment: the overlay and
+  staged-package skill tiers enumerate only when `PI_GLOBAL_PI_DIR` is set for the session running
+  `/dispatch insights` (the deployment pointer deliberately cannot carry it), and a flow the visible
+  tiers miss renders the amber `[not at HEAD]` state rather than a red claim — see
+  [`graph.md`](graph.md).
 - The what-if is the `/dispatch insights whatif <provider/model> --flow <flow>` command: an
   estimate wants the full priced catalog, and tab completion offers it.

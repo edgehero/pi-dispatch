@@ -131,7 +131,7 @@ export function findLoopHints(text) {
 // minting a new one without a renderer arm should go red in a unit test, not render as nothing.
 export const GRAPH_EDGE_KINDS = Object.freeze(["config", "observed", "potential", "cron-rearm"]);
 export const GRAPH_FLAGS = Object.freeze([
-  "no-skill", // config edge target absent at HEAD in an ENUMERATED folder (readFlowGate's precise token)
+  "no-skill", // config edge target absent in EVERY checkable applicable tier (readFlowGate's precise token, now with the full ladder behind it)
   "charset-invalid", // run.flow fails SKILL_NAME_RE: can never materialise, a distinct defect from no-skill
   "orphan", // no trigger, no ai-trigger, no incoming mention: dead by every path the system has
   "ai-reachable-no-trigger", // no trigger but ai-trigger: allow -- deliberately chain/dispatch_run-reachable
@@ -139,6 +139,26 @@ export const GRAPH_FLAGS = Object.freeze([
   "unread", // SKILL.md unreadable/oversized at enumeration: facts unknown, gate read as closed
   "pr-spend-loop-risk", // pull_request on opened/synchronize: the OQ-020 cross-actor spend-loop signature
 ]);
+// The node kinds, closed and pinned like the two vocabularies above since issue #188 grew them: a
+// renderer meets every one of these or a new producer goes red in a unit test. The edge and flag sets
+// are BYTE-UNCHANGED by that issue -- REQ-TOPOLOGY-GRAPH (h)'s "the closed vocabularies stay closed"
+// holds literally; resolution honesty lives in kinds and node facts, never in a new flag.
+export const GRAPH_NODE_KINDS = Object.freeze([
+  "trigger",
+  "skill", // committed at HEAD in an enumerated folder
+  "skill-missing", // absent in every checkable applicable tier: the one red, dangling state
+  "skill-unverified", // the folder itself was never readable (forge/remote): a read that never happened
+  "skill-not-at-head", // absent at HEAD, but some lower tier was not checkable from this session
+  "injected", // run.skillsDir working-tree skill: trigger-reachable, never AI-reachable
+  "overlay", // deployment overlay skills/: trigger-reachable, never AI-reachable
+  "staged", // a staged pi package's skill: trigger-reachable, never AI-reachable
+]);
+
+// The ladder's tier names, one vocabulary for `tiersUnknown` and the no-skill detail text; doctor's
+// per-trigger flow lines spell the same tiers so an operator can cross-read the two surfaces.
+const TIER_INJECTED = "injected run.skillsDir";
+const TIER_OVERLAY = "overlay skills/";
+const TIER_STAGED = "staged packages";
 
 /**
  * Assemble the graph model every consumer renders from. Pure fold over the read-model's outputs --
@@ -160,11 +180,17 @@ export const GRAPH_FLAGS = Object.freeze([
  * Total function: absent or malformed inputs degrade to an empty-but-well-formed model, never a
  * throw (the read-model's viewer doctrine, one layer up).
  */
-export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, foldersTruncated, forgeRepos, cronStats, runJoin, chainEdges, caps, nowMs, triggerCosts } = {}) {
+export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSkills, overlaySkills, stagedSkills, foldersTruncated, forgeRepos, cronStats, runJoin, chainEdges, caps, nowMs, triggerCosts } = {}) {
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulerList = Array.isArray(schedulers) ? schedulers : [];
   const folders = folderSkills && typeof folderSkills === "object" ? folderSkills : {};
   const injected = injectedSkills && typeof injectedSkills === "object" ? injectedSkills : {};
+  // The two deployment-wide skill tiers (issue #188). Null OR malformed reads as "tier not checkable
+  // from this session" -- the deployment pointer cannot carry PI_GLOBAL_PI_DIR, so a wizard-launched
+  // console legitimately sees nothing -- and only a well-formed result can ever produce a known miss:
+  // degrading junk to an empty-but-known shape here would re-mint the false red this issue removes.
+  const overlay = overlaySkills && typeof overlaySkills === "object" && Array.isArray(overlaySkills.skills) ? overlaySkills : null;
+  const staged = stagedSkills && typeof stagedSkills === "object" && Array.isArray(stagedSkills.skills) ? stagedSkills : null;
   const statsById = cronStats?.byId && typeof cronStats.byId === "object" ? cronStats.byId : {};
   const statsByIndex = runJoin?.byIndex && typeof runJoin.byIndex === "object" ? runJoin.byIndex : {};
   const observed = Array.isArray(chainEdges?.edges) ? chainEdges.edges : [];
@@ -194,7 +220,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
         // collectGraphInputs' cap flag rides its spread into this input (review finding: this was
         // hardcoded false, so the cap-reached banner could never fire on any surface).
         folders: foldersTruncated === true,
-        skills: Object.values(folders).some((f) => f?.truncated === true),
+        skills: Object.values(folders).some((f) => f?.truncated === true) || overlay?.truncated === true || staged?.truncated === true,
         edges: chainEdges?.truncated === true,
       },
       droppedObservedEdges: 0,
@@ -204,6 +230,11 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
         .filter(([, r]) => typeof r?.unreachable === "string")
         .map(([dir]) => dir)
         .sort(),
+      // The two tier-honesty counters (issue #188): an overlay whose skills/ failed to read, and the
+      // staged packages whose pattern manifests defeat enumeration. Both feed the softened state
+      // below AND a banner, because a tier the ladder silently skipped would read as "checked".
+      overlayUnreachable: overlay?.unreachable === "unreadable",
+      stagedUnenumerable: (Array.isArray(staged?.unenumerable) ? staged.unenumerable : []).filter((p) => typeof p === "string").sort(),
     },
   };
 
@@ -284,6 +315,32 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       }
     }
   }
+  // The two deployment-wide tiers render like the injected dirs (issue #188): every enumerated skill
+  // gets a node, capped upstream, bucketed by the page into its own tier group, orphan-exempt by
+  // kind. Neither joins skillNode -- that map answers "committed at HEAD in THIS folder", and a tier
+  // node resolves a config edge only through the precedence ladder below.
+  const overlayNodeId = new Map(); // name -> node id
+  if (overlay) {
+    for (const skill of overlay.skills) {
+      if (typeof skill?.name !== "string" || skill.name === "" || overlayNodeId.has(skill.name)) continue;
+      const id = `overlay:${skill.name}`;
+      overlayNodeId.set(skill.name, id);
+      model.nodes.push({ id, kind: "overlay", name: skill.name });
+    }
+  }
+  const stagedNodeId = new Map(); // name -> FIRST matching node id: manifest order is loader order
+  if (staged) {
+    const seenStagedIds = new Set();
+    for (const skill of staged.skills) {
+      if (typeof skill?.name !== "string" || skill.name === "" || typeof skill?.dir !== "string" || skill.dir === "") continue;
+      const id = `staged:${skill.dir}:${skill.name}`;
+      if (!seenStagedIds.has(id)) {
+        seenStagedIds.add(id);
+        model.nodes.push({ id, kind: "staged", name: skill.name, package: typeof skill.package === "string" && skill.package !== "" ? skill.package : skill.dir });
+      }
+      if (!stagedNodeId.has(skill.name)) stagedNodeId.set(skill.name, id);
+    }
+  }
 
   // A config edge may point at a flow the enumeration did not find; the target then exists as a
   // `skill-missing` node so the edge has a visible end. Created lazily, once per (group, name).
@@ -295,6 +352,22 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
     skillNode.set(key, node);
     model.nodes.push(node);
     group.skillIds.push(node.id);
+    return node;
+  };
+
+  // missingNode's softened sibling (issue #188): the flow is known absent at HEAD, but at least one
+  // lower tier was not checkable from this session, so neither "missing" styling nor a dangling flag
+  // would be honest. Shares missingNode's id space; where a red and a softened claimant land on one
+  // (group, name) -- per-trigger tier knowledge differs by skillsDir and run.packages -- the softened
+  // kind wins in EITHER arrival order, because red asserts "definitively nowhere" and the softened
+  // claimant's unknown tiers refute exactly that. The red claimant loses nothing: its no-skill flag
+  // rides its own TRIGGER node and survives the shared target.
+  const notAtHeadNode = (group, name, tiers) => {
+    const node = missingNode(group, name);
+    if (node.kind === "skill-missing") node.kind = "skill-not-at-head";
+    if (node.kind === "skill-not-at-head") {
+      node.tiersUnknown = [...new Set([...(Array.isArray(node.tiersUnknown) ? node.tiersUnknown : []), ...tiers])].sort();
+    }
     return node;
   };
 
@@ -386,11 +459,61 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
           existing.isFlow = true;
           model.edges.push({ from: id, to: existing.id, kind: "config" });
         } else {
-          // Enumeration SUCCEEDED and the path is absent: this is readFlowGate's precise
-          // "no-skill", the one token that means dangling (deny would prove nothing).
-          const target = missingNode(group, t.flow);
-          model.edges.push({ from: id, to: target.id, kind: "config" });
-          model.flags.push({ nodeId: id, flag: "no-skill", detail: `.pi/skills/${t.flow}/SKILL.md absent at HEAD` });
+          // Absent at HEAD -- but the repo is only the top of the loader's four tiers (issue #188).
+          // Probe the rest in precedence order, per trigger: injected run.skillsDir, overlay
+          // skills/, staged packages. Each probe answers hit, miss, or unknown, and a tier node is
+          // claimed only when every higher applicable tier is a KNOWN miss: a config edge asserts
+          // node identity ("the job loads THIS file"), so a hit below an unknown tier stays soft.
+          // Doctor probes past an unknown on purpose -- its check answers the existential "does the
+          // name resolve anywhere", which a lower hit satisfies regardless of which tier shadows it;
+          // an identity claim may not, because the wrong node is a wrong tick
+          // (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS's one forbidden direction).
+          const probes = [];
+          if (typeof t.skillsDir === "string" && t.skillsDir !== "") {
+            // Applicable only when THIS trigger injects a dir; an unreadable or truncated listing
+            // proves nothing about the name (the miss may sit past the cap).
+            const r = injected[t.skillsDir];
+            if (!r || typeof r.unreachable === "string") probes.push({ tier: TIER_INJECTED, state: "unknown" });
+            else if ((Array.isArray(r.skills) ? r.skills : []).some((s) => s?.name === t.flow)) probes.push({ tier: TIER_INJECTED, state: "hit", nodeId: `injected:${t.skillsDir}:${t.flow}` });
+            else probes.push({ tier: TIER_INJECTED, state: r.truncated === true ? "unknown" : "miss" });
+          }
+          if (overlay === null || typeof overlay.unreachable === "string") probes.push({ tier: TIER_OVERLAY, state: "unknown" });
+          else if (overlayNodeId.has(t.flow)) probes.push({ tier: TIER_OVERLAY, state: "hit", nodeId: overlayNodeId.get(t.flow) });
+          else probes.push({ tier: TIER_OVERLAY, state: overlay.truncated === true ? "unknown" : "miss" });
+          if (t.packages === false) {
+            // Withheld by the trigger's own config is a KNOWN miss: the job would not load the tier
+            // either. Named in the detail text so a red on a packages:false trigger says why the
+            // staged tier could not have saved it.
+            probes.push({ tier: `${TIER_STAGED} (withheld: run.packages false)`, state: "miss" });
+          } else if (staged === null) probes.push({ tier: TIER_STAGED, state: "unknown" });
+          else if (stagedNodeId.has(t.flow)) probes.push({ tier: TIER_STAGED, state: "hit", nodeId: stagedNodeId.get(t.flow) });
+          else probes.push({ tier: TIER_STAGED, state: staged.unenumerable.length > 0 || staged.truncated === true ? "unknown" : "miss" });
+
+          let target = null;
+          let blocked = false;
+          for (const probe of probes) {
+            if (probe.state === "hit" && !blocked) {
+              target = probe.nodeId;
+              break;
+            }
+            if (probe.state === "unknown") blocked = true;
+          }
+          if (target !== null) {
+            // Resolved in a lower tier: the edge lands on the tier node that already renders its own
+            // "never AI-reachable" truth, and NO flag is minted -- the flow runs fine.
+            model.edges.push({ from: id, to: target, kind: "config" });
+          } else if (probes.some((p) => p.state === "unknown")) {
+            const soft = notAtHeadNode(group, t.flow, probes.filter((p) => p.state === "unknown").map((p) => p.tier));
+            model.edges.push({ from: id, to: soft.id, kind: "config" });
+          } else {
+            // Every applicable tier checked and missed: readFlowGate's precise "no-skill", the one
+            // token that means dangling (deny would prove nothing), now with the whole ladder
+            // behind it -- the detail names the tiers so the claim is auditable.
+            const target2 = missingNode(group, t.flow);
+            model.edges.push({ from: id, to: target2.id, kind: "config" });
+            const alsoChecked = probes.length > 0 ? `; also checked: ${probes.map((p) => p.tier).join(", ")}` : "";
+            model.flags.push({ nodeId: id, flag: "no-skill", detail: `.pi/skills/${t.flow}/SKILL.md absent at HEAD${alsoChecked}` });
+          }
         }
       } else if (group) {
         // Forge repo (not local) or unreachable folder: the edge still draws -- the config fact is

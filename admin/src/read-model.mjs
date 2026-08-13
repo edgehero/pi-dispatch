@@ -31,7 +31,7 @@ import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connecti
 import { makeQueue, enqueueLocalJob } from "@edgehero/pi-dispatch/queue";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
-import { readStageManifest } from "@edgehero/pi-dispatch/packages";
+import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
 // The skill enumeration reuses the worker's OWN listing parsers (issue #54), the same anti-drift rule
 // as parseTriggers/readOverlay above: selectEntries keeps only regular blobs at allowed paths, and
 // keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
@@ -864,6 +864,7 @@ export const GRAPH_LIMITS = Object.freeze({
   maxEdges: 200, // distinct observed chain edges kept; beyond this the graph says "truncated"
   windowDays: 30, // run-record window the graph folds; matches the default PI_LOG_RETENTION_DAYS
   maxReposListed: 5, // repos named per forge group, from record targets; a scope label, not an inventory
+  maxStagedSkills: 64, // staged-package skills kept for display; one stage read per graph build
 });
 
 /**
@@ -1183,14 +1184,110 @@ export function readInjectedSkills({ skillsDir, fs = nodeFs } = {}) {
 }
 
 /**
- * The one I/O aggregation for a graph build: enumerate every distinct cron folder and injected
- * skills dir the display triggers name, deduped and capped. Lives here so the dashboard seam and the
- * `/dispatch graph` command share one folder-dedupe/caps implementation; callers bring their own
- * records/schedulers reads. Forge triggers contribute no folder -- their repo is not on this host,
- * which is exactly what the graph's "skills unverifiable from the admin host" folder line says.
+ * Enumerate the deployment overlay's `skills/` (REQ-GLOBAL-PI-OVERLAY) for display: a working-tree
+ * readdir like readInjectedSkills, because the overlay is operator-authored host state with no git
+ * history. Existence-only on purpose, no frontmatter read and no `ai-trigger` fact: an overlay skill
+ * is never AI-reachable regardless of what its frontmatter claims (DES-AI-TRIGGER-FLOW-GATE), and the
+ * flag vocabulary is closed, so a body read could add nothing the tip's "never AI-reachable" does not
+ * already say. The unbadged overlay `ai-trigger: allow` no-op is a recorded residual, not an oversight.
+ *
+ * ENOENT on the readdir is KNOWN-EMPTY, not unreachable: an overlay carrying only models.json or
+ * prompts/ is a legal deployment, and calling it unreadable would soften every dangling flow into
+ * "tier not checkable" for deployments that simply stage no overlay skills. Every other failure is
+ * "unreadable", which the resolution ladder treats as an unknown tier: a read that failed proves
+ * nothing (the readFolderSkills doctrine, one tier over).
  */
-export function collectGraphInputs({ triggers, readFolder = readFolderSkills, readInjected = readInjectedSkills } = {}) {
-  const out = { folderSkills: {}, injectedSkills: {}, foldersTruncated: false };
+export function readOverlaySkills({ globalPiDir, fs = nodeFs } = {}) {
+  if (typeof globalPiDir !== "string" || globalPiDir === "") return { skills: [], truncated: false, unreachable: null };
+  const dir = join(globalPiDir, "skills");
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (err) {
+    if (err?.code === "ENOENT") return { skills: [], truncated: false, unreachable: null };
+    return { skills: [], truncated: false, unreachable: "unreadable" };
+  }
+  const valid = names.filter((n) => SKILL_NAME_RE.test(n)).sort();
+  const truncated = valid.length > GRAPH_LIMITS.maxSkillsPerFolder;
+  const skills = [];
+  for (const name of valid.slice(0, GRAPH_LIMITS.maxSkillsPerFolder)) {
+    let present = false;
+    try {
+      present = fs.existsSync(join(dir, name, "SKILL.md"));
+    } catch {
+      present = false; // an unstattable entry is not a skill the loader would take either
+    }
+    if (present) skills.push({ name });
+  }
+  return { skills, truncated, unreachable: null };
+}
+
+/**
+ * Enumerate the staged pi packages' skills for display, through the worker's OWN readStagedSkills
+ * (worker/src/packages.mjs): manifest-vs-convention semantics at the pin, glob/override packages
+ * reported as unenumerable rather than guessed at, dir-basename naming (a frontmatter rename can
+ * only turn a would-be resolution into a softened one, never invent one). Same anti-drift rule as
+ * readStagedPackages above, and the same wrapper doctrine: that reader never throws by contract, and
+ * the try/catch here additionally covers the injected fs callbacks.
+ *
+ * Manifest order is PRESERVED, no re-sort: resolution takes the first name match, the same package
+ * doctor's staged probe names, and display determinism comes from the page normalizer's id sort,
+ * never from this list.
+ */
+export function readStagedSkillsList({ globalPiDir, fs = nodeFs, readStaged = readStagedSkills } = {}) {
+  const empty = { skills: [], unenumerable: [], truncated: false };
+  if (typeof globalPiDir !== "string" || globalPiDir === "") return empty;
+  let result;
+  try {
+    result = readStaged({
+      globalPiDir,
+      readFile: (path) => fs.readFileSync(path, "utf8"),
+      fileExists: (path) => fs.existsSync(path),
+      readDir: (path, opts) => fs.readdirSync(path, opts),
+    });
+  } catch {
+    return empty;
+  }
+  const seen = new Set();
+  const skills = [];
+  for (const s of Array.isArray(result?.skills) ? result.skills : []) {
+    if (typeof s?.name !== "string" || !SKILL_NAME_RE.test(s.name)) continue;
+    if (typeof s.dir !== "string" || s.dir === "") continue;
+    const key = `${s.dir} ${s.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    skills.push({ name: s.name, package: typeof s.package === "string" && s.package !== "" ? s.package : s.dir, dir: s.dir });
+  }
+  return {
+    skills: skills.slice(0, GRAPH_LIMITS.maxStagedSkills),
+    unenumerable: (Array.isArray(result?.unenumerable) ? result.unenumerable : []).filter((p) => typeof p === "string").sort(),
+    truncated: skills.length > GRAPH_LIMITS.maxStagedSkills,
+  };
+}
+
+/**
+ * The one I/O aggregation for a graph build: enumerate every distinct cron folder and injected
+ * skills dir the display triggers name, deduped and capped, plus the two deployment-wide skill tiers
+ * (overlay `skills/` and staged packages) when this session can see the global pi dir at all. Lives
+ * here so the dashboard seam and the `/dispatch graph` command share one folder-dedupe/caps
+ * implementation; callers bring their own records/schedulers reads. Forge triggers contribute no
+ * folder -- their repo is not on this host, which is exactly what the graph's "skills unverifiable
+ * from the admin host" folder line says.
+ *
+ * `overlaySkills`/`stagedSkills` are null (not empty) when `globalPiDir` is unset: the deployment
+ * pointer's env allowlist deliberately excludes PI_GLOBAL_PI_DIR, so a wizard-launched session sees
+ * null even when the worker service has a real overlay. Null means "tier not checkable from this
+ * session", never "tier empty", and the model softens rather than flagging.
+ */
+export function collectGraphInputs({
+  triggers,
+  globalPiDir = null,
+  readFolder = readFolderSkills,
+  readInjected = readInjectedSkills,
+  readOverlay = readOverlaySkills,
+  readStaged = readStagedSkillsList,
+} = {}) {
+  const out = { folderSkills: {}, injectedSkills: {}, overlaySkills: null, stagedSkills: null, foldersTruncated: false };
   if (!Array.isArray(triggers)) return out;
   const folders = [];
   const injectedDirs = [];
@@ -1204,6 +1301,10 @@ export function collectGraphInputs({ triggers, readFolder = readFolderSkills, re
   }
   for (const dir of injectedDirs.slice(0, GRAPH_LIMITS.maxFoldersScanned)) {
     out.injectedSkills[dir] = readInjected({ skillsDir: dir });
+  }
+  if (typeof globalPiDir === "string" && globalPiDir !== "") {
+    out.overlaySkills = readOverlay({ globalPiDir });
+    out.stagedSkills = readStaged({ globalPiDir });
   }
   return out;
 }
