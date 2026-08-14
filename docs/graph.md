@@ -144,13 +144,14 @@ Read the files, then the picture.
 ] }
 ```
 
-`pi-packages.json` — two staged packages, one shipping skills, one shipping a workflow extension
-([`workflows.md`](workflows.md) explains staging):
+`pi-packages.json` — three staged packages: one shipping skills, one shipping a workflow extension, and
+one whose manifest declares its skills as patterns ([`workflows.md`](workflows.md) explains staging):
 
 ```jsonc
 { "packages": [
-  { "name": "@acme/pi-house-skills",      "version": "1.4.2" },
-  { "name": "@juicesharp/rpiv-workflow",  "version": "2.4.0" }
+  { "name": "@acme/pi-house-skills",             "version": "1.4.2", "dir": "house-skills" },
+  { "name": "@juicesharp/rpiv-workflow",         "version": "2.4.0" },
+  { "name": "@quintinshaw/pi-dynamic-workflows", "version": "0.1.0" }
 ] }
 ```
 
@@ -168,8 +169,9 @@ by trigger — each line below is one flow resolution from the [tier ladder](#wh
   03:00 fire, and its spend badge reads `plan:<id>` — a prepaid chip, never `$0.00`.
 - **`inject-tidy` ◷ → `tidy` under *injected skills (run.skillsDir)*.** `tidy` is absent at HEAD, but
   the trigger carries `skillsDir`, so the edge lands on the injected node that already exists — no red,
-  no `[no-skill]`. The tip keeps the other half of the story: trigger-reachable, **never AI-reachable**
-  (an injected `ai-trigger: allow` is a silent no-op, and the tip says so).
+  no `[no-skill]`. Its spend badge is plain metered dollars. The tip keeps the other half of the story:
+  trigger-reachable, **never AI-reachable** (an injected `ai-trigger: allow` is a silent no-op, and the
+  tip says so).
 - **`weekly-overlay` ◷ → ◎ `overlay-report` under *overlay skills (global pi dir)*.** Absent at HEAD,
   not injected; the deployment overlay's `skills/` holds it. Renders only when the session running
   `/dispatch insights` can see `PI_GLOBAL_PI_DIR`.
@@ -178,11 +180,11 @@ by trigger — each line below is one flow resolution from the [tier ladder](#wh
   miss. An edge is an identity claim about which file the job loads, so a hit below an unknowable tier
   would soften instead of claiming.
 - **`reaper` ◷ → ⋯ `prune-stale` `[not at HEAD]`.** The flow resolves in no tier this session can see —
-  but a staged package that declares its skills as a manifest *pattern* cannot be enumerated from the
-  console, so the claim softens to the amber not-committed-at-HEAD state and the tip names the tier
-  that went unchecked. Red would assert "this can never run", which is exactly what the graph does not
-  know; `doctor` answers the same question per tier on the worker host, and the runner's
-  `flow_not_loaded` line is the in-container truth both approximate.
+  but `@quintinshaw/pi-dynamic-workflows` declares its skills as manifest *patterns*, which cannot be
+  enumerated from the console, so the claim softens to the amber not-committed-at-HEAD state and the
+  legend banners the unenumerable package. Red would assert "this can never run", which is exactly what
+  the graph does not know; `doctor` answers the same question per tier on the worker host, and the
+  runner's `flow_not_loaded` line is the in-container truth both approximate.
 - **`@pi wf` ❝ → nothing, by design.** The command trigger: labelled `/wf`, **no config edge** (it names
   a registered extension command — here `@juicesharp/rpiv-workflow`'s — not a skill), the full
   `command: /wf run` line in its tip, and an estimated spend badge (`~ … est.`, amber). Never
