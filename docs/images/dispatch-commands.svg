@@ -1,22 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 894 485" width="894" height="485" role="img" aria-label="pi — /dispatch status · runs · triggers">
-  <rect width="894" height="485" rx="10" fill="#0d1117" stroke="#30363d"/>
-  <rect width="894" height="34" rx="10" fill="#161b22"/>
-  <rect y="24" width="894" height="10" fill="#161b22"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 976 504" width="976" height="504" role="img" aria-label="pi — /dispatch status · runs · triggers">
+  <rect width="976" height="504" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect width="976" height="34" rx="10" fill="#161b22"/>
+  <rect y="24" width="976" height="10" fill="#161b22"/>
   <circle cx="20" cy="17" r="6" fill="#ff5f57"/>
   <circle cx="42" cy="17" r="6" fill="#febc2e"/>
   <circle cx="64" cy="17" r="6" fill="#28c840"/>
-  <text x="447" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">pi — /dispatch status · runs · triggers</text>
+  <text x="488" y="21" text-anchor="middle" fill="#8b949e" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">pi — /dispatch status · runs · triggers</text>
   <text x="16" y="46" xml:space="preserve" fill="#58a6ff" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">› /dispatch status</text>
   <text x="16" y="65" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">Queue: running</text>
   <text x="16" y="84" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  waiting 2  active 1  paused 0  delayed 0  failed 0</text>
   <text x="16" y="103" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  workers: 1</text>
   <text x="16" y="122" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
   <text x="16" y="141" xml:space="preserve" fill="#58a6ff" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">› /dispatch runs</text>
-  <text x="16" y="160" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">JOB ID      TARGET        FLOW          OUTCOME    REASON    TURNS  TOKENS  COST     CHAIN  ENDED</text>
-  <text x="16" y="179" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-a91f     acme/web#412  frontend-fix  completed  -         14     54330   $0.2712  -      2026-07-23T09:37Z</text>
-  <text x="16" y="198" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-7c02     acme/web#409  review        completed  -         6      24020   $0.1041  -      2026-07-23T09:12Z</text>
-  <text x="16" y="217" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">local-4d8b  local:site    tidy          completed  -         9      34900   $0.1620  d1     2026-07-23T03:00Z</text>
-  <text x="16" y="236" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-1e55     acme/api#88   backend-fix   no-fix     cant-fix  21     80400   $0.4015  -      2026-07-22T18:44Z</text>
+  <text x="16" y="160" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">JOB ID      TARGET        FLOW          OUTCOME    REASON    TURNS  TOKENS  COST     CHAIN  REPLICA  ENDED</text>
+  <text x="16" y="179" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-a91f     acme/web#412  frontend-fix  completed  -         14     54330   $0.2712  -      -        2026-07-23T09:37Z</text>
+  <text x="16" y="198" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-7c02     acme/web#409  review        completed  -         6      24020   $0.1041  -      -        2026-07-23T09:12Z</text>
+  <text x="16" y="217" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">local-4d8b  local:site    tidy          completed  -         9      34900   $0.1620  d1     -        2026-07-23T03:00Z</text>
+  <text x="16" y="236" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">gh-1e55     acme/api#88   backend-fix   no-fix     cant-fix  21     80400   $0.4015  -      -        2026-07-22T18:44Z</text>
   <text x="16" y="255" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></text>
   <text x="16" y="274" xml:space="preserve" fill="#58a6ff" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">› /dispatch triggers</text>
   <text x="16" y="293" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">Schedulers:</text>
@@ -29,4 +29,5 @@
   <text x="16" y="426" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  comment  "@pi" → fix</text>
   <text x="16" y="445" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  pull_request  action[labeled] any[pi:review] → review</text>
   <text x="16" y="464" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  pull_request  action[open,update] → review  [gitlab]</text>
+  <text x="16" y="483" xml:space="preserve" fill="#c9d1d9" font-size="13" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">  comment  "@pi wf" → /wf</text>
 </svg>
