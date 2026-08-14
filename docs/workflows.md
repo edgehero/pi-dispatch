@@ -51,11 +51,11 @@ the handler to read, so nothing from the event ever rides the dispatch line. Tha
 whole trigger schema rests on: this service decides *when* and *in what box*, the entry point decides
 *what*.
 
-**A job is not an interactive session, and no longer needs to pretend otherwise.** The runner assembles one
-prompt, calls pi once, and reads the exit line. This file used to conclude that an extension registering a
-**slash command** therefore has nobody to type it inside a job -- refuted at the pin: `session.prompt()`
-dispatches a whole-text `/name` to the extension handler itself, before any model or auth work, so the one
-prompt a job gets can *be* the command. `@juicesharp/rpiv-workflow` names the distinction in its own
+**A job is not an interactive session, and a slash command does not need one.** The runner assembles one
+prompt, calls pi once, and reads the exit line — and `session.prompt()` dispatches a whole-text `/name`
+to the extension handler itself, before any model or auth work, so the one prompt a job gets can *be*
+the command. (The obvious counterargument, that an extension's slash command has nobody to type it
+inside a job, is wrong at the pin: dispatch happens in `prompt()`, not in a terminal.) `@juicesharp/rpiv-workflow` names the distinction in its own
 trigger taxonomy: `command` for a typed `/wf`, `programmatic` for an embedder that calls the API,
 `external` for a webhook or cron source. **A pi-dispatch flow job is the programmatic case, and a
 `run.command` job is the command case, reached headlessly**: `"command": "wf run nightly"` on a trigger
@@ -65,8 +65,9 @@ flow-side routes remain as alternatives:
 - the flow's `SKILL.md` tells the agent to use the workflow's skills, which needs nothing but prose, and
   leaves the decision to start a workflow with the model; or
 - you stage a second small extension of your own that imports the package and starts a run from a lifecycle
-  hook. That is the embedding route the package documents; before `run.command`, it was the only way to
-  start a workflow *without* the model choosing to.
+  hook. That is the embedding route the package documents; reach for it only when the dispatch must depend
+  on something a reviewed trigger line cannot express — `run.command` covers the static case with no code
+  of your own.
 
 **One trigger is one job, one budget slot, and one turn budget.** Every stage runs inside the container that
 one delivery produced, so ten stages share the `PI_MAX_TURNS` ceiling and the per-job token budget, and
@@ -124,7 +125,9 @@ prompt IS its `task`, so a second field would write the same region with no defi
 
 A command trigger takes neither. Its whole prompt is the dispatch line `/command args`, so there is no
 envelope for `instructions` and no task region for `task`, and both are refused when the file loads rather
-than accepted where they would do nothing.
+than accepted where they would do nothing. `"resume": true` is refused at load too — what a resumed
+session should do with a re-dispatched command is undesigned, a gap to close rather than a limit — so a
+command trigger always starts a fresh session.
 
 ## The structured case: stage a workflow extension
 
@@ -171,9 +174,10 @@ What `--with-packages` does, per entry:
    whether it came from your pi setup or from `pi-packages.json`.
 
 **No restart.** The receipt is read at each job start, so `pi install` something, re-run the stager, and the
-next job has it. That also means a re-stage that *removes* a package takes effect immediately, which is the
-point: before, every job would have kept failing on the missing directory until the worker was restarted,
-burning a daily-cap slot each time.
+next job has it. A re-stage that *removes* a package takes effect immediately too, and that is the point of
+the per-job read: under a boot-time read, every job after a removing re-stage refuses at container start
+with its budget slot already reserved, and keeps doing so until the worker restarts — a daily-cap slot
+burned per fire.
 
 Set `PI_GLOBAL_PI_DIR` to the overlay and the staged set lands at `/opt/pi-global/packages/<dir>` in every
 container, named by `PI_PACKAGES`. No new mount and no new trust boundary: staged packages ride the same
@@ -202,6 +206,28 @@ you have read. The list `import-pi` prints is the vetting step.
 
 Any package with a `pi` manifest works the same way, and one staged directory may contribute **extensions,
 skills, prompts and themes** at once.
+
+### Wire it to a trigger
+
+Staged, the extension's `/wf` is dispatchable from any trigger kind via `run.command` — the name without
+the leading slash (the runner prepends it), arguments verbatim:
+
+```jsonc
+// triggers.json -- a schedule dispatches /wf run nightly, headlessly
+{ "on": { "type": "cron", "id": "nightly-workflow", "pattern": "30 3 * * *" },
+  "run": { "kind": "local", "folder": "/srv/site", "command": "wf run nightly" } }
+
+// ...or a collaborator's comment dispatches /wf run; the comment itself never rides the
+// dispatch line -- it waits in /job/event.json for the handler to read as data
+{ "on": { "type": "comment", "phrase": "@pi wf" },
+  "run": { "kind": "github", "command": "wf run" } }
+```
+
+The job's whole prompt is that `/wf …` line. The runner verifies the command is registered before any
+model call and refuses with `command-unregistered` (exit 2, never retried) when it is not — a typo costs
+nothing. The job image must declare the `commands` capability, and the worker refuses pre-spend when it
+does not ([`job-image.md`](job-image.md)). On the graph, a command trigger renders as `/wf` with no flow
+edge ([`graph.md`](graph.md)).
 
 ## What the loader does with a staged package
 
@@ -247,7 +273,8 @@ Two supported ways to continue work **across** jobs:
 
 - **`"resume": true`** on the trigger continues the pi session the previous job for the same key produced.
   It persists the whole transcript to host disk, which is a real disclosure and refuses to run at all when
-  no store is configured. Read [`sessions.md`](sessions.md) first.
+  no store is configured. Read [`sessions.md`](sessions.md) first. Flow triggers only: a command trigger
+  refuses `resume` when the file loads (see [the refusal list](#a-standing-instruction-and-what-it-is-not)).
 - **Job chaining** through `/outbox`: a finished job may request a follow-up job. It is **local jobs only**
   (a forge parent gets no `/outbox` mount), depth-bounded, and gated on the target flow carrying
   `ai-trigger: allow`; a request naming a `command` is refused outright, with no opt-in.

@@ -1,6 +1,6 @@
 <!--
 Launch copy for pi-dispatch. Drafts to copy-paste and post. Every claim here traces to the README /
-SECURITY.md / the code — keep it that way when you edit. Be honest about maturity (v0.x, solo-maintained,
+SECURITY.md / the code — keep it that way when you edit. Be honest about maturity (1.0, solo-maintained,
 self-host, read SECURITY.md); overclaiming burns a launch faster than underclaiming.
 
 Repo: https://github.com/edgehero/pi-dispatch
@@ -25,8 +25,9 @@ no permission system. pi-dispatch is exactly that missing operational layer: eve
 a container starts (per-job turn budget + a daily cap), and the same job runs whether you trigger it from the
 CLI, a cron schedule, or a label, `@pi` comment or PR event on GitHub, GitLab, Forgejo or Azure DevOps. You
 bake your own toolchain into the image (it ships Playwright + Chromium, so a flow can build a frontend,
-screenshot it, and iterate on the render), and a live `/dispatch` admin panel shows the queue, spend meters,
-run history, and triggers.
+screenshot it, and iterate on the render), a live `/dispatch` admin panel shows the queue, spend meters,
+run history, and triggers, and one `/dispatch insights` page prices it all: spend charts, subscription
+verdicts against API rates, and the whole trigger/flow topology.
 
 **The install line** (use this everywhere; the scoped form only, per the naming rule above):
 
@@ -62,13 +63,17 @@ pi-dispatch is the operational layer that closes them, and nothing else:
   week/month ceilings and a soft-hold band) checked before a single token is spent.
 - One job, many ways in: a CLI command, a cron schedule, or a label, @pi comment or PR event on
   GitHub, GitLab, Forgejo or Azure DevOps. Same queue, same box, same budget. Cron is the
-  unattended one. A confirm-free tool in the operator's own pi session and a finished job's
-  outbox can each enqueue one more, both behind their own gates.
+  unattended one. A trigger can also dispatch a staged workflow extension's slash command
+  headlessly (run.command) — third-party multi-stage workflows with no glue code. A confirm-free
+  tool in the operator's own pi session and a finished job's outbox can each enqueue one more,
+  both behind their own gates.
 - Your image, your tools. Bake a project's toolchain into the Dockerfile; it ships Playwright +
   Chromium so a flow can build a frontend, screenshot it, and iterate on the rendered result.
 - A live admin panel (a pi extension): queue state, day/week/month spend meters, run history
-  with per-job token+cost accounting, and editable triggers — plus per-repo "quiet hours" that
-  defer runs between certain times and resume automatically.
+  with per-job token+cost accounting, editable triggers, per-repo "quiet hours" that defer runs
+  between certain times — and one /dispatch insights page: spend charts, subscription
+  SAVING/LOSING verdicts against API rates, what-if re-pricing, and the whole trigger/flow
+  topology drawn Node-RED style with the spend badged onto the triggers that earned it.
 
 Setup is the panel's job too. `pi install npm:@edgehero/pi-dispatch-admin`, then `/dispatch`:
 with nothing configured it walks the whole deployment with a consent per step, and lands you in
@@ -81,7 +86,7 @@ untrusted, adversarial input through an unrestricted agent on purpose, so SECURI
 plainly what is and isn't defended (short version: the trust model is the same as a GitHub
 Action — whoever can merge to your default branch can instruct the agent).
 
-It's MIT, solo-maintained, v0.x, self-hosted (needs Docker + Node 22.19 + a provider key).
+It's MIT, solo-maintained, 1.0, self-hosted (needs Docker + Node 22.19 + a provider key).
 Feedback very welcome, especially on the security model.
 
 https://github.com/edgehero/pi-dispatch
@@ -115,8 +120,10 @@ The admin side is itself a pi extension: a /dispatch command + overlay (queue, s
 run history, editable triggers) and confirm-gated tools so an agent can operate the deployment
 with a human approving each *config* change. Two tools skip that dialog on purpose: pause and
 resume (reversible, spend nothing), and the paid dispatch_run (bounded by six limits instead,
-spelled out in SECURITY.md). Newest bit: per-repo scheduled pause windows ("quiet hours")
-that defer runs between certain times via BullMQ moveToDelayed and auto-resume.
+spelled out in SECURITY.md). Newest bits: /dispatch insights — one self-contained page with
+the spend charts, subscription SAVING/LOSING verdicts, what-if re-pricing, and the whole
+trigger/flow topology — and run.command triggers that dispatch a staged workflow extension's
+slash command headlessly, no glue code.
 
 Repo: https://github.com/edgehero/pi-dispatch — feedback and pokes at the security model welcome.
 ```
@@ -197,10 +204,11 @@ Bake the toolchain into the Dockerfile — it ships Playwright + Chromium, so a 
 frontend, screenshot it, and iterate on the render.
 
 5/ A live admin panel (itself a pi extension): queue, day/week/month spend meters, run history w/
-per-job token+cost, editable triggers, and per-repo "quiet hours" that pause runs between certain
-times and auto-resume. [image]
+per-job token+cost, editable triggers, per-repo "quiet hours" — and one insights page: spend
+charts, subscription verdicts vs API rates, what-if re-pricing, and the trigger/flow topology
+drawn Node-RED style. [image]
 
-6/ MIT, self-hosted, v0.x. Honest about the threat model (SECURITY.md). Built on @earendil pi.
+6/ MIT, self-hosted, 1.0. Honest about the threat model (SECURITY.md). Built on @earendil pi.
 https://github.com/edgehero/pi-dispatch
 ```
 
@@ -223,7 +231,8 @@ that makes that safe-ish and boring:
 - Spend capped before a container even starts (per-job + daily/weekly/monthly).
 - Durable queue (Valkey + BullMQ) so a burst or a reboot doesn't drop jobs.
 - Bring your own Docker image (Playwright/Chromium included for frontend work).
-- A TUI admin panel for queue/spend/runs/triggers, plus per-repo scheduled pause windows.
+- A TUI admin panel for queue/spend/runs/triggers, per-repo scheduled pause windows, and a
+  self-contained insights page (spend charts, subscription verdicts, the trigger/flow topology).
 
 Self-hosted, MIT, needs Docker + Node 22.19 + a provider key. Threat model is written down
 honestly in SECURITY.md (it's the GitHub-Actions trust model: whoever can merge can instruct it).
@@ -254,7 +263,11 @@ Working title: **"Giving a coding agent an off-switch: containers, spend caps, a
    human. Why "operator-approved" beats "no tool at all" here, and then the honest half: where that gate
    deliberately stops. Pause and resume carry no confirm (reversible, spend nothing), and the paid
    `dispatch_run` carries none either, bounded by six independent limits instead of a dialog.
-6. **What I got wrong / what's not defended.** Link SECURITY.md's honest list. Invite scrutiny.
+6. **One page that explains the bill.** The insights page: why the analytics are a self-contained file
+   (no server, no port, works over scp), how every dollar keeps its class (metered vs estimated vs
+   plan-covered — never a lying $0.00), and the trigger/flow topology as the map the spend hangs off.
+   (Screenshot: the insights page.)
+7. **What I got wrong / what's not defended.** Link SECURITY.md's honest list. Invite scrutiny.
 
 ---
 
@@ -262,11 +275,12 @@ Working title: **"Giving a coding agent an off-switch: containers, spend caps, a
 
 <!--
 TEMPLATE, NOT the current release. This block is v0.2.0-era copy and its feature list predates the GitLab,
-Forgejo and Azure DevOps arms, the resurrectable sandbox, run.replicas, resumable sessions, the cost analytics,
-the setup wizard, polling mode and `setup github`. Re-cut it per release against that release's own changes,
-keeping the shape (Admin / AI-operable / feature area / Docs & safety / the maturity footer) and nothing
-else. Versions at the time of writing: root 0.8.0, @edgehero/pi-dispatch 0.1.2,
-@edgehero/pi-dispatch-admin 0.5.0, @edgehero/pi-dispatch-receiver 0.1.1.
+Forgejo and Azure DevOps arms, the resurrectable sandbox, run.replicas, resumable sessions, the insights
+page, the setup wizard, polling mode, `setup github` and run.command triggers. Re-cut it per release
+against that release's own changes, keeping the shape (Admin / AI-operable / feature area / Docs & safety /
+the maturity footer) and nothing else. Note the release workflows generate the actual GitHub release notes
+automatically on merge; this template is for a hand-written launch-moment re-cut. Versions at the time of
+writing: root 1.0.0, and 1.0.0 for all three packages (@edgehero/pi-dispatch, -receiver, -admin).
 -->
 
 **Title:** `v0.2.0 — admin panel, AI-operable controls, scoped pause windows`

@@ -107,6 +107,11 @@ refused fail-loud when the triggers file loads, the same way `run.replicas` is. 
 principle (the trigger's own `on.id`, operator-authored and stable across fires), so this is a gap to
 close rather than a permanent limit, and the refusal says so.
 
+**Command triggers refuse `resume` the same way, on every kind.** A command job's whole prompt is the
+dispatch line `/name args`, and what a resumed session should do with a re-dispatched command is
+undesigned — so `run.resume` beside `run.command` is refused fail-loud at load, another gap to close
+rather than a permanent limit ([`workflows.md`](workflows.md)).
+
 ## When it silently doesn't resume
 
 Every one of these is a **cold start, never a failed job**, and every one is named in the run record's

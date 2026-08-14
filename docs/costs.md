@@ -16,7 +16,9 @@ The **by-trigger** breakdown answers "which trigger burns the most" and "what di
 cost": each row is a `triggers.json` entry (attributed by the persisted index-and-type join the
 topology uses). Runs no trigger claims stay visible as their own rows, never blended in:
 `(chained runs)` for children spawned by another run, `(manual/local)` for CLI dispatches,
-`(unattributed)` for forge runs whose recorded trigger no longer matches the current file. The
+`(unattributed)` for forge runs whose recorded trigger no longer matches the current file. A
+`run.command` trigger is a `triggers.json` entry like any other: its row reads `/name` and its jobs'
+spend folds the same way — dispatching a workflow extension is not cheaper by classification. The
 **by-repo** breakdown groups spend by the target repository (issue and MR numbers stripped), with
 `local:<folder>` targets as their own rows.
 

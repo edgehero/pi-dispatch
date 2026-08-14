@@ -2,6 +2,7 @@
   "_shape": "{ name: <npm package>, version: <EXACT version -- no ^ ~ x * or latest>, dir: <optional staged dir name, defaults to scope__name> }",
   "packages": [
     { "name": "@quintinshaw/pi-dynamic-workflows", "version": "0.1.0" },
-    { "name": "@acme/pi-house-skills", "version": "1.4.2", "dir": "house-skills" }
+    { "name": "@acme/pi-house-skills", "version": "1.4.2", "dir": "house-skills" },
+    { "name": "@juicesharp/rpiv-workflow", "version": "2.4.0" }
   ]
 }

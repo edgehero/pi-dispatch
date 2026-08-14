@@ -39,7 +39,8 @@ tab you keep open picks the new fold up through its Reload/auto-reload controls.
   row highlights its node in the topology below.
 - **Topology**: the trigger/flow graph, pan/zoom/hover and all ([`graph.md`](graph.md) explains
   every edge and badge), with spend badged under every trigger that spent in the window and each
-  cron's next fire or overdue state in its tip.
+  cron's next fire or overdue state in its tip. A `run.command` trigger renders as its `/name` with
+  no flow edge — by design, not as a defect — and earns its by-trigger spend row like any other entry.
 - **Footer**: the provenance ledger — which pi-ai priced the numbers, what was unmetered,
   unledgered, truncated, or drifted — plus the graph's own honesty counters in the legend.
 
@@ -67,6 +68,40 @@ conflate them.
 Over SSH or without a display the browser spawn is skipped and the skip is stated; the URL is
 always printed first. `scp` the file to your desktop and open it there.
 
+## What-if: re-price a flow before you switch
+
+The estimator answers "what would this flow have cost on another model" from the same ledger the page
+draws — history is never re-priced, the counterfactual is:
+
+```
+/dispatch insights whatif <provider/model> --flow <flow>
+```
+
+The target splits on the **first** `/` (model ids carry dots and colons, never the provider separator),
+`--flow` is required because the estimate scores **one flow's median run**, not a portfolio, and tab
+completion offers the full priced catalog. Worked question: nightly `build-report` runs cost real money
+on the deployment default; before pinning the trigger's `model` to something cheaper, ask
+
+```
+/dispatch insights whatif anthropic/claude-haiku-4-5 --flow build-report
+```
+
+```
+What-if build-report @ anthropic/claude-haiku-4-5:
+  estimate ~$4.87 est. total · ~$0.16 est. per run
+  coverage 87% of observed runs ledgered · excluded 4 (no ledger)
+  rates pi-ai 0.80.7
+```
+
+How to read it, class markers on ([`costs.md`](costs.md)): the flow's **median ledgered run** is
+re-priced at the target's rates, then multiplied across **every observed run** — the un-ledgered ones
+presumably cost something too, and the coverage line states how much of that extrapolation is measured.
+There is no window argument: the estimate wants every ledgered run it can see, so the scan runs at its
+own 92-day ceiling rather than a display window. A flow with no ledgered run at all answers with a
+seeded band, marked as such, never a confident number; an unknown model answers with the closest priced
+ids instead of an estimate. The output is an argument for an edit, not an edit: the lever stays the
+trigger's own `model`/`provider` fields or the `/dispatch set` knobs.
+
 ## Honest limits
 
 - The page is a snapshot: it re-renders when you re-run the command, not by itself. The auto-reload
@@ -78,5 +113,3 @@ always printed first. `scp` the file to your desktop and open it there.
   `/dispatch insights` (the deployment pointer deliberately cannot carry it), and a flow the visible
   tiers miss renders the amber `[not at HEAD]` state rather than a red claim — see
   [`graph.md`](graph.md).
-- The what-if is the `/dispatch insights whatif <provider/model> --flow <flow>` command: an
-  estimate wants the full priced catalog, and tab completion offers it.
