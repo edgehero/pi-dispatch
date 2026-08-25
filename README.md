@@ -11,7 +11,8 @@ schedule, or when an issue, comment or pull request arrives from GitHub, GitLab,
 DevOps, it opens a locked down container, lets the agent do one job against the repo, records what it
 did and what it spent, and shuts the container down. A durable queue absorbs bursts, spend caps are
 checked before a single token is spent, and a live admin panel shows everything and can turn the whole
-thing off.
+thing off. This is not another agent to weigh against the one you already use; it is the queue, the
+budget and the box for the pi you already run, steered by the `.pi/` setup your repo already has.
 
 ![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request, and a command trigger shown as its /name; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=1.0.0)
 
@@ -44,6 +45,11 @@ running without you:
 - "label an issue `ai` and a fix PR appears", for your team's everyday small fixes;
 - a follow up loop that answers review comments on the PRs the agent itself opened;
 - several repos and several such loops, sharing one queue, one budget, one panel.
+
+On a forge you stay in the loop at both ends: a job starts only when someone with write access to
+the repo asks for one, by a label, an `@pi` comment or a review, and what comes back is a pull
+request you review and land, because pi-dispatch never merges anything, not on green CI, not on any
+condition ([the details](#github-automation)). What it removes is the terminal babysitting, not you.
 
 For a one off interactive session on your own machine, plain pi is enough; pi-dispatch earns its keep
 the moment an agent runs while nobody is watching the terminal.
