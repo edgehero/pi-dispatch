@@ -613,8 +613,27 @@ function runWrapper(dir, { args, onSpawn } = {}) {
 		child.stderr.on("data", (d) => (stderr += d));
 		child.on("error", reject);
 		child.on("close", (code) => resolvePromise({ code, stderr }));
-		onSpawn?.(child);
+		// Routed through the promise on purpose: a bare onSpawn?.(child) drops a rejection on the floor
+		// (an async callback here returns a promise nobody holds), so a throw inside it would surface as
+		// an unhandled rejection somewhere else in the run instead of failing this test.
+		Promise.resolve(onSpawn?.(child)).catch(reject);
 	});
+}
+
+/**
+ * Poll for a marker file the wrapper's stub writes, and SAY whether it appeared (issue #207). The old
+ * inline loop fell through on timeout and signalled anyway: on a loaded runner the TERM landed before
+ * the stub had installed its trap, the stub died on the default disposition, and the resulting failure
+ * was word-for-word identical to the wrapper simply not forwarding. Returning the answer lets the
+ * caller assert the two apart. The bound is generous on purpose -- it is a ceiling on a hang, never a
+ * wait in the healthy case, where the marker lands in tens of milliseconds.
+ */
+async function waitForMarker(path, timeoutMs = 30_000, stepMs = 25) {
+	for (let waited = 0; waited < timeoutMs; waited += stepMs) {
+		if (existsSync(path)) return true;
+		await new Promise((r) => setTimeout(r, stepMs));
+	}
+	return existsSync(path);
 }
 
 test("wrapper: a policy refusal (node exits 2) becomes a clean exit 0 with the refusal note — KeepAlive must not relaunch it", { skip: !POSIX }, async () => {
@@ -656,20 +675,32 @@ test("wrapper: refuses when ./.env is absent from its cwd, naming the directory 
 });
 
 test("wrapper: SIGTERM to the wrapper reaches node (trap + kill + double wait replaces the old exec)", { skip: !POSIX }, async () => {
-	// The stub records that it started, then waits; on TERM it records the delivery and exits 0. If
-	// the wrapper failed to forward, the stub would sit in sleep and the test would time out. The trap
-	// must kill the sleep too: an orphaned sleep inherits the wrapper's stdio pipes and would hold the
-	// spawn's `close` event (and this test) hostage for the full 30s.
-	const dir = wrapperDir('#!/bin/sh\n: > "$MARKER_DIR/started"\ntrap \': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0\' TERM\nsleep 30 &\nsp=$!\nwait\nexit 1\n');
+	// The stub waits, and on TERM it records the delivery and exits 0. If the wrapper failed to forward,
+	// the stub would sit in sleep and the test would time out. The trap must kill the sleep too: an
+	// orphaned sleep inherits the wrapper's stdio pipes and would hold the spawn's `close` event (and
+	// this test) hostage for the full 30s.
+	//
+	// ORDER IS THE POINT (issue #207): the `started` marker is written LAST, after the sleep, after $sp
+	// and after the trap, so its existence means the stub is genuinely ready to be signalled. It used to
+	// be the first line, which made it a marker for "the stub has begun" -- a TERM racing in behind it
+	// still landed on the default disposition, and the test blamed the wrapper.
+	const dir = wrapperDir('#!/bin/sh\nsleep 30 &\nsp=$!\ntrap \': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0\' TERM\n: > "$MARKER_DIR/started"\nwait\nexit 1\n');
+	let ready = false;
 	const { code } = await runWrapper(dir, {
 		onSpawn: async (child) => {
-			// Signal only after the stub is definitely running, so the wrapper's trap is in place.
-			for (let i = 0; i < 200 && !existsSync(join(dir, "started")); i++) {
-				await new Promise((r) => setTimeout(r, 25));
-			}
-			child.kill("SIGTERM");
+			// Signal only after the stub is definitely running, so the wrapper's trap is in place. When it
+			// never gets there, KILL instead of signalling: a TERM sent into a stub that has not reached
+			// its `trap` line tests nothing, and used to be reported as a forwarding failure (issue #207).
+			// SIGKILL only ends the wrapper, but the stub cannot be past its first line if `started` is
+			// missing, so there is nothing left holding the pipes.
+			ready = await waitForMarker(join(dir, "started"));
+			child.kill(ready ? "SIGTERM" : "SIGKILL");
 		},
 	});
+	assert.ok(
+		ready,
+		"the stub never wrote its `started` marker: the readiness wait timed out and the wrapper was never signalled, so this is a slow or hung stub, NOT a signal-forwarding failure",
+	);
 	assert.ok(existsSync(join(dir, "got-term")), "the stub received the forwarded TERM");
 	assert.equal(code, 0, "the wrapper reports node's post-drain exit code, not its own interrupted wait");
 });
