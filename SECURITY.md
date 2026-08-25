@@ -379,7 +379,10 @@ Stated openly rather than discovered later:
   forges: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `FORGEJO_TOKEN`, `GITEA_SERVER_TOKEN`,
   `AZURE_DEVOPS_EXT_PAT` and `SYSTEM_ACCESSTOKEN`. The worker sets them from the per-job mint, and a
   forwarded operator token would silently override it. That list is derived from one row per forge rather
-  than hand-maintained, so a forge added to the mint cannot be missed here.
+  than hand-maintained, so a forge added to the mint cannot be missed here. If a secrets manager supplies
+  the worker's environment, its own credential belongs on the host and never in `PI_FORWARD_ENV`: a token
+  that can read every secret in your project is a worse thing to hand an agent than the two credentials a
+  job already carries (`docs/secrets.md`).
 - **With `GITHUB_AUTH_SOURCE=gh` (the default), your entire gh login reaches every token-carrying job.**
   The minted value is your own full-scope `gh auth token`, and `pi-dispatch doctor` warns and names the
   scopes it carries (calling out broad ones like `admin:org`, `delete_repo`, `workflow`). Prefer a

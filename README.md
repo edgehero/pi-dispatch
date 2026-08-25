@@ -391,7 +391,9 @@ enforcement.
   already carry (a custom provider's key, say). Same exposure.
 
 The bound is on the blast radius, not on the leak. [`SECURITY.md`](SECURITY.md) states the whole of it,
-including the case this design does not defend.
+including the case this design does not defend. None of these have to sit in a file on that host: the
+worker reads its environment and parses no `.env`, so a secrets manager drops straight in
+([`docs/secrets.md`](docs/secrets.md)).
 
 ## Reuse your existing pi setup
 
