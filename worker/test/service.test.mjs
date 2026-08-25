@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,10 @@ const WRAPPER_CMD = join(DEPLOY_DIR, "worker-env-wrapper.cmd");
 // The injected deployment folder (cwd): deliberately NOT the repo root, so any assertion that still
 // expected repo-root-derived paths would fail loudly instead of passing by coincidence.
 const DEPLOY_AT = "/srv/pi-deploy";
+// The operator's env-setup script (issue #209). Absolute and outside the deployment folder on purpose:
+// that is where a secrets manager's credentials actually live, and the render must not resolve it.
+const ENV_SETUP = "/etc/pi-dispatch/setup-env.sh";
+const ENV_SETUP_FILES = { [ENV_SETUP]: "#!/bin/sh\nexport FROM_MANAGER=1\n" };
 
 // ---------------------------------------------------------------------------------------------------
 // The pin test: render is a targeted substitution of the templates' KNOWN literals, so a template
@@ -234,6 +238,134 @@ test("render win32: the nssm sequence carries the package wrapper + exec argv an
 	assert.match(text, /AppExit 2 Exit/, "the EXIT_POLICY never-retry must survive");
 	assert.match(text, /AppStopMethodConsole 15000/, "the console-stop grace must survive");
 	assert.match(text, /AppThrottle 5000/, "the crash-loop throttle must survive");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// --env-setup (issue #209): the seam that lets a secrets manager fill the environment without anyone
+// hand-editing a rendered unit. The two halves that matter are (1) with no flag, every render above is
+// byte-identical to what it always produced, and (2) with it, the RENDERER owns the `exec`, because the
+// hand-edit an operator reaches for instead (`<manager> run -- …`) reports the child's exit 2 as 1.
+// ---------------------------------------------------------------------------------------------------
+
+test("render linux --env-setup: sh -c sources the script then EXECS the worker, so exit 2 still reaches systemd; EnvironmentFile and the exit-2 semantics are untouched", async () => {
+	const h = harness({ platform: "linux", argv: ["render", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.ok(
+		text.includes(`ExecStart=/bin/sh -c 'set -a; . "${ENV_SETUP}" || exit 1; set +a; exec "/fake/node/bin/node" "${CLI_PATH}" "worker"'`),
+		"the whole sh script is ONE single-quoted systemd word; the inner double quotes are sh's, and they are what makes a path with spaces work",
+	);
+	assert.match(text, /exec "/, "`exec` is the point: without it systemd watches a shell and RestartPreventExitStatus=2 never sees a 2");
+	assert.match(text, /\|\| exit 1/, "a failed setup is infra-retryable (1), never the determinate refusal (2)");
+	assert.match(text, /set -a/, "a bare KEY=value must export, exactly as EnvironmentFile= does");
+	assert.ok(text.includes(`EnvironmentFile=${DEPLOY_AT}/.env`), "EnvironmentFile is untouched: it is read first, and the setup script runs after it and wins");
+	assert.match(text, /RestartPreventExitStatus=2/, "the EXIT_POLICY never-restart must survive the seam");
+	assert.match(text, /# ExecStart also runs `--env-setup/, "the rendered unit explains its own ExecStart");
+	assert.match(text, /do not hand-edit this line/);
+});
+
+test("render linux --receiver --env-setup: the receiver unit gets the same composed exec", async () => {
+	const h = harness({ platform: "linux", argv: ["render", "--receiver", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+	assert.equal(await h.run(), 0);
+	assert.ok(
+		h.text().includes(`ExecStart=/bin/sh -c 'set -a; . "${ENV_SETUP}" || exit 1; set +a; exec "/fake/node/bin/node" "${RECEIVER_START}"'`),
+		"same shape, the receiver's own entry point",
+	);
+});
+
+test("render darwin --env-setup: the path rides the EnvironmentVariables dict and ProgramArguments does NOT change", async () => {
+	const h = harness({ platform: "darwin", argv: ["render", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	// A variable, not a composed command line: launchd has no shell in front of ProgramArguments, so
+	// nothing here needs quoting and the argv contract stays exactly what the wrapper already expects.
+	assert.deepEqual(
+		programArguments(text),
+		["/bin/sh", WRAPPER_SH, "/fake/node/bin/node", CLI_PATH, "worker"],
+		"ProgramArguments is byte-identical to the default render",
+	);
+	assert.ok(text.includes("<key>PI_ENV_SETUP</key>"), "the seam is delivered as a variable the wrapper reads");
+	assert.ok(text.includes(`<string>${ENV_SETUP}</string>`));
+	assert.ok(text.includes("<string>/fake/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>"), "PATH still shares the dict");
+	assert.match(text, /sources this file after \.\/\.env/, "the plist says which source wins");
+	assert.match(text, /With it set, \.\/\.env becomes optional/, "the render note states the relaxed contract");
+});
+
+test("render win32 --env-setup: one nssm AppEnvironmentExtra, and AppParameters does NOT change", async () => {
+	const setup = "C:\\pi-dispatch\\setup-env.cmd";
+	const h = harness({ platform: "win32", argv: ["render", "--env-setup", setup], files: { [setup]: "@echo off\n" } });
+	assert.equal(await h.run(), 0);
+	const text = h.text();
+	assert.ok(text.includes(`nssm install pi-dispatch-worker ${WRAPPER_CMD} /fake/node/bin/node ${CLI_PATH} worker`), "AppParameters is byte-identical to the default render");
+	assert.ok(text.includes(`nssm set pi-dispatch-worker AppEnvironmentExtra "PI_ENV_SETUP=${setup}"`), "the seam is one nssm set, no shell in between");
+	assert.match(text, /AppExit 2 Exit/, "the EXIT_POLICY never-retry must survive the seam");
+});
+
+test("--env-setup refuses a relative path, a path systemd or the plist would reinterpret, and one that is not there", async () => {
+	const relative = harness({ platform: "linux", argv: ["render", "--env-setup", "setup-env.sh"], files: ENV_SETUP_FILES });
+	assert.equal(await relative.run(), 1);
+	assert.match(relative.errText(), /ABSOLUTE path/);
+	assert.match(relative.errText(), /searches \$PATH/, "the reason is POSIX `.`, not a style preference");
+
+	// systemd expands $VAR inside Exec lines whatever the quoting, so a $ in the path is unrenderable.
+	const dollar = harness({ platform: "linux", argv: ["render", "--env-setup", "/etc/pi-$USER/setup.sh"], files: ENV_SETUP_FILES });
+	assert.equal(await dollar.run(), 1);
+	assert.match(dollar.errText(), /contains "\$"/);
+
+	// The plist is XML; the same path is fine on Linux, which is why the refusal is per platform.
+	const amp = harness({ platform: "darwin", argv: ["render", "--env-setup", "/etc/pi & dispatch/setup.sh"], files: ENV_SETUP_FILES });
+	assert.equal(await amp.run(), 1);
+	assert.match(amp.errText(), /contains "&"/);
+	assert.match(amp.errText(), /plist/);
+
+	const missing = harness({ platform: "linux", argv: ["render", "--env-setup", "/etc/pi-dispatch/nope.sh"], files: ENV_SETUP_FILES });
+	assert.equal(await missing.run(), 1);
+	assert.match(missing.errText(), /not found/);
+	assert.match(missing.errText(), /installs cleanly and then fails at every boot/, "refusing beats rendering a unit that boots into nothing");
+});
+
+test("--env-setup on a subcommand that renders nothing refuses instead of being silently ignored", async () => {
+	for (const cmd of ["status", "restart", "uninstall"]) {
+		const h = harness({ platform: "linux", argv: [cmd, "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+		assert.equal(await h.run(), 1, `${cmd} must refuse`);
+		assert.match(h.errText(), /--env-setup applies to `service render` and `service install`/);
+		assert.equal(h.calls.length, 0, `${cmd} must refuse BEFORE it spawns anything`);
+	}
+});
+
+test("install linux --user --env-setup: the unit that lands on disk carries the composed exec", async () => {
+	const h = harness({
+		platform: "linux",
+		argv: ["install", "--env-setup", ENV_SETUP],
+		files: ENV_SETUP_FILES,
+		plan: { systemctl: 0 },
+	});
+	assert.equal(await h.run(), 0);
+	const unit = h.store.get(USER_UNIT);
+	assert.ok(unit.includes(`. "${ENV_SETUP}" || exit 1`), "install writes what render printed");
+	assert.ok(unit.includes(`exec "/fake/node/bin/node" "${CLI_PATH}" "worker"`));
+});
+
+// systemd is the one platform whose rendered artifact has a real parser, so use it. Gated on BOTH linux
+// and the binary being present: this skips on a macOS dev box and runs on every PR inside the required
+// contract-tests job. The gate on the diagnostics rather than the exit code mirrors deploy-lint.yml —
+// systemd-analyze fails on the paths that do not exist on a runner, which is expected, not a defect.
+const SYSTEMD = process.platform === "linux" && spawnSync("systemd-analyze", ["--version"]).status === 0;
+
+test("render linux --env-setup: systemd itself parses the composed unit", { skip: !SYSTEMD }, async () => {
+	const h = harness({ platform: "linux", argv: ["render", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+	assert.equal(await h.run(), 0);
+	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-unit-"));
+	const unitPath = join(dir, "pi-dispatch-worker.service");
+	// The first line is the render's "# → <path>" header, which is output, not unit content.
+	writeFileSync(unitPath, h.text().split("\n").slice(1).join("\n"));
+	const { stdout, stderr } = spawnSync("systemd-analyze", ["verify", "--no-pager", unitPath], { encoding: "utf8" });
+	const log = `${stdout}${stderr}`;
+	assert.doesNotMatch(
+		log,
+		/Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected /i,
+		`systemd-analyze found a syntax error in the composed unit:\n${log}`,
+	);
 });
 
 // ---------------------------------------------------------------------------------------------------
@@ -602,11 +734,13 @@ function wrapperDir(nodeStub, { env = true } = {}) {
 	return dir;
 }
 
-function runWrapper(dir, { args, onSpawn } = {}) {
+function runWrapper(dir, { args, onSpawn, env = {} } = {}) {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn("sh", [REAL_WRAPPER, ...(args ?? [join(dir, "bin", "node")])], {
 			cwd: dir,
-			env: { ...process.env, MARKER_DIR: dir },
+			// `env` is how the daemon manager delivers PI_ENV_SETUP: the plist's EnvironmentVariables
+			// dict on macOS, `nssm set … AppEnvironmentExtra` on Windows. Nothing composes a shell.
+			env: { ...process.env, MARKER_DIR: dir, ...env },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stderr = "";
@@ -703,4 +837,90 @@ test("wrapper: SIGTERM to the wrapper reaches node (trap + kill + double wait re
 	);
 	assert.ok(existsSync(join(dir, "got-term")), "the stub received the forwarded TERM");
 	assert.equal(code, 0, "the wrapper reports node's post-drain exit code, not its own interrupted wait");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The wrapper's half of the --env-setup seam (issue #209). Same discipline as above: the SHIPPED file
+// under a real sh, started the way a rendered unit starts it. These are the tests that make the macOS
+// and Windows halves more than a rendered string, because the wrapper is where the behaviour lives.
+// ---------------------------------------------------------------------------------------------------
+
+/** Write an env-setup script into the wrapper's temp dir and return its absolute path. */
+function setupScript(dir, body, name = "setup-env.sh") {
+	const path = join(dir, name);
+	writeFileSync(path, body);
+	return path;
+}
+
+test("wrapper: PI_ENV_SETUP is sourced, and it BEATS ./.env — a stale key in the file must not shadow the manager", { skip: !POSIX }, async () => {
+	// .env sets the variable to the stale value; the setup script sets it to the managed one. The stub
+	// exits 0 only if the managed value won, which is the whole promise of running the setup after.
+	const dir = wrapperDir('#!/bin/sh\n[ "$PI_WRAPPER_TEST" = "managed" ] || exit 9\n[ "$PI_BARE_EXPORT" = "1" ] || exit 8\nexit 0\n');
+	// A bare KEY=value, deliberately: `set -a` around the source is what makes it export, exactly as
+	// ./.env and systemd's EnvironmentFile= do. Without it the child would never see PI_BARE_EXPORT.
+	const setup = setupScript(dir, 'PI_WRAPPER_TEST=managed\nPI_BARE_EXPORT=1\n');
+	const { code } = await runWrapper(dir, { env: { PI_ENV_SETUP: setup } });
+	assert.equal(code, 0, "exit 9 = .env shadowed the manager; exit 8 = a bare KEY=value did not export");
+});
+
+test("wrapper: with PI_ENV_SETUP set, a missing ./.env starts instead of refusing, and says where the environment came from", { skip: !POSIX }, async () => {
+	const dir = wrapperDir('#!/bin/sh\n[ "$FROM_MANAGER" = "1" ] || exit 9\nexit 0\n', { env: false });
+	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
+	const { code, stderr } = await runWrapper(dir, { env: { PI_ENV_SETUP: setup } });
+	assert.equal(code, 0, "the .env refusal is relaxed ONLY when the environment demonstrably comes from elsewhere");
+	assert.match(stderr, /no \.env in \//, "it still says so, rather than starting silently");
+	assert.match(stderr, /PI_ENV_SETUP/);
+});
+
+test("wrapper: a PI_ENV_SETUP that does not exist exits 1 and names it — never 2, which would read as a policy refusal", { skip: !POSIX }, async () => {
+	const dir = wrapperDir("#!/bin/sh\nexit 0\n");
+	const { code, stderr } = await runWrapper(dir, { env: { PI_ENV_SETUP: join(dir, "nope.sh") } });
+	assert.equal(code, 1, "infrastructure, worth a restart — not the determinate refusal that must stay stopped");
+	assert.match(stderr, /does not exist/);
+	assert.match(stderr, /nope\.sh/);
+});
+
+test("wrapper: a PI_ENV_SETUP script that FAILS exits 1, and the worker never starts", { skip: !POSIX }, async () => {
+	// The stub writes a marker if it ever runs. A failed setup means a half-filled environment, and
+	// starting the worker with one would spend a budget reservation on a config that cannot work.
+	const dir = wrapperDir('#!/bin/sh\n: > "$MARKER_DIR/ran"\nexit 0\n');
+	const setup = setupScript(dir, "echo 'manager unreachable' >&2\nfalse\n");
+	const { code, stderr } = await runWrapper(dir, { env: { PI_ENV_SETUP: setup } });
+	assert.equal(code, 1, "a failed setup is 1, never 2");
+	assert.match(stderr, /script failed/);
+	assert.ok(!existsSync(join(dir, "ran")), "the command must not run on a half-filled environment");
+});
+
+test("wrapper: a PI_ENV_SETUP line INSIDE ./.env is not honoured — the seam is unit configuration, not file content", { skip: !POSIX }, async () => {
+	// The path is captured before ./.env is sourced on purpose. Otherwise anything that could write
+	// .env (an operator's editor, a manager's own template render) could name a script the wrapper runs.
+	const dir = wrapperDir('#!/bin/sh\n[ -z "$PLANTED" ] || exit 9\nexit 0\n');
+	const planted = setupScript(dir, "export PLANTED=1\n", "planted.sh");
+	writeFileSync(join(dir, ".env"), `PI_WRAPPER_TEST=1\nPI_ENV_SETUP=${planted}\n`);
+	const { code } = await runWrapper(dir);
+	assert.equal(code, 0, "exit 9 = a .env line got itself sourced as a setup script");
+});
+
+test("wrapper: the exit-2 conversion survives the seam — a policy refusal under PI_ENV_SETUP still stops cleanly", { skip: !POSIX }, async () => {
+	const dir = wrapperDir("#!/bin/sh\nexit 2\n");
+	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
+	const { code, stderr } = await runWrapper(dir, { env: { PI_ENV_SETUP: setup } });
+	assert.equal(code, 0, "EXIT_POLICY is still converted, so KeepAlive leaves a refusal stopped");
+	assert.match(stderr, /policy refusal \(exit 2\)/);
+});
+
+test("wrapper: SIGTERM still reaches the command through the seam", { skip: !POSIX }, async () => {
+	const dir = wrapperDir('#!/bin/sh\nsleep 30 &\nsp=$!\ntrap \': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0\' TERM\n: > "$MARKER_DIR/started"\nwait\nexit 1\n');
+	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
+	let ready = false;
+	const { code } = await runWrapper(dir, {
+		env: { PI_ENV_SETUP: setup },
+		onSpawn: async (child) => {
+			ready = await waitForMarker(join(dir, "started"));
+			child.kill(ready ? "SIGTERM" : "SIGKILL");
+		},
+	});
+	assert.ok(ready, "the stub never wrote its `started` marker: a readiness timeout, NOT a forwarding failure");
+	assert.ok(existsSync(join(dir, "got-term")), "sourcing a setup script must not cost the graceful drain");
+	assert.equal(code, 0);
 });

@@ -118,7 +118,59 @@ export const TEMPLATE_PINS = {
 		"AppExit Default Restart",
 		"AppExit 2 Exit",
 	],
+	// The wrappers are COPIED, never substituted, so they have no substitution surface of their own.
+	// They are pinned anyway for the same reason nssm-install.cmd is: the render EMITS the variable name
+	// they read back (`--env-setup`, issue #209 — the plist's EnvironmentVariables dict on macOS, nssm's
+	// AppEnvironmentExtra on Windows), and a rename on one side with silence on the other would produce
+	// a unit that starts fine and ignores the operator's secrets manager.
+	"worker-env-wrapper.sh": ["PI_ENV_SETUP"],
+	"worker-env-wrapper.cmd": ["PI_ENV_SETUP"],
 };
+
+/**
+ * The env-setup seam (issue #209): an operator-typed path to their OWN script, sourced before the
+ * worker starts, so a secrets manager can put the provider key and the forge token into the process
+ * environment without anyone hand-editing a rendered unit. The renderer owns the `exec` that follows
+ * it, which is the whole point — the hand-edit an operator naturally reaches for (`<manager> run -- …`)
+ * reports the CHILD's exit 2 as 1, and exit 2 is the determinate policy refusal that
+ * RestartPreventExitStatus=2, nssm's `AppExit 2 Exit` and the wrapper's exit-2 conversion all key on.
+ *
+ * A PATH and not a command, deliberately. systemd expands `$…`/`${…}` inside Exec lines whatever the
+ * quoting, a plist is XML, and nssm's argv is neither, so an inline command would need three separate
+ * escaping stories — and it is the shape docs/secrets.md already tells operators not to write.
+ *
+ * Absolute, and never resolved against anything: `.` in POSIX sh SEARCHES $PATH for an operand with no
+ * slash in it, so a relative path here would be a different file depending on the service manager's
+ * environment. Refuse rather than guess.
+ *
+ * The refused characters are per platform because the constraint is: on Linux the path lands inside a
+ * systemd Exec word (which owns `$`, `"` and `\`), on macOS inside a plist <string> (XML), and on
+ * Windows inside an nssm NAME=VALUE that cmd expands with `%`. Spaces are fine everywhere: every
+ * composed form quotes.
+ */
+const ENV_SETUP_REFUSALS = {
+	linux: { re: /['"$\\\x00-\x1f\x7f]/, why: "the path lands inside a single-quoted systemd Exec word, and systemd expands $VAR there whatever the quoting" },
+	darwin: { re: /[<>&"\x00-\x1f\x7f]/, why: "the launchd unit is a plist, and the path lands in an XML <string>" },
+	win32: { re: /[%"\x00-\x1f\x7f]/, why: "cmd expands %VAR% when the wrapper runs the script" },
+};
+
+function resolveEnvSetup(ctx, raw) {
+	const path = String(raw);
+	const absolute = ctx.platform === "win32" ? /^([A-Za-z]:[\\/]|\\\\)/.test(path) : path.startsWith("/");
+	if (!absolute) {
+		return { error: `--env-setup needs an ABSOLUTE path, got: ${path}\nPOSIX \`.\` searches $PATH for an operand with no slash in it, and a service manager's environment is not your shell's, so a relative path here is a different file on every host.` };
+	}
+	const { re, why } = ENV_SETUP_REFUSALS[ctx.platform];
+	const hit = re.exec(path);
+	if (hit) {
+		const shown = hit[0].charCodeAt(0) < 0x20 || hit[0].charCodeAt(0) === 0x7f ? `\\x${hit[0].charCodeAt(0).toString(16).padStart(2, "0")}` : hit[0];
+		return { error: `--env-setup path contains ${JSON.stringify(shown)}, which cannot be rendered safely on ${ctx.platform}: ${why}. Move the script somewhere without it: ${path}` };
+	}
+	if (!ctx.fs.existsSync(path)) {
+		return { error: `--env-setup script not found: ${path}\nRefusing rather than rendering: a unit pointing at a script that is not there installs cleanly and then fails at every boot.` };
+	}
+	return { path };
+}
 
 const SUBCOMMANDS = new Set(["render", "install", "uninstall", "status", "start", "stop", "restart"]);
 
@@ -137,6 +189,9 @@ const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver) as
          --user | --system   linux scope (default --user; --system never executes root commands)
          --force             replace an existing unit in the same scope
          --print             also print the rendered unit before installing
+         --env-setup <path>  render|install: source YOUR script before the worker starts, so a secrets
+                             manager fills the environment. Absolute path, env only (no exec, no paths):
+                             the render owns the exec, so a policy refusal still exits 2. docs/secrets.md
 `;
 
 export async function runService(argv = [], deps = {}) {
@@ -175,6 +230,7 @@ export async function runService(argv = [], deps = {}) {
 				print: { type: "boolean", default: false },
 				drain: { type: "boolean", default: false },
 				"drain-timeout": { type: "string" },
+				"env-setup": { type: "string" },
 			},
 		}));
 	} catch (error) {
@@ -224,7 +280,22 @@ export async function runService(argv = [], deps = {}) {
 		which: values.receiver ? "receiver" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
+		// The operator's env-setup script, or null for the shipped default. Null is load-bearing: with no
+		// seam configured every render below is byte-identical to what it produced before issue #209.
+		envSetup: null,
 	};
+
+	if (values["env-setup"] !== undefined) {
+		// Only the two subcommands that COMPOSE a command line can honour it. Ignoring the flag on the
+		// others would be the silent no-op this project refuses on principle: an operator who typed it on
+		// `restart` would believe the seam was in place.
+		if (cmd !== "render" && cmd !== "install") {
+			return fail(err, `--env-setup applies to \`service render\` and \`service install\`, which compose the command the unit runs; \`service ${cmd}\` renders nothing. Re-render (or re-install --force) to change it.`);
+		}
+		const resolved = resolveEnvSetup(ctx, values["env-setup"]);
+		if (resolved.error) return fail(err, resolved.error);
+		ctx.envSetup = resolved.path;
+	}
 
 	switch (cmd) {
 		case "render":
@@ -300,6 +371,32 @@ function refuseMissingReceiver(ctx) {
 }
 
 /**
+ * The systemd form of the env-setup seam. Three pieces, each load-bearing:
+ *
+ *   - `exec` keeps systemd watching the WORKER and not a shell in front of it, so an exit 2 arrives as
+ *     an exit 2 and RestartPreventExitStatus=2 still sees a real policy refusal. This is the whole
+ *     reason the renderer owns this line instead of leaving it to a hand-edit.
+ *   - `|| exit 1` maps a failed setup (an expired token, an unreachable manager) onto the
+ *     infrastructure code, so systemd retries it under Restart=on-failure inside the StartLimit bound,
+ *     and it can never be mistaken for the determinate refusal that must stay stopped. A setup script
+ *     that calls `exit 2` ITSELF still exits 2 — sourcing cannot intercept that — which is why
+ *     docs/secrets.md tells operators not to.
+ *   - `set -a` exports a bare KEY=value, exactly as EnvironmentFile= does, so the seam accepts both an
+ *     `export`-style script and raw dotenv output. EnvironmentFile= is untouched and still read first;
+ *     this runs after it, so the manager wins over a stale value left in the file.
+ *
+ * The whole sh script is ONE single-quoted systemd word, which is why resolveEnvSetup refuses a single
+ * quote in the path (it would end the word) and a `$` (systemd expands those inside Exec lines whatever
+ * the quoting). The inner double quotes are sh's, and they are what makes a path with spaces work.
+ * Verified against systemd 252: `systemctl show -p ExecStart` reports argv[] as /bin/sh, -c, and the
+ * whole script as one word, and a worker exiting 2 under it reports ExecMainStatus=2 with NRestarts=0.
+ */
+function composeEnvSetupExec(setup, argv) {
+	const command = argv.map((a) => `"${a}"`).join(" ");
+	return `/bin/sh -c 'set -a; . "${setup}" || exit 1; set +a; exec ${command}'`;
+}
+
+/**
  * Render worker.service / receiver.service for this host. Targeted substitution of the templates'
  * known literals (see TEMPLATE_PINS); everything else — RestartPreventExitStatus=2, the StartLimit
  * crash-loop bound, KillSignal, TimeoutStopSec — passes through byte-for-byte.
@@ -310,14 +407,17 @@ function renderLinuxUnit(ctx) {
 	// to a repo-root WorkingDirectory that only a checkout has. The rendered unit points at absolute
 	// entries that exist in both layouts — cliPath beside this module; the receiver package's ./start
 	// export — so ExecStart works no matter what WorkingDirectory is.
-	const execStart =
-		ctx.which === "receiver"
-			? ["ExecStart=/usr/bin/node receiver/src/start.mjs", `ExecStart=${ctx.execPath} ${ctx.receiverStart}`]
-			: ["ExecStart=/usr/bin/node worker/src/cli.mjs worker", `ExecStart=${ctx.execPath} ${ctx.cliPath} worker`];
+	const argv = ctx.which === "receiver" ? [ctx.execPath, ctx.receiverStart] : [ctx.execPath, ctx.cliPath, "worker"];
+	const templateLine =
+		ctx.which === "receiver" ? "ExecStart=/usr/bin/node receiver/src/start.mjs" : "ExecStart=/usr/bin/node worker/src/cli.mjs worker";
+	const execStart = [templateLine, `ExecStart=${ctx.envSetup ? composeEnvSetupExec(ctx.envSetup, argv) : argv.join(" ")}`];
 	// The banner outranks the template's own "TEMPLATE/UNTESTED EXAMPLE — set the PLACEHOLDERs" header,
 	// which renders through below (the no-markers design keeps templates byte-usable, so their prose
 	// survives): a reader of the rendered unit should know the placeholders are already substituted.
-	let unit = `# rendered by \`pi-dispatch service\` — paths computed for this host from deploy/${template};\n# the template's PLACEHOLDER prose below is already substituted.\n` +
+	const seamNote = ctx.envSetup
+		? `# ExecStart also runs \`--env-setup ${ctx.envSetup}\` first: sourced with \`set -a\` (a bare\n# KEY=value exports, exactly as EnvironmentFile= does, and it runs AFTER EnvironmentFile so a secrets\n# manager wins over a stale value in .env). A failed setup exits 1, never the exit 2 below, and \`exec\`\n# keeps systemd watching the worker itself. Re-render to change it; do not hand-edit this line.\n`
+		: "";
+	let unit = `# rendered by \`pi-dispatch service\` — paths computed for this host from deploy/${template};\n# the template's PLACEHOLDER prose below is already substituted.\n${seamNote}` +
 		readTemplate(ctx, template)
 		.replace(execStart[0], execStart[1])
 		// /opt/pi-dispatch → the deployment folder (the cwd this render ran from): WorkingDirectory and
@@ -378,10 +478,24 @@ function renderPlist(ctx) {
 	// that spawns bare `node`) still resolve via PATH; prepending the render node's directory keeps
 	// them on the SAME binary. PATH is configuration, not a secret: the template's deliberate
 	// no-EnvironmentVariables stance is about credentials, which still live only in .env.
+	// The dict is built as a list so the seam below can extend it without a second anchor. Everything
+	// in it is a PATH; nothing in it is a credential, which is what keeps this file committable.
+	const envEntries = ["\t\t<key>PATH</key>", `\t\t<string>${dirname(ctx.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin</string>`];
+	if (ctx.envSetup) {
+		// launchd has no EnvironmentFile and no shell in front of ProgramArguments, so the seam is a
+		// VARIABLE the wrapper reads rather than a composed command line: nothing here has to be quoted
+		// for a shell, and ProgramArguments stays byte-identical to the default render. The wrapper
+		// sources it AFTER ./.env, so a secrets manager wins over a stale key left in the file.
+		envEntries.push(
+			"\t\t<!-- `pi-dispatch service --env-setup`: worker-env-wrapper.sh sources this file after ./.env.\n\t\t     A path, not a credential. Re-render to change it. -->",
+			"\t\t<key>PI_ENV_SETUP</key>",
+			`\t\t<string>${ctx.envSetup}</string>`,
+		);
+	}
 	plist = plist.replace(
 		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>",
-		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>\n\n\t<!-- Injected by `pi-dispatch service`: launchd's default PATH cannot see an nvm/Homebrew node,\n\t     and child processes may call bare `node`. Not a secrets dict - credentials still live only\n\t     in .env (see the header comment). -->\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>" +
-			`${dirname(ctx.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin</string>\n\t</dict>`,
+		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>\n\n\t<!-- Injected by `pi-dispatch service`: launchd's default PATH cannot see an nvm/Homebrew node,\n\t     and child processes may call bare `node`. Not a secrets dict - credentials still live only\n\t     in .env (see the header comment). -->\n\t<key>EnvironmentVariables</key>\n\t<dict>\n" +
+			`${envEntries.join("\n")}\n\t</dict>`,
 	);
 	// Everything left standing on /opt/pi-dispatch — WorkingDirectory, the log paths, comment prose —
 	// belongs to the deployment folder.
@@ -407,6 +521,10 @@ function nssmSequence(ctx) {
 		commands: [
 			["install", service, ctx.wrapperCmd, ...execArgv],
 			["set", service, "AppDirectory", ctx.deployDir],
+			// Same seam as the plist's EnvironmentVariables dict, for the same reason: nssm takes a
+			// NAME=VALUE with no shell between it and the wrapper, so the path needs no quoting and
+			// AppParameters stays byte-identical to the default render.
+			...(ctx.envSetup ? [["set", service, "AppEnvironmentExtra", `PI_ENV_SETUP=${ctx.envSetup}`]] : []),
 			["set", service, "AppStdout", `${logDir}\\${ctx.which}.out.log`],
 			["set", service, "AppStderr", `${logDir}\\${ctx.which}.err.log`],
 			["set", service, "AppStopMethodConsole", "15000"],
@@ -426,6 +544,11 @@ function doRender(ctx) {
 		ctx.out(
 			"\n# note: ProgramArguments runs the package's worker-env-wrapper.sh, which sources ./.env in the\n# WorkingDirectory above and then runs the argv that follows it — launchd has no EnvironmentFile.\n# The wrapper also converts a policy refusal (exit 2, EXIT_POLICY) into a clean exit, so KeepAlive\n# never relaunch-loops a refusal into a provider bill.\n",
 		);
+		if (ctx.envSetup) {
+			ctx.out(
+				`# note: --env-setup is delivered as PI_ENV_SETUP above. The wrapper sources ${ctx.envSetup} AFTER\n# ./.env, so your manager wins over a stale value in the file, and a missing or failing script exits 1\n# rather than the exit 2 that means a policy refusal. With it set, ./.env becomes optional.\n`,
+			);
+		}
 		return 0;
 	}
 	if (ctx.platform === "linux") {

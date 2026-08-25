@@ -72,14 +72,14 @@ printf '%s' '<client-id>'     > /etc/pi-dispatch/infisical-client-id
 printf '%s' '<client-secret>' > /etc/pi-dispatch/infisical-client-secret
 ```
 
-Then a start script, and point the unit's `ExecStart=` at it. Everything else in the unit stays exactly
-as `pi-dispatch service render` produced it:
+Then write a script that sets up the environment, and nothing else. **No `exec`, no node path, no path
+to the CLI**: those are what `pi-dispatch service` already computes for your host, and getting them by
+hand is the mistake this seam exists to remove.
 
 ```sh
 #!/bin/sh
-# /etc/pi-dispatch/start-worker.sh, mode 0755. The absolute paths are the ones `service render`
-# computed for this host; take them from the ExecStart line you are replacing.
-set -e
+# /etc/pi-dispatch/setup-env.sh. Readable by the account the unit runs as and writable by nobody
+# else: the service manager sources this file at every boot, so whoever can edit it owns the worker.
 export INFISICAL_DISABLE_UPDATE_CHECK=true
 
 # Absolute path to the CLI on purpose: a unit's PATH is whatever the service manager gives it,
@@ -91,23 +91,46 @@ INFISICAL_TOKEN="$(/usr/local/bin/infisical login --method=universal-auth \
 export INFISICAL_TOKEN
 
 eval "$(/usr/local/bin/infisical export --format=dotenv-eval --projectId <project-id> --env=prod)"
-
-exec /usr/bin/node /opt/pi-dispatch/worker/src/cli.mjs worker
 ```
+
+Then point the renderer at it. That is the whole integration, on all three platforms:
+
+```bash
+pi-dispatch service install --env-setup /etc/pi-dispatch/setup-env.sh
+pi-dispatch service render  --env-setup /etc/pi-dispatch/setup-env.sh   # to read it first
+```
+
+On Linux the rendered `ExecStart` becomes one line, and every part of it is load-bearing:
 
 ```ini
-# deploy/worker.service: this line only. RestartPreventExitStatus=2 and the rest stay as rendered.
-ExecStart=/etc/pi-dispatch/start-worker.sh
+ExecStart=/bin/sh -c 'set -a; . "/etc/pi-dispatch/setup-env.sh" || exit 1; set +a; exec "/usr/bin/node" "/opt/pi-dispatch/worker/src/cli.mjs" "worker"'
 ```
 
-Four things make that shape the right one, and three of them are not obvious:
+- **`exec` is why the renderer owns this line.** It replaces the shell with node, so the service manager
+  watches the worker itself: its exit code is the worker's, its pid is the worker's, and `SIGTERM`
+  reaches the drain directly. Drop the `exec` and a shell sits in the middle reporting its own status,
+  which is the same defect as the first trap below.
+- **`|| exit 1` is the other half.** A setup that fails (expired token, unreachable manager) exits `1`,
+  which is infrastructure and worth a restart. It is never `2`, which means a determinate refusal and
+  must stay stopped. Your script must not call `exit 2` itself: sourcing cannot intercept that.
+- **`set -a` exports a bare `KEY=value`,** exactly as `EnvironmentFile=` does, so a script that just
+  `eval`s dotenv output works without adding `export` to every line.
+- **`EnvironmentFile=` is untouched, and your setup runs after it.** A stale key left in `.env` loses
+  instead of shadowing the managed one, which retires the third trap below for this deployment.
 
-- **`exec` is load-bearing.** It replaces the shell with node, so the service manager watches the worker
-  itself: its exit code is the worker's, its pid is the worker's, and `SIGTERM` reaches the drain
-  directly. Drop the `exec` and a shell sits in the middle reporting its own status instead.
-- **A script, not an inline `sh -c`.** systemd does its own `$` substitution inside `Exec` lines, so a
-  command substitution written there is a quoting question you have to get right per platform. A file has
-  no such rules, is reviewable, and is the same file on macOS.
+On macOS and Windows there is no `sh -c`: the path rides the unit itself (the plist's
+`EnvironmentVariables` dict, `nssm set … AppEnvironmentExtra`) as `PI_ENV_SETUP`, and
+`worker-env-wrapper.sh` / `.cmd` sources it after `./.env` with the same rules. Nothing is quoted into a
+shell anywhere, and `ProgramArguments` and `AppParameters` are byte-identical to a default render. With
+`PI_ENV_SETUP` set, `./.env` becomes optional on those platforms: it is the only case where the wrapper
+starts without one.
+
+The path must be absolute and free of characters the unit format would reinterpret (`$` and a quote on
+Linux, `<`, `>` and `&` on macOS, `%` on Windows). The renderer refuses the rest by name rather than
+rendering something that means a different thing at boot, and it refuses a path that is not there at all.
+
+Two more properties of the recipe, neither obvious:
+
 - **`--format=dotenv-eval` is the export format to use.** It POSIX-quotes every value, so a secret
   holding a quote, a newline or a `$` survives `eval` intact.
 - **Nothing is written to disk.** The secrets live in the process environment and nowhere else.
@@ -171,6 +194,10 @@ This recipe also works on systemd, and it is the better choice there when you wa
 byte-unchanged: leave `EnvironmentFile=` alone, point the agent at the same path, and let its `execute:`
 restart the unit when a secret rotates.
 
+Recipe A and Recipe B are not exclusive on macOS and Windows. `--env-setup` makes `./.env` optional
+there; an agent that renders `.env` makes it authoritative. Pick one, because running both means two
+sources for the same key, and the setup script is the one that wins.
+
 ## The traps
 
 ### 1. `infisical run` collapses your exit code, and that one costs money
@@ -190,7 +217,10 @@ failure the wrapper gave up its own `exec` to prevent.
 `SIGTERM` is forwarded correctly, so the graceful drain still works. It is only the exit code that is
 lost, and it is lost silently.
 
-Recipe A's `eval` plus `exec` preserves it: the same child exiting `2` exits `2`.
+Recipe A preserves it, and does not ask you to get it right: `pi-dispatch service --env-setup` renders
+the `exec` itself. Measured under systemd 252 with a stub worker exiting `2`: `ExecMainStatus=2` and
+`NRestarts=0`, so `RestartPreventExitStatus=2` saw a real refusal and left it stopped. The same unit
+with a setup script that fails reports `ExecMainStatus=1` and restarts, and the worker never runs.
 
 ### 2. `export` does not filter reserved names, and `run` does
 
@@ -215,6 +245,10 @@ manager injected anything. Measured: with `FOO` set both in `.env` and in the ma
 So a stale key left in `.env` silently shadows the managed one, and it is silent precisely because every
 other key still works. On those platforms, either let the manager own the whole file (Recipe B) or keep
 `.env` free of anything the manager also holds.
+
+**Unless you use `--env-setup`.** The wrapper sources that script *after* `./.env`, deliberately, so the
+manager wins and the stale key loses. That is the one arrangement on macOS and Windows where the two can
+disagree safely.
 
 ### 4. The App key has two homes, and exactly one at a time
 
@@ -259,6 +293,10 @@ that reports its own status instead of the child's turns a policy refusal into a
 will not find out from a log line. Test it with `<your wrapper> -- sh -c 'exit 2'; echo $?` before it
 goes in front of a provider account.
 
+The question disappears entirely if you keep the manager inside an `--env-setup` script instead of
+wrapping the worker in its runner, because then nothing sits between the service manager and the worker.
+That is the shape to prefer, whichever manager you run.
+
 ## How this was verified
 
 Everything on this page was run, none of it against a paid completion. The lab was a self-hosted
@@ -278,6 +316,18 @@ Universal Auth, and a project holding a fake provider key.
   did not.
 - `SIGTERM` through `infisical run` reached the child, which ran its own trap before exiting.
 - The real `deploy/worker-env-wrapper.sh` was exercised for the precedence and the missing-file refusal.
+
+The `--env-setup` seam was measured separately, under a real systemd (252) in a throwaway container and
+under the real `sh` on macOS:
+
+- A rendered unit with the seam: `systemd-analyze verify` clean, and `systemctl show -p ExecStart`
+  confirms systemd passes the whole script to `sh -c` as ONE argument.
+- The worker exiting `2` under it: `ExecMainStatus=2`, `NRestarts=0`. Exiting `7`: restarts, as before.
+- A setup script that fails: `ExecMainStatus=1`, restarts, and the worker never ran.
+- Both an `export KEY=…` line and a bare `KEY=value` reached the worker's environment.
+- On the wrapper path: the setup script beat a stale `.env` value; a missing `./.env` started instead of
+  refusing; a missing or failing setup exited `1`; a `PI_ENV_SETUP=` line planted *inside* `.env` was
+  ignored; and both the exit-2 conversion and the `SIGTERM` drain survived the seam.
 
 Versions move. The exit-code behaviour in particular is a bug shape that a future release may fix, so
 re-run the two-second check above rather than trusting this page forever.

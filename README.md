@@ -441,8 +441,10 @@ and `.env` point at the folder you run the command from, and the exec paths poin
 package, so the same command is correct from a checkout and from an npm install. It refuses a second worker unit in another scope: one worker per docker daemon, because
 the boot reaper would treat the other's containers as strays. Honesty notes: on macOS and Windows the
 service is login-scoped, because Docker Desktop is; and a policy refusal (exit 2) never relaunches, on
-any OS, so no supervisor loops against a paid provider. The templates remain hand-editable examples if
-you prefer to adapt them directly.
+any OS, so no supervisor loops against a paid provider. If a secrets manager owns your credentials,
+`--env-setup <path>` renders a unit that sources your own setup script and then execs the worker, so a
+policy refusal still exits 2 instead of reading as a crash ([`docs/secrets.md`](docs/secrets.md)). The
+templates remain hand-editable examples if you prefer to adapt them directly.
 
 Steer the running worker without stopping it, from any terminal:
 

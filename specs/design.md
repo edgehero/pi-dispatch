@@ -580,7 +580,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   docker pull of the deployment's *own default* image, a loopback Valkey start, an overlay
   `auth.json` delete, an `import-pi` restage) is shown verbatim and runs only on an explicit y/N
   accept, defaulting to No, including on non-TTY stdin. The receiver's `pi-dispatch-receiver` bin is
-  a sibling on the same ladder (serve = the operator typed it).
+  a sibling on the same ladder (serve = the operator typed it). `service render|install --env-setup
+  <path>` is **operator-typed** too, and it is the sharpest thing on that tier: the named script runs as
+  the service user at every boot, with the deployment's environment.
 - **Why**: `init` and `doctor` grew organically with no recorded surface; issue #80 adds subcommands
   that *mutate the host*, and an unrecorded gate ladder is how a later "helpful" flag erodes a trust
   property nobody wrote down. Recording which tier each subcommand sits on makes "may this be
@@ -589,8 +591,56 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (fail-loud/keep-last-good is doctrine), write triggers/pause-windows *content*, pull a
   trigger-named `run.image` (each image is a separate per-flow trust posture — only the deployment's
   default is ever offered, and the consent keypress is the "pulled it onto this host yourself" act
-  `SECURITY.md` requires), guess a semantic env value, or touch branch protection on a forge.
+  `SECURITY.md` requires), guess a semantic env value, touch branch protection on a forge, or **name an
+  env-setup script from anywhere but an operator-typed flag** — not from `.env`, not from a trigger
+  file, not from the panel, not from the deployment pointer. The wrappers enforce their half by
+  capturing `PI_ENV_SETUP` *before* they source `./.env`, so no file they read can name a file they run.
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-TRIGGER-FOR-LOCAL`, `CONST-BUDGET-BEFORE-TOKENS`
+
+## DES-SERVICE-ENV-SETUP-SEAM
+
+- **Decision**: `pi-dispatch service render|install --env-setup <absolute path>` is the supported way to
+  run a secrets manager in front of the worker. The operator writes a script that sets up the
+  **environment only**; the renderer composes everything else. On systemd that is one line,
+  `ExecStart=/bin/sh -c 'set -a; . "<setup>" || exit 1; set +a; exec "<node>" "<cli>" worker'`. On
+  launchd and nssm the path rides the unit as `PI_ENV_SETUP` (the plist's `EnvironmentVariables` dict,
+  `nssm set … AppEnvironmentExtra`) and the existing `worker-env-wrapper.sh` / `.cmd` sources it after
+  `./.env`; `ProgramArguments` and `AppParameters` do not change at all, and with the variable set
+  `./.env` becomes optional. With no flag, every rendered artifact is byte-identical to what shipped
+  before.
+- **Why**: The command already composed the whole `ExecStart`, so an operator running a manager had one
+  option: hand-edit the rendered unit. The obvious hand-edit is wrong in a way that costs money.
+  Measured against Infisical's CLI: `infisical run -- <cmd>` collapses every nonzero child exit to `1`,
+  and exit `2` is `INT-RUNNER-EXIT-CODE-PROTOCOL`'s policy refusal — the code
+  `RestartPreventExitStatus=2`, nssm's `AppExit 2 Exit` and the wrapper's own exit-2 conversion all key
+  on. Wrapped that way a determinate refusal reads as a crash and the supervisor relaunches it in front
+  of a paid provider, which is the exact failure the wrapper gave up its own `exec` to prevent. **The
+  renderer owning the `exec` is the whole value**: an operator supplying only the setup half cannot get
+  the exit code wrong.
+- **A path, not a command**: systemd expands `$VAR` inside `Exec` lines whatever the quoting, a plist is
+  XML, and nssm's argv is neither, so an inline command would need three separate escaping stories and
+  would still be the shape `docs/secrets.md` tells operators not to write. A path collapses that to one
+  validation, per platform, of characters that would change what the line *means* (`$` and quotes on
+  Linux, `<>&` on macOS, `%` on Windows). Absolute and never resolved, because POSIX `.` searches
+  `$PATH` for an operand with no slash in it.
+- **A failed setup is exit 1, never 2**: an expired token or an unreachable manager is infrastructure,
+  worth a retry inside the existing `StartLimit` bound; the determinate refusal that must stay stopped
+  is a different fact. The worker never starts on a half-filled environment. A setup script that calls
+  `exit 2` itself still exits 2, since sourcing cannot intercept that, which is why the docs say not to.
+- **The setup runs after `./.env` and after `EnvironmentFile=`**, so the manager wins over a stale key
+  left in the file. That asymmetry used to be a documented trap with no fix on macOS and Windows.
+- **Rejected**: depending on, or blessing, any particular manager (the seam is a file; `docs/secrets.md`
+  names the shapes); a shipped launcher script for systemd (a third wrapper file to mirror and pin, for
+  a line the render can compose); composing a command line into the plist and the nssm argv (quoting for
+  two more formats to deliver a value the unit can simply carry); and making this reachable from
+  configuration, which would turn a boot-time root-adjacent exec into something a trigger file could
+  name (`DES-CLI-SURFACE`'s never-tier).
+- **Windows is weaker on purpose, and says so**: `worker-env-wrapper.cmd` has no `exec`, so a wrapper
+  process always sits in the middle there. What the seam guarantees on Windows is that the setup runs in
+  the same process tree, that a missing or failing setup exits 1, and that the existing exit-2
+  conversion is untouched.
+- **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-SURFACE`, `DES-WORKER-ON-HOST`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `docs/secrets.md`
 
 ## DES-GH-APP-MANIFEST-SETUP
 
@@ -2124,6 +2174,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #209 (the service render env seam). **NEW `DES-SERVICE-ENV-SETUP-SEAM`**: `service render|install --env-setup <absolute path>` sources an operator-written env-only script and then `exec`s the worker, composed as one `sh -c` word on systemd and delivered as `PI_ENV_SETUP` (the plist's `EnvironmentVariables` dict, `nssm set … AppEnvironmentExtra`) on launchd and nssm, where the existing wrappers source it after `./.env` and `ProgramArguments`/`AppParameters` do not change at all. The renderer owns the `exec` because the hand-edit it replaces (`<manager> run -- <worker>`) reports the child's exit 2 as 1, and exit 2 is the determinate refusal `RestartPreventExitStatus=2`, `AppExit 2 Exit` and the wrapper's own conversion all key on; a failed setup is exit 1, never 2, and the worker never starts on a half-filled environment. A PATH and not a command (three unit formats, three escaping stories, one of which systemd expands `$VAR` inside whatever the quoting), absolute and never resolved (POSIX `.` searches `$PATH`). Rejected: a shipped launcher script for systemd, composing a command line into the plist and the nssm argv, blessing any particular manager, and any route to this seam from configuration. **DES-CLI-SURFACE AMENDED**: the flag joins the operator-typed tier as the sharpest thing on it, and the never-tier gains "never name an env-setup script from anywhere but an operator-typed flag" — enforced in the wrappers by capturing `PI_ENV_SETUP` before sourcing `./.env`, so no file they read can name a file they run. **DES-WORKER-ON-HOST UNCHANGED, checked** — the worker is still a host process driving the docker CLI; only what prepares its environment moved. **DES-CONCURRENCY-3 UNCHANGED, checked** — the seam adds no daemon and the cross-scope install refusal is untouched. |
 | 2026-08-13 | Issue #188 (topology: tier-aware config-edge resolution). **DES-GRAPH-EDGE-DERIVATION AMENDED**: the config bullet's edge-end fallback set grows the tier nodes and the amber `skill-not-at-head` state; the dangling doctrine is rewritten around the per-trigger precedence ladder (repo > injected > overlay > staged) with `no-skill` demanding every applicable tier checked-and-missed; the stop-at-unknown rule is recorded WITH its doctor divergence (existential ✓ probes past an unknown, identity edge stops at one) as the load-bearing why; Rejected grows *claiming a lower-tier node under an unknown higher tier* and *a new flag or edge kind for tier resolution* (the closed vocabularies stay closed; node kinds became the third closed pinned set instead). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: the graph data surface gains `readOverlaySkills` (existence-only, ENOENT = legal models-only overlay = known-empty, other failures = unknown) and `readStagedSkillsList` (the worker's own reader behind the `readStagedPackages` wrapper doctrine, manifest order preserved as loader shadowing order), both null-means-not-checkable when `PI_GLOBAL_PI_DIR` is invisible (the deployment pointer deliberately cannot supply it), same never-throw/`GRAPH_LIMITS`/display-advisory posture. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS AMENDED** (one sentence): the topology joins doctor as the residual's third advisory surface, divergence cross-referenced. **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** -- AI-reachability stays committed-repo-only; tier nodes carry no `aiTrigger` and no chainable badge, and `potential`-edge eligibility still reads only the repo enumeration. |
 | 2026-08-13 | Issue #189 (closing pass: package prompt templates, OQ-019 deferral (b)). **DES-COMMAND-ENTRY-POINT AMENDED**: the template half of the /name fall-through hazard recorded and closed -- `getCommand()` forecloses the unregistered case, `promptsOverride` forecloses a package template shadowing a protected one, so both halves of what /name runs are pinned to reviewed content. **DES-OPERATOR-GLOBAL-OVERLAY UNCHANGED, checked** -- the overlay's trust class and mount are untouched; it gained a resource kind through the existing mount. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS UNCHANGED, checked** -- skills-tier resolution is untouched by the prompts work. |
 | 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command` in the triggers file). **DES-COMMAND-ENTRY-POINT AMENDED** with the producer-half decisions: legal on ALL FOUR trigger kinds (`run.skillsDir`'s capability-of-the-deployment reasoning — a webhook trigger runs what a cron trigger runs), exactly one of `flow`/`command` enforced at parse by the shared validator; forge command prompts are the same bare `/<command> [args]` — the envelope bypassed whole, delivery context handler-read from `event.json`, `CONST-ISSUE-TEXT-IS-DATA` held and arguably strengthened since nothing payload-authored renders into a command prompt; the `cmd:`-prefixed dedup slot so a command rule never coalesces with a same-named flow rule; the `commands` capability gate now enforced worker-side pre-spend (`job-image-commands-unsupported`, the label's second direction); the comment trailing-word override INERT on a command rule; and `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`'s byte-for-byte objection answered head-on — command prompts are NEW prompts, every existing flow trigger's `prompt.md` stays byte-identical. **DES-AI-TRIGGER-FLOW-GATE AMENDED**: the command clause joins the injected-skills paragraph's neighborhood — never AI-reachable, and BUILT at the two producers rather than falling out, because no committed artifact exists for the gate to read (`chain-command-refused` before the charset check, no opt-in; `dispatch_run` structurally incapable plus a readable slash-leading-flow refusal; `OQ-022`'s allowlist closing shape unchanged in spirit, with the inversion stated on that row). **DES-JOB-OUTBOX-CHAINING AMENDED**: the explicit refusal token joins the validation ladder; commands may chain OUT, nothing chains INTO a command — ignoring the key under unknown-keys would enqueue a flow the agent did not request. **DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE AMENDED**: command jobs have no envelope, and `run.instructions` is refused beside `run.command` rather than left inert — the cron refusal's accepted-where-it-does-nothing hazard, arriving through a bypassed envelope; the entry's byte-for-byte reasoning survives because no existing prompt changes. **DES-TRIGGERS-UNIFIED-FILE UNCHANGED, checked** — the shared validator gains a field, and the one-validator doctrine is exactly what makes the mutual exclusion fail both services identically; no engine merges, and the on × run matrix is untouched. |
