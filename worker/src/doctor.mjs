@@ -56,6 +56,7 @@ import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
+import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -100,8 +101,13 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// default is a real path in the developer's home directory and the host comparison may spawn their
 		// package manager -- neither belongs in a unit test, and "no network, no Docker" is the same rule.
 		agentDir = agentDirFrom(env),
+		// Where the service manager's units live, and which formats to read them in (issue #216). Seams
+		// rather than bare process.platform/homedir() because the --env-setup check has to be exercised
+		// for all three unit formats, and only one of them exists on whichever host runs the suite.
+		platform = process.platform,
+		home = homedir(),
 	} = deps;
-	const seams = { cwd, out, spawn, probeValkey, fileExists, nodeVersion, mkdir, chmod, rm, agentDir };
+	const seams = { cwd, out, spawn, probeValkey, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -203,7 +209,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, fileExists, nodeVersion, agentDir = agentDirFrom(env) } = seams;
+	const { cwd, spawn, probeValkey, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env) } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -240,6 +246,10 @@ export async function collectChecks(env, seams) {
 			},
 		},
 	});
+
+	// Right after `.env present`, because it answers the same question that check raises: where DOES this
+	// deployment's environment come from. [] unless a seam is configured (issue #216).
+	checks.push(...(await envSetupChecks(env, seams)));
 
 	const dockerCode = await runCmd(spawn, "docker", ["info"]);
 	checks.push({
@@ -680,7 +690,7 @@ export async function collectChecks(env, seams) {
 			checks.push({ ok: true, label: `GitHub App private key present (${keyPath})` });
 			// POSIX mode only -- on win32 stat modes are synthetic (0666-ish for everything), so a warn
 			// there would fire on every healthy deployment and teach operators to ignore it.
-			if (process.platform !== "win32") {
+			if (platform !== "win32") {
 				try {
 					const loose = statSync(keyPath).mode & 0o077;
 					if (loose !== 0) {
@@ -1409,6 +1419,129 @@ function readTriggerFacts(env, fileExists, cwd) {
 	} catch {
 		return none;
 	}
+}
+
+/**
+ * The `--env-setup` script (issue #216). `pi-dispatch service render|install --env-setup <path>` names a
+ * script the service manager SOURCES at every boot, as the service user, with the deployment's
+ * environment -- and after that nothing ever looks at it again. resolveEnvSetup checked it existed once,
+ * at render time, on a host that may not be this one.
+ *
+ * doctor has to DISCOVER the path before it can check it, because --env-setup is a render-time flag and
+ * the rendered unit is the only place it lives. Two sources, in this order:
+ *
+ *   1. The installed units for THIS deployment -- the file that actually boots, and so the honest
+ *      answer. A unit whose WorkingDirectory names some other folder belongs to some other deployment on
+ *      the same host and is deliberately skipped: doctor is this deployment's preflight, and warning
+ *      about a neighbour's unit would fire forever on a host that runs two.
+ *   2. PI_ENV_SETUP in doctor's OWN environment, and only when (1) found nothing. That is what launchd
+ *      and nssm put in front of the wrapper, so it is the right answer for a doctor run through the same
+ *      environment the service gets. It is a different question from (1), which is why every line below
+ *      names the source it came from rather than blurring the two.
+ *
+ * Everything here is warn-tier and nothing carries a `fixAction` -- the never tier
+ * (REQ-DEPLOYMENT-BOOTSTRAP): doctor does not chmod an operator's file and does not move it. Nor does it
+ * ever OPEN the script. The script holds no secret by design, but what it holds is the commands that
+ * fetch them, and a preflight that echoed those would be publishing the map instead of the treasure.
+ *
+ * Returns [] when no seam is configured, so a deployment that does not use one gets byte-identical
+ * output.
+ */
+async function envSetupChecks(env, seams) {
+	const { cwd, spawn, fileExists, platform, home } = seams;
+	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins
+
+	if (platform === "win32") {
+		for (const which of ["worker", "receiver"]) {
+			const service = `pi-dispatch-${which}`;
+			const got = await runCmdCapture(spawn, "nssm", ["get", service, "AppEnvironmentExtra"]);
+			// Not installed, or nssm not on PATH: silence. Same doctrine as check-ignore below -- a check
+			// nobody can silence must never cry wolf, and "could not ask" is not "misconfigured".
+			if (got.code !== 0) continue;
+			// No deployment match here: nssm keeps the folder in a SEPARATE AppDirectory property, and there
+			// is exactly one machine-scoped service per name for it to be confused with.
+			const { setup } = readUnitSeam(got.output, "win32");
+			if (setup && !sources.has(setup)) sources.set(setup, `${service}'s AppEnvironmentExtra`);
+		}
+	} else {
+		for (const { path } of installedUnitPaths(platform, home)) {
+			if (!fileExists(path)) continue;
+			let seam;
+			try {
+				seam = readUnitSeam(readFileSync(path, "utf8"), platform);
+			} catch {
+				continue; // a system-scope unit this user may not read: which deployment it serves is unknowable
+			}
+			if (!seam.setup || seam.deployDir !== cwd) continue;
+			if (!sources.has(seam.setup)) sources.set(seam.setup, path);
+		}
+	}
+
+	const fromEnv = (env.PI_ENV_SETUP ?? "").trim();
+	if (sources.size === 0 && fromEnv) sources.set(fromEnv, "PI_ENV_SETUP in this environment");
+
+	const checks = [];
+	for (const [setup, source] of sources) {
+		if (!fileExists(setup)) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `the env-setup script at ${setup} does not exist (named by ${source})`,
+				fix: "restore it, or re-render without --env-setup -- the service manager sources it at every boot, so until it is back the unit exits 1 in a restart loop and the worker never starts (docs/secrets.md)",
+			});
+			continue;
+		}
+		checks.push({ ok: true, label: `env-setup script present (${setup}, named by ${source})` });
+
+		// WRITABILITY, not readability -- deliberately `& 0o022` and not the App key's `& 0o077`. This file
+		// is EXECUTED (sourced) by the account that holds the provider key and the forge token, so anyone
+		// who can edit it owns the worker. That it is READABLE is fine: it holds no secret by design.
+		// POSIX only, for the same reason the App key's mode check skips win32 -- stat modes are synthetic
+		// there, so this would warn on every healthy Windows deployment and teach operators to scroll past.
+		if (platform !== "win32") {
+			try {
+				if ((statSync(setup).mode & 0o022) !== 0) {
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `the env-setup script at ${setup} is group/world-writable`,
+						fix: `chmod go-w ${setup} -- the service manager sources it at every boot as the account that holds the provider key and the forge token, so whoever can edit it owns the worker`,
+					});
+				}
+			} catch {
+				// stat raced a deletion or an exotic fs: the presence line above already covered existence.
+			}
+			const dir = dirname(setup);
+			try {
+				const mode = statSync(dir).mode;
+				// Sticky (0o1000) is exempt and must stay exempt: in a sticky directory a non-owner cannot
+				// rename or delete someone else's file, so "anyone can replace it" would simply be false there.
+				if ((mode & 0o022) !== 0 && (mode & 0o1000) === 0) {
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `the directory holding the env-setup script (${dir}) is group/world-writable`,
+						fix: `chmod go-w ${dir} -- the script's own mode does not help when anyone can replace the file, and the manager sources whatever is there at the next boot`,
+					});
+				}
+			} catch {
+				// an unreadable parent directory: nothing to claim either way.
+			}
+		}
+
+		// The #211 question, asked of a different file. Exit 1 is again the ONLY case that speaks: 0 means
+		// ignored, 128 means no work tree, null means git could not be launched, and all three are silence.
+		const ignoreCode = await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(setup), "check-ignore", "-q", setup]);
+		if (ignoreCode === 1) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `the env-setup script at ${setup} is inside a git work tree that does not ignore it`,
+				fix: "move it outside that repo, or ignore it there -- it holds no secret by design, but it holds the commands that FETCH them (client and project ids, a manager address, sometimes a path to a credential file), which is a map to every secret this deployment uses",
+			});
+		}
+	}
+	return checks;
 }
 
 /**

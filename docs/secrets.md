@@ -80,6 +80,8 @@ hand is the mistake this seam exists to remove.
 #!/bin/sh
 # /etc/pi-dispatch/setup-env.sh. Readable by the account the unit runs as and writable by nobody
 # else: the service manager sources this file at every boot, so whoever can edit it owns the worker.
+# `pi-dispatch doctor` warns when that stops being true -- for this file and for the directory it
+# sits in, since a world-writable directory means anyone can replace the file whatever its own mode.
 export INFISICAL_DISABLE_UPDATE_CHECK=true
 
 # Absolute path to the CLI on purpose: a unit's PATH is whatever the service manager gives it,
@@ -281,6 +283,54 @@ by design, the provider key resolved from the injected environment, and every ot
 normally. Run `doctor` through your manager once, exactly the way the unit will, before you enable the
 service.
 
+## What doctor says about the setup script itself
+
+Once the unit is installed, doctor reads the **script** too. It has to find it first, and the only
+record of the path is the unit `service install` wrote -- so doctor reads that unit back: the
+`ExecStart` line on systemd, the `EnvironmentVariables` dict on launchd, and `nssm get
+AppEnvironmentExtra` on Windows. Only units whose `WorkingDirectory` is *this* deployment count, so a
+host running two deployments never hears about its neighbour's. If no installed unit names one,
+`PI_ENV_SETUP` in doctor's own environment answers instead, and the line says so rather than blurring
+the two.
+
+A healthy deployment gets one line:
+
+```
+✓ env-setup script present (/etc/pi-dispatch/setup-env.sh, named by /home/pi/.config/systemd/user/pi-dispatch-worker.service)
+```
+
+and a deployment that does not use the seam at all gets nothing -- not one added line. The three ways
+it can go wrong each get their own:
+
+```
+⚠ the env-setup script at /etc/pi-dispatch/setup-env.sh does not exist (named by …/pi-dispatch-worker.service)
+    → restore it, or re-render without --env-setup -- the service manager sources it at every boot, so
+      until it is back the unit exits 1 in a restart loop and the worker never starts (docs/secrets.md)
+
+⚠ the env-setup script at /etc/pi-dispatch/setup-env.sh is group/world-writable
+    → chmod go-w /etc/pi-dispatch/setup-env.sh -- the service manager sources it at every boot as the
+      account that holds the provider key and the forge token, so whoever can edit it owns the worker
+
+⚠ the env-setup script at /etc/pi-dispatch/setup-env.sh is inside a git work tree that does not ignore it
+    → move it outside that repo, or ignore it there -- it holds no secret by design, but it holds the
+      commands that FETCH them …
+```
+
+Three things doctor deliberately does not do. It never **opens** the script: the path is named, the
+contents are not read, because what the file holds is the commands that fetch your secrets and echoing
+those would publish the map instead of the treasure. It never offers a `--fix` for any of these --
+doctor does not `chmod` your file and does not move it out of a repository. And a missing script is a
+**warning**, not a failure: it breaks the boot path, not `pi-dispatch worker` typed by hand, so doctor
+still exits 0 and so does `up`.
+
+The mode check is `go-w`, not `go-r`, and that asymmetry is the point. The script is *executed*, so
+writability is the risk; that it is readable is fine, because by design it holds no secret. Windows has
+no mode check at all -- stat modes are synthetic there, so it would warn on every healthy deployment.
+
+`pi-dispatch service status` names the configured script too, as one plain line with no verdict
+attached. Use it to answer "is a seam configured, and which file"; use `doctor` to answer "and is it
+still safe".
+
 ## Other managers
 
 Every one of them is one of the two shapes on this page: **inject into the process** (Vault Agent's
@@ -328,6 +378,13 @@ under the real `sh` on macOS:
 - On the wrapper path: the setup script beat a stale `.env` value; a missing `./.env` started instead of
   refusing; a missing or failing setup exited `1`; a `PI_ENV_SETUP=` line planted *inside* `.env` was
   ignored; and both the exit-2 conversion and the `SIGTERM` drain survived the seam.
+
+The read-back doctor uses was measured the same way: every rendered unit on all three platforms was fed
+straight back through the reader and returned the path that went in, a unit rendered without the flag
+read as no seam, and a hand-rewritten `ExecStart` read as no seam rather than as a guess. A group- and a
+world-writable script each warned, a world-readable one did not, a world-writable directory warned and a
+sticky one did not, and a unit whose `WorkingDirectory` named a different deployment produced no output
+at all.
 
 Versions move. The exit-code behaviour in particular is a bug shape that a future release may fix, so
 re-run the two-second check above rather than trusting this page forever.

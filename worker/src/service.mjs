@@ -172,6 +172,58 @@ function resolveEnvSetup(ctx, raw) {
 	return { path };
 }
 
+/**
+ * The read side of the same seam (issue #216). `--env-setup` is a RENDER-TIME flag: once the unit is
+ * written, the unit is the only record of the path, so a preflight that wants to check the script has
+ * to read it back out of the file that actually boots. These patterns match exactly what
+ * composeEnvSetupExec and renderPlist emit, and they live here beside ENV_SETUP_REFUSALS so the writer
+ * and the reader cannot drift apart unnoticed — worker/test/service.test.mjs round-trips every render
+ * through readUnitSeam, so changing one half without the other turns the suite red.
+ *
+ * The capture classes are exact rather than lazy because ENV_SETUP_REFUSALS already guarantees what
+ * cannot be in the path: no `"` on any platform, so `[^"]*` ends where the renderer's quote does, and
+ * no `<`/`>`/`&` on macOS, so a plist <string> can never hold an XML entity to decode.
+ *
+ * win32 is not a file at all — the value comes back from `nssm get <service> AppEnvironmentExtra`,
+ * which some nssm builds write as UTF-16, hence the NUL strip in readUnitSeam.
+ */
+const ENV_SETUP_READERS = {
+	linux: {
+		setup: /^ExecStart=\/bin\/sh -c 'set -a; \. "([^"]*)" \|\| exit 1;/m,
+		deployDir: /^WorkingDirectory=(.*)$/m,
+	},
+	darwin: {
+		setup: /<key>PI_ENV_SETUP<\/key>\s*<string>([^<]*)<\/string>/,
+		deployDir: /<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/,
+	},
+	win32: {
+		setup: /^PI_ENV_SETUP=(.*)$/m,
+		// nssm holds the deployment folder in a SEPARATE property (AppDirectory), and there is only one
+		// machine-scoped service per name to confuse it with — so the caller matches on nothing here
+		// rather than spending a second `nssm get` to answer a question Windows cannot ask twice.
+		deployDir: null,
+	},
+};
+
+/**
+ * What an installed unit records: the configured `--env-setup` path and the deployment folder it
+ * serves. Both null for a unit rendered without the flag, which is every unit that predates issue #209
+ * and every default render since. Never throws: an unreadable, truncated or hand-rewritten unit simply
+ * reads as "no seam configured", because a preflight guessing at a shape it does not recognise is
+ * worse than one that says nothing.
+ */
+export function readUnitSeam(text, platform) {
+	const readers = ENV_SETUP_READERS[platform];
+	if (!readers || typeof text !== "string") return { setup: null, deployDir: null };
+	const clean = text.replace(/\0/g, "");
+	const grab = (re) => (re ? (re.exec(clean)?.[1] ?? null) : null);
+	// Only a trailing CR is stripped, never surrounding whitespace: on the quoted and XML forms the
+	// capture already ends exactly where the renderer's delimiter does, and a path is allowed to hold a
+	// space anywhere in it. An empty value means the same as no value at all.
+	const clip = (v) => (v === null ? null : v.replace(/\r$/, "") || null);
+	return { setup: clip(grab(readers.setup)), deployDir: clip(grab(readers.deployDir)) };
+}
+
 const SUBCOMMANDS = new Set(["render", "install", "uninstall", "status", "start", "stop", "restart"]);
 
 const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver) as an OS service, rendered for THIS host
@@ -353,8 +405,57 @@ function unitPaths(ctx) {
 	return { name: `pi-dispatch-${ctx.which}` };
 }
 
+/**
+ * Every unit FILE this tool could have installed on this host: both daemons, both scopes, plus the
+ * `worker.service` name the README's manual `sudo cp` instructions produce (doStatus already counts
+ * that one as a real worker unit, so a preflight reading units must too). Derived from unitPaths
+ * rather than restated, so the two cannot disagree about where a unit lives.
+ *
+ * Empty on win32 by construction: there is no file to read there, only `nssm get`.
+ */
+export function installedUnitPaths(platform, home) {
+	if (platform !== "linux" && platform !== "darwin") return [];
+	const found = [];
+	for (const which of ["worker", "receiver"]) {
+		const paths = unitPaths({ platform, home, which, scope: "user" });
+		found.push({ which, scope: "user", path: platform === "linux" ? paths.userPath : paths.installPath });
+		found.push({ which, scope: "system", path: paths.systemPath });
+		if (platform === "linux" && which === "worker") found.push({ which, scope: "system", path: "/etc/systemd/system/worker.service" });
+	}
+	return found;
+}
+
 function readTemplate(ctx, name) {
 	return ctx.fs.readFileSync(join(ctx.templatesDir, name), "utf8");
+}
+
+/**
+ * The per-host path substitutions, applied to a TEMPLATE and never to anything a render composed.
+ * /opt/pi-dispatch becomes the deployment folder (the cwd this render ran from): WorkingDirectory and
+ * EnvironmentFile stay operator territory, never the package dir npm may wipe on update.
+ *
+ * The ordering matters and used to be wrong. A composed value is already absolute for THIS host, so
+ * putting it through these rewrites a path the operator typed rather than a placeholder the template
+ * shipped — and an `--env-setup /opt/pi-dispatch/setup-env.sh` on a deployment at /srv/pi-deploy became
+ * `. "/srv/pi-deploy/setup-env.sh"`, a file resolveEnvSetup never checked, while the banner above it
+ * still named the one that was typed. Substitute first, compose second, and anchor on the substituted
+ * form.
+ */
+function subDeployDir(ctx, text) {
+	// Function replacement, here and everywhere below a computed path is the REPLACEMENT: String.replace
+	// and replaceAll both read `$&` and its relatives out of a replacement STRING, so a deployment folder
+	// holding one would splice itself into the unit. A function replacement is taken literally.
+	return text.replaceAll("/opt/pi-dispatch", () => ctx.deployDir);
+}
+
+/**
+ * subDeployDir plus the systemd unit's node: the shipped `/usr/bin/node` literal does not exist on an
+ * nvm host. The PLIST deliberately gets only subDeployDir — its header comment SHOWS
+ * `<string>/usr/bin/node</string>` as the argv an operator would append by hand, and that prose is
+ * meant to keep reading as an example rather than silently becoming this host's node.
+ */
+function subUnitPaths(ctx, text) {
+	return subDeployDir(ctx, text).replaceAll("/usr/bin/node", () => ctx.execPath);
 }
 
 /**
@@ -410,20 +511,21 @@ function renderLinuxUnit(ctx) {
 	const argv = ctx.which === "receiver" ? [ctx.execPath, ctx.receiverStart] : [ctx.execPath, ctx.cliPath, "worker"];
 	const templateLine =
 		ctx.which === "receiver" ? "ExecStart=/usr/bin/node receiver/src/start.mjs" : "ExecStart=/usr/bin/node worker/src/cli.mjs worker";
-	const execStart = [templateLine, `ExecStart=${ctx.envSetup ? composeEnvSetupExec(ctx.envSetup, argv) : argv.join(" ")}`];
+	const execStart = `ExecStart=${ctx.envSetup ? composeEnvSetupExec(ctx.envSetup, argv) : argv.join(" ")}`;
 	// The banner outranks the template's own "TEMPLATE/UNTESTED EXAMPLE — set the PLACEHOLDERs" header,
 	// which renders through below (the no-markers design keeps templates byte-usable, so their prose
 	// survives): a reader of the rendered unit should know the placeholders are already substituted.
 	const seamNote = ctx.envSetup
 		? `# ExecStart also runs \`--env-setup ${ctx.envSetup}\` first: sourced with \`set -a\` (a bare\n# KEY=value exports, exactly as EnvironmentFile= does, and it runs AFTER EnvironmentFile so a secrets\n# manager wins over a stale value in .env). A failed setup exits 1, never the exit 2 below, and \`exec\`\n# keeps systemd watching the worker itself. Re-render to change it; do not hand-edit this line.\n`
 		: "";
-	let unit = `# rendered by \`pi-dispatch service\` — paths computed for this host from deploy/${template};\n# the template's PLACEHOLDER prose below is already substituted.\n${seamNote}` +
-		readTemplate(ctx, template)
-		.replace(execStart[0], execStart[1])
-		// /opt/pi-dispatch → the deployment folder (the cwd this render ran from): WorkingDirectory and
-		// EnvironmentFile stay operator territory, never the package dir npm may wipe on update.
-		.replaceAll("/opt/pi-dispatch", ctx.deployDir)
-		.replaceAll("/usr/bin/node", ctx.execPath);
+	// Substituted first, then the composed line goes in — see subUnitPaths for why that order is
+	// load-bearing. The anchor is the template's own ExecStart put through the same substitutions, which
+	// is what it looks like by the time we search for it. Function replacements throughout: a deployment
+	// path holding `$&` would otherwise be spliced by String.replace's own syntax.
+	const substituted = subUnitPaths(ctx, readTemplate(ctx, template));
+	let unit =
+		`# rendered by \`pi-dispatch service\` — paths computed for this host from deploy/${template};\n# the template's PLACEHOLDER prose below is already substituted.\n${seamNote}` +
+		substituted.replace(subUnitPaths(ctx, templateLine), () => execStart);
 	if (ctx.scope === "user") {
 		// A systemd --user unit always runs as the invoking user, and systemd REJECTS a User= line in
 		// user scope ("Unknown lvalue"); the line must not survive the render. The replacement is a
@@ -439,7 +541,7 @@ function renderLinuxUnit(ctx) {
 		// started. default.target is the user manager's boot target.
 		unit = unit.replace("WantedBy=multi-user.target", "WantedBy=default.target");
 	} else {
-		unit = unit.replace(/^User=pi$/m, `User=${ctx.user}`);
+		unit = unit.replace(/^User=pi$/m, () => `User=${ctx.user}`);
 	}
 	return unit;
 }
@@ -451,7 +553,10 @@ function renderLinuxUnit(ctx) {
  * receiver — it has no EXIT_POLICY — and harmless.
  */
 function renderPlist(ctx) {
-	let plist = readTemplate(ctx, "com.pi-dispatch.worker.plist");
+	// Substituted before anything composed goes in (subDeployDir): the two anchors below are therefore
+	// written in their post-substitution form, and PI_ENV_SETUP can no longer be rewritten into a path
+	// the operator never typed. Only subDeployDir here — the template's /usr/bin/node is example prose.
+	let plist = subDeployDir(ctx, readTemplate(ctx, "com.pi-dispatch.worker.plist"));
 	// One wrapper, two daemons: the exec argv IS the difference now. The wrapper sources ./.env in the
 	// unit's WorkingDirectory and runs exactly these arguments — no `receiver` selector flag, no paths
 	// guessed inside the wrapper (issue #96: the wrapper's self-relative guess broke under npm install).
@@ -466,12 +571,13 @@ function renderPlist(ctx) {
 	// the command: absolute node, absolute script. The wrapper path is module-relative (templatesDir),
 	// so it exists in a checkout AND under node_modules — unlike the old repo-root guess.
 	plist = plist.replace(
-		"<string>/opt/pi-dispatch/deploy/worker-env-wrapper.sh</string>",
-		[
-			`<string>${ctx.wrapperSh}</string>`,
-			"<!-- the command the wrapper execs after sourcing ./.env in WorkingDirectory - absolute paths, nothing guessed -->",
-			...execArgv.map((a) => `<string>${a}</string>`),
-		].join("\n\t\t"),
+		`<string>${ctx.deployDir}/deploy/worker-env-wrapper.sh</string>`,
+		() =>
+			[
+				`<string>${ctx.wrapperSh}</string>`,
+				"<!-- the command the wrapper execs after sourcing ./.env in WorkingDirectory - absolute paths, nothing guessed -->",
+				...execArgv.map((a) => `<string>${a}</string>`),
+			].join("\n\t\t"),
 	);
 	// launchd's default PATH is /usr/bin:/bin — an nvm or Homebrew node is invisible to it. The exec
 	// argv above pins THIS node absolutely, but the worker's own children (npx-style hooks, tooling
@@ -492,14 +598,14 @@ function renderPlist(ctx) {
 			`\t\t<string>${ctx.envSetup}</string>`,
 		);
 	}
+	const workingDir = `<key>WorkingDirectory</key>\n\t<string>${ctx.deployDir}</string>`;
 	plist = plist.replace(
-		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>",
-		"<key>WorkingDirectory</key>\n\t<string>/opt/pi-dispatch</string>\n\n\t<!-- Injected by `pi-dispatch service`: launchd's default PATH cannot see an nvm/Homebrew node,\n\t     and child processes may call bare `node`. Not a secrets dict - credentials still live only\n\t     in .env (see the header comment). -->\n\t<key>EnvironmentVariables</key>\n\t<dict>\n" +
+		workingDir,
+		() =>
+			`${workingDir}\n\n\t<!-- Injected by \`pi-dispatch service\`: launchd's default PATH cannot see an nvm/Homebrew node,\n\t     and child processes may call bare \`node\`. Not a secrets dict - credentials still live only\n\t     in .env (see the header comment). -->\n\t<key>EnvironmentVariables</key>\n\t<dict>\n` +
 			`${envEntries.join("\n")}\n\t</dict>`,
 	);
-	// Everything left standing on /opt/pi-dispatch — WorkingDirectory, the log paths, comment prose —
-	// belongs to the deployment folder.
-	return plist.replaceAll("/opt/pi-dispatch", ctx.deployDir);
+	return plist;
 }
 
 /**
@@ -733,6 +839,11 @@ async function doStatus(ctx) {
 		if (status.code === null) ctx.out(`${paths.name}: cannot query — nssm.exe not on PATH (https://nssm.cc)\n`);
 		else if (status.code !== 0) ctx.out(`${paths.name}: not installed\n`);
 		else ctx.out(`${paths.name}: ${status.output.trim()}\n`);
+		if (status.code === 0) {
+			const extra = await runCapture(ctx, "nssm", ["get", paths.name, "AppEnvironmentExtra"]);
+			const setup = extra.code === 0 ? readUnitSeam(extra.output, "win32").setup : null;
+			if (setup) ctx.out(`env-setup: ${setup} (named by ${paths.name}'s AppEnvironmentExtra)\n`);
+		}
 		return 0;
 	}
 	if (ctx.platform === "darwin") {
@@ -743,6 +854,7 @@ async function doStatus(ctx) {
 			ctx.out(`user scope: not installed (${paths.installPath})\n`);
 		}
 		ctx.out(ctx.fs.existsSync(paths.systemPath) ? `system scope: ${paths.systemPath} EXISTS — not managed by this tool\n` : "system scope: none\n");
+		reportEnvSetup(ctx, [paths.installPath, paths.systemPath]);
 		return 0;
 	}
 	if (ctx.fs.existsSync(paths.userPath)) {
@@ -753,7 +865,29 @@ async function doStatus(ctx) {
 	}
 	const systemHits = [paths.systemPath, ...(ctx.which === "worker" ? ["/etc/systemd/system/worker.service"] : [])].filter((p) => ctx.fs.existsSync(p));
 	ctx.out(systemHits.length ? `system scope: ${systemHits.join(", ")} EXISTS — not managed by this tool\n` : "system scope: none\n");
+	reportEnvSetup(ctx, [paths.userPath, ...systemHits]);
 	return 0;
+}
+
+/**
+ * One informational line per unit that names an `--env-setup` script (issue #216). status REPORTS: it
+ * says where the seam is configured, and nothing about whether the script is still there, still
+ * private, or still uncommitted. Those are `doctor`'s — it is the preflight, it owns the warn tiers,
+ * and it already has the git check-ignore seam. Prints nothing when no seam is configured, so the
+ * output of every deployment that does not use one is byte-identical to before.
+ */
+function reportEnvSetup(ctx, paths) {
+	for (const path of paths) {
+		if (!ctx.fs.existsSync(path)) continue;
+		let setup = null;
+		try {
+			setup = readUnitSeam(ctx.fs.readFileSync(path, "utf8"), ctx.platform).setup;
+		} catch {
+			// Unreadable — a system-scope unit this user may not read is the ordinary case. The scope line
+			// above already reported that it exists; status never fails on what it could not look at.
+		}
+		if (setup) ctx.out(`env-setup: ${setup} (named by ${path})\n`);
+	}
 }
 
 async function doStart(ctx) {

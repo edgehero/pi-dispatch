@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { installedUnitPaths, readUnitSeam, runService, TEMPLATE_PINS } from "../src/service.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // The deploy/ copy the render actually reads: worker/deploy, shipped in the npm tarball and kept
@@ -366,6 +366,123 @@ test("render linux --env-setup: systemd itself parses the composed unit", { skip
 		/Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected /i,
 		`systemd-analyze found a syntax error in the composed unit:\n${log}`,
 	);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The read side (issue #216): the rendered unit is the ONLY record of --env-setup, so doctor reads it
+// back out. These are the anti-drift pins — every assertion below runs a REAL render through the REAL
+// reader, so changing what composeEnvSetupExec or renderPlist emits without changing ENV_SETUP_READERS
+// turns this file red rather than making doctor quietly blind.
+// ---------------------------------------------------------------------------------------------------
+
+test("round-trip: what the render writes is exactly what readUnitSeam reads back, on every platform", async () => {
+	for (const platform of ["linux", "darwin"]) {
+		const h = harness({ platform, argv: ["render", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
+		assert.equal(await h.run(), 0);
+		assert.deepEqual(readUnitSeam(h.text(), platform), { setup: ENV_SETUP, deployDir: DEPLOY_AT }, `${platform}: the path and the deployment survive the round trip`);
+	}
+	// win32's unit is not a file: the render SETS the value with `nssm set … AppEnvironmentExtra`, and
+	// doctor reads it back from `nssm get`, which echoes the NAME=VALUE. That is the pair pinned here.
+	const win = harness({ platform: "win32", argv: ["render", "--env-setup", "C:\\pi\\setup.cmd"], files: { "C:\\pi\\setup.cmd": "@echo off\n" } });
+	assert.equal(await win.run(), 0);
+	const set = win.text().match(/AppEnvironmentExtra "([^"]*)"/);
+	assert.ok(set, "the render sets AppEnvironmentExtra");
+	assert.deepEqual(readUnitSeam(set[1], "win32"), { setup: "C:\\pi\\setup.cmd", deployDir: null });
+});
+
+test("round-trip: a default render carries no seam, which is every unit that predates the flag", async () => {
+	for (const platform of ["linux", "darwin"]) {
+		const h = harness({ platform, argv: ["render"] });
+		assert.equal(await h.run(), 0);
+		assert.deepEqual(readUnitSeam(h.text(), platform), { setup: null, deployDir: DEPLOY_AT }, `${platform}: no flag, no seam — and the deployment is still readable`);
+	}
+});
+
+test("installedUnitPaths names both daemons in both scopes, and the hand-copied worker.service too", () => {
+	const linux = installedUnitPaths("linux", "/home/tester").map((u) => u.path);
+	assert.ok(linux.includes(USER_UNIT), "the user-scope worker unit install writes");
+	assert.ok(linux.includes("/etc/systemd/system/pi-dispatch-worker.service"));
+	assert.ok(linux.includes("/etc/systemd/system/worker.service"), "the README's manual `sudo cp` produces this name, and it is still a worker");
+	assert.ok(linux.includes("/home/tester/.config/systemd/user/pi-dispatch-receiver.service"));
+	const darwin = installedUnitPaths("darwin", "/home/tester").map((u) => u.path);
+	assert.ok(darwin.includes(AGENT_PLIST));
+	assert.ok(darwin.includes("/Library/LaunchDaemons/com.pi-dispatch.receiver.plist"));
+	assert.deepEqual(installedUnitPaths("win32", "/home/tester"), [], "there is no unit FILE on Windows — only `nssm get`");
+});
+
+test("regression: the deployment-folder substitution must not rewrite the operator's --env-setup path", async () => {
+	// The path the operator typed contains the template's own placeholder. Substituting AFTER the
+	// ExecStart was composed turned it into /srv/pi-deploy/setup-env.sh — a file resolveEnvSetup never
+	// checked, with the banner comment above it still naming the one that was typed.
+	const setup = "/opt/pi-dispatch/setup-env.sh";
+	const files = { [setup]: "#!/bin/sh\n" };
+	const linux = harness({ platform: "linux", argv: ["render", "--env-setup", setup], files });
+	assert.equal(await linux.run(), 0);
+	assert.ok(linux.text().includes(`. "${setup}" || exit 1`), "the unit sources the file that was typed");
+	assert.equal(readUnitSeam(linux.text(), "linux").setup, setup);
+	assert.equal(
+		(linux.text().match(/--env-setup ([^\s`]+)/) ?? [])[1],
+		setup,
+		"the banner comment and the ExecStart below it must name the same file",
+	);
+	assert.ok(linux.text().includes(`WorkingDirectory=${DEPLOY_AT}`), "the template's own placeholders are still substituted");
+
+	const darwin = harness({ platform: "darwin", argv: ["render", "--env-setup", setup], files });
+	assert.equal(await darwin.run(), 0);
+	assert.equal(readUnitSeam(darwin.text(), "darwin").setup, setup);
+	assert.ok(darwin.text().includes(`<string>${DEPLOY_AT}</string>`), "WorkingDirectory still points at the deployment folder");
+});
+
+test("regression: a deployment folder holding `$&` renders literally rather than splicing itself", async () => {
+	// String.replace and replaceAll read $& out of a replacement STRING. Every substitution that carries
+	// a computed path is a function replacement for exactly this reason.
+	const cwd = "/srv/pi$&deploy";
+	for (const platform of ["linux", "darwin"]) {
+		const h = harness({ platform, argv: ["render"], cwd });
+		assert.equal(await h.run(), 0);
+		assert.ok(h.text().includes(cwd), `${platform}: the deployment folder appears verbatim`);
+		assert.doesNotMatch(h.text(), /\/opt\/pi-dispatch/, `${platform}: and nothing of the placeholder survives`);
+		assert.equal(readUnitSeam(h.text(), platform).deployDir, cwd);
+	}
+});
+
+test("status names the configured env-setup script, and says nothing when there is none", async () => {
+	const withSeam = harness({
+		platform: "linux",
+		argv: ["status"],
+		files: { [USER_UNIT]: `WorkingDirectory=${DEPLOY_AT}\nExecStart=/bin/sh -c 'set -a; . "${ENV_SETUP}" || exit 1; set +a; exec "/fake/node/bin/node" "x" "worker"'\n` },
+		plan: { systemctl: { code: 0, output: "active\n" } },
+	});
+	assert.equal(await withSeam.run(), 0);
+	assert.match(withSeam.text(), new RegExp(`env-setup: ${ENV_SETUP.replace(/[.\\/]/g, "\\$&")} \\(named by ${USER_UNIT.replace(/[.\\/]/g, "\\$&")}\\)`));
+
+	const without = harness({
+		platform: "linux",
+		argv: ["status"],
+		files: { [USER_UNIT]: `WorkingDirectory=${DEPLOY_AT}\nExecStart=/fake/node/bin/node x worker\n` },
+		plan: { systemctl: { code: 0, output: "active\n" } },
+	});
+	assert.equal(await without.run(), 0);
+	assert.doesNotMatch(without.text(), /env-setup/, "a deployment without the seam sees byte-identical status output");
+});
+
+test("status reads the seam out of a plist, and out of nssm on win32", async () => {
+	const mac = harness({
+		platform: "darwin",
+		argv: ["status"],
+		files: { [AGENT_PLIST]: `<key>WorkingDirectory</key>\n\t<string>${DEPLOY_AT}</string>\n<key>PI_ENV_SETUP</key>\n\t\t<string>${ENV_SETUP}</string>\n` },
+		plan: { launchctl: 0 },
+	});
+	assert.equal(await mac.run(), 0);
+	assert.match(mac.text(), /env-setup: \/etc\/pi-dispatch\/setup-env\.sh \(named by /);
+
+	const win = harness({
+		platform: "win32",
+		argv: ["status"],
+		plan: { "nssm get": { code: 0, output: `PI_ENV_SETUP=C:\\pi\\setup.cmd\r\n` }, "nssm status": { code: 0, output: "SERVICE_RUNNING\n" } },
+	});
+	assert.equal(await win.run(), 0);
+	assert.match(win.text(), /env-setup: C:\\pi\\setup\.cmd \(named by pi-dispatch-worker's AppEnvironmentExtra\)/);
 });
 
 // ---------------------------------------------------------------------------------------------------

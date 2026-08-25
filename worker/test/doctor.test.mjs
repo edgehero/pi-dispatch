@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -694,6 +694,260 @@ test("doctor: the app-auth block only fires for source app", async () => {
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "pat" }), ghDeps(out, green));
 	assert.doesNotMatch(text(), /GITHUB_APP_ID/, "pat deployments hear nothing about App credentials");
+});
+
+// -- the --env-setup script (issue #216): doctor reads the installed unit, then checks the file -------
+
+// Real files throughout, like the App key fixtures above: the unit is read with the real readFileSync
+// and the script's mode is stat'ed. `platform` and `home` are injected because the point is to exercise
+// all three unit formats, and only one of them exists on whichever host runs this suite.
+//
+// The unit bodies below are written by hand rather than rendered. That the hand-written shape and the
+// RENDERED shape agree is not this file's job: worker/test/service.test.mjs round-trips every real
+// render through readUnitSeam, so the renderer and the reader cannot drift apart unnoticed.
+const SETUP_BODY = "export INFISICAL_TOKEN=st.setup-body-distinctive\n"; // planted: must never be echoed
+
+function setupScript({ mode = 0o755, dirMode = 0o755, name = "setup-env.sh" } = {}) {
+	const dir = mkdtempSync(join(tmpdir(), "pi-env-setup-"));
+	const path = join(dir, name);
+	writeFileSync(path, SETUP_BODY);
+	chmodSync(path, mode);
+	chmodSync(dir, dirMode);
+	return path;
+}
+
+const linuxUnit = (deployDir, setup) =>
+	`[Service]\nWorkingDirectory=${deployDir}\nEnvironmentFile=${deployDir}/.env\n` +
+	(setup
+		? `ExecStart=/bin/sh -c 'set -a; . "${setup}" || exit 1; set +a; exec "/usr/bin/node" "/opt/x/cli.mjs" "worker"'\n`
+		: `ExecStart=/usr/bin/node /opt/x/cli.mjs worker\n`);
+
+const darwinUnit = (deployDir, setup) =>
+	`<dict>\n\t<key>WorkingDirectory</key>\n\t<string>${deployDir}</string>\n\n\t<key>EnvironmentVariables</key>\n\t<dict>\n` +
+	`\t\t<key>PATH</key>\n\t\t<string>/usr/bin:/bin</string>\n` +
+	(setup ? `\t\t<key>PI_ENV_SETUP</key>\n\t\t<string>${setup}</string>\n` : "") +
+	`\t</dict>\n</dict>\n`;
+
+/** Plant a unit in a temp home, in the location `pi-dispatch service install` writes it to. */
+function installUnit({ platform, home = mkdtempSync(join(tmpdir(), "pi-unit-home-")), deployDir, setup, which = "worker" }) {
+	const rel =
+		platform === "darwin"
+			? join("Library", "LaunchAgents", `com.pi-dispatch.${which}.plist`)
+			: join(".config", "systemd", "user", `pi-dispatch-${which}.service`);
+	const path = join(home, rel);
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, platform === "darwin" ? darwinUnit(deployDir, setup) : linuxUnit(deployDir, setup));
+	return { home, path };
+}
+
+const seamEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", ...extra });
+const seamDeps = (out, extra = {}) => ({
+	out,
+	cwd: tmpdir(),
+	home: mkdtempSync(join(tmpdir(), "pi-empty-home-")),
+	platform: "linux",
+	spawn: fakeSpawn(green),
+	probeValkey: async () => true,
+	nodeVersion: "22.19.0",
+	...extra,
+});
+const rx = (p) => p.replace(/[.\\/]/g, "\\$&");
+
+test("doctor: with no unit and no PI_ENV_SETUP, the seam adds not one line", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out));
+	assert.equal(code, 0);
+	assert.doesNotMatch(text(), /env-setup/, "a deployment that does not use the seam gets byte-identical output");
+});
+
+test("doctor: a systemd unit for THIS deployment names its env-setup script, and doctor says which unit", async () => {
+	const setup = setupScript();
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home, path } = installUnit({ platform: "linux", deployDir, setup });
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, platform: "linux" }));
+	assert.equal(code, 0);
+	assert.match(text(), new RegExp(`✓ env-setup script present \\(${rx(setup)}, named by ${rx(path)}\\)`));
+	assert.doesNotMatch(text(), new RegExp(SETUP_BODY.trim()), "the path is named; the contents are never read");
+});
+
+test("doctor: a launchd plist carries the same seam, read out of its EnvironmentVariables dict", async () => {
+	const setup = setupScript();
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home, path } = installUnit({ platform: "darwin", deployDir, setup });
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, platform: "darwin" }));
+	assert.equal(code, 0);
+	assert.match(text(), new RegExp(`✓ env-setup script present \\(${rx(setup)}, named by ${rx(path)}\\)`));
+});
+
+test("doctor: on win32 the seam comes back from `nssm get`, NULs and all", async () => {
+	const setup = setupScript();
+	// nssm writes wide characters on some builds; readUnitSeam strips them rather than pretending the
+	// output is always UTF-8. A CRLF rides along too, because it always does.
+	const utf16ish = [..."PI_ENV_SETUP=" + setup + "\r\nOTHER=1"].map((c) => c + "\0").join("");
+	const calls = [];
+	const { out, text } = capture();
+	const code = await runDoctor(
+		seamEnv(),
+		seamDeps(out, {
+			platform: "win32",
+			// BOTH services answer with the same script, which is the ordinary Windows deployment: one
+			// setup file serving both daemons. The dedupe is what keeps that one set of lines.
+			spawn: fakeSpawn({ ...green, "nssm get": { code: 0, output: utf16ish } }, calls),
+		}),
+	);
+	assert.equal(code, 0);
+	assert.match(text(), new RegExp(`✓ env-setup script present \\(${rx(setup)}, named by pi-dispatch-worker's AppEnvironmentExtra\\)`));
+	assert.deepEqual(
+		calls.filter((c) => c.cmd === "nssm").map((c) => c.args),
+		[
+			["get", "pi-dispatch-worker", "AppEnvironmentExtra"],
+			["get", "pi-dispatch-receiver", "AppEnvironmentExtra"],
+		],
+		"both daemons are asked, and nothing else is",
+	);
+	assert.equal(text().match(/env-setup script present/g).length, 1, "one script serving both daemons is one finding");
+	assert.doesNotMatch(text(), /group\/world-writable/, "win32 stat modes are synthetic -- the mode findings cannot exist there");
+});
+
+test("doctor: a unit belonging to ANOTHER deployment on this host is not doctor's business", async () => {
+	const setup = setupScript();
+	const { home } = installUnit({ platform: "linux", deployDir: "/srv/some-other-deployment", setup });
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: mkdtempSync(join(tmpdir(), "pi-deploy-")), home }));
+	assert.equal(code, 0);
+	assert.doesNotMatch(text(), /env-setup/, "a host running two deployments must not hear about the neighbour's unit forever");
+});
+
+test("doctor: with no unit, PI_ENV_SETUP in doctor's own environment answers -- and the line says so", async () => {
+	const setup = setupScript();
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv({ PI_ENV_SETUP: setup }), seamDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), new RegExp(`✓ env-setup script present \\(${rx(setup)}, named by PI_ENV_SETUP in this environment\\)`));
+});
+
+test("doctor: the unit outranks PI_ENV_SETUP -- the file that boots is the answer", async () => {
+	const fromUnit = setupScript({ name: "unit-setup.sh" });
+	const fromEnv = setupScript({ name: "env-setup.sh" });
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home } = installUnit({ platform: "linux", deployDir, setup: fromUnit });
+	const { out, text } = capture();
+	await runDoctor(seamEnv({ PI_ENV_SETUP: fromEnv }), seamDeps(out, { cwd: deployDir, home }));
+	assert.match(text(), new RegExp(rx(fromUnit)));
+	assert.doesNotMatch(text(), new RegExp(rx(fromEnv)), "the environment is only consulted when no unit named one");
+});
+
+test("doctor: worker and receiver naming the same script produce one set of lines, not two", async () => {
+	const setup = setupScript();
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	// The receiver unit is written FIRST, so "the worker names it" below is about the scan order and
+	// not about which file happened to land first.
+	const { path: receiver } = installUnit({ platform: "linux", deployDir, setup, which: "receiver" });
+	const { home } = installUnit({ platform: "linux", home: dirname(dirname(dirname(dirname(receiver)))), deployDir, setup });
+	const { out, text } = capture();
+	await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+	assert.equal(text().match(/env-setup script present/g).length, 1, "the finding is about the script, so it is deduped by path");
+	assert.match(text(), /named by .*pi-dispatch-worker\.service/, "the first unit to name it is the one reported, and the worker is scanned first");
+	assert.doesNotMatch(text(), new RegExp(rx(receiver)), "the second unit naming the same script adds nothing");
+});
+
+test("doctor: a unit naming a script that is gone warns, names it, and still exits 0", async () => {
+	const setup = setupScript();
+	rmSync(dirname(setup), { recursive: true, force: true });
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home, path } = installUnit({ platform: "linux", deployDir, setup });
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+	assert.equal(code, 0, "a broken boot path is a warning: `pi-dispatch worker` by hand still runs, and `up` inherits this code");
+	assert.match(text(), new RegExp(`⚠ the env-setup script at ${rx(setup)} does not exist \\(named by ${rx(path)}\\)`));
+	assert.match(text(), /restart loop/, "the fix says what actually happens at the next boot");
+	assert.doesNotMatch(text(), /is group\/world-writable/, "nothing to stat once it is gone -- the missing line stands alone");
+});
+
+test("doctor: a group- or world-writable env-setup script warns -- it is EXECUTED, so writability is the risk", async () => {
+	for (const mode of [0o775, 0o757]) {
+		const setup = setupScript({ mode });
+		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const { home } = installUnit({ platform: "linux", deployDir, setup });
+		const { out, text } = capture();
+		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+		assert.equal(code, 0);
+		assert.match(text(), new RegExp(`⚠ the env-setup script at ${rx(setup)} is group/world-writable`));
+		assert.match(text(), new RegExp(`chmod go-w ${rx(setup)}`));
+		assert.match(text(), /owns the worker/, "the fix says what the escalation actually buys");
+	}
+});
+
+test("doctor: a world-READABLE script is fine -- it holds no secret, only the commands that fetch them", async () => {
+	const setup = setupScript({ mode: 0o644 });
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home } = installUnit({ platform: "linux", deployDir, setup });
+	const { out, text } = capture();
+	await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+	assert.doesNotMatch(text(), /is group\/world-writable/, "0o022 and not the App key's 0o077: this file is sourced, not secret");
+});
+
+test("doctor: a world-writable directory warns, and a STICKY one does not", async () => {
+	for (const [dirMode, expected] of [
+		[0o777, true],
+		[0o1777, false],
+	]) {
+		const setup = setupScript({ dirMode });
+		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const { home } = installUnit({ platform: "linux", deployDir, setup });
+		const { out, text } = capture();
+		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+		assert.equal(code, 0);
+		const line = new RegExp(`⚠ the directory holding the env-setup script \\(${rx(dirname(setup))}\\) is group/world-writable`);
+		if (expected) assert.match(text(), line);
+		else assert.doesNotMatch(text(), line, "sticky: a non-owner cannot replace someone else's file there, so the claim would be false");
+	}
+});
+
+test("doctor: an env-setup script in a work tree that does not ignore it warns, with the path and no contents", async () => {
+	const setup = setupScript();
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home } = installUnit({ platform: "linux", deployDir, setup });
+	const calls = [];
+	const { out, text } = capture();
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, spawn: fakeSpawn({ ...green, "git ": 1 }, calls) }));
+	assert.equal(code, 0);
+	assert.match(text(), new RegExp(`⚠ the env-setup script at ${rx(setup)} is inside a git work tree that does not ignore it`));
+	assert.match(text(), /commands that FETCH them/, "the fix says why a file with no secret in it still matters");
+	assert.doesNotMatch(text(), new RegExp(SETUP_BODY.trim()));
+	const git = calls.find((c) => c.cmd === "git");
+	assert.equal(git.args.at(-1), setup, "the question is about the script itself");
+	assert.equal(git.args.at(-4), dirname(setup), "asked from the script's own directory, not doctor's cwd");
+});
+
+test("doctor: an ignored script, a non-repo, and a git that will not launch are all silent about the seam", async () => {
+	for (const [name, outcome] of [
+		["ignored (exit 0)", 0],
+		["not a work tree (exit 128)", 128],
+		["git missing", "enoent"],
+	]) {
+		const setup = setupScript();
+		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const { home } = installUnit({ platform: "linux", deployDir, setup });
+		const { out, text } = capture();
+		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, spawn: fakeSpawn({ ...green, "git ": outcome }) }));
+		assert.equal(code, 0);
+		assert.doesNotMatch(text(), /does not ignore it/, `${name}: only a definite "not ignored" may warn`);
+	}
+});
+
+test("doctor: a unit rendered WITHOUT the flag reads as no seam, and an unparseable one does not guess", async () => {
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const { home, path } = installUnit({ platform: "linux", deployDir, setup: null });
+	const { out, text } = capture();
+	await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
+	assert.doesNotMatch(text(), /env-setup/, "every unit that predates issue #209 lands here");
+	writeFileSync(path, "[Service]\nWorkingDirectory=" + deployDir + "\nExecStart=/usr/bin/env something-hand-written\n");
+	const second = capture();
+	await runDoctor(seamEnv(), seamDeps(second.out, { cwd: deployDir, home }));
+	assert.doesNotMatch(second.text(), /env-setup/, "a hand-rewritten ExecStart reads as no seam rather than as a guess");
 });
 
 // -- replica runs (REQ-REPLICA-RUNS): the multiplier is worth stating, not worth failing on ------------
@@ -1409,7 +1663,16 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 		RECEIVER_PORT: "http",
 		AZURE_WEBHOOK_MODE: "hmac",
 	};
-	const checks = await collectChecks(env, collectSeams({ "docker info": 0, "docker image": 1, "gh auth": "enoent" }));
+	// A configured --env-setup seam, wrong in all three ways at once (issue #216). Without a unit that
+	// names one, envSetupChecks returns [] and this pin would walk straight past the new checks -- the
+	// same hollowing-out the triggers-parse guard below exists to prevent.
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-doctrine-deploy-"));
+	const loose = setupScript({ mode: 0o777, dirMode: 0o777 });
+	const { home } = installUnit({ platform: "linux", deployDir, setup: loose });
+	const checks = await collectChecks(
+		env,
+		collectSeams({ "docker info": 0, "docker image": 1, "gh auth": "enoent", "git ": 1 }, { cwd: deployDir, home, platform: "linux" }),
+	);
 	const carried = assertFixActionDoctrine(checks);
 	// The fixture must actually reach every eligible check -- a triggers-parse regression swallowed to
 	// zeroes would otherwise hollow this pin out silently.
@@ -1432,6 +1695,9 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	never(/but WEBHOOK_SECRET is unset/, "secrets are never minted or set");
 	never(/AZURE_WEBHOOK_MODE is/, "an undefaulted mode must stay a chosen thing");
 	never(/GITHUB_AUTH_SOURCE is gh but/, "auth posture is never changed behind the operator");
+	never(/^the env-setup script at .* is group\/world-writable$/, "doctor does not chmod an operator's file");
+	never(/^the directory holding the env-setup script/, "nor the directory it sits in");
+	never(/^the env-setup script at .* is inside a git work tree/, "and never moves a file out of a repository");
 });
 
 test("doctor --fix doctrine: a missing manifest offers restage; overridden image and remote valkey never gain offers", async () => {

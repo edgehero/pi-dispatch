@@ -383,6 +383,16 @@ Stated openly rather than discovered later:
   the worker's environment, its own credential belongs on the host and never in `PI_FORWARD_ENV`: a token
   that can read every secret in your project is a worse thing to hand an agent than the two credentials a
   job already carries (`docs/secrets.md`).
+- **An `--env-setup` script is a boot-time exec as the account that holds every credential this
+  deployment has.** `pi-dispatch service render|install --env-setup <path>` records a file the service
+  manager **sources at every boot**, as the service user, with the deployment's environment — so
+  whoever can write that file, or the directory holding it, owns the worker. Keep it writable by
+  nobody but the account the unit runs as, and keep it out of any repository you push: it holds no
+  secret by design, but it holds the commands that fetch them, which is a map to all of them.
+  `pi-dispatch doctor` warns on all three (gone; group- or world-writable; in a work tree that does
+  not ignore it) and offers no `--fix` for any of them — it will not `chmod` your file and will not
+  move it. The path can only ever be named by an operator typing the flag: never `.env`, never a
+  trigger file, never the panel (`docs/secrets.md`).
 - **With `GITHUB_AUTH_SOURCE=gh` (the default), your entire gh login reaches every token-carrying job.**
   The minted value is your own full-scope `gh auth token`, and `pi-dispatch doctor` warns and names the
   scopes it carries (calling out broad ones like `admin:org`, `delete_repo`, `workflow`). Prefer a
