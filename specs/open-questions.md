@@ -66,7 +66,13 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 
 ## OQ-004 — Egress from the job container is unrestricted in v1
 
-- **Status**: **ACCEPTED RISK** — *wants explicit ratification*
+- **Status**: **ACCEPTED RISK — RATIFIED 2026-08-25, and SCOPED.** Accepted as the **default** posture,
+  on the condition the row was really waiting on: that the policy `SECURITY.md` tells an operator to apply
+  is written down rather than left to be derived. That condition is now met (issue #199) — `docs/sandbox.md`
+  carries a recipe that has been **run**, in both directions, with the failure costs measured. The verdict
+  is scoped to a deployment whose operator has set the provider-side spend limit `SECURITY.md` already
+  requires; a deployment servicing repositories whose issue-opening population the operator does not
+  control should apply the recipe rather than rely on the credential bound alone.
 - **Position**: v1 ships without an allowlist proxy. A job container can reach the internet. The bound
   on exfiltration is `CONST-TOKEN-SCOPED-PER-JOB`'s short-lived, minimally-permissioned credential, not network policy.
 - **Why it is a risk row and not a constraint**: the source design doc listed egress allowlisting as
@@ -74,9 +80,32 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   than an honest open risk** — it teaches readers that the constitution is aspirational, which corrodes
   every other entry in it. So it lives here, and `SECURITY.md` states it plainly under "what is NOT
   defended".
+- **Why the verdict is scoped rather than blanket, which is the substance of the ratification**: the
+  argument above justifies *not lying in the constitution*; it never justified leaving the operator with an
+  instruction and no recipe, which is the state this row was actually in for a year. Ratifying the risk and
+  shipping the recipe are the same decision, and either alone is the dishonest half: a documented control
+  nobody enabled is still an accepted risk, and an accepted risk nobody can act on is a disclosure with a
+  dead end at the end of it.
+- **Corroboration, external**: independent review of v1.0.0 asked for "some secrets injecting egress proxy
+  added to the setup" unprompted, from the README alone, arriving at this row's close condition in almost
+  its own words. Note where it points: a *secrets-injecting* proxy is `OQ-011`'s TLS-terminating mechanism,
+  not this row's allowlist, and the two must not be conflated when the graduation is designed.
+- **What the recipe changes, and what it deliberately does not**: it is an operator control, applied around
+  the container on the host. The job argv is untouched, so `INT-CONTAINER-RUNTIME-CONTRACT`'s pinned flag
+  list is **UNCHANGED, checked**. Two findings from running it belong on this row because they change the
+  shape of any future default: the runner's **provider call does not follow `HTTPS_PROXY`** (verified
+  against the pinned pi in the shipped image, with `NODE_USE_ENV_PROXY=1` set and the proxy dead), so a
+  proxy-only design cannot carry provider traffic and the provider needs a network-layer rule; and a
+  **too-tight allowlist spends two job-count slots per job and refunds neither** (exit `1` is retryable,
+  `attempts: 2`, and `releaseBudget` covers only `container-never-started`), which is why a shipped default
+  must refuse pre-spend rather than fail mid-run.
 - **What would close it**: an allowlist proxy (`api.anthropic.com`, `github.com`,
-  `registry.npmjs.org`) on a dedicated Docker network. At that point it graduates to a `CONST-`.
-- **Needs**: maintainer ratification that shipping v1 this way is acceptable.
+  `registry.npmjs.org`) on a dedicated Docker network. At that point it graduates to a `CONST-`. Owned by
+  **issue #202**, which carries both findings above as design constraints.
+- **What would REOPEN it**: a documented exfiltration that the recipe would have stopped and the credential
+  bound did not; the recipe going stale against the image (a new client in the container, or a provider that
+  stops resolving to a stable address); or the graduation landing, at which point this row closes rather
+  than reopens.
 
 ## OQ-005 — pi's `modelRuntime` migration: NOT in the pin; lands when we bump
 
@@ -276,7 +305,9 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   `SECURITY.md` tells every operator to set. Also the four gates in front of a staged package at all: an
   operator declares it, pins it, stages it, and arms it per trigger.
 - **Related risk**: `OQ-004` (unrestricted egress) — same fix, and it remains **ACCEPTED RISK**, unchanged
-  by this entry.
+  by this entry. `OQ-004` was **RATIFIED 2026-08-25** with an operator-applied recipe (issue #199); that
+  ratification does not touch this row, because a recipe an operator applies around the container accounts
+  for nothing. The coupling above is unchanged: this closes **with** `OQ-004`, under issue #202.
 - **Needs**: maintainer ratification that shipping staged packages with in-process-only metering is
   acceptable, given that the unmetered path requires an operator to have staged and armed a package that
   spawns `pi`.
@@ -849,6 +880,7 @@ adversarial passes did.
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #199 (the egress recipe `SECURITY.md` promised, and the ratification it was waiting on). **OQ-004 RATIFIED, and SCOPED** — accepted as the default posture on the condition that the operator-applied policy is documented rather than derived, which `docs/sandbox.md` now satisfies with a recipe that was run in both directions. Per the `OQ-014` precedent the `Needs` field is replaced by **what would REOPEN it**, and the entry gains a scoped-verdict field, the external corroboration (v1.0.0 review, which asks for the *secrets-injecting* proxy and therefore points at `OQ-011`, not at this row's allowlist), and the two findings from running the recipe that constrain any future default: the runner's provider call does not follow `HTTPS_PROXY` (so a proxy-only design cannot carry provider traffic), and a too-tight allowlist spends two job-count slots per job and refunds neither (so a shipped default must refuse pre-spend). Graduation to a `CONST-` is unchanged as the close condition and is now owned by issue #202. **OQ-011 AMENDED**, one clause: its `Related risk` gloss records that `OQ-004` is ratified while this row is not, because a recipe applied around the container accounts for nothing; the closes-**with**-`OQ-004` coupling stands byte-unchanged. `INT-CONTAINER-RUNTIME-CONTRACT` **UNCHANGED, checked** — no flag was added to the job argv, which is what makes the recipe an operator control rather than a shipped one. **OQ-012, OQ-013 and OQ-015 UNCHANGED, checked** — all three still want explicit ratification, and none is downstream of egress. |
 | 2026-08-13 | Issue #188 (topology tier resolution). Added **OQ-025** (ACCEPTED, itemised): the six display-side residuals of probing skill tiers from the host — dir-basename naming (false soft possible, false hit impossible), deployment-pointer blindness to `PI_GLOBAL_PI_DIR` (wizard sessions soften rather than lie red; widening the allowlist is a reviewed policy edit, deliberately not done here), overlay/staged `ai-trigger: allow` unbadged (existence-only readers; the closed flag vocabulary stays closed and the tier tips carry the categorical truth), forge flows in non-repo tiers staying unverified (the remote repo outranks every readable tier), malformed stage manifest reading as nothing-staged where the job path keeps last-known-good, and the pre-existing repo-tier truncation false-red (banner-covered; the three new tiers soften on truncation instead). Each bounded by the runner's exact `flow_not_loaded` layer. **OQ-022 AMENDED** (prose correction): doctor's warn is no longer "the only thing that would have told them" — the topology badges `injected-ai-trigger` since issue #54, and since #188 the config edge itself lands on the injected node with its never-AI-reachable tip. **OQ-008 UNCHANGED, checked** — the graph still re-reads the live triggers file per build; tier reads added no cache. **OQ-009 UNCHANGED, checked** — tier nodes join config edges only; no chain edge gained a source or crossed a folder. |
 | 2026-08-13 | Issue #189 (closing pass). **OQ-019 AMENDED**: deferral (b) partially closed -- in-container prompt templates get the skills treatment (overlay channel, enforced precedence, per-root counting; commands counted post-session), themes stay count-only with the no-failure-mode-to-prevent reason stated, and the host-side ENABLEMENT mirror half of (b) still stands on OQ-018's argument. **OQ-018 UNCHANGED, checked** -- no new pi internal is mirrored; the enforcement rides declared loader seams. **OQ-022 UNCHANGED, checked**. |
 | 2026-08-13 | Issue #189 (Gap 2, producer half: `run.command`). **OQ-022 AMENDED**: the command asymmetry joins the row as the built-not-fallen-out sibling — a `run.command` trigger is trigger-reachable and never AI-reachable, refused at both model-reachable producers (`chain-command-refused` before the charset check; `dispatch_run` structurally incapable, its params `{folder, flow, task}` and a slash-leading flow refusing with a readable message) rather than falling out of an object-store miss, because a command has no committed artifact a gate could read: its dispatch line is BUILT from the reviewed `triggers.json`, so default-deny cannot be a frontmatter read and must be a refusal. The row's closing shape ("an explicit allowlist in the reviewed `triggers.json`") is unchanged in spirit and now covers both asymmetries. **OQ-008 UNCHANGED, checked** — command triggers reach the file through the same operator-typed, `parseTriggers`-validated, live-reloaded write path its resolution rests on, and no LLM tool gained a write (`dispatch_trigger_add`/`_edit` carry no `command` parameter). **OQ-019 UNCHANGED, checked, and its (b) stays open** — extension enablement mirroring is untouched by commands: a package the operator disabled registers no command, which now surfaces as the runner's pre-spend `command-unregistered` refusal instead of a job silently modelling the line as prose, so the row's cost/benefit call is if anything cheaper to leave; the skills/prompts/themes half remains deferred on its own terms. **OQ-009 UNCHANGED, checked** — a forge command job gets no `/outbox`, exactly as no forge job does; commands changed what a parent may BE, never who may chain. |

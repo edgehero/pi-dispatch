@@ -194,7 +194,7 @@ because pi-dispatch does **nothing special** for it. Staged against this repo's 
 | staged directory | `packages/juicesharp__rpiv-workflow`, 8.7 MB |
 | `pi` manifest | `{ "extensions": ["./extension.ts"] }`, so it contributes one extension and no skills |
 | entry format | TypeScript, which pi loads through jiti; the staged copy carries its own `jiti` |
-| dependencies | all three (`@juicesharp/rpiv-config`, `jiti`, `typebox`) nested **inside** the package dir, so the completeness assertion passes and it resolves with egress denied |
+| dependencies | all three (`@juicesharp/rpiv-config`, `jiti`, `typebox`) nested **inside** the package dir, so the completeness assertion passes and it resolves with no install at job time |
 | lifecycle scripts | none beyond `test`, so `--ignore-scripts` left nothing unbuilt |
 | peers | `@earendil-works/pi-coding-agent` and `@standard-schema/spec`, both omitted by staging, and both referenced only as `import type` in the package, so nothing imports them at run time |
 | `dispatch_*` tools | none, so the recursion guard below leaves it alone |

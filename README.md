@@ -344,8 +344,9 @@ output validation and append-only JSONL state. pi-dispatch does not integrate it
 the point. **Any package whose `package.json` carries a `pi` manifest stages the same way**, and one
 staged directory can contribute extensions, skills, prompts and themes at once.
 
-What the deployment provides is the plumbing and the limits: no network at job time (so nothing installs
-inside a job, which is why staging exists), exact versions only, package code loaded **last** so it can
+What the deployment provides is the plumbing and the limits: no package installs at job time (pi's
+resolver runs offline in every job, which is why staging exists), exact versions only, package code
+loaded **last** so it can
 never shadow your repo's own skills, any extension that tries to register a `dispatch_*` tool dropped,
 and `"packages": false` on any trigger that must not load it. Every package is printed by name with where it
 came from, because that list is the moment to vet what will run in every job.
@@ -367,8 +368,10 @@ flowchart LR
 
 Every trigger flows through this same path: a container boundary, spend checked before the container
 starts, nothing dropped. Read [`SECURITY.md`](SECURITY.md) before you rely on it; it states plainly what
-is and is not defended. Recorded tokens and cost are process-wide (subagent sessions included), and the
-per-job token budget is enforced against that same total.
+is and is not defended. One thing it does not defend is the container's network egress, which is open by
+default and is yours to bound: [`docs/sandbox.md`](docs/sandbox.md) carries a recipe that has been run,
+with the failure modes measured. Recorded tokens and cost are process-wide (subagent sessions included),
+and the per-job token budget is enforced against that same total.
 
 ## Reuse your existing pi setup
 

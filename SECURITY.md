@@ -285,7 +285,10 @@ Stated openly rather than discovered later:
 - **Network egress from the job container is unrestricted.** There is no allowlist proxy in v1. A job
   can reach the internet. If an agent is successfully induced to exfiltrate its environment, egress
   filtering will not stop it — the token's short expiry and narrow scope are what bound the damage. Run this on
-  hardware where that is acceptable, or put an egress policy on the Docker network yourself.
+  hardware where that is acceptable, or put an egress policy on the Docker network yourself: `docs/sandbox.md`
+  carries one that has been run, including the trap that the runner's provider call does not follow a proxy
+  variable, and what a too-tight allowlist costs you in budget slots. It bounds where an induced agent can
+  send your environment; it does not prevent it, which is why this row stays where it is.
 - **The provider API key is broad.** Unlike the GitHub token it cannot be meaningfully scoped per job —
   the agent needs it to function. It is the one broad secret inside the container. **Set a spend limit
   on it.**
