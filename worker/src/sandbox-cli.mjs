@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
+import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildSandboxRunArgs, launchSandbox, listRunningSandboxes, parsePublish, resolveSandbox, sandboxContainerName } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
 
@@ -22,6 +24,9 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		isTty = Boolean(process.stdin.isTTY && process.stdout.isTTY),
 		running = listRunningSandboxes,
 		launch = launchSandbox,
+		// The docker spawn used for this session's egress network, seamed like `launch` so the tests never
+		// touch a daemon. Only used when PI_EGRESS=1.
+		spawnNetwork = spawn,
 		now = () => Date.now(),
 	} = deps;
 
@@ -89,6 +94,10 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		else err(`warning: could not pin ${jobId}: ${pinned.reason}\n`);
 	}
 
+	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container
+	// so the reaper's `pi-job-` filter never touches it -- a worker restart must not tear the network out
+	// from under a shell an operator is sitting in.
+	const network = config.egress ? networkNameFor(resolved.name) : null;
 	const args = buildSandboxRunArgs({
 		image: resolved.manifest.image,
 		name: resolved.name,
@@ -97,15 +106,27 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		publish,
 		term: env.TERM,
 		idleSeconds: config.sandboxIdleMinutes * 60,
+		network,
+		egressEnv: egressEnv({ proxy: config.egressProxy, armed: config.egress }),
 	});
 
 	out(`opening ${resolved.name} — image ${resolved.manifest.image}, workspace ${resolved.manifest.workspace}\n`);
 	out("no credentials are set in this container. exit the shell to dispose of it.\n");
 	if (publish.length > 0) out(`published: ${publish.filter((f) => f !== "-p").join(", ")}\n`);
 
-	const { code, error } = await launch({ args });
-	if (error) return fail(err, `could not start docker: ${error.message}`);
-	return code ?? 0;
+	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing
+	// proxy fails at `docker run` with docker's own message, in front of an operator at a terminal, which
+	// is the one place a late failure is cheap.
+	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: config.egressProxy }))) {
+		return fail(err, `could not create the egress network ${network} -- is the proxy running? \`docker compose -f deploy/docker-compose.yml --profile egress up -d\``);
+	}
+	try {
+		const { code, error } = await launch({ args });
+		if (error) return fail(err, `could not start docker: ${error.message}`);
+		return code ?? 0;
+	} finally {
+		if (network) await removeJobNetwork(spawnNetwork, { network, proxy: config.egressProxy });
+	}
 }
 
 /**

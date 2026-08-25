@@ -47,7 +47,7 @@ const SECRET = "cafef00d".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [] } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" } } = {}) {
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -55,7 +55,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	const buf = [];
 	const store = new Map(Object.entries(files));
 	const deps = {
-		env: { PI_PROVIDER: "anthropic" },
+		env,
 		spawn: fakeSpawn(plan, calls),
 		out: (s) => buf.push(s),
 		prompt: (q) => {
@@ -245,4 +245,78 @@ test("defaultPrompt: non-TTY stdin declines immediately without readline (the ev
 	assert.equal(answer, "", "an empty answer is the No contract");
 	assert.match(printed, /Proceed\? \[y\/N\] /, "the question still reaches the transcript");
 	assert.match(printed, /defaulting to No/, "the default is stated, not silent");
+});
+
+// --- REQ-EGRESS-ALLOWLIST: up offers the proxy, and only to a deployment that armed the policy --------
+
+const EGRESS_ENV = { PI_PROVIDER: "anthropic", PI_EGRESS: "1" };
+const EGRESS_NET = ["network", "create", "pi-dispatch-egress-out"];
+const EGRESS_RUN = [
+	"run", "-d", "--name", "pi-dispatch-egress-proxy", "--restart", "unless-stopped",
+	"--network", "pi-dispatch-egress-out",
+	"-v", "./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro",
+	"-v", "./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro",
+	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
+];
+
+test("up: a deployment that has not armed the policy is never asked about a proxy", async () => {
+	// up never invents operator policy -- the same doctrine that keeps it pulling this repo's own image
+	// and no other. Nothing about egress appears at all.
+	const h = harness({ plan: green, listening: true });
+	await h.run();
+	assert.doesNotMatch(h.text(), /egress/i);
+	assert.ok(!h.calls.some((c) => c.args.includes("pi-dispatch-egress-proxy")));
+});
+
+test("up: an armed policy with the proxy already up prompts for nothing", async () => {
+	const h = harness({
+		env: EGRESS_ENV,
+		plan: { ...green, "docker inspect --format={{.State.Running}} pi-dispatch-egress-proxy": 0 },
+		listening: true,
+	});
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /✓ Egress proxy already present/);
+	assert.equal(h.promptCalls.length, 0);
+});
+
+test("up: --yes starts the proxy with exactly the argv it showed", async () => {
+	const h = harness({
+		env: EGRESS_ENV,
+		plan: { ...green, "docker inspect --format={{.State.Running}} pi-dispatch-egress-proxy": 1, "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 },
+		listening: true,
+		files: { "/deploy/egress-allowlist.conf": "api.anthropic.com\n" },
+		argv: ["--yes"],
+	});
+	await h.run();
+	const ran = h.calls.filter((c) => c.args[0] === "network" || c.args[0] === "run").map((c) => c.args);
+	assert.ok(ran.some((a) => JSON.stringify(a) === JSON.stringify(EGRESS_NET)), "the network argv is the one shown");
+	assert.ok(ran.some((a) => JSON.stringify(a) === JSON.stringify(EGRESS_RUN)), "the proxy argv is the one shown");
+	assert.match(h.text(), /started pi-dispatch-egress-proxy/);
+});
+
+test("up: an armed policy with NO allowlist file declines itself rather than starting a deny-everything proxy", async () => {
+	// Starting a proxy whose allowlist file does not exist gets a DIRECTORY created by docker where a file
+	// belonged, and a squid that fails confusingly. Naming the file is the fix; starting it is not.
+	const h = harness({
+		env: EGRESS_ENV,
+		plan: { ...green, "docker inspect --format={{.State.Running}} pi-dispatch-egress-proxy": 1 },
+		listening: true,
+		argv: ["--yes"],
+	});
+	await h.run();
+	assert.match(h.text(), /egress-allowlist\.conf is not here/);
+	assert.ok(!h.calls.some((c) => c.args.includes("pi-dispatch-egress-proxy") && c.args[0] === "run"), "nothing is started");
+});
+
+test("up: a declined proxy prompt runs nothing, and the summary says what that costs", async () => {
+	const h = harness({
+		env: EGRESS_ENV,
+		plan: { ...green, "docker inspect --format={{.State.Running}} pi-dispatch-egress-proxy": 1 },
+		listening: true,
+		files: { "/deploy/egress-allowlist.conf": "api.anthropic.com\n" },
+		answers: ["n"],
+	});
+	await h.run();
+	assert.ok(!h.calls.some((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-egress-proxy")));
+	assert.match(h.text(), /refuses every job pre-spend until the proxy is up/);
 });

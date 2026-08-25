@@ -63,3 +63,26 @@ test("init without a cwd .env.example falls back to the copy shipped with the pa
 	assert.equal(readFileSync(join(dir, ".env"), "utf8"), packaged, ".env is the packaged worker/.env.example, byte for byte");
 	assert.match(text(), /created\s+\.env/, "the fallback still reports .env as created");
 });
+
+test("init scaffolds an egress allowlist that WORKS, not an empty one", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
+	runInit(dir, { out: () => {} });
+	const list = readFileSync(join(dir, "egress-allowlist.conf"), "utf8");
+	// Every other scaffold in init is EMPTY because empty is inert: no triggers, no windows, no packages.
+	// An empty allowlist is not inert -- it is a deployment where every job dies at its first turn and
+	// spends two budget slots doing it -- so this one ships the working minimum instead.
+	assert.match(list, /^api\.anthropic\.com$/m, "the provider is an ordinary entry, with no address rule anywhere");
+	assert.match(list, /^\.github\.com$/m);
+	assert.match(list, /^registry\.npmjs\.org$/m);
+	// The honest part: the flow-specific tail is the half nobody can enumerate for an operator.
+	assert.match(list, /Your flows are the part nobody can list for you/);
+});
+
+test("init never overwrites an edited allowlist", () => {
+	const dir = tmp();
+	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n");
+	writeFileSync(join(dir, "egress-allowlist.conf"), "example.com\n");
+	runInit(dir, { out: () => {} });
+	assert.equal(readFileSync(join(dir, "egress-allowlist.conf"), "utf8"), "example.com\n", "create-only, like every other scaffold here");
+});

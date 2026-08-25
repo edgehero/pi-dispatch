@@ -1184,6 +1184,73 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ---
 
+## REQ-EGRESS-ALLOWLIST
+
+- **Statement**: A deployment shall be able to bound what a job container reaches on the network, with a
+  control **pi-dispatch itself applies**. With `PI_EGRESS=1`, every job runs on its own `--internal` Docker
+  network whose only other member is an allowlist proxy, reaching listed hosts by name and nothing else; and
+  a job whose policy cannot serve it shall be **refused before it spends**, with a reason naming what is
+  wrong and no budget slot consumed. Unset is today's behaviour exactly: no `--network`, no proxy variable,
+  no preflight spawn, and a docker argv byte-identical to one built before this requirement existed.
+- **Scope**: Every job kind and every forge, and every image nameable in `run.image` -- the network is the
+  worker's argv, so an operator-built image inherits it the way it inherits `--cap-drop=ALL`. A resurrected
+  sandbox joins the same kind of network (`INT-SANDBOX-CONTRACT`) and is **not** preflighted, because it
+  spends nothing. **Off by default**, and deliberately not per trigger: there is no `run.network`, no
+  runtime-settings key and no model-callable parameter, because a per-trigger egress relaxation is a
+  per-trigger security downgrade and the population that would want one should be editing the deployment
+  instead. `DES-PER-TRIGGER-JOB-IMAGE` already drew this line: the image decides what is *in* the box, never
+  what the box can *do*.
+- **Why the check is pre-spend, which is the whole shape of the feature**: a job that cannot reach its
+  provider **starts the container, spends its budget slot, and produces nothing**. Measured against the real
+  runner: three provider attempts, `Request timed out.`, exit `1`, ~40 seconds, **zero tokens**. Exit `1` is
+  the retryable class (`INT-RUNNER-EXIT-CODE-PROTOCOL`), the queue is configured for two attempts, and
+  `releaseBudget` refunds only `container-never-started` -- this container started. So a misconfigured
+  policy spends **two job-count slots per job**, buys nothing with either, and a cron-driven deployment can
+  empty its daily cap before anyone reads the first failure. That is `CONST-BUDGET-BEFORE-TOKENS` working
+  exactly as specified, on jobs that were never going to succeed, and it is why the gate is a free
+  determinate refusal in front of the paid ones rather than a doc.
+- **Why one network per job rather than one shared one**: a shared network is a shared L2 segment, and at
+  `DES-CONCURRENCY-3` that is three mutually-untrusting issue authors who can reach each other.
+  `enable_icc=false` is the obvious mitigation and is not one: ICC governs **every** container pair on the
+  bridge and the proxy is a container, so it blocks job-to-proxy along with job-to-job (verified in both
+  directions against a control). Per-job networks make job-to-job **structurally impossible**, which is
+  strictly stronger than what preceded it -- two job containers on docker's default bridge can reach each
+  other by IP today, so this **removes** an adjacency rather than adding one. It costs ~190ms to build and
+  ~260ms to tear down, against a container run of minutes.
+- **The provider is an ordinary allowlist entry, and the record that said otherwise is corrected here.**
+  `OQ-004` and `docs/sandbox.md` recorded that the runner's provider call does not follow `HTTPS_PROXY` even
+  with `NODE_USE_ENV_PROXY=1`, and concluded a proxy could not carry provider traffic. The observation was
+  real; the cause was not pi. The Anthropic SDK resolves `globalThis.fetch` at construction and pi passes it
+  no dispatcher, so the call follows the process's global dispatcher, and the pinned image's Node installs a
+  proxy-aware one when the flag is set (verified: the same client follows a dead proxy to `ECONNREFUSED`
+  with it, and goes to DNS without it). What actually happened is that the container env is a **closed
+  allowlist** and the recipe's `PI_FORWARD_ENV` line named three variables, not four -- the flag never
+  reached the runner. The worker now emits all four itself, in the closed map, so arming the policy cannot
+  half-work, and `PI_FORWARD_ENV` refuses those names at boot while it is armed.
+- **What is checked pre-spend, and what deliberately is not.** One determinate host-side fact: the proxy is
+  running. That is one `docker inspect` when armed and **zero spawns** when not. Reachability is **not**
+  probed per job: it would convert a determinate gate into a flaky one, and a flaky pre-spend gate has no
+  good class (as POLICY it drops real work on a blip, as INFRA it retries and burns the second slot this
+  requirement exists to save), it doubles the container starts a deployment makes, and the only
+  credential-free way to prove it is an unauthenticated request to a third party before every job.
+  **Honest gap**: an allowlist missing a host the flows need is not pre-spend detectable, and that job pays
+  the two slots. `doctor` proves the whole path once, when a human asks, using the job image's own node --
+  which also proves that image honours `NODE_USE_ENV_PROXY`, the property a stale one would silently lack.
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-TOKEN-SCOPED-PER-JOB`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SANDBOX-CONTRACT`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
+  `OQ-004`, `OQ-011`
+- **Acceptance**: Given `PI_EGRESS` unset, a job's docker argv and container env are byte-identical to ones
+  built before this requirement existed and the preflight spawns nothing. Given `PI_EGRESS=1` and a running
+  proxy, every job's argv carries `--network=pi-job-<jobId>-net` and its env carries all four proxy
+  variables; a job reaching a listed host succeeds and one reaching an unlisted host is refused by the proxy
+  rather than by the agent; and the network is removed when the container exits. Given a proxy that is
+  absent or stopped, the job returns `outcome: "policy"` with `budgetReserved: false` and reason
+  `egress-proxy-missing` or `egress-proxy-stopped`, `docker run` is never spawned, and the queue does not
+  retry it. Given a daemon that does not answer, the job throws and IS retried. Given a configured
+  deployment, `pi-dispatch doctor` reports the proxy's state and proves both directions of the policy
+  without spending a token, and no check it emits carries a `fixAction`.
+
 ## REQ-RESUMABLE-SESSION
 
 - **Statement**: A trigger may set `run.resume: true`, and a job whose **key** resolves shall then run on
@@ -1426,6 +1493,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #202 (egress). **NEW `REQ-EGRESS-ALLOWLIST`**: with `PI_EGRESS=1` every job runs on its own `--internal` network whose only other member is an allowlist proxy, and a job whose policy cannot serve it is refused before it spends. **Off by default**, and the pre-spend gate is the whole shape of the feature rather than a nicety beside it: a job that cannot reach its provider starts the container, spends its slot and produces nothing (three attempts, `Request timed out.`, exit `1`, ~40s, **zero tokens**), and exit `1` is retryable at `attempts: 2` while `releaseBudget` refunds only `container-never-started` -- two slots per job, neither refunded, faster than anyone reads the first failure. One network PER JOB rather than one shared: a shared network is a shared L2 segment at `DES-CONCURRENCY-3`, and `enable_icc=false` is not the fix because ICC governs every container pair and the proxy is a container, so it blocks the path the design depends on (verified against a control). The claim is stated precisely rather than overclaimed -- two job containers on docker's default bridge can already reach each other by IP, so per-job networks REMOVE an adjacency rather than adding one. Scope names what is deliberately absent: no `run.network`, no runtime-settings key, no model-callable parameter. Also records the honest gap the gate cannot close: an allowlist missing a host the flows need is not pre-spend detectable, and that job pays the two slots. **REQ-GLOBAL-PI-OVERLAY UNCHANGED, checked** -- `PI_OFFLINE=1` is a property of the runner and an allowlist that permits `registry.npmjs.org` does not put pi's resolver back on the network. **REQ-RESURRECTABLE-SANDBOX UNCHANGED, checked**: the network reaches a sandbox through the same builder seam its Scope already delegates to `INT-SANDBOX-CONTRACT`. **REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked, and it is the one worth naming**: doctor gains five checks and `up` gains a consented step, and **none of them carries a `fixAction`** -- the never tier holds. One candidate was considered and refused: a prompt-tier offer to start the proxy on the Valkey precedent, which starts a QUEUE whose failure mode is that nothing runs, where this would stand up a SECURITY CONTROL whose allowlist the operator has not written, turning "no policy" into "a policy that fails every job inside a paid container". **REQ-TOKEN-ACCOUNTING-AND-CAPS UNCHANGED, checked**, and it gains nothing: a subprocess `pi` spends against the provider host, which is on the allowlist by necessity, and a proxy that does not decrypt cannot count tokens. An egress control that does not touch metering is the finding, not an oversight. |
 | 2026-08-25 | Issue #216 (the `--env-setup` seam had no preflight: nothing checked whether the script the service manager sources at every boot still existed, was still writable by nobody else, or had been committed). **REQ-DEPLOYMENT-BOOTSTRAP AMENDED**: Scope gains doctor's read-back — the path exists nowhere but the rendered unit, so doctor parses that unit (the `ExecStart` line, the plist's `EnvironmentVariables` dict, `nssm get … AppEnvironmentExtra`), matched to this deployment by `WorkingDirectory`, with `PI_ENV_SETUP` in doctor's own environment as the fallback when no unit names one — plus the three warn-tier findings it may report (missing; a group/world-writable script or non-sticky directory; a work tree that does not ignore it), none of which ever reads the script's contents. The `never` enumeration gains "an env-setup script's mode or location", and acceptance gains both the reporting clause and the byte-identical-when-unconfigured clause. The mask is `0o022` and deliberately not the App key's `0o077`: this file is EXECUTED by the account holding the provider key and the forge token, so writability is the risk and readability is not, and a sticky directory is exempt because a non-owner cannot replace a file there. A missing script stays a warning rather than a failure because it breaks the boot path and not `pi-dispatch worker` typed by hand, and `up` returns doctor's code verbatim. Fixed here too, since the read-back is what surfaces it: `service render` substituted `/opt/pi-dispatch` → the deployment folder AFTER composing the ExecStart and injecting `PI_ENV_SETUP`, so an operator's `--env-setup /opt/pi-dispatch/setup-env.sh` on a deployment elsewhere was silently rewritten into a file `resolveEnvSetup` never checked, while the unit's own banner still named the one that was typed. **DES-SERVICE-ENV-SETUP-SEAM AMENDED** (the unit is the record; substitute before composing). **DES-CLI-SURFACE UNCHANGED, checked** — doctor stays read-only/always-safe and the new checks carry no `fixAction`, so the tier ladder it defines is untouched. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** — nothing here reads or maps an exit code. |
 | 2026-08-25 | Issue #209 (`service render` had no seam for a secrets manager, and the obvious hand-edit ate the exit code). **REQ-DEPLOYMENT-BOOTSTRAP AMENDED**: Scope gains `--env-setup <absolute path>` on `render`/`install` and its three normative clauses — operator-typed only (never `.env`, a trigger file, the panel or anything a model can write; the wrappers capture `PI_ENV_SETUP` before sourcing `./.env` so file content cannot name a script they then run), a missing or failing setup is exit 1 and never exit 2 (with the worker not started on a half-filled environment), and a byte-identical default render on all three platforms. The seam exists because the hand-edit it replaces is wrong in a way that costs money: `infisical run -- <cmd>` reports a child's exit 2 as 1, and exit 2 is what `RestartPreventExitStatus=2`, nssm's `AppExit 2 Exit` and the wrapper's exit-2 conversion all key on, so a refusal read as a crash and the supervisor relaunched it in front of a paid provider. The renderer owning the `exec` is what forecloses that. Measured under systemd 252: `ExecMainStatus=2` with `NRestarts=0` for a refusal, `ExecMainStatus=1` with restarts for a failed setup. **DES-CLI-SURFACE AMENDED** (the flag's tier and one never-tier clause), **NEW `DES-SERVICE-ENV-SETUP-SEAM`** (a path and not a command, the renderer owning the exec, a variable rather than a composed command line on macOS/Windows, and the rejected alternatives). **DES-WORKER-ON-HOST UNCHANGED, checked** — the worker is still a host process; only what prepares its environment moved. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** — the in-container protocol is untouched, and the new host-side mapping (setup failure = 1) is stated here rather than there. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked** — a failed setup refuses before the process that would reserve anything exists. |
 | 2026-08-25 | Issue #199 (egress). Prose correction, no requirement change: `REQ-GLOBAL-PI-OVERLAY`'s why-packages-are-staged paragraph said a job container loads a staged package "with egress denied", which nothing enforces (`OQ-004`). It now says "with no job-time install", which is what `PI_OFFLINE=1` and host-side staging actually provide. |

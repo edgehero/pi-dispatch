@@ -246,7 +246,7 @@ function rebuildUsage(u) {
  * path embeds the operator's OS account name.
  *
  * `reason` is a fixed enum passthrough (worker-abort | over-budget | unprotected-branch |
- * runner-policy | job-image-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
+ * runner-policy | job-image-missing | egress-proxy-missing | ...), never free-form or payload text. `exitCode`, `turns`, and `budgetReserved`
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */

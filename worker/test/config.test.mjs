@@ -461,3 +461,39 @@ test("loadGitLabAuth is null without a token, and refuses any source other than 
 	// silently ignoring.
 	assert.throws(() => loadGitLabAuth({ GITLAB_TOKEN: "glpat-x", GITLAB_AUTH_SOURCE: "app" }), (e) => e.piDispatchConfig === true);
 });
+
+// --- REQ-EGRESS-ALLOWLIST -----------------------------------------------------------------------------
+
+test("PI_EGRESS is off by default and parses STRICTLY, so a typo never leaves a deployment believing it is bounded", () => {
+	assert.equal(loadConfig({}).egress, false, "unset is off");
+	assert.equal(loadConfig({ PI_EGRESS: "" }).egress, false, "empty is off");
+	assert.equal(loadConfig({ PI_EGRESS: "0" }).egress, false);
+	assert.equal(loadConfig({ PI_EGRESS: "1" }).egress, true);
+	// The strictness is the point, and it is PI_GLOBAL_ALLOW_EXTENSIONS' reason one knob over: an operator
+	// who believes they have an egress policy and does not is in a WORSE position than one who knows they
+	// have none, because the belief displaces the credential bound that is actually holding.
+	for (const bad of ["true", "yes", "on", "2"]) {
+		assert.throws(() => loadConfig({ PI_EGRESS: bad }), /PI_EGRESS must be exactly/, `${bad} must not be guessed`);
+	}
+});
+
+test("the egress proxy name is overridable, and an empty value falls back rather than throwing later", () => {
+	assert.equal(loadConfig({}).egressProxy, "pi-dispatch-egress-proxy");
+	assert.equal(loadConfig({ PI_EGRESS_PROXY: "my-egress" }).egressProxy, "my-egress");
+	assert.equal(loadConfig({ PI_EGRESS_PROXY: "" }).egressProxy, "pi-dispatch-egress-proxy", "|| not ??, like jobImage");
+});
+
+test("PI_FORWARD_ENV refuses the policy's own variables WHILE ARMED, and permits them otherwise", () => {
+	// Conditional deliberately: with no policy these are an ordinary escape hatch, and docs/egress.md still
+	// documents the manual form that uses them. With a policy, a forwarded value would point every job at
+	// an operator's own proxy instead of the one attached to this job's network -- and would read exactly
+	// like the control working, which is the failure class this file already refuses for the minted token.
+	for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]) {
+		assert.throws(
+			() => loadConfig({ PI_EGRESS: "1", PI_FORWARD_ENV: name }),
+			/must not forward .* while PI_EGRESS=1/,
+			`${name} must be refused while the policy is armed`,
+		);
+		assert.deepEqual(loadConfig({ PI_FORWARD_ENV: name }).forwardEnv, [name], `${name} is fine with no policy`);
+	}
+});

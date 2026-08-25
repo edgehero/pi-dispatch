@@ -56,6 +56,7 @@ import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
+import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
@@ -448,6 +449,11 @@ export async function collectChecks(env, seams) {
 			});
 		}
 	}
+
+	// REQ-EGRESS-ALLOWLIST (issue #202). [] unless PI_EGRESS=1, so a deployment without a policy gets
+	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
+	// the rest are noise on top of a down daemon.
+	checks.push(...(await egressChecks(env, seams, { dockerCode, imageCode, jobImage })));
 
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
 	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
@@ -1447,6 +1453,134 @@ function readTriggerFacts(env, fileExists, cwd) {
  * Returns [] when no seam is configured, so a deployment that does not use one gets byte-identical
  * output.
  */
+/**
+ * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
+ * rather than assumed from the compose file that was supposed to create it.
+ *
+ * Returns [] when `PI_EGRESS` is not exactly "1", so a deployment that has not armed the policy gets
+ * byte-identical output -- the same convention envSetupChecks follows one feature over.
+ *
+ * TIERING, and it is the whole editorial judgement here. The proxy's PRESENCE is a hard failure when the
+ * policy is armed: the worker refuses every job pre-spend without it, so a ✓ would be a lie and a ⚠ would
+ * under-report a deployment that cannot run anything. Everything that needs the NETWORK to answer is
+ * warn-tier, on doctor's own rule that a ✗ is reserved for certainties: a custom provider base URL, a
+ * corporate egress path or a transient provider blip each make a red here a false alarm, and an operator
+ * who learns to scroll past doctor costs more than a missed warning does.
+ *
+ * NOTHING here carries a `fixAction` -- the never tier (REQ-DEPLOYMENT-BOOTSTRAP). One candidate was
+ * considered and refused: a prompt-tier offer to start the proxy, on the Valkey precedent. That offer
+ * starts a QUEUE, whose failure mode is that nothing runs. This one would stand up a SECURITY CONTROL
+ * whose allowlist the operator has not written yet, turning "no policy" into "a policy that fails every
+ * job inside a paid container". It is also not one argv but a compose profile and a file that must already
+ * exist, and doctor "never guesses a semantic env value".
+ */
+async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
+	const { spawn } = seams;
+	if (env.PI_EGRESS !== "1") return [];
+	const proxy = env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY;
+	const checks = [];
+
+	if (dockerCode !== 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: "Egress policy: not checked (the Docker daemon did not answer)",
+			fix: "start Docker, then re-run doctor -- the policy lives in docker's own networks and containers, so none of it can be read from here",
+		});
+		return checks;
+	}
+
+	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
+	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
+	// a boolean nor a health word can contain "|".
+	const state = await runCmdCapture(spawn, "docker", ["inspect", `--format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, proxy]);
+	const [running, health] = state.code === 0 ? state.output.trim().split("|") : [];
+	const up = running === "true";
+	checks.push({
+		ok: up,
+		label: up ? `Egress proxy running (${proxy})` : state.code === 0 ? `Egress proxy is stopped (${proxy})` : `Egress proxy is not on this host (${proxy})`,
+		fix: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- PI_EGRESS=1 refuses every job pre-spend while this is down, which costs no budget but runs nothing",
+	});
+	if (!up) return checks;
+
+	// Advisory on purpose, and deliberately NOT what the money gate reads. A healthcheck can flap, and a
+	// pre-spend gate that refuses on a flapping signal drops real work while one that retries on it burns
+	// the second budget slot this whole requirement exists to save. Here a human is reading, so it is worth
+	// saying: a squid that parsed its config and then wedged looks identical to a healthy one from outside.
+	if (health && health !== "none") {
+		checks.push({
+			ok: health === "healthy",
+			warn: true,
+			label: `Egress proxy health: ${health}`,
+			fix: `docker logs ${proxy} -- the container is up but its listener is not answering, so jobs will start and then fail to reach anything`,
+		});
+	}
+
+	// The end-to-end probe, and the only place in this codebase that proves the policy rather than
+	// inspecting it. Two containers, on a throwaway network built exactly like a job's, gated on the image
+	// being present because it uses the job image's own node -- which is the point: it proves the operator's
+	// OWN image honours NODE_USE_ENV_PROXY, the property a stale image would silently lack and the one
+	// whose absence turns the whole policy into an outage.
+	//
+	// Credential-free by construction: `api.anthropic.com` answers 401 to an unauthenticated request, so
+	// reaching the provider and being refused for the key proves the entire path and costs nothing. That is
+	// docs/egress.md's own method, promoted from prose to a check.
+	if (imageCode !== 0) return checks;
+	const net = `pi-dispatch-egress-doctor-${process.pid}`;
+	if ((await runCmd(spawn, "docker", ["network", "create", "--internal", net])) !== 0) return checks;
+	try {
+		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
+		for (const [slug, host, url, want] of [
+			["provider", "the provider", "https://api.anthropic.com/v1/messages", true],
+			["unlisted", "an unlisted host", "https://pi-dispatch-not-on-your-allowlist.example/", false],
+		]) {
+			const probe = await runCmdCapture(spawn, "docker", [
+				"run",
+				"--rm",
+				// Named, and outside the boot reaper's `pi-job-` filter by construction. `--rm` disposes of it,
+				// so the name exists for the operator watching `docker ps` during a doctor run and for the one
+				// reading `ps` afterwards to find out what a wedged probe was doing.
+				"--name",
+				`pi-dispatch-egress-probe-${slug}`,
+				"--pull=never",
+				`--network=${net}`,
+				"-e",
+				`HTTPS_PROXY=http://${proxy}:3128`,
+				"-e",
+				"NODE_USE_ENV_PROXY=1",
+				"--entrypoint",
+				"node",
+				jobImage,
+				"-e",
+				// The URL rides ARGV, not the spawn env, and the difference from the in-image `gh` probe is
+				// deliberate: that one carries a TOKEN, which must never be visible in `ps`. This carries a
+				// public hostname, so argv is the honest place for it -- an operator reading `ps` during a
+				// doctor run can see exactly which host is being probed.
+				`fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)})`,
+			]);
+			const reached = probe.code === 0;
+			checks.push({
+				ok: reached === want,
+				warn: true,
+				label: reached === want
+					? want
+						? `Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)`
+						: `Egress policy denies ${host} (the deny direction is the half an allowlist can silently lose)`
+					: want
+						? `Egress policy does NOT reach the provider (api.anthropic.com)`
+						: `Egress policy ALLOWS ${host} that is not on your allowlist`,
+				fix: want
+					? `add api.anthropic.com to egress-allowlist.conf and restart the proxy -- until then every job starts, fails at its first turn, and spends two budget slots proving it (docs/egress.md)`
+					: `check egress-allowlist.conf: a rule wider than you meant (a bare domain where you wanted a subdomain) lets a job reach hosts you did not list`,
+			});
+		}
+	} finally {
+		await runCmd(spawn, "docker", ["network", "disconnect", "-f", net, proxy]);
+		await runCmd(spawn, "docker", ["network", "rm", net]);
+	}
+	return checks;
+}
+
 async function envSetupChecks(env, seams) {
 	const { cwd, spawn, fileExists, platform, home } = seams;
 	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins

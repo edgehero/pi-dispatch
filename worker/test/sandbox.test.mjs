@@ -134,3 +134,35 @@ test("listRunningSandboxes returns ids, and THROWS rather than reporting an empt
 	// arrive looking like "nothing is running".
 	await assert.rejects(() => listRunningSandboxes({ execFn: async () => { throw new Error("daemon down"); } }), /daemon down/);
 });
+
+// --- REQ-EGRESS-ALLOWLIST: a sandbox reaches no further than the run it reproduces --------------------
+
+test("a sandbox with no egress policy is byte-identical to one built before the feature existed", () => {
+	const base = { image: "pi-job:latest", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j" };
+	assert.deepEqual(buildSandboxRunArgs(base), buildSandboxRunArgs({ ...base, network: null, egressEnv: {} }));
+	assert.ok(!buildSandboxRunArgs(base).join(" ").includes("--network"));
+});
+
+test("an armed sandbox joins its OWN network and carries the proxy variables -- still no credentials", () => {
+	const args = buildSandboxRunArgs({
+		image: "pi-job:latest",
+		name: "pi-sandbox-gh-1",
+		workspace: "/w",
+		jobDir: "/j",
+		term: "xterm",
+		network: "pi-sandbox-gh-1-net",
+		egressEnv: { HTTPS_PROXY: "http://pi-dispatch-egress-proxy:3128", NODE_USE_ENV_PROXY: "1" },
+	});
+	assert.ok(args.includes("--network=pi-sandbox-gh-1-net"));
+	// Its own network, never a job's: `pi-sandbox-` shares no substring with the reaper's `pi-job-` filter,
+	// so a worker restart cannot tear the network out from under a shell an operator is sitting in.
+	assert.ok(!args.join(" ").includes("pi-job-"), "a sandbox network is outside the reaper's filter");
+	const envValues = args.filter((_, i) => args[i - 1] === "-e");
+	assert.ok(envValues.includes("HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128"));
+	assert.ok(envValues.includes("NODE_USE_ENV_PROXY=1"));
+	// The clause that does not move. A proxy URL is not a credential, and buildContainerEnv is still not
+	// reused here, so there is no path by which a mint or a provider key could arrive.
+	assert.ok(!envValues.some((v) => /TOKEN|API_KEY|_KEY=/.test(v)), "no credential reaches a sandbox");
+	// And every isolation flag still reaches this shape, asserted against the imported array as ever.
+	for (const flag of ISOLATION_FLAGS) assert.ok(args.includes(flag), `missing isolation flag: ${flag}`);
+});

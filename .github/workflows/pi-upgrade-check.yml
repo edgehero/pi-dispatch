@@ -86,6 +86,19 @@ jobs:
           fi
           echo "OK: base pinned by digest"
 
+      - name: The egress proxy image is pinned by digest
+        run: |
+          # Same reasoning as the base image above, and one step sharper. deploy/docker-compose.yml names
+          # valkey/valkey:8, a floating minor, and that is FINE for a queue: a bad pull breaks loudly and
+          # spends nothing. The egress proxy IS the allowlist (REQ-EGRESS-ALLOWLIST), so a floating tag
+          # would let an upstream rebuild change what every job container may reach, with no commit
+          # anywhere and nothing failing.
+          if ! grep -qE 'image: ubuntu/squid@sha256:[0-9a-f]{64}' deploy/docker-compose.yml; then
+            echo "::error::The egress proxy image in deploy/docker-compose.yml is not digest-pinned."
+            exit 1
+          fi
+          echo "OK: egress proxy pinned by digest"
+
       - name: The example pi-packages.json pins exact versions
         run: |
           # Third-party pi packages an operator stages into the global overlay are pinned by the SAME

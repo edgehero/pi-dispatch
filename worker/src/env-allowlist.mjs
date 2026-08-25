@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { findEnvKeys } from "@earendil-works/pi-ai/compat";
+import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 
 function configError(message) {
@@ -110,7 +111,7 @@ function resolveEnvName(provider, cred) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, command = null, authFromPi = false, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, command = null, authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a pre-spend refusal.
@@ -180,6 +181,20 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	for (const name of forwardEnv) {
 		if (hostEnv[name] !== undefined) env[name] = hostEnv[name];
 	}
+
+	// The shipped egress policy's variables (REQ-EGRESS-ALLOWLIST), AFTER the PI_FORWARD_ENV loop so a
+	// forwarded name can never override them -- the same ordering, for the same reason, as the minted token
+	// below (and loadConfig refuses those names outright while the policy is armed anyway).
+	//
+	// Empty object when no policy is armed, so `-e` emits nothing and the container env is byte-identical
+	// to one built before this feature existed.
+	//
+	// NODE_USE_ENV_PROXY is the one that matters and the one the hand-written recipe omits. The two proxy
+	// variables alone steer git, gh, npm and Chromium but NOT the runner's provider call, because the
+	// Anthropic SDK resolves globalThis.fetch and nothing installs a proxy-aware dispatcher without this
+	// flag. Behind an internal network that is not a leak, it is an outage: every job dies at its first
+	// turn. It rides the closed map, never PI_FORWARD_ENV, so arming the policy cannot half-work.
+	Object.assign(env, egressEnv({ proxy: egressProxy, armed: egress }));
 
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
 	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because

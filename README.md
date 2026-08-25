@@ -368,8 +368,9 @@ flowchart LR
 
 Every trigger flows through this same path: a container boundary, spend checked before the container
 starts, nothing dropped. Read [`SECURITY.md`](SECURITY.md) before you rely on it; it states plainly what
-is and is not defended. One thing it does not defend is the container's network egress, which is open by
-default and is yours to bound: [`docs/sandbox.md`](docs/sandbox.md) carries a recipe that has been run,
+is and is not defended. One thing it does not defend by default is the container's network egress, which
+is open unless you turn the egress policy on: [`docs/egress.md`](docs/egress.md) is the control (each job
+on its own network behind an allowlist proxy, and a job the policy cannot serve refused before it spends),
 with the failure modes measured. Recorded tokens and cost are process-wide (subagent sessions included),
 and the per-job token budget is enforced against that same total.
 

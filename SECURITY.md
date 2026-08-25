@@ -285,10 +285,13 @@ Stated openly rather than discovered later:
 - **Network egress from the job container is unrestricted.** There is no allowlist proxy in v1. A job
   can reach the internet. If an agent is successfully induced to exfiltrate its environment, egress
   filtering will not stop it — the token's short expiry and narrow scope are what bound the damage. Run this on
-  hardware where that is acceptable, or put an egress policy on the Docker network yourself: `docs/sandbox.md`
-  carries one that has been run, including the trap that the runner's provider call does not follow a proxy
-  variable, and what a too-tight allowlist costs you in budget slots. It bounds where an induced agent can
-  send your environment; it does not prevent it, which is why this row stays where it is.
+  hardware where that is acceptable, or turn the egress policy on: `PI_EGRESS=1` puts every job on its own
+  `--internal` network behind an allowlist proxy and refuses a job the policy cannot serve before it spends
+  (`docs/egress.md`, which also carries what a too-tight allowlist costs you in budget slots). **Turning it
+  on does not retire this row**, and the reason is the part worth reading twice: your forge is on the
+  allowlist, because a job that cannot push has nothing to do, and a repository is a perfectly good place to
+  write a secret to. It bounds where an induced agent can send your environment; it does not prevent it,
+  which is why this row stays where it is.
 - **The provider API key is broad.** Unlike the GitHub token it cannot be meaningfully scoped per job —
   the agent needs it to function. It is the one broad secret inside the container. **Set a spend limit
   on it.**

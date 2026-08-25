@@ -62,5 +62,64 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # The egress policy's allowlist proxy (REQ-EGRESS-ALLOWLIST, issue #202). OPT-IN, like the receiver
+  # above: a plain `up` stays Valkey-only, and a deployment that has not turned PI_EGRESS on never needs
+  # this service at all.
+  #
+  #   docker compose -f deploy/docker-compose.yml --profile egress up -d
+  #
+  # It sits on ONE network here, the upstream one. The networks that matter are created by the WORKER, one
+  # per job, `--internal`, and this container is attached to each for the life of that job and detached
+  # after (worker/src/egress.mjs). Per-job rather than one shared network because a shared network is a
+  # shared L2 segment: at DES-CONCURRENCY-3 that is three mutually-untrusting issue authors who can reach
+  # each other. `enable_icc=false` cannot fix that -- ICC governs every container pair on the bridge and
+  # this proxy is a container, so it would block the very path the design depends on.
+  #
+  # NOTHING IS PUBLISHED, deliberately. The hand-written recipe this replaces ran squid with
+  # `--network host` and had to warn, in bold, to bind it to the bridge gateway, because an unbound
+  # `http_port` in the host namespace is an open forward proxy on the LAN -- "a worse thing than the one
+  # you set out to fix". On a docker network with no ports published, that class does not exist.
+  egress-proxy:
+    profiles: ["egress"]
+    # Digest-pinned, and the valkey service above deliberately is NOT. A floating tag on a queue is fine:
+    # a bad pull breaks loudly and spends nothing. This container IS the allowlist, so a floating tag would
+    # let an upstream rebuild change what every job may reach with no commit anywhere (CONST-PI-VERSION-PINNED
+    # reasoning, one vendor over). Multi-arch manifest list, so amd64 and arm64 both resolve.
+    image: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    # An explicit name, because the WORKER attaches this container to each job network by name and refuses
+    # a job pre-spend when it is not running. Without this key compose would prefix it with the project
+    # name and the two literals would disagree -- silently, and only on a deployment that renamed nothing.
+    container_name: pi-dispatch-egress-proxy
+    volumes:
+      # The RULES, shipped and not edited. Relative paths resolve against THIS FILE's directory.
+      - ./egress-proxy.conf:/etc/squid/squid.conf:ro
+      # The LIST, yours. `pi-dispatch init` scaffolds it next to your .env; it is create-only, so a re-run
+      # never clobbers an edited allowlist. Mounting a path that does not exist makes Docker create it as a
+      # DIRECTORY and squid then fails confusingly, which is why init writes it first.
+      - ../egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro
+    networks:
+      - egress-out
+    restart: unless-stopped
+    healthcheck:
+      # Is the listener actually accepting? A squid that parsed its config and then wedged looks identical
+      # to a healthy one from the outside, and `doctor` reports this where a human is reading it. The
+      # pre-spend gate deliberately reads only `Running`, because a money gate must not refuse real work
+      # on a signal that can flap.
+      # `CMD` with an explicit bash, never `CMD-SHELL`: that form runs /bin/sh, which on this image is
+      # dash, and `/dev/tcp` is a BASH feature -- under dash it fails with "Directory nonexistent" and the
+      # container reports unhealthy forever while squid is serving perfectly. The image has no nc, no curl,
+      # no wget and no squidclient, so bash's own socket redirection is what there is.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # The proxy's route out. Only the proxy is ever on it: job containers live on their own per-job
+  # `--internal` networks, which have no route anywhere except to this container.
+  egress-out:
+    name: pi-dispatch-egress-out
+
 volumes:
   valkey-data:

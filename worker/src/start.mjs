@@ -13,6 +13,7 @@ import { makeForgejoAuth } from "./forgejo-auth.mjs";
 import { makeForgejoHost } from "./forgejo-host.mjs";
 import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
+import { makeEgressPreflight } from "./egress.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker } from "./index.mjs";
 import { makeCollectChain } from "./outbox.mjs";
@@ -112,6 +113,22 @@ export function makeReaper({ log }) {
 				await exec("docker", ["rm", "-f", name]);
 				log("reaped_container", { name });
 			}
+			// REQ-EGRESS-ALLOWLIST: the per-job networks those containers were on. Swept AFTER the containers,
+			// because a network with a member still attached cannot be removed -- and swept by the SAME
+			// `pi-job-` filter, so the namespace rule that keeps an operator's live sandbox safe from the
+			// container reaper keeps their sandbox NETWORK safe too, with no second rule to remember.
+			//
+			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
+			// on every ordinary path, so anything still here outlived a process that did not get to run it.
+			// A network still in use by something else fails to remove and is skipped, which is correct: this
+			// is a best-effort sweep and never a reason not to boot.
+			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", "name=pi-job-", "--format", "{{.Name}}"]);
+			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) {
+				try {
+					await exec("docker", ["network", "rm", net]);
+					log("reaped_network", { network: net });
+				} catch {} // still in use, or already gone -- either way not this boot's problem
+			}
 		} catch (err) {
 			log("reaper_skipped", { reason: err?.message });
 		}
@@ -146,6 +163,7 @@ export async function startWorker(
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
+		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -386,6 +404,12 @@ export async function startWorker(
 			// one who removes it would stay admitted. Contrast the staged-package manifest, correctly read once at
 			// boot because it is deploy-time state under a :ro mount; the host's image set is not.
 			imagePreflight: makeImagePreflightFn({ image: config.jobImage }),
+			// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
+			// value, one place, so the gate that checks the proxy and the runner that attaches to its network
+			// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
+			// starts the proxy mid-day must not stay refused, and one who stops it must not stay admitted.
+			// Unarmed it spawns nothing at all, so a deployment without a policy pays for none of this.
+			egressPreflight: makeEgressPreflightFn({ proxy: config.egressProxy, armed: config.egress }),
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
@@ -397,6 +421,8 @@ export async function startWorker(
 			runContainer: makeRunContainerFn({
 				image: config.jobImage,
 				hostEnv: env,
+				egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
+				egressProxy: config.egressProxy,
 				openJobLog,
 				globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
 				allowGlobalExtensions: config.allowGlobalExtensions,

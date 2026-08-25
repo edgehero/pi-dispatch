@@ -86,145 +86,24 @@ scoped to that repository, and short-lived (`CONST-TOKEN-SCOPED-PER-JOB`); a she
 not a job, and handing it a harness credential would make it a different security object entirely. If
 you need to push from inside a sandbox, authenticate yourself — `gh auth login` is in the image.
 
-## Egress, and the policy you have to write yourself
+## Egress
 
-`SECURITY.md` says network egress from the job container is unrestricted, and it means that literally. The
-worker's `docker run` argv carries no `--network`, no `--dns` and no proxy setting, so a job container
-lands on Docker's default bridge with the whole internet in front of it, holding a provider key and a
-minted forge token. That is `OQ-004`: an accepted risk, ratified rather than quietly fixed, because what
-bounds exfiltration is the short-lived narrowly-scoped credential (`CONST-TOKEN-SCOPED-PER-JOB`), not
-network policy.
+A sandbox lands on **whatever network the job did**. With `PI_EGRESS=1` that is its own `--internal`
+network with no route anywhere except the allowlist proxy, and with it unset it is Docker's default bridge
+and the whole internet, which is what `SECURITY.md` discloses. The policy, how to turn it on, and a
+host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
-This section is the policy that disclosure tells you to write. It is yours to apply, on the host, around
-the container. Nothing here changes the argv, so installing it needs no new pi-dispatch version, and
-nothing here is on by default. It is written for a Linux host, which is what `deploy/` targets. A sandbox
-inherits it for free, being the same image on the same bridge.
+Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a
+convenience (install a missing dependency while debugging) and it is a **wider reach than the run the
+sandbox exists to reproduce**. A shell that can go where the run could not is not reproducing the run.
+Nothing you want is lost, because the forge and the registry are on the allowlist a job needed anyway. If
+you really need the open bridge for one session, that is your own deliberate act from another terminal:
+`docker network connect bridge pi-sandbox-<jobId>`.
 
-### What a job actually has to reach
-
-| Destination | Reached by | When |
-|---|---|---|
-| The provider host, `api.anthropic.com` on the default provider | the runner itself | every turn of every job |
-| Your forge: `github.com` and `api.github.com`, or the GitLab/Forgejo/Azure host you configured | the agent, in-container | when it pushes and opens the pull request |
-| `registry.npmjs.org` | the agent, in-container | only when the job installs the serviced repo's own dependencies |
-| Whatever the flow's tooling reaches | the agent | flow-specific, and the honest answer is that you have to know your flows |
-
-Two things that look like they belong on that list and do not. **Staged pi packages need no network at
-all**: `import-pi` installs them on the host and mounts them read-only, and `PI_OFFLINE=1` is set on every
-job, so pi's resolver cannot shell out to `npm` even if a path were missed. **Playwright downloads
-nothing**: Chromium is baked into the image at build time. A browsing job still reaches whatever site it
-browses, and that single case will drive an allowlist wider than everything else combined.
-
-### The shape that works
-
-Deny by default, punch one hole at the network layer for the provider, and send the rest through an
-allowlist proxy. The order of the rules is the design, not a detail. Substitute your own bridge subnet;
-`172.17.0.0/16` is the common default.
-
-```bash
-PROVIDER_IP=$(getent ahostsv4 api.anthropic.com | awk '{print $1}' | head -1)
-
-iptables -F DOCKER-USER
-iptables -A DOCKER-USER -i docker0 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A DOCKER-USER -i docker0 -p udp --dport 53 -j RETURN          # names must still resolve
-iptables -A DOCKER-USER -i docker0 -d "$PROVIDER_IP" -j RETURN          # the provider, by address: see below
-iptables -A DOCKER-USER -i docker0 ! -d 172.17.0.0/16 -j DROP           # everything else, denied
-iptables -A DOCKER-USER -j RETURN
-```
-
-The proxy runs on the host and listens on the bridge gateway, filtering `CONNECT` by hostname:
-
-```bash
-docker run -d --name egress-proxy --network host \
-  -v /etc/pi-dispatch/squid.conf:/etc/squid/squid.conf:ro ubuntu/squid:latest
-```
-
-```
-# /etc/pi-dispatch/squid.conf
-http_port 172.17.0.1:3128
-acl CONNECT method CONNECT
-acl SSL_ports port 443
-acl allowed dstdomain .github.com
-acl allowed dstdomain registry.npmjs.org
-http_access deny CONNECT !SSL_ports
-http_access allow CONNECT allowed
-http_access allow allowed
-http_access deny all
-cache deny all
-```
-
-**Bind the proxy to the bridge gateway, not to every interface.** `--network host` puts it in the host's
-namespace, so an unbound `http_port 3128` is an open forward proxy on your LAN, which is a worse thing than
-the one you set out to fix. Bound as above it is reachable from job containers and from the host, and from
-nowhere else.
-
-`PI_FORWARD_ENV` is how the proxy reaches a job, and it is the only channel that will carry it: the
-container env is a closed allowlist, so an unnamed variable is simply not forwarded.
-
-```bash
-HTTPS_PROXY=http://172.17.0.1:3128   # the gateway, by address: a job cannot resolve names for it
-HTTP_PROXY=http://172.17.0.1:3128
-PI_FORWARD_ENV=HTTPS_PROXY,HTTP_PROXY,NO_PROXY
-```
-
-The proxy filters on the hostname the client asks for and never terminates TLS, so it never sees inside
-the tunnel. That boundary is deliberate. A proxy that decrypts provider traffic is `OQ-011`'s mechanism,
-a materially larger change, and it is not this.
-
-### The trap, and it is a bad one
-
-**The proxy environment does not steer the runner's provider call.** Every other client in the image
-honours it, verified one at a time against a dead proxy port: `git` fails with "Failed to connect to
-127.0.0.1 port 9", `gh` reports `proxyconnect tcp`, `npm` retries until it gives up, headless Chromium
-returns an empty document. The runner's provider traffic does not. With `HTTPS_PROXY` pointed at a dead
-port **and** `NODE_USE_ENV_PROXY=1` set, a job still reached `api.anthropic.com` and came back with the
-provider's `401`. Node's own `fetch` in that same image does honour the flag, so this is pi's provider
-client, not Node, and no environment variable available to you will move it.
-
-That is why the provider gets a network-layer rule, and why that rule names an address rather than a
-hostname. Skip it, expect the proxy to carry the provider, and every job dies at its first turn while the
-allowlist looks correct.
-
-**That rule is coarser than you want, and it is the honest gap in this recipe.** It permits an address, so
-whatever answers on that address is permitted, and if the provider moves you have a dead deployment until
-you re-resolve. At the time of writing `api.anthropic.com` resolved to a single address, which makes this
-practical rather than merely possible. Do not assume that holds. Put the re-resolve on a timer, or accept
-the maintenance.
-
-### When it is too tight
-
-A job whose provider host is unreachable **starts the container, spends its budget slot, and produces
-nothing**. Measured against the real runner behind the rules above, with the provider hole removed: three
-provider attempts, `Request timed out.`, container exit `1`, about 40 seconds, zero tokens. A policy that
-rejects rather than drops fails the same way in seconds, reporting `Connection error.` instead.
-
-Exit `1` is the retryable class (`INT-RUNNER-EXIT-CODE-PROTOCOL`), the queue is configured for two
-attempts, and the reservation is **not** given back: a slot is refunded only when the container never
-started, and this container started. So a misconfigured allowlist spends two job-count slots per job, buys
-nothing with either, and can do it faster than anyone reads the first failure. A cron-driven deployment
-can empty its daily cap this way. That is `CONST-BUDGET-BEFORE-TOKENS` working exactly as specified, on
-jobs that were never going to succeed.
-
-Token spend really is zero, so what a too-tight allowlist costs you is the cap, not the money. Set it,
-then watch one job complete, before leaving it in front of a schedule.
-
-### What this does not buy you
-
-An allowlist bounds where an induced agent can send your environment. It does not prevent it. The forge is
-on the list, the agent holds a token for it, and a repository is a perfectly good place to write a secret
-to. `SECURITY.md`'s disclosure stands whether or not you apply any of this, and the credential's scope and
-expiry remain what actually bound the damage.
-
-### How this was verified
-
-All of it was run, none of it against a paid completion, and the method is worth knowing because it costs
-nothing to repeat. **Reachability is provable without spending**: `api.anthropic.com` answers `401` to an
-unauthenticated request, so a job that reaches the provider and is refused for its key has proven the
-whole path. The rules were exercised on a real Linux dockerd with the shipped image and the real runner:
-with the provider rule in place the job reached the provider and came back `401 API key is invalid`, and
-with it removed the same job timed out and exited `1`. An unlisted host was refused in both directions,
-`403` through the proxy and dropped without it. A run that reaches the provider and gets a `401` is one
-valid key away from a completion, and that is the strongest claim made here.
+One thing here is genuinely different from a job. A sandbox carries **no credentials** (above), so egress
+from it is a different object: there is no minted forge token and no provider key to send anywhere. What it
+can still reach is whatever the workspace's code reaches when you run it, and that workspace is whatever a
+run produced from an issue anyone could open. The network is the same; the stakes are not.
 
 ## Publishing a port
 

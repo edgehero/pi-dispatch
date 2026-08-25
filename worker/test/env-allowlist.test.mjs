@@ -381,3 +381,52 @@ test("every forge in the table mints into its OWN names and no other forge's", {
 		}
 	}
 });
+
+// --- REQ-EGRESS-ALLOWLIST: the proxy variables ride the CLOSED map, never PI_FORWARD_ENV -------------
+
+const egressBase = {
+	provider: "anthropic",
+	model: "m",
+	maxTurns: 5,
+	jobId: "job-1",
+	forgeKind: "local",
+	hostEnv: { ANTHROPIC_API_KEY: "sk-test" },
+};
+
+test("no egress policy emits NO proxy variables, so the container env is byte-identical to a pre-feature one", { skip }, () => {
+	const env = mod.buildContainerEnv({ ...egressBase });
+	for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]) {
+		assert.equal(env[name], undefined, `${name} must be absent without a policy`);
+	}
+});
+
+test("an armed policy emits all four, including the NODE_USE_ENV_PROXY the hand-written recipe omits", { skip }, () => {
+	const env = mod.buildContainerEnv({ ...egressBase, egress: true });
+	assert.equal(env.HTTPS_PROXY, "http://pi-dispatch-egress-proxy:3128");
+	assert.equal(env.HTTP_PROXY, "http://pi-dispatch-egress-proxy:3128");
+	assert.equal(env.NO_PROXY, "localhost,127.0.0.1");
+	// The provider call follows the process's global dispatcher, and nothing installs a proxy-aware one
+	// without this flag. Behind an --internal network its absence is an outage, not a leak: every job dies
+	// at its first turn, exit 1 is retryable, and each one spends two budget slots to prove it.
+	assert.equal(env.NODE_USE_ENV_PROXY, "1");
+});
+
+test("a PI_FORWARD_ENV entry can NEVER override the policy's own proxy variables", { skip }, () => {
+	// loadConfig refuses these names outright while the policy is armed, so this is the second line rather
+	// than the first. It exists because the ordering inside buildContainerEnv is what actually enforces it,
+	// and an edit that moved the assignment above the forward loop would silently hand every job an
+	// operator's own proxy -- which would read exactly like the control working.
+	const env = mod.buildContainerEnv({
+		...egressBase,
+		egress: true,
+		forwardEnv: ["HTTPS_PROXY", "NODE_USE_ENV_PROXY"],
+		hostEnv: { ANTHROPIC_API_KEY: "sk-test", HTTPS_PROXY: "http://attacker.example:8080", NODE_USE_ENV_PROXY: "0" },
+	});
+	assert.equal(env.HTTPS_PROXY, "http://pi-dispatch-egress-proxy:3128", "the policy's value wins");
+	assert.equal(env.NODE_USE_ENV_PROXY, "1");
+});
+
+test("the proxy is named, not hardcoded, so a deployment can run its own component", { skip }, () => {
+	const env = mod.buildContainerEnv({ ...egressBase, egress: true, egressProxy: "my-egress" });
+	assert.equal(env.HTTPS_PROXY, "http://my-egress:3128");
+});

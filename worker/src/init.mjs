@@ -19,6 +19,35 @@ const EMPTY_PACKAGES = `${JSON.stringify({ packages: [] }, null, 2)}\n`;
 // Operator-declared subscription plans (issue #53), read by the admin extension only — never at job
 // time. Versioned because a newer file must fail loud, and that cannot be retrofitted into a v1 reader.
 const EMPTY_SUBSCRIPTIONS = `${JSON.stringify({ version: 1, subscriptions: [] }, null, 2)}\n`;
+/**
+ * The egress allowlist (REQ-EGRESS-ALLOWLIST): the hosts a job container may reach, one bare hostname per
+ * line. Scaffolded with the three a job cannot work without, and NOT empty -- unlike every other scaffold
+ * in this file, whose empty form is inert. An empty allowlist is not inert, it is a deployment where every
+ * job dies at its first turn, so the safe default here is the working minimum rather than nothing.
+ *
+ * The provider is an ordinary entry. There is no address-based rule and nothing is special about it: the
+ * proxy carries provider traffic like everything else, because the runner's own `fetch` follows the proxy
+ * once NODE_USE_ENV_PROXY is set, which the worker sets (worker/src/egress.mjs).
+ */
+const DEFAULT_EGRESS_ALLOWLIST = `# Hosts a job container may reach, one per line. Deny by default: anything not listed is refused by
+# the proxy, and a job container has no other route out. A leading dot matches subdomains.
+#
+# Only read when PI_EGRESS=1. Edit freely -- \`pi-dispatch init\` never overwrites this file, and
+# \`pi-dispatch doctor\` reports what the running policy actually permits. See docs/egress.md.
+#
+# Your flows are the part nobody can list for you: a job that browses, or installs, or calls an API you
+# added, reaches hosts that are not here. doctor names what it can; the rest you have to know.
+
+# The provider. Every turn of every job goes here.
+api.anthropic.com
+
+# Your forge, for the push and the pull request. Replace with your own host if you self-host, and drop
+# the ones you do not use.
+.github.com
+
+# Only needed when a job installs the serviced repo's own dependencies.
+registry.npmjs.org
+`;
 
 export function runInit(cwd = process.cwd(), deps = {}) {
 	const { fs = { existsSync, copyFileSync, writeFileSync }, out = (s) => process.stdout.write(s) } = deps;
@@ -44,6 +73,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 	scaffold(fs, results, join(cwd, "pause-windows.json"), EMPTY_PAUSE_WINDOWS, "empty pause-windows list");
 	scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
 	scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
+	scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; only read when PI_EGRESS=1)");
 
 	for (const [verb, name, note] of results) {
 		out(`${verb.padEnd(7)} ${name.padEnd(20)} ${note}\n`);

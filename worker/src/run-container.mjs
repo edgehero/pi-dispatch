@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE } from "./docker-run.mjs";
+import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { InfraRetry } from "./processor.mjs";
@@ -40,6 +41,8 @@ export function makeRunContainer({
 	forwardEnv = [],
 	authFromPi = false, // fall back to ~/.pi/agent/auth.json for the provider key when the env has none
 	forgeHosts = {}, // per-forge self-hosted instance URLs, so a forge CLI in the container talks to the right one
+	egress = false, // REQ-EGRESS-ALLOWLIST: put this job on its own --internal network behind the allowlist proxy
+	egressProxy, // the proxy component attached to that network; undefined = egress.mjs's default name
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -59,6 +62,8 @@ export function makeRunContainer({
 			forgeKind: job?.kind,
 			forgeHosts,
 			hostEnv,
+			egress, // REQ-EGRESS-ALLOWLIST: emits HTTPS_PROXY/HTTP_PROXY/NO_PROXY/NODE_USE_ENV_PROXY, or nothing
+			egressProxy,
 			allowGlobalExtensions, // REQ-GLOBAL-PI-OVERLAY: false emits the explicit PI_GLOBAL_ALLOW_EXTENSIONS=0 opt-out
 			// REQ-GLOBAL-PI-OVERLAY: the per-job value comes off `job` (like maxTurns), the staged set off
 			// the closure (like allowGlobalExtensions) -- so a trigger can withhold what the operator staged.
@@ -84,6 +89,10 @@ export function makeRunContainer({
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 		});
 
+		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
+		// guard then omits the flag entirely, so the argv is byte-identical to one built before this feature.
+		const network = egress ? networkNameFor(name) : null;
+
 		const args = buildDockerRunArgs({
 			// Same split as packagePaths above: the per-job value off `job`, the deployment value off the closure,
 			// so a trigger can name its own toolchain (INT-TRIGGERS-FILE-CONTRACT). Resolved through the SAME
@@ -99,13 +108,26 @@ export function makeRunContainer({
 			sessionDir: prepared.session?.hostDir,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
+			network, // REQ-EGRESS-ALLOWLIST: null when no policy is armed, and the flag is then absent
 		});
+
+		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because
+		// it holds exactly two endpoints -- this container and the proxy -- and that is what makes job-to-job
+		// traffic structurally impossible rather than merely discouraged. A shared network could not do it:
+		// `enable_icc=false` would block job-to-job AND job-to-proxy, since ICC governs every container pair
+		// on the bridge and the proxy is a container.
+		//
+		// A failure to build it is INFRA, not policy: nothing has been spent, a retry may well succeed, and
+		// `container-never-started` is literally true, so the reservation is given back (processor.mjs).
+		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy }))) {
+			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
+		}
 
 		// Host-side per-job log sink, teed off `onOutput`. `name` is `pi-job-<jobId>`; the sink
 		// sanitizes internally. No container mount, no env var -- the sink lives on this side only.
 		const sink = openJobLog(name);
 
-		return await new Promise((resolve, reject) => {
+		const run = new Promise((resolve, reject) => {
 			const child = spawnFn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
 			// A throwing sink.write is swallowed so a misbehaving sink cannot break the tee or hang the run.
 			const tee = (chunk) => {
@@ -141,5 +163,14 @@ export function makeRunContainer({
 				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage } : { code: code ?? 1, aborted: false, turns, tokens, session, usage });
 			});
 		});
+
+		// The network outlives the container by exactly this `finally`. Best-effort and never throwing: the
+		// container has already exited, its code is the job's answer, and a teardown fault must not rewrite
+		// that answer. What a failure leaves behind is a memberless network, which the boot reaper sweeps.
+		try {
+			return await run;
+		} finally {
+			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy });
+		}
 	};
 }

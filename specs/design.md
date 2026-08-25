@@ -2061,6 +2061,79 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `REQ-RESURRECTABLE-SANDBOX`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SANDBOX-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`
 
+## DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK
+
+- **Decision**: Ship the egress control as **one `--internal` Docker network per job, named in the worker's
+  own `docker run` argv**, plus **one long-lived allowlist proxy** attached to each of those networks for the
+  life of that run, filtering `CONNECT` by hostname and never terminating TLS. The provider is an ordinary
+  entry on the allowlist. A **pre-spend check** on the proxy refuses a job the policy cannot serve. Off
+  unless `PI_EGRESS=1`, and then on every job with no per-trigger opt-out (`REQ-EGRESS-ALLOWLIST`,
+  `INT-EGRESS-POLICY-CONTRACT`).
+- **Why**: The rules were already written down and already run (`docs/sandbox.md`, issue #199, which touched
+  zero code files). What was missing was not the mechanism but **the worker knowing about it**. Every
+  property this project relies on -- reporting a refusal an operator can act on, checking a control in
+  `doctor`, refusing before money is spent -- needs the policy to be an object the worker names. That is
+  what makes this an argv change rather than a documentation change, and it is why the network and not the
+  proxy is the load-bearing half.
+- **Rejected**:
+  - *The `DOCKER-USER` host recipe as the shipped form.* It works. What it cannot be is **known**: the
+    worker cannot report it in the run record, `doctor` cannot check it, a Docker upgrade that rewrites the
+    chain removes it with no signal, and a second worker on the host inherits it without asking. An
+    operator who believes they have a control they cannot verify is in a **worse** position than one who
+    knows they have none, because the belief displaces the credential bound that is actually holding it.
+    Shipping it as code is worse still: a host process that deliberately refuses to mount `docker.sock`
+    because "a socket mount is root-equivalent access to the host" would instead take root directly, to
+    write firewall rules, on Linux only, for a worker whose own `service.mjs` also renders launchd plists
+    and nssm services. It survives as an appendix in `docs/egress.md`, for an operator who wants a layer
+    *underneath* docker's rules rather than instead of them.
+  - *One shared network with `com.docker.network.bridge.enable_icc=false`.* This was the design until it was
+    measured. ICC governs **every** container pair on that bridge and the proxy is a container, so the
+    option blocks job-to-proxy along with job-to-job: the control defeats itself. Verified in both
+    directions against a control network where the same connection succeeds. Without the option, a shared
+    network is a shared L2 segment for `DES-CONCURRENCY-3` mutually-untrusting issue authors -- and worth
+    stating precisely, because the tempting overclaim is available: two job containers on docker's default
+    bridge can already reach each other **by IP** today, so a shared network would not create that
+    adjacency, only make it resolvable **by name**. Per-job networks remove it outright.
+  - *A network-layer rule permitting the provider by address*, which is what the recipe does and what
+    `OQ-004` recorded as forced. Refuted by measurement rather than preference (see the requirement): the
+    provider follows the proxy once `NODE_USE_ENV_PROXY` actually reaches the runner, and the flag was
+    missing from the recipe's `PI_FORWARD_ENV` line, not unavailable. An address rule permits whatever
+    answers on that address and goes stale silently when the provider re-resolves; it also cannot be
+    expressed inside a docker internal network at all, so adopting it would have dragged the whole design
+    back to host firewall rules.
+  - *A TLS-terminating, secrets-injecting proxy.* `OQ-011`'s mechanism, and not merely larger: a
+    **different security object**, in which the provider key stops living in the container and starts living
+    in a host process that reads provider plaintext, needing its own constitution entry and its own story
+    for the proxy's own compromise. Named here so this design is never mistaken for a down payment on it,
+    and so the conflation `OQ-004:89-92` warned about does not happen at the one moment it was warning
+    about.
+  - *The worker starting the proxy at boot.* Today the worker starts only ephemeral `--rm` containers it
+    reaps by a name filter. A long-lived, network-attached, restart-policied component is a different
+    lifecycle object, and making the worker responsible for a security control's **uptime** creates the one
+    failure this whole feature exists to prevent: a control that is believed up while it is down. It is a
+    compose profile, and `up` offers it behind the same consent gate every other host mutation gets.
+  - *A `run.network` trigger field.* A per-trigger egress relaxation is a per-trigger security downgrade,
+    and it would need a model-callable exclusion maintained in perpetuity. The deployment configures egress;
+    a trigger never does.
+  - *An allowlist read from the serviced repo's `.pi/`.* Merge-gated content, and `DES-AI-TRIGGER-FLOW-GATE`
+    takes only a **boolean** from that file for precisely this reason: an egress allowlist from a repo is
+    the repo naming where the agent may send the operator's credentials.
+  - *A denylist.* It fails open on everything nobody thought of, which is the failure mode this exists to
+    remove.
+  - *Handing the operator a `squid.conf` to edit*, which is what the recipe does. A misordered `http_access`
+    silently allows everything, so the ordering ships and the operator's file is a list of hostnames with no
+    ordering in it at all.
+  - *Caching the preflight's answer across jobs.* `image-preflight.mjs` caches nothing on purpose, and a
+    stale "the proxy is fine" is wrong in the direction that costs a budget slot.
+  - *A per-job reachability probe.* It would prove what the presence check cannot, and it costs a throwaway
+    container start on the money path before every job, converts a determinate gate into a flaky one, and
+    means every job on every deployment makes an unauthenticated request to a third party before it starts.
+    That belongs in `doctor`, once, when a human asks for it.
+- **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
+  `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
+  `OQ-004`, `OQ-011`
+
 ## DES-REPLICA-INDEX-REACHES-THE-BRANCH
 
 - **Decision**: Implement replica runs (`REQ-REPLICA-RUNS`) by threading a single host-assigned integer —
@@ -2185,6 +2258,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #202 (egress). **NEW `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`**: a per-job `--internal` network named in the worker's own argv, one long-lived allowlist proxy attached to each for the life of a run, hostname filtering with no TLS termination, the provider as an ordinary entry, and a pre-spend check on the proxy. The `Rejected` list is where the value is, and two entries were reached by measurement rather than argument. **A shared network with `enable_icc=false`** was the design until it was run: ICC governs every container pair on the bridge and the proxy is a container, so the option blocks job-to-proxy along with job-to-job and the control defeats itself. **A network-layer rule permitting the provider by address** -- what the recipe does and what `OQ-004` recorded as forced -- is refuted: the provider follows the proxy once `NODE_USE_ENV_PROXY` actually reaches the runner, and it was missing from the recipe's own `PI_FORWARD_ENV` line rather than unavailable. Also rejected: shipping the `DOCKER-USER` recipe as code (a process that refuses `docker.sock` because a socket mount is root-equivalent would instead take root directly, on Linux only); the worker starting the proxy at boot (it would own a security control's UPTIME, which is the believed-up-while-down failure this feature exists to prevent); a TLS-terminating secrets-injecting proxy (`OQ-011`'s mechanism and a DIFFERENT security object, named so this is never mistaken for a down payment on it); a `run.network` trigger field; a repo-declared allowlist; a denylist; handing the operator a `squid.conf` to edit; caching the preflight; and a per-job reachability probe. **DES-CONCURRENCY-3 UNCHANGED, checked, and newly load-bearing**: three concurrent jobs are the reason the network is per-job. **DES-WORKER-ON-HOST UNCHANGED, checked** -- the worker driving the local docker CLI is what makes any of this readable back at all. **DES-PER-TRIGGER-JOB-IMAGE UNCHANGED, checked**, gaining an instance of its own sentence: an operator-built image inherits the network the way it inherits `--cap-drop=ALL`, so `OQ-012`'s residual does not widen. **DES-SANDBOX-IS-A-FRESH-CONTAINER UNCHANGED, checked**: same image, same workspace, and now the same network, which is a narrowing of what that shell can reach rather than a change to what it preserves. |
 | 2026-08-25 | Issue #216 (nothing checked the `--env-setup` script after render time). **DES-SERVICE-ENV-SETUP-SEAM AMENDED**: new bullet *the unit is the record* — the flag is render-time, so the rendered unit is the only place the path lives and a preflight has to read it back (`ENV_SETUP_READERS`/`readUnitSeam`, deliberately in `service.mjs` beside the composer that emits those shapes, with every render round-tripped through the reader so the two cannot drift). Two consequences recorded with it: the renderer substitutes the template's per-host placeholders BEFORE composing rather than after, because substituting after rewrote the operator's own `--env-setup` path into a file `resolveEnvSetup` never checked while the unit's banner still named the typed one; and doctor matches a unit to this deployment by `WorkingDirectory` before believing it, since a host may run two. **DES-CLI-SURFACE UNCHANGED, checked** — doctor stays on the read-only/always-safe tier: it reports the script's absence, its group/world writability and a non-ignoring work tree, offers no `fixAction` for any of them, and never opens the file. The never-tier clause "never name an env-setup script from anywhere but an operator-typed flag" is untouched — reading a path back out of a unit this tool wrote is not naming one. **DES-WORKER-ON-HOST UNCHANGED, checked** — no change to what the worker is or where it runs. **DES-CONCURRENCY-3 UNCHANGED, checked** — the unit scan reads both daemons in both scopes and installs nothing. |
 | 2026-08-25 | Issue #209 (the service render env seam). **NEW `DES-SERVICE-ENV-SETUP-SEAM`**: `service render|install --env-setup <absolute path>` sources an operator-written env-only script and then `exec`s the worker, composed as one `sh -c` word on systemd and delivered as `PI_ENV_SETUP` (the plist's `EnvironmentVariables` dict, `nssm set … AppEnvironmentExtra`) on launchd and nssm, where the existing wrappers source it after `./.env` and `ProgramArguments`/`AppParameters` do not change at all. The renderer owns the `exec` because the hand-edit it replaces (`<manager> run -- <worker>`) reports the child's exit 2 as 1, and exit 2 is the determinate refusal `RestartPreventExitStatus=2`, `AppExit 2 Exit` and the wrapper's own conversion all key on; a failed setup is exit 1, never 2, and the worker never starts on a half-filled environment. A PATH and not a command (three unit formats, three escaping stories, one of which systemd expands `$VAR` inside whatever the quoting), absolute and never resolved (POSIX `.` searches `$PATH`). Rejected: a shipped launcher script for systemd, composing a command line into the plist and the nssm argv, blessing any particular manager, and any route to this seam from configuration. **DES-CLI-SURFACE AMENDED**: the flag joins the operator-typed tier as the sharpest thing on it, and the never-tier gains "never name an env-setup script from anywhere but an operator-typed flag" — enforced in the wrappers by capturing `PI_ENV_SETUP` before sourcing `./.env`, so no file they read can name a file they run. **DES-WORKER-ON-HOST UNCHANGED, checked** — the worker is still a host process driving the docker CLI; only what prepares its environment moved. **DES-CONCURRENCY-3 UNCHANGED, checked** — the seam adds no daemon and the cross-scope install refusal is untouched. |
 | 2026-08-13 | Issue #188 (topology: tier-aware config-edge resolution). **DES-GRAPH-EDGE-DERIVATION AMENDED**: the config bullet's edge-end fallback set grows the tier nodes and the amber `skill-not-at-head` state; the dangling doctrine is rewritten around the per-trigger precedence ladder (repo > injected > overlay > staged) with `no-skill` demanding every applicable tier checked-and-missed; the stop-at-unknown rule is recorded WITH its doctor divergence (existential ✓ probes past an unknown, identity edge stops at one) as the load-bearing why; Rejected grows *claiming a lower-tier node under an unknown higher tier* and *a new flag or edge kind for tier resolution* (the closed vocabularies stay closed; node kinds became the third closed pinned set instead). **DES-ADMIN-VIA-PI-EXTENSION AMENDED**: the graph data surface gains `readOverlaySkills` (existence-only, ENOENT = legal models-only overlay = known-empty, other failures = unknown) and `readStagedSkillsList` (the worker's own reader behind the `readStagedPackages` wrapper doctrine, manifest order preserved as loader shadowing order), both null-means-not-checkable when `PI_GLOBAL_PI_DIR` is invisible (the deployment pointer deliberately cannot supply it), same never-throw/`GRAPH_LIMITS`/display-advisory posture. **DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS AMENDED** (one sentence): the topology joins doctor as the residual's third advisory surface, divergence cross-referenced. **DES-AI-TRIGGER-FLOW-GATE UNCHANGED, checked** -- AI-reachability stays committed-repo-only; tier nodes carry no `aiTrigger` and no chainable badge, and `potential`-edge eligibility still reads only the repo enumeration. |

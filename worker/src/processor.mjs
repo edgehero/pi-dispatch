@@ -41,6 +41,9 @@ export async function runJob(job, deps) {
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
 		// omits it behaves exactly as before -- the container's own failure stays the backstop.
 		imagePreflight = async () => ({ ok: true }),
+		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
+		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
+		egressPreflight = async () => ({ ok: true }),
 		// (session, { piVersion }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
 		// it behaves exactly as before -- no store, no promotion, no session in the record.
@@ -182,6 +185,46 @@ export async function runJob(job, deps) {
 			// the refund path below: a no-op pre-reserve, and still honest if this gate ever moves.
 			// provider/model attribute even this pre-container death; no usage -- nothing ran to emit one.
 			throw new InfraRetry("docker unavailable, image preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+
+		// REQ-EGRESS-ALLOWLIST. The egress policy this deployment claims must be able to serve this job
+		// BEFORE the job costs anything. It is one `docker inspect` when the policy is armed and ZERO spawns
+		// when it is not, so a deployment without one pays nothing at all.
+		//
+		// PLACEMENT, and it is the same ladder the image preflight sits at the top of. A missing proxy blocks
+		// EVERY job of EVERY kind on this host -- like a missing image -- and unlike a missing image it blocks
+		// them EXPENSIVELY: the container starts, the provider is unreachable, the runner exits 1, exit 1 is
+		// the retryable class, `attempts: 2`, and `releaseBudget` refunds only `container-never-started` --
+		// this container started. So each such job spends two job-count slots and buys nothing with either,
+		// and a cron-driven deployment empties its daily cap before anyone reads the first failure. That cost
+		// is what makes this a pre-spend gate rather than a doc: measured at three provider attempts,
+		// `Request timed out.`, exit 1, ~40 seconds, zero tokens (docs/egress.md).
+		//
+		// A RETURN, never a throw (CONST-RETRY-INFRA-ONLY): retrying never makes an absent proxy appear.
+		const egress = await egressPreflight(job);
+		if (egress.proxyMissing || egress.proxyStopped) {
+			const proxy = egress.proxyMissing ?? egress.proxyStopped;
+			const state = egress.proxyMissing ? "is not on this host" : "is not running";
+			await comment(job, `Refused: this deployment runs jobs behind an egress policy (PI_EGRESS=1) and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. Start it with \`docker compose -f deploy/docker-compose.yml --profile egress up -d\`, or unset PI_EGRESS to run without an egress policy. Not run.`);
+			// The proxy's NAME is operator-authored deployment config, never payload -- the same PII class as
+			// the image ref on the refusal above.
+			log(egress.proxyMissing ? "refused_egress_proxy_missing" : "refused_egress_proxy_stopped", { proxy });
+			return {
+				outcome: "policy",
+				reason: egress.proxyMissing ? "egress-proxy-missing" : "egress-proxy-stopped",
+				exitCode: null,
+				turns: null,
+				tokens: null,
+				provider: job.provider ?? null,
+				model: job.model ?? null,
+				budgetReserved: false, // refused before reserveBudget, so no job-count slot was consumed
+			};
+		}
+		if (egress.unavailable) {
+			// The daemon did not answer, so this is indeterminate rather than a refusal -- the same
+			// determinate/indeterminate split the image preflight draws one gate up, and thrown for the same
+			// reason. Pre-reserve, so the refund below is a no-op and still honest if this gate ever moves.
+			throw new InfraRetry("docker unavailable, egress preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// REQ-RESUMABLE-SESSION's one fail-CLOSED case. Everything else in that feature fails OPEN and

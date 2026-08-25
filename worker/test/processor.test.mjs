@@ -459,6 +459,57 @@ test("a missing job image refuses BEFORE mint, prepare and reserveBudget -- noth
 	);
 });
 
+// --- the egress policy (issue #202): a host whose policy cannot serve a job must not pay to find out ---
+
+test("an absent egress proxy refuses BEFORE reserveBudget -- and this gate is worth MORE than the image one", async () => {
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, egressPreflight: async () => ({ proxyMissing: "pi-dispatch-egress-proxy" }) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "egress-proxy-missing");
+	assert.equal(r.budgetReserved, false);
+	assert.deepEqual([r.exitCode, r.turns, r.tokens], [null, null, null]);
+	assert.ok(!calls.some((c) => c.startsWith("mint:")), "no credential for a job that cannot reach anything");
+	assert.ok(!calls.includes("prepare"), "no clone");
+	assert.ok(!calls.includes("run-container"), "no container");
+	// The assertion this whole requirement exists for. WITHOUT this gate the container starts, the provider
+	// is unreachable, the runner exits 1 -- the RETRYABLE class -- `attempts: 2` runs it again, and
+	// releaseBudget refunds only `container-never-started`, which this is not. Two job-count slots per job,
+	// neither refunded, on a schedule nobody is watching.
+	assert.equal(redis.incrCalls, 0, "reserveBudget never reached -- a down proxy must not burn two cap slots");
+	assert.ok(
+		calls.some((c) => c.startsWith("comment:")),
+		"the operator is told which component is down and how to start it",
+	);
+});
+
+test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, egressPreflight: async () => ({ proxyStopped: "pi-dispatch-egress-proxy" }) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "egress-proxy-stopped");
+	assert.equal(redis.incrCalls, 0);
+});
+
+test("a docker daemon that will not answer the egress probe RETRIES, rather than refusing determinately", async () => {
+	// The determinate/indeterminate split, and the direction matters in both. A refusal here would drop
+	// real work on a daemon restart; a retry on a genuinely absent proxy would burn the second slot.
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, egressPreflight: async () => ({ unavailable: "pi-dispatch-egress-proxy" }) });
+	await assert.rejects(() => runJob(ghJob, d), (e) => e.reason === "container-never-started");
+	assert.equal(redis.incrCalls, 0, "still pre-reserve, so the refund path is a no-op and stays honest");
+});
+
+test("a deployment with no egress policy is unaffected: the default preflight admits every job", async () => {
+	// The wired default and the real factory's unarmed return are the same shape, so a deployment that
+	// never turned this on cannot be refused by a gate it does not use.
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis }); // no egressPreflight injected at all
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.ok(calls.includes("run-container"), "the job runs exactly as it did before this gate existed");
+});
+
 test("an image that cannot serve this job's forge refuses pre-spend, and names run.image as the fix", async () => {
 	// Same money gate, a different cause: the image is PRESENT and says it ships no CLI for this forge.
 	// Without this the job runs, finds no such command, and fails at step 3 inside a paid container -- on

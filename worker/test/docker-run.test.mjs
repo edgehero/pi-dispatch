@@ -99,6 +99,39 @@ test("refuses to build without image / name / workspace", () => {
 	assert.throws(() => buildDockerRunArgs({ ...base, workspace: undefined }), /workspace/);
 });
 
+test("--network is CONFIGURED, never frozen: it must not be a member of ISOLATION_FLAGS", () => {
+	// The boundary between the two lists is itself pinned, because the pressure to move this flag into the
+	// array is real and the consequence is silent. `ISOLATION_FLAGS` is the LITERAL, value-free,
+	// unconditional set, and two places assert every member of it reaches the sandbox argv against the
+	// IMPORTED array (CONST-ISOLATION-CONTAINER-PER-JOB, INT-SANDBOX-CONTRACT). A conditional member makes
+	// "every member" false on any deployment running without an egress policy, so the assertion would have
+	// to be weakened to "every member except this one" -- which does not weaken a constraint so much as
+	// retire the assertion that was enforcing it.
+	assert.ok(!ISOLATION_FLAGS.some((f) => f.startsWith("--network")), "the boundary is fixed; the network is configured");
+});
+
+test("the egress network flag is ABSENT when no policy is armed -- byte-identical to a pre-feature argv", () => {
+	const common = { image: "pi-job:latest", env: {}, jobDir: "/j", workspace: "/w", name: "pi-job-1" };
+	assert.deepEqual(buildDockerRunArgs(common), buildDockerRunArgs({ ...common, network: null }));
+	assert.ok(!buildDockerRunArgs(common).join(" ").includes("--network"), "no policy, no flag");
+});
+
+test("an armed job carries --network, positioned before the image positional", () => {
+	const args = buildDockerRunArgs({
+		image: "pi-job:latest",
+		env: {},
+		jobDir: "/j",
+		workspace: "/w",
+		name: "pi-job-1",
+		network: "pi-job-1-net",
+	});
+	assert.ok(args.includes("--network=pi-job-1-net"));
+	// The image stays last, which is the one positional constraint the whole argv has.
+	assert.equal(args.at(-1), "pi-job:latest", "the image is still the final argv element");
+	// And it sits beside --memory/--cpus, the other two configured-value flags, ahead of the mounts.
+	assert.ok(args.indexOf("--network=pi-job-1-net") < args.indexOf("-v"), "flags precede the mounts");
+});
+
 test("ISOLATION_FLAGS is frozen intent -- the exact set the spec pins", () => {
 	// A change here is a change to the security boundary and must be deliberate.
 	assert.deepEqual(ISOLATION_FLAGS, [

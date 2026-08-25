@@ -79,8 +79,10 @@ function inPortRange(n) {
  * @param publish      already-parsed `-p` flags
  * @param term         the host's TERM, so the shell renders
  * @param idleSeconds  bash's own TMOUT; 0 omits it
+ * @param network      this session's own egress network (REQ-EGRESS-ALLOWLIST); null = the default bridge
+ * @param egressEnv    the proxy variables that go with it, or {} when no policy is armed
  */
-export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0 }) {
+export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {} }) {
 	return buildDockerRunArgs({
 		image,
 		name,
@@ -89,9 +91,20 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 		// The ONLY two variables, and neither is a credential. TERM so the shell renders; TMOUT so a
 		// forgotten session closes itself. `buildDockerRunArgs` skips undefined, so an unset TERM or a
 		// disabled idle timeout emits nothing rather than an empty string.
+		// A sandbox joins the SAME kind of network a job did, by the same builder, so the boundary cannot
+		// land on job containers and miss this one. Leaving sandboxes on the default bridge was the tempting
+		// alternative and it is the wrong one: it reads as a convenience (install a missing dependency while
+		// debugging) and it is a WIDER reach than the run the sandbox exists to reproduce. A shell that can
+		// go where the run could not is not reproducing the run. Nothing an operator wants is lost, because
+		// the forge and the registry are on the allowlist a job needed anyway.
+		network,
 		env: {
 			TERM: term || undefined,
 			TMOUT: idleSeconds > 0 ? String(idleSeconds) : undefined,
+			// Still NO CREDENTIALS, and that clause is untouched: a proxy URL is not a credential, and
+			// buildContainerEnv is still not reused here. The env is two variables about the terminal and,
+			// when a policy is armed, three about the network.
+			...proxyEnv,
 		},
 		// Ahead of the env and the mounts, and well ahead of the image, which buildDockerRunArgs keeps as
 		// the final positional. `--entrypoint` also clears the image's CMD; this repo's Dockerfile sets

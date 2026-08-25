@@ -1837,3 +1837,119 @@ test("doctor: a flow that fails the skill charset is its own ⚠ -- no tier coul
 	assert.match(text(), /⚠ Trigger flow "Not A Skill" fails the skill name charset \(cron "nightly"\)/);
 	assert.doesNotMatch(text(), /resolves in NO tier/, "the charset finding replaces the tier probe, not stacks on it");
 });
+
+// --- REQ-EGRESS-ALLOWLIST (issue #202) ----------------------------------------------------------------
+
+const egressPlan = (extra = {}) => ({
+	...green,
+	"docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n" },
+	"docker network create": 0,
+	"docker network connect": 0,
+	"docker network disconnect": 0,
+	"docker network rm": 0,
+	// The two end-to-end probes, distinguishable because each names its own container. A CORRECT policy
+	// reaches the provider (the probe exits 0) and is blocked from an unlisted host (the probe exits 3).
+	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
+	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
+	...extra,
+});
+
+test("doctor: a deployment with NO egress policy says nothing about one", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(ghEnv(), ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }));
+	assert.equal(code, 0);
+	// Byte-identical output for a deployment that never armed the feature, the same convention the
+	// env-setup checks follow one feature over.
+	assert.doesNotMatch(text(), /[Ee]gress (policy|proxy|network)/);
+});
+
+test("doctor: an armed policy with a running proxy reports it, and proves the path without spending", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	const code = await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, egressPlan({ "gh auth status": { code: 0, output: ghStatusOutput } }), calls),
+	);
+	assert.equal(code, 0);
+	assert.match(text(), /✓ Egress proxy running \(pi-dispatch-egress-proxy\)/);
+	// A correct policy: the provider reachable, an unlisted host refused. BOTH directions, because an
+	// allowlist that has quietly become a pass-through reads exactly like one that works.
+	assert.match(text(), /✓ Egress policy reaches the provider \(api\.anthropic\.com answered/);
+	assert.match(text(), /✓ Egress policy denies an unlisted host/);
+	// The probe uses the JOB IMAGE's own node, which is the point: it proves the operator's own image
+	// honours NODE_USE_ENV_PROXY, the property a stale image would silently lack.
+	const run = calls.find((c) => c.args[0] === "run");
+	assert.ok(run, "the end-to-end probe runs a container");
+	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "node");
+	assert.ok(run.args.includes("NODE_USE_ENV_PROXY=1"), "the probe sets the flag the runner depends on");
+	assert.ok(run.args.includes("--pull=never"), "doctor never fetches an image to run a probe");
+	// Credential-free by construction: nothing is passed, because a 401 from an unauthenticated request
+	// proves the whole path.
+	assert.ok(!run.args.some((a) => /sk-|ANTHROPIC_API_KEY=/.test(a)), "no credential in the probe argv");
+	// And the throwaway network is cleaned up.
+	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"), "the doctor network is removed");
+});
+
+test("doctor: a proxy that is not on the host FAILS, because every job is refused pre-spend without it", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": 1, "gh auth status": { code: 0, output: ghStatusOutput } })),
+	);
+	// A ✓ would be a lie and a ⚠ would under-report a deployment that cannot run anything at all.
+	assert.equal(code, 1, "an armed policy with no proxy is a hard failure");
+	assert.match(text(), /✗ Egress proxy is not on this host \(pi-dispatch-egress-proxy\)/);
+	assert.match(text(), /--profile egress up -d/);
+});
+
+test("doctor: a proxy that exists but is STOPPED says so, because the fix is a different one", async () => {
+	const { out, text } = capture();
+	await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "false|none\n" }, "gh auth status": { code: 0, output: ghStatusOutput } })),
+	);
+	assert.match(text(), /✗ Egress proxy is stopped \(pi-dispatch-egress-proxy\)/);
+});
+
+test("doctor: a wedged proxy WARNS rather than fails -- health can flap, and the money gate ignores it", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "true|unhealthy\n" }, "gh auth status": { code: 0, output: ghStatusOutput } })),
+	);
+	assert.equal(code, 0, "a flapping healthcheck must not make doctor red");
+	assert.match(text(), /⚠ Egress proxy health: unhealthy/);
+});
+
+test("doctor: a policy that cannot reach the provider warns, and names the budget cost of leaving it", async () => {
+	const { out, text } = capture();
+	// The provider probe is blocked -- that is the outage. The unlisted one is blocked too, which is right.
+	const code = await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, egressPlan({ "gh auth status": { code: 0, output: ghStatusOutput }, "docker run --rm --name pi-dispatch-egress-probe-provider": 3 })),
+	);
+	assert.equal(code, 0, "warn tier: a custom base URL or a provider blip must not make this a certainty");
+	assert.match(text(), /⚠ Egress policy does NOT reach the provider/);
+	assert.match(text(), /spends two budget slots proving it/);
+	assert.match(text(), /✓ Egress policy denies an unlisted host/);
+});
+
+test("doctor: an allowlist WIDER than the operator meant is reported -- the deny direction is checked too", async () => {
+	const { out, text } = capture();
+	// Both probes REACH. The provider one reaching is correct; the unlisted one reaching is the finding --
+	// an allowlist that is wider than it reads (a bare domain where a subdomain was meant) permits hosts
+	// nobody listed, and the deny direction is the half an allowlist can silently lose.
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, egressPlan({ "gh auth status": { code: 0, output: ghStatusOutput }, "docker run --rm --name pi-dispatch-egress-probe-unlisted": 0 })));
+	assert.equal(code, 0, "warn tier: doctor cannot know which hosts an operator's flows legitimately need");
+	assert.match(text(), /✓ Egress policy reaches the provider/);
+	assert.match(text(), /⚠ Egress policy ALLOWS an unlisted host that is not on your allowlist/);
+	assert.match(text(), /a bare domain where you wanted a subdomain/);
+});
+
+test("doctor: no egress probing at all on top of a down daemon", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, { "docker info": 1 }, calls));
+	assert.match(text(), /⚠ Egress policy: not checked \(the Docker daemon did not answer\)/);
+	assert.ok(!calls.some((c) => c.args[0] === "network"), "no network is created against a daemon that is not answering");
+});

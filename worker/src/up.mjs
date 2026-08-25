@@ -63,6 +63,31 @@ const VALKEY_RUN_ARGS = [
 	"yes",
 ];
 
+// deploy/docker-compose.yml's `egress` profile, reproduced as one docker run (REQ-EGRESS-ALLOWLIST):
+// same digest-pinned image, same two mounts, same explicit container name, same restart policy, on the
+// same upstream network. Written out here for the same reason VALKEY_RUN_ARGS is -- an operator who runs
+// `up` and one who runs compose must end up with the same component, and two ways of starting one thing
+// is two places for it to drift.
+//
+// The per-job networks are NOT here: the worker creates one per job and attaches this container to it for
+// the life of that run. This is only the proxy and its way out.
+const EGRESS_NETWORK_ARGS = ["network", "create", "pi-dispatch-egress-out"];
+const EGRESS_RUN_ARGS = [
+	"run",
+	"-d",
+	"--name",
+	"pi-dispatch-egress-proxy",
+	"--restart",
+	"unless-stopped",
+	"--network",
+	"pi-dispatch-egress-out",
+	"-v",
+	"./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro",
+	"-v",
+	"./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro",
+	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
+];
+
 export async function runUp(argv = [], deps = {}) {
 	const {
 		env = process.env,
@@ -171,6 +196,38 @@ export async function runUp(argv = [], deps = {}) {
 		}
 	} else {
 		summary.push(["WEBHOOK_SECRET", "no .env here — skipped (set it wherever your env lives)"]);
+	}
+
+	// (e2) the egress policy's proxy, and ONLY when the operator has already armed it. up never invents
+	// operator policy -- the same doctrine that keeps it pulling this repo's own image and no other -- so a
+	// deployment that has not set PI_EGRESS hears nothing about this at all.
+	//
+	// AFTER init, deliberately: init has just scaffolded egress-allowlist.conf, and starting a proxy whose
+	// allowlist file does not exist gets a directory created by docker where a file belonged and a squid
+	// that fails confusingly. If the file is still missing, this step declines itself and says which file.
+	if (env.PI_EGRESS === "1") {
+		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"])) === 0) {
+			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
+			summary.push(["egress", "proxy already present — left untouched"]);
+		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf"))) {
+			out("\n✗ PI_EGRESS=1 but egress-allowlist.conf is not here — not starting a proxy with no allowlist\n");
+			summary.push(["egress", "skipped — no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
+		} else if (
+			await consent("PI_EGRESS=1 but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
+		) {
+			// The network may already exist from a previous run; that is not a failure, so its code is not
+			// checked. The proxy is what matters and it is checked.
+			await runStreamed(spawn, "docker", EGRESS_NETWORK_ARGS, out);
+			if ((await runStreamed(spawn, "docker", EGRESS_RUN_ARGS, out)) !== 0) {
+				out("✗ could not start the egress proxy — continuing; doctor below will re-check it\n");
+				summary.push(["egress", "start failed — every job refuses pre-spend until it is up (costs no budget, runs nothing)"]);
+			} else {
+				summary.push(["egress", "started pi-dispatch-egress-proxy on pi-dispatch-egress-out"]);
+			}
+		} else {
+			out("skipped — start it later with `docker compose -f deploy/docker-compose.yml --profile egress up -d`\n");
+			summary.push(["egress", "skipped (declined) — PI_EGRESS=1 refuses every job pre-spend until the proxy is up"]);
+		}
 	}
 
 	// (f) doctor — always, verbatim: up converges what it can, doctor is the judge of what remains

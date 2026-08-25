@@ -7,6 +7,7 @@
 
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
+import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 
 export function configError(message) {
@@ -107,7 +108,17 @@ function commaList(raw) {
  */
 export const WORKER_ONLY_SECRET_VARS = new Set(["GITHUB_APP_PRIVATE_KEY"]);
 
-function forwardEnvList(raw) {
+/**
+ * The proxy variables the egress policy writes into the closed container env (REQ-EGRESS-ALLOWLIST).
+ * Refused in `PI_FORWARD_ENV` only WHILE THE POLICY IS ARMED, and the conditionality is the point: with
+ * no policy these are an ordinary operator escape hatch, and `docs/egress.md` still documents the manual
+ * form that uses them. With a policy, a forwarded value would point every job at an operator's own proxy
+ * instead of the one the worker attached to the network -- and it would read exactly like the control
+ * working, which is the failure class this file already refuses for the minted token.
+ */
+export const EGRESS_ENV_VARS = new Set(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]);
+
+function forwardEnvList(raw, egressArmed = false) {
 	const names = commaList(raw);
 	const minted = names.filter((n) => MINTED_TOKEN_VARS.has(n));
 	if (minted.length > 0) {
@@ -121,7 +132,29 @@ function forwardEnvList(raw) {
 			`PI_FORWARD_ENV must not forward ${workerOnly.join(", ")} -- the App's signing key mints tokens for every repository the App is installed on, and a job container is the last place it belongs (CONST-TOKEN-SCOPED-PER-JOB)`,
 		);
 	}
+	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];
+	if (egress.length > 0) {
+		throw configError(
+			`PI_FORWARD_ENV must not forward ${egress.join(", ")} while PI_EGRESS=1 -- the egress policy sets them itself, pointing at the proxy on this job's network, and a forwarded value would silently redirect every job while looking like the control working (REQ-EGRESS-ALLOWLIST). Unset PI_EGRESS to use your own proxy: docs/egress.md`,
+		);
+	}
 	return names;
+}
+
+/**
+ * PI_EGRESS -- the shipped egress policy (REQ-EGRESS-ALLOWLIST). An opt-IN in this release.
+ *
+ * Strict parse, matching PI_GLOBAL_ALLOW_EXTENSIONS: exactly "1" arms it, unset/empty/"0" leave it off,
+ * and ANY other value is a loud configError rather than a guess. A typo must never silently leave a
+ * deployment believing it has an egress policy while every job runs with open egress -- an operator who
+ * thinks they are bounded and is not is in a worse position than one who knows they are not, because the
+ * belief displaces the credential bound that is actually holding.
+ */
+function egressEnabled(env) {
+	const raw = env.PI_EGRESS;
+	if (raw === undefined || raw === "" || raw === "0") return false;
+	if (raw === "1") return true;
+	throw configError(`PI_EGRESS must be exactly "1" (on) or "0"/unset (off); got ${JSON.stringify(raw)}`);
 }
 
 // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY). Unset/empty = feature off. When set it
@@ -192,7 +225,12 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		jobImage: env.PI_JOB_IMAGE || "pi-job:latest", // || (not ??) so an empty string falls back; "" is falsy and would throw inside buildDockerRunArgs AFTER a budget slot was reserved
 		globalPiDir: resolveGlobalPiDir(env, fileExists), // REQ-GLOBAL-PI-OVERLAY: operator's ~/.pi/agent subset, :ro-mounted; null = off
 		allowGlobalExtensions: globalExtensionsEnabled(env), // REQ-GLOBAL-PI-OVERLAY: ON unless PI_GLOBAL_ALLOW_EXTENSIONS=0
-		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
+		// REQ-EGRESS-ALLOWLIST. `egress` gates the whole feature; `egressProxy` names the component the
+		// per-job network is built around. Read BEFORE forwardEnv below, because the forward list's refusal
+		// of the proxy variables is conditional on it.
+		egress: egressEnabled(env),
+		egressProxy: env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY, // || (not ??) so an empty string falls back
+		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV, egressEnabled(env)), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
 		jobsDir: env.PI_JOBS_DIR ?? defaultJobsDir(),
 		// REQ-RESURRECTABLE-SANDBOX. `||` (not `??`) so an empty string falls back, matching logsDir.

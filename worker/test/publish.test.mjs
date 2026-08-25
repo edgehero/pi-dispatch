@@ -29,6 +29,10 @@ const RECEIVER_DIR = join(REPO_ROOT, "receiver");
 const MIRRORED_DEPLOY = [
 	"com.pi-dispatch.worker.plist",
 	"docker-compose.yml",
+	// The egress policy's RULES (REQ-EGRESS-ALLOWLIST). A deployment artifact, not operator config, and
+	// the distinction this file's own comment asks to be decided: it ships unedited, the compose service
+	// mounts it, and the operator's own list lives in the deployment folder where `init` scaffolds it.
+	"egress-proxy.conf",
 	"nssm-install.cmd",
 	"receiver.service",
 	"worker-env-wrapper.cmd",

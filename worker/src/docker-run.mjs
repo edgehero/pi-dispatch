@@ -62,6 +62,8 @@ export const ISOLATION_FLAGS = [
  * @param globalPiDir host path to the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY); mounted /opt/pi-global:ro
  * @param name       container name (for `docker stop` at the timeout)
  * @param memory     e.g. "4g"; cpus e.g. "2"
+ * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
+ *                   docker default bridge, which is what every job did before that requirement existed
  * @param extraFlags escape hatch for a Linux-only --user uid:gid on a bind-mounted local folder
  */
 export function buildDockerRunArgs({
@@ -75,13 +77,26 @@ export function buildDockerRunArgs({
 	name,
 	memory = "4g",
 	cpus = "2",
+	network = null,
 	extraFlags = [],
 }) {
 	if (!image) throw new Error("docker run: image is required");
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 
-	const args = ["run", `--name=${name}`, ...ISOLATION_FLAGS, `--memory=${memory}`, `--cpus=${cpus}`, ...extraFlags];
+	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
+	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
+	// of it reaches the sandbox argv *against the imported array, not a copy* (CONST-ISOLATION-CONTAINER-PER-JOB
+	// and INT-SANDBOX-CONTRACT). A conditional member makes "every member" false on any deployment running
+	// without an egress policy, so the assertion would have to be weakened to "every member except this one"
+	// -- which does not weaken a constraint so much as retire the assertion that was enforcing it. There is
+	// no literal to put there anyway: the name carries a job id.
+	//
+	// null => the flag is ABSENT, so a job argv without an egress policy is byte-identical to one built
+	// before this feature existed. Same shape as the sessionDir/outboxDir/globalPiDir mounts below.
+	const args = ["run", `--name=${name}`, ...ISOLATION_FLAGS, `--memory=${memory}`, `--cpus=${cpus}`];
+	if (network) args.push(`--network=${network}`);
+	args.push(...extraFlags);
 
 	// Explicit env allowlist. Each entry is `-e NAME=VALUE`, built from the closed map -- so a
 	// stray host variable cannot ride along (no bare `-e NAME` inheriting from the host, no

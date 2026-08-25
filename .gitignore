@@ -76,6 +76,12 @@ coverage/
 /subscriptions.json
 !subscriptions.example.json
 
+# The egress allowlist (issue #202): the hosts THIS deployment's jobs may reach. init scaffolds it into
+# the cwd, so without this rule the scaffold is committable by accident. There is no committed template
+# beside it, deliberately: the shipped default lives in init.mjs, and an example file here would be one
+# more copy of a security policy to drift.
+/egress-allowlist.conf
+
 # Python — bytecode and tool caches from the skill scripts under .claude/skills/
 __pycache__/
 *.py[cod]

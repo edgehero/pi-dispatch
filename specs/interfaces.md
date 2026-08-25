@@ -803,7 +803,16 @@ Evidence convention as in `constitution.md`.
     operator-facing form of this list; the `image` CI job is its executable form; `OQ-012` is the honest
     statement that nothing in this repo enforces it.
   - Flags: `--pull=never --rm --init --cap-drop=ALL --security-opt no-new-privileges --memory=4g --cpus=2
-    --pids-limit=512 --shm-size=1g`
+    --pids-limit=512 --shm-size=1g`, and -- **only when `PI_EGRESS=1`** -- `--network=pi-job-<jobId>-net`.
+  - **Three of those are NOT members of `ISOLATION_FLAGS`, and this is a list of FLAGS rather than a
+    rendering of that constant.** `ISOLATION_FLAGS` (`worker/src/docker-run.mjs`) is the **literal,
+    value-free, unconditional** set, and two places assert every member of it reaches the sandbox argv
+    *against the imported array, not a copy* (`CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-SANDBOX-CONTRACT`).
+    `--memory`, `--cpus` and `--network` carry **configured values** and are appended beside it. The
+    distinction is load-bearing rather than clerical: a conditional flag inside that array makes "every
+    member" false on any deployment running without an egress policy, so the assertion would have to be
+    weakened to "every member except this one" -- which does not weaken a constraint so much as **retire
+    the assertion that was enforcing it**.
   - **Mounts**: `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
     configured), and `/session:rw` — the last only when a trigger armed `run.resume` and the worker
     resolved a key (`INT-SESSION-STORE-CONTRACT`). `/session` is a **per-job** directory under the job's
@@ -844,6 +853,41 @@ Evidence convention as in `constitution.md`.
     `job-image-missing` rather than throwing, because retrying never makes a misspelled tag appear
     (`CONST-RETRY-INFRA-ONLY`). The two are not redundant: the check is readable but raceable, the flag is
     unraceable but silent.
+  - **`--network=pi-job-<jobId>-net`, present only when `PI_EGRESS=1`, and its OWN network per job.**
+    `docker run` defaults to the shared bridge, which is not a neutral starting point but a policy: the
+    whole internet, in front of a container holding a provider key and a minted forge token, reading text
+    anyone could have written. This flag is how an egress policy becomes a property of the **argv** rather
+    than of a host firewall the worker cannot see, report or check -- the same move `--pull=never` makes for
+    image selection and `PI_OFFLINE=1` makes for pi's resolver.
+    **Per job, and that is the clause with a measurement behind it.** One shared network would be one shared
+    L2 segment, and at `DES-CONCURRENCY-3` that is three mutually-untrusting issue authors who can reach
+    each other. `com.docker.network.bridge.enable_icc=false` is the obvious fix and it is not one: ICC
+    governs **every** container pair on the bridge and the proxy is a container, so it blocks job-to-proxy
+    along with job-to-job (verified in both directions against a control network). A network per job makes
+    job-to-job **structurally impossible** instead, which is strictly stronger than what preceded it -- two
+    job containers on the default bridge can reach each other by IP today, so this **removes** an adjacency
+    rather than adding one. Measured cost: ~190ms to create and attach, ~260ms to detach and remove.
+    **The proxy carries EVERYTHING, including the provider call, and there is no address-based rule
+    anywhere.** The container env gains `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` **and `NODE_USE_ENV_PROXY=1`**,
+    all four in the closed map (never `PI_FORWARD_ENV`, which refuses those names at boot while the policy
+    is armed). The fourth is the one that matters: without it the other three steer `git`, `gh`, `npm` and
+    Chromium but not the runner's own provider call, because the Anthropic SDK resolves `globalThis.fetch`
+    at construction and pi passes it no dispatcher. Behind an internal network that is not a leak but an
+    **outage** -- every job dies at its first turn. `docs/sandbox.md` recorded the opposite (that pi's
+    client cannot be steered by any environment variable, so the provider needs a network-layer rule); that
+    is **refuted** and the correction is in `docs/egress.md`, with the measurement: the same SDK client, in
+    the pinned image, follows a dead proxy to `ECONNREFUSED` with the flag and goes straight to DNS without
+    it. The original observation was a variable that never reached the container.
+    **Unset is not a degraded mode, it is the prior behaviour byte for byte**: no `--network`, no proxy
+    variable, no preflight spawn, and an argv identical to one built before this contract named a network.
+  - **A conformance item for the policy, and it belongs on the "fails silently or late" list above**: the
+    proxy component must be running when `PI_EGRESS=1`. Unchecked it fails **late and expensively** -- the
+    container starts, the provider is unreachable, the runner exits `1`, which is the RETRYABLE class, so
+    `attempts: 2` runs it again and `releaseBudget` refunds neither (only `container-never-started` is
+    refunded, and this container started). Two job-count slots per job, buying nothing. Hence a pre-spend
+    refusal (`REQ-EGRESS-ALLOWLIST`), which pairs with the flag exactly as the image inspect pairs with
+    `--pull=never`: the check is readable but raceable, the flag is unraceable but silent, and neither is
+    sufficient alone.
   - **`--shm-size=1g`, and explicitly NOT `--ipc=host`.** Playwright's docs say verbatim: *"Using
     `--ipc=host` is recommended when using Chromium. Without it, Chromium can run out of memory and
     crash."* **We deliberately diverge.** `--ipc=host` shares the **host's IPC namespace** with a
@@ -914,6 +958,14 @@ Evidence convention as in `constitution.md`.
     **not** opt in, which is exactly backwards. The runner re-asserts it in-process for the same reason
     (`INT-SDK-SESSION-OPTIONS`): offline is a property of the runner, not of whoever started it, so a
     hand-run `docker run` or a future worker regression cannot re-arm the install path.
+    **The `--network` flag is deliberately NOT this shape, and the analogy is the first thing a reader will
+    reach for.** `PI_OFFLINE=1` can be unconditional because it costs an unarmed job **nothing**: the branch
+    it forecloses is one nothing should reach anyway. A network flag cannot be, because a deployment that
+    has not started the proxy would have every job fail at `docker run` -- which is not a narrowing, it is
+    an outage. So the policy is armed by configuration and the *narrowing discipline* moves one level down:
+    given a policy, the flag is on **every** job with no per-trigger opt-out. Note also what an allowlist
+    does not re-arm: `registry.npmjs.org` being reachable from the container does not put pi's resolver back
+    on the network, because offline is a property of the **runner**, re-asserted in-process.
   - **Per-job token *scoping* (`CONST-TOKEN-SCOPED-PER-JOB`) is the App path's property, not `gh`'s.** With
     `GITHUB_AUTH_SOURCE=gh` (the default) the minted value is the operator's own full-scope `gh auth token`,
     so every token-carrying job holds whatever that login can do; a fine-grained PAT approximates per-job
@@ -1036,6 +1088,74 @@ Evidence convention as in `constitution.md`.
   `run.image` naming an image absent from the host, `docker run` is never reached: the pre-spend inspect
   refuses first and `--pull=never` forecloses the fetch.
 
+## INT-EGRESS-POLICY-CONTRACT
+
+**worker → docker daemon, and operator → allowlist file.** What the shipped egress policy IS, as objects on
+a host, so the worker that builds it, the gate that checks it and the operator who edits it are describing
+one thing. A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, on the `INT-SANDBOX-CONTRACT` precedent: that
+contract governs the argv of one container, this governs the estate that argv joins.
+
+- **Contract**:
+  - **Armed by `PI_EGRESS`, and by nothing else.** Exactly `"1"` arms it; unset, `""` and `"0"` leave it
+    off; **any other value is a boot-time refusal**, never a guess. The strict parse is
+    `PI_GLOBAL_ALLOW_EXTENSIONS`' and the reason is sharper here: an operator who believes they have an
+    egress policy and does not is in a **worse** position than one who knows they have none, because the
+    belief displaces the credential bound that is actually holding.
+  - **Objects, and their names are the contract**:
+
+    | Object | Name | Properties |
+    |---|---|---|
+    | per-job network | `pi-job-<jobId>-net` | `--internal`. Created at job start, removed at job end. Exactly two members: the job container and the proxy. |
+    | per-sandbox network | `pi-sandbox-<jobId>-net` | the same, for an operator session (`INT-SANDBOX-CONTRACT`) |
+    | upstream network | `pi-dispatch-egress-out` | an ordinary bridge; only the proxy is on it |
+    | proxy component | `pi-dispatch-egress-proxy` | squid, `http_port 3128`, **no published port**. Overridable by `PI_EGRESS_PROXY`. |
+
+    The network name is **derived from the container name** (`<name>-net`), never rebuilt from the job id.
+    The container name already survives every id shape this project produces and docker's network-name
+    grammar is the container-name grammar, so a name legal for one is legal for the other **by
+    construction** -- and the `pi-job-`/`pi-sandbox-` namespace split the reaper depends on is inherited for
+    free rather than restated.
+  - **The allowlist is `egress-allowlist.conf` in the deployment folder**: bare hostnames, one per line,
+    `#` comments, a leading dot matching subdomains. Read by squid natively through its quoted-filename ACL
+    form, so **no code renders it** and the operator never touches squid syntax. `pi-dispatch init`
+    scaffolds it create-only with the provider, the forge and the registry; it is the one scaffold in that
+    command that is not empty, because an empty allowlist is not inert -- it is a deployment where every job
+    dies at its first turn.
+  - **The rules are `deploy/egress-proxy.conf`**, shipped and not edited, mirrored into `worker/deploy/`.
+    The split is the security property: `http_access` ordering is what makes an allowlist an allowlist, a
+    misordered rule silently allows everything, so the file an operator edits contains no ordering at all.
+  - **The proxy image is digest-pinned**, and the `valkey/valkey:8` precedent one service over deliberately
+    does not transfer: a floating tag on a queue breaks loudly and spends nothing, while this container **is
+    the allowlist**, so a floating tag would let an upstream rebuild change what every job may reach with no
+    commit anywhere.
+  - **TLS is never terminated.** The proxy sees the name in a `CONNECT` and no byte inside the tunnel, so it
+    cannot read a credential and cannot count a token. A proxy that decrypts provider traffic is `OQ-011`'s
+    mechanism and is explicitly not this (`OQ-004` warns against conflating them).
+  - **What each disagreement fails toward**:
+
+    | State | Result |
+    |---|---|
+    | `PI_EGRESS` unset | no network, no flag, no proxy variables, **zero docker spawns** -- byte-identical to a deployment before this contract |
+    | proxy absent | POLICY refusal `egress-proxy-missing`, pre-spend, not retried |
+    | proxy stopped | POLICY refusal `egress-proxy-stopped`, pre-spend, not retried |
+    | daemon silent | INFRA `container-never-started`, **retried**, reservation refunded |
+    | network create fails | INFRA `container-never-started`, retried; a network the proxy could not join is torn down rather than left half-built |
+    | allowlist missing a host | the job runs and the agent is refused by the proxy at that host. **Not** pre-spend detectable, and said so plainly rather than implied away. |
+- **Why**: The mechanism was already written down and already run (`docs/sandbox.md`, issue #199). What was
+  missing was not the rules but **the worker knowing about them**. Every property this project relies on --
+  reporting a refusal an operator can act on, checking a control in `doctor`, refusing before money is spent
+  -- requires the policy to be an object the worker names. That is what makes this an argv change rather
+  than a documentation change.
+- **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SANDBOX-CONTRACT`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`, `OQ-004`, `OQ-011`
+- **Acceptance**: Given `PI_EGRESS` unset, no docker network is created, no `--network` flag is built, no
+  proxy variable is emitted and the preflight spawns nothing. Given `PI_EGRESS=1` and a running proxy, each
+  job runs on a network whose only other member is that proxy, reaches an allowlisted host, and is refused
+  an unlisted one by the proxy rather than by the agent. Given a proxy that is absent or stopped, the job
+  returns `outcome: "policy"` with `budgetReserved: false`, `docker run` is never spawned, and the queue
+  does not retry it. Given a daemon that does not answer, the job throws and IS retried.
+
 ## INT-SANDBOX-CONTRACT
 
 **operator → docker daemon.** A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, never an amendment to it.
@@ -1056,7 +1176,17 @@ sibling rather than an extension of the GitHub one for the same reason.
     same two the run itself had, from the same paths. **No `/outbox`** (nothing to chain: no agent),
     **no `/session`** (the transcript is deleted before retention), **no `/opt/pi-global`** (pi is not
     running).
-  - **Env is exactly `TERM` and `TMOUT`.** No minted forge token under any forge's variable names, no
+  - **A sandbox joins the job's kind of network**, through the same builder seam that already delivers
+    `ISOLATION_FLAGS`, `--memory` and `--cpus`, so it is inherited by construction rather than by a promise.
+    Its own network, named off its own container (`pi-sandbox-<jobId>-net`), which keeps it outside the boot
+    reaper's `pi-job-` filter for the reason the container names already are: a worker restart must not tear
+    the network out from under a shell an operator is sitting in. Rejected: leaving sandboxes on the open
+    bridge, which reads as a convenience and is a **wider reach than the run the sandbox exists to
+    reproduce** -- a shell that can go where the run could not is not reproducing it. The **preflight does
+    not gate a sandbox**: that is a money gate and a sandbox spends nothing, so a missing proxy fails at
+    `docker run` with docker's own message, in front of an operator at a terminal, which is the one place a
+    late failure is cheap.
+  - **Env is exactly `TERM` and `TMOUT`**, plus the three proxy variables when a policy is armed. No minted forge token under any forge's variable names, no
     provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables. `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
@@ -1106,7 +1236,10 @@ sibling rather than an extension of the GitHub one for the same reason.
   contains no member of `MINTED_TOKEN_VARS` and no provider key variable. The container name contains no
   `pi-job-`. `--publish 3000` yields `127.0.0.1:3000:3000` and an explicit bind address is refused. A
   retained directory contains no `session/`. A directory whose sandbox is running is not swept, and a
-  sweep whose docker lookup failed removes nothing.
+  sweep whose docker lookup failed removes nothing. Given `PI_EGRESS=1` the argv carries
+  `--network=pi-sandbox-<jobId>-net` and the three proxy variables, and **still no credential** -- a proxy
+  URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS` unset, the argv is
+  byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -1874,7 +2007,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2376,6 +2509,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #202 (the egress allowlist becomes a shipped control). **NEW `INT-EGRESS-POLICY-CONTRACT`**: the objects the policy IS on a host -- a per-job `--internal` network, a long-lived allowlist proxy publishing nothing, an upstream bridge, an operator-edited hostname list and a shipped rules file -- so the worker that builds it, the gate that checks it and the operator who edits it describe one thing. A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT` on the `INT-SANDBOX-CONTRACT` precedent. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, three edits. The flag list gains `--network=pi-job-<jobId>-net` when `PI_EGRESS=1`, plus a sentence it has needed since `--memory`/`--cpus` were written into it: this is a list of FLAGS, not a rendering of `ISOLATION_FLAGS`, and three of its members are not in that constant. That is not clerical -- issue #202's own text said the change "touches `ISOLATION_FLAGS`", and following it literally would make this file's `:1104` sandbox assertion ("against the imported array, not a copy") and `CONST-ISOLATION-CONTAINER-PER-JOB`'s twin false for every deployment running without a policy, which does not weaken the assertion so much as retire it. A new per-flag sub-bullet records why the network and not the proxy is load-bearing, why it is PER JOB (a shared network is a shared L2 segment at `DES-CONCURRENCY-3`, and `enable_icc=false` cannot fix it because ICC blocks job-to-proxy along with job-to-job -- measured in both directions), and that the provider is an ordinary allowlist entry because the recorded finding that it could not be is REFUTED. And the `PI_OFFLINE=1` sub-bullet gains **one clause and nothing else**: it is the closest unconditional-narrowing precedent and the analogy does NOT carry, because offline costs an unarmed job nothing while an unconditional network flag would turn every job on a deployment that never started the proxy into an outage. **INT-SANDBOX-CONTRACT AMENDED**: a sandbox joins its own network by the same builder seam, its env grows by three variables, and its NO CREDENTIALS clause is untouched and was checked rather than assumed -- a proxy URL is not a credential and `buildContainerEnv` is still not reused. The preflight deliberately does not gate a sandbox: it is a money gate and a sandbox spends nothing. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** -- the egress refusals are host-side policy returns that never reach a container, so no exit code gained a meaning. **INT-CONTAINER-JOB-INPUTS, INT-SESSION-STORE-CONTRACT, INT-OUTBOX-CONTRACT UNCHANGED, checked**: no mount, no file and no input crosses the boundary. **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked**, deliberately and not incidentally: no `run.network` field exists, because a per-trigger egress relaxation is a per-trigger security downgrade. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: two reason tokens, `egress-proxy-missing` and `egress-proxy-stopped`. |
 | 2026-08-25 | Issue #208 (the App key had to be a file). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, the `PI_FORWARD_ENV` refusal clause: `GITHUB_APP_PRIVATE_KEY` now exists as a configuration variable (the App's PEM supplied inline, for a deployment whose environment comes from a secrets manager rather than a file), and it is refused in the forward allowlist for a reason the existing clause did not cover. Every name refused before it is refused because a forwarded host value would OVERRIDE the per-job mint; this one overrides nothing and simply must not be in a container: it is the App's *signing* key, so it mints installation tokens for every repository the App is installed on, strictly broader than the credential `CONST-TOKEN-SCOPED-PER-JOB` bounds, handed to a process reading adversarial issue text. The hazard is CREATED by this change — while the key could only be named by a path, `PI_FORWARD_ENV` could carry nothing but that path — so the refusal lands in the same commit as the variable. The same edit un-staled the clause's enumeration, which named four of the eight minted variables the code has derived from the forge table since issue #42; it now says derived-not-enumerated and lists all eight. `GITHUB_APP_PRIVATE_KEY_PATH` is deliberately NOT refused, and the clause says why: a path with no mount behind it is inert in a container, and a refusal that fires on harmless things stops being read. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — no mount, no file, nothing new crosses the boundary; the key reaches the worker's own process and stops there. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** — a malformed inline key is a config refusal at load, which is the boot path, not a job exit. **INT-SDK-SESSION-OPTIONS, INT-SANDBOX-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked** — no session option, no sandbox variable (a sandbox carries no credential at all, now pinned against this name too), and no record field. |
 | 2026-08-25 | Issue #199 (egress). Prose correction, no contract change: `INT-STAGED-PACKAGE-CONTRACT` said host staging is what lets a job load third-party extensions "with egress denied", and nothing denies egress — the job argv carries no `--network` and `OQ-004` is explicit that a job container reaches the internet. What staging plus `PI_OFFLINE=1` actually buys is that there is no job-time install, which is what the sentence now says; the staged-layout line drops the same "no network at job time" phrasing for "no registry fetch at job time". `INT-CONTAINER-RUNTIME-CONTRACT` **UNCHANGED, checked** — its pinned flag list is untouched, and the egress policy `docs/sandbox.md` documents is applied by the operator around the container. |
 | 2026-08-13 | Issue #189 (closing pass: package prompt templates, OQ-019 deferral (b)). **INT-SDK-SESSION-OPTIONS AMENDED**: the loader gains `additionalPromptTemplatePaths` (the overlay's `prompts/`, existsSync-gated, merged after discovery so the repo's `.pi/prompts` still wins first-path-wins) and `promptsOverride` (repo-wins-on-conflict ENFORCED for templates -- pi merges package prompt paths first and dedupePrompts is first-wins, the same inversion `skillsOverride` closes; the protected set is PRE-LOADED by a second minimal DefaultResourceLoader because no per-dir prompt loader is exported at the pin and the exports map is closed -- pi's own reader through its public surface, built only when packages are staged so the common job pays nothing). The `packages_loaded` line grows per-root `prompts`/`themes` counts, and a new post-session `commands_registered` line counts what the ExtensionRunner actually registered per root, names only. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** -- no mount, no env var, no new input crosses the boundary. **INT-PI-PACKAGES-FILE-CONTRACT UNCHANGED, checked** -- what a package may declare is untouched; what happens to it in-container gained precedence and visibility. |
