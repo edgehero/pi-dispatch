@@ -373,6 +373,26 @@ default and is yours to bound: [`docs/sandbox.md`](docs/sandbox.md) carries a re
 with the failure modes measured. Recorded tokens and cost are process-wide (subagent sessions included),
 and the per-job token budget is enforced against that same total.
 
+### What is inside the container while a job runs
+
+Two credentials go in as environment values, and the agent can read both. The runner is the container's
+entrypoint and starts the agent session in its own process, so `process.env` is the agent's own
+environment. The guardrails tell it never to print or transmit them, and that is prompt text, not
+enforcement.
+
+- **The provider key**, under whichever variable name your provider uses. It cannot be scoped, because
+  the agent cannot function without it, so it is bounded by a **provider-side spend limit** instead of by
+  scope. Set one. A host holding both `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` sends both.
+- **The forge token**, under that forge's own variable names, bounded by whichever auth source you
+  configured: a per-repo one-hour token on the GitHub App path, your whole login under the default `gh`
+  (`GITHUB_AUTH_SOURCE`). On the other forges it is the token you minted, for as long as you leave it
+  valid.
+- **Anything you list in `PI_FORWARD_ENV`**, the one channel for a variable the allowlist does not
+  already carry (a custom provider's key, say). Same exposure.
+
+The bound is on the blast radius, not on the leak. [`SECURITY.md`](SECURITY.md) states the whole of it,
+including the case this design does not defend.
+
 ## Reuse your existing pi setup
 
 Give every job your host pi setup (custom models, global skills, a persona), layered under each repo's
