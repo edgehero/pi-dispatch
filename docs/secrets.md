@@ -218,10 +218,12 @@ other key still works. On those platforms, either let the manager own the whole 
 
 ### 4. The App key is a path, not a value
 
-`GITHUB_APP_PRIVATE_KEY_PATH` names a file, and `loadConfig` refuses at startup if that file does not
-exist. No amount of environment injection satisfies it. Either render the PEM to disk with your manager
-(Recipe B's template shape, mode `0600`) or leave it where `pi-dispatch setup github` put it, which is
-already `0600` and already outside the repo.
+`GITHUB_APP_PRIVATE_KEY_PATH` names a file, and the config loader refuses at startup when that file does
+not exist. No amount of environment injection satisfies it. Either render the PEM to disk from your
+manager (Recipe B's template shape, mode `0600`) or leave it where `pi-dispatch setup github` put it:
+`github-app-<slug>.pem` in the deployment folder, written `0600`. If that folder is a checkout of this
+repository, note that `.gitignore` covers `.env` and not `*.pem`, so keep the key somewhere your `git
+add` cannot reach it.
 
 ## What doctor says when there is no file
 
