@@ -28,6 +28,17 @@ jobs/
 sessions/
 current.jsonl
 
+# The GitHub App private key. `pi-dispatch setup github` writes github-app-<slug>.pem into the
+# deployment folder itself (worker/src/github-app-setup.mjs) at mode 0600, and when that folder is a
+# checkout of this repo the key lands right here -- where 0600 stops meaning anything the moment
+# `git add -A` stages it. Broad rather than github-app-*.pem on purpose: an operator who renamed the
+# key, or brought their own, made the same mistake and deserves the same net. This is deliberately NOT
+# the `*.jsonl` case argued against above: nothing matching *.pem is tracked, the tests that need a key
+# mint one into a temp dir, and if a fixture ever needs to ship, the `!name.example.json` convention
+# used throughout this file un-ignores it in one line. `pi-dispatch doctor` covers a key kept outside
+# this repo, warning when it sits in a work tree that does not ignore it.
+*.pem
+
 # Node
 node_modules/
 dist/

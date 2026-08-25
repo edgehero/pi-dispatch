@@ -46,7 +46,7 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
@@ -688,6 +688,26 @@ export async function collectChecks(env, seams) {
 				}
 			} catch {
 				checks.push({ ok: false, warn: true, label: `the App private key at ${keyPath} exists but is not readable by this user`, fix: setupFix });
+			}
+			// Mode 0600 protects the key from other users on this host; it does nothing once the file is in
+			// a commit. `setup github` writes the key into the DEPLOYMENT FOLDER, and a deployment folder is
+			// very often a checkout -- so the last thing between an App signing key and a public repository
+			// can be one `git add -A`. This repo's own .gitignore covers *.pem; the operator's may not, and
+			// a key they renamed or brought themselves is the same accident.
+			//
+			// Exit 1 is the ONLY case that warns: git says "this is a work tree, and that path is not
+			// ignored". 0 means covered, 128 means no work tree at all, and null means git could not be
+			// launched. Every one of those is silence, because a check nobody can silence must never cry
+			// wolf -- the cost of a missed warning here is one operator reading the doc, and the cost of a
+			// false one is every operator learning to scroll past doctor.
+			const ignoreCode = await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(keyPath), "check-ignore", "-q", keyPath]);
+			if (ignoreCode === 1) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `the App private key at ${keyPath} is inside a git work tree that does not ignore it`,
+					fix: `move it outside that repo, or ignore it there (\`*.pem\`) -- one \`git add -A\` commits the App's signing key, which can mint a token for every repository the App is installed on, and mode 0600 does not survive a commit`,
+				});
 			}
 		}
 	}

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
 
@@ -611,6 +611,51 @@ test("doctor: a file that does not start with -----BEGIN warns, and its contents
 	assert.equal(code, 0);
 	assert.match(text(), /⚠ the file at GITHUB_APP_PRIVATE_KEY_PATH does not look like a PEM \(first line is not "-----BEGIN \.\.\."\)/);
 	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "not even a malformed key's contents may reach output");
+});
+
+// The key file's mode protects it from other users on this host and does nothing at all once the file is
+// in a commit (issue #211). `setup github` writes it into the DEPLOYMENT folder, which is very often a
+// checkout, so doctor asks git. `fakeSpawn` matches by prefix and nothing else in these fixtures shells
+// out to git, so keying the plan on "git " is unambiguous here.
+
+test("doctor: a key inside a git work tree that does not ignore it warns, with the path and no contents", async () => {
+	const keyPath = appKeyFile();
+	const { out, text } = capture();
+	const deps = { ...appDeps(out), spawn: fakeSpawn({ ...green, "git ": 1 }) };
+	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: keyPath }), deps);
+	assert.equal(code, 0, "a committable key is a warning, not a failure -- doctor never fails on hygiene");
+	assert.match(text(), new RegExp(`⚠ the App private key at ${keyPath.replace(/[.\\/]/g, "\\$&")} is inside a git work tree that does not ignore it`));
+	assert.match(text(), /git add -A/, "the fix says what would actually happen");
+	assert.doesNotMatch(text(), new RegExp(KEY_BODY));
+});
+
+test("doctor: check-ignore asks about the key path, from the key's own directory", async () => {
+	const keyPath = appKeyFile();
+	const calls = [];
+	const { out } = capture();
+	const deps = { ...appDeps(out), spawn: fakeSpawn({ ...green, "git ": 1 }, calls) };
+	await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: keyPath }), deps);
+	const git = calls.find((c) => c.cmd === "git");
+	assert.ok(git, "doctor asked git");
+	assert.equal(git.args.at(-1), keyPath, "the question is about the key file itself");
+	assert.equal(git.args.at(-2), "-q");
+	assert.equal(git.args.at(-3), "check-ignore");
+	assert.equal(git.args.at(-4), dirname(keyPath), "asked from the key's own directory, not doctor's cwd");
+});
+
+test("doctor: an ignored key, a non-repo, and a git that will not launch are all silent", async () => {
+	const keyPath = appKeyFile();
+	for (const [name, outcome] of [
+		["ignored (exit 0)", 0],
+		["not a work tree (exit 128)", 128],
+		["git missing", "enoent"],
+	]) {
+		const { out, text } = capture();
+		const deps = { ...appDeps(out), spawn: fakeSpawn({ ...green, "git ": outcome }) };
+		const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: keyPath }), deps);
+		assert.equal(code, 0);
+		assert.doesNotMatch(text(), /does not ignore it/, `${name}: only a definite "not ignored" may warn`);
+	}
 });
 
 test("doctor: the app-auth block only fires for source app", async () => {

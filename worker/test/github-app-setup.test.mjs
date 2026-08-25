@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
 
 // A REAL RSA keypair, generated once: the conversion response carries the private half as its `pem`,
@@ -27,6 +28,17 @@ const APP = {
 };
 
 const PEM_PATH = "/deploy/github-app-pi-dispatch-testbox.pem";
+
+// The wizard writes the App's signing key into the DEPLOYMENT folder at mode 0600, and a deployment
+// folder is very often a checkout of this repo (issue #211). Mode 0600 does not survive a commit, so the
+// repo's own .gitignore has to cover what this module names. Bound here rather than left implicit,
+// because the two live in different files and only this one decides the extension.
+test("the repo ignores the key file this wizard writes", () => {
+	const gitignore = readFileSync(new URL("../../.gitignore", import.meta.url), "utf8");
+	const patterns = gitignore.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+	assert.ok(patterns.includes("*.pem"), "`*.pem` must stay in .gitignore: the wizard writes github-app-<slug>.pem into the deployment folder");
+	assert.ok(PEM_PATH.endsWith(".pem"), "and the wizard must keep writing a .pem, or the pattern above stops covering it");
+});
 const ENV_PATH = "/deploy/.env";
 // A .env in the pre-setup shape: gh source, App keys scaffolded empty (like .env.example).
 const SEED_ENV = "GITHUB_AUTH_SOURCE=gh\nGITHUB_APP_ID=\nGITHUB_APP_PRIVATE_KEY_PATH=\nWEBHOOK_SECRET=\n";
