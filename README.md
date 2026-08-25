@@ -490,7 +490,7 @@ flowchart LR
   end
   R -->|"enqueueGitHubJob (jobId = gh-&lt;delivery&gt;)"| Q[("Valkey + BullMQ<br/>pi-jobs, AOF, 31d+ retention")]
   subgraph HOST["worker/ (host process)"]
-    W["mint scoped token, refuse an unprotected branch,<br/>hardened clone at the default-branch SHA, run container"]
+    W["mint the job's token, refuse an unprotected branch,<br/>hardened clone at the default-branch SHA, run container"]
   end
   Q --> W
   W -->|"docker run --rm"| C["job container: the agent commits,<br/>pushes --force-with-lease, gh pr create, comments"]
@@ -501,9 +501,12 @@ flowchart LR
   step. PR triggers (label, comment, auto on open/update, or a submitted review) gate the auto path on the
   PR author being a collaborator, so a fork PR from a stranger never auto-fires, and gate a review on the
   **reviewer** instead, so a collaborator reviewing that same fork PR does.
-- The per-job token is repo-scoped and short-lived, and honestly: it *can* merge, because GitHub gates
-  push and merge behind the same scope. **Branch protection on your default branch is the real
-  control**, and the worker refuses an unprotected repo before any spend.
+- What bounds the per-job token depends on which auth source you run. The App mints one scoped to a
+  single repository, expiring in an hour; the default `gh` source forwards your own login into every
+  token-carrying job, full-scope and non-expiring, which is what `pi-dispatch doctor` warns about. Under
+  every source it *can* merge, because GitHub gates push and merge behind the same scope. **Branch
+  protection on your default branch is the real control**, and the worker refuses an unprotected repo
+  before any spend.
 - The checkout is always the base repo at its default-branch SHA, never a PR branch. Landing a commit on
   your default branch is enough to run code in a job container; issue and comment text never is. It
   stays data.
@@ -511,8 +514,8 @@ flowchart LR
 **Credentials in one click**: `pi-dispatch setup github` runs GitHub's App Manifest flow against your own
 loopback. One browser click mints the App id, private key and webhook secret; every `.env` line is shown
 before one consent, the key lands with mode 0600, and no secret is ever printed. The App is the
-strongest auth source (per-repo one-hour tokens); `gh` and fine-grained PATs also work
-(`GITHUB_AUTH_SOURCE`).
+strongest auth source (per-repo one-hour tokens); a fine-grained PAT carries an expiry you set, and
+`gh` carries neither (`GITHUB_AUTH_SOURCE`).
 
 **Three ways to run the trigger edge**, pick one (or let `/dispatch setup` walk you through the choice,
 which is what it offers right after the credentials step):
