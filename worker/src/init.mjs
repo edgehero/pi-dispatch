@@ -32,7 +32,7 @@ const EMPTY_SUBSCRIPTIONS = `${JSON.stringify({ version: 1, subscriptions: [] },
 const DEFAULT_EGRESS_ALLOWLIST = `# Hosts a job container may reach, one per line. Deny by default: anything not listed is refused by
 # the proxy, and a job container has no other route out. A leading dot matches subdomains.
 #
-# Only read when PI_EGRESS=1. Edit freely -- \`pi-dispatch init\` never overwrites this file, and
+# Not read when PI_EGRESS=0. Edit freely -- \`pi-dispatch init\` never overwrites this file, and
 # \`pi-dispatch doctor\` reports what the running policy actually permits. See docs/egress.md.
 #
 # Your flows are the part nobody can list for you: a job that browses, or installs, or calls an API you
@@ -73,7 +73,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 	scaffold(fs, results, join(cwd, "pause-windows.json"), EMPTY_PAUSE_WINDOWS, "empty pause-windows list");
 	scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
 	scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
-	scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; only read when PI_EGRESS=1)");
+	scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
 
 	for (const [verb, name, note] of results) {
 		out(`${verb.padEnd(7)} ${name.padEnd(20)} ${note}\n`);

@@ -225,7 +225,8 @@ Stated openly rather than discovered later:
   with pi's normal discovery: the repo's `AGENTS.md` becomes part of the agent's context, and
   `/workspace/.pi/extensions` is **loaded and executed**. Anyone who can land a commit on your default
   branch can therefore run arbitrary code inside a job container — with the job's GitHub token and
-  unrestricted network egress — where previously they could only supply text the agent reads. What bounds
+  network egress bounded only by the allowlist you configured, which necessarily includes your forge —
+  where previously they could only supply text the agent reads. What bounds
   it is the container, the token's narrow scope and short expiry, and your branch protection; **this
   layer bounds nothing**. The practical rule: a repository whose default branch you would not hand a
   shell to is not a repository to service. Note the population is the same one that could already write
@@ -282,16 +283,16 @@ Stated openly rather than discovered later:
   exists: a wedged run is re-processed — and re-paid — on every stall, indefinitely. Our per-job turn
   budget is the real backstop there, not the queue. Cron multiplies every other risk on this page by
   removing the human who would have noticed.
-- **Network egress from the job container is unrestricted.** There is no allowlist proxy in v1. A job
-  can reach the internet. If an agent is successfully induced to exfiltrate its environment, egress
-  filtering will not stop it — the token's short expiry and narrow scope are what bound the damage. Run this on
-  hardware where that is acceptable, or turn the egress policy on: `PI_EGRESS=1` puts every job on its own
-  `--internal` network behind an allowlist proxy and refuses a job the policy cannot serve before it spends
-  (`docs/egress.md`, which also carries what a too-tight allowlist costs you in budget slots). **Turning it
-  on does not retire this row**, and the reason is the part worth reading twice: your forge is on the
-  allowlist, because a job that cannot push has nothing to do, and a repository is a perfectly good place to
-  write a secret to. It bounds where an induced agent can send your environment; it does not prevent it,
-  which is why this row stays where it is.
+- **An egress allowlist bounds where an induced agent can send your environment; it does not prevent it.**
+  Egress is **denied by default** now: every job runs on its own `--internal` network behind a hostname
+  allowlist proxy, and a job the policy cannot serve is refused before it spends (`docs/egress.md`). That
+  is a real narrowing and it is **not** a fix for this row, for a reason worth reading twice: **your forge
+  is on the allowlist, because a job that cannot push has nothing to do**, and a repository is a perfectly
+  good place to write a secret to. A successful injection still has somewhere to send things; it has fewer
+  places. What actually bounds the damage is unchanged and is what it always was: the token's short expiry
+  and narrow scope (`CONST-TOKEN-SCOPED-PER-JOB`), and a provider-side spend limit on the key. The list of
+  hosts is also **yours**, and nothing here can enumerate what your own flows reach (`OQ-026`). You can
+  return to open egress with `PI_EGRESS=0`; run this on hardware where that is acceptable.
 - **The provider API key is broad.** Unlike the GitHub token it cannot be meaningfully scoped per job —
   the agent needs it to function. It is the one broad secret inside the container. **Set a spend limit
   on it.**
@@ -355,7 +356,8 @@ Stated openly rather than discovered later:
   population that can be handed a transcript is your repository's push-access population, not the issue's
   author. **A fork pull request never resumes anything**, which is what stops a stranger naming a branch
   `pi/issue-7` and being handed issue 7's history. Two consequences worth stating because they are not
-  obvious. With unrestricted egress (above), a single later job on that key can exfiltrate the whole
+  obvious. With egress bounded only by an allowlist that must include your forge (above), a single later
+  job on that key can exfiltrate the whole
   accumulated history in one request, where before it could only exfiltrate its own view. And a review
   comment now arrives into a conversation that already contains the previous author's text in the
   assistant's own voice — an injection that failed the first time gets a second, better-placed attempt.
@@ -430,8 +432,9 @@ Stated openly rather than discovered later:
   is mounted `:ro` into every job — a container that runs adversarial input — so a secret in it is a secret
   in the box. Stage it with `pi-dispatch import-pi` (it refuses a `models.json` with a literal key and never
   copies `auth.json`) and let `pi-dispatch doctor` re-check it; the provider key belongs in the environment,
-  never a mounted file. Overlay **extensions run arbitrary code against adversarial input with open network
-  egress** and are not scanned for secrets — and they are staged and loaded **by default**. `import-pi`
+  never a mounted file. Overlay **extensions run arbitrary code against adversarial input, reaching
+  whatever your egress allowlist permits** (which includes your forge), and are not scanned for secrets —
+  and they are staged and loaded **by default**. `import-pi`
   copies `extensions/` unless you pass `--no-extensions`, and **prints every extension it staged**: read
   that list, because it is the vetting step. Anything you do not want in job containers should not be in
   the overlay; `PI_GLOBAL_ALLOW_EXTENSIONS=0` disables the whole directory if you want it staged but
@@ -479,7 +482,8 @@ Stated openly rather than discovered later:
   such a declaration would mean a job-time registry install, which `PI_OFFLINE=1` exists to make
   unreachable; and whoever can merge can already instruct the agent, while adding arbitrary npm packages
   would put third-party **install-time and load-time** code beside a live minted forge token in a container
-  with open egress. That is a materially bigger grant than editing a prompt. If it is ever wanted, the shape
+  that can reach your forge. That is a materially bigger grant than editing a
+  prompt. If it is ever wanted, the shape
   is an operator-held allowlist, not a per-repo opt-in, because the repo is the thing that is not trusted.
 - **Token and cost accounting is process-wide, but it is not process-tree-wide.** The recorded totals cover
   every session inside the job container's Node process, including subagent sessions an extension spawns,

@@ -122,10 +122,18 @@ test("up: declined prompts run NOTHING and the summary says skipped", async () =
 	});
 	assert.equal(await h.run(), 0, "declining is not an error; doctor still ran and was green");
 	assert.equal(h.promptCalls.length, 2, "one consent per docker action pair (image, valkey)");
-	// The ONLY spawns are the two read-only probes — no pull, no tag, no volume, no run.
-	assert.deepEqual(h.calls.map((c) => c.args), [["version"], ["image", "inspect", "pi-job:latest"]]);
+	// The ONLY spawns are the three read-only probes — no pull, no tag, no volume, no run. The third is the
+	// egress proxy, which the policy being ON by default makes up look for; it asks nothing here because
+	// this deployment has no egress-allowlist.conf, and up declines that step itself rather than standing
+	// up a proxy with no allowlist behind it.
+	assert.deepEqual(h.calls.map((c) => c.args), [
+		["version"],
+		["image", "inspect", "pi-job:latest"],
+		["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"],
+	]);
 	assert.match(h.text(), /job image\s+skipped \(declined\)/);
 	assert.match(h.text(), /valkey\s+skipped \(declined\)/);
+	assert.match(h.text(), /egress-allowlist\.conf is not here/);
 });
 
 test("up: --yes runs both docker action pairs with exactly the argv that was shown", async () => {
@@ -259,10 +267,11 @@ const EGRESS_RUN = [
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
 
-test("up: a deployment that has not armed the policy is never asked about a proxy", async () => {
-	// up never invents operator policy -- the same doctrine that keeps it pulling this repo's own image
-	// and no other. Nothing about egress appears at all.
-	const h = harness({ plan: green, listening: true });
+test("up: a deployment that turned the policy OFF is never asked about a proxy", async () => {
+	// PI_EGRESS=0 is the opt-out rather than the default now, and up still says nothing to a deployment
+	// that took it: up never invents operator policy, the same doctrine that keeps it pulling this repo's
+	// own image and no other.
+	const h = harness({ env: { PI_PROVIDER: "anthropic", PI_EGRESS: "0" }, plan: green, listening: true });
 	await h.run();
 	assert.doesNotMatch(h.text(), /egress/i);
 	assert.ok(!h.calls.some((c) => c.args.includes("pi-dispatch-egress-proxy")));
@@ -318,5 +327,5 @@ test("up: a declined proxy prompt runs nothing, and the summary says what that c
 	});
 	await h.run();
 	assert.ok(!h.calls.some((c) => c.args[0] === "run" && c.args.includes("pi-dispatch-egress-proxy")));
-	assert.match(h.text(), /refuses every job pre-spend until the proxy is up/);
+	assert.match(h.text(), /every job is refused pre-spend until the proxy is up/);
 });

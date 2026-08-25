@@ -464,14 +464,17 @@ test("loadGitLabAuth is null without a token, and refuses any source other than 
 
 // --- REQ-EGRESS-ALLOWLIST -----------------------------------------------------------------------------
 
-test("PI_EGRESS is off by default and parses STRICTLY, so a typo never leaves a deployment believing it is bounded", () => {
-	assert.equal(loadConfig({}).egress, false, "unset is off");
-	assert.equal(loadConfig({ PI_EGRESS: "" }).egress, false, "empty is off");
-	assert.equal(loadConfig({ PI_EGRESS: "0" }).egress, false);
+test("PI_EGRESS is an opt-OUT: the bounded posture is the default, and a typo never weakens it", () => {
+	// The polarity, and it is the decision rather than a detail. A control that ships off is a control
+	// nobody enabled, which is the state OQ-004 spent a year in: a disclosure with a dead end at the end of
+	// it. Unset, "" and "1" all mean ON -- exactly PI_GLOBAL_ALLOW_EXTENSIONS' shape, one knob over.
+	assert.equal(loadConfig({}).egress, true, "unset is ON");
+	assert.equal(loadConfig({ PI_EGRESS: "" }).egress, true, "empty is ON");
 	assert.equal(loadConfig({ PI_EGRESS: "1" }).egress, true);
-	// The strictness is the point, and it is PI_GLOBAL_ALLOW_EXTENSIONS' reason one knob over: an operator
-	// who believes they have an egress policy and does not is in a WORSE position than one who knows they
-	// have none, because the belief displaces the credential bound that is actually holding.
+	assert.equal(loadConfig({ PI_EGRESS: "0" }).egress, false, "only an explicit 0 turns it off");
+	// A typo must never silently produce the OPEN posture while an operator believes they are bounded:
+	// they would then be in a worse position than one who knows they have no policy, because the belief
+	// displaces the credential bound that is actually holding.
 	for (const bad of ["true", "yes", "on", "2"]) {
 		assert.throws(() => loadConfig({ PI_EGRESS: bad }), /PI_EGRESS must be exactly/, `${bad} must not be guessed`);
 	}
@@ -490,10 +493,10 @@ test("PI_FORWARD_ENV refuses the policy's own variables WHILE ARMED, and permits
 	// like the control working, which is the failure class this file already refuses for the minted token.
 	for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]) {
 		assert.throws(
-			() => loadConfig({ PI_EGRESS: "1", PI_FORWARD_ENV: name }),
-			/must not forward .* while PI_EGRESS=1/,
+			() => loadConfig({ PI_FORWARD_ENV: name }), // armed by default now
+			/must not forward .* while the egress policy is armed/,
 			`${name} must be refused while the policy is armed`,
 		);
-		assert.deepEqual(loadConfig({ PI_FORWARD_ENV: name }).forwardEnv, [name], `${name} is fine with no policy`);
+		assert.deepEqual(loadConfig({ PI_EGRESS: "0", PI_FORWARD_ENV: name }).forwardEnv, [name], `${name} is fine with no policy`);
 	}
 });

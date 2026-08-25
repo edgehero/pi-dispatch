@@ -25,7 +25,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		running = listRunningSandboxes,
 		launch = launchSandbox,
 		// The docker spawn used for this session's egress network, seamed like `launch` so the tests never
-		// touch a daemon. Only used when PI_EGRESS=1.
+		// touch a daemon. Not used when PI_EGRESS=0.
 		spawnNetwork = spawn,
 		now = () => Date.now(),
 	} = deps;

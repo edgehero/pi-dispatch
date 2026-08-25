@@ -164,6 +164,19 @@ passing, on the record — issue #80.)
   containerize or sandbox Pi."*
 - **Traces to**: `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-TOKEN-SCOPED-PER-JOB`, `INT-SESSION-STORE-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`
+  **A NETWORK NOW EXISTS BETWEEN A JOB AND ONE OTHER CONTAINER, and the argument this entry has twice
+  borrowed is refused here.** With `CONST-EGRESS-POLICY-IN-THE-ARGV`, a job container joins a Docker
+  network. Two revision rows recorded that this entry survived a change **because the change added no
+  mount**, and that argument is available again and is not good enough: a network is reachability, which
+  the mount enumeration says nothing about. What makes it admissible is that the network is **per job and
+  `--internal`**, holding exactly two endpoints -- this container and the allowlist proxy -- so it is the
+  narrowest network a job could be on that is not `none`. The tempting alternative, one shared network with
+  `com.docker.network.bridge.enable_icc=false`, was measured and refused: ICC governs **every** container
+  pair on the bridge and the proxy is a container, so the option blocks job-to-proxy along with
+  job-to-job. And the claim is stated at its true size rather than overclaimed: two job containers on
+  docker's **default bridge can already reach each other by IP today**, so per-job networks **remove** an
+  adjacency this entry never actually had, rather than adding one. That is why this clause reads as a
+  strengthening and not as an exception.
 - **Acceptance**: Given any job, the agent has no filesystem path to the host outside the declared mounts
   in `INT-CONTAINER-RUNTIME-CONTRACT` — `/job:ro`, `/workspace:rw`, `/outbox:rw` (local only),
   `/opt/pi-global:ro` (the operator global overlay, only when configured; `REQ-GLOBAL-PI-OVERLAY`), and
@@ -183,6 +196,77 @@ passing, on the record — issue #80.)
   `pi-job-`, and no trigger, chain request or model tool can start one. Given
   `PI_SANDBOX_RETENTION_HOURS=0`, no directory outlives a run and every job's argv and teardown are
   byte-identical to one from before that feature existed.
+  **Given an egress policy** (`CONST-EGRESS-POLICY-IN-THE-ARGV`) -- asserted separately rather than folded
+  into the mount enumeration above, because a network is not a mount: the job's network is `--internal` and
+  its only other member is the allowlist proxy, so no job container can open a connection to a
+  concurrently-running one; it is created and removed with the container, so nothing outlives the run; and
+  given `PI_EGRESS=0` the argv carries no `--network` and is byte-identical to one built before that entry
+  existed.
+
+## CONST-EGRESS-POLICY-IN-THE-ARGV
+
+- **Statement**: An egress policy this project claims shall be expressed in the worker's **own `docker run`
+  argv**, and a job shall **never start against a policy that cannot serve it**. Both halves are
+  unconditional. **Neither says egress is denied**, and that omission is the entry rather than a gap in it:
+  an operator may set `PI_EGRESS=0` and a deployment that has done so runs exactly as it did before this
+  constraint existed, with no `--network`, no proxy variable and no probe. What is forbidden is a **third
+  state**: a deployment believing it has an egress policy that the worker cannot name, cannot check and
+  does not apply. An operator's own host firewall is **out of scope** rather than forbidden, on the same
+  terms this file already puts an operator's interactive pi session out of scope: it is their control, this
+  project makes no claim about it, and `docs/egress.md` still carries its manual form.
+- **Why**: Two failure classes, both measured rather than reasoned about, and both silent.
+  **The first is what a policy the worker cannot see produces.** For a year the answer to "how do I bound
+  egress" was a `DOCKER-USER` recipe applied around the container. The recipe works; what it cannot do is
+  be *known*. The worker cannot report it in the run record, `doctor` cannot check it, a Docker upgrade
+  that rewrites the chain removes it with no signal, and a second worker on the host inherits it without
+  having asked. A control whose presence is unobservable to the thing that starts the containers is
+  indistinguishable, from every angle this project can see, from no control at all -- and an operator who
+  believes they have one is in a **worse** position than one who knows they do not, because the belief
+  displaces the credential bound `CONST-TOKEN-SCOPED-PER-JOB` says is what actually bounds the damage.
+  **The second is what a too-tight policy costs, and it is not money.** Measured against the real runner:
+  three provider attempts, `Request timed out.`, exit `1`, ~40 seconds, **zero tokens**. Exit `1` is the
+  retryable class, `attempts: 2`, and `releaseBudget` covers only `container-never-started` -- this
+  container started. So a misconfigured allowlist spends **two job-count slots per job and refunds
+  neither**, faster than anyone reads the first failure, and a cron-driven deployment empties its daily cap
+  on jobs that were never going to succeed. That is `CONST-BUDGET-BEFORE-TOKENS` working exactly as
+  specified, which is what makes this a constraint rather than a bug report: the ordering rule was already
+  right, and what was missing was a free determinate gate in front of it. Hence the second half of the
+  Statement, and hence a **policy return** rather than a throw (`CONST-RETRY-INFRA-ONLY`: retrying never
+  makes an absent proxy appear).
+  **Rejected alternative -- `CONST-EGRESS-DENIED-BY-DEFAULT`**, which is the entry a reader expects and the
+  one this project must not write. Egress denial is the **default**, not an invariant: `PI_EGRESS=0` turns
+  it off, and a deployment that has not started the proxy is refused rather than confined. A "shall" over
+  something an operator disables is the constraint-that-ships-unenforced `OQ-004` refused for exactly this
+  reason -- *"it teaches readers that the constitution is aspirational, which corrodes every other entry in
+  it."* The default posture is a requirement (`REQ-EGRESS-ALLOWLIST`) and a disclosure (`SECURITY.md`);
+  what graduates here is only the part that is true of every deployment.
+  **Rejected alternative -- a TLS-terminating, secrets-injecting proxy.** That is `OQ-011`'s mechanism and
+  a materially different security object: the provider key leaves the container and provider plaintext
+  enters a host process, so the proxy's own compromise becomes a new class. Named here so the two are never
+  conflated, and so the reason it is bigger is on the record as *different* rather than merely *harder*.
+- **Evidence (upstream)**: pi README, verbatim: *"Pi does not include a built-in permission system for
+  restricting filesystem, process, **network**, or credential access."* The same sentence
+  `CONST-ISOLATION-CONTAINER-PER-JOB` cites for the filesystem and process halves names the network half,
+  and nothing upstream has changed that.
+- **Code evidence**: `worker/src/egress.mjs → makeEgressPreflight` (the pre-spend gate) and `→ egressArmed`
+  (one parse, so `doctor` and `up` cannot disagree with the worker about the posture) ·
+  `worker/src/docker-run.mjs → buildDockerRunArgs` (the `--network` argument, beside `--memory`/`--cpus`
+  and deliberately NOT a member of `ISOLATION_FLAGS`) · `worker/src/processor.mjs → runJob` (the gate,
+  before `reserveBudget`)
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-TOKEN-SCOPED-PER-JOB`, `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SANDBOX-CONTRACT`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
+  `OQ-011`, `OQ-026`
+- **Acceptance**: Given `PI_EGRESS=0`, a job's docker argv and container env are **byte-identical** to ones
+  built before this entry existed and the preflight spawns nothing. Given any other accepted value, **every**
+  job's argv carries `--network=pi-job-<jobId>-net`, and no trigger field, runtime-settings key or
+  model-callable tool can produce a job argv that omits it or names a different one. Given a policy whose
+  proxy is absent or stopped, the job returns `outcome: "policy"` with `budgetReserved: false`, `docker run`
+  is never spawned, and the queue does not retry it. Given a probe that is **indeterminate** rather than
+  negative -- the daemon did not answer -- the job **throws** and is retried, the same
+  determinate/indeterminate split `makeImagePreflight` draws with `docker info`. Given any deployment, no
+  clause of this entry is satisfiable by a host firewall rule, and `doctor` reports the policy it reads back
+  from docker and from the argv it would build, never from the host's `iptables`.
 
 ## CONST-NO-CONTEXT-FILES-MANDATORY
 
@@ -666,6 +750,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #202 (the egress allowlist becomes the default posture). **NEW `CONST-EGRESS-POLICY-IN-THE-ARGV`**, and the whole of its design is in what the Statement refuses to say. It does **not** say egress is denied: an operator can set `PI_EGRESS=0`, and a deployment whose proxy is down is refused rather than confined, so a "shall" over denial would be the constraint-that-ships-unenforced `OQ-004` refused for in the first place. The rejected ID `CONST-EGRESS-DENIED-BY-DEFAULT` is named inside the entry so it is not re-proposed. What IS unconditional is two things: an egress policy **this project claims** lives in the worker's own argv rather than in a host firewall it cannot see, report or check; and a job **never starts against a policy that cannot serve it**, which is `CONST-BUDGET-BEFORE-TOKENS`' ordering applied to a new axis after a measured cost (a too-tight allowlist spends two job-count slots per job and refunds neither, at zero tokens). An operator's own host firewall is out of scope rather than forbidden, on the same terms this file already puts an interactive pi session out of scope. Also rejected, on the record: a TLS-terminating secrets-injecting proxy, which is `OQ-011`'s mechanism and a **different** security object rather than a larger one -- the provider key leaves the container and provider plaintext enters a host process. This is the **first entry in this repository to carry a `- **Code evidence**:` line**; the convention has been documented in the preamble since the beginning and never exercised, and it cites file→symbol rather than line numbers, per that same paragraph's lesson about warnings that always fire. **CONST-ISOLATION-CONTAINER-PER-JOB AMENDED**, and the amendment refuses an argument this entry has twice accepted. The change adds **no mount**, so the 2026-08-08 and 2026-08-09 reasoning was available again and is not good enough: a network is reachability, which the mount enumeration says nothing about. What makes it admissible is that the network is **per job and `--internal`**, holding exactly two endpoints, which is the narrowest network a job could be on that is not `none` -- and the alternative, one shared network with `enable_icc=false`, was measured and refused because ICC governs every container pair and the proxy is a container, so it blocks job-to-proxy along with job-to-job. The claim is also stated at its true size rather than overclaimed: two job containers on docker's **default bridge can already reach each other by IP today**, so per-job networks REMOVE an adjacency this entry never had rather than adding one. Acceptance gains a network clause, held **outside** the mount enumeration because a network is not a mount. Its "every member of `ISOLATION_FLAGS`" clause is **UNCHANGED, checked, and load-bearing**: it is precisely why `--network` is appended beside `--memory`/`--cpus` instead of joining that array, despite issue #202's own wording -- a conditional member makes "every member" false on any deployment with the policy off, which does not weaken the assertion so much as retire it. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**, gaining an instance rather than an exception. **CONST-RETRY-INFRA-ONLY UNCHANGED, checked**: an absent proxy is config, so the gate RETURNS policy, while an unanswering daemon THROWS. **CONST-TOKEN-SCOPED-PER-JOB UNCHANGED, checked, and it is the one a reader will expect to have moved**: the credential's expiry and scope are still what bound exfiltration, because the forge is necessarily on the allowlist and a repository is a perfectly good place to write a secret to. `SECURITY.md` is amended to say exactly that, in five places, without softening one of them. **CONST-MERGE-NEVER-AUTOMATIC, CONST-PI-VERSION-PINNED, CONST-HMAC-OVER-RAW-BODY, CONST-ISSUE-TEXT-IS-DATA, CONST-TRIGGER-AUTHOR-GATE, CONST-NO-CONTEXT-FILES-MANDATORY, CONST-PERSONA-IN-CACHED-PREFIX UNCHANGED, checked** -- none is downstream of network posture, and the last two were checked rather than assumed: no prompt byte and no loader flag moves. |
 | 2026-08-09 | Issue #60 (Gap 3: `run.instructions`). **CONST-ISSUE-TEXT-IS-DATA AMENDED**, one clause, in the shape of the replay clause `run.resume` added. Operator standing text in the user prompt's INSTRUCTION region is a region this entry had never described: it governs event PAYLOADS, and a trigger's `run.instructions` is operator-authored text from the reviewed, git-tracked `triggers.json`, which passes the same mutability test `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` already applies to the overlay persona. The clause is written as four CHECKABLE parts rather than as a permission: the text sits in the instruction region and never inside the fence; it is never derived from a payload, and nothing reachable from a webhook, an issue or comment body, or `dispatch_run` can supply it; it does not move the delimiter, which is still asserted to follow it; and the data region below is byte-identical with and without it. Stated plainly because it is the whole of the amendment: this widens WHO may write an instruction, from the flow author and the deploy-time operator to the same operator per trigger, and not WHAT may become one. **CONST-PERSONA-IN-CACHED-PREFIX UNCHANGED, checked**, and the check is worth recording because the obvious reading is wrong: the system prompt is untouched, the text is written once and `session.prompt()` is called once, so the rejected pattern that entry names (injecting a persistent user message on every prompt) is not what this is -- and at the pin, pi-ai attaches `cache_control` to the LAST USER MESSAGE as well, so after turn one it sits in the cached prefix at roughly the persona's rate anyway. The 2000-character cap is therefore justified on context overflow inside a paid container and on keeping the field in its lane, NOT on caching, and the entry says so rather than borrowing an argument that does not apply. **CONST-TRIGGER-AUTHOR-GATE UNCHANGED, checked**: the field changes how a job is prompted, never whether it starts. **CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY UNCHANGED, checked** -- no mount, and the only new refusal is at load. |
 | 2026-08-09 | Issue #60 (Gap 2: `run.skillsDir`). **CONST-ISOLATION-CONTAINER-PER-JOB UNCHANGED, checked**, and the check is the one this change was shaped around rather than a formality: its acceptance ENUMERATES the mounts, and the feature adds none -- the injected skills are copied into the per-job dir and ride the `/job:ro` bind that already exists, so a job carrying them has a docker argv byte-identical to one without, pinned by a test. This entry can therefore borrow the argument the 2026-07-31 `/session` row explicitly could not. **CONST-NO-CONTEXT-FILES-MANDATORY UNCHANGED, checked**: `noSkills` stays `true` and the injected root arrives by an explicit path rather than by discovery, so the double-registration reasoning it rests on is untouched. **CONST-PERSONA-IN-CACHED-PREFIX UNCHANGED, checked**, with one thing recorded rather than left implicit: the cached prefix now has a THIRD skill source, because pi emits each loaded skill's name and description into the system prompt, and what bounds it is the copier's directory cap. Within-job byte-identity is unaffected -- the loader is still evaluated once at build. **CONST-ISSUE-TEXT-IS-DATA UNCHANGED, checked**: no payload text moves, and nothing reachable from a webhook, an issue body or `dispatch_run` can name a skills directory. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**, gaining an instance: the absent-directory refusal is free and determinate (one lstat), so it sits among the free gates and strictly before the mint, the clone and the reservation. **CONST-RETRY-INFRA-ONLY UNCHANGED, checked**: every new refusal RETURNS, because no retry makes a missing directory appear. **CONST-TOKEN-SCOPED-PER-JOB UNCHANGED, checked**: nothing credential-bearing is copied, and the copies land `0444` under a read-only mount. |
 | 2026-08-08 | Issue #60 (Gap 1: a repo skill is materialised whole). **CONST-NO-CONTEXT-FILES-MANDATORY UNCHANGED, checked**, and the check is worth stating because the change sounds like it should have moved this entry. Its acceptance ("given a repo shipping `.pi/skills`, each skill appears **once**, sourced from `/job/pi/skills`") is still exactly true: `noSkills` stays `true`, the mount stays the one copy in force, and a skill's supporting files arriving beside its `SKILL.md` changes how MUCH of an already-admitted source is copied, never WHICH sources are admitted. Nor is it a new trust grant, and the comparison is the honest one: this same entry, as amended on 2026-07-28, already admits merge-gated repo files that **execute** (`/workspace/.pi/extensions`), so repo bytes landing `0444` on a read-only mount is strictly less than what it already permits. **CONST-ISOLATION-CONTAINER-PER-JOB UNCHANGED, checked** — its acceptance enumerates the mounts and this change adds none: the widened content rides the `/job:ro` bind that already existed, so this entry can borrow the argument the 2026-07-31 row explicitly could not. **CONST-BUDGET-BEFORE-TOKENS UNCHANGED, checked**, and it gained a new instance rather than an exception: the size caps are decided from one `git ls-tree -r -l -z` before the first `cat-file` and before the first write, which is this constraint's ordering applied one layer below the one it was written for. **CONST-RETRY-INFRA-ONLY UNCHANGED, checked** — a cap breach is determinate (the same tree at the same sha breaches the same cap forever), so it RETURNS a policy result and is never retried; only the narrow `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` overrun on the listing needed reclassifying from an accidental infra throw into that same policy refusal, and every other git failure still throws. **CONST-PI-VERSION-PINNED UNCHANGED, checked** — the two upstream facts this change rests on (pi resolves a skill's relative paths against the skill directory; pi recurses past a directory with no `SKILL.md`) were both read from the pinned 0.80.7 artifact on disk, not from documentation. |

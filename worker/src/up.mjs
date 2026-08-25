@@ -24,6 +24,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { join } from "node:path";
+import { egressArmed as egressArmedFn } from "./egress.mjs";
 import { updateEnvFile } from "./env-file.mjs";
 
 // The one image up may ever fetch, and the local name jobs run under. Literal on purpose (not
@@ -205,15 +206,15 @@ export async function runUp(argv = [], deps = {}) {
 	// AFTER init, deliberately: init has just scaffolded egress-allowlist.conf, and starting a proxy whose
 	// allowlist file does not exist gets a directory created by docker where a file belonged and a squid
 	// that fails confusingly. If the file is still missing, this step declines itself and says which file.
-	if (env.PI_EGRESS === "1") {
+	if (egressArmedFn(env)) {
 		if ((await runCmd(spawn, "docker", ["inspect", "--format={{.State.Running}}", "pi-dispatch-egress-proxy"])) === 0) {
 			out("\n✓ Egress proxy already present (pi-dispatch-egress-proxy)\n");
 			summary.push(["egress", "proxy already present — left untouched"]);
 		} else if (!fs.existsSync(join(cwd, "egress-allowlist.conf"))) {
-			out("\n✗ PI_EGRESS=1 but egress-allowlist.conf is not here — not starting a proxy with no allowlist\n");
+			out("\n✗ the egress policy is on but egress-allowlist.conf is not here — not starting a proxy with no allowlist\n");
 			summary.push(["egress", "skipped — no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
 		} else if (
-			await consent("PI_EGRESS=1 but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
+			await consent("The egress policy is on (PI_EGRESS=0 opts out) but the allowlist proxy is not running. up would start it (same semantics as deploy/docker-compose.yml --profile egress):", [`docker ${EGRESS_NETWORK_ARGS.join(" ")}`, `docker ${quoteArgs(EGRESS_RUN_ARGS)}`], { yes, out, prompt })
 		) {
 			// The network may already exist from a previous run; that is not a failure, so its code is not
 			// checked. The proxy is what matters and it is checked.
@@ -226,7 +227,7 @@ export async function runUp(argv = [], deps = {}) {
 			}
 		} else {
 			out("skipped — start it later with `docker compose -f deploy/docker-compose.yml --profile egress up -d`\n");
-			summary.push(["egress", "skipped (declined) — PI_EGRESS=1 refuses every job pre-spend until the proxy is up"]);
+			summary.push(["egress", "skipped (declined) — every job is refused pre-spend until the proxy is up (PI_EGRESS=0 opts out)"]);
 		}
 	}
 

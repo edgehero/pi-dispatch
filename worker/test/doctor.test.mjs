@@ -66,7 +66,23 @@ function stripFlowLines(output) {
 	}
 	return kept.join("\n");
 }
-const green = { "docker info": 0, "docker image": 0 };
+// A host where everything is in place -- INCLUDING the egress policy, which is armed by default now
+// (REQ-EGRESS-ALLOWLIST). The egress keys come FIRST so they win the prefix match over a later, broader
+// "docker run" a test may plan for the in-image gh probe. A correct policy reaches the provider (exit 0)
+// and is blocked from an unlisted host (exit 3).
+// A HEALTHY egress policy, as docker would answer (REQ-EGRESS-ALLOWLIST). Spread into every plan that
+// wants a working host, because the policy is armed by DEFAULT now: a plan that omits these describes a
+// deployment whose proxy is down, and doctor is right to fail it. Listed FIRST wherever it is spread, so
+// these specific keys win the prefix match over a later, broader "docker run" a test plans for the
+// in-image gh probe. A correct policy reaches the provider (exit 0) and is blocked from an unlisted host
+// (exit 3), which is what makes both directions of the allowlist assertable.
+const EGRESS_OK = {
+	"docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n" },
+	"docker network": 0,
+	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
+	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
+};
+const green = { ...EGRESS_OK, "docker info": 0, "docker image": 0 };
 // A classic-token `gh auth status` (newer gh quotes each scope; the parser also accepts unquoted).
 const ghStatusOutput = [
 	"github.com",
@@ -224,7 +240,7 @@ test("doctor: a trigger image that is absent FAILS, and the fix says the worker 
 	// With --pull=never nothing will pull it at job time, so this line is the only warning that arrives
 	// before the trigger fires.
 	const { out, text } = capture();
-	const plan = { "docker info": 0, "docker image inspect pi-job:latest": 0, "docker image inspect my-python:1.2.0": 1, "docker image": 0 };
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect pi-job:latest": 0, "docker image inspect my-python:1.2.0": 1, "docker image": 0 };
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(undefined, "my-python:1.2.0") }), imgDeps(out, plan));
 	assert.equal(code, 1, "a trigger that can never run is a hard failure, not a warning");
 	assert.match(text(), /✗ Trigger job image present \(my-python:1\.2\.0\)/);
@@ -235,7 +251,7 @@ test("doctor: a trigger image present but without the runner entrypoint WARNS, n
 	// An image without the runner can exit 0 without ever starting the agent, and the queue records that as
 	// success. But an operator may legitimately wrap the entrypoint, so ✗ is not ours to claim.
 	const { out, text } = capture();
-	const plan = { "docker info": 0, "docker image inspect --format": { code: 0, output: '["/bin/sh"]\n' }, "docker image": 0 };
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect --format": { code: 0, output: '["/bin/sh"]\n' }, "docker image": 0 };
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(undefined, "my-python:1.2.0") }), imgDeps(out, plan));
 	assert.equal(code, 0, "warn, never fail");
 	assert.match(text(), /⚠ my-python:1\.2\.0 does not appear to carry the pi-dispatch runner entrypoint/);
@@ -244,7 +260,7 @@ test("doctor: a trigger image present but without the runner entrypoint WARNS, n
 
 test("doctor: a conformant trigger image passes both checks silently", async () => {
 	const { out, text } = capture();
-	const plan = { "docker info": 0, "docker image inspect --format": RUNNER_ENTRYPOINT, "docker image": 0 };
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect --format": RUNNER_ENTRYPOINT, "docker image": 0 };
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(undefined, "my-python:1.2.0") }), imgDeps(out, plan));
 	assert.equal(code, 0);
 	assert.match(text(), /✓ Trigger job image present \(my-python:1\.2\.0\)/);
@@ -500,7 +516,9 @@ test("doctor: the in-image probe passes the token via the spawn env, never argv"
 	};
 	const code = await runDoctor(ghEnv(), ghDeps(out, plan, calls));
 	assert.equal(code, 0);
-	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run");
+	// The gh probe specifically: the egress checks run their own containers, so "the first docker run" is
+	// no longer the same thing as "the one this test is about".
+	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh"));
 	assert.ok(run, "the in-image probe spawned docker run");
 	assert.equal(run.args[run.args.indexOf("--entrypoint") + 1], "gh", "the image entrypoint is overridden to gh");
 	// value-less -e flags: only the names appear in argv, the values ride the spawn env
@@ -535,7 +553,10 @@ test("doctor: GITHUB_AUTH_SOURCE=app skips the in-image probe (mints per-job)", 
 	const code = await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "app" }), ghDeps(out, green, calls));
 	assert.equal(code, 0);
 	assert.match(text(), /✓ in-image gh auth: skipped \(GITHUB_AUTH_SOURCE=app mints per-job\)/);
-	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args[0] === "run"), "app mints per-job — nothing to preflight");
+	assert.ok(
+		!calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh")),
+		"app mints per-job — nothing to preflight (the egress probes are a different check and still run)",
+	);
 	assert.doesNotMatch(text(), /forwards your full gh login/, "no scope warning for source app");
 });
 
@@ -1304,7 +1325,7 @@ test("doctor: without --fix, a fixAction-bearing failure prints exactly the old 
 	const { out, text } = capture();
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
-		{ out, cwd: tmpdir(), spawn: fakeSpawn({ "docker info": 0, "docker image": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", promptFn },
+		{ out, cwd: tmpdir(), spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", promptFn },
 	);
 	assert.equal(code, 1);
 	assert.match(
@@ -1322,7 +1343,7 @@ test("doctor --fix: declining every offer runs nothing and leaves the exit code 
 	const { out, text } = capture();
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
-		{ out, cwd: tmpdir(), spawn: fakeSpawn({ "docker info": 0, "docker image": 1 }, calls), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn },
+		{ out, cwd: tmpdir(), spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 1 }, calls), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(code, 1, "warn-not-fail doctrine: offering fixes changes nothing about severity");
 	// The EXACT command is shown before each prompt -- consent is to a command, not to a vibe.
@@ -1346,7 +1367,7 @@ test("doctor --fix: accepting the image offer runs exactly docker pull then dock
 		{
 			out,
 			cwd: tmpdir(),
-			spawn: fakeSpawn({ "docker info": 0, "docker image": 1, "docker pull": 0, "docker tag": 0 }, calls),
+			spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 1, "docker pull": 0, "docker tag": 0 }, calls),
 			probeValkey: async () => true,
 			fileExists: () => true,
 			nodeVersion: "22.19.0",
@@ -1368,7 +1389,7 @@ test("doctor --fix: accepting the image offer runs exactly docker pull then dock
 
 test("doctor --fix: the converge re-check reruns the probes once and reports green", async () => {
 	const calls = [];
-	const plan = { "docker info": 0, "docker image": 1, "docker pull": 0, "docker tag": 0 };
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image": 1, "docker pull": 0, "docker tag": 0 };
 	const inner = fakeSpawn(plan, calls);
 	// Once the tag lands, the next inspect finds the image -- the probes are idempotent, so the single
 	// re-collect is what honestly turns the report green.
@@ -1396,17 +1417,19 @@ test("doctor --fix: accepting the valkey offer runs the exact loopback docker ru
 		{
 			out,
 			cwd: tmpdir(),
-			spawn: fakeSpawn({ "docker info": 0, "docker image": 0, "docker run": 0 }, calls),
+			spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 0, "docker run": 0 }, calls),
 			// Reachable exactly once the container has been started: the converge pass flips to ✓ only
 			// because the fix actually ran, not because fixing earns credit.
-			probeValkey: async () => calls.some((c) => c.cmd === "docker" && c.args[0] === "run"),
+			probeValkey: async () => calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey")),
 			fileExists: () => true,
 			nodeVersion: "22.19.0",
 			fix: true,
 			promptFn: async () => true,
 		},
 	);
-	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run");
+	// The VALKEY run, named explicitly: the egress checks run their own probe containers, so "the first
+	// docker run" stopped being a unique way to name this one.
+	const run = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey"));
 	assert.deepEqual(run.args, [
 		"run",
 		"-d",
@@ -1554,7 +1577,7 @@ test("doctor --fix: piped stdin executes nothing from the prompt tier, end to en
 		{
 			out,
 			cwd: tmpdir(),
-			spawn: fakeSpawn({ "docker info": 0, "docker image": 1 }, calls),
+			spawn: fakeSpawn({ ...EGRESS_OK, "docker info": 0, "docker image": 1 }, calls),
 			probeValkey: async () => true,
 			fileExists: () => true,
 			nodeVersion: "22.19.0",
@@ -1671,7 +1694,7 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	const { home } = installUnit({ platform: "linux", deployDir, setup: loose });
 	const checks = await collectChecks(
 		env,
-		collectSeams({ "docker info": 0, "docker image": 1, "gh auth": "enoent", "git ": 1 }, { cwd: deployDir, home, platform: "linux" }),
+		collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 1, "gh auth": "enoent", "git ": 1 }, { cwd: deployDir, home, platform: "linux" }),
 	);
 	const carried = assertFixActionDoctrine(checks);
 	// The fixture must actually reach every eligible check -- a triggers-parse regression swallowed to
@@ -1709,7 +1732,7 @@ test("doctor --fix doctrine: a missing manifest offers restage; overridden image
 		PI_JOB_IMAGE: "acme/pi-job:2",
 		VALKEY_URL: "redis://queue.internal:6379",
 	};
-	const checks = await collectChecks(env, collectSeams({ "docker info": 0, "docker image": 1, "gh auth": "enoent" }, { nodeVersion: "22.19.0" }));
+	const checks = await collectChecks(env, collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 1, "gh auth": "enoent" }, { nodeVersion: "22.19.0" }));
 	assertFixActionDoctrine(checks);
 	const manifest = checks.find((c) => /^Staged packages manifest readable/.test(c.label));
 	assert.ok(manifest && !manifest.ok);
@@ -1840,23 +1863,13 @@ test("doctor: a flow that fails the skill charset is its own ⚠ -- no tier coul
 
 // --- REQ-EGRESS-ALLOWLIST (issue #202) ----------------------------------------------------------------
 
-const egressPlan = (extra = {}) => ({
-	...green,
-	"docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n" },
-	"docker network create": 0,
-	"docker network connect": 0,
-	"docker network disconnect": 0,
-	"docker network rm": 0,
-	// The two end-to-end probes, distinguishable because each names its own container. A CORRECT policy
-	// reaches the provider (the probe exits 0) and is blocked from an unlisted host (the probe exits 3).
-	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
-	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
-	...extra,
-});
+const egressPlan = (extra = {}) => ({ ...green, ...extra });
 
-test("doctor: a deployment with NO egress policy says nothing about one", async () => {
+test("doctor: a deployment that turned the policy OFF says nothing about one", async () => {
 	const { out, text } = capture();
-	const code = await runDoctor(ghEnv(), ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }));
+	// PI_EGRESS=0 is now the opt-out rather than the default, and the byte-identical-output convention
+	// still holds for it: a deployment that declined the policy gets no lines about it at all.
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }));
 	assert.equal(code, 0);
 	// Byte-identical output for a deployment that never armed the feature, the same convention the
 	// env-setup checks follow one feature over.

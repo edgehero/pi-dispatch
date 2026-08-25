@@ -66,7 +66,20 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 
 ## OQ-004 — Egress from the job container is unrestricted in v1
 
-- **Status**: **ACCEPTED RISK — RATIFIED 2026-08-25, and SCOPED.** Accepted as the **default** posture,
+- **Status**: **CLOSED 2026-08-25 — graduated to `CONST-EGRESS-POLICY-IN-THE-ARGV`.** The close condition
+  this row set is met: an allowlist proxy on a dedicated Docker network, applied by the worker's own argv,
+  **on by default**, with the constraint written. What follows is the row's history, kept because the
+  answer is the durable half and because two of its findings were corrected rather than confirmed.
+- **Answer**: Egress from a job container is bounded by default. Every job runs on its own `--internal`
+  network whose only other member is a hostname allowlist proxy, and a job whose policy cannot serve it is
+  refused **before it spends** (`REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`,
+  `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`). An operator may still open it with `PI_EGRESS=0`, and that
+  posture is what `OQ-026` now carries. **Closing this row does not retire the disclosure**: an allowlist
+  bounds *where* an induced agent can send the environment and does not prevent it, because the forge is on
+  the list by necessity and a repository is a perfectly good place to write a secret to.
+  `CONST-TOKEN-SCOPED-PER-JOB` remains what actually bounds the damage.
+- **Superseded status**: **ACCEPTED RISK — RATIFIED 2026-08-25, and SCOPED.** Accepted as the **default**
+  posture,
   on the condition the row was really waiting on: that the policy `SECURITY.md` tells an operator to apply
   is written down rather than left to be derived. That condition is now met (issue #199) — `docs/sandbox.md`
   carries a recipe that has been **run**, in both directions, with the failure costs measured. The verdict
@@ -312,19 +325,34 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   diagnostic — it degrades to nothing off Linux, swallows every error, and can never fail a job — and it
   detects only that a job **went wide**, never what that went-wide cost. Naming a number it cannot know
   would be worse than reporting none.
-- **What would close it**: a container-level egress proxy that terminates TLS and accounts provider traffic
-  per container rather than per process. That is the same mechanism `OQ-004` names, arriving for a
-  different reason — which is why this closes **with** `OQ-004` rather than before it. Reading usage off a
-  subprocess needs to read its HTTP, and reading its HTTP needs TLS termination; there is no cheaper
-  version of this.
+- **What would close it**: a container-level egress proxy that **terminates TLS** and accounts provider
+  traffic per container rather than per process. Reading usage off a subprocess needs to read its HTTP, and
+  reading its HTTP needs TLS termination; there is no cheaper version of this for **accounting**. Worth
+  adding, because it is the strongest argument for the eventual mechanism and nobody had written it down: a
+  header cannot be injected into a `CONNECT` tunnel without terminating it either, so the secrets-injecting
+  proxy that would take the provider key **out** of the container entirely is necessarily the same one.
+- **Corrected (2026-08-25, issue #202) — this row used to claim TLS termination was "the same mechanism
+  `OQ-004` names", and it never was.** `OQ-004`'s close condition was a **hostname allowlist** proxy;
+  `docs/sandbox.md` said in terms that such a proxy *never* terminates TLS; and `OQ-004` itself warned that
+  the two "must not be conflated when the graduation is designed". The claim entered this register in
+  #199's own pass, whose revision row records the coupling standing "byte-unchanged" while the sibling row
+  three lines up was being rewritten around it. So the **closes-with-`OQ-004`** coupling is struck.
+- **What the graduation actually changed for this row: nothing, on the accounting axis.** A subprocess `pi`
+  spends against the **provider host**, which is on the allowlist by necessity because every job needs it,
+  so the allowlist cannot bound whether it spends, how much, or record that it did. The child-process
+  sampler below is still the only detection and still detects went-wide rather than went-wide-and-spent.
+  What it **did** change is the cost of closing this row: with the network and the proxy shipped, the
+  terminating variant is a mode change on components that already exist rather than new plumbing. So this
+  closes **on top of** `OQ-004`'s mechanism rather than with it.
 - **What bounds it meanwhile**: the job-count caps (`CONST-BUDGET-BEFORE-TOKENS`), `maxTurns` on the root
   session, the 30-minute container timeout (`REQ-JOB-TIMEOUT-30M`), and the provider-side spend limit
   `SECURITY.md` tells every operator to set. Also the four gates in front of a staged package at all: an
   operator declares it, pins it, stages it, and arms it per trigger.
-- **Related risk**: `OQ-004` (unrestricted egress) — same fix, and it remains **ACCEPTED RISK**, unchanged
-  by this entry. `OQ-004` was **RATIFIED 2026-08-25** with an operator-applied recipe (issue #199); that
-  ratification does not touch this row, because a recipe an operator applies around the container accounts
-  for nothing. The coupling above is unchanged: this closes **with** `OQ-004`, under issue #202.
+- **Related risk**: `OQ-004` (egress), **CLOSED 2026-08-25** by issue #202. That does not touch this row's
+  facts: a hostname allowlist applied around the traffic accounts for nothing, and the provider does not
+  even become unreachable, because it must be on the list. This row stays **ACCEPTED RISK** and still wants
+  explicit ratification, on the precedent #199 set by leaving `OQ-012`, `OQ-013` and `OQ-015` all wanting
+  it rather than ratifying three rows in passing.
 - **Needs**: maintainer ratification that shipping staged packages with in-process-only metering is
   acceptable, given that the unmetered path requires an operator to have staged and armed a package that
   spawns `pi`.
@@ -893,10 +921,43 @@ adversarial passes did.
 
 ---
 
+---
+
+## OQ-026 — An allowlist cannot enumerate what a flow reaches
+
+- **Status**: **ACCEPTED RISK** — the successor to `OQ-004`'s residual, opened by closing it.
+- **Position**: `CONST-EGRESS-POLICY-IN-THE-ARGV` bounds a job to a list of hostnames. The list ships with
+  the three a job cannot work without (the provider, the forge, the registry) and is otherwise the
+  operator's. **What a job actually reaches is a property of the flows an operator wrote**, and nothing in
+  this project can enumerate it: a flow that browses, calls an API someone added, or installs from a private
+  registry reaches hosts nobody listed. `docs/egress.md` says so in those words rather than implying
+  coverage.
+- **Why it is a risk row and not a constraint**: the same reason `OQ-004` was one. A constraint promising
+  that the allowlist is complete would ship unenforced, and there is no mechanism by which this project
+  could enforce it -- "which hosts do your flows need" is not a question a worker can ask. Naming it here
+  is honest; naming it in the constitution would teach readers that the constitution is aspirational.
+- **What it costs when it bites**: a job that reaches an unlisted host is refused **by the proxy, mid-run**,
+  not pre-spend. The gate in front of the container proves the policy is *present*, never that it is
+  *sufficient*, and the distinction is stated in `REQ-EGRESS-ALLOWLIST` rather than left to be discovered.
+  So this is the one egress failure that still costs a budget slot, and a browsing flow is the case most
+  likely to find it.
+- **What bounds it meanwhile**: `doctor` proves both directions of the policy on demand and names the
+  provider and the forge specifically; the proxy's own log records every `TCP_DENIED`, which is where the
+  missing host appears by name; and `PI_EGRESS=0` is a one-line, fully-documented way back to the prior
+  posture while an operator works out what a flow needs.
+- **What would close it**: a per-trigger declaration of the hosts a flow needs, checked pre-spend against
+  the running policy -- which needs a place for a flow to declare them that is not the serviced repo (a
+  repo naming where the agent may send the operator's credentials is `DES-AI-TRIGGER-FLOW-GATE`'s refusal,
+  one layer over). Until then, an operator reading their own deny log is the mechanism.
+- **What would REOPEN `OQ-004` rather than this row**: a documented exfiltration the allowlist would have
+  stopped and the credential bound did not.
+- **Raised by**: issue #202, on closing `OQ-004`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-25 | Issue #202 (the default flip, and the close). **OQ-004 CLOSED** -- graduated to `CONST-EGRESS-POLICY-IN-THE-ARGV`, on the criterion the row itself set: an allowlist proxy on a dedicated Docker network, applied by the worker's argv, **on by default**. The Answer states plainly what closing does NOT mean, because a row titled "egress is unrestricted in v1" closing while an operator can still open it would be exactly the quiet divergence this register exists to prevent: `PI_EGRESS=0` still exists, the forge is on the allowlist by necessity, and `CONST-TOKEN-SCOPED-PER-JOB` remains what actually bounds the damage. The superseded status is kept rather than deleted, because the answer is the durable half. **NEW `OQ-026`** -- an allowlist cannot enumerate what a flow reaches: the successor to this row's residual, opened by closing it. A job that reaches an unlisted host is refused by the proxy **mid-run**, not pre-spend, so it is the one egress failure that still costs a budget slot, and a browsing flow is the case most likely to find it. Recorded as an ACCEPTED RISK rather than a constraint on this register's own principle: "which hosts do your flows need" is not a question a worker can ask, and a constraint promising the allowlist is complete would ship unenforced. **OQ-011 CORRECTED, and this is the substance of the row.** It claimed TLS termination was "the same mechanism `OQ-004` names" and that it therefore closes **with** `OQ-004`. That was false and had been since `OQ-004` was ratified: that row's close condition was a **hostname allowlist**, `docs/sandbox.md` said in terms that such a proxy never terminates TLS, and `OQ-004` itself warned the two must not be conflated. It entered this register in #199's own pass, whose revision row records the coupling standing "byte-unchanged" while the sibling row three lines up was rewritten around it. The coupling is struck; what the graduation actually bought this row is recorded in both directions (nothing on the accounting axis, because a subprocess spends against the provider host which is on the allowlist by necessity; a materially cheaper close, because the terminating variant is now a mode change on components that already exist). Its `Needs` **stays** -- ratification is a maintainer's act on evidence and this issue produces none for it. One argument is added because it is the strongest case for the eventual mechanism and nobody had written it: a header cannot be injected into a `CONNECT` tunnel without terminating it either, so the secrets-injecting proxy is necessarily the same one. **OQ-012, OQ-013, OQ-014, OQ-015 UNCHANGED, checked** -- `OQ-014`'s in particular is not a formality: an allowlist does not narrow a resumed session's exfiltration reach, because the forge is on the list and a transcript pushed to a branch is exfiltration through an allowed host. |
 | 2026-08-25 | Issue #202 (the graduation `OQ-004` named). **OQ-004 AMENDED, not yet closed.** The mechanism its close condition names has landed -- an allowlist proxy on a dedicated Docker network (`REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`) -- and it ships **off**, so the row's Position is still literally true and closing it here would be the quiet divergence this register exists to prevent. It closes with the release that makes it the default. **The first of its two design findings is REFUTED**, and recording that is the substance of this row. `OQ-004:95-97` and `docs/sandbox.md` held that the runner's provider call does not follow `HTTPS_PROXY` even with `NODE_USE_ENV_PROXY=1`, and concluded the provider needed a network-layer rule by address. The observation was real and the cause was not pi: `@anthropic-ai/sdk` resolves `globalThis.fetch` at construction, pi-ai passes it no dispatcher, and the pinned image's Node 22.23.1 installs a proxy-aware one when that flag is set -- measured, the same client follows a dead proxy to `ECONNREFUSED` with it and goes to DNS without it. What actually happened is two paragraphs above the trap the doc recorded: the container env is a **closed allowlist**, and the recipe's own `PI_FORWARD_ENV` line named three variables, not four, so the flag was set on the host and never reached the runner. A proxy therefore CAN carry provider traffic, the provider is an ordinary hostname entry, and there is no address rule anywhere -- which is a better answer than the row asked for. The second finding stands and is why the shipped control refuses pre-spend. **OQ-011 UNCHANGED in substance, checked, and it gains NOTHING here** -- worth stating because the naive reading is the opposite: a subprocess `pi` spends against the provider host, which is on the allowlist by necessity, so the allowlist cannot bound whether it spends, how much, or record that it did, and the Linux-only child sampler is still the only detection. Its `Needs` stays: ratification is a maintainer's act on evidence and this issue produces none for that row. **OQ-012 UNCHANGED, checked**: an operator-built image inherits the network from the worker's argv, so its residual does not widen. **OQ-014 UNCHANGED, checked, and not a formality**: an allowlist does not narrow a resumed session's exfiltration reach, because the forge is on the list and a transcript pushed to a branch is exfiltration through an allowed host. **OQ-013, OQ-015 UNCHANGED, checked** -- neither is downstream of egress. |
 | 2026-08-25 | Issue #199 (the egress recipe `SECURITY.md` promised, and the ratification it was waiting on). **OQ-004 RATIFIED, and SCOPED** — accepted as the default posture on the condition that the operator-applied policy is documented rather than derived, which `docs/sandbox.md` now satisfies with a recipe that was run in both directions. Per the `OQ-014` precedent the `Needs` field is replaced by **what would REOPEN it**, and the entry gains a scoped-verdict field, the external corroboration (v1.0.0 review, which asks for the *secrets-injecting* proxy and therefore points at `OQ-011`, not at this row's allowlist), and the two findings from running the recipe that constrain any future default: the runner's provider call does not follow `HTTPS_PROXY` (so a proxy-only design cannot carry provider traffic), and a too-tight allowlist spends two job-count slots per job and refunds neither (so a shipped default must refuse pre-spend). Graduation to a `CONST-` is unchanged as the close condition and is now owned by issue #202. **OQ-011 AMENDED**, one clause: its `Related risk` gloss records that `OQ-004` is ratified while this row is not, because a recipe applied around the container accounts for nothing; the closes-**with**-`OQ-004` coupling stands byte-unchanged. `INT-CONTAINER-RUNTIME-CONTRACT` **UNCHANGED, checked** — no flag was added to the job argv, which is what makes the recipe an operator control rather than a shipped one. **OQ-012, OQ-013 and OQ-015 UNCHANGED, checked** — all three still want explicit ratification, and none is downstream of egress. |
 | 2026-08-13 | Issue #188 (topology tier resolution). Added **OQ-025** (ACCEPTED, itemised): the six display-side residuals of probing skill tiers from the host — dir-basename naming (false soft possible, false hit impossible), deployment-pointer blindness to `PI_GLOBAL_PI_DIR` (wizard sessions soften rather than lie red; widening the allowlist is a reviewed policy edit, deliberately not done here), overlay/staged `ai-trigger: allow` unbadged (existence-only readers; the closed flag vocabulary stays closed and the tier tips carry the categorical truth), forge flows in non-repo tiers staying unverified (the remote repo outranks every readable tier), malformed stage manifest reading as nothing-staged where the job path keeps last-known-good, and the pre-existing repo-tier truncation false-red (banner-covered; the three new tiers soften on truncation instead). Each bounded by the runner's exact `flow_not_loaded` layer. **OQ-022 AMENDED** (prose correction): doctor's warn is no longer "the only thing that would have told them" — the topology badges `injected-ai-trigger` since issue #54, and since #188 the config edge itself lands on the injected node with its never-AI-reachable tip. **OQ-008 UNCHANGED, checked** — the graph still re-reads the live triggers file per build; tier reads added no cache. **OQ-009 UNCHANGED, checked** — tier nodes join config edges only; no chain edge gained a source or crossed a folder. |

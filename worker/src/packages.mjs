@@ -8,7 +8,10 @@
  * pi's package resolver treats any spec that is not `npm:`/`git:`/a URL as a LOCAL path: it resolves the
  * directory in place -- no install, no network, no writes -- and a `pi` manifest there contributes
  * extensions, skills, prompts and themes. That is precisely what lets a job container load them with
- * network egress denied, which is the whole point of staging at all.
+ * NO JOB-TIME INSTALL, which is the whole point of staging at all. This said "with network egress denied"
+ * until issue #202, and that was the third instance of one claim corrected in the spec and left standing in
+ * its twin: nothing denied egress when it was written, and what staging plus PI_OFFLINE=1 actually buys is
+ * that no install happens, which is true whatever the egress policy is.
  *
  * Versions are EXACT, never a range (CONST-PI-VERSION-PINNED): a floating range turns a silent upstream
  * minor into every queued job becoming a no-op with NO signal -- the queue still reports success, the

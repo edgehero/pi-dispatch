@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
 	createJobNetwork,
 	DEFAULT_EGRESS_PROXY,
+	egressArmed,
 	egressEnv,
 	egressProxyUrl,
 	makeEgressPreflight,
@@ -150,4 +151,28 @@ test("removeJobNetwork detaches before removing, and never throws on a failing t
 		["network disconnect", "network rm"],
 		"a network with a member still attached cannot be removed, so the order is load-bearing",
 	);
+});
+
+test("the posture is BOUNDED by default, and only an explicit 0 opens it", () => {
+	// The polarity is the decision, not a detail. A control that ships off is a control nobody enabled,
+	// which is the state OQ-004 spent a year in: a disclosure with a dead end at the end of it.
+	assert.equal(egressArmed({}), true, "a deployment that says nothing is bounded");
+	assert.equal(egressArmed({ PI_EGRESS: "" }), true);
+	assert.equal(egressArmed({ PI_EGRESS: "1" }), true);
+	assert.equal(egressArmed({ PI_EGRESS: "0" }), false, "only an explicit opt-out opens it");
+	// A typo must never produce the OPEN posture silently. An operator who believes they are bounded and is
+	// not is worse off than one who knows they are not, because the belief displaces the credential bound
+	// that is actually holding.
+	for (const bad of ["true", "on", "yes", "2"]) {
+		assert.throws(() => egressArmed({ PI_EGRESS: bad }), /must be exactly/, `${bad} must not be guessed`);
+	}
+});
+
+test("a deployment that UPGRADES and does nothing is refused, never silently opened", async () => {
+	// The upgrade path, pinned. With no proxy on the host the preflight refuses -- loudly, for free, and
+	// naming the fix -- rather than falling back to open egress. The fallback is the tempting option and it
+	// is the one this project refuses: a security control that quietly disables itself is exactly the
+	// "believed on while off" failure the whole feature exists to remove. Reversible in one line.
+	const preflight = makeEgressPreflight({ armed: egressArmed({}), spawnFn: fakeSpawn([], { inspect: 1, info: 0 }) });
+	assert.deepEqual(await preflight({}), { proxyMissing: DEFAULT_EGRESS_PROXY });
 });

@@ -205,7 +205,7 @@ export async function runJob(job, deps) {
 		if (egress.proxyMissing || egress.proxyStopped) {
 			const proxy = egress.proxyMissing ?? egress.proxyStopped;
 			const state = egress.proxyMissing ? "is not on this host" : "is not running";
-			await comment(job, `Refused: this deployment runs jobs behind an egress policy (PI_EGRESS=1) and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. Start it with \`docker compose -f deploy/docker-compose.yml --profile egress up -d\`, or unset PI_EGRESS to run without an egress policy. Not run.`);
+			await comment(job, `Refused: this deployment runs jobs behind an egress policy and its allowlist proxy "${proxy}" ${state}, so the job could not reach the provider and would burn its budget slot proving it. Start it with \`docker compose -f deploy/docker-compose.yml --profile egress up -d\`, or set PI_EGRESS=0 to run without an egress policy. Not run.`);
 			// The proxy's NAME is operator-authored deployment config, never payload -- the same PII class as
 			// the image ref on the refusal above.
 			log(egress.proxyMissing ? "refused_egress_proxy_missing" : "refused_egress_proxy_stopped", { proxy });

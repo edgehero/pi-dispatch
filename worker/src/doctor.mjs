@@ -56,7 +56,7 @@ import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
-import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
@@ -450,7 +450,7 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
-	// REQ-EGRESS-ALLOWLIST (issue #202). [] unless PI_EGRESS=1, so a deployment without a policy gets
+	// REQ-EGRESS-ALLOWLIST (issue #202). [] when PI_EGRESS=0, so a deployment that declined it gets
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
 	checks.push(...(await egressChecks(env, seams, { dockerCode, imageCode, jobImage })));
@@ -1457,8 +1457,9 @@ function readTriggerFacts(env, fileExists, cwd) {
  * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
  * rather than assumed from the compose file that was supposed to create it.
  *
- * Returns [] when `PI_EGRESS` is not exactly "1", so a deployment that has not armed the policy gets
- * byte-identical output -- the same convention envSetupChecks follows one feature over.
+ * Returns [] when `PI_EGRESS=0`, so a deployment that declined the policy gets byte-identical output --
+ * the same convention envSetupChecks follows one feature over. Armed is the DEFAULT, so most deployments
+ * see these lines.
  *
  * TIERING, and it is the whole editorial judgement here. The proxy's PRESENCE is a hard failure when the
  * policy is armed: the worker refuses every job pre-spend without it, so a ✓ would be a lie and a ⚠ would
@@ -1476,7 +1477,17 @@ function readTriggerFacts(env, fileExists, cwd) {
  */
 async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	const { spawn } = seams;
-	if (env.PI_EGRESS !== "1") return [];
+	// The SAME parse the worker boots with (egress.mjs), never a second `=== "1"`: doctor reporting a
+	// policy that is off, or nothing about one that is on, is worse than doctor not checking at all.
+	// A malformed value is the worker's boot failure to report, not doctor's to guess at, so it reads as
+	// armed here and the `.env` check above is what fails.
+	let armed;
+	try {
+		armed = egressArmed(env);
+	} catch {
+		armed = true;
+	}
+	if (!armed) return [];
 	const proxy = env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY;
 	const checks = [];
 
@@ -1499,7 +1510,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	checks.push({
 		ok: up,
 		label: up ? `Egress proxy running (${proxy})` : state.code === 0 ? `Egress proxy is stopped (${proxy})` : `Egress proxy is not on this host (${proxy})`,
-		fix: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- PI_EGRESS=1 refuses every job pre-spend while this is down, which costs no budget but runs nothing",
+		fix: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
 	});
 	if (!up) return checks;
 

@@ -7,7 +7,7 @@
 
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
-import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 
 export function configError(message) {
@@ -135,26 +135,24 @@ function forwardEnvList(raw, egressArmed = false) {
 	const egress = egressArmed ? names.filter((n) => EGRESS_ENV_VARS.has(n)) : [];
 	if (egress.length > 0) {
 		throw configError(
-			`PI_FORWARD_ENV must not forward ${egress.join(", ")} while PI_EGRESS=1 -- the egress policy sets them itself, pointing at the proxy on this job's network, and a forwarded value would silently redirect every job while looking like the control working (REQ-EGRESS-ALLOWLIST). Unset PI_EGRESS to use your own proxy: docs/egress.md`,
+			`PI_FORWARD_ENV must not forward ${egress.join(", ")} while the egress policy is armed -- it sets them itself, pointing at the proxy on this job's network, and a forwarded value would silently redirect every job while looking like the control working (REQ-EGRESS-ALLOWLIST). Set PI_EGRESS=0 to use your own proxy: docs/egress.md`,
 		);
 	}
 	return names;
 }
 
 /**
- * PI_EGRESS -- the shipped egress policy (REQ-EGRESS-ALLOWLIST). An opt-IN in this release.
- *
- * Strict parse, matching PI_GLOBAL_ALLOW_EXTENSIONS: exactly "1" arms it, unset/empty/"0" leave it off,
- * and ANY other value is a loud configError rather than a guess. A typo must never silently leave a
- * deployment believing it has an egress policy while every job runs with open egress -- an operator who
- * thinks they are bounded and is not is in a worse position than one who knows they are not, because the
- * belief displaces the credential bound that is actually holding.
+ * PI_EGRESS (REQ-EGRESS-ALLOWLIST). The parse itself lives in egress.mjs, because `doctor` and `up` read
+ * the environment directly and three copies of one default is two chances to flip it in the wrong number
+ * of places. Here it only gains the `piDispatchConfig` tag, so a bad value prints as a config error and
+ * the worker refuses to boot rather than guessing a security posture.
  */
 function egressEnabled(env) {
-	const raw = env.PI_EGRESS;
-	if (raw === undefined || raw === "" || raw === "0") return false;
-	if (raw === "1") return true;
-	throw configError(`PI_EGRESS must be exactly "1" (on) or "0"/unset (off); got ${JSON.stringify(raw)}`);
+	try {
+		return egressArmed(env);
+	} catch (error) {
+		throw configError(error.message);
+	}
 }
 
 // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY). Unset/empty = feature off. When set it

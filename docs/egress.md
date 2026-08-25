@@ -1,19 +1,24 @@
 # Egress: what a job container may reach
 
-A job container holds a provider key and a minted forge token, runs code from a repository anyone can open
-an issue against, and, by default, has the whole internet in front of it. `SECURITY.md` says so plainly and
-it means it literally.
+A job container holds a provider key and a minted forge token and runs code from a repository anyone can
+open an issue against. For a year it also had the whole internet in front of it, and `SECURITY.md` said so
+plainly.
 
-This is the control for that. It is **off by default**; one variable turns it on.
+Not any more. Egress is **denied by default**: every job runs on **its own
+`--internal` Docker network** with no route anywhere except an allowlist proxy, and a job whose policy
+cannot serve it is **refused before it costs anything**.
+
+What you have to do, once:
 
 ```bash
-PI_EGRESS=1
 docker compose -f deploy/docker-compose.yml --profile egress up -d
 pi-dispatch doctor
 ```
 
-With it on, every job runs on **its own `--internal` Docker network** with no route anywhere except an
-allowlist proxy, and a job whose policy cannot serve it is **refused before it costs anything**.
+**If you are upgrading**, that is the step. Until the proxy is up, every job is refused pre-spend naming it
+and naming that command: loud, free (no budget slot, no tokens), and reversible in one line with
+`PI_EGRESS=0` if you want the old posture back. `pi-dispatch up` offers to start it, and `doctor` fails
+until it is running, so both commands you already run say it before a single job does.
 
 ## The hosts, and they are yours
 
@@ -123,7 +128,7 @@ is a closed allowlist**, and the recipe's own line was
 set on the host and never reached the runner.
 
 The worker now sets all four itself, in the closed map, so arming the policy cannot half-work. While
-`PI_EGRESS=1`, `PI_FORWARD_ENV` refuses those four names at boot: a forwarded value would point every job
+the policy is armed, `PI_FORWARD_ENV` refuses those four names at boot: a forwarded value would point every job
 at a proxy of your own and would read exactly like the control working.
 
 ## What this does not buy you

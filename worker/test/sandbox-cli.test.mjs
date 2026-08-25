@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { runSandbox } from "../src/sandbox-cli.mjs";
 
@@ -22,6 +23,15 @@ function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUnti
 	return { root, dir, workspace: ws };
 }
 
+/** A `docker` that always succeeds, so the per-job network lifecycle never touches a real daemon. */
+function fakeDockerSpawn() {
+	return () => {
+		const child = new EventEmitter();
+		queueMicrotask(() => child.emit("close", 0));
+		return child;
+	};
+}
+
 function capture(over = {}) {
 	const out = [];
 	const err = [];
@@ -36,6 +46,9 @@ function capture(over = {}) {
 			isTty: true,
 			running: async () => [],
 			launch: async () => ({ code: 0 }),
+			// The egress policy is ON by default, so a sandbox builds its own network. Seamed here for the
+			// reason every docker call in this suite is: a unit test must never reach a daemon.
+			spawnNetwork: fakeDockerSpawn(),
 			...over,
 		},
 	};

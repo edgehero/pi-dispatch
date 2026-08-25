@@ -40,6 +40,29 @@ import { spawn } from "node:child_process";
  */
 
 /**
+ * Is the egress policy armed for this environment? An opt-OUT: ON unless explicitly "0".
+ *
+ * THE PARSE LIVES HERE, not in config.mjs, and that is the point. The worker reads it through `loadConfig`,
+ * but `doctor` and `up` read the environment directly -- and a second copy of this three-line rule is a
+ * second place for the default to be wrong. It was: while this was `=== "1"` in three files, flipping the
+ * default in one of them left doctor silently reporting nothing about a policy that was on.
+ *
+ * Strict, matching PI_GLOBAL_ALLOW_EXTENSIONS exactly, including its polarity: unset, "" and "1" all mean
+ * ON; only "0" turns it off; ANY other value throws. A typo must never silently produce the OPEN posture
+ * while an operator believes they are bounded -- they would then be worse off than one who knows they have
+ * no policy, because the belief displaces the credential bound that is actually holding.
+ *
+ * Throws a plain Error; config.mjs re-tags it as a config error so the CLI prints it cleanly. This module
+ * imports nothing but node:child_process (see the header), so it does not reach for that tagger itself.
+ */
+export function egressArmed(env) {
+	const raw = env?.PI_EGRESS;
+	if (raw === undefined || raw === "" || raw === "1") return true;
+	if (raw === "0") return false;
+	throw new Error(`PI_EGRESS must be exactly "0" (off) or "1"/unset (on); got ${JSON.stringify(raw)}`);
+}
+
+/**
  * The long-lived proxy component, started by `deploy/docker-compose.yml`'s `egress` profile (or by
  * `pi-dispatch up`, which mirrors it). One per host, not one per job: it is the only thing on the job's
  * network with a route out, and it is where the allowlist lives.

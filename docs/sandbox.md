@@ -88,9 +88,9 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 
 ## Egress
 
-A sandbox lands on **whatever network the job did**. With `PI_EGRESS=1` that is its own `--internal`
-network with no route anywhere except the allowlist proxy, and with it unset it is Docker's default bridge
-and the whole internet, which is what `SECURITY.md` discloses. The policy, how to turn it on, and a
+A sandbox lands on **whatever network the job did**. By default that is its own `--internal` network with
+no route anywhere except the allowlist proxy; with `PI_EGRESS=0` it is Docker's default bridge and the
+whole internet, which is what `SECURITY.md` discloses. The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a
