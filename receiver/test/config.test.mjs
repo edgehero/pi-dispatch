@@ -381,6 +381,7 @@ test("github block is produced by the shared worker loader -- default gh source,
 		appId: undefined,
 		installationId: undefined,
 		privateKeyPath: undefined,
+		privateKey: null,
 	});
 });
 

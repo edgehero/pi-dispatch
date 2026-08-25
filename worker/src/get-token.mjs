@@ -80,12 +80,14 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 	}
 
 	if (source === "app") {
-		if (!cfg.appId || !cfg.installationId || !cfg.privateKeyPath) {
+		if (!cfg.appId || !cfg.installationId || (!cfg.privateKeyPath && !cfg.privateKey)) {
 			throw configError(
-				"app auth requires appId, installationId, and privateKeyPath (see .env.example)",
+				"app auth requires appId, installationId, and one of privateKeyPath / privateKey (see .env.example)",
 			);
 		}
-		const privateKey = await readPem(readFile, cfg.privateKeyPath);
+		// The key is either already in hand (GITHUB_APP_PRIVATE_KEY, normalised and shape-checked at config
+		// load) or on disk. loadGitHubAuth refuses both-set, so this is a fallback, never a precedence rule.
+		const privateKey = cfg.privateKey ?? (await readPem(readFile, cfg.privateKeyPath));
 		const auth = { appId: cfg.appId, privateKey, installationId: cfg.installationId };
 
 		// App-JWT client: resolveSelfId's app path reads GET /app then GET /users/{slug}[bot].

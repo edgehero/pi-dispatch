@@ -145,6 +145,26 @@ test("app happy: installation token minted, selfId is the bot-user id via the tw
 	assert.equal(await auth.mintToken({ kind: "github", repo: "some-owner/some-repo" }), "ghs_installtoken");
 });
 
+test("app happy with an inline key: mints without ever touching the filesystem (issue #208)", async () => {
+	const calls = [];
+	const pem = "-----BEGIN RSA PRIVATE KEY-----\ninline\n-----END RSA PRIVATE KEY-----\n";
+	let readFileCalls = 0;
+	const auth = await makeGitHubAuth(
+		// The shape loadGitHubAuth produces for a secrets-manager deployment: key in hand, no path at all.
+		{ source: "app", appId: "123", installationId: "456", privateKeyPath: undefined, privateKey: pem },
+		{
+			Octokit: FakeOctokit(APP_ROUTES),
+			createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_installtoken" }, calls }),
+			readFile: async () => {
+				readFileCalls++;
+				throw new Error("a deployment with no key file must never reach the filesystem");
+			},
+		},
+	);
+	assert.equal(await auth.mintToken({ kind: "github", repo: "some-owner/some-repo" }), "ghs_installtoken");
+	assert.equal(readFileCalls, 0, "the inline key is used directly -- no read, no path, nothing to stat");
+});
+
 test("app mint strips the owner: repositoryNames gets the bare repo name", async () => {
 	const calls = [];
 	const auth = await makeGitHubAuth(

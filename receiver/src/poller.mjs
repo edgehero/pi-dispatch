@@ -804,7 +804,10 @@ function makeAppInstallationTokenFn(github, { fetchFn, readFile, now }) {
 	let cached = null; // { token, expiresAtMs }
 	return async () => {
 		if (cached !== null && cached.expiresAtMs - now() > 5 * 60_000) return cached.token;
-		const pem = await readFile(github.privateKeyPath, "utf8");
+		// Inline key (GITHUB_APP_PRIVATE_KEY) when the operator supplied one, the file otherwise. The shared
+		// loadGitHubAuth normalised and shape-checked it at load and refuses both-set, so there is nothing to
+		// decide here (issue #208).
+		const pem = github.privateKey ?? (await readFile(github.privateKeyPath, "utf8"));
 		const jwt = appJwt(github.appId, pem, now());
 		const res = await fetchFn(`${API_URL}/app/installations/${github.installationId}/access_tokens`, {
 			method: "POST",

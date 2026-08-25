@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
 import { buildSandboxRunArgs, listRunningSandboxes, parsePublish, resolveSandbox, sandboxContainerName, SANDBOX_NAME_PREFIX } from "../src/sandbox.mjs";
 
@@ -39,7 +40,7 @@ test("NO credential of any kind reaches a resurrected sandbox", () => {
 	const s = args.join(" ");
 	// Every forge's minted variable names, from the table itself -- so a forge added later cannot leak in
 	// through a hand-maintained list that nobody updated.
-	for (const name of MINTED_TOKEN_VARS) {
+	for (const name of [...MINTED_TOKEN_VARS, ...WORKER_ONLY_SECRET_VARS]) {
 		assert.ok(!s.includes(name), `a sandbox must not carry ${name}`);
 	}
 	for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY", "PI_PROVIDER", "PI_MODEL"]) {

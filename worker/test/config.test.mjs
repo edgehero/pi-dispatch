@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { delimiter } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, globalExtensionsEnabled, loadConfig, loadGitLabAuth } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, globalExtensionsEnabled, loadConfig, loadGitLabAuth, normalizeAppPrivateKey } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
@@ -138,6 +138,19 @@ test("forwardEnv refuses GITHUB_TOKEN and GH_TOKEN at boot -- a forwarded operat
 			`PI_FORWARD_ENV=${bad}`,
 		);
 	}
+});
+
+test("forwardEnv refuses the App signing key -- worse in a container than the token it would mint", () => {
+	for (const bad of ["GITHUB_APP_PRIVATE_KEY", "FOO,GITHUB_APP_PRIVATE_KEY,BAR"]) {
+		assert.throws(
+			() => loadConfig({ PI_FORWARD_ENV: bad }),
+			(e) => e.piDispatchConfig === true && /every repository the App is installed on/.test(e.message),
+			`PI_FORWARD_ENV=${bad}`,
+		);
+	}
+	// The PATH is deliberately still forwardable: a path string with no mount behind it is inert in a
+	// container, and a refusal that fires on harmless things stops being read.
+	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "GITHUB_APP_PRIVATE_KEY_PATH" }).forwardEnv, ["GITHUB_APP_PRIVATE_KEY_PATH"]);
 });
 
 test("authFromPi defaults ON; only PI_AUTH_FROM_PI=0 forces env-only", () => {
@@ -327,6 +340,68 @@ test("source=app with all vars present but a missing key file is a config error"
 	);
 });
 
+// -- the App key as a VALUE (issue #208) ---------------------------------------------------------------
+//
+// A deployment fed by a secrets manager can supply every other secret as an environment value; the App
+// key was the one that had to be a file (docs/secrets.md). These pin the contract: exactly one source,
+// one normalisation rule, a shape check at load, and never the key in a message.
+
+const PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsecret\n-----END RSA PRIVATE KEY-----";
+const appEnvBase = { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "1", GITHUB_APP_INSTALLATION_ID: "2" };
+
+test("source=app takes the key inline, with no key file anywhere", () => {
+	const c = loadConfig({ ...appEnvBase, GITHUB_APP_PRIVATE_KEY: PEM }, { fileExists: () => false });
+	assert.equal(c.github.privateKey, PEM, "carried verbatim -- real newlines need no normalising");
+	assert.equal(c.github.privateKeyPath, undefined, "and no path is invented for it");
+});
+
+test("a flattened key (literal backslash-n, no real newline) is unescaped -- one unambiguous rule", () => {
+	const flat = PEM.replace(/\n/g, "\\n");
+	assert.ok(!flat.includes("\n"), "the fixture really is single-line");
+	const c = loadConfig({ ...appEnvBase, GITHUB_APP_PRIVATE_KEY: flat }, { fileExists: () => false });
+	assert.equal(c.github.privateKey, PEM, "a .env line and a manager UI both produce this shape");
+});
+
+test("both key sources set is a refusal, not a precedence rule", () => {
+	assert.throws(
+		() => loadConfig({ ...appEnvBase, GITHUB_APP_PRIVATE_KEY: PEM, GITHUB_APP_PRIVATE_KEY_PATH: "/k.pem" }, { fileExists: () => true }),
+		(e) => e.piDispatchConfig === true && /both set/.test(e.message),
+		"two places holding one signing key disagree eventually, and the winner should not be folklore",
+	);
+});
+
+test("source=app with neither key source names both ways to supply it", () => {
+	assert.throws(
+		() => loadConfig({ ...appEnvBase }, { fileExists: () => true }),
+		(e) => e.piDispatchConfig === true && /GITHUB_APP_PRIVATE_KEY_PATH \(or GITHUB_APP_PRIVATE_KEY\)/.test(e.message),
+	);
+});
+
+test("an inline key that is not a PEM refuses at load, and the refusal never quotes it", () => {
+	const junk = "not-a-pem-but-still-a-secret-9f3a";
+	assert.throws(
+		() => loadConfig({ ...appEnvBase, GITHUB_APP_PRIVATE_KEY: junk }, { fileExists: () => false }),
+		(e) => e.piDispatchConfig === true && /not a PEM private key/.test(e.message) && !e.message.includes(junk),
+		"a truncated paste must fail here, not at the first mint with a crypto error naming nothing",
+	);
+});
+
+test("a blank inline key reads as unset, so a scaffolded .env line never shadows the path", () => {
+	const c = loadConfig({ ...appEnvBase, GITHUB_APP_PRIVATE_KEY: "   ", GITHUB_APP_PRIVATE_KEY_PATH: "/k.pem" }, { fileExists: () => true });
+	assert.equal(c.github.privateKey, null);
+	assert.equal(c.github.privateKeyPath, "/k.pem", "the empty line is not 'both set', and does not win");
+});
+
+test("normalizeAppPrivateKey: blank is null, a real PEM is untouched, a mixed value is left alone", () => {
+	assert.equal(normalizeAppPrivateKey(undefined), null);
+	assert.equal(normalizeAppPrivateKey("  "), null);
+	assert.equal(normalizeAppPrivateKey(PEM), PEM, "verbatim once trimmed");
+	// A value that already has real newlines is NOT unescaped, even if it also contains a backslash-n:
+	// the rule fires only on the unambiguous case, so nothing can mangle a key that was already correct.
+	const withBoth = "-----BEGIN PRIVATE KEY-----\nline\\nstill\n-----END PRIVATE KEY-----";
+	assert.equal(normalizeAppPrivateKey(withBoth), withBoth);
+});
+
 test("source=app with all vars present and key file present parses the exact block shape", () => {
 	const c = loadConfig(
 		{
@@ -343,6 +418,10 @@ test("source=app with all vars present and key file present parses the exact blo
 		appId: "1",
 		installationId: "2",
 		privateKeyPath: "/k.pem",
+		// Null because this deployment supplies the key as a FILE. Present in the shape either way, so an
+		// inline deployment and a path deployment are the same object with one field swapped, and neither
+		// consumer has to ask which kind it is holding.
+		privateKey: null,
 		// The gh-source resume escape hatch (PI_SESSIONS_ALLOW_GH_SOURCE), carried on the block so
 		// makeGitHubAuth reads it without a second env lookup. False here: unset means the refusal is armed.
 		allowGhResume: false,

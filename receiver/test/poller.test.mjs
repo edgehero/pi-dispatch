@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import { filter } from "../src/filter.mjs";
 import { parseSubset } from "../src/receiver.mjs";
@@ -574,6 +575,43 @@ test("GITHUB_AUTH_SOURCE=app with no POLL_REPOS discovers the installation's rep
 	for (const repo of ["o/a", "o/b"]) {
 		assert.ok(fetch.calls.some((c) => c.url.includes(`/repos/${repo}/issues/events`)), `${repo} is polled`);
 	}
+});
+
+test("an inline App key mints the poll token without touching the filesystem (issue #208)", async () => {
+	// No tokenFn here: this drives the REAL makeAppInstallationTokenFn, which is the only place the
+	// receiver reads the key. `readFile` throws, so a deployment with no key file on disk proves it.
+	// A REAL key: the receiver signs an App JWT with it, so a fixture string only proves the crypto
+	// rejects a fixture string. Generated here rather than at module scope -- one test needs it.
+	const { privateKey: PEM } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
+	const env = { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "7", GITHUB_APP_INSTALLATION_ID: "11", GITHUB_APP_PRIVATE_KEY: PEM, POLL_REPOS: "o/a" };
+	const routes = [
+		{ path: "/app/installations/11/access_tokens", replies: [ghResponse(201, { token: "ghs_polled" })] },
+		{ path: "/repos/o/a/issues/events", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/a/pulls?state=open", replies: [ghResponse(200, [])] },
+	];
+	const fetchFn = fakeFetch(routes);
+	// The injected sleep runs INSIDE startPoller, before its binding settles, so it cannot reach for
+	// `poller.stop()` the way runPoller does. It parks forever instead; stop() below is seen by the
+	// loop's own `if (stopped) break` at the end of cycle one, so the delay is never reached.
+	const never = new Promise(() => {});
+	const poller = await startPoller(env, {
+		fetchFn,
+		redis: fakeRedis(),
+		queueFn: async () => {},
+		out: () => {},
+		now: () => NOW,
+		random: () => 0.5,
+		selfIdFn: async () => SELF,
+		readFile: async () => assert.fail("an inline key must never send the receiver to the filesystem"),
+		fsDeps: FS,
+		sleep: () => never,
+	});
+	poller.stop();
+	await poller.done;
+	const mint = fetchFn.calls.find((c) => c.url.includes("/access_tokens"));
+	assert.ok(mint, "the installation token was minted from the inline key");
+	assert.equal(mint.method, "POST");
+	assert.match(mint.headers.authorization, /^Bearer /, "signed as an App JWT built from the key we supplied");
 });
 
 test("zero repos from discovery fails loud at boot, naming both mechanisms", async () => {

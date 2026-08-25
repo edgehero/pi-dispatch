@@ -89,12 +89,36 @@ function commaList(raw) {
 // token under that name into every container of every forge, with nothing failing and nothing logged.
 // `forges.mjs` derives both from one row, and `env-allowlist.test.mjs` binds them.
 
+/**
+ * Names the WORKER holds that must never reach a job container, for a different reason than the minted
+ * ones above: nothing overrides them, they simply do not belong in there.
+ *
+ * `GITHUB_APP_PRIVATE_KEY` is the App's signing key. It mints installation tokens for every repository
+ * the App is installed on, with no expiry of its own -- so forwarding it hands an agent that is reading
+ * adversarial issue text something strictly worse than the per-job token the whole of
+ * `CONST-TOKEN-SCOPED-PER-JOB` exists to bound. This became reachable the moment the key could be an
+ * environment value at all (issue #208); before that, `PI_FORWARD_ENV` could only have carried the PATH.
+ *
+ * `GITHUB_APP_PRIVATE_KEY_PATH` is deliberately NOT here: a path string with no mount behind it is inert
+ * inside a container, and refusing harmless things is how a refusal stops being read.
+ *
+ * Kept separate from `MINTED_TOKEN_VARS`, which is defined as "every name any forge's mint can write"
+ * and derived from the forge table. This is not that, and folding it in would make that definition a lie.
+ */
+export const WORKER_ONLY_SECRET_VARS = new Set(["GITHUB_APP_PRIVATE_KEY"]);
+
 function forwardEnvList(raw) {
 	const names = commaList(raw);
 	const minted = names.filter((n) => MINTED_TOKEN_VARS.has(n));
 	if (minted.length > 0) {
 		throw configError(
 			`PI_FORWARD_ENV must not forward ${minted.join(", ")} -- the worker mints a per-job token (CONST-TOKEN-SCOPED-PER-JOB) and a forwarded operator token would silently override it`,
+		);
+	}
+	const workerOnly = names.filter((n) => WORKER_ONLY_SECRET_VARS.has(n));
+	if (workerOnly.length > 0) {
+		throw configError(
+			`PI_FORWARD_ENV must not forward ${workerOnly.join(", ")} -- the App's signing key mints tokens for every repository the App is installed on, and a job container is the last place it belongs (CONST-TOKEN-SCOPED-PER-JOB)`,
 		);
 	}
 	return names;
@@ -210,9 +234,42 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 }
 
 /**
+ * Normalise an inline App private key, or refuse it. Returns `null` for absent/blank (an empty
+ * `GITHUB_APP_PRIVATE_KEY=` line in a scaffolded .env means "unset", never "a key that is empty").
+ *
+ * ONE normalisation rule, and it is unambiguous rather than lenient: a PEM contains no backslash, so a
+ * value carrying literal `\n` escapes and no real newline can only be a flattened key -- which is what a
+ * .env line and most secrets-manager UIs produce, since neither can hold a multi-line value. Anything
+ * else is passed through untouched.
+ *
+ * Then the shape is CHECKED, because the alternative is a deployment that boots clean and dies at its
+ * first mint with a crypto error naming nothing. A truncated paste fails here instead.
+ *
+ * The value NEVER appears in a refusal message. That is the whole reason this is a function rather than
+ * three lines inline: one place to get that right, and one place to test it.
+ */
+export function normalizeAppPrivateKey(raw) {
+	const value = typeof raw === "string" ? raw.trim() : "";
+	if (value === "") return null;
+	const pem = value.includes("\\n") && !value.includes("\n") ? value.replace(/\\n/g, "\n") : value;
+	const begins = /^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(pem);
+	const ends = /-----END [A-Z0-9 ]*PRIVATE KEY-----$/.test(pem.trimEnd());
+	if (!begins || !ends) {
+		throw configError(
+			"GITHUB_APP_PRIVATE_KEY is not a PEM private key -- expected it to begin `-----BEGIN ... PRIVATE KEY-----` and end `-----END ... PRIVATE KEY-----` (the value itself is deliberately not shown; check for a truncated paste, or use GITHUB_APP_PRIVATE_KEY_PATH)",
+		);
+	}
+	return pem;
+}
+
+/**
  * Parse and validate the GitHub auth block consumed verbatim by `makeGitHubAuth(cfg)` in
- * get-token.mjs. Shape is fixed: `{ source, patVar, appId, installationId, privateKeyPath }`.
+ * get-token.mjs. Shape is fixed: `{ source, patVar, appId, installationId, privateKeyPath, privateKey }`.
  * Fails loud at load time so a misconfigured worker refuses to boot rather than failing per-job.
+ *
+ * `privateKey` carries KEY MATERIAL when the operator supplied it inline, so nothing may serialise this
+ * block: its three consumers (start.mjs, cli.mjs, sandbox-cli.mjs) pass it along and never print it, and
+ * that is a property to keep rather than a coincidence to rely on.
  */
 export function loadGitHubAuth(env, fileExists) {
 	const source = env.GITHUB_AUTH_SOURCE ?? "gh";
@@ -224,6 +281,11 @@ export function loadGitHubAuth(env, fileExists) {
 	const appId = env.GITHUB_APP_ID;
 	const installationId = env.GITHUB_APP_INSTALLATION_ID;
 	const privateKeyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
+	// Blank counts as unset on BOTH, so a scaffolded `.env` full of empty keys never shadows the one an
+	// operator actually set.
+	const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? "").trim();
+	const keyPathSet = (privateKeyPath ?? "").trim() !== "";
+	let privateKey = null;
 
 	if (source === "pat") {
 		const pat = (env[patVar] ?? "").trim();
@@ -233,19 +295,32 @@ export function loadGitHubAuth(env, fileExists) {
 	}
 
 	if (source === "app") {
+		// Both set is a REFUSAL, not a precedence rule. A precedence rule means two places hold the App's
+		// signing key, they disagree eventually, and the deployment keeps working with whichever one this
+		// function happened to prefer -- which is exactly the class of surprise every other credential
+		// decision in this file forecloses.
+		if (inlineKey !== "" && keyPathSet) {
+			throw configError(
+				"GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- supply the App key exactly once (the inline value for a secrets manager, the path for a key on disk)",
+			);
+		}
 		const missing = [];
 		if (!appId) missing.push("GITHUB_APP_ID");
 		if (!installationId) missing.push("GITHUB_APP_INSTALLATION_ID");
-		if (!privateKeyPath) missing.push("GITHUB_APP_PRIVATE_KEY_PATH");
+		if (inlineKey === "" && !keyPathSet) missing.push("GITHUB_APP_PRIVATE_KEY_PATH (or GITHUB_APP_PRIVATE_KEY)");
 		if (missing.length > 0) {
 			throw configError(`GITHUB_AUTH_SOURCE=app requires ${missing.join(", ")}`);
 		}
-		if (!fileExists(privateKeyPath)) {
+		if (inlineKey !== "") {
+			privateKey = normalizeAppPrivateKey(inlineKey);
+		} else if (!fileExists(privateKeyPath)) {
+			// Only when the PATH is the chosen source: an inline deployment has no key file to check, which
+			// is the entire point of the variable (docs/secrets.md).
 			throw configError(`GITHUB_APP_PRIVATE_KEY_PATH does not exist: ${privateKeyPath}`);
 		}
 	}
 
-	return { source, patVar, appId, installationId, privateKeyPath };
+	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
 function defaultJobsDir() {

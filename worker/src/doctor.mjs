@@ -644,9 +644,36 @@ export async function collectChecks(env, seams) {
 				fix: setupFix,
 			});
 		}
+		// Two ways to supply the key, exactly one of them at a time (issue #208): a path to a file, or the
+		// PEM itself in GITHUB_APP_PRIVATE_KEY for a deployment whose environment comes from a secrets
+		// manager. The hygiene pass below belongs to the PATH variant -- there is no mode to check and no
+		// file to stat on a value that only ever exists in this process's environment, and whoever supplies
+		// that environment owns its hygiene. What survives for both is the shape sniff, and the rule that
+		// nothing from the key reaches output.
 		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
-		if (!keyPath) {
-			checks.push({ ok: false, warn: true, label: "GITHUB_AUTH_SOURCE=app but GITHUB_APP_PRIVATE_KEY_PATH is unset -- the worker will refuse to boot", fix: setupFix });
+		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? "").trim();
+		if (inlineKey !== "" && keyPath) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: "GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker will refuse to boot",
+				fix: "unset one of them: the inline value for a deployment fed by a secrets manager, the path for a key on disk (docs/secrets.md)",
+			});
+		} else if (inlineKey !== "") {
+			// A flattened key still starts with the header -- the `\n` escapes come after it -- so one sniff
+			// covers both accepted forms.
+			if (inlineKey.startsWith("-----BEGIN")) {
+				checks.push({ ok: true, label: "GitHub App private key supplied inline (GITHUB_APP_PRIVATE_KEY)" });
+			} else {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- the worker will refuse to boot; contents not shown`,
+					fix: "check for a truncated paste, or point GITHUB_APP_PRIVATE_KEY_PATH at the key file instead (docs/secrets.md)",
+				});
+			}
+		} else if (!keyPath) {
+			checks.push({ ok: false, warn: true, label: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot", fix: setupFix });
 		} else if (!fileExists(keyPath)) {
 			checks.push({ ok: false, warn: true, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath})`, fix: setupFix });
 		} else {

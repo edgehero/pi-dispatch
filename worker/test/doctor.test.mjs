@@ -574,7 +574,7 @@ test("doctor: app source with the whole triple unset warns per variable, points 
 	assert.equal(code, 0, "app-auth completeness warns, never fails — a deployment can be mid-setup");
 	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset/);
 	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset/);
-	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but GITHUB_APP_PRIVATE_KEY_PATH is unset/);
+	assert.match(text(), /⚠ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set/);
 	assert.match(text(), /run `pi-dispatch setup github`/, "the fix is the wizard that mints all three");
 });
 
@@ -611,6 +611,38 @@ test("doctor: a file that does not start with -----BEGIN warns, and its contents
 	assert.equal(code, 0);
 	assert.match(text(), /⚠ the file at GITHUB_APP_PRIVATE_KEY_PATH does not look like a PEM \(first line is not "-----BEGIN \.\.\."\)/);
 	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "not even a malformed key's contents may reach output");
+});
+
+// The key can also be supplied as a VALUE (issue #208), for a deployment whose environment comes from a
+// secrets manager. Then there is no file to stat, no mode to judge and nothing for the ignore check to
+// ask about -- what survives is the shape sniff and the rule that nothing from the key reaches output.
+
+test("doctor: an inline App key is reported as such, with no file anywhere and no contents echoed", async () => {
+	const { out, text } = capture();
+	const inline = `-----BEGIN PRIVATE KEY-----\n${KEY_BODY}\n-----END PRIVATE KEY-----`;
+	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: inline }), appDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /✓ GitHub App private key supplied inline \(GITHUB_APP_PRIVATE_KEY\)/);
+	assert.doesNotMatch(text(), /GITHUB_APP_PRIVATE_KEY_PATH/, "no path was configured, so none is demanded");
+	assert.doesNotMatch(text(), /group\/world-readable|does not ignore it/, "there is no file to have a mode or a repo");
+	assert.doesNotMatch(text(), new RegExp(KEY_BODY));
+});
+
+test("doctor: both key sources set warns that the worker will refuse to boot", async () => {
+	const { out, text } = capture();
+	const env = appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----", GITHUB_APP_PRIVATE_KEY_PATH: appKeyFile() });
+	const code = await runDoctor(env, appDeps(out));
+	assert.equal(code, 0, "doctor still only warns -- the boot refusal is config's job");
+	assert.match(text(), /⚠ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set/);
+	assert.match(text(), /unset one of them/);
+});
+
+test("doctor: an inline value that is not a PEM warns, and its contents are never echoed", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: `junk ${KEY_BODY}` }), appDeps(out));
+	assert.equal(code, 0);
+	assert.match(text(), /⚠ GITHUB_APP_PRIVATE_KEY does not look like a PEM/);
+	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "not even a malformed key's bytes may reach output");
 });
 
 // The key file's mode protects it from other users on this host and does nothing at all once the file is

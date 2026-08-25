@@ -39,7 +39,7 @@ Everything else in `.env.example` is a dial, and dials are fine in plain sight.
 | | |
 |---|---|
 | The provider key | `ANTHROPIC_API_KEY` or your provider's own variable, per pi's table |
-| The forge credential | `GITHUB_PAT`, or the App trio (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`), or `GITLAB_TOKEN` / `FORGEJO_TOKEN` / `AZURE_TOKEN` |
+| The forge credential | `GITHUB_PAT`, or the App trio (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_PATH`), or `GITLAB_TOKEN` / `FORGEJO_TOKEN` / `AZURE_TOKEN` |
 | The webhook secrets | `WEBHOOK_SECRET`, `GITLAB_WEBHOOK_SECRET`, `FORGEJO_WEBHOOK_SECRET`, `AZURE_WEBHOOK_SECRET` |
 | `VALKEY_URL` | only when it carries a password |
 
@@ -216,14 +216,21 @@ So a stale key left in `.env` silently shadows the managed one, and it is silent
 other key still works. On those platforms, either let the manager own the whole file (Recipe B) or keep
 `.env` free of anything the manager also holds.
 
-### 4. The App key is a path, not a value
+### 4. The App key has two homes, and exactly one at a time
 
-`GITHUB_APP_PRIVATE_KEY_PATH` names a file, and the config loader refuses at startup when that file does
-not exist. No amount of environment injection satisfies it. Either render the PEM to disk from your
-manager (Recipe B's template shape, mode `0600`) or leave it where `pi-dispatch setup github` put it:
-`github-app-<slug>.pem` in the deployment folder, written `0600`. Mode `0600` protects it from other
-users on the host and not at all from a commit, so this repository's `.gitignore` covers `*.pem`, and
-`pi-dispatch doctor` warns when the key sits in any git work tree that does not ignore it.
+`GITHUB_APP_PRIVATE_KEY` takes the PEM itself, which is what makes App auth reachable for a deployment
+with no key file at all. Real newlines and `\n` escapes both work, and it is checked at load, so a
+truncated paste refuses at boot instead of failing at the first mint. **Set exactly one of it and
+`GITHUB_APP_PRIVATE_KEY_PATH`**: both set is a refusal, not a precedence rule.
+
+**Never list it in `PI_FORWARD_ENV`.** The worker refuses that at load, and the reason is worth knowing:
+the App's signing key mints installation tokens for every repository the App is installed on, so putting
+it in a job container is strictly worse than the per-job token that container already holds.
+
+If you keep the file instead, `pi-dispatch setup github` leaves it at `github-app-<slug>.pem` in the
+deployment folder, mode `0600`. That mode protects it from other users on the host and not at all from a
+commit, so this repository's `.gitignore` covers `*.pem` and `pi-dispatch doctor` warns when the key sits
+in any git work tree that does not ignore it.
 
 ## What doctor says when there is no file
 
