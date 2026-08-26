@@ -452,9 +452,12 @@ function registerTools(pi: ExtensionAPI): void {
       "id, pattern, `folder` (absolute host path the job runs in), `flow`, and `task` (the prompt text handed to " +
       "the agent), and may set optional model/provider/maxTurns for that schedule (omit = deployment default). " +
       "label needs labels[]+flow; comment needs phrase+flow; pull_request needs action[] (+ optional labels[]) + " +
-      "flow. Webhook triggers take an optional `forge` = github (default) | gitlab, which also decides which " +
-      "action words pull_request accepts: github is labeled|opened|synchronize|reopened|review_submitted, " +
-      "gitlab is open|update|reopen|approved. A github review_submitted trigger may also set " +
+      "flow. Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
+      "also decides which action words pull_request accepts: github is " +
+      "labeled|opened|synchronize|reopened|review_submitted, gitlab is open|update|reopen|approved, forgejo " +
+      "is label_updated|opened|synchronized|reopened, azure is created|updated. An azure label or comment " +
+      "trigger must also set `repository` (a work item belongs to a project, not a repository), and an azure " +
+      "pull_request trigger may not carry labels[] at all. A github review_submitted trigger may also set " +
       "reviewState[] (approved|changes_requested|commented) to narrow which verdicts fire; omitted, all " +
       "three do. For webhook triggers the repo and the task come from the triggering " +
       "issue/PR event — set only the match + flow — and they run under the deployment default model.",
@@ -463,6 +466,10 @@ function registerTools(pi: ExtensionAPI): void {
       kind: Type.String(),
       flow: Type.String(),
       forge: Type.Optional(Type.String()),
+      // buildTriggerEntry has always READ `f.repository`, and the schema has always stripped it -- so an
+      // azure label/comment trigger was unauthorable by the model, refused at the write for want of a field
+      // it had no way to send. Surfaced by #187 widening what the description above must say about forges.
+      repository: Type.Optional(Type.String()),
       id: Type.Optional(Type.String()),
       pattern: Type.Optional(Type.String()),
       folder: Type.Optional(Type.String()),

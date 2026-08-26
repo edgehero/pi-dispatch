@@ -122,14 +122,16 @@ job time; and `pi-dispatch doctor` lists every image their triggers name and fla
 
 ## The forge a trigger listens to — `run.kind`
 
-A webhook trigger names its forge: `"kind": "github"` or `"kind": "gitlab"`. Everything else about the
-trigger is the same — the `on.type`, the `{any, all, none}` label predicate, `flow`, `packages`, `image`.
+A webhook trigger names its forge: `"kind"` is `github`, `gitlab`, `forgejo` or `azure`. Everything else
+about the trigger is the same — the `on.type`, the `{any, all, none}` label predicate, `flow`, `packages`,
+`image`, `replicas`.
 
-Two things are NOT the same, and both refuse at load rather than misbehaving quietly:
+Three things are NOT the same, and all of them refuse at load rather than misbehaving quietly:
 
 - **`pull_request` actions are the forge's own words.** GitHub takes
   `labeled | opened | synchronize | reopened | review_submitted`; GitLab takes
-  `open | update | reopen | approved`. A word
+  `open | update | reopen | approved`; Forgejo takes
+  `label_updated | opened | synchronized | reopened`; Azure takes `created | updated`. A word
   from the wrong forge is refused when the file is written. It would not break anything otherwise — it
   would simply never match an event, and the trigger would look configured while doing nothing.
   `review_submitted` is GitHub's `pull_request_review` event: it fires on **every** submitted review, so
@@ -138,6 +140,29 @@ Two things are NOT the same, and both refuse at load rather than misbehaving qui
   load, because a narrowing that cannot apply reads as one that does.
 - **One `comment` trigger per forge.** Two GitHub comment triggers are refused; one GitHub and one GitLab
   are fine.
+- **Azure names no repository.** A work item belongs to a project, so an azure `label` or `comment` trigger
+  MUST set `run.repository` (the repo within the project to clone) and every other forge's must not. An
+  azure `pull_request` trigger may not carry a label predicate at all: Azure tags work items, never pull
+  requests, so `any`/`all`/`none` could never match and a rule that loads clean and never fires reads as a
+  broken harness.
+
+## Racing two agents on one event — `run.replicas`
+
+`"replicas": 2` on a `label`, `comment` or `pull_request` trigger turns one delivery into **two independent
+paid jobs**: two containers, two branches (`pi/issue-7-r1` and `-r2`), two review requests, one human
+picking. It works on every forge. Absent, nothing changes.
+
+Three things to say when an operator asks about it:
+
+- **It multiplies spend, and the caps are the only ceiling.** Each replica reserves its own budget slot
+  before its own tokens, so a `replicas: 2` trigger firing ten times a day consumes twenty slots of the
+  daily cap, not ten. Nothing is discounted; that is the feature, not an oversight.
+- **You cannot set it from here.** There is no `replicas` parameter on `dispatch_trigger_add` or
+  `_edit`, and no panel key. It is a reviewed edit to `triggers.json`, deliberately: a spend multiplier is
+  plainly a capability a model should not gain. Say so rather than looking for a way around it.
+- **It refuses on cron, and beside `resume`.** A local job's `/workspace` IS the operator's folder, so two
+  replicas would edit one working tree with no gate and no undo. And a resumed run continues one lineage
+  where replicas exist to fork it.
 
 `dispatch_trigger_add` takes an optional `forge` parameter, defaulting to `github`. Unlike `image`, this
 one IS offered to the model — a model that can already add a GitHub trigger can already arm a paid run,

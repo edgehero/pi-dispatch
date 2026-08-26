@@ -1460,3 +1460,27 @@ test("a LIST trigger row carries the RAW file index, so delete targets the right
   assert.equal(payload?.action, "deleteTrigger");
   assert.equal(payload?.index, 1, "the RAW file index, not the display position 0");
 });
+
+test("the sibling scan does not cross forges -- a stranger's run is never named as your replica (#187)", async () => {
+  // `target` is repo + separator + number, and targetFor renders github and forgejo with the SAME `#`, so
+  // a github `o/r#5` and a forgejo `o/r#5` are one string. While github alone could replicate, no two
+  // replica runs could collide on it; #187 is what makes this reachable. The fixtures above carry no
+  // `kind` at all, so they cannot catch it -- this one does.
+  const snapshot = {
+    ...SNAPSHOT,
+    activeJobId: null,
+    runs: [
+      { jobId: "gh-g1-r1", kind: "github", target: "o/r#5", flow: "fix", outcome: "completed", turns: 4, replica: 1, replicas: 2, endedAt: "2026-08-01T00:00:00.000Z" },
+      { jobId: "fj-x9-r2", kind: "forgejo", target: "o/r#5", flow: "fix", outcome: "completed", turns: 6, replica: 2, replicas: 2, endedAt: "2026-08-01T00:01:00.000Z" },
+    ],
+  };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snapshot }) });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const detail = stripAnsi(comp.render(100).join("\n"));
+  await comp.dispose();
+  assert.match(detail, /replica\s+r1\/2/, "it is still a replica run");
+  assert.doesNotMatch(detail, /sibling r2 fj-x9-r2/, "a different forge's run is not this job's sibling");
+  assert.match(detail, /no sibling in this window/, "and saying so is better than naming a stranger");
+});

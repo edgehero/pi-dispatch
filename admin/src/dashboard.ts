@@ -1507,7 +1507,11 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // only for a replica run, so an ordinary post-mortem is unchanged.
   if (r.replica > 0) {
     const sibs = (Array.isArray(allRuns) ? allRuns : []).filter(
-      (x) => x?.replica > 0 && x.replica !== r.replica && x.target === r.target && x.flow === r.flow,
+      // `kind` is load-bearing since #187, not decoration: `target` is repo + separator + number, and
+      // targetFor renders github and forgejo with the SAME `#`, so a github `o/r#5` and a forgejo `o/r#5`
+      // are one string. While only github could replicate, no two replica runs could collide; now they can,
+      // and naming a stranger's job as your sibling is worse than naming none.
+      (x) => x?.replica > 0 && x.replica !== r.replica && x.kind === r.kind && x.target === r.target && x.flow === r.flow,
     );
     const repBits = [`r${r.replica}/${r.replicas ?? "?"}`];
     repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${s.replica} ${s.jobId}`).join(", ")}` : "no sibling in this window");

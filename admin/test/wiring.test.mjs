@@ -758,3 +758,28 @@ test("the canary's needle/member lists cannot drift from the pinned test or USED
     assert.ok(typesSrc.includes(needle), `canary needle "${needle}" is not in the PINNED types.d.ts`);
   }
 });
+
+test("no write tool exposes a `replicas` parameter -- a spend multiplier stays a reviewed file edit", async () => {
+  // docs/replicas.md and INT-TRIGGERS-FILE-CONTRACT both assert this and nothing tested it. It mattered
+  // less while replicas were github-only and the loader refused three of the four forges outright; since
+  // #187 the field is legal on every webhook trigger the model can author, so the ONLY thing keeping a
+  // spend multiplier off the model-callable surface is the absence of the parameter. Structural, like
+  // dispatch_run's missing `command` param above.
+  const { calls } = await loadRegistered();
+  for (const name of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    const tool = toolByName(calls, name);
+    const keys = Object.keys(tool.parameters.properties ?? {});
+    assert.equal(keys.includes("replicas"), false, `${name} must expose no replicas parameter (got ${keys.join(", ")})`);
+    assert.equal(keys.includes("replica"), false, `${name} must expose no replica parameter either`);
+  }
+});
+
+test("dispatch_trigger_add can actually SEND every field buildTriggerEntry reads", async () => {
+  // `repository` was read by buildTriggerEntry and stripped by the schema, so an azure label/comment
+  // trigger was unauthorable by the model: refused at the write for want of a field it had no way to send.
+  // Found while widening the tool's forge description for #187.
+  const { calls } = await loadRegistered();
+  const keys = Object.keys(toolByName(calls, "dispatch_trigger_add").parameters.properties ?? {});
+  assert.ok(keys.includes("repository"), "an azure label/comment trigger needs run.repository");
+  assert.ok(keys.includes("forge"), "and the forge that makes it required");
+});
