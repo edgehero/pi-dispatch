@@ -480,3 +480,31 @@ test("instructions reach prompt.md and never event.json", async () => {
 	assert.ok(!event.includes("OPERATOR-SENTINEL-e71"), "operator config leaked into event.json");
 	assert.ok(!event.includes("instructions"), "and not even the key belongs there");
 });
+
+test("the SHARED preparer forwards replica/replicas to whichever builder the forge arm injected (#187)", async () => {
+	// The one line that makes replicas cross-forge: prepare-github.mjs is the shared preparer, and it hands
+	// `replica`/`replicas` to the INJECTED buildPrompt. makeForgePreparers injects a different builder per
+	// forge, so if this stops forwarding, every non-github replica renders an unreplicated envelope while
+	// the jobId, the dedup key and the branch all still say `-r2`. Nothing errors and you pay twice for one
+	// review request -- the failure this whole feature is built to make impossible.
+	//
+	// Pinned HERE rather than against a builder directly, because a test that calls the builder itself
+	// proves the builder honours a replica and says nothing about whether it is ever handed one.
+	const git = fakeGit();
+	const h = harness({ git });
+	const seen = [];
+	await prepareGithubWorkspace(
+		{ ...JOB, replica: 2, replicas: 3 },
+		TOKEN,
+		{ ...h.deps, buildPrompt: (args) => (seen.push(args), "PROMPT") },
+	);
+	assert.equal(seen.length, 1);
+	assert.equal(seen[0].replica, 2, "the replica index must reach the builder");
+	assert.equal(seen[0].replicas, 3, "and so must the set size, or the [r2/3] marker cannot be rendered");
+
+	// The other direction: an unreplicated job forwards neither, so an unflagged prompt stays byte-identical.
+	const seen2 = [];
+	await prepareGithubWorkspace(JOB, TOKEN, { ...harness({ git: fakeGit() }).deps, buildPrompt: (args) => (seen2.push(args), "PROMPT") });
+	assert.equal(seen2[0].replica, undefined);
+	assert.equal(seen2[0].replicas, undefined);
+});

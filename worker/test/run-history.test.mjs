@@ -1065,3 +1065,29 @@ test("a cron-shaped trigger ({id, pattern}, no matched) records null attribution
 	assert.equal(rec.triggerType, null);
 	assert.equal(JSON.stringify(rec).includes("nightly"), true, "the id still reaches the record -- inside jobId, its canonical home");
 });
+
+test("a NON-github replica record carries replica/replicas AND the forge's own target notation (#187)", () => {
+	// REQ-REPLICA-RUNS' acceptance clause "the run records carry replica/replicas" was proven on github
+	// alone. It is not free elsewhere: `targetFor` composes the target through targetSeparator, so a gitlab
+	// MR replica must read `grp/proj!7` where a github PR replica reads `o/r#7`. This file already carries
+	// the scar that makes it worth asserting -- targetFor once enumerated github only and every GitLab run
+	// silently wrote `target: null`.
+	const rec = buildRecord({
+		job: { id: "gl-wh1-r2", attemptsMade: 0, name: "gitlab", data: { kind: "gitlab", repo: "grp/proj", projectId: 42, flow: "fix", target: { type: "pull_request", number: 7 }, replica: 2, replicas: 2 } },
+		result: { outcome: "completed" },
+		startedAt: "2026-08-01T00:00:00.000Z",
+		endedAt: "2026-08-01T00:01:00.000Z",
+	});
+	assert.equal(rec.replica, 2);
+	assert.equal(rec.replicas, 2);
+	assert.equal(rec.target, "grp/proj!7", "an MR is ! -- # is the issue sequence, and they are separate");
+	assert.equal(rec.kind, "gitlab");
+
+	// The unreplicated twin on the same forge stays null, not 0, so the record shape is stable.
+	const plain = buildRecord({
+		job: { id: "gl-wh1", attemptsMade: 0, name: "gitlab", data: { kind: "gitlab", repo: "grp/proj", projectId: 42, flow: "fix", target: { type: "pull_request", number: 7 } } },
+		result: { outcome: "completed" },
+	});
+	assert.equal(plain.replica, null);
+	assert.equal(plain.replicas, null);
+});

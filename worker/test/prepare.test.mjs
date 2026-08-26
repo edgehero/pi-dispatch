@@ -510,3 +510,28 @@ test("the injection log line carries COUNTS only, never a host path or a skill n
 		cleanup();
 	}
 });
+
+test("every forge arm's wired builder honours a replica index -- the seam #187 depends on", async () => {
+	// prepare-github.mjs passes `replica`/`replicas` into whatever `buildPrompt` the arm injected, and
+	// makeForgePreparers is what injects a DIFFERENT builder per forge. Both halves were forge-blind before
+	// #187 and neither was tested with a replica, so the one line that makes the feature cross-forge had no
+	// pin at all: swap in a builder that drops the index and every assertion here still passed.
+	const seen = [];
+	const preparers = makeForgePreparers({
+		gitlabApiUrl: "https://gl.internal",
+		forgejoApiUrl: "https://fj.internal",
+		azureOrgUrl: "https://dev.azure.com/org",
+		prepareForge: async (job, _token, opts) => (seen.push({ kind: job.kind, prompt: opts.buildPrompt }), { ok: true }),
+	});
+
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		const job = { kind, repo: "group/proj", projectId: 1, azure: { organization: "org", project: "p", repository: "r" }, flow: "fix", target: { type: "issue", number: 3 } };
+		await preparers[kind](job, "tok", { jobDir: "/j" });
+		const build = seen.at(-1).prompt;
+		const replicated = build({ flow: "fix", target: job.target, replica: 2, replicas: 2 });
+		assert.ok(replicated.includes("`pi/issue-3-r2`"), `${kind}: the wired builder must mint the replica branch`);
+		assert.equal(replicated.includes("`pi/issue-3`"), false, `${kind}: and never the unsuffixed one`);
+		// The other direction, which is what a byte-identity regression trips on.
+		assert.equal(/replica/i.test(build({ flow: "fix", target: job.target })), false, `${kind}: unflagged stays silent`);
+	}
+});

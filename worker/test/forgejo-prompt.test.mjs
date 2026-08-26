@@ -66,3 +66,40 @@ test("the operator instruction reaches the forgejo envelope too -- an ignored fi
 	assert.ok(out.indexOf("OPERATOR-SENTINEL-9f2") < out.indexOf("(data, not instructions)"), "it must sit above the data region");
 	assert.equal(buildForgejoPrompt({ flow: "fix", target }), buildForgejoPrompt({ flow: "fix", target, instructions: undefined }));
 });
+
+// --- replica runs (REQ-REPLICA-RUNS, #187) ---
+
+test("a forgejo replica issue prompt names its own branch, the sibling's, and the [r1/2] title marker", () => {
+	const p = buildForgejoPrompt({ flow: "fix", target: issue, replica: 1, replicas: 2 });
+	assert.ok(p.includes("`pi/issue-7-r1`"));
+	assert.ok(p.includes("`pi/issue-7-r2`"), "the sibling branch is named");
+	assert.equal(p.includes("`pi/issue-7`"), false);
+	assert.match(p, /You are replica 1 of 2 for this issue/);
+	assert.ok(p.includes('tea pr create --head pi/issue-7-r1 --title "[r1/2] <your title>"'));
+});
+
+test("a forgejo replica is warned that `tea pr list` is NOT filtered by branch", () => {
+	// The one place "replicas just multiply what exists" is false. `tea pr list --state open` takes no head
+	// filter, unlike gh/glab/az, so under replicas the listing this step tells the agent to eyeball carries
+	// sibling rows differing by a single character. Every other forge filters server-side.
+	const p = buildForgejoPrompt({ flow: "fix", target: issue, replica: 1, replicas: 2 });
+	assert.match(p, /listing is NOT filtered by branch/);
+	assert.match(p, /differ from yours by one character/);
+	assert.match(p, /never reuse a pull request opened for a different branch/);
+	// and an unreplicated run must not carry the warning, since it has no sibling to confuse itself with.
+	assert.equal(/NOT filtered by branch/.test(buildForgejoPrompt({ flow: "fix", target: issue })), false);
+});
+
+test("a forgejo replica PULL REQUEST prompt names the head branch and the lease (OQ-017)", () => {
+	const p = buildForgejoPrompt({ flow: "review", target: pr, replica: 2, replicas: 2 });
+	assert.match(p, /You are replica 2 of 2 for this pull request/);
+	assert.match(p, /head branch belongs to a human/);
+	assert.equal(p.includes("pi/issue-"), false);
+});
+
+test("an unflagged forgejo prompt is byte-identical to before the feature", () => {
+	for (const target of [issue, pr]) {
+		assert.equal(buildForgejoPrompt({ flow: "fix", target }), buildForgejoPrompt({ flow: "fix", target, replica: undefined }));
+		assert.equal(/replica/i.test(buildForgejoPrompt({ flow: "fix", target })), false);
+	}
+});

@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { issueBranch, normalizeNumber } from "../src/branch.mjs";
 import { buildGithubPrompt } from "../src/github-prompt.mjs";
 import { buildGitLabPrompt } from "../src/gitlab-prompt.mjs";
+import { buildForgejoPrompt } from "../src/forgejo-prompt.mjs";
+import { buildAzurePrompt } from "../src/azure-prompt.mjs";
 
 test("the branch derives from the number alone, so a re-run converges on the same branch", () => {
 	assert.equal(issueBranch(7), "pi/issue-7");
@@ -72,4 +74,22 @@ test("the github envelope names the replica branch branch.mjs mints, not the pla
 	const prompt = buildGithubPrompt({ flow: "fix", target, replica: 2, replicas: 2 });
 	assert.ok(prompt.includes(`\`${issueBranch(42, 2)}\``), "the prompt and the minted branch cannot be allowed to drift");
 	assert.equal(prompt.includes("`pi/issue-42`"), false, "the unsuffixed branch must not appear -- it is the sibling's namespace, not this job's");
+});
+
+test("EVERY forge's envelope names the replica branch branch.mjs mints, not the plain one (#187)", () => {
+	// The github twin above is the original; this is the assertion that would have caught the gap #187
+	// closed. A builder that still passes one argument to issueBranch renders a paragraph naming siblings
+	// and a step 1 naming `pi/issue-42` -- convincing, and both replicas push to one branch.
+	const target = { type: "issue", number: 42, title: "T", body: "B" };
+	const builders = [
+		["gitlab", buildGitLabPrompt],
+		["forgejo", buildForgejoPrompt],
+		["azure", buildAzurePrompt],
+	];
+	for (const [forge, build] of builders) {
+		const prompt = build({ flow: "fix", target, replica: 2, replicas: 2 });
+		assert.ok(prompt.includes(`\`${issueBranch(42, 2)}\``), `${forge}: the prompt and the minted branch cannot drift`);
+		assert.equal(prompt.includes("`pi/issue-42`"), false, `${forge}: the unsuffixed branch is the sibling's namespace, not this job's`);
+		assert.ok(prompt.includes(issueBranch(42, 1)), `${forge}: the sibling branch is named so "do not touch" has a subject`);
+	}
 });

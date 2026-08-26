@@ -135,3 +135,17 @@ test("a replica-carrying job keys IDENTICALLY to an unreplicated one -- and that
 	// point, and the exact reason the key above must never be read by one of them.
 	assert.notEqual(issueBranch(7, 1), issueBranch(7, 2));
 });
+
+test("the replica/session LOCK holds on EVERY forge, not just github (#187)", () => {
+	// keyParts gates on isForgeKind, so widening run.replicas past github widened this blindness with it.
+	// Same reading as the github lock above: if this breaks, the triggers.mjs refusal went, and the replica
+	// index now has to reach keyParts on all four forges rather than one.
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		const base = { kind, repo: "o/r", target: { type: "issue", number: 7 } };
+		const r1 = { ...base, replica: 1, replicas: 2 };
+		const r2 = { ...base, replica: 2, replicas: 2 };
+		assert.deepEqual(keyParts(r1), [kind, "o/r", "pi/issue-7"], `${kind} keys on the UNSUFFIXED branch`);
+		assert.equal(sessionKeyFor(r1), sessionKeyFor(r2), `${kind}: both replicas resolve one key`);
+		assert.equal(sessionKeyFor(r1), sessionKeyFor(base), `${kind}: and the same key an unreplicated run resolves`);
+	}
+});

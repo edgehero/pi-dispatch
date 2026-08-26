@@ -80,8 +80,17 @@ export function buildGithubPrompt({ flow, target, comment, resumed = false, repl
 	return buildIssuePrompt(flow, target, comment, replica, replicas, instructions);
 }
 
-/** The other replica indices in a set — who this job must stay independent of. */
-function siblings(replica, replicas) {
+/**
+ * The other replica indices in a set — who this job must stay independent of.
+ *
+ * EXPORTED for the three sibling builders (#187). It is the one part of the replica paragraph that travels:
+ * pure arithmetic over two host-assigned integers, with no vocabulary in it, which is exactly the test the
+ * sibling builders' own headers set for what may be shared out of this file ("None of the three is a fact
+ * about GitHub"). The paragraphs themselves do NOT travel, because their nouns are forge facts: a merge
+ * request is not a pull request and a work item is not an issue, and this repo keeps four builders rather
+ * than one parameterised prompt precisely so those stay separable.
+ */
+export function siblings(replica, replicas) {
 	const out = [];
 	for (let i = 1; i <= replicas; i++) if (i !== replica) out.push(i);
 	return out;

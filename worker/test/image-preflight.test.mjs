@@ -230,3 +230,29 @@ test("the forge refusal still outranks the replica one -- a job that cannot run 
 	assert.equal(r.forgeUnsupported, "pi-job:latest");
 	assert.equal(r.replicaUnsupported, undefined);
 });
+
+test("the capabilities gate is FORGE-BLIND: a non-github replica is refused and admitted on the same terms (#187)", async () => {
+	// Every assertion in this section was written when replicas were github-only, so the gate's
+	// forge-blindness was true by construction and untested. It is REQ-REPLICA-RUNS' acceptance clause
+	// "the image capability gate refuses per replica set exactly as on GitHub", and until #187 there was no
+	// non-github replica for it to be exactly-as-on-github about.
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		const forges = "github,gitlab,forgejo,azure";
+		const bare = makeImagePreflight({ image: "pi-job:v", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}${forges}${FIELD_SEP}\n`) });
+		assert.deepEqual(await bare({ kind, replica: 2, replicas: 2 }), { replicaUnsupported: "pi-job:v", declared: [] }, `${kind} replica on an unlabelled image`);
+		assert.deepEqual(await bare({ kind }), { ok: true, image: "pi-job:v", piVersion: "0.80.7" }, `${kind} unflagged pays nothing`);
+
+		const capable = makeImagePreflight({ image: "pi-job:v", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}${forges}${FIELD_SEP}replicas\n`) });
+		assert.deepEqual(await capable({ kind, replica: 1, replicas: 2 }), { ok: true, image: "pi-job:v", piVersion: "0.80.7" }, `${kind} replica on a capable image`);
+	}
+});
+
+test("the FORGE refusal still outranks the replica one on a non-github replica job", async () => {
+	// Ordering matters for the message an operator gets: an azure replica on the default image should be
+	// told to set run.image, not told to rebuild for replica support. The image-preflight checks forges
+	// first, and this pins that it still does once the replica gate can fire on azure at all.
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github,gitlab,forgejo${FIELD_SEP}replicas\n`) });
+	const r = await preflight({ kind: "azure", replica: 2, replicas: 2 });
+	assert.equal(r.forgeUnsupported, "pi-job:latest", "the forge gate answers first");
+	assert.equal("replicaUnsupported" in r, false);
+});

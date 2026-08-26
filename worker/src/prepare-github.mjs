@@ -203,10 +203,12 @@ export async function prepareGithubWorkspace(
 			join(jobDir, "prompt.md"),
 			// `replica`/`replicas` (REQ-REPLICA-RUNS) are host-assigned integers off job.data, so they are safe
 			// to interpolate, and they are what makes this job's branch differ from its sibling's. This is the
-			// SHARED forge preparer, so the gitlab/forgejo/azure builders receive the two keys and destructure
-			// them away -- harmless, and always undefined while replicas are github-only.
-			// `review` rides beside `comment` and, like `replica`/`replicas`, is destructured away by the
-			// gitlab/forgejo/azure builders -- harmless, and always undefined while reviews are github-only.
+			// SHARED forge preparer, and since #187 all four builders READ the two keys rather than destructuring
+			// them away: every forge mints `pi/issue-<n>-r<i>` through the same issueBranch.
+			// `review` rides beside `comment` and IS still destructured away by the gitlab/forgejo/azure builders
+			// -- harmless, and always undefined, because reviews remain github-only. That asymmetry is why both are
+			// spelled out: one of these keys crossed the forge boundary and one did not, and a reader who assumes
+			// they move together will widen the wrong one.
 			job.command
 				? `/${job.command}`
 				: buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions }),
