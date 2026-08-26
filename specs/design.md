@@ -2089,6 +2089,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     host path segment moves the whole problem into a validator. Hashing makes traversal unreachable and
     keeps the store listing PII-free by construction, the same property `local:<basename>` gives the run
     record. The cost — an operator cannot eyeball which directory is which — is answered by `keyParts`.
+  - *Counting a key's resume chain from the run records* — the shape this entry refuses, reached from a
+    new direction and worth writing down because it looks like reading rather than indexing. It is not
+    available at any price: the record deliberately carries no session key
+    (`INT-RUN-HISTORY-FILE-CONTRACT`, and that absence is what keeps it PII-free by construction), forge
+    job ids are delivery GUIDs, so a lineage on one key leaves records with unrelated filenames, and
+    joining them would mean recording the key against each — the index, again. The counter that ships
+    instead is one integer **inside the key directory**, written under the promotion lock beside the
+    transcript it counts. That is not this entry's refusal: it is keyed state stored where the key already
+    is, answering one question rather than offering a query surface, and it survives the store being
+    deleted in the only way that matters, by degrading to a cold start like everything else there.
 - **Traces to**: `REQ-RESUMABLE-SESSION`, `INT-SESSION-STORE-CONTRACT`, `DES-RUN-HISTORY-FLAT-FILES-NO-DB`;
   implemented in `worker/src/session-key.mjs`.
 

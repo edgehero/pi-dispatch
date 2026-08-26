@@ -510,23 +510,26 @@ test("the session-store bounds default to their shipped values, pinned as litera
 	assert.equal(c.sessionsTtlDays, 14);
 	assert.equal(c.sessionMaxBytes, 8388608);
 	assert.equal(c.sessionMaxAgeDays, 0, "the conversation-age bound is OFF unless an operator chooses an age");
+	assert.equal(c.sessionMaxResumeChain, 0, "and so is the chain bound");
 	assert.equal(c.sessionsDir, null, "no default: unset means the feature is unavailable, not defaulted into a temp dir");
 });
 
 test("the session-store bounds take explicit values and accept their 0 sentinels", () => {
-	const set = loadConfig({ PI_SESSIONS_TTL_DAYS: "7", PI_SESSION_MAX_BYTES: "1024", PI_SESSION_MAX_AGE_DAYS: "30" });
+	const set = loadConfig({ PI_SESSIONS_TTL_DAYS: "7", PI_SESSION_MAX_BYTES: "1024", PI_SESSION_MAX_AGE_DAYS: "30", PI_SESSION_MAX_RESUME_CHAIN: "3" });
 	assert.equal(set.sessionsTtlDays, 7);
 	assert.equal(set.sessionMaxBytes, 1024);
 	assert.equal(set.sessionMaxAgeDays, 30);
+	assert.equal(set.sessionMaxResumeChain, 3);
 
-	const off = loadConfig({ PI_SESSIONS_TTL_DAYS: "0", PI_SESSION_MAX_BYTES: "0", PI_SESSION_MAX_AGE_DAYS: "0" });
+	const off = loadConfig({ PI_SESSIONS_TTL_DAYS: "0", PI_SESSION_MAX_BYTES: "0", PI_SESSION_MAX_AGE_DAYS: "0", PI_SESSION_MAX_RESUME_CHAIN: "0" });
 	assert.equal(off.sessionsTtlDays, 0, "0 = keep forever");
 	assert.equal(off.sessionMaxBytes, 0, "0 = no cap");
 	assert.equal(off.sessionMaxAgeDays, 0, "0 = no age bound");
+	assert.equal(off.sessionMaxResumeChain, 0, "0 = no chain bound");
 });
 
 test("the session-store bounds reject negatives and non-integers as config errors", () => {
-	for (const name of ["PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_BYTES", "PI_SESSION_MAX_AGE_DAYS"]) {
+	for (const name of ["PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_BYTES", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_RESUME_CHAIN"]) {
 		for (const bad of ["-1", "abc", "1.5"]) {
 			assert.throws(() => loadConfig({ [name]: bad }), (e) => e.piDispatchConfig === true, `${name}=${bad}`);
 		}

@@ -16,14 +16,14 @@ const headerAt = (ms) => `${JSON.stringify({ type: "session", version: 3, id: "s
 const daysAgo = (n) => NOW - n * 86400000;
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
-function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, now = () => NOW, fs } = {}) {
+function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, now = () => NOW, fs } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];
 	// `fs` omitted = the store's own real-fs default. Passing one is how a disk fault is injected on a
 	// specific call without a chmod, which root ignores and Windows spells differently.
-	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
+	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, maxResumeChain, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
 	const jobDir = mkdtempSync(join(root, "job-"));
 	return { root, sessionsDir, store, jobDir, logs };
 }
@@ -297,4 +297,104 @@ test("a corrupt transcript is corrupt, not old: unparseable still wins over the 
 		seed(sessionsDir, sessionKeyFor(ghIssue), { body });
 		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "unparseable");
 	}
+});
+
+
+test("the resume chain counts consecutive resumed completions, and a cold one starts the lineage over", () => {
+	// The acceptance case from the issue, driven end to end through the real store: bound of 3, so the
+	// fourth job in a row starts fresh, and its own completion lets the next one resume again.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 3 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const chain = join(sessionsDir, key, "resume-chain");
+
+	const runOnce = () => {
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		// What a completed container leaves behind, and the verdict it reports for it.
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+		store.promoteSession(s, { piVersion: PI, resumed: s.resume });
+		return s.reason;
+	};
+
+	assert.equal(runOnce(), "resumed");
+	assert.equal(readFileSync(chain, "utf8"), "1");
+	assert.equal(runOnce(), "resumed");
+	assert.equal(runOnce(), "resumed");
+	assert.equal(readFileSync(chain, "utf8"), "3", "three consecutive resumed completions");
+
+	assert.equal(runOnce(), "resume-chain-too-long", "the fourth job starts fresh");
+	assert.equal(readFileSync(chain, "utf8"), "0", "and its own completion resets the lineage");
+	assert.equal(runOnce(), "resumed", "so the next one resumes again");
+});
+
+test("the chain counter follows what pi observed, not what the host intended", () => {
+	// A host that staged a transcript pi then declined to continue did not extend the lineage, and
+	// counting the host's intent would let a broken transcript exhaust a bound it never used.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 2 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const chain = join(sessionsDir, key, "resume-chain");
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.resume, true, "the host did resolve a transcript");
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(s, { piVersion: PI, resumed: false });
+	assert.equal(readFileSync(chain, "utf8"), "0", "the container is the one that observed the outcome");
+
+	// And with no verdict at all (a runner image predating the field), the host's intent is the fallback.
+	const s2 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s2.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(s2, { piVersion: PI });
+	assert.equal(readFileSync(chain, "utf8"), "1");
+});
+
+test("an unset chain bound counts anyway, so setting it later is honest immediately", () => {
+	// A counter that only starts when the knob does is a bound that does nothing for its first N runs.
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	for (let i = 0; i < 4; i++) {
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		assert.equal(s.reason, "resumed", "with no bound set, nothing is ever refused for chain length");
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+		store.promoteSession(s, { piVersion: PI, resumed: true });
+	}
+	assert.equal(readFileSync(join(sessionsDir, key, "resume-chain"), "utf8"), "4");
+});
+
+test("a missing or unreadable chain counter is a chain of zero, never an exhausted one", () => {
+	// Fails OPEN, the opposite of the age gate, because every key that predates this counter has no file
+	// and reading that as exhausted would cold-start a whole store the day the bound is set.
+	for (const body of [null, "", "  ", "not a number", "-4", "3.5"]) {
+		const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 1 });
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key);
+		if (body !== null) writeFileSync(join(sessionsDir, key, "resume-chain"), body);
+		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed", `counter=${JSON.stringify(body)}`);
+	}
+});
+
+test("the chain bound refuses before the transcript is read at all", () => {
+	// The arm sits ahead of the header read on purpose: it asks about the lineage, not the file, so an
+	// exhausted chain must not require pulling a transcript that may be megabytes. A body that would
+	// otherwise be reported as unparseable proves the file was never inspected.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 1 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { body: "not a session\n" });
+	writeFileSync(join(sessionsDir, key, "resume-chain"), "1");
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resume-chain-too-long");
+});
+
+test("a promotion that never happened leaves the counter alone", () => {
+	// Only a completed run promotes, and a refused promotion must not advance a lineage that gained no
+	// turn. Nothing is seeded, so this is a cold start whose container wrote nothing back: the staged file
+	// is still the 0-byte one the host laid down, and inspectFile refuses before the lock is taken.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 3 });
+	const key = sessionKeyFor(ghIssue);
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "absent");
+	const p = store.promoteSession(s, { piVersion: PI, resumed: true });
+	assert.equal(p.promoted, false);
+	assert.equal(p.reason, "absent");
+	assert.equal(existsSync(join(sessionsDir, key, "resume-chain")), false, "no promotion, no counter");
 });

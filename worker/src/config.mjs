@@ -265,6 +265,9 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// OFF by default (0) rather than defaulted to a number: an age an operator did not choose is an
 		// opinion about their lineages that this project has no basis for.
 		sessionMaxAgeDays: nonNegativeInt(env, "PI_SESSION_MAX_AGE_DAYS", 0), // 0 = no age bound
+		// How many times in a row one key may be resumed before the next job starts fresh. The bound a long
+		// lineage actually needs: age and size both grow slowly while a chain grows once per run.
+		sessionMaxResumeChain: nonNegativeInt(env, "PI_SESSION_MAX_RESUME_CHAIN", 0), // 0 = no chain bound
 		chainDepthMax: nonNegativeInt(env, "PI_CHAIN_DEPTH_MAX", CHAIN_DEPTH_MAX_DEFAULT), // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
 		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", CHAIN_MAX_PER_JOB_DEFAULT), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 		dispatchRunPerHour: nonNegativeInt(env, "PI_DISPATCH_RUN_PER_HOUR", 3), // DES-ADMIN-VIA-PI-EXTENSION; 0 = disable dispatch_run

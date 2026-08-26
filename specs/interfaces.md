@@ -2044,7 +2044,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
   ```
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
@@ -2058,7 +2058,7 @@ validator rather than a second copy of it.
 
   | Producer | Tokens |
   |---|---|
-  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
   | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
 
@@ -2254,6 +2254,7 @@ validator rather than a second copy of it.
   ```
   <PI_SESSIONS_DIR>/<key>/current.jsonl   canonical transcript; mode 0700; NEVER bind-mounted
   <PI_SESSIONS_DIR>/<key>/pi-version      the pi version that wrote it
+  <PI_SESSIONS_DIR>/<key>/resume-chain    consecutive resumed completions on this key; maintained unconditionally
   <PI_SESSIONS_DIR>/<key>/lock            exclusive-create promotion lock; absent when free
   <jobDir>/session/current.jsonl          this job's OWN copy; mounted /session:rw
   PI_SESSION_FILE=/session/current.jsonl  emitted ONLY when the job has a transcript; never empty
@@ -2262,13 +2263,28 @@ validator rather than a second copy of it.
   `PI_SESSIONS_DIR` has **no default**; unset means the feature is unavailable.
 - **Read path**, host-side, fail-open at the first miss, every miss a named cold start: key resolves ->
   canonical file exists -> **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
-  -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `pi-version` matches the job image's label -> first
-  parsed line is a `{"type":"session"}` header -> that header's `timestamp` is within
-  `PI_SESSION_MAX_AGE_DAYS` -> copy into the per-job dir. A cold start stages a **0-byte file** rather
+  -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `pi-version` matches the job image's label ->
+  `resume-chain` below `PI_SESSION_MAX_RESUME_CHAIN` -> first parsed line is a `{"type":"session"}` header
+  -> that header's `timestamp` is within `PI_SESSION_MAX_AGE_DAYS` -> copy into the per-job dir. A cold start stages a **0-byte file** rather
   than nothing. The order is the contract, not an implementation detail, because the first miss is the one
   that names itself: the shape check stays AHEAD of the age bound so a damaged transcript reads as
   `unparseable` rather than as a lineage that aged out, and the age bound is the only arm that reads
-  anything from the header beyond its `type`.
+  anything from the header beyond its `type`. The chain bound sits BEHIND `pi-version` and AHEAD of the
+  header read, because it is a sidecar read like `pi-version` and because it is the one arm that asks
+  about the lineage rather than the file, so refusing on it need not pull a transcript that may be
+  megabytes. What that costs is stated rather than left to be found: a transcript both chain-exhausted and
+  corrupt reports the chain, and the corruption is deferred by exactly one run, since that cold start's own
+  promotion resets the counter.
+- **The chain counter**: an integer file beside the transcript, written inside the same promotion lock and
+  the same swap, so it can never describe a transcript other than the one next to it. Incremented when the
+  promoted run actually continued the lineage, reset to `0` otherwise. **Whose verdict counts is the
+  container's**, on `INT-RUN-HISTORY-FILE-CONTRACT`'s precedence: the host's `resume` is intent, and a
+  staged transcript pi declined to continue extended nothing; the host's intent is the fallback for a
+  container that gave no verdict. **Maintained whether or not a bound is set**, because a counter that
+  starts when the knob does is a bound that does nothing for its first N runs, and an operator setting `3`
+  against a lineage already forty deep would get no refusal at all. **A missing or unreadable counter is a
+  chain of zero**, the opposite polarity to the age bound and deliberately: every key predating the file
+  has none, and reading absence as exhaustion would cold-start an entire store the day the bound was set.
 - **Write path**, after a `completed` exit **only**: the same `lstat` and size checks on the container's
   output, then an atomic rename under the per-key lock. A job that cannot take the lock discards rather
   than clobbers. Everything else the agent left in `/session` is deleted unread with the job dir.

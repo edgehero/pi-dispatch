@@ -44,6 +44,15 @@ import { sessionKeyFor } from "./session-key.mjs";
 export const SESSION_FILE_NAME = "current.jsonl";
 const PI_VERSION_FILE = "pi-version";
 const LOCK_FILE = "lock";
+/**
+ * How many times in a row this key has been resumed. A counter rather than a derivation, because there
+ * is nothing to derive it from: the run record deliberately carries no session key
+ * (DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED), so counting past runs would need the key->record index that
+ * entry refuses. One integer beside the transcript it describes is not that index; it is keyed state
+ * written where the key already is, and it answers exactly one question rather than being a query
+ * surface. Maintained even when no bound is set, deliberately -- see the write in promoteSession.
+ */
+const RESUME_CHAIN_FILE = "resume-chain";
 
 /**
  * Read-path outcomes. Every one is a named cold start rather than a bare `false`: a feature that fails
@@ -57,6 +66,7 @@ export function makeSessionStore({
 	ttlDays,
 	maxBytes,
 	maxAgeDays = 0,
+	maxResumeChain = 0,
 	log = () => {},
 	now = () => Date.now(),
 	fs = { copyFileSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
@@ -115,7 +125,7 @@ export function makeSessionStore({
 	 * one key is a real shape (REQ-QUEUE-BURST-NO-DROP), and last-write-wins there would interleave two
 	 * agents' turns into one transcript.
 	 */
-	function promoteSession(session, { piVersion = null } = {}) {
+	function promoteSession(session, { piVersion = null, resumed = null } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
 		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
@@ -148,6 +158,20 @@ export function makeSessionStore({
 				fs.copyFileSync(staged, tmp);
 				fs.renameSync(tmp, canonicalFile(session.key));
 				fs.writeFileSync(join(dir, PI_VERSION_FILE), String(piVersion ?? ""));
+				// Under the same lock and in the same swap, so the counter can never describe a transcript
+				// other than the one beside it.
+				//
+				// WHOSE VERDICT COUNTS: the container's. `session.resume` is what the host intended; whether
+				// the lineage actually got another turn is what pi observed, and a staged transcript pi
+				// declined to continue did not extend anything. The host's intent is the fallback for a
+				// container that gave no verdict, which is the same precedence mergeSession applies.
+				//
+				// WRITTEN EVEN WITH NO BOUND SET, deliberately. A counter that only starts when the knob
+				// does is a bound that does nothing for its first N runs: an operator who sets 3 because a
+				// lineage is already forty deep would get no refusal at all, which is the believed-on-while-
+				// off failure this project keeps arriving at from new directions.
+				const continued = typeof resumed === "boolean" ? resumed : session.resume === true;
+				fs.writeFileSync(join(dir, RESUME_CHAIN_FILE), String(continued ? readResumeChain(session.key) + 1 : 0));
 			} finally {
 				fs.closeSync(fd);
 				try {
@@ -193,6 +217,21 @@ export function makeSessionStore({
 		}
 		if (stamped !== piVersion) return COLD("pi-version-changed");
 
+		// How many times in a row this key has already been resumed. Placed HERE, ahead of the header read,
+		// for two reasons. It is a small sidecar read exactly like the pi-version arm above it, so refusing
+		// on it skips pulling a transcript that may be megabytes; and unlike every other arm it asks about
+		// the LINEAGE rather than the file, so it needs nothing the file could tell it.
+		//
+		// The cost of that placement, stated rather than left to be discovered: a transcript that is both
+		// chain-exhausted AND corrupt reports the chain. That is the intentional refusal of the two, and the
+		// corruption is not hidden, only deferred -- this cold start's own promotion resets the counter, so
+		// the very next run reads the file and reports `unparseable`.
+		//
+		// FAILS OPEN on absence, which is the opposite of the age gate one arm down and deliberate. Every
+		// key that existed before this counter did has no file, and reading that as "already exhausted"
+		// would cold-start an operator's entire store the day they set the bound.
+		if (maxResumeChain > 0 && readResumeChain(key) >= maxResumeChain) return COLD("resume-chain-too-long");
+
 		// Cheapest real shape check, and the last one before the header's own contents are used: the first
 		// line must be a pi session header. Anything else the runner would throw on, so refusing here keeps
 		// the container's degrade path for genuine surprises rather than for a file we could already tell
@@ -232,6 +271,23 @@ export function makeSessionStore({
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
 		return { resume: true, reason: "resumed", bytes: check.bytes };
+	}
+
+	/**
+	 * The consecutive-resume counter for a key, or 0 when there is not a readable one. Never throws and
+	 * never guesses: a missing, empty, corrupt or negative counter is 0, so the only way to be refused by
+	 * the chain bound is for this store to have written a number that reaches it.
+	 */
+	function readResumeChain(key) {
+		try {
+			const raw = String(fs.readFileSync(join(keyDir(key), RESUME_CHAIN_FILE), "utf8")).trim();
+			const n = Number.parseInt(raw, 10);
+			// `String(n) === raw` is the same anti-truncation guard config.mjs applies to every integer knob,
+			// and it is what keeps a corrupt "3.5" from being read as a chain of three.
+			return Number.isInteger(n) && n > 0 && String(n) === raw ? n : 0;
+		} catch {
+			return 0;
+		}
 	}
 
 	/**

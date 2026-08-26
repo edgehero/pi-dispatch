@@ -388,7 +388,7 @@ export async function runJob(job, deps) {
 				// (CONST-RETRY-INFRA-ONLY). Same completed-only rule INT-OUTBOX-CONTRACT already uses, and
 				// it sits beside the chain collection for the same reason: both must happen before the
 				// `finally` deletes jobDir. Never throws.
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion }) : null;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, resumed: session?.resumed }) : null;
 				return {
 					outcome: "completed",
 					exitCode: code,
