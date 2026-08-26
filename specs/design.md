@@ -645,6 +645,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `exit 2` itself still exits 2, since sourcing cannot intercept that, which is why the docs say not to.
 - **The setup runs after `./.env` and after `EnvironmentFile=`**, so the manager wins over a stale key
   left in the file. That asymmetry used to be a documented trap with no fix on macOS and Windows.
+- **The preparation window belongs to the seam** (issue #221): the seam's whole value is that an
+  operator's script runs *before* the worker, which means the wrapper now spends measurable time — a
+  network round trip to a secrets manager — started and with nothing yet to stop. What happens to a stop
+  that lands there is `DES-WRAPPER-STOPS-WHAT-IT-STARTED`: the handler is armed above the sourcing,
+  re-asserted below it because `.` can replace it, and the command is never launched at all.
 - **Rejected**: depending on, or blessing, any particular manager (the seam is a file; `docs/secrets.md`
   names the shapes); a shipped launcher script for systemd (a third wrapper file to mirror and pin, for
   a line the render can compose); composing a command line into the plist and the nssm argv (quoting for
@@ -665,8 +670,58 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Windows is weaker on purpose, and says so**: `worker-env-wrapper.cmd` has no `exec`, so a wrapper
   process always sits in the middle there. What the seam guarantees on Windows is that the setup runs in
   the same process tree, that a missing or failing setup exits 1, and that the existing exit-2
-  conversion is untouched.
+  conversion is untouched. It has no `trap` either, so the preparation window has no wrapper-level
+  handling at all there; nssm stops with a console event to the process group, which reaches the worker
+  directly rather than through this file.
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-SURFACE`, `DES-WORKER-ON-HOST`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `docs/secrets.md`
+
+## DES-WRAPPER-STOPS-WHAT-IT-STARTED
+
+- **Decision**: `worker-env-wrapper.sh` arms its `TERM`/`INT` handler **before it sources anything**,
+  **re-asserts** it after the sourcing, **refuses to launch** the command at all when a stop arrived first
+  (exit 0, with the reason on stderr), and **re-sends** the signal immediately after `child=$!` when the
+  handler fired before the pid was knowable. Together those cover every instant from process start to
+  `wait`, which is the property the file did not have.
+- **Why**: this wrapper gave up `exec` so it could outlive the worker and convert exit 2
+  (`DES-SERVICE-ENV-SETUP-SEAM`, and the `exec` cannot come back for the same reason). The cost of that
+  trade is that forwarding a stop is now hand-written, and hand-written forwarding had two holes, both
+  silent. Everything before the trap ran with `TERM` at its **default disposition**, so a stop landing
+  during the sourcing killed the shell mid-preparation with nothing said anywhere; and `$!` is readable
+  only **after** the fork, so a stop landing between `"$@" &` and `child=$!` ran the handler with no pid,
+  forwarded to nothing, set a flag nobody read again, and left the wrapper waiting out the command's
+  entire natural lifetime while the service manager believed it had asked the process to stop. A launcher
+  that accepts a stop and then does not stop is the silent no-op this project treats as its worst
+  available outcome, and it is reachable from this project's own CLI: `pi-dispatch service stop` on macOS
+  is `launchctl kill SIGTERM` at that pid.
+- **Refusing to launch, rather than launching and then stopping**: a worker started after its stop has
+  already arrived reserves a budget slot and takes a job, and then needs a drain nobody is waiting for.
+  Exit **0** because 0 is the only code launchd's `KeepAlive`/`SuccessfulExit=false` leaves stopped — the
+  same reasoning as the exit-2 conversion. Not 2, because nothing was refused; not 1, because nothing
+  failed; the manager's own instruction was carried out, and the wrapper says so rather than exiting mute.
+- **The re-assert, and the one thing it cannot undo**: `.` runs in the wrapper's own shell, so a setup
+  script's `trap … TERM` **replaces** the handler and the drain silently disappears; worse, `trap '' TERM`
+  leaves the signal ignored, and a child forked from such a shell inherits `SIG_IGN` and cannot trap
+  `TERM` at all. Re-installing a real handler before the fork restores `SIG_DFL` for the child and covers
+  both shapes. What it cannot recover is a signal delivered **while** the script had it ignored: that one
+  is already discarded, which is why `docs/secrets.md` tells operators not to touch signals in a setup
+  script at all.
+- **launchd and nssm only, checked rather than assumed**: with `--env-setup` systemd does put an untrapped
+  `sh -c` in the same window, but `KillMode` is unset everywhere so the default `control-group` signals the
+  whole tree, no worker has been launched yet, and `Restart=on-failure` treats death by `SIGTERM` as a
+  clean exit. The same stop stops the same unit either way. On Windows `worker-env-wrapper.cmd` has no
+  `trap` and cmd has no equivalent, so the preparation window there is whatever nssm's stop does to the
+  tree; the asymmetry is named in the file and here, and is not closed.
+- **Rejected**: **a readiness handshake** — a marker the wrapper writes once it can forward, waited on
+  before signalling, which is what the issue proposed. It would make the TEST reliable and leave the
+  PRODUCT dropping the signal, and no marker written by the child can close a window that exists before
+  the child does. **Blocking the signal around the fork**: POSIX `sh` has no `sigprocmask`, and the
+  reachable spelling, `trap '' TERM`, is inherited by the child as `SIG_IGN` — the exact failure the
+  re-assert exists to undo. **Exiting 143 for a pre-launch stop**: nonzero relaunches the service the
+  operator just stopped, into the half-built environment the setup script never finished. **Skipping or
+  retrying the tests that caught it**: they pin real behaviour, and four reruns across two tests are what
+  bought the misdiagnosis.
+- **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-SERVICE-ENV-SETUP-SEAM`, `DES-WORKER-ON-HOST`,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`, `docs/secrets.md`
 
 ## DES-GH-APP-MANIFEST-SETUP
@@ -2285,6 +2340,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-26 | Issue #221 (the wrapper accepted a stop and then went on as if it had not). **NEW `DES-WRAPPER-STOPS-WHAT-IT-STARTED`**: the handler is armed above the sourcing, re-asserted below it, the command is not launched at all when a stop arrived first (exit 0, reason on stderr), and the signal is re-sent immediately after `child=$!` when the handler fired before the pid was knowable. The entry exists because the wrapper's signal contract had no home: it lived in that file's own comments and in the 2026-08-02 row below, whose sentence "SIGTERM still reaches node via the trap" was true of every case anyone had looked at and false of the two that fire under load. Its Rejected list is where the value is. **A readiness handshake** — a marker the wrapper writes once it can forward, which is what the issue proposed — would have made the TEST reliable and left the PRODUCT dropping the signal, and no marker written by the child can close a window that exists before the child does. **Blocking the signal around the fork** is unreachable in POSIX sh, and its one spelling, `trap '' TERM`, is inherited by the child as SIG_IGN, which is the exact failure the re-assert exists to undo. **Exiting 143** relaunches the service the operator just stopped, into the half-built environment the setup script never finished. **DES-SERVICE-ENV-SETUP-SEAM AMENDED**: the preparation window belongs to the seam, since the seam is what made it long, and the Windows bullet now says the `.cmd` twin has no `trap` either. **DES-CLI-SURFACE UNCHANGED, checked** — no tier moves, and the never-tier's wrapper clause (capture `PI_ENV_SETUP` before sourcing `./.env`) is byte-identical: arming a handler earlier changes when signals are handled, never what may name a script. **DES-WORKER-ON-HOST UNCHANGED, checked** — the worker is still a host process; only when its parent handles signals moved. **DES-CONCURRENCY-3 UNCHANGED, checked** — one wrapper, one daemon, unchanged. |
 | 2026-08-26 | Issue #187 (`run.replicas` on every forge). **DES-TRIGGERS-UNIFIED-FILE AMENDED**, and the amendment corrects a safety claim this entry has carried since it was written: *"One validator, run by both, means a malformed file fails both services identically — the two cannot drift."* There are THREE readers. `admin` bundles `parseTriggers` into its published console at build time (`admin/build.mjs`, esbuild `bundle: true`, the worker absent from `external`) and validates the whole file through that frozen copy in `writeTriggers`, which is the "two independent validators" its own Rejected list refuses, separated by time rather than by code. Recorded rather than fixed: the alternative is a runtime dependency from the console on the worker package, a heavier coupling than the one it would remove. The entry also gains the **widening-vs-narrowing** rule this issue is the first instance of — every prior field ADDED an optional key and unknown keys drop, so an old parser meeting a new file was a silent no-op; relaxing a refusal on a known key makes it an explicit throw, which is a release-ordering constraint rather than a code one. **DES-REPLICA-INDEX-REACHES-THE-BRANCH AMENDED**: the four layers are unchanged, but the PROMPT layer is recorded as four builders rather than one, with `siblings()` the only shared part and both alternatives (a parameterised noun table, four independent copies) in Rejected with their reasons. The local/cron rejection is byte-unchanged and is now the only kind gate the validator has. **DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED UNCHANGED, checked**: `keyParts` gates on `isForgeKind` rather than on github, so widening changed nothing about what it derives — what widened with it is the blindness the `resume`×`replicas` refusal makes harmless, now pinned per forge. **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked**: the `local`-only guard bounds fanout from a replica on any forge. **DES-CONCURRENCY-3 UNCHANGED, checked**: `REPLICAS_MAX` still derives from `PI_CONCURRENCY`'s default and no forge enters that reasoning. |
 | 2026-08-25 | Issue #202 (the egress default). **DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK UNCHANGED, checked** -- the mechanism it records is unaffected by which way the default points, and the default itself is a requirement (`REQ-EGRESS-ALLOWLIST`) and a constraint (`CONST-EGRESS-POLICY-IN-THE-ARGV`) rather than a design decision. Recorded here rather than left silent because the entry's "Off unless `PI_EGRESS=1`" sentence would otherwise read as stale against a shipped opt-out. **DES-CONCURRENCY-3 UNCHANGED, checked**, and still the reason the network is per-job. |
 | 2026-08-25 | Issue #202 (egress). **NEW `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`**: a per-job `--internal` network named in the worker's own argv, one long-lived allowlist proxy attached to each for the life of a run, hostname filtering with no TLS termination, the provider as an ordinary entry, and a pre-spend check on the proxy. The `Rejected` list is where the value is, and two entries were reached by measurement rather than argument. **A shared network with `enable_icc=false`** was the design until it was run: ICC governs every container pair on the bridge and the proxy is a container, so the option blocks job-to-proxy along with job-to-job and the control defeats itself. **A network-layer rule permitting the provider by address** -- what the recipe does and what `OQ-004` recorded as forced -- is refuted: the provider follows the proxy once `NODE_USE_ENV_PROXY` actually reaches the runner, and it was missing from the recipe's own `PI_FORWARD_ENV` line rather than unavailable. Also rejected: shipping the `DOCKER-USER` recipe as code (a process that refuses `docker.sock` because a socket mount is root-equivalent would instead take root directly, on Linux only); the worker starting the proxy at boot (it would own a security control's UPTIME, which is the believed-up-while-down failure this feature exists to prevent); a TLS-terminating secrets-injecting proxy (`OQ-011`'s mechanism and a DIFFERENT security object, named so this is never mistaken for a down payment on it); a `run.network` trigger field; a repo-declared allowlist; a denylist; handing the operator a `squid.conf` to edit; caching the preflight; and a per-job reachability probe. **DES-CONCURRENCY-3 UNCHANGED, checked, and newly load-bearing**: three concurrent jobs are the reason the network is per-job. **DES-WORKER-ON-HOST UNCHANGED, checked** -- the worker driving the local docker CLI is what makes any of this readable back at all. **DES-PER-TRIGGER-JOB-IMAGE UNCHANGED, checked**, gaining an instance of its own sentence: an operator-built image inherits the network the way it inherits `--cap-drop=ALL`, so `OQ-012`'s residual does not widen. **DES-SANDBOX-IS-A-FRESH-CONTAINER UNCHANGED, checked**: same image, same workspace, and now the same network, which is a narrowing of what that shell can reach rather than a change to what it preserves. |

@@ -74,7 +74,10 @@ printf '%s' '<client-secret>' > /etc/pi-dispatch/infisical-client-secret
 
 Then write a script that sets up the environment, and nothing else. **No `exec`, no node path, no path
 to the CLI**: those are what `pi-dispatch service` already computes for your host, and getting them by
-hand is the mistake this seam exists to remove.
+hand is the mistake this seam exists to remove. **And nothing that changes what a signal does**: no
+`trap`, no backgrounded process. Your script is sourced inside the process the service manager stops, so
+a handler you install is a handler that runs instead of the wrapper's, and that costs the worker its
+graceful drain. Trap 5 below has the whole of it.
 
 ```sh
 #!/bin/sh
@@ -268,6 +271,47 @@ deployment folder, mode `0600`. That mode protects it from other users on the ho
 commit, so this repository's `.gitignore` covers `*.pem` and `pi-dispatch doctor` warns when the key sits
 in any git work tree that does not ignore it.
 
+### 5. A setup script that touches signals takes the drain with it
+
+Your script is **sourced**, not run. It executes inside the very process the service manager stops, and it
+owns that process for as long as it takes to answer, which for a secrets manager is a network round trip.
+Three things follow, and not one of them shows up in a log line.
+
+**`trap … TERM` in your script replaces the wrapper's.** The wrapper re-asserts its own handler after
+sourcing you, so a handler you leave behind is undone. A handler that runs *during* the sourcing is not:
+yours ran, the wrapper's did not, and the drain that should have followed did not happen.
+
+**`trap '' TERM` is worse, and part of it cannot be undone.** A signal ignored while it is ignored is
+discarded, not queued: the manager reports the stop as delivered and nothing received it. Worse, a
+process started from a shell where `TERM` is ignored inherits that, so the worker itself would be unable
+to trap `TERM` at all. Re-asserting a real handler before the launch is what restores it.
+
+**A backgrounded process (`… &`) outlives you.** It inherits the unit's stdio, so the manager can be left
+waiting on a pipe held by something it does not know exists, and on macOS it is killed without warning
+when `ExitTimeOut` expires. If your manager needs a long-lived agent, run it as its own service
+(Recipe B), not out of a setup script.
+
+A stop that arrives while your script is still running is handled, and handled by *not starting*: the
+wrapper traps `TERM` and `INT` before it sources anything, and if one arrives it exits `0` without ever
+launching the worker, saying so:
+
+```
+worker-env-wrapper: stopped before the worker started -- a stop signal arrived while the environment was
+being prepared, so the command was never launched; exiting 0 (nothing to restart)
+```
+
+Exit `0` for the same reason the exit-2 conversion exists: it is the only code launchd's `KeepAlive`
+leaves stopped, and relaunching a service the operator just stopped, into the half-built environment your
+script had not finished, is not a recovery.
+
+On **Windows** none of this applies, because `worker-env-wrapper.cmd` has no `trap` and cmd has no
+equivalent. A stop that lands while your `.cmd` setup is running is whatever nssm's stop does to the
+process tree. The asymmetry is named in the file and in `DES-SERVICE-ENV-SETUP-SEAM`, and it is not
+closed.
+
+Note that `pi-dispatch doctor` cannot help you here. It never opens the script, by design, so it can say
+nothing about what is inside one.
+
 ## What doctor says when there is no file
 
 Nothing alarming, and this is worth seeing once before you trust it:
@@ -343,6 +387,12 @@ that reports its own status instead of the child's turns a policy refusal into a
 will not find out from a log line. Test it with `<your wrapper> -- sh -c 'exit 2'; echo $?` before it
 goes in front of a provider account.
 
+Ask a second question while you are there: **what does it do to my signals?** A runner that installs its
+own handler, or forwards `TERM` late, or not at all, turns a 30 second graceful drain into a hard kill,
+and you will not find that out from a log line either. Run
+`<your wrapper> -- sh -c 'trap "echo drained; exit 0" TERM; sleep 30' &` and then `kill -TERM` the
+wrapper: you should see `drained`.
+
 The question disappears entirely if you keep the manager inside an `--env-setup` script instead of
 wrapping the worker in its runner, because then nothing sits between the service manager and the worker.
 That is the shape to prefer, whichever manager you run.
@@ -377,7 +427,12 @@ under the real `sh` on macOS:
 - Both an `export KEY=…` line and a bare `KEY=value` reached the worker's environment.
 - On the wrapper path: the setup script beat a stale `.env` value; a missing `./.env` started instead of
   refusing; a missing or failing setup exited `1`; a `PI_ENV_SETUP=` line planted *inside* `.env` was
-  ignored; and both the exit-2 conversion and the `SIGTERM` drain survived the seam.
+  ignored; the exit-2 conversion survived the seam; and the `SIGTERM` drain survived it **for a worker
+  already running**. What was not measured then, and is now: a stop arriving *while the setup script is
+  still running*, which until this release killed the wrapper on `TERM`'s default disposition, and a stop
+  arriving in the window between the launch and the wrapper knowing the worker's pid, which was forwarded
+  to nothing at all. Both are covered by tests against the shipped file under a real `sh`, and the second
+  was reproduced first by widening only that window in a copy of it.
 
 The read-back doctor uses was measured the same way: every rendered unit on all three platforms was fed
 straight back through the reader and returned the path that went in, a unit rendered without the flag
