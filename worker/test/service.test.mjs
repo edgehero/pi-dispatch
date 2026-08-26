@@ -851,9 +851,9 @@ function wrapperDir(nodeStub, { env = true } = {}) {
 	return dir;
 }
 
-function runWrapper(dir, { args, onSpawn, env = {} } = {}) {
+function runWrapper(dir, { args, onSpawn, env = {}, wrapper = REAL_WRAPPER } = {}) {
 	return new Promise((resolvePromise, reject) => {
-		const child = spawn("sh", [REAL_WRAPPER, ...(args ?? [join(dir, "bin", "node")])], {
+		const child = spawn("sh", [wrapper, ...(args ?? [join(dir, "bin", "node")])], {
 			cwd: dir,
 			// `env` is how the daemon manager delivers PI_ENV_SETUP: the plist's EnvironmentVariables
 			// dict on macOS, `nssm set … AppEnvironmentExtra` on Windows. Nothing composes a shell.
@@ -863,12 +863,39 @@ function runWrapper(dir, { args, onSpawn, env = {} } = {}) {
 		let stderr = "";
 		child.stderr.on("data", (d) => (stderr += d));
 		child.on("error", reject);
-		child.on("close", (code) => resolvePromise({ code, stderr }));
-		// Routed through the promise on purpose: a bare onSpawn?.(child) drops a rejection on the floor
-		// (an async callback here returns a promise nobody holds), so a throw inside it would surface as
-		// an unhandled rejection somewhere else in the run instead of failing this test.
-		Promise.resolve(onSpawn?.(child)).catch(reject);
+		// BOTH must settle before the caller reads anything (issue #221). Resolving on `close` alone let
+		// a wrapper that exited EARLY beat its own onSpawn -- and the wrapper now exits early BY DESIGN
+		// when a stop arrives during startup. onSpawn is where `ready` is assigned, so the assertion ran
+		// against its initial false and reported a readiness timeout that never happened: a fabricated
+		// diagnosis, in the one place a real one was needed. The abandoned poll then ran on after the
+		// test had finished.
+		//
+		// Still routed through the promise for the older reason too: a bare onSpawn?.(child) drops an
+		// async callback's rejection, so a throw inside it surfaced as an unhandled rejection somewhere
+		// else in the run instead of failing this test.
+		const closed = new Promise((r) => child.on("close", (code, signal) => r({ code, signal })));
+		Promise.all([closed, Promise.resolve(onSpawn?.(child))])
+			.then(([result]) => resolvePromise({ ...result, stderr }))
+			.catch(reject);
 	});
+}
+
+// How long the signal stubs below stay alive, and the readiness ceiling that must stay well INSIDE it.
+// Derived rather than typed twice, because the old pair was a 30s readiness bound against a 30s stub
+// with zero headroom: a slow readiness wait could outlive the very process it was waiting to signal,
+// and the failure then came out wearing the FORWARDING message -- the confusion issue #207 existed to
+// remove, arriving through a door it did not close (issue #221).
+const STUB_LIFETIME_S = 30;
+const READY_TIMEOUT_MS = (STUB_LIFETIME_S * 1000) / 3;
+
+/**
+ * The stub the signal tests run as their command: it backgrounds a sleep, arms a TERM trap that records
+ * the delivery and kills the sleep, and only THEN writes `started`. Order is the point (issue #207) --
+ * the marker means "ready to be signalled", not "has begun". One definition, because the tests now
+ * reason about its lifetime and a literal typed twice is a lifetime that can drift.
+ */
+function signalStub() {
+	return `#!/bin/sh\nsleep ${STUB_LIFETIME_S} &\nsp=$!\ntrap ': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0' TERM\n: > "$MARKER_DIR/started"\nwait\nexit 1\n`;
 }
 
 /**
@@ -876,14 +903,20 @@ function runWrapper(dir, { args, onSpawn, env = {} } = {}) {
  * inline loop fell through on timeout and signalled anyway: on a loaded runner the TERM landed before
  * the stub had installed its trap, the stub died on the default disposition, and the resulting failure
  * was word-for-word identical to the wrapper simply not forwarding. Returning the answer lets the
- * caller assert the two apart. The bound is generous on purpose -- it is a ceiling on a hang, never a
- * wait in the healthy case, where the marker lands in tens of milliseconds.
+ * caller assert the two apart. The bound is a ceiling on a hang, never a wait in the healthy case,
+ * where the marker lands in tens of milliseconds.
+ *
+ * WALL CLOCK, not `waited += stepMs` (issue #221). The nominal count undercharged every iteration by
+ * the existsSync plus the event-loop hop, so the bound it enforced was neither 30s nor knowable, and on
+ * a loaded runner it drifted PAST the stub's own lifetime -- at which point the stub exits on its own,
+ * the TERM lands on a dead child, and a readiness problem is reported as a forwarding failure.
  */
-async function waitForMarker(path, timeoutMs = 30_000, stepMs = 25) {
-	for (let waited = 0; waited < timeoutMs; waited += stepMs) {
+async function waitForMarker(path, timeoutMs = READY_TIMEOUT_MS, stepMs = 25) {
+	const deadline = Date.now() + timeoutMs;
+	do {
 		if (existsSync(path)) return true;
 		await new Promise((r) => setTimeout(r, stepMs));
-	}
+	} while (Date.now() < deadline);
 	return existsSync(path);
 }
 
@@ -935,15 +968,18 @@ test("wrapper: SIGTERM to the wrapper reaches node (trap + kill + double wait re
 	// and after the trap, so its existence means the stub is genuinely ready to be signalled. It used to
 	// be the first line, which made it a marker for "the stub has begun" -- a TERM racing in behind it
 	// still landed on the default disposition, and the test blamed the wrapper.
-	const dir = wrapperDir('#!/bin/sh\nsleep 30 &\nsp=$!\ntrap \': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0\' TERM\n: > "$MARKER_DIR/started"\nwait\nexit 1\n');
+	const dir = wrapperDir(signalStub());
 	let ready = false;
 	const { code } = await runWrapper(dir, {
 		onSpawn: async (child) => {
 			// Signal only after the stub is definitely running, so the wrapper's trap is in place. When it
 			// never gets there, KILL instead of signalling: a TERM sent into a stub that has not reached
 			// its `trap` line tests nothing, and used to be reported as a forwarding failure (issue #207).
-			// SIGKILL only ends the wrapper, but the stub cannot be past its first line if `started` is
-			// missing, so there is nothing left holding the pipes.
+			// SIGKILL only ends the wrapper. It does NOT free the pipes: the stub's first line backgrounds
+			// the sleep, so a stub caught between there and its `trap` is orphaned holding this spawn's
+			// stdio, and `close` waits out the rest of STUB_LIFETIME_S (the comment here used to claim the
+			// opposite). Bounded, and only on an already-failing path -- which is why the headroom is
+			// bought by lowering READY_TIMEOUT_MS rather than by lengthening the stub.
 			ready = await waitForMarker(join(dir, "started"));
 			child.kill(ready ? "SIGTERM" : "SIGKILL");
 		},
@@ -1027,7 +1063,11 @@ test("wrapper: the exit-2 conversion survives the seam — a policy refusal unde
 });
 
 test("wrapper: SIGTERM still reaches the command through the seam", { skip: !POSIX }, async () => {
-	const dir = wrapperDir('#!/bin/sh\nsleep 30 &\nsp=$!\ntrap \': > "$MARKER_DIR/got-term"; kill "$sp" 2>/dev/null; exit 0\' TERM\n: > "$MARKER_DIR/started"\nwait\nexit 1\n');
+	// The seam adds a `.` before the launch and must cost the drain nothing. This test carried no comment
+	// at all until issue #221, which is part of why it was read as a duplicate of the one above: it is
+	// not, it pins the SEAM's half, and the two failed on CI for the same reason a month apart. The
+	// readiness protocol is the one at :928 -- see it for why `started` is written last.
+	const dir = wrapperDir(signalStub());
 	const setup = setupScript(dir, "export FROM_MANAGER=1\n");
 	let ready = false;
 	const { code } = await runWrapper(dir, {
@@ -1040,4 +1080,226 @@ test("wrapper: SIGTERM still reaches the command through the seam", { skip: !POS
 	assert.ok(ready, "the stub never wrote its `started` marker: a readiness timeout, NOT a forwarding failure");
 	assert.ok(existsSync(join(dir, "got-term")), "sourcing a setup script must not cost the graceful drain");
 	assert.equal(code, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The STOP windows (issue #221). The wrapper accepted a stop and then went on as if it had not: TERM
+// carried its DEFAULT disposition for the whole of the preparation (sourcing ./.env, then sourcing an
+// operator's secrets manager), and after that a stop landing between the fork and the pid assignment was
+// forwarded to nothing and never re-sent. The second one is what the two tests above kept failing on,
+// once per CI runner under load, for a month. Everything here drives the SHIPPED wrapper under a real
+// sh, except the last test, which says at length why it cannot.
+// ---------------------------------------------------------------------------------------------------
+
+// 600 x 0.05s. A hang bound, never a wait: the healthy path is released in tens of milliseconds. It sits
+// inside STUB_LIFETIME_S on purpose, so a test that forgets to release fails on an assertion.
+const HOLD_STEPS = 600;
+
+/**
+ * A shell body that ANNOUNCES it is running and then blocks until the test releases it. This is what
+ * makes the stop-during-preparation tests exact rather than lucky: while the marker exists and `release`
+ * does not, the wrapper is provably INSIDE the `.` that is reading this body, so a signal sent then
+ * cannot land anywhere else. Nothing here is timed.
+ */
+function blockUntilReleased(marker = "sourcing") {
+	return `: > "$MARKER_DIR/${marker}"\ni=0\nwhile [ ! -f "$MARKER_DIR/release" ] && [ "$i" -lt ${HOLD_STEPS} ]; do sleep 0.05; i=$((i+1)); done\n`;
+}
+
+/** A command stub that PROVES it ran. Used wherever the promise is "this must never start". */
+const NEVER_RUNS = '#!/bin/sh\n: > "$MARKER_DIR/ran"\nexit 0\n';
+
+test("wrapper: a stop arriving while PI_ENV_SETUP is sourced never launches the command", { skip: !POSIX }, async () => {
+	// The production defect behind issue #221, on the path that can block for seconds: PI_ENV_SETUP is an
+	// operator's secrets manager, so sourcing it is a network round trip (docs/secrets.md's own example
+	// runs `infisical login` there). Before the fix TERM had its default disposition for all of it -- the
+	// wrapper died where it stood, `code` null and `signal` SIGTERM, with nothing anywhere saying the
+	// environment had been half-built. Reachable from this project's own CLI: `pi-dispatch service stop`
+	// on macOS is `launchctl kill SIGTERM` at exactly this pid.
+	const dir = wrapperDir(NEVER_RUNS);
+	const setup = setupScript(dir, blockUntilReleased());
+	let inSetup = false;
+	const { code, signal, stderr } = await runWrapper(dir, {
+		env: { PI_ENV_SETUP: setup },
+		onSpawn: async (child) => {
+			inSetup = await waitForMarker(join(dir, "sourcing"));
+			if (inSetup) child.kill("SIGTERM");
+			// Released AFTER the signal and UNCONDITIONALLY: a wrapper still in there must never hold the
+			// suite, not even on the path where the readiness wait timed out.
+			writeFileSync(join(dir, "release"), "");
+		},
+	});
+	assert.ok(inSetup, "the setup script never announced itself: a readiness timeout, NOT a signal-handling failure");
+	assert.equal(signal, null, "the wrapper was KILLED by the signal instead of handling it -- TERM still has its default disposition while the environment is being prepared");
+	assert.equal(code, 0, "a stop the manager asked for is a clean stop, and 0 is the only code launchd's KeepAlive leaves stopped");
+	assert.equal(existsSync(join(dir, "ran")), false, "the command started after a stop had already arrived -- that is a worker the manager believes it stopped");
+	assert.match(stderr, /stopped before the worker started/);
+	assert.match(stderr, /never launched/, "the exit 0 must say WHICH stop it is, rather than being indistinguishable from a clean run");
+});
+
+test("wrapper: the same holds while ./.env is sourced -- the trap is up before EITHER source", { skip: !POSIX }, async () => {
+	// A separate test rather than a parameter, because it pins a different LINE: a fix that armed the trap
+	// after ./.env and before the setup script would pass the test above and leave this one red. ./.env is
+	// sourced too, so it runs arbitrary shell in this process, and a manager that RENDERS that file
+	// (Recipe B in docs/secrets.md) can leave it mid-write under a slow template fetch.
+	const dir = wrapperDir(NEVER_RUNS);
+	writeFileSync(join(dir, ".env"), `PI_WRAPPER_TEST=1\n${blockUntilReleased()}`);
+	let inEnv = false;
+	const { code, signal, stderr } = await runWrapper(dir, {
+		onSpawn: async (child) => {
+			inEnv = await waitForMarker(join(dir, "sourcing"));
+			if (inEnv) child.kill("SIGTERM");
+			writeFileSync(join(dir, "release"), "");
+		},
+	});
+	assert.ok(inEnv, "./.env never announced itself: a readiness timeout, NOT a signal-handling failure");
+	assert.equal(signal, null, "the trap must be armed before ./.env, not merely before the setup script");
+	assert.equal(code, 0);
+	assert.equal(existsSync(join(dir, "ran")), false, "the command started after a stop had already arrived");
+	assert.match(stderr, /stopped before the worker started/);
+});
+
+test("wrapper: a setup script that installs its OWN TERM trap does not cost the drain", { skip: !POSIX }, async () => {
+	// `.` runs in THIS shell, so a `trap ... TERM` inside a setup script REPLACES the wrapper's handler and
+	// the forward silently disappears. Plausible rather than exotic: a manager's cleanup helper does
+	// exactly this. It only became reachable when the trap moved ABOVE the sourcing to close the window the
+	// two tests above pin, so the one-line re-assert after the sourcing is what keeps the old property.
+	// Mutation-checked: drop that line and this goes red with `hijacked` written, `got-term` absent and the
+	// wrapper hanging for the stub's whole lifetime.
+	const dir = wrapperDir(signalStub());
+	const setup = setupScript(dir, `export FROM_MANAGER=1\ntrap ': > "$MARKER_DIR/hijacked"' TERM\n`);
+	let ready = false;
+	const { code } = await runWrapper(dir, {
+		env: { PI_ENV_SETUP: setup },
+		onSpawn: async (child) => {
+			ready = await waitForMarker(join(dir, "started"));
+			child.kill(ready ? "SIGTERM" : "SIGKILL");
+		},
+	});
+	assert.ok(ready, "the stub never wrote its `started` marker: a readiness timeout, NOT a forwarding failure");
+	assert.equal(existsSync(join(dir, "hijacked")), false, "the setup script's own handler ran instead of the wrapper's re-asserted one");
+	assert.ok(existsSync(join(dir, "got-term")), "a trap left behind by a sourced script ate the stop");
+	assert.equal(code, 0);
+});
+
+test("wrapper: a setup script that IGNORES TERM does not cost the drain either", { skip: !POSIX }, async () => {
+	// The worse shape, and the reason the re-assert is not merely tidy. `trap '' TERM` leaves the signal
+	// IGNORED, and a child forked from a shell where TERM is ignored inherits SIG_IGN -- its own `trap`
+	// then becomes a no-op it cannot undo, and the drain is dead for the life of the process with nothing
+	// in any log. Re-installing a real handler before the fork restores SIG_DFL for the child. Measured:
+	// without the re-assert the stub never receives TERM at all and the wrapper waits out its full sleep.
+	const dir = wrapperDir(signalStub());
+	const setup = setupScript(dir, "export FROM_MANAGER=1\ntrap '' TERM\n");
+	let ready = false;
+	const { code } = await runWrapper(dir, {
+		env: { PI_ENV_SETUP: setup },
+		onSpawn: async (child) => {
+			ready = await waitForMarker(join(dir, "started"));
+			child.kill(ready ? "SIGTERM" : "SIGKILL");
+		},
+	});
+	assert.ok(ready, "the stub never wrote its `started` marker: a readiness timeout, NOT a forwarding failure");
+	assert.ok(existsSync(join(dir, "got-term")), "an ignored TERM was inherited by the child, which can no longer trap it");
+	assert.equal(code, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The FORK WINDOW. Between `"$@" &` and `child=$!` a child exists and its pid does not, so a stop landing
+// there ran the handler with nothing to forward to; the re-send after the assignment is what makes it
+// harmless. The window is two instructions wide and cannot be scheduled from outside the shell, so this
+// ONE test does not execute the shipped bytes, and says so.
+//
+// It DERIVES a copy from them by a single substitution -- an inert "announce, then block until the test
+// says go" between those two lines -- and asserts that the substitution matched exactly once and changed
+// nothing else. Built at test time from the real file and never checked in, so a wrapper edit that
+// renames or reorders those lines fails HERE rather than leaving a stale shape under test.
+//
+// The alternatives were considered and are worse. A content pin proves a STRING is present and would
+// survive `kill -TERM "$$"` in place of `kill -TERM "$child"`: a spelling check wearing a behaviour
+// test's name. A repeat-until-you-hit-it stress test is a coin flip dressed as an assertion, green on
+// nearly every iteration and red on a loaded runner for a reason nobody can reproduce, which is the exact
+// class of test this issue exists to remove.
+// ---------------------------------------------------------------------------------------------------
+
+/** The two lines, adjacent, exactly as the wrapper spells them. The ADJACENCY is the window. */
+const FORK_WINDOW = '"$@" &\nchild=$!\n';
+
+function instrumentedWrapper(dir) {
+	const real = readFileSync(REAL_WRAPPER, "utf8");
+	assert.equal(
+		real.split(FORK_WINDOW).length - 1,
+		1,
+		"deploy/worker-env-wrapper.sh no longer contains the fork window exactly once -- those two lines moved, were reordered or were respelled, so this test measures nothing until FORK_WINDOW follows them",
+	);
+	// Inert on purpose: no trap, no kill, no exit, nothing backgrounded (which would move `$!`), and no
+	// variable the wrapper reads. It only holds, and it gives up on its own.
+	const hold = blockUntilReleased("in-fork-window");
+	const text = real.replace(FORK_WINDOW, `"$@" &\n${hold}child=$!\n`);
+	assert.equal(text.replace(hold, ""), real, "the instrumented copy must differ from the shipped file by the inserted hold and nothing else");
+	const path = join(dir, "instrumented-wrapper.sh");
+	writeFileSync(path, text);
+	return path;
+}
+
+test("wrapper: a stop landing in the fork window is re-sent once the pid is known", { skip: !POSIX }, async () => {
+	const dir = wrapperDir(signalStub());
+	const wrapper = instrumentedWrapper(dir);
+	let inWindow = false;
+	let stubReady = false;
+	const { code } = await runWrapper(dir, {
+		wrapper,
+		onSpawn: async (child) => {
+			// BOTH facts, because either alone is a different test. `in-fork-window` says the wrapper is
+			// between the fork and the assignment; `started` says the stub has its own trap up, without
+			// which a delivered TERM would kill it on the default disposition and the failure would wear
+			// the forwarding message again (issue #207's shape, one layer down).
+			inWindow = await waitForMarker(join(dir, "in-fork-window"));
+			stubReady = await waitForMarker(join(dir, "started"));
+			if (inWindow && stubReady) child.kill("SIGTERM");
+			// A fact about the window, not a settle: the stub can only be signalled BY the wrapper, and the
+			// wrapper has no pid to signal with yet.
+			assert.equal(existsSync(join(dir, "got-term")), false, "the handler forwarded during the window -- it had no pid, so the signal reached the stub some other way");
+			writeFileSync(join(dir, "release"), "");
+		},
+	});
+	assert.ok(inWindow && stubReady, "the instrumented wrapper or the stub never announced itself: a readiness timeout, NOT a forwarding failure");
+	assert.ok(
+		existsSync(join(dir, "got-term")),
+		"the stop was dropped: the handler fired with $child unset and nothing re-sent it after `child=$!`, so the wrapper is waiting out the command's whole natural lifetime while the manager believes it asked it to stop",
+	);
+	assert.equal(code, 0, "the wrapper reports the command's post-drain exit code");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Two pins on the HARNESS itself. Both defects below were live in this file while issue #221 was being
+// diagnosed, and both make the harness LIE about a signal test rather than fail one -- which is how the
+// same drop got misdiagnosed twice. A harness nothing checks is how they survived.
+// ---------------------------------------------------------------------------------------------------
+
+test("runWrapper waits for onSpawn as well as close, so an early-exiting wrapper cannot beat its own callback", { skip: !POSIX }, async () => {
+	// The wrapper now exits early BY DESIGN when a stop arrives during startup, and `onSpawn` is where
+	// every signal test assigns its readiness fact. Resolving on `close` alone let the exit win the race:
+	// the assertion then ran against the initial `false` and reported "a readiness timeout, NOT a
+	// forwarding failure" -- a diagnosis of something that never happened, printed in the one place a real
+	// one was needed. The release below is written FROM the close handler, so it can only land after the
+	// wrapper has exited: with the fix this reads true, without it the promise has already resolved.
+	const dir = wrapperDir("#!/bin/sh\nexit 0\n");
+	let settledAfterClose = false;
+	await runWrapper(dir, {
+		onSpawn: async (child) => {
+			child.on("close", () => writeFileSync(join(dir, "release"), ""));
+			settledAfterClose = await waitForMarker(join(dir, "release"));
+		},
+	});
+	assert.ok(settledAfterClose, "runWrapper resolved before onSpawn finished, so a test reading a value it assigns would read the initial one");
+});
+
+test("the readiness ceiling stays well inside the stub's own lifetime", { skip: !POSIX }, () => {
+	// The pair that produced issue #221's misreport: a 30s readiness bound against a 30s stub, no headroom.
+	// Let the wait outlive the stub and the stub exits on its own, the TERM lands on a dead child, and a
+	// READINESS problem is reported with the FORWARDING message -- exactly what issue #207 set out to make
+	// impossible. An arithmetic pin rather than a timing one, so it costs nothing and cannot flake.
+	assert.ok(
+		READY_TIMEOUT_MS * 2 <= STUB_LIFETIME_S * 1000,
+		`READY_TIMEOUT_MS (${READY_TIMEOUT_MS}) must leave the stub's ${STUB_LIFETIME_S}s lifetime real headroom: a readiness wait that can outlive the process it is waiting to signal reports the wrong failure`,
+	);
 });
