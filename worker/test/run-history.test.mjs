@@ -268,6 +268,12 @@ test("parseExitContext refuses a measurement that is not one", () => {
 	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":-1,"window":200000}}'), null);
 	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":1.5,"window":200000}}'), null);
 	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":"100","window":"200000"}}'), null);
+	// Beyond the safe range a number stringifies to exponential notation, which the session store's
+	// decimal round-trip rejects on read -- so accepting it here would write a measurement into the store
+	// that nothing can ever read back, and the gate would fail open on a context reported as full.
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":1e21,"window":1e22}}'), null);
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":1e308,"window":1e308}}'), null);
+	assert.deepEqual(parseExitContext('{"event":"exit","context":{"tokens":9007199254740991,"window":9007199254740991}}'), { tokens: 9007199254740991, window: 9007199254740991 }, "the top of the safe range still round-trips");
 });
 
 test("parseExitContext returns the LAST exit line's context and never throws", () => {

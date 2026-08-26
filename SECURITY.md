@@ -374,9 +374,16 @@ Stated openly rather than discovered later:
   `PI_SESSIONS_TTL_DAYS` you can work with, and **check that `PI_SESSIONS_DIR` is outside any repository
   you commit** — the shipped `.gitignore` covers the conventional layout and cannot cover a path it has
   never seen. `PI_SESSIONS_TTL_DAYS` alone does not bound a lineage an operator actually uses: it reads
-  the file's mtime, which every run on the key refreshes, so a pull request worked on daily never ages
-  out however far back its first turn goes. `PI_SESSION_MAX_AGE_DAYS` bounds the conversation itself, and
-  it is the knob that puts a ceiling on how much history one attacker-reachable transcript can accumulate.
+  the transcript's mtime, which every **completed** run refreshes, so a pull request that keeps getting
+  work done on it never ages out however far back its first turn goes. `PI_SESSION_MAX_AGE_DAYS` bounds
+  the conversation itself.
+  **Read what that bound is and is not.** It reads a timestamp on the transcript's first line, and the
+  agent owns `/session`, so the value it judges is one the agent wrote. Against an ordinary long-running
+  lineage it does what it says. Against an agent that wants its history to survive, it does not: the same
+  agent can restamp the header every run, and can carry content across runs in the file regardless of
+  what any of these bounds decide. Treat all three as operating limits on how much history accumulates by
+  accident, not as controls on an adversary who already has code execution in the container. The bound
+  that is not agent-writable is `PI_SESSION_MAX_RESUME_CHAIN`, which counts the host's own deliveries.
 
 ## Operator responsibilities
 

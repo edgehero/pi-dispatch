@@ -235,7 +235,6 @@ test("a disk fault mid-promotion is named promote-failed, and does not wedge the
 	);
 });
 
-
 test("the conversation-age bound reads the header's clock, which mtime cannot see", () => {
 	// The whole point of the bound: mtime is FRESH here (seed just wrote the file), so `expired` passes and
 	// only the header's own timestamp can tell that the lineage is old.
@@ -299,7 +298,6 @@ test("a corrupt transcript is corrupt, not old: unparseable still wins over the 
 	}
 });
 
-
 test("the resume chain counts consecutive resumed completions, and a cold one starts the lineage over", () => {
 	// The acceptance case from the issue, driven end to end through the real store: bound of 3, so the
 	// fourth job in a row starts fresh, and its own completion lets the next one resume again.
@@ -312,7 +310,7 @@ test("the resume chain counts consecutive resumed completions, and a cold one st
 		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 		// What a completed container leaves behind, and the verdict it reports for it.
 		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
-		store.promoteSession(s, { piVersion: PI, resumed: s.resume });
+		store.promoteSession(s, { piVersion: PI });
 		return s.reason;
 	};
 
@@ -327,25 +325,86 @@ test("the resume chain counts consecutive resumed completions, and a cold one st
 	assert.equal(runOnce(), "resumed", "so the next one resumes again");
 });
 
-test("the chain counter follows what pi observed, not what the host intended", () => {
-	// A host that staged a transcript pi then declined to continue did not extend the lineage, and
-	// counting the host's intent would let a broken transcript exhaust a bound it never used.
-	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 2 });
+test("the chain counter follows the HOST's delivery, which is the half no container can influence", () => {
+	// This counted pi's `resumed` first, on the reasoning that a transcript pi declined to continue
+	// extended nothing. That reasoning loses to the agent, which owns /session: a transcript whose payload
+	// sits on lines pi's parser DROPS is delivered by the host every run while pi reports zero messages,
+	// so the counter reset every run and the bound never fired. The regression test below drives that
+	// exact file through the real store; this one pins the rule it rests on.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 5 });
 	const key = sessionKeyFor(ghIssue);
 	seed(sessionsDir, key);
 	const chain = join(sessionsDir, key, "resume-chain");
 
 	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
-	assert.equal(s.resume, true, "the host did resolve a transcript");
+	assert.equal(s.resume, true, "the host did hand the transcript over");
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
-	store.promoteSession(s, { piVersion: PI, resumed: false });
-	assert.equal(readFileSync(chain, "utf8"), "0", "the container is the one that observed the outcome");
+	store.promoteSession(s, { piVersion: PI });
+	assert.equal(readFileSync(chain, "utf8"), "1", "the delivery is what counts, whatever pi made of it");
 
-	// And with no verdict at all (a runner image predating the field), the host's intent is the fallback.
-	const s2 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
-	writeFileSync(join(s2.hostDir, SESSION_FILE_NAME), HEADER);
-	store.promoteSession(s2, { piVersion: PI });
-	assert.equal(readFileSync(chain, "utf8"), "1");
+	// A cold start resets, because the host did NOT hand anything over.
+	const { store: s2store, jobDir: jd2, sessionsDir: sd2 } = fixture({ maxResumeChain: 5 });
+	const k2 = sessionKeyFor(ghIssue);
+	const cold = s2store.resolveSession(ghIssue, { jobDir: jd2, piVersion: PI });
+	assert.equal(cold.resume, false);
+	writeFileSync(join(cold.hostDir, SESSION_FILE_NAME), HEADER);
+	s2store.promoteSession(cold, { piVersion: PI });
+	assert.equal(readFileSync(join(sd2, k2, "resume-chain"), "utf8"), "0");
+});
+
+test("a transcript pi reports zero messages for still counts as a delivery", () => {
+	// The regression. `payload` is a line pi's parser drops, so the runner reports `absent` every run
+	// while the file rides back and forth intact. Counting pi's verdict made this a chain of zero
+	// forever; counting the delivery makes the bound fire on schedule.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 3, maxAgeDays: 7 });
+	const key = sessionKeyFor(ghIssue);
+	const carrier = () =>
+		`${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: new Date(NOW).toISOString(), cwd: "/workspace" })}\n${JSON.stringify({ type: "carry", note: "payload pi drops" })}\n`;
+	seed(sessionsDir, key, { body: carrier() });
+
+	const reasons = [];
+	for (let run = 0; run < 4; run++) {
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		reasons.push(s.reason);
+		// The agent rewrites its carrier, header timestamp refreshed, exactly as it would each run.
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), carrier());
+		store.promoteSession(s, { piVersion: PI });
+	}
+	assert.deepEqual(reasons, ["resumed", "resumed", "resumed", "resume-chain-too-long"], "the bound must fire even though pi never reports a resume");
+});
+
+test("a sidecar is read through an lstat, so a planted link cannot decide a gate", () => {
+	// The transcript has been guarded against this since the feature shipped; the sidecars inherit it
+	// rather than being the exception. The store is host-only and never mounted, but the directory NAME is
+	// derived rather than random, so the path can be precomputed by anyone who knows the repo and branch.
+	const { store, jobDir, sessionsDir, root } = fixture({ maxResumeChain: 3, maxContextPct: 50 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const outside = join(root, "outside.txt");
+
+	writeFileSync(outside, "9");
+	symlinkSync(outside, join(sessionsDir, key, "resume-chain"));
+	writeFileSync(join(root, "outside-ctx.txt"), "999 1000");
+	symlinkSync(join(root, "outside-ctx.txt"), join(sessionsDir, key, "context"));
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "resumed", "neither link may be followed, so neither gate acts on a file outside the store");
+
+	// ...and the write side must not truncate what a link points at either.
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(s, { piVersion: PI, context: { tokens: 1, window: 1000 } });
+	assert.equal(readFileSync(outside, "utf8"), "9", "a promotion must not write through a planted link");
+});
+
+test("an oversized sidecar is no measurement, not a slow one", () => {
+	// maxBytes bounds the transcript and never covered these. Both formats are a handful of bytes, and
+	// reading a huge file happens on the job's own path, before any container starts.
+	const { store, jobDir, sessionsDir } = fixture({ maxResumeChain: 3, maxContextPct: 50 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	writeFileSync(join(sessionsDir, key, "resume-chain"), `${"9".repeat(5000)}`);
+	writeFileSync(join(sessionsDir, key, "context"), `999 1000${" ".repeat(5000)}`);
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed");
 });
 
 test("an unset chain bound counts anyway, so setting it later is honest immediately", () => {
@@ -357,7 +416,7 @@ test("an unset chain bound counts anyway, so setting it later is honest immediat
 		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 		assert.equal(s.reason, "resumed", "with no bound set, nothing is ever refused for chain length");
 		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
-		store.promoteSession(s, { piVersion: PI, resumed: true });
+		store.promoteSession(s, { piVersion: PI });
 	}
 	assert.equal(readFileSync(join(sessionsDir, key, "resume-chain"), "utf8"), "4");
 });
@@ -393,12 +452,11 @@ test("a promotion that never happened leaves the counter alone", () => {
 	const key = sessionKeyFor(ghIssue);
 	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 	assert.equal(s.reason, "absent");
-	const p = store.promoteSession(s, { piVersion: PI, resumed: true });
+	const p = store.promoteSession(s, { piVersion: PI });
 	assert.equal(p.promoted, false);
 	assert.equal(p.reason, "absent");
 	assert.equal(existsSync(join(sessionsDir, key, "resume-chain")), false, "no promotion, no counter");
 });
-
 
 test("the context bound refuses at or above the threshold and resumes below it", () => {
 	// 80% of a 200k window is 160000 tokens. At the line and over it refuse; one token under resumes.
@@ -439,6 +497,110 @@ test("an unset context bound never reads the sidecar at all", () => {
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed");
 });
 
+test("a cold start CLEARS the context reading, because it promoted a different conversation", () => {
+	// The trap this closes: the gate cold-started on a stale high reading, and the cold start left the same
+	// reading behind for the next run to read, forever. The transcript a cold start promotes shares nothing
+	// with the one the old number described, so keeping it is not caution, it is a false statement that
+	// re-refuses the key every run. Nothing releases it either: every promotion refreshes the transcript's
+	// mtime, so neither the TTL gate nor the reaper can reach an actively-used key.
+	const { store, jobDir, sessionsDir } = fixture({ maxContextPct: 80 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const sidecar = join(sessionsDir, key, "context");
+	writeFileSync(sidecar, "170000 200000");
+
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(first.reason, "context-too-full");
+	// The container completes and reports no measurement, the case the runner's own comment enumerates.
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(first, { piVersion: PI });
+	assert.equal(existsSync(sidecar), false, "the reading described a transcript that no longer exists");
+
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed", "and the key is usable again");
+});
+
+test("a reading stamped with another model is not a reading about this one", () => {
+	// A key is (kind, repo, ref) and carries no model, so two triggers on one issue can name different
+	// ones. 25000 tokens is 78% of a 32k window and 2.5% of a 1M one, so using a foreign reading is wrong
+	// in both directions: it refuses a job with a far larger window and passes one with a far smaller.
+	const big = { ...ghIssue, provider: "anthropic", model: "big-window" };
+	const small = { ...ghIssue, provider: "anthropic", model: "small-window" };
+
+	const { store, jobDir, sessionsDir } = fixture({ maxContextPct: 70 });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	writeFileSync(join(sessionsDir, key, "context"), "25000 32000 anthropic/small-window");
+	assert.equal(store.resolveSession(small, { jobDir, piVersion: PI }).reason, "context-too-full", "78% of its own window");
+	assert.equal(store.resolveSession(big, { jobDir, piVersion: PI }).reason, "resumed", "the same number says nothing about a different window");
+
+	// Case is normalised, and the case that proves it must be one where a MISSING stamp and a MATCHING one
+	// give different answers. A capitalised job against a reading from a DIFFERENT model: normalised, the
+	// two ids differ and the reading is ignored; unnormalised, the job's id falls out of the charset,
+	// counts as unknown, and the foreign reading is used after all.
+	const shouty = { ...ghIssue, provider: "Anthropic", model: "Big-Window" };
+	assert.equal(store.resolveSession(shouty, { jobDir, piVersion: PI }).reason, "resumed");
+
+	// Unknown on either side stays usable, so a deployment naming no model keeps the bound it had.
+	const bare = fixture({ maxContextPct: 70 });
+	seed(bare.sessionsDir, key);
+	writeFileSync(join(bare.sessionsDir, key, "context"), "25000 32000");
+	assert.equal(bare.store.resolveSession(ghIssue, { jobDir: bare.jobDir, piVersion: PI }).reason, "context-too-full");
+});
+
+test("a promotion that landed is never reported as promote-failed by its own bookkeeping", () => {
+	// The sidecars are written AFTER the transcript is swapped in. Letting one throw returned
+	// `promote-failed` for a promotion that demonstrably happened, which tells an operator the next run
+	// will cold start when it will in fact resume, and freezes the counter below its bound forever.
+	const { store, jobDir, sessionsDir, logs } = fixture({
+		maxResumeChain: 5,
+		fs: {
+			...realFs,
+			writeFileSync: (p, ...rest) => {
+				if (String(p).includes("resume-chain")) throw new Error("ENOSPC: no space left on device");
+				return realFs.writeFileSync(p, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}extended\n`);
+	const p = store.promoteSession(s, { piVersion: PI });
+
+	assert.equal(p.promoted, true, "the transcript really was promoted");
+	assert.equal(p.reason, "promoted");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("extended"), true);
+	assert.ok(
+		logs.some(([event, fields]) => event === "session_sidecar_failed" && fields.file === "resume-chain"),
+		"the bookkeeping loss is logged rather than reported as a failed promotion",
+	);
+	assert.equal(existsSync(join(sessionsDir, key, "lock")), false, "and the lock is still released");
+});
+
+test("locked means locked: any other failure to take the lock is promote-failed", () => {
+	// openSync(lock, "wx") fails for a read-only directory, a full disk and a vanished store too, and
+	// reporting those as `locked` sends an operator looking for a stuck lock file that does not exist.
+	const { store, jobDir, sessionsDir, logs } = fixture({
+		fs: {
+			...realFs,
+			openSync: (p, flags) => {
+				if (String(p).endsWith("lock")) {
+					const err = new Error("EACCES: permission denied");
+					err.code = "EACCES";
+					throw err;
+				}
+				return realFs.openSync(p, flags);
+			},
+		},
+	});
+	seed(sessionsDir, sessionKeyFor(ghIssue));
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.reason, "promote-failed");
+	assert.equal(logs.some(([, fields]) => fields?.reason === "locked"), false, "nothing may be reported as a concurrency event that was not one");
+});
+
 test("promotion stores the container's context reading, and never erases one it cannot replace", () => {
 	const { store, jobDir, sessionsDir } = fixture();
 	const key = sessionKeyFor(ghIssue);
@@ -454,6 +616,6 @@ test("promotion stores the container's context reading, and never erases one it 
 	// last real reading in place: writing 0 would read as "the context emptied", which cannot have happened.
 	const second = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 	writeFileSync(join(second.hostDir, SESSION_FILE_NAME), HEADER);
-	store.promoteSession(second, { piVersion: PI, resumed: true });
+	store.promoteSession(second, { piVersion: PI });
 	assert.equal(readFileSync(sidecar, "utf8"), "12345 200000");
 });

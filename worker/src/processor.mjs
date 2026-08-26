@@ -44,7 +44,7 @@ export async function runJob(job, deps) {
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
-		// (session, { piVersion, resumed, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
+		// (session, { piVersion, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
 		// it behaves exactly as before -- no store, no promotion, no session in the record.
 		promoteSession = () => null,
@@ -388,7 +388,7 @@ export async function runJob(job, deps) {
 				// (CONST-RETRY-INFRA-ONLY). Same completed-only rule INT-OUTBOX-CONTRACT already uses, and
 				// it sits beside the chain collection for the same reason: both must happen before the
 				// `finally` deletes jobDir. Never throws.
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, resumed: session?.resumed, context }) : null;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context }) : null;
 				return {
 					outcome: "completed",
 					exitCode: code,

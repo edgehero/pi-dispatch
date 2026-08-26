@@ -628,6 +628,35 @@ test("the record's session merges host intent with what the container actually d
 	assert.equal(JSON.stringify(degraded.session).includes(prepared.session.key), false);
 });
 
+test("the promotion carries the container's context reading, or the bound it feeds can never fire", async () => {
+	// The join between the two halves of the context bound, and it was unpinned: the runner's emit and the
+	// store's gate each had tests, while the one line that carries the number between them had none, so
+	// deleting it left the whole suite green and the knob permanently inert on a wired worker.
+	// deepEqual on the OPTIONS OBJECT, not a property probe, so a dropped key and a stray one both fail.
+	const calls = [];
+	const prepared = { workspace: "/w", jobDir: "/j", session: { key: "abc", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 42 } };
+	const { deps: base } = deps({
+		prepareWorkspace: async () => prepared,
+		promoteSession: (s, opts) => {
+			calls.push(opts);
+			return { promoted: true, reason: "promoted", bytes: 99 };
+		},
+		imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }),
+	});
+
+	await runJob(ghJob, {
+		...base,
+		runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, context: { tokens: 5000, window: 200000 } }),
+	});
+	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: { tokens: 5000, window: 200000 } }]);
+
+	// A container that reported none passes null through rather than omitting the key, so the store's
+	// "leave the last real reading alone" branch is reached rather than its "no key" one.
+	calls.length = 0;
+	await runJob(ghJob, { ...base, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: true, reason: "resumed" }, context: null }) });
+	assert.deepEqual(calls, [{ piVersion: "0.80.7", context: null }]);
+});
+
 test("a host gate that refused outranks the runner's absent, so the record names WHICH gate", async () => {
 	// The repair. A refused read stages a 0-byte file rather than nothing, the container is handed it
 	// either way, and pi opens it and finds no messages -- so the runner reports `absent` on EVERY host

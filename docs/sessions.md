@@ -36,7 +36,9 @@ PI_SESSION_MAX_CONTEXT_PCT=    # unset = no bound; 1-100, e.g. 80: refuse a resu
 `PI_SESSIONS_DIR` is unset. It also prints which of the four bounds are on, because a knob that is silent
 when unset gives you no way to tell a deliberate "no bound" from a forgotten one, and it warns when
 `PI_SESSION_MAX_CONTEXT_PCT` is set, since that one needs a job image whose runner reports the
-measurement and does nothing at all on an older one. **One case fails closed**: a trigger that sets `"resume": true` with no store
+measurement and does nothing at all on an older one. On an image that does report it, readings are kept
+whether or not the bound is set, so switching the bound on applies from the next job rather than from the
+next run of each key. **One case fails closed**: a trigger that sets `"resume": true` with no store
 configured is refused **before it costs anything**, as a policy refusal that reserves no budget slot and
 starts no container, rather than running unpersisted and looking like it worked. That is the whole reason
 the refusal exists: a green run is exactly how an operator comes to believe a feature is on while it is
@@ -126,20 +128,22 @@ stages an empty transcript, the container opens it and reports `absent`, and tha
 host's answer, so `expired` and `pi-version-changed` never reached a record at all. A gate that refused
 now keeps its own name on the record. What the container found is still what you see whenever the
 container is the one that found it: `unparseable` below is reported by both, and a run whose transcript
-the host resolved and the container could not use still reads `absent`, which is the disagreement worth
-seeing rather than an ordinary cold start.
+the host resolved and the container could not use reads `absent`. Be careful with that last one, because
+in the record it looks exactly like an ordinary first-ever cold start: the record carries the container's
+verdict, not the host's intent. The worker's own `session_resolved` log line is where the two halves can
+be told apart.
 
 | reason | meaning |
 |---|---|
 | `absent` | first run for this key, or the previous one produced nothing |
-| `expired` | older than `PI_SESSIONS_TTL_DAYS`, measured from the last run on the key |
-| `conversation-too-old` | the conversation itself started more than `PI_SESSION_MAX_AGE_DAYS` ago. A different clock from `expired`: that one reads the file's mtime, which every run refreshes, so a lineage worked on daily never ages out however old its first turn is. A header whose timestamp is missing or unreadable lands here too, because a conversation that cannot say how old it is has not been shown to be young enough |
+| `expired` | older than `PI_SESSIONS_TTL_DAYS`, measured from the last **completed** run on the key (the promotion is what refreshes the file) |
+| `conversation-too-old` | the conversation itself started more than `PI_SESSION_MAX_AGE_DAYS` ago. A different clock from `expired`: that one reads the transcript's mtime, which every completed run refreshes, so a lineage that keeps finishing work never ages out however old its first turn is. A header whose timestamp is missing or unreadable lands here too, because a conversation that cannot say how old it is has not been shown to be young enough. The timestamp is written by the agent's own session, so this bounds accumulation, not an adversary |
 | `too-large` | over `PI_SESSION_MAX_BYTES` |
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
 | `not-a-regular-file` | ignored, not refused: the check is an `lstat`, so a symlink planted in `/session` is never followed, and the job runs cold |
 | `pi-version-changed` | the job image ships a different pi than wrote the transcript |
-| `context-too-full` | the saved session's context was already at or above `PI_SESSION_MAX_CONTEXT_PCT` of the model's window when it was last written. The measurement comes from the job image's runner, so this bound is inert until you run an image that reports it and each key has completed one run since; where there is no measurement the gate passes rather than guessing, and it never estimates one from the transcript's size |
-| `resume-chain-too-long` | this key has already been resumed `PI_SESSION_MAX_RESUME_CHAIN` times in a row. The count is kept for every key whether or not the bound is set, so setting it takes effect on the next job rather than that many jobs later, and the cold start it causes resets the count so the lineage begins again |
+| `context-too-full` | the saved session's context was already at or above `PI_SESSION_MAX_CONTEXT_PCT` of its model's window when it was last written. The measurement comes from the job image's runner, so on an image that does not report one this bound does nothing at all; where there is no measurement the gate passes rather than guessing, and it never estimates one from the transcript's size. The reading is stamped with the model that produced it and ignored by a job running a different one, since the same token count is most of a small window and almost none of a large one. A cold start clears it, so a key cannot be refused forever on a number describing a conversation it no longer holds |
+| `resume-chain-too-long` | the host has already handed this key's transcript to a container `PI_SESSION_MAX_RESUME_CHAIN` times in a row. It counts deliveries rather than what pi made of them, so an agent cannot reset it by arranging for pi to find nothing usable in a file it still receives. The count is kept for every key whether or not the bound is set, so setting it takes effect on the next job rather than that many jobs later, and the cold start it causes resets the count **once that run completes**: a lineage whose runs keep failing keeps cold-starting, which is the safe direction |
 
 `pi-version-changed` is the one that surprises people. A transcript can outlive the pi that wrote it, and
 an older session's stored tool-call arguments may not match a newer pi's tool schema. Rather than fail

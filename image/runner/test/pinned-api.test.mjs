@@ -181,6 +181,14 @@ test("getContextUsage and the ContextUsage shape the session store's bound is wr
 	// has no model or no window. Both are why the runner omits the key entirely rather than emitting a
 	// zero, and why the host's gate passes on absence instead of inventing a denominator.
 	assert.match(types, /tokens: number \| null;/, "ContextUsage.tokens stopped being nullable -- re-check whether the runner still needs its guard");
+
+	// The OTHER bound's input, pinned here for the same reason and with more at stake. The conversation-age
+	// gate reads `SessionHeader.timestamp` and fails CLOSED when it cannot: if a pin bump renames or drops
+	// that field, PI_SESSION_MAX_AGE_DAYS stops being a bound and becomes a deployment-wide refusal to
+	// resume anything, reported as `conversation-too-old`, with nothing else in this suite noticing.
+	const header = agentDistFile("core", "session-manager.d.ts");
+	assert.match(header, /export interface SessionHeader \{/, "SessionHeader is gone from the pinned types");
+	assert.match(header, /SessionHeader \{[^}]*\btimestamp: string;/, "SessionHeader.timestamp is gone or is no longer a string -- the conversation-age bound reads it and fails closed without it");
 });
 
 test("ProviderConfigInput still accepts the { api, streamSimple } pair the meter registers", { skip }, () => {

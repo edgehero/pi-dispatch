@@ -134,8 +134,12 @@ export function parseExitContext(text) {
 		}
 		if (parsed?.event !== "exit") continue;
 		const c = parsed?.context;
-		// A window of 0 is not a denominator, and a negative count is not a measurement.
-		if (c && typeof c === "object" && !Array.isArray(c) && Number.isInteger(c.tokens) && Number.isInteger(c.window) && c.tokens >= 0 && c.window > 0) {
+		// A window of 0 is not a denominator, and a negative count is not a measurement. SAFE integers
+		// specifically: `Number.isInteger` accepts up to ~1.8e308, and anything from 1e21 up stringifies to
+		// exponential notation, which the session store's own decimal round-trip then rejects on read --
+		// so a value in that range would be written into the store and be unreadable forever after, with
+		// the gate failing open on a measurement that said the context was full.
+		if (c && typeof c === "object" && !Array.isArray(c) && Number.isSafeInteger(c.tokens) && Number.isSafeInteger(c.window) && c.tokens >= 0 && c.window > 0) {
 			return { tokens: c.tokens, window: c.window };
 		}
 		return null;

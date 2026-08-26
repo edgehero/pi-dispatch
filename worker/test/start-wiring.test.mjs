@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -605,4 +605,24 @@ test("with no GITLAB_TOKEN there is no gitlab forge, and a gitlab job refuses at
 		(e) => e.piDispatchConfig === true,
 		"an unconfigured forge refuses with a message, rather than running the job anonymously",
 	);
+});
+
+test("every session bound config reads is actually handed to the store", () => {
+	// A bound that config parses and start.mjs forgets to pass is a knob an operator sets, doctor prints,
+	// and nothing enforces -- silent in exactly the way this project keeps refusing to be. Asserted
+	// against the SOURCE, the same tactic the checks above use: constructing the real wiring needs a
+	// Valkey connection, and the makeSessionStore call is a literal either way.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	const call = src.match(/makeSessionStore\(\{[^}]*\}\)/s);
+	assert.ok(call, "makeSessionStore must be called with an object literal");
+	for (const [option, setting] of [
+		["sessionsDir", "config.sessionsDir"],
+		["ttlDays", "config.sessionsTtlDays"],
+		["maxBytes", "config.sessionMaxBytes"],
+		["maxAgeDays", "config.sessionMaxAgeDays"],
+		["maxResumeChain", "config.sessionMaxResumeChain"],
+		["maxContextPct", "config.sessionMaxContextPct"],
+	]) {
+		assert.match(call[0], new RegExp(`${option}:\\s*${setting.replace(".", "\\.")}`), `${option} must be wired from ${setting}`);
+	}
 });

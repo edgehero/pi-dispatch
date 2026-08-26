@@ -259,9 +259,10 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// oversized transcript is a prefill an operator never sized PI_MAX_TOKENS for.
 		sessionMaxBytes: nonNegativeInt(env, "PI_SESSION_MAX_BYTES", 8 * 1024 * 1024), // 0 = no cap
 		// How old the CONVERSATION may be, which is a different clock from sessionsTtlDays above and not a
-		// finer setting of it: the TTL reads mtime, and mtime is refreshed by every resolve copy and every
-		// promote rename, so it measures time since the last completed run on this key. A key touched daily
-		// never expires however old its first turn is. This one reads the session header's own timestamp.
+		// finer setting of it: the TTL reads the transcript's mtime, which the PROMOTE rename refreshes (the
+		// resolve copy does not, measured -- copyFileSync stamps the destination), so it measures time since
+		// the last COMPLETED run on this key. A key whose runs keep completing never expires however old its
+		// first turn is. This one reads the session header's own timestamp.
 		// OFF by default (0) rather than defaulted to a number: an age an operator did not choose is an
 		// opinion about their lineages that this project has no basis for.
 		sessionMaxAgeDays: nonNegativeInt(env, "PI_SESSION_MAX_AGE_DAYS", 0), // 0 = no age bound

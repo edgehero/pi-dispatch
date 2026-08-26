@@ -1160,7 +1160,7 @@ export async function collectChecks(env, seams) {
 					ok: true,
 					warn: true,
 					label: `PI_SESSION_MAX_CONTEXT_PCT=${env.PI_SESSION_MAX_CONTEXT_PCT} needs a job image whose runner reports context usage`,
-					fix: `an older image reports none, and a bound with no measurement passes rather than guessing: after upgrading the image, each key needs one completed run before the bound can refuse anything. Each run's own record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
+					fix: `an older image reports none, and a bound with no measurement passes rather than guessing, so on such an image this bound does nothing at all. On an image that does report one the reading is kept whether or not the bound is set, so it applies from the next job. Each run's own record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
 				});
 			}
 		}
