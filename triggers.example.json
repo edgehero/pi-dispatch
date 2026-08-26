@@ -4,6 +4,7 @@
     { "on": { "type": "cron", "id": "nightly-workflow", "pattern": "30 3 * * *" }, "run": { "kind": "local", "folder": "/absolute/path/to/your/project", "command": "wf run nightly" } },
     { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "github", "flow": "frontend-fix", "packages": false, "skillsDir": "/absolute/path/to/your/skills" } },
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "github", "flow": "fix", "resume": true, "instructions": "This repo uses pnpm, not npm. Run the type check before opening a PR." } },
+    { "on": { "type": "label", "any": ["pi:deploy"] }, "run": { "kind": "github", "flow": "deploy", "secretsProfile": "prod", "secrets": { "STRIPE_KEY": "op://ci-vault/stripe/api-key" } } },
     { "on": { "type": "label", "any": ["pi:wf"] }, "run": { "kind": "github", "command": "wf run" } },
     { "on": { "type": "pull_request", "action": ["labeled"], "any": ["pi:review"] }, "run": { "kind": "github", "flow": "review" } },
     { "on": { "type": "pull_request", "action": ["opened", "synchronize"] }, "run": { "kind": "github", "flow": "review" } },

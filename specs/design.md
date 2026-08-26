@@ -613,6 +613,81 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   capturing `PI_ENV_SETUP` *before* they source `./.env`, so no file they read can name a file they run.
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-TRIGGER-FOR-LOCAL`, `CONST-BUDGET-BEFORE-TOKENS`
 
+## DES-PER-TRIGGER-SECRET-PROFILE
+
+- **Decision**: A trigger names secret REFERENCES and a resolver PROFILE NAME. The operator declares
+  profiles as `name -> absolute path` in `PI_SECRET_PROFILES` or through the operator-typed
+  `/dispatch secrets` command; the worker runs the selected script once per reference, host-side, before
+  anything spends, and injects the values into the closed container environment.
+
+- **Why**: A deployment-wide `PI_FORWARD_ENV` entry is the only way a job can hold a secret of its own
+  today, and it gives that secret to every job on the host. The unit of choice an operator actually wants
+  is the trigger: this repository's `pi:deploy` label holding a Stripe key while `pi:fix` holds none.
+
+  **A trigger names a NAME, never a path, and that distinction is the whole reason this is allowed.**
+  `DES-SERVICE-ENV-SETUP-SEAM` rejected "making this reachable from configuration, which would turn a
+  boot-time root-adjacent exec into something a trigger file could name". A profile name SELECTS among execs
+  the operator already declared. It cannot introduce one, cannot name a path, and cannot reach a script
+  nobody wired. The rejected thing is a trigger file naming an exec; this is a trigger file choosing between
+  the operator's.
+
+  **What that argument does NOT establish, stated because the first draft of this entry claimed it.** It is
+  tempting to add that a resolver is safer than `--env-setup` because it runs mid-life as the worker's own
+  user rather than root-adjacent at boot. That does not survive `SECURITY.md`'s own words: the blast radius
+  named there is "the account that holds every credential this deployment has", which IS the worker's user,
+  and a resolver inherits the worker's whole environment including `GITHUB_APP_PRIVATE_KEY`. Boot-time
+  versus job-time is a difference in timing, not in power. What actually bounds the new surface is the
+  fail-closed default below, not a weaker blast radius.
+
+  **The panel may declare a manager, and `PI_SECRET_RESOLVER_ROOTS` is what makes that safe.** Declaring a
+  profile means naming an absolute host path the worker executes, so it is reachable only from the
+  operator-typed command surface (`registerCommand` has no LLM-facing surface at all) and every
+  panel-declared path must realpath inside an operator-named root. The default is empty, so a deployment
+  that never opts in behaves exactly as though the panel path did not exist. This is
+  `DES-PER-TRIGGER-JOB-IMAGE`'s own prediction arriving: "If a future tool ever takes an image parameter,
+  the allowlist arrives with that tool, and this row is the reason it must."
+
+  **The bound is enforced in the WORKER, not only where a profile is written.** The settings overlay
+  defaults into the OS temp directory, so on a multi-user host a check that lived in the panel alone would
+  be cosmetic. Re-checking at resolution time caps a tampered overlay at "choose among scripts the operator
+  allowlisted" rather than "name any executable on the host".
+
+  **Neither source wins a name collision.** `DES-RUNTIME-SETTINGS-FILE-OVERLAY` gives the overlay
+  precedence over env, and inverting that for one key would leave two rules disagreeing about what an
+  overlay is; honouring it would let a file in a world-writable default directory redirect a profile the
+  operator wrote in `.env`. So a name declared in both refuses per delivery, which is the posture `PI_EGRESS`
+  already takes toward an ambiguous value.
+
+  **The resolver's exit code is `INT-RUNNER-EXIT-CODE-PROTOCOL`'s, reused rather than invented.** Folding
+  every nonzero exit into a refusal is the obvious design and it breaks `CONST-RETRY-INFRA-ONLY` in the
+  expensive direction: a vault unreachable for twenty seconds would permanently burn a delivery that
+  `attempts: 2` would have recovered, and a webhook does not redeliver itself.
+
+- **Rejected**:
+  - ***A trigger naming the resolver path directly*** — this is the thing `DES-SERVICE-ENV-SETUP-SEAM`
+    refused, and no bound recovers it: `triggers.json` is operator-authored but the whole design of the
+    name/path split is that the file which says WHICH job reaches a vault need not also be the file that
+    says WHAT runs to reach it.
+  - ***A flow declaring a profile*** — `.pi/skills/<flow>/SKILL.md` is merge-gated, not operator-authored.
+    `DES-AI-TRIGGER-FLOW-GATE` reads a BOOLEAN from that file precisely because a boolean is all it is
+    willing to take from there, and `DES-PER-TRIGGER-JOB-IMAGE` calls a flow-declared image its sharpest
+    rejection. A flow-declared vault profile is that with a credential attached.
+  - ***A vault name as the unit of grant*** — a trigger enumerating fields stays true as the vault grows;
+    a trigger naming a vault silently widens every time someone adds an item to it. Naming a vault is how a
+    capability review decays without anyone editing the file it lives in.
+  - ***A model-callable `secretsProfile` picker*** — considered, and it cannot exist coherently: a profile
+    that resolves nothing is refused at load and no tool can write `run.secrets`, so the picker could never
+    produce a valid trigger. A control that looks like a grant and is only ever an error.
+  - ***A manager's client inside the job image*** — nothing in this design runs in the container, which is
+    what keeps the image free of a vendor and the job free of a credential.
+  - ***A per-trigger egress relaxation to reach a vault*** — `run.network` was already refused
+    (the deployment configures egress; a trigger never does), and nothing here needs one: the resolver runs
+    on the host, outside the job's network entirely.
+
+- **Traces to**: `REQ-TRIGGER-SECRETS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `DES-SERVICE-ENV-SETUP-SEAM`, `DES-PER-TRIGGER-JOB-IMAGE`,
+  `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `CONST-TOKEN-SCOPED-PER-JOB`
+
 ## DES-SERVICE-ENV-SETUP-SEAM
 
 - **Decision**: `pi-dispatch service render|install --env-setup <absolute path>` is the supported way to
@@ -2350,6 +2425,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-26 | **NEW `DES-PER-TRIGGER-SECRET-PROFILE`** (issue #225). **`DES-SERVICE-ENV-SETUP-SEAM` AMENDED by scope, not reversed**: its Rejected row refuses "making this reachable from configuration, which would turn a boot-time root-adjacent exec into something a trigger file could name", and that still holds -- a trigger names a profile NAME, never a path, so it selects among execs the operator already declared and cannot introduce one. A first draft of the new entry also argued the resolver's blast radius is smaller because it runs mid-life as the worker's user rather than root-adjacent at boot; that claim was WITHDRAWN before merge, because `SECURITY.md` names the `--env-setup` radius as "the account that holds every credential this deployment has", which IS the worker's user. What bounds the new surface is the fail-closed `PI_SECRET_RESOLVER_ROOTS`, not a weaker radius. **`DES-PER-TRIGGER-JOB-IMAGE` UNCHANGED, checked**: its "if a future tool ever takes an image parameter, the allowlist arrives with that tool" row is the reason the roots allowlist exists, and it predicted this correctly. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` UNCHANGED, checked**: `secretProfiles` is validated by the overlay but kept out of `KNOWN_KEYS`, and it takes no `overlay > env` precedence -- a name declared in both sources refuses. **`DES-AI-TRIGGER-FLOW-GATE` UNCHANGED, checked**: a flow still supplies only a boolean, and a flow-declared profile is in the new entry's Rejected list. |
 | 2026-08-26 | Issue #186 (resume eligibility bounds). **DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED AMENDED**: one rejected alternative, *counting a key's resume chain from the run records*. It is worth refusing in writing because it looks like reading rather than indexing, and because it is not available at any price: the record deliberately carries no session key (that absence is what keeps it PII-free by construction), forge job ids are delivery GUIDs so one key's lineage leaves records with unrelated filenames, and joining them would mean recording the key against each, which is the index this entry already refused. The counter that ships instead is one integer INSIDE the key directory, written under the promotion lock beside the transcript it counts, and the entry states why that is not the same thing: it is keyed state stored where the key already is, it answers one question rather than offering a query surface, and it degrades to a cold start like everything else there when the store is deleted. **DES-RUN-HISTORY-FLAT-FILES-NO-DB UNCHANGED, checked**, and it is the entry the alternative above would have violated: a cross-record content query is the database by another name. **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked** despite the name collision an unwary reader will make -- `PI_CHAIN_DEPTH_MAX` bounds how far one job may spawn another, and `PI_SESSION_MAX_RESUME_CHAIN` bounds how many times one key may be resumed; they share a word and nothing else, which is why the reason token is `resume-chain-too-long` rather than anything shorter. |
 | 2026-08-26 | Issue #221 (the wrapper accepted a stop and then went on as if it had not). **NEW `DES-WRAPPER-STOPS-WHAT-IT-STARTED`**: the handler is armed above the sourcing, re-asserted below it, the command is not launched at all when a stop arrived first (exit 0, reason on stderr), and the signal is re-sent immediately after `child=$!` when the handler fired before the pid was knowable. The entry exists because the wrapper's signal contract had no home: it lived in that file's own comments and in the 2026-08-02 row below, whose sentence "SIGTERM still reaches node via the trap" was true of every case anyone had looked at and false of the two that fire under load. Its Rejected list is where the value is. **A readiness handshake** — a marker the wrapper writes once it can forward, which is what the issue proposed — would have made the TEST reliable and left the PRODUCT dropping the signal, and no marker written by the child can close a window that exists before the child does. **Blocking the signal around the fork** is unreachable in POSIX sh, and its one spelling, `trap '' TERM`, is inherited by the child as SIG_IGN, which is the exact failure the re-assert exists to undo. **Exiting 143** relaunches the service the operator just stopped, into the half-built environment the setup script never finished. **DES-SERVICE-ENV-SETUP-SEAM AMENDED**: the preparation window belongs to the seam, since the seam is what made it long, and the Windows bullet now says the `.cmd` twin has no `trap` either. **DES-CLI-SURFACE UNCHANGED, checked** — no tier moves, and the never-tier's wrapper clause (capture `PI_ENV_SETUP` before sourcing `./.env`) is byte-identical: arming a handler earlier changes when signals are handled, never what may name a script. **DES-WORKER-ON-HOST UNCHANGED, checked** — the worker is still a host process; only when its parent handles signals moved. **DES-CONCURRENCY-3 UNCHANGED, checked** — one wrapper, one daemon, unchanged. |
 | 2026-08-26 | Issue #187 (`run.replicas` on every forge). **DES-TRIGGERS-UNIFIED-FILE AMENDED**, and the amendment corrects a safety claim this entry has carried since it was written: *"One validator, run by both, means a malformed file fails both services identically — the two cannot drift."* There are THREE readers. `admin` bundles `parseTriggers` into its published console at build time (`admin/build.mjs`, esbuild `bundle: true`, the worker absent from `external`) and validates the whole file through that frozen copy in `writeTriggers`, which is the "two independent validators" its own Rejected list refuses, separated by time rather than by code. Recorded rather than fixed: the alternative is a runtime dependency from the console on the worker package, a heavier coupling than the one it would remove. The entry also gains the **widening-vs-narrowing** rule this issue is the first instance of — every prior field ADDED an optional key and unknown keys drop, so an old parser meeting a new file was a silent no-op; relaxing a refusal on a known key makes it an explicit throw, which is a release-ordering constraint rather than a code one. **DES-REPLICA-INDEX-REACHES-THE-BRANCH AMENDED**: the four layers are unchanged, but the PROMPT layer is recorded as four builders rather than one, with `siblings()` the only shared part and both alternatives (a parameterised noun table, four independent copies) in Rejected with their reasons. The local/cron rejection is byte-unchanged and is now the only kind gate the validator has. **DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED UNCHANGED, checked**: `keyParts` gates on `isForgeKind` rather than on github, so widening changed nothing about what it derives — what widened with it is the blindness the `resume`×`replicas` refusal makes harmless, now pinned per forge. **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked**: the `local`-only guard bounds fanout from a replica on any forge. **DES-CONCURRENCY-3 UNCHANGED, checked**: `REPLICAS_MAX` still derives from `PI_CONCURRENCY`'s default and no forge enters that reasoning. |

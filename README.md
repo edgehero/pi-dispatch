@@ -232,6 +232,11 @@ or what it costs):
   than from the issue, so "the tests run with pnpm here" applies to every run of that trigger without
   being committed to the repo or pushed into the deployment wide persona. Cron triggers use `task`
   instead, which is the same text in the same place.
+- `"secrets": { "STRIPE_KEY": "op://ci-vault/stripe/api-key" }` names vault references this trigger's jobs
+  receive as environment variables, with `"secretsProfile"` choosing which of your declared resolvers reads
+  them. The worker runs your one line script (`exec op read --no-newline "$1"`) on the host before the
+  container starts, so the job gets values and never your manager's credential
+  ([`docs/secrets.md`](docs/secrets.md))
 - `"resume": true` continues the session that opened the PR ([`docs/sessions.md`](docs/sessions.md)).
 - `"github": true` on a cron trigger mints the same per-job GitHub token the webhook path gets, so a
   scheduled flow can use `gh`.

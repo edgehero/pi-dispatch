@@ -432,7 +432,14 @@ Evidence convention as in `constitution.md`.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
-**container → worker.**
+**container → worker, and secret resolver → worker.**
+
+The table below is written for the container, and a trigger's secret resolver (`REQ-TRIGGER-SECRETS`) speaks
+the same three codes for the same reason: `0` carries the value on stdout, `1` says the manager could not be
+reached and is RETRIED, `2` says the reference is wrong and is not. An unrecognised code is treated as `1`.
+Reusing this vocabulary rather than minting a second one is deliberate: an operator writing a resolver is
+already told to ask what their manager does to their exit code (`docs/secrets.md`), and folding every nonzero
+exit into a refusal would permanently burn a delivery over a transient vault outage.
 
 - **Contract**:
   | Code | Meaning | Queue behaviour |
@@ -915,7 +922,11 @@ Evidence convention as in `constitution.md`.
     a common reason for zombie processes."* Our entrypoint `exec`s the runner, so **node is PID 1** and
     reaps nothing. Chromium spawns many processes; zombies accumulate against `--pids-limit` until the
     job dies of something unrelated to its actual work.
-  - Env **passed by the worker**: the configured provider's key variable(s), derived — not hardcoded
+  - Env **passed by the worker**: any variable a trigger's `run.secrets` names, resolved HOST-SIDE before the
+  container starts and injected exactly as the provider credential is (`REQ-TRIGGER-SECRETS`) -- a value, never
+  the manager credential that fetched it, and assigned AFTER `PI_FORWARD_ENV` but BEFORE the egress policy's
+  variables and the minted token, so a trigger can outrank the operator's blanket host list and can outrank
+  neither the network policy nor the per-job credential; the configured provider's key variable(s), derived — not hardcoded
     (see below); the minted per-job token under **its own forge's variable
     names, and only those**: `GITHUB_TOKEN` + `GH_TOKEN` for a github job (and for a local cron job that
     opts in via `run.github: true`, `INT-TRIGGERS-FILE-CONTRACT`); `GITLAB_TOKEN` + `GL_TOKEN`, plus
@@ -1524,19 +1535,25 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "github": <optional boolean>, "packages": <optional boolean>,
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
-               "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>" } },
+               "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>",
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
     { "on": { "type": "label", "any": [...], "all": [...], "none": [...] },
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; webhook kinds only> } },
+               "replicas": <optional int 2..3; webhook kinds only>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; webhook kinds only> } },
+               "replicas": <optional int 2..3; webhook kinds only>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
               "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
@@ -1546,7 +1563,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; webhook kinds only> } } ] }
+               "replicas": <optional int 2..3; webhook kinds only>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`) `⟹ run.kind ∈ {"github", "gitlab"}` — a forge
@@ -1816,6 +1835,36 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `dispatch_trigger_add`/`_edit` carry no `replicas` parameter, for a sharper version of the reason they
   carry no `image` one: a spend multiplier is plainly a capability the model would *gain*. It is a file
   edit, and the panel displays it without offering a key that sets it.
+- **`run.secrets` (ALL FOUR trigger kinds, optional map of env-var name to opaque reference) and
+  `run.secretsProfile` (optional name)**: the environment variables this trigger's jobs receive, and which
+  operator-declared resolver reads them. **The reference grammar is the resolver's, never this project's**
+  (`REQ-TRIGGER-SECRETS`, `DES-PER-TRIGGER-SECRET-PROFILE`): the loader validates that keys are environment
+  variable names and values are non-empty strings, and validates nothing about what a value MEANS.
+
+  **Refused at load** for a key that is not an env-var name, a value that is empty, whitespace-padded or
+  starts with `-` (the resolver's `argv[1]`, where a dash parses as a flag, exactly `run.image`'s reason),
+  more than sixteen references (each is resolved sequentially before the container, holding a concurrency
+  slot), a key colliding with a name the worker writes itself, a `secretsProfile` naming nothing, and
+  `run.secrets` beside `run.resume: true` (a resumed job replays a transcript on host disk into every later
+  job on that key, and nothing here redacts one).
+
+  **A second and third refusal are pre-spend, not at load**, for `run.resume`'s reason: which profiles a
+  deployment declares, which credential variables its provider uses, and what `PI_FORWARD_ENV` names are all
+  deployment state, and the loader is pure and fs-free. Those refuse per delivery as
+  `secret-profile-unknown`, `secret-profile-ambiguous`, `secret-name-reserved` and `secret-unresolved`, all
+  with `budgetReserved: false`; a resolver that could not reach its manager is INFRASTRUCTURE and retries as
+  `secret-resolver-unreachable`. `doctor` carries the load-time half.
+
+  **Unlike `run.replicas`, this is legal on a `cron` trigger.** That refusal turns on a local `/workspace`
+  being the operator's own folder with no clone, which is a fact about two agents sharing a working tree and
+  not about a credential. The folder does bring its own hazard, and `doctor` warns about it.
+
+  **There is deliberately no model-callable path to either field, and therefore no picker.**
+  `dispatch_trigger_add`/`_edit` carry no `secrets` parameter, and no `secretsProfile` parameter either: a
+  profile that resolves nothing is refused at load and no tool can write `run.secrets`, so a picker could
+  never produce a valid trigger. The panel declares RESOLVERS, through the operator-typed `/dispatch
+  secrets` command; binding one to a job stays an edit to this file.
+
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
   owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
@@ -2030,7 +2079,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|sessions-dir-unset|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2396,6 +2445,7 @@ validator rather than a second copy of it.
     "model":       "<optional, non-empty string>",   // provider-native model id
     "provider":    "<optional, non-empty string>",   // pi provider id
     "maxTurns":    <optional, int >= 1>,             // runner turn budget
+    "secretProfiles": <optional { "<name>": "<absolute path to a resolver script>" }>,  // REQ-TRIGGER-SECRETS; deliberately NOT in KNOWN_KEYS, so no model-callable tool can set it
     "dailyCap":    <optional, int >= 1>,             // jobs admitted per day (mandatory window; env default 25)
     "weeklyCap":   <optional, int >= 1>,             // jobs admitted per ISO week; unset -> weekly window disabled
     "monthlyCap":  <optional, int >= 1>,             // jobs admitted per calendar month; unset -> monthly window disabled
@@ -2610,6 +2660,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-26 | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** (issue #225): `run.secrets` and `run.secretsProfile` on all four kinds, with the load-time refusals and the pre-spend ones split by what a pure, fs-free validator can answer. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: resolved values join the closed map, assigned after `PI_FORWARD_ENV` and before both the egress variables and the minted token, so a trigger outranks the operator's blanket host list and outranks neither the network policy nor the per-job credential. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: five new `reason` tokens, plus four the code already emitted and this enum had drifted from (`job-image-forge-unsupported`, `job-image-commands-unsupported`, `daily-token-cap`, `soft-hold`). Every new token was checked against the nested `session.reason` enum for the collision rule. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: `secretProfiles`, deliberately absent from `KNOWN_KEYS` so `dispatch_set` cannot reach it. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a second participant, speaking the same three codes for the same reason. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: a chained child inherits neither field, and the explicit-property-reads rule is what makes that true by construction. |
 | 2026-08-26 | Issue #186 (resume eligibility bounds). **INT-SESSION-STORE-CONTRACT AMENDED**, four edits. The key directory's file enumeration was CLOSED at three files and grows to five: `resume-chain` and `context`, both written inside the existing promotion lock and the same atomic swap, so neither can ever describe a transcript other than the one beside it. The read-path order gains two arms and, for the first time, says why the order is itself the contract rather than an implementation detail: the first miss is the one that names itself, so the shape check stays AHEAD of the age bound (a damaged transcript must read `unparseable`, not as a lineage that aged out) while the chain and context arms sit BEHIND `pi-version` and ahead of the header read, because they are sidecar reads that ask about the LINEAGE rather than the file and refusing on them need not pull a transcript that may be megabytes. The cost of that placement is recorded rather than left to be discovered: a transcript both chain-exhausted and corrupt reports the chain, and the corruption is deferred by exactly one run, since that cold start's own promotion resets the counter. Two new bullets carry the sidecars' own contracts, including the three decisions each: the chain counter counts the HOST's deliveries, is maintained whether or not a bound is set (a counter that starts when the knob does is a bound that does nothing for its first N runs), and reads absence as zero. It counted the container's `resumed` first, and an adversarial pass refuted that: the agent owns `/session`, so a transcript carrying a valid header with its payload on lines pi's parser DROPS is delivered every run while pi reports zero messages, which reset the counter every run and meant the bound never fired. Measured against the pinned pi. The host's decision to hand the file over is the only half of the exchange nothing in the container can influence, so that is what it counts; the context sidecar stores both numbers rather than a percentage so a refusal can be read against what judged it, stamps the MODEL beside them (a key is `(kind, repo, ref)` and carries none, so two triggers on one issue may name different models and the same token count is most of a small window and almost none of a large one; a foreign reading is ignored, unknown on either side stays usable), is left in place by a RESUMED promotion that measured nothing (a zero would read as "the context emptied", the one thing that cannot have happened) but CLEARED by a cold start (keeping it there made one high reading refuse a key forever, since the gate cold-started on a stale number and the cold start left it behind, and nothing releases it because every promotion refreshes the transcript's mtime), and records the rejected `bytes`-against-`contextWindow` fallback -- no bytes-to-tokens calibration exists here, and `bytes` is the whole branch INCLUDING what compaction folded away, so it over-reads exactly past the threshold the bound exists for and would fire hardest on the sessions that had just become safe. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: three nested `session.reason` tokens (`conversation-too-old`, `resume-chain-too-long`, `context-too-full`), the producer table's resolve row, and **the second precedence rule this entry never recorded**. It documented promote-beats-the-rest and was silent on runner-beats-host, and that silence was load-bearing: a reader told which tokens are unreachable concludes the rest are reachable, while in fact `expired` and `pi-version-changed` could reach no record whose container emitted an exit line, which is every ordinary run. The mechanism is spelled out because it is invisible from either half of the code alone (0-byte staging, `PI_SESSION_FILE` emitted whenever a session exists at all, and pi's `setSessionFile` gating its own refusal on `size > 0`), and so is the narrowness of the fix, `resume === false` on the host side and exactly `absent` on the runner's. Every new token was checked against the terminal enum for the collision rule at `:649-652`. Four further clauses came out of an adversarial review of the shipped branch and are recorded because each was a real defect rather than a hardening idea: **every read in a key directory is now an `lstat` first and every write goes through a rename**, since `readFileSync` follows a link (deciding a gate on another file's contents) and `writeFileSync`/`copyFileSync` follow one at the destination (turning a promotion into a truncating write of any worker-writable file), and the directory NAME is derived rather than random so the path is precomputable -- `pi-version` inherited the guard as the one unguarded read that predated the sidecars; **sidecar reads are size-bounded**, because `PI_SESSION_MAX_BYTES` never covered them and a huge one costs wall clock on the job's own path; **a sidecar write that fails is logged, never fatal**, because it runs after the transcript is already promoted and throwing returned `promote-failed` for a promotion that demonstrably happened, which told an operator the next run would cold start when it would in fact resume and froze the counter below its bound forever; and **`locked` means EEXIST and nothing else**, since a read-only directory or a full disk also fail to create the lock and reporting those as a concurrency event sends an operator looking for a stuck file that does not exist. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `context` joins `turns`, `tokens` and `usage` as read-only telemetry that feeds no classification, a SIBLING of `tokens` for the reason the ledger is one (`tokens` is a per-run BILLING snapshot with two producers; occupancy is neither billing nor per-run), OMITTED rather than nulled when there is no measurement, and deliberately given no `dev.pi-dispatch.capabilities` entry -- capabilities are an INCLUSION list for what the host DEMANDS of an image, and additive telemetry has nothing `verify-image.sh` could grep that would mean anything. What that costs is on the record too: the bound it feeds is inert on an old image and stays inert forever on one that is never rebuilt. **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked**: all three bounds are deployment state rather than trigger content, and a per-trigger relaxation of a safety bound is the shape `run.network` was refused for. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: no mount, no flag and no env var moved, and the container is handed exactly what it was before. **INT-SDK-SESSION-OPTIONS UNCHANGED, checked**: `getContextUsage()` is read off the session the runner already built, and no option changed. |
 | 2026-08-26 | Issue #187 (`run.replicas` on every forge). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: the field's scope goes from github-only to every webhook kind on every forge, in all three schema blocks and the prose; the four refusals become **three**, and the surviving `local` one is recorded as the ONLY kind gate, so its position ahead of the range check is load-bearing (move it and a cron entry carrying `replicas: 2` is ACCEPTED rather than refused with a different message); the jobId and dedup key generalise to the forge table's own prefix and separator, which is what makes a GitLab MR `project!5:flow:r2` rather than a second `#` sequence; and a new **webhook-only** clause states plainly that the poller is GitHub-only, because a scope that said "every forge" and stopped would have claimed a parity the feature does not have. Acceptance now says **every loader** rather than both services — there are three, and the third is the reason this issue is a coordinated release rather than a diff. The `1`-is-refused, `3`-is-the-ceiling and `resume` clauses are byte-unchanged. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: `replica`/`replicas` were always host-assigned integers with no forge in them, and `target` already composed through `targetSeparator`, so a gitlab MR replica records `grp/proj!7` with no contract change — asserted rather than assumed, because this file's own history records `targetFor` once enumerating github alone while every GitLab run silently wrote `target: null`. **INT-CONTAINER-JOB-INPUTS and INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked**: `event.json` still carries the delivery's own body plus one decision record, and an execution knob is still not a fact about the delivery, on four forges as on one. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: the `replicas` capability label is read from `job.replica` alone and `verify-image.sh` proves it by grepping the baked guardrails for *"the branch your prompt names"*, a phrase with no forge in it, so every already-conformant image serves non-GitHub replicas with no rebuild. **INT-OUTBOX-CONTRACT UNCHANGED, checked**: its `local`-only guard bounds chain fanout from a replica on any forge. |
 | 2026-08-25 | Issue #202 (the egress default). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, one clause: the network flag is present unless `PI_EGRESS=0`, rather than only when it is `1`. **INT-EGRESS-POLICY-CONTRACT AMENDED**, the same clause plus the arming rule, which now lives in one place (`egress.mjs`) because the worker, `doctor` and `up` must not be able to disagree about the posture. **INT-SANDBOX-CONTRACT UNCHANGED, checked**: it inherits the flag through the builder seam either way. |

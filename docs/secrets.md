@@ -55,7 +55,15 @@ already holds a provider key and a forge token and the agent can read both (`SEC
 credential that can read **every** secret in your project is strictly worse than the trade this project
 already discloses, and it converts one bounded exposure into an unbounded one.
 
-The manager's job stops at the worker process. Nothing below crosses the container boundary.
+The manager's job stops at the worker process. **The manager's credential** never crosses the container
+boundary.
+
+A **value** may, and one thing already does: the provider API key is read on the host and injected as an
+environment variable into every job. `run.secrets` (below) is that same shape, made per trigger. The line
+this page draws is not "nothing crosses", it is **the thing that can fetch secrets stays on the host**. A
+job that holds a resolved Stripe key can spend that key; a job that holds `OP_SERVICE_ACCOUNT_TOKEN` can
+read every secret you own. The first is a bounded exposure you chose per trigger. The second is the
+unbounded one this page has always refused.
 
 ## Recipe A: the service, with your exit code intact
 
@@ -202,6 +210,95 @@ restart the unit when a secret rotates.
 Recipe A and Recipe B are not exclusive on macOS and Windows. `--env-setup` makes `./.env` optional
 there; an agent that renders `.env` makes it authoritative. Pick one, because running both means two
 sources for the same key, and the setup script is the one that wins.
+
+## Recipe C: one secret, one trigger, resolved before the container starts
+
+Recipes A and B give the WORKER an environment. Every job on the host then shares it. When you want one
+trigger to hold a deploy key and no other job to hold it, name the secret in the trigger instead:
+
+```jsonc
+{ "on": { "type": "label", "any": ["pi:deploy"] },
+  "run": { "kind": "github", "flow": "deploy",
+           "secretsProfile": "prod",
+           "secrets": { "STRIPE_KEY": "op://ci-vault/stripe/api-key" } } }
+```
+
+You declare the resolver once, either in the environment or from the panel:
+
+```sh
+# /etc/pi-dispatch/pi-dispatch.env, beside your forge token and your provider key.
+PI_SECRET_PROFILES=prod:/opt/pi/resolve-prod.sh,staging:/opt/pi/resolve-staging.sh
+```
+
+```sh
+#!/bin/sh
+# /opt/pi/resolve-prod.sh. Owned by the account the worker runs as and writable by nobody else: whoever
+# can edit this file can run code as the worker. `pi-dispatch doctor` warns when that stops being true.
+#
+# One reference in on $1, one value out on stdout.
+#   exit 2  the reference is wrong, absent, or denied. The job refuses and is NOT retried.
+#   exit 1  you could not reach your manager. The job retries, which is the whole reason these differ.
+exec op read --no-newline "$1"
+```
+
+That is the entire integration for 1Password. The offline and Vault spellings are the same one line:
+
+```sh
+exec pass show "$1"                                  # pass, gpg-backed, no network at all
+exec vault kv get -field="${1##*#}" "${1%%#*}"       # Vault, reference written as secret/data/ci#stripe
+exec gcloud secrets versions access latest --secret="$1"
+```
+
+**The reference grammar is yours, not this project's.** `op://ci-vault/stripe/api-key` is what a 1Password
+operator writes because that is what their resolver understands. pi-dispatch validates the SHAPE of the map
+(the keys are environment variable names, the values are non-empty strings) and never the meaning of a
+value. Nothing here knows what `op://` is, and that is deliberate: the day you move to Doppler, you rewrite
+one script.
+
+### What the job gets, and what it does not
+
+The worker runs your resolver **on the host**, once per reference, **before the container starts**. The
+container receives the resolved values as ordinary environment variables, exactly the way it already
+receives the provider key. It does not receive `OP_SERVICE_ACCOUNT_TOKEN`, it cannot run `op`, and it cannot
+ask for a reference nobody named in the reviewed file.
+
+Because resolution happens before anything spends, a wrong reference costs nothing: no token is minted, no
+repository is cloned, no budget slot is reserved. You get a refusal on the issue naming the VARIABLE that
+failed, and never the reference, the resolver's path, or a byte of what it printed.
+
+### Three things worth knowing before you wire one
+
+1. **Your exit code decides whether the job retries.** This is the same question this page asks of every
+   manager, and here it is load-bearing rather than advisory. Exit 2 means "that reference is wrong" and the
+   delivery is refused for good. Exit 1 means "I could not reach my manager" and BullMQ retries it. A
+   resolver that exits 1 for everything still works; you simply pay one extra retry on a genuine typo.
+2. **`run.secrets` cannot be combined with `run.resume`.** A resumed job replays a transcript kept on host
+   disk, and any command the agent ran that echoed a resolved value wrote it into that transcript, which is
+   then prefilled into every later job on the same key. The file is refused at load if you write both.
+3. **On a `local` (cron) trigger, `/workspace` is your own folder**, bind-mounted read-write with no clone.
+   An agent handed a credential often persists it to make its next command simpler, and on a local job that
+   `.env` lands in your real repository. Nothing scans for it. `pi-dispatch doctor` warns when a local
+   trigger binds secrets; keep those folders out of anything you push.
+
+### From the panel
+
+`/dispatch secrets add` asks two questions (a name and the path to the script) and shows you the exact bytes
+before writing them. It is operator-typed only: there is no model-callable tool for it, because declaring a
+profile means naming a path the worker executes.
+
+For the panel to declare anything at all you must first name the directory those scripts live in:
+
+```sh
+PI_SECRET_RESOLVER_ROOTS=/opt/pi
+```
+
+Unset is the default and it is fail-closed: the panel can declare nothing, and only `PI_SECRET_PROFILES`
+is honoured. The worker re-checks that bound itself, on the real path, every time it resolves. That is not
+belt-and-braces: the settings file the panel writes lives under your OS temp directory unless you moved it
+with `PI_SETTINGS_FILE`, so a check that lived only in the panel would prove nothing on a shared host.
+
+**Binding a secret to a trigger stays a file edit.** The panel declares managers; `triggers.json` says which
+job reaches one. No `dispatch_*` tool has a `secrets` parameter.
 
 ## The traps
 
@@ -377,10 +474,12 @@ still safe".
 
 ## Other managers
 
-Every one of them is one of the two shapes on this page: **inject into the process** (Vault Agent's
+Every one of them is one of **three** shapes on this page: **inject into the process** (Vault Agent's
 `env` templating, `doppler run`, `op run`, `sops exec-env`, `aws-vault exec`) or **render a file the
 unit already reads** (Vault Agent templates, `sops -d`, the Infisical agent). Both work here, because
-the worker only ever reads its environment.
+the worker only ever reads its environment. The third is **resolve one reference on demand** (`op read`,
+`pass show`, `vault kv get -field=`), which is Recipe C: the first two are deployment-wide by construction,
+and that one is per trigger.
 
 Ask any of them the same question this page had to ask: **what does it do to my exit code?** A wrapper
 that reports its own status instead of the child's turns a policy refusal into a restart loop, and you

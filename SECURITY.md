@@ -54,6 +54,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A serviced repo's `.pi/` on the **default branch** | **Maintainer-level** | It is read into the system prompt, from a pinned SHA, on purpose — same trust as `.github/workflows/`. Only someone who can merge can change it. |
 | A serviced repo's contents on **any other branch** | **None** | A fork PR can contain anything. Never read for instructions. |
 | A local folder's `.pi/` | **Whatever can write that folder** | No merge gate, no reviewer, no history |
+| A trigger's `run.secrets` and `run.secretsProfile` | **Operator — the same trust as the triggers file, plus a host exec** | The references are named in the reviewed file; the resolver that reads them is a script the operator wrote and declared. The job receives VALUES and never a manager credential, so it cannot enumerate a vault, but it can spend what it was given. |
 | A trigger's `run.skillsDir` and `run.instructions` | **Operator — the same trust as the triggers file** | Both are instructions, and both come from the reviewed `triggers.json` on the worker host rather than from any payload. Nothing reachable from a webhook, an issue or comment body, or `dispatch_run` can set either, and no panel key or AI tool writes them. The skills are copied per job into `/job` (adding no mount) and are layered UNDER the repo's own `.pi/`, so a serviced repo still wins a name collision; the instruction text lands in the user prompt above the issue text and never in the system prompt |
 | The job image (`PI_JOB_IMAGE`, or a trigger's `run.image`) | **Operator — the same trust as baking it** | It *is* the code every job executes: the pi version, the runner and its exit codes, the guardrail floor, the loader's discovery posture and the non-root user all come from it. Nothing here verifies an image this project did not build. The isolation flags are applied by the worker's argv and hold for **any** image; the **contents** do not. |
 | The job container | **None** — it is the untrusted side | It runs the agent |
@@ -297,6 +298,20 @@ Stated openly rather than discovered later:
   and narrow scope (`CONST-TOKEN-SCOPED-PER-JOB`), and a provider-side spend limit on the key. The list of
   hosts is also **yours**, and nothing here can enumerate what your own flows reach (`OQ-026`). You can
   return to open egress with `PI_EGRESS=0`; run this on hardware where that is acceptable.
+- **A resolved secret is a secret the agent can read, and this feature does not change where it can go.**
+  `run.secrets` reduces the KIND and the QUANTITY of what an injection can reach: a job holds the two or
+  three values its trigger named rather than a credential that can read every secret you own, and the
+  reviewed file enumerates them by name so a capability review stays true as the vault grows. It does not
+  reduce the paths. The value enters the model's context on the first turn after it is read, the agent
+  holds a write-capable forge token, and your forge is on the egress allowlist by necessity. What bounds
+  the damage is what it always was: how narrow the thing you named is, and what it can do if spent.
+  Two further exposures are worth stating plainly. Every environment value reaches the container as
+  `-e NAME=VALUE` in the worker's own `docker run` argv, so under a default `hidepid` any local user can
+  read it from `/proc/<pid>/cmdline` for the container's lifetime; that is already true of the provider key
+  and the forge token, and a vault-managed value arriving there is new in kind rather than in mechanism.
+  And a container's output is teed to the worker's stdout unconditionally, independent of
+  `PI_CAPTURE_JOB_LOGS`, so under systemd a value the agent echoes reaches journald. Set
+  `StandardOutput=null` on the unit if that matters more to you than watching jobs run.
 - **The provider API key is broad.** Unlike the GitHub token it cannot be meaningfully scoped per job —
   the agent needs it to function. It is the one broad secret inside the container. **Set a spend limit
   on it.**
@@ -411,7 +426,18 @@ Stated openly rather than discovered later:
   `pi-dispatch doctor` warns on all three (gone; group- or world-writable; in a work tree that does
   not ignore it) and offers no `--fix` for any of them — it will not `chmod` your file and will not
   move it. The path can only ever be named by an operator typing the flag: never `.env`, never a
-  trigger file, never the panel (`docs/secrets.md`).
+  trigger file, never the panel (`docs/secrets.md`). **That sentence is about the `--env-setup` script
+  specifically**, and a second, narrower exec now exists: see the next bullet.
+- **A secret resolver is a host exec of the same trust class, reached two ways this document once
+  reserved for the flag alone.** `PI_SECRET_PROFILES` names resolver scripts in `.env`, and
+  `/dispatch secrets add` can name one from the panel. Both run as the account the worker runs as, and
+  that account holds every credential this deployment has, so the blast radius is the `--env-setup`
+  script's and not a smaller one. Boot-time versus job-time is a difference in timing, not in power.
+  What bounds it instead: the panel path is fail-CLOSED (`PI_SECRET_RESOLVER_ROOTS` is empty by default,
+  so the panel can declare nothing at all until an operator names the directory), the worker re-checks
+  every panel-declared path against those roots on the realpath rather than trusting the settings file,
+  and a trigger names only a profile NAME, never a path. A deployment that never sets
+  `PI_SECRET_RESOLVER_ROOTS` keeps the guarantee above intact, byte for byte.
 - **With `GITHUB_AUTH_SOURCE=gh` (the default), your entire gh login reaches every token-carrying job.**
   The minted value is your own full-scope `gh auth token`, and `pi-dispatch doctor` warns and names the
   scopes it carries (calling out broad ones like `admin:org`, `delete_repo`, `workflow`). Prefer a
