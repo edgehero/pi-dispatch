@@ -28,6 +28,7 @@ import { watch } from "node:fs";
 import { dirname, basename } from "node:path";
 import { loadReceiverConfig, triggersFilePath, reloadTriggers } from "./config.mjs";
 import { makeReceiver } from "./receiver.mjs";
+import { entryExitCode } from "./cli.mjs";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { resolveGitLabSelfId } from "@edgehero/pi-dispatch/gitlab-identity";
 import { resolveForgejoSelfId } from "@edgehero/pi-dispatch/forgejo-identity";
@@ -192,6 +193,12 @@ function watchTriggers(env, cfg, log) {
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("start.mjs")) {
 	startReceiver(process.env).catch((err) => {
 		process.stderr.write(`${JSON.stringify({ event: "receiver_start_failed", reason: err?.message })}\n`);
-		process.exitCode = 1;
+		// entryExitCode, NOT a bare 1. This file is what `receiver.service` execs -- cli.mjs is not on that
+		// path -- so the mapping cli.mjs documents ("a supervisor restarting on exit 2 would loop on a config
+		// that can never parse") only reaches a real deployment from here. A tagged config refusal exits 2
+		// and `RestartPreventExitStatus=2` stops the unit; anything else is infra and stays retryable at 1.
+		// IMPORTED rather than restated: two copies of an exit-code rule is one place for it to drift, and
+		// the copy that drifts is the one nobody is looking at.
+		process.exitCode = entryExitCode(err);
 	});
 }

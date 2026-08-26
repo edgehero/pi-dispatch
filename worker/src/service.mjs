@@ -94,6 +94,13 @@ export const TEMPLATE_PINS = {
 		"EnvironmentFile=/opt/pi-dispatch/.env",
 		"\nUser=pi\n",
 		"WantedBy=multi-user.target",
+		// Byte-for-byte survivors — semantics the render must not lose, matching worker.service's list
+		// above. Added with #187: the receiver had none of the three, so any config it could not parse
+		// produced an unbounded five-second restart loop, and `service install` rendering them away would
+		// put that back on a deployment that had just been fixed.
+		"RestartPreventExitStatus=2", // EXIT_POLICY is never restarted (the next start reads the same bad file)
+		"StartLimitIntervalSec=60",
+		"StartLimitBurst=5",
 		"KillSignal=SIGTERM",
 		"TimeoutStopSec=30",
 	],

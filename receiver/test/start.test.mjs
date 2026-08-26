@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { entryExitCode } from "../src/cli.mjs";
 import { startReceiver } from "../src/start.mjs";
 
 // The committed unified triggers file, addressed absolutely so loadReceiverConfig's real fs reads
@@ -282,4 +284,41 @@ test("a github-free deployment 404s `/` -- the skipped identity resolution and t
 	const res = mockRes();
 	await drive(captured.handler, req, res, payload);
 	assert.equal(res.statusCode, 404, "not 401: an endpoint that answers is an endpoint an operator can believe is armed");
+});
+
+test("a config refusal exits 2, so a supervisor stops instead of restart-looping forever", () => {
+	// The unit execs THIS file, not cli.mjs, so cli.mjs's entryExitCode -- and the reason it exists,
+	// "a supervisor restarting on exit 2 would loop on a config that can never parse" -- never reached a
+	// real deployment. Every receiver config error exited 1, and deploy/receiver.service pairs
+	// Restart=on-failure with RestartSec=5 and (until #187) no RestartPreventExitStatus and no start
+	// limit: an unbounded five-second loop, one JSON line per iteration, no failed-unit state to notice.
+	//
+	// Driven as a SUBPROCESS because an exit code is the whole assertion: the entry guard only runs when
+	// this module is argv[1], which is exactly the path the unit takes and the path no in-process test
+	// can reach. A refusal is answered before any socket or queue connection, so this costs no network.
+	const dir = mkdtempSync(join(tmpdir(), "pi-recv-exit-"));
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["x"] }, run: { kind: "gitlab", flow: "f", replicas: 99 } }] }));
+
+	const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/start.mjs", import.meta.url))], {
+		env: { PATH: process.env.PATH, PI_TRIGGERS_FILE: triggers, WEBHOOK_SECRET: "s" },
+		encoding: "utf8",
+	});
+
+	assert.equal(r.status, 2, "a determinate config refusal is EXIT_POLICY, never the retryable 1");
+	const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
+	assert.equal(line.event, "receiver_start_failed");
+	assert.match(line.reason, /run\.replicas must be an integer/, "and the reason names the entry, not just the file");
+});
+
+test("the INFRA half of the mapping is untouched -- only a tagged config refusal becomes 2", () => {
+	// The pair matters: mapping everything to 2 would stop a supervisor restarting a receiver whose Valkey
+	// was merely down, which is exactly what Restart=on-failure exists for. Asserted against the pure
+	// function rather than a second subprocess, because every infra failure a real boot could produce
+	// (a dead queue, a bound port) is one where the process either RETRIES or serves -- there is no
+	// infra path that exits promptly enough to spawn in a unit test without risking a hang.
+	const config = Object.assign(new Error("bad triggers"), { piDispatchConfig: true });
+	assert.equal(entryExitCode(config), 2);
+	assert.equal(entryExitCode(new Error("ECONNREFUSED")), 1);
+	assert.equal(entryExitCode(undefined), 1);
 });

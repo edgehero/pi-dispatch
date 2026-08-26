@@ -1966,3 +1966,27 @@ test("doctor: no egress probing at all on top of a down daemon", async () => {
 	assert.match(text(), /⚠ Egress policy: not checked \(the Docker daemon did not answer\)/);
 	assert.ok(!calls.some((c) => c.args[0] === "network"), "no network is created against a daemon that is not answering");
 });
+
+test("doctor: a triggers file that does not parse FAILS, names the reason, and says the receiver will not start", async () => {
+	// This used to be swallowed to zeroes, justified by "a malformed triggers file already fails LOUD at
+	// worker boot". False for the deployment that needs doctor most: the worker reads the file only when
+	// PI_TRIGGERS_FILE is set, so a receiver-only host got no loud failure anywhere -- while the zeroes
+	// disarmed the WEBHOOK_SECRET, per-forge credential, per-image and flow-tier checks. doctor came back
+	// GREENER than a healthy deployment, which is the one direction a preflight must never fail in.
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-bad-")), "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix", replicas: 99 } }] }));
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
+
+	assert.equal(code, 1, "a file neither service can load is a failure, not a warning");
+	assert.match(text(), /triggers file does not parse/);
+	assert.match(text(), /the receiver will refuse to start/, "the consequence, not just the symptom");
+	assert.match(text(), /run\.replicas must be an integer between 2 and 3/, "the loader's own message travels");
+	assert.ok(text().includes(path), "and the path to fix");
+});
+
+test("doctor: a VALID triggers file says nothing about parsing -- the check is silent when it passes", async () => {
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), imgDeps(out, green));
+	assert.doesNotMatch(text(), /does not parse/);
+});

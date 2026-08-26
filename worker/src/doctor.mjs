@@ -263,7 +263,17 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, commands, images, skillsDirs, forges, repositories, flows } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, commands, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
+	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
+	// file unconditionally and refuses to start without it, which is the consequence worth naming.
+	if (parseError) {
+		checks.push({
+			ok: false,
+			label: `triggers file does not parse -- the receiver will refuse to start: ${parseError}`,
+			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it parses`,
+		});
+	}
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
 	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
@@ -1273,9 +1283,11 @@ function nodeCheck(version) {
  * Parsed with the SHARED `parseTriggers`, so doctor counts exactly the entries the worker and receiver will
  * act on -- a truthy `"true"` string is rejected there and therefore never counted here.
  *
- * Swallows ANY error to zeroes -- a missing, unreadable, or malformed triggers file already fails LOUD at
- * worker boot (config.mjs, schedules.mjs), so re-reporting the parse failure here would only bury doctor's
- * own findings under a second copy of a diagnosis the operator already gets.
+ * A missing file still reads as zeroes and says nothing: that is an ordinary cron-less deployment. A file
+ * that EXISTS and does not parse is reported instead, with the reason. The old justification here -- that
+ * such a file "already fails LOUD at worker boot" -- was false for the deployment that needs doctor most:
+ * the worker reads this file only when PI_TRIGGERS_FILE is set, so on a receiver-only host nothing else
+ * says a word, while the zeroes quietly disarm every forge, image and flow check below.
  */
 /** lstat, so a symlinked skillsDir is judged on its own inode -- copy-tree.mjs's rule, restated. */
 function dirExists(dir) {
@@ -1370,7 +1382,7 @@ async function repoFlowAtHead(spawn, folder, flow) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [] };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1422,9 +1434,28 @@ function readTriggerFacts(env, fileExists, cwd) {
 				}))
 				.filter((f) => typeof f.flow === "string"),
 		};
-	} catch {
-		return none;
+	} catch (e) {
+		// REPORTED, not swallowed. This catch used to justify itself with "a malformed triggers file already
+		// fails LOUD at worker boot", and that premise does not hold: the worker reads the file only when
+		// PI_TRIGGERS_FILE is set, so a receiver-only deployment gets no loud failure anywhere. Worse, the
+		// zeroes below silently disarm the WEBHOOK_SECRET check, every per-forge credential check, the
+		// per-image checks and the flow-tier probes -- so doctor came back GREENER than a healthy
+		// deployment, which is the one direction a preflight must never fail in.
+		//
+		// The counts stay zero, because every downstream check reads them and a half-parsed file has no
+		// honest counts to give. What changes is that the reason travels with them.
+		// Only a TAGGED config refusal is reported. parseTriggers throws `piDispatchConfig` errors; anything
+		// else here is an fs failure on a path the guard above already said existed (a race, a permission,
+		// a directory), which is not a statement about the file's CONTENT and has no fix an operator can act
+		// on from this line. Those keep the old silent zeroes.
+		if (e?.piDispatchConfig !== true) return none;
+		return { ...none, parseError: e.message, path: triggersPath(env, cwd) };
 	}
+}
+
+/** The triggers path doctor would have read, so a parse failure can name it. */
+function triggersPath(env, cwd) {
+	return env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json");
 }
 
 /**

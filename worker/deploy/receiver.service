@@ -19,6 +19,12 @@
 Description=pi-dispatch webhook receiver (public edge: verifies GitHub deliveries and enqueues jobs)
 After=network-online.target
 Wants=network-online.target
+# Crash-loop bound: at most StartLimitBurst restarts within StartLimitIntervalSec, then systemd stops
+# trying. The worker unit has carried this since it shipped; the receiver did not, and the gap is not
+# cosmetic -- the receiver is the process that dies on a triggers file it cannot parse, and it dies on
+# EVERY start. Pairs with Restart=on-failure below.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -28,6 +34,11 @@ EnvironmentFile=/opt/pi-dispatch/.env
 ExecStart=/usr/bin/node receiver/src/start.mjs
 Restart=on-failure
 RestartSec=5
+# Exit 2 is EXIT_POLICY: a determinate config refusal (a triggers file that cannot parse, a missing
+# secret), not infra. Never restart it -- the next start reads the same file and fails the same way, so
+# the loop is pure noise with a five-second period and no end. Only infra failures are worth a restart,
+# and Restart=on-failure already covers those.
+RestartPreventExitStatus=2
 # The receiver handles SIGTERM: it closes the HTTP server and the queue connection, then exits.
 KillSignal=SIGTERM
 TimeoutStopSec=30
