@@ -46,7 +46,7 @@ export function makeRunContainer({
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
-	return async function runContainer({ job, token, prepared, name, signal }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
@@ -87,6 +87,10 @@ export function makeRunContainer({
 			// mutually exclusive with it by parse -- a job carries one or the other, never both.
 			command: typeof job.command === "string" && job.command.trim() !== "" ? job.command : undefined,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
+			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
+			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the
+			// record may carry nor a deployment setting, it is a live credential, and `token` is its precedent.
+			secrets,
 		});
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's

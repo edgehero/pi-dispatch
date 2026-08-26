@@ -546,3 +546,32 @@ test("the session-store bounds reject negatives and non-integers as config error
 		}
 	}
 });
+
+// --- run.secrets deployment state (REQ-TRIGGER-SECRETS, issue #225) ---
+
+test("secretProfiles defaults to {} -- unset means the feature is simply off", () => {
+	assert.deepEqual(loadConfig({}).secretProfiles, {});
+	assert.deepEqual(loadConfig({ PI_SECRET_PROFILES: "" }).secretProfiles, {});
+	assert.deepEqual(loadConfig({ PI_SECRET_PROFILES: "prod:/opt/pi/a.sh" }).secretProfiles, { prod: "/opt/pi/a.sh" });
+});
+
+test("a garbled PI_SECRET_PROFILES refuses to BOOT rather than dropping the entry", () => {
+	// A silently dropped profile is one the operator believes is wired, and every trigger naming it would
+	// then refuse at delivery time while the .env line sat there looking correct. parsePollRepos' doctrine.
+	assert.throws(() => loadConfig({ PI_SECRET_PROFILES: "prod" }), (e) => e.piDispatchConfig === true);
+	assert.throws(() => loadConfig({ PI_SECRET_PROFILES: "prod:relative/path" }), (e) => e.piDispatchConfig === true);
+});
+
+test("secretResolverRoots defaults to [] and FAILS CLOSED, exactly as dispatchRunRoots does", () => {
+	// With this unset the panel can declare no resolver at all: only PI_SECRET_PROFILES is honoured, and a
+	// deployment that never wanted panel authoring keeps today's promise byte for byte.
+	assert.deepEqual(loadConfig({}).secretResolverRoots, []);
+	assert.deepEqual(loadConfig({ PI_SECRET_RESOLVER_ROOTS: "" }).secretResolverRoots, []);
+	assert.deepEqual(loadConfig({ PI_SECRET_RESOLVER_ROOTS: ["/opt/pi", "/srv/r"].join(delimiter) }).secretResolverRoots, ["/opt/pi", "/srv/r"]);
+});
+
+test("the per-reference timeout defaults to 10s -- tighter than doctor's, because this one holds a slot", () => {
+	assert.equal(loadConfig({}).secretResolveTimeoutMs, 10000);
+	assert.equal(loadConfig({ PI_SECRET_RESOLVE_TIMEOUT_MS: "2500" }).secretResolveTimeoutMs, 2500);
+	assert.throws(() => loadConfig({ PI_SECRET_RESOLVE_TIMEOUT_MS: "0" }), (e) => e.piDispatchConfig === true);
+});

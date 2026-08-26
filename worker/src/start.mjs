@@ -25,6 +25,7 @@ import { makeSessionStore } from "./session-store.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
+import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter } from "./run-history.mjs";
 import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
 import { loadSchedules } from "./schedules.mjs";
@@ -162,6 +163,7 @@ export async function startWorker(
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
+		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
@@ -326,7 +328,12 @@ export async function startWorker(
 			log("settings_overlay_invalid", { reason: res.invalid, settingsFile });
 			return { invalid: res.invalid };
 		}
-		return effectiveSettings(config, res.overlay);
+		// REQ-TRIGGER-SECRETS rides ALONGSIDE the ten tunables rather than inside them. `effectiveSettings`
+		// resolves `overlay > env` over a fixed ten-key literal, and its own tests pin that key set and
+		// assert an empty overlay returns the config verbatim -- so an eleventh key there would break both,
+		// and would also claim a precedence this key deliberately does not have (a name declared in both
+		// sources is refused per delivery, not silently won by either).
+		return { ...effectiveSettings(config, res.overlay), secretProfiles: res.overlay?.secretProfiles ?? {} };
 	};
 
 	// Resolve the Worker constructor's slot count once from the overlay: a present overlay may raise or lower
@@ -421,6 +428,14 @@ export async function startWorker(
 			// real path; the difference shows under an injected env, where the store would be built from the
 			// synthetic value while the gate read the process one.
 			sessionsDir: config.sessionsDir,
+			// REQ-TRIGGER-SECRETS. Built here for the image and egress preflights' reason: one deployment
+			// value, one place, so the gate that refuses an unknown profile and the spawn that runs it cannot
+			// disagree about which resolvers exist. The env-declared table is parsed once at boot (it is env,
+			// and a change to it is a restart), while the OVERLAY half arrives per job through index.mjs,
+			// because the settings file is read at each job start and an operator who declares a profile in
+			// the panel should not have to restart the worker to use it. A deployment that declares nothing
+			// spawns nothing at all: the gate only calls this when a trigger is armed.
+			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, log }),
 			runContainer: makeRunContainerFn({
 				image: config.jobImage,
 				hostEnv: env,

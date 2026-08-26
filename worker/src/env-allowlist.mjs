@@ -111,7 +111,7 @@ function resolveEnvName(provider, cred) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], sessionFile = null, flow = null, command = null, authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a pre-spend refusal.
@@ -180,6 +180,36 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	// on the host is skipped, never forwarded as empty.
 	for (const name of forwardEnv) {
 		if (hostEnv[name] !== undefined) env[name] = hostEnv[name];
+	}
+
+	// The trigger's own secrets (REQ-TRIGGER-SECRETS), resolved HOST-SIDE by the processor before anything
+	// spent and injected exactly the way the provider credential is -- never a vault credential handed to the
+	// container to fetch them itself. `docs/secrets.md`'s rule survives intact: what crosses the boundary is a
+	// value, and the thing that can FETCH values stays on the host.
+	//
+	// AFTER the PI_FORWARD_ENV loop, for that loop's own stated reason: a name on the operator's blanket host
+	// list must not silently outrank the specific reference this trigger declared.
+	//
+	// BEFORE the egress assign, and that direction is deliberate rather than incidental. A secret named
+	// HTTPS_PROXY that WON would point this job away from the proxy its --internal network was built around,
+	// while reading exactly like the control working -- an OUTAGE dressed as a policy. config.mjs refuses
+	// those names in PI_FORWARD_ENV outright while the policy is armed, for the same reason.
+	//
+	// BEFORE the mint below too, so the per-job scoped token still wins. A vault-supplied GITHUB_TOKEN overwriting
+	// the mint would hand every container a long-lived operator credential: CONST-TOKEN-SCOPED-PER-JOB
+	// defeated by a config line, which is the inversion forwardEnvList refuses at boot.
+	//
+	// Ordering is the BACKSTOP, not the gate. parseTriggers refuses every statically knowable one of these
+	// names at load, and the processor refuses the provider's own credential variables and the PI_FORWARD_ENV
+	// names pre-spend, where the resolved provider and the host env are in hand. This is the same division of
+	// labour the minted token already keeps ("and loadConfig refuses those names at load anyway").
+	//
+	// A LOOP rather than Object.assign, so a non-string or empty value becomes an ABSENT variable rather than
+	// `NAME=`: docker-run skips `undefined` but not `""`, and "never an empty string" is the rule PI_PACKAGES,
+	// PI_SESSION_FILE and PI_FLOW already keep. The resolver guarantees non-empty; this is the defense in
+	// depth at the DI seam that the empty-token guard keeps for the mint.
+	for (const [name, value] of Object.entries(secrets ?? {})) {
+		if (typeof value === "string" && value !== "") env[name] = value;
 	}
 
 	// The shipped egress policy's variables (REQ-EGRESS-ALLOWLIST), AFTER the PI_FORWARD_ENV loop so a

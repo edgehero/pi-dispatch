@@ -92,7 +92,8 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, name, signal }) => { code, aborted, turns, tokens, session, usage }. It MUST honour
+		// runContainer({ job, token, prepared, secrets, name, signal }) => { code, aborted, turns, tokens, session, usage, context }.
+		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
 		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal.
 		runContainer,
@@ -325,6 +326,43 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "secret-profile-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		if (resolved.ambiguous) {
+			// Two sources declared one profile name. Neither wins, deliberately: runtime-settings documents the
+			// overlay's precedence as overlay > env, so inverting it here would leave two rules disagreeing about
+			// what an overlay is, while honouring it would let a settings file in a world-writable default
+			// directory redirect a profile the operator wrote in .env. This project already refuses ambiguity
+			// rather than resolving it (PI_EGRESS: "a typo must never leave you believing you have a policy you
+			// do not"), and an operator who sees this fixes it in seconds.
+			await comment(job, "Refused: this trigger set `run.secrets`, and the resolver profile it names is declared twice on this worker host, once in the environment and once in the settings overlay. Neither wins, on purpose: the job would otherwise run against whichever one happened to be picked. Remove one of the two. Not run.");
+			log("refused_secret_profile_ambiguous", { kind: job.kind ?? null, profile: resolved.ambiguous });
+			return { outcome: "policy", reason: "secret-profile-ambiguous", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		if (resolved.unresolved) {
+			// DETERMINATE: the resolver said exit 2, printed nothing, overran the size cap, or returned a value
+			// with a NUL in it. Retrying cannot change any of those, so this RETURNS (CONST-RETRY-INFRA-ONLY).
+			const why = SECRET_FAILURES[resolved.failure] ?? "did not return a value";
+			await comment(job, `Refused: this trigger set \`run.secrets\`, and the resolver for \`${resolved.unresolved}\` ${why}. The job would have started with that variable unset, and an agent that gets a 401 writes a plausible report and exits 0. Run your profile's resolver by hand against that reference to see why: this comment carries neither the reference, nor the resolver's path, nor a byte of what it printed. Not run.`);
+			// The variable NAME, never a value -- the restraint refused_sessions_dir_unset keeps, and the name is
+			// the operator's own choice rather than payload. `failure` is OUR enum, `code` the script's small
+			// integer exit, `stderrBytes` a COUNT: never the resolver's words.
+			log("refused_secret_unresolved", { kind: job.kind ?? null, name: resolved.unresolved, failure: resolved.failure ?? null, code: resolved.code ?? null, stderrBytes: resolved.stderrBytes ?? 0 });
+			return { outcome: "policy", reason: "secret-unresolved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		if (resolved.unreachable) {
+			// INDETERMINATE: exit 1 ("could not reach my manager"), an exit code we do not recognise, a spawn
+			// fault, or a timeout. THROWS, so BullMQ retries per `attempts` -- the determinate/indeterminate split
+			// the image and egress preflights already draw, decided here by the resolver's own exit code rather
+			// than by matching its stderr, which image-preflight.mjs forbids for good reason. Folding this into
+			// the refusal above would permanently burn a delivery over a twenty-second vault blip, and a webhook
+			// does not redeliver itself. Nothing has spent: `budgetReserved` computes false in the catch below
+			// because `reserved` is still false here.
+			log("secret_resolver_unreachable", { kind: job.kind ?? null, name: resolved.unreachable, failure: resolved.failure ?? null, code: resolved.code ?? null, stderrBytes: resolved.stderrBytes ?? 0 });
+			throw new InfraRetry(`secret resolver could not answer for ${resolved.unreachable}`, { reason: "secret-resolver-unreachable", provider: job.provider ?? null, model: job.model ?? null });
+		}
+		const secrets = resolved.secrets ?? {};
+
 		if (wantsForgeToken) {
 			token = await mintToken(job);
 
@@ -397,7 +435,7 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 		}
 
-		const { code, aborted, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared });
+		const { code, aborted, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets });
 		log("container_exit", { exitCode: code, aborted });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
@@ -537,6 +575,19 @@ function mergeSession(prepared, fromRunner, promoted = null) {
 		bytes: promoted?.bytes ?? host?.bytes ?? null,
 	};
 }
+
+/**
+ * Our own words for why a resolver did not produce a value, turned into a phrase at the refusal site --
+ * the shape the egress refusal already uses for its `state` discriminator. The `??` fallback in the caller
+ * is not decoration: a failure code added in secrets.mjs must degrade to a generic sentence rather than
+ * print `undefined` on a public issue.
+ */
+const SECRET_FAILURES = {
+	exit: "refused that reference",
+	empty: "printed nothing",
+	overflow: "printed more than the size cap allows",
+	nul: "printed a value containing a NUL byte, which cannot survive the container's argv",
+};
 
 export class InfraRetry extends Error {
 	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved } = {}) {

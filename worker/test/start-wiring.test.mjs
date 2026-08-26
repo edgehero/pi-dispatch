@@ -339,6 +339,9 @@ test("runtime settings: getSettings is a top-level createWorker arg resolving ef
 
 	// Calling it with an empty overlay yields the ten effective keys from env/default config (env {} here);
 	// the optional week/month ceilings, token controls, and the soft-hold band default to disabled (null).
+	// `secretProfiles` (issue #225) rides ALONGSIDE those ten rather than inside effectiveSettings, which is
+	// why it appears here and not in that function's own pins: it carries no `overlay > env` precedence, so
+	// putting it there would have claimed one it deliberately does not have.
 	assert.deepEqual(
 		captured.getSettings(),
 		{
@@ -350,6 +353,7 @@ test("runtime settings: getSettings is a top-level createWorker arg resolving ef
 			monthlyCap: null,
 			maxTokens: null,
 			dailyTokenCap: null,
+			secretProfiles: {},
 			concurrency: 3,
 			softHoldPct: null,
 		},

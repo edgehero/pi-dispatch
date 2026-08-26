@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 // Static, unlike env-allowlist itself below: forges.mjs imports nothing, so it is available even on a
 // box where pi-ai will not load and the rest of this file skips.
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
@@ -429,4 +430,76 @@ test("a PI_FORWARD_ENV entry can NEVER override the policy's own proxy variables
 test("the proxy is named, not hardcoded, so a deployment can run its own component", { skip }, () => {
 	const env = mod.buildContainerEnv({ ...egressBase, egress: true, egressProxy: "my-egress" });
 	assert.equal(env.HTTPS_PROXY, "http://my-egress:3128");
+});
+
+// --- run.secrets: resolved values enter the closed map, and lose every collision (issue #225) ---
+
+const secretsBase = { provider: "anthropic", model: "m", maxTurns: 5, jobId: "job-1", forgeKind: "github", hostEnv: HOST };
+
+test("resolved secrets reach the container under the operator's own names", { skip }, () => {
+	const env = mod.buildContainerEnv({ ...secretsBase, secrets: { STRIPE_KEY: "sk-live-x", DB_URL: "postgres://y" } });
+	assert.equal(env.STRIPE_KEY, "sk-live-x");
+	assert.equal(env.DB_URL, "postgres://y");
+	// And the closed set is otherwise untouched: this widens the map by exactly what the operator wrote.
+	assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, "the stray host variable still does not ride along");
+});
+
+test("omitting `secrets` leaves the env map byte-identical -- which is why the whole-map pin above still holds", { skip }, () => {
+	const withKey = mod.buildContainerEnv({ ...secretsBase, secrets: {} });
+	const without = mod.buildContainerEnv({ ...secretsBase });
+	assert.deepEqual(Object.keys(withKey).sort(), Object.keys(without).sort());
+});
+
+test("a secret can NEVER override the minted per-job token", { skip }, () => {
+	// The whole of CONST-TOKEN-SCOPED-PER-JOB defeated by a config line: a vault-supplied GITHUB_TOKEN
+	// winning here hands every container a long-lived operator credential. parseTriggers refuses this name
+	// at load; the ordering is the second line, and this test is what keeps the two from drifting apart.
+	const env = mod.buildContainerEnv({ ...secretsBase, githubToken: "ghs_scoped", secrets: { GITHUB_TOKEN: "vault-supplied", GH_TOKEN: "vault-supplied" } });
+	assert.equal(env.GITHUB_TOKEN, "ghs_scoped");
+	assert.equal(env.GH_TOKEN, "ghs_scoped");
+});
+
+test("a secret can NEVER override the egress policy's proxy variables", { skip }, () => {
+	// A secret named HTTPS_PROXY that won would point the job away from the proxy its --internal network
+	// was built around, while reading exactly like the control working. That is an OUTAGE dressed as a
+	// policy, and it is the reason the assignment sits after the egress block rather than before it.
+	const env = mod.buildContainerEnv({ ...egressBase, egress: true, secrets: { HTTPS_PROXY: "http://attacker:3128", NODE_USE_ENV_PROXY: "0" } });
+	assert.equal(env.HTTPS_PROXY, "http://pi-dispatch-egress-proxy:3128");
+	assert.equal(env.NODE_USE_ENV_PROXY, "1");
+});
+
+test("a secret DOES outrank a same-named PI_FORWARD_ENV entry", { skip }, () => {
+	// The one collision that resolves in the secret's favour, and deliberately: PI_FORWARD_ENV is the
+	// operator's blanket host list, while run.secrets is the specific binding this trigger asked for.
+	// Deployment-wide loses to per-trigger; both lose to the closed map.
+	const env = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, SHARED: "from-host" }, forwardEnv: ["SHARED"], secrets: { SHARED: "from-vault" } });
+	assert.equal(env.SHARED, "from-vault");
+});
+
+test("an empty or non-string value emits NO variable at all, never `NAME=`", { skip }, () => {
+	// docker-run skips undefined but not "", so an empty string would reach the container as a set-but-blank
+	// variable -- a third state neither side reads the same way, which PI_PACKAGES and PI_FLOW already refuse.
+	const env = mod.buildContainerEnv({ ...secretsBase, secrets: { EMPTY: "", NUMBER: 5, NOTHING: null, GOOD: "x" } });
+	assert.equal("EMPTY" in env, false);
+	assert.equal("NUMBER" in env, false);
+	assert.equal("NOTHING" in env, false);
+	assert.equal(env.GOOD, "x");
+});
+
+test("the reserved-name list triggers.mjs refuses covers every STATIC name this map writes", { skip }, () => {
+	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
+	// validator and the admin bundle can have it for free), and a variable added to the closed map without
+	// being added there would open a hole a trigger could drive through. This is the test that closes it.
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", allowGlobalExtensions: false });
+	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead
+	for (const name of Object.keys(env)) {
+		if (dynamic.has(name)) continue;
+		assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is written by buildContainerEnv but is missing from reserved-env.mjs`);
+	}
+	// And a command job, whose PI_COMMAND replaces PI_FLOW.
+	const cmd = mod.buildContainerEnv({ ...secretsBase, command: "wf run" });
+	for (const name of Object.keys(cmd)) {
+		if (dynamic.has(name)) continue;
+		assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is missing from reserved-env.mjs`);
+	}
 });

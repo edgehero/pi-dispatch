@@ -27,6 +27,22 @@ import { defaultSettingsFile } from "./config.mjs";
 
 export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyCap", "monthlyCap", "maxTokens", "dailyTokenCap", "concurrency", "softHoldPct"];
 
+/**
+ * Overlay keys the OVERLAY accepts but no model-callable tool may set. `secretProfiles` maps a profile name
+ * to an absolute path to a script the worker executes, which is plainly "a capability the model would
+ * GAIN" -- the test `admin/src/index.ts` already applies to `run.image` and `run.resume`.
+ *
+ * The mechanism is the OMISSION from KNOWN_KEYS above: `dispatch_set` narrows its open string parameter
+ * with `KNOWN_KEYS.includes(...)`, and the panel's generic settings dialog is a `ui.select` over the same
+ * array, so leaving the key out closes both doors at once. This constant exists so that omission has a NAME
+ * and a reason attached to it. Without one, `KNOWN_KEYS` silently stops meaning "keys the overlay accepts"
+ * and the next contributor tidies the gap away as an oversight.
+ *
+ * A profile is declared through the operator-typed `/dispatch` command instead, which pi reaches only from
+ * its own user-input path, and every declared path is bounded by PI_SECRET_RESOLVER_ROOTS in the worker.
+ */
+export const OPERATOR_ONLY_KEYS = ["secretProfiles"];
+
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
 }
@@ -85,6 +101,30 @@ function validateOverlay(candidate, log) {
 				if (!isIntInRange(value, 1, 10)) return { invalid: "concurrency must be an integer 1-10" };
 				overlay[key] = value;
 				break;
+			case "secretProfiles": {
+				// REQ-TRIGGER-SECRETS. `{ [name]: "/abs/path" }`, the panel-authored half of the resolver
+				// table. The shape is checked here and the PATH BOUND is not: whether a path is allowed is
+				// PI_SECRET_RESOLVER_ROOTS' question, and it is asked in the worker at resolution time rather
+				// than here, because this same validator runs inside the admin extension where a "yes" would
+				// prove nothing about the host the job will run on.
+				//
+				// An invalid value fails the WHOLE overlay, which is this function's documented rule and is
+				// deliberate here too: a half-read profile table is a deployment that believes it has a
+				// resolver it does not.
+				if (value === null || typeof value !== "object" || Array.isArray(value)) {
+					return { invalid: "secretProfiles must be an object mapping profile names to resolver paths" };
+				}
+				for (const name of Object.keys(value)) {
+					if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+						return { invalid: "secretProfiles names may use letters, digits, dot, dash and underscore only" };
+					}
+					if (typeof value[name] !== "string" || value[name].trim() === "") {
+						return { invalid: `secretProfiles.${name} must be a non-empty absolute path` };
+					}
+				}
+				overlay[key] = { ...value };
+				break;
+			}
 			case "softHoldPct":
 				// A percentage of each active cap; 100 would equal the hard wall (no band) and 0 has no meaning,
 				// so the enforced band is 1-99. Absence disables the soft-hold entirely.

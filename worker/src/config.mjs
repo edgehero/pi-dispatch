@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
+import { parseSecretProfiles } from "./secret-profiles.mjs";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -278,6 +279,22 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", CHAIN_MAX_PER_JOB_DEFAULT), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 		dispatchRunPerHour: nonNegativeInt(env, "PI_DISPATCH_RUN_PER_HOUR", 3), // DES-ADMIN-VIA-PI-EXTENSION; 0 = disable dispatch_run
 		dispatchRunRoots: delimitedList(env.PI_DISPATCH_RUN_ROOTS), // DES-AI-TRIGGER-FLOW-GATE: default [] fails closed — no folder passes, dispatch_run refuses everything
+		// REQ-TRIGGER-SECRETS. The operator's declared resolvers, `name:absolute-path` pairs, comma separated.
+		// Each entry splits on its FIRST colon so a Windows `C:\...` path survives -- the same drive-letter
+		// hazard `delimitedList` above exists for, arriving from the other side. Unset = the feature is off and
+		// any trigger naming secrets refuses pre-spend, which is why there is no default profile to fall into.
+		secretProfiles: parseSecretProfiles(env.PI_SECRET_PROFILES),
+		// The directories a resolver may live in. Default [] FAILS CLOSED exactly as dispatchRunRoots does, and
+		// for a sharper version of its reason: this bounds paths that can arrive from the settings overlay,
+		// which is not the reviewed artifact `triggers.json` is. Unset means the panel can declare no profile
+		// at all and only PI_SECRET_PROFILES above is honoured. Env-only, never the overlay and never the
+		// deployment pointer: `deployment-pointer.mjs` already refuses to carry PI_DISPATCH_RUN_ROOTS
+		// "because a pointer that could widen the AI-run folder allowlist would be a second, unreviewed door",
+		// and a bound that can be widened from the surface it bounds is not a bound.
+		secretResolverRoots: delimitedList(env.PI_SECRET_RESOLVER_ROOTS),
+		// Per-reference ceiling. Tighter than doctor's 30s on purpose: this runs before a paid container, is
+		// multiplied by the reference count, and holds a PI_CONCURRENCY slot while it waits.
+		secretResolveTimeoutMs: positiveInt(env, "PI_SECRET_RESOLVE_TIMEOUT_MS", 10000),
 		github: { ...loadGitHubAuth(env, fileExists), allowGhResume: env.PI_SESSIONS_ALLOW_GH_SOURCE === "1" },
 		gitlab: loadGitLabAuth(env),
 		forgejo: loadForgejoAuth(env),

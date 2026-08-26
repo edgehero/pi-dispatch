@@ -108,7 +108,10 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// container that runContainer will refuse at entry anyway. Injected here, mirroring runContainer,
 				// because `signal` exists only in this scope. Omitted when unwired so a bare processor keeps
 				// runJob's own fail-closed default.
-				...(deps.resolveSecrets ? { resolveSecrets: (j) => deps.resolveSecrets(j, { signal }) } : {}),
+				// `secretProfiles` is the OVERLAY half of the resolver table, read this job-start with the ten
+				// tunables above. It is bound here rather than at construction for the reason the overlay exists:
+				// an operator who declares a profile in the panel must not have to restart the worker.
+				...(deps.resolveSecrets ? { resolveSecrets: (j) => deps.resolveSecrets(j, { signal, overlayProfiles: settings.secretProfiles ?? {} }) } : {}),
 				// collectChain (INT-OUTBOX-CONTRACT) reads the completed parent's REAL BullMQ job: its `.id`
 				// (the parent id children carry) and `.data` (kind/chainDepth). runJob's own `job` is the
 				// effectiveJob -- a spread of job.data with no `.id`/`.data` -- so inject the real wrapper here,
