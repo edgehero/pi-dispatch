@@ -224,8 +224,9 @@ or what it costs):
   a flow against a repo that has not adopted `.pi/skills/` at all, to A/B two versions of a flow across two
   triggers, or to keep a private flow out of a public repo's history
   ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
-- `"replicas": 2` (GitHub only) races independent sandboxes on the same event and opens one PR per
-  replica. Each replica spends its own budget slot ([`docs/replicas.md`](docs/replicas.md)).
+- `"replicas": 2` races independent sandboxes on the same event and opens one review request per replica,
+  on any forge (webhook triggers only; the poller does not fan out). Each replica spends its own budget
+  slot ([`docs/replicas.md`](docs/replicas.md)).
 - `"instructions"` attaches one line of standing text to that trigger (forge triggers only, up to 2000
   characters). It reaches the job's prompt above the issue or PR text, labelled as coming from you rather
   than from the issue, so "the tests run with pnpm here" applies to every run of that trigger without

@@ -263,16 +263,20 @@ Stated openly rather than discovered later:
   jobs run with `--pull=never` behind a pre-spend presence check, so the only images that can run are ones
   you built or pulled onto that host yourself. `docs/job-image.md` is the conformance checklist; `OQ-012` in
   `specs/open-questions.md` is the honest statement of what nothing here can check.
-- **`run.replicas` multiplies budget reservations by N, and the caps are the only ceiling.** A github
-  trigger carrying `run.replicas: 2` turns one delivery into two independent paid jobs — two containers,
-  two token bills, two pull requests. Nothing about that is a bypass: each replica reserves its own slot
+- **`run.replicas` multiplies budget reservations by N, and the caps are the only ceiling.** A webhook
+  trigger on any forge carrying `run.replicas: 2` turns one delivery into two independent paid jobs — two
+  containers, two token bills, two review requests. Nothing about that is a bypass: each replica reserves its own slot
   before its own tokens, so the daily, weekly and monthly caps still bound the blast radius exactly as they
   did — they simply divide by N, and a cap sized for one job per delivery now covers half as many
   deliveries. The field is a **file edit only**: no tool parameter, no panel key, no settings-overlay key,
   so nothing a model can reach turns your spend into a multiple. It is refused on cron/local triggers and
-  alongside `run.resume`. One residual is stated rather than defended: on a **pull_request**-typed target
-  the replicas share the pull request's head branch, and only the prompt asks them not to collide
-  (`OQ-017`).
+  alongside `run.resume`. Two residuals are stated rather than defended. On a **pull_request**-typed target
+  the replicas share the review request's branch (a head branch on GitHub and Forgejo, a source branch on
+  GitLab and Azure), and only the prompt asks them not to collide (`OQ-017`) — a **comment** trigger reaches
+  that same state, since a comment on a merge or pull request routes to that target. And on
+  gitlab/forgejo/azure the replicas hold the **same** operator-supplied token rather than N per-job scoped
+  ones: only the GitHub App path mints per job, so a replica set there is N concurrent attempts against one
+  credential on one target. `PI_CONCURRENCY` bounds how many are ever live at once.
 - **Local-folder jobs have no gate and no undo.** No merge, no reviewer, no pull request to decline. The
   bar for writing the agent's standing instructions drops from "can merge to default" to "can write a
   file in that folder" — which includes anything you ever downloaded into it. If the folder is not under

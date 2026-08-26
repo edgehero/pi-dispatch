@@ -141,6 +141,16 @@ bad agent rather than a missing tool.
 `gh`. `image/verify-image.sh` checks it is present and that the image's `dev.pi-dispatch.forges` label
 agrees.
 
+**`run.replicas` works here** (issue #187). `"replicas": 2` on a `label`, `comment` or `pull_request` rule
+races two independent sandboxes on one delivery, each on its own `pi/issue-<n>-r<i>` branch, each opening
+its own pull request titled `[r1/2] …`. It is **webhook only**: there is no Forgejo poller.
+
+One wrinkle is Forgejo's alone. `tea pr list` takes no branch filter, where `gh`, `glab` and `az repos` all
+filter server-side, so the "is there already a pull request for my branch?" step is a client-side scan of a
+listing that, under replicas, contains your siblings' pull requests on branches differing by one character.
+The replica prompt says so and tells the agent to match the `-r<i>` suffix exactly, but it is worth knowing
+that this step is a request rather than a filter here.
+
 ## What is not supported
 
 - **Gogs.** Same header family, different and less-maintained project.

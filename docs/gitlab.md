@@ -216,6 +216,14 @@ agent follows an envelope naming a command that is not there, explains itself in
 Everything else is identical to a GitHub job: the same isolation flags, the same `/job:ro` inputs, the
 same budget and pause windows, the same run history, and the same rule that **the harness never merges**.
 
+**`run.replicas` works here** (issue #187). `"replicas": 2` on a `label`, `comment` or `pull_request` rule
+races two independent sandboxes on one delivery, each on its own `pi/issue-<iid>-r<i>` branch, each opening
+its own merge request titled `[r1/2] …`. Two caveats specific to this arm. It is **webhook only**: there is
+no GitLab poller, so nothing fans out on a poll. And GitLab's `update` action is a firehose: a merge request
+edit, a label change, a description tweak and a push all arrive as `update`, and unlike GitHub's `labeled`
+there is no positive-selector requirement to narrow it, so `replicas: 2` on `action: ["update"]` multiplies
+every edit rather than every push. See [`docs/replicas.md`](replicas.md) for the budget arithmetic.
+
 ## What is not supported
 
 - **Group-level webhooks.** Untested, and nothing refuses one: verification reads only the delivery's

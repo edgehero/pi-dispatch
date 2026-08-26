@@ -1517,13 +1517,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; github only> } },
+               "replicas": <optional int 2..3; webhook kinds only> } },
     { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; github only> } },
+               "replicas": <optional int 2..3; webhook kinds only> } },
     { "on": { "type": "pull_request",
               "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
               "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
@@ -1533,7 +1533,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; github only> } } ] }
+               "replicas": <optional int 2..3; webhook kinds only> } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`) `⟹ run.kind ∈ {"github", "gitlab"}` — a forge
@@ -1765,19 +1765,22 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   a settings-overlay key, so `dispatch_set` cannot repoint the fleet. A `PI_JOB_IMAGE_ALLOWLIST` was
   considered and rejected — see `DES-PER-TRIGGER-JOB-IMAGE`. Naming an image is an operator edit to the
   reviewed file.
-- **`run.replicas` (github `label`/`comment`/`pull_request` only, optional integer `2..3`) — a fanout
+- **`run.replicas` (`label`/`comment`/`pull_request` on any forge, optional integer `2..3`) — a fanout
   count, and the only field in this file that MULTIPLIES SPEND** (`REQ-REPLICA-RUNS`). Absent = today: one
   delivery, one job, one branch, one pull request, and `data` byte-identical to the pre-feature shape.
   Present = the receiver enqueues exactly that many independent jobs from the one delivery, each carrying
   its own 1-based `replica` index. Every layer that would otherwise collapse them back to one is given the
-  index: the jobId (`gh-<guid>-r<i>`), the semantic dedup key (`repo#n:flow:r<i>`), the minted branch
-  (`pi/issue-<n>-r<i>`), the PR title marker, and the run record.
-  **Four refusals, each for its own reason, all fail-loud at load in both services.** A **`kind: "local"`
+  index: the jobId (`<prefix><id>-r<i>`, the prefix from the forge table), the semantic dedup key
+  (`repo<sep>n:flow:r<i>`, the separator from the same table, so a GitLab MR is `project!5:flow:r2`), the
+  minted branch (`pi/issue-<n>-r<i>`), the review-request title marker, and the run record.
+  **Webhook only on gitlab/forgejo/azure**: the poller is GitHub-only, so a replica set on those three is
+  minted by a delivery and never by a poll.
+  **Three refusals, each for its own reason, all fail-loud at load in every loader.** A **`kind: "local"`
   (cron) trigger** is refused because a local job's `/workspace` *is* the operator's folder, bind-mounted
   read-write and edited in place — two replicas would edit one working tree with no gate and no undo,
-  where a forge job gets its own `mkdtemp`'d clone. A **non-`github` forge** is refused as *not yet
-  covered* rather than impossible: every forge mints its branch through the same `issueBranch`, so this is
-  a gap to close. A value outside `2..3` or not an integer is refused, and `1` is refused **rather than
+  where a forge job gets its own `mkdtemp`'d clone. It is also the ONLY kind gate: with forge coverage
+  complete (#187) anything that is not `local` is admitted, so this check's position ahead of the range
+  check is load-bearing rather than cosmetic. A value outside `2..3` or not an integer is refused, and `1` is refused **rather than
   accepted-and-ignored** — a one-member replica set is a field that does nothing, and a field that does
   nothing is one an operator sets and then trusts. `3` is the ceiling because `PI_CONCURRENCY` defaults to
   3, so a fourth replica would queue rather than race, promising a comparison the deployment cannot
@@ -1846,11 +1849,12 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   nobody reads the byte-match clause as covering it.
   The byte-match admits `replicas` on the same terms: it stays **absent** when the trigger omits it, so an
   unflagged trigger's `data` **and its semantic dedup id** are byte-identical to the pre-`replicas` shape.
-  Given `run.replicas` on a `cron` trigger, on a `gitlab`/`forgejo`/`azure` trigger, beside
-  `run.resume: true`, or with a value that is not an integer in `2..3` (including `1` and `4`), when the
-  config loads, then **both services throw** and the message names the field and the reason. Given
-  `run.replicas: 2` on a github label trigger and one matching delivery, when the receiver accepts it, then
-  **two** jobs are enqueued with jobIds `gh-<guid>-r1`/`-r2` and dedup ids `repo#n:flow:r1`/`:r2`, and a
+  Given `run.replicas` on a `cron` trigger, beside `run.resume: true`, or with a value that is not an
+  integer in `2..3` (including `1` and `4`), when the config loads, then **every loader throws** — worker,
+  receiver, and the admin console's bundled copy — and the message names the field and the reason. Given
+  `run.replicas: 2` on a label trigger on ANY forge and one matching delivery, when the receiver accepts
+  it, then **two** jobs are enqueued with that forge's own jobId prefix (`gh-`/`gl-`/`fj-`/`az-`) suffixed
+  `-r1`/`-r2`, and dedup ids `repo<sep>n:flow:r1`/`:r2` composed with that forge's own separator, and a
   redelivery of that same GUID enqueues **nothing further**. Given a failure enqueueing replica *k*, then
   the receiver answers **503** with replicas `1..k-1` already queued — the retry converges on exactly *n*
   jobs, never more, because the queued ones dedup on their own now-taken ids.
@@ -2515,6 +2519,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-26 | Issue #187 (`run.replicas` on every forge). **INT-TRIGGERS-FILE-CONTRACT AMENDED**: the field's scope goes from github-only to every webhook kind on every forge, in all three schema blocks and the prose; the four refusals become **three**, and the surviving `local` one is recorded as the ONLY kind gate, so its position ahead of the range check is load-bearing (move it and a cron entry carrying `replicas: 2` is ACCEPTED rather than refused with a different message); the jobId and dedup key generalise to the forge table's own prefix and separator, which is what makes a GitLab MR `project!5:flow:r2` rather than a second `#` sequence; and a new **webhook-only** clause states plainly that the poller is GitHub-only, because a scope that said "every forge" and stopped would have claimed a parity the feature does not have. Acceptance now says **every loader** rather than both services — there are three, and the third is the reason this issue is a coordinated release rather than a diff. The `1`-is-refused, `3`-is-the-ceiling and `resume` clauses are byte-unchanged. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: `replica`/`replicas` were always host-assigned integers with no forge in them, and `target` already composed through `targetSeparator`, so a gitlab MR replica records `grp/proj!7` with no contract change — asserted rather than assumed, because this file's own history records `targetFor` once enumerating github alone while every GitLab run silently wrote `target: null`. **INT-CONTAINER-JOB-INPUTS and INT-WEBHOOK-PAYLOAD-SUBSET UNCHANGED, checked**: `event.json` still carries the delivery's own body plus one decision record, and an execution knob is still not a fact about the delivery, on four forges as on one. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: the `replicas` capability label is read from `job.replica` alone and `verify-image.sh` proves it by grepping the baked guardrails for *"the branch your prompt names"*, a phrase with no forge in it, so every already-conformant image serves non-GitHub replicas with no rebuild. **INT-OUTBOX-CONTRACT UNCHANGED, checked**: its `local`-only guard bounds chain fanout from a replica on any forge. |
 | 2026-08-25 | Issue #202 (the egress default). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, one clause: the network flag is present unless `PI_EGRESS=0`, rather than only when it is `1`. **INT-EGRESS-POLICY-CONTRACT AMENDED**, the same clause plus the arming rule, which now lives in one place (`egress.mjs`) because the worker, `doctor` and `up` must not be able to disagree about the posture. **INT-SANDBOX-CONTRACT UNCHANGED, checked**: it inherits the flag through the builder seam either way. |
 | 2026-08-25 | Issue #202 (the egress allowlist becomes a shipped control). **NEW `INT-EGRESS-POLICY-CONTRACT`**: the objects the policy IS on a host -- a per-job `--internal` network, a long-lived allowlist proxy publishing nothing, an upstream bridge, an operator-edited hostname list and a shipped rules file -- so the worker that builds it, the gate that checks it and the operator who edits it describe one thing. A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT` on the `INT-SANDBOX-CONTRACT` precedent. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, three edits. The flag list gains `--network=pi-job-<jobId>-net` when `PI_EGRESS=1`, plus a sentence it has needed since `--memory`/`--cpus` were written into it: this is a list of FLAGS, not a rendering of `ISOLATION_FLAGS`, and three of its members are not in that constant. That is not clerical -- issue #202's own text said the change "touches `ISOLATION_FLAGS`", and following it literally would make this file's `:1104` sandbox assertion ("against the imported array, not a copy") and `CONST-ISOLATION-CONTAINER-PER-JOB`'s twin false for every deployment running without a policy, which does not weaken the assertion so much as retire it. A new per-flag sub-bullet records why the network and not the proxy is load-bearing, why it is PER JOB (a shared network is a shared L2 segment at `DES-CONCURRENCY-3`, and `enable_icc=false` cannot fix it because ICC blocks job-to-proxy along with job-to-job -- measured in both directions), and that the provider is an ordinary allowlist entry because the recorded finding that it could not be is REFUTED. And the `PI_OFFLINE=1` sub-bullet gains **one clause and nothing else**: it is the closest unconditional-narrowing precedent and the analogy does NOT carry, because offline costs an unarmed job nothing while an unconditional network flag would turn every job on a deployment that never started the proxy into an outage. **INT-SANDBOX-CONTRACT AMENDED**: a sandbox joins its own network by the same builder seam, its env grows by three variables, and its NO CREDENTIALS clause is untouched and was checked rather than assumed -- a proxy URL is not a credential and `buildContainerEnv` is still not reused. The preflight deliberately does not gate a sandbox: it is a money gate and a sandbox spends nothing. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** -- the egress refusals are host-side policy returns that never reach a container, so no exit code gained a meaning. **INT-CONTAINER-JOB-INPUTS, INT-SESSION-STORE-CONTRACT, INT-OUTBOX-CONTRACT UNCHANGED, checked**: no mount, no file and no input crosses the boundary. **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked**, deliberately and not incidentally: no `run.network` field exists, because a per-trigger egress relaxation is a per-trigger security downgrade. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: two reason tokens, `egress-proxy-missing` and `egress-proxy-stopped`. |
 | 2026-08-25 | Issue #208 (the App key had to be a file). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**, the `PI_FORWARD_ENV` refusal clause: `GITHUB_APP_PRIVATE_KEY` now exists as a configuration variable (the App's PEM supplied inline, for a deployment whose environment comes from a secrets manager rather than a file), and it is refused in the forward allowlist for a reason the existing clause did not cover. Every name refused before it is refused because a forwarded host value would OVERRIDE the per-job mint; this one overrides nothing and simply must not be in a container: it is the App's *signing* key, so it mints installation tokens for every repository the App is installed on, strictly broader than the credential `CONST-TOKEN-SCOPED-PER-JOB` bounds, handed to a process reading adversarial issue text. The hazard is CREATED by this change — while the key could only be named by a path, `PI_FORWARD_ENV` could carry nothing but that path — so the refusal lands in the same commit as the variable. The same edit un-staled the clause's enumeration, which named four of the eight minted variables the code has derived from the forge table since issue #42; it now says derived-not-enumerated and lists all eight. `GITHUB_APP_PRIVATE_KEY_PATH` is deliberately NOT refused, and the clause says why: a path with no mount behind it is inert in a container, and a refusal that fires on harmless things stops being read. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked** — no mount, no file, nothing new crosses the boundary; the key reaches the worker's own process and stops there. **INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked** — a malformed inline key is a config refusal at load, which is the boot path, not a job exit. **INT-SDK-SESSION-OPTIONS, INT-SANDBOX-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked** — no session option, no sandbox variable (a sandbox carries no credential at all, now pinned against this name too), and no record field. |

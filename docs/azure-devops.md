@@ -183,6 +183,16 @@ the image declares which forges it can serve (`dev.pi-dispatch.forges`) and the 
 that label on the inspect it already runs. Without it, the job would run, find no `az`, and fail at step 3
 inside a paid container — on every single delivery, looking exactly like a bad agent run.
 
+**`run.replicas` works here** (issue #187). `"replicas": 2` on a `label`, `comment` or `pull_request` rule
+races two independent sandboxes on one delivery, each on its own `pi/issue-<id>-r<i>` branch, each opening
+its own pull request titled `[r1/2] …`. Three things specific to this arm. It is **webhook only**: there is
+no Azure poller. Azure's `updated` action is a firehose, like GitLab's `update`, and carries no
+positive-selector requirement, so a replicating `pull_request` rule multiplies every edit rather than every
+push. And the image must declare `dev.pi-dispatch.capabilities` including `replicas`: the published
+`pi-job:azure` inherits that label from the default image it is built `FROM`, but a hand-rolled Azure
+variant built from an older base will be refused pre-spend with `job-image-replicas-unsupported`, and the
+fix is rebuilding it against a current base rather than editing the trigger.
+
 ## What is not supported
 
 - **Azure Pipelines integration.** pi-dispatch is the trigger and the box; CI stays the project's business.

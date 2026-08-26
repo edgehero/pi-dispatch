@@ -10,6 +10,7 @@
     { "on": { "type": "pull_request", "action": ["review_submitted"], "reviewState": ["changes_requested"] }, "run": { "kind": "github", "flow": "address-review" } },
 
     { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "gitlab", "flow": "frontend-fix" } },
+    { "on": { "type": "label", "any": ["pi:urgent"] }, "run": { "kind": "gitlab", "flow": "fix", "replicas": 2 } },
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "gitlab", "flow": "fix" } },
     { "on": { "type": "pull_request", "action": ["open", "update"] }, "run": { "kind": "gitlab", "flow": "review" } },
     { "on": { "type": "label", "any": ["pi:fix"] }, "run": { "kind": "forgejo", "flow": "fix" } },

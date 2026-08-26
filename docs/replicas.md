@@ -9,7 +9,12 @@ human picking. `run.replicas` is the opt-in that does exactly that.
   "run": { "kind": "github", "flow": "fix-issue", "replicas": 2 } }
 ```
 
-Label an issue `pi:urgent` and you get **two** containers, **two** branches, and **two** pull requests.
+It works on **every forge**: github, gitlab, forgejo and azure. Swap the `kind` and the nouns follow, a
+merge request on GitLab and a pull request everywhere else. One limit worth knowing up front: on the three
+non-GitHub forges this is **webhook only**, because the poller is GitHub-only, so a replica set is minted by
+a delivery and never by a poll.
+
+Label an issue `pi:urgent` and you get **two** containers, **two** branches, and **two** review requests.
 Neither replica knows what the other did. That is the point — a comparison is only worth something if the
 runs were independent.
 
@@ -22,11 +27,11 @@ Each is handed the replica index, and nothing else moves.
 
 | Layer | Unreplicated | With `replicas: 2` |
 |---|---|---|
-| BullMQ job id | `gh-<guid>` | `gh-<guid>-r1`, `gh-<guid>-r2` |
-| Semantic dedup key | `repo#7:fix-issue` | `repo#7:fix-issue:r1`, `…:r2` |
+| BullMQ job id | `<prefix><id>` | `<prefix><id>-r1`, `-r2` (`gh-`/`gl-`/`fj-`/`az-`, from the forge table) |
+| Semantic dedup key | `repo<sep>7:fix-issue` | `…:r1`, `…:r2` (`#` for an issue, `!` where the forge numbers merge/pull requests separately) |
 | Branch | `pi/issue-7` | `pi/issue-7-r1`, `pi/issue-7-r2` |
-| Container name | `pi-job-gh-<guid>` | `pi-job-gh-<guid>-r1`, `-r2` |
-| PR title (agent-honored, issue path only) | whatever the flow chose | `[r1/2] …`, `[r2/2] …` |
+| Container name | `pi-job-<jobid>` | `pi-job-<jobid>-r1`, `-r2` (and one egress network each, named after it) |
+| Review-request title (agent-honored, issue path only) | whatever the flow chose | `[r1/2] …`, `[r2/2] …` |
 | Run record | `replica: null` | `replica: 1` / `2`, `replicas: 2` |
 
 Every row but the PR title is host-enforced. The `[r1/2]` marker is prompt text the agent is asked to
@@ -39,7 +44,7 @@ replica 1 kept `pi/issue-7` would make the pair read as an original and a duplic
 that makes people stop comparing them.
 
 **Redelivery still dedups**, by the same two mechanisms an unreplicated job uses. An *exact* redelivery
-(the same webhook guid) is stopped by the job id: `gh-<guid>-r<i>` is already in the queue's history,
+(the same webhook guid) is stopped by the job id: `<prefix><id>-r<i>` is already in the queue's history,
 which is retained for 31 days. The 10-minute semantic window does a different job: it coalesces
 *distinct* guids landing on the same `repo#7:fix-issue`, which is what absorbs re-label bursts. The
 `:r<i>` suffix is added to that semantic key *only* when a replica is set, so each replica coalesces
@@ -103,15 +108,16 @@ worker without that variable will therefore start happily on a file its receiver
 
 | Refused | Why |
 |---|---|
-| `kind: "local"` (a cron trigger) | A local job's `/workspace` **is** your folder, bind-mounted read-write and edited in place. Two replicas would edit one working tree with no gate and no undo. A GitHub job gets its own `mkdtemp`'d clone — that is the whole reason it is safe there. |
-| `gitlab` / `forgejo` / `azure` | **Not yet covered**, not impossible. Every forge mints its branch through the same function, so extending this is mechanical. |
+| `kind: "local"` (a cron trigger) | A local job's `/workspace` **is** your folder, bind-mounted read-write and edited in place. Two replicas would edit one working tree with no gate and no undo. A forge job gets its own `mkdtemp`'d clone — that is the whole reason it is safe there. This is also the ONLY kind check left, so it is what keeps a cron entry out. |
 | `replicas: 1` | A one-member replica set is a field that does nothing — and a field that does nothing is one you set and then trust. |
 | `replicas: 4` or more | `REPLICAS_MAX` is the literal `3`, chosen because `PI_CONCURRENCY` defaults to 3 and a fourth replica would queue instead of racing. It is not a read of the concurrency setting: raising `PI_CONCURRENCY` does not raise the cap, so the literal is the line to edit (see above). |
 | alongside `"resume": true` | A resumed run continues **one** lineage; replicas exist to fork it. Without this refusal every replica of an issue would resolve the same session key, share one transcript, and contend for the store's one-writer lock. |
 
-## The pull-request hazard
+## The review-request hazard
 
-`replicas` is allowed on `pull_request` triggers, and there the guarantee is weaker — honestly so.
+`replicas` is allowed on `pull_request` triggers, and there the guarantee is weaker — honestly so. A
+**comment** trigger reaches the same state: a comment on a merge or pull request routes to that target, and
+the loader allows one comment rule per forge, so arming `replicas` there arms this path too.
 
 An **issue** target is fully bounded: the host mints a branch per replica and each is told to push only to
 its own. A **pull_request** target has no branch to mint. The pull request's head branch belongs to a human,
@@ -149,3 +155,24 @@ host-assigned index is not one. The branch name they imply is deliberately **not
 - [`DES-REPLICA-INDEX-REACHES-THE-BRANCH`](../specs/design.md) — the design and what was rejected
 - [`docs/job-image.md`](job-image.md) — the image conformance checklist
 - [`SECURITY.md`](../SECURITY.md) — the spend multiplier under "what is NOT defended"
+
+## Two things that are not the same on every forge
+
+- **Forgejo's "is there already a pull request?" step is a client-side scan.** `tea pr list` takes no
+  branch filter, where `gh`, `glab` and `az` all filter server-side. Under replicas that listing shows your
+  siblings' pull requests, whose branches differ from yours by a single character, so the replica prompt
+  says so explicitly and tells the agent to match the `-r<i>` suffix exactly.
+- **Only the GitHub App path mints a token per job.** On gitlab, forgejo and azure one operator-supplied
+  token serves every project, so a replica set is N concurrent containers holding the SAME credential while
+  working on one target. Nothing about that is new to replicas (any two concurrent jobs already share it)
+  and `PI_CONCURRENCY` still bounds how many are live, but it is worth knowing before arming a set of three.
+
+## Upgrading, and rolling back
+
+The console bundles the trigger validator at build time, so a published `/dispatch` older than this feature
+will **refuse every trigger edit** while a non-github `replicas` entry sits in the file, including the edit
+that would remove it. Upgrade the admin extension together with the worker and receiver, not after.
+
+Rolling back is the mirror image: an earlier worker or receiver refuses to load a file carrying non-github
+`replicas` at all, loudly and at boot. There is no operator surface to unset the field (deliberately: it is
+a spend multiplier, so it is a reviewed file edit only), so recovery is editing `triggers.json` by hand.
