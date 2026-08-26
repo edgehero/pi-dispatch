@@ -294,3 +294,29 @@ test("gitlab: replicas rides the matched rule onto the job, at JOB level and nev
 test("gitlab: an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
 	assert.equal("replicas" in run(issuePayload()).job, false);
 });
+
+test("secrets and secretsProfile ride the JOB from the matched rule, never inside trigger (#225)", () => {
+	const t = {
+		...triggers,
+		label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" }],
+	};
+	const r = filterGitLab(parseGitLabSubset(issuePayload()), t, knownFlows, SELF_ID, true, "wh-9");
+	assert.deepEqual(r.job.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" });
+	assert.equal(r.job.secretsProfile, "prod");
+	// `trigger` is copied verbatim into /job/event.json, which the AGENT reads. A reference list there
+	// would hand the agent the map of the operator's vault, which is the one thing this feature is for
+	// not doing. It rides the job for packages/image's reason, and for a sharper one.
+	assert.equal("secrets" in r.job.trigger, false);
+	assert.equal("secretsProfile" in r.job.trigger, false);
+});
+
+test("the receiver enqueues REFERENCES and never a value -- it has no resolver at all (#225)", () => {
+	// The receiver runs on the trigger edge, often on a different host, and holds no manager credential.
+	// Resolution is the worker's, pre-spend. This pins the division: whatever the operator wrote in the
+	// file is what lands on the queue, verbatim and unresolved.
+	const reference = "op://ci-vault/stripe/api-key";
+	const t = { ...triggers, label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", secrets: { A: reference } }] };
+	const r = filterGitLab(parseGitLabSubset(issuePayload()), t, knownFlows, SELF_ID, true, "wh-9");
+	assert.equal(r.job.secrets.A, reference);
+	assert.equal("secretsProfile" in r.job, false, "an unset profile stays absent, never present-and-undefined");
+});

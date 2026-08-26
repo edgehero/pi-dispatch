@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
+import { FORGE_HOST_VARS, MINTED_TOKEN_VARS } from "../src/forges.mjs";
+import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
 
 // parseTriggers is pure over the file TEXT -- no fs, no bullmq. `parse` serializes triggers and feeds
@@ -913,4 +916,164 @@ test("a comment command trigger loads with no default-flow refusal", () => {
 	assert.equal(t.run.command, "wf run");
 	assert.equal(t.run.flow, undefined);
 	assert.deepEqual(t.on, { type: "comment", phrase: "@pi" });
+});
+
+// --- run.secrets / run.secretsProfile (REQ-TRIGGER-SECRETS, issue #225) ---
+
+test("run.secrets survives normalization on all four kinds, cron included", () => {
+	// Cron is the case worth stating: `run.replicas` refuses a local job, and the reason (two agents
+	// sharing one bind-mounted working tree) does not transfer to resolving a credential. A nightly
+	// deploy is the obvious user, so a refusal here would be a refusal of the use case.
+	for (const { kind, entry } of KINDS) {
+		const [t] = parse([withRun(entry, { secrets: { STRIPE_KEY: "op://ci/stripe/api-key" } })]);
+		assert.deepEqual(t.run.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" }, `${kind} must carry the map`);
+	}
+});
+
+test("an unflagged trigger grows NEITHER key, on all four kinds", () => {
+	// The conditional-spread invariant every deepEqual pin in this file depends on.
+	for (const { kind, entry } of KINDS) {
+		const [t] = parse([entry]);
+		assert.equal("secrets" in t.run, false, `${kind} must not gain a secrets key`);
+		assert.equal("secretsProfile" in t.run, false, `${kind} must not gain a secretsProfile key`);
+	}
+});
+
+test("run.secrets that is not an object of strings is refused, naming the trigger, on all four kinds", () => {
+	for (const { kind, entry, mentions } of KINDS) {
+		for (const bad of ["op://x/y/z", 1, null, true, [], [{ A: "b" }]]) {
+			assert.throws(
+				() => parse([withRun(entry, { secrets: bad })]),
+				(e) => isConfigError(e) && e.message.includes(mentions) && /run\.secrets/.test(e.message),
+				`${kind} must refuse secrets=${JSON.stringify(bad)}`,
+			);
+		}
+	}
+});
+
+test("an EMPTY run.secrets map is refused -- a field that does nothing is the failure class, not a shortcut", () => {
+	assert.throws(
+		() => parse([withRun(LABEL, { secrets: {} })]),
+		(e) => isConfigError(e) && /empty/.test(e.message),
+	);
+});
+
+test("a run.secrets key that is not an environment variable name is refused", () => {
+	// No downstream check exists: `-e NAME=VALUE` reaches the docker argv as written, so a key carrying
+	// an `=` binds a different variable than the one the operator wrote.
+	for (const bad of ["1STRIPE", "STRIPE-KEY", "STRIPE KEY", "STRIPE=KEY", "", "stripe.key", "PI:X"]) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { [bad]: "op://a/b/c" } })]),
+			(e) => isConfigError(e) && /environment variable name/.test(e.message),
+			`key ${JSON.stringify(bad)} must refuse`,
+		);
+	}
+	// Lowercase and underscores are LEGAL env names and must stay accepted: refusing them would be this
+	// project inventing a naming convention for the operator's own variables.
+	const [t] = parse([withRun(LABEL, { secrets: { db_url: "x", _X9: "y" } })]);
+	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["_X9", "db_url"]);
+});
+
+test("a run.secrets key the worker sets itself is refused, from every set and derived from the table", () => {
+	// Derived, never retyped: a forge added to FORGES later stays covered without a second edit here.
+	// FORGE_HOST_VARS is the one that was missing when this was first designed -- `hostVar` is a separate
+	// column from `tokenVars`, so GITLAB_HOST was in NO refusal set while buildContainerEnv wrote it
+	// after the mint, which would have silently discarded the trigger's value.
+	const reserved = [...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES];
+	assert.ok(reserved.includes("GITHUB_TOKEN") && reserved.includes("GITLAB_HOST"), "the fixture must span both columns");
+	assert.ok(reserved.includes("GITHUB_APP_PRIVATE_KEY") && reserved.includes("HTTPS_PROXY") && reserved.includes("PI_OFFLINE"));
+	for (const name of reserved) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { [name]: "op://a/b/c" } })]),
+			(e) => isConfigError(e) && e.message.includes(name),
+			`${name} must be refused as a reserved name`,
+		);
+	}
+});
+
+test("a run.secrets reference that is empty, whitespace-padded, or starts with a dash is refused", () => {
+	for (const [bad, needle] of [["", /non-empty string/], ["   ", /non-empty string/], [" op://a/b/c ", /whitespace/], ["--help", /start with/], ["-rf", /start with/]]) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { A: bad } })]),
+			(e) => isConfigError(e) && needle.test(e.message),
+			`reference ${JSON.stringify(bad)} must refuse`,
+		);
+	}
+});
+
+test("the reference grammar is NOT validated -- this project blesses no vendor (#206, #209)", () => {
+	// The deliberately-permissive pin, in `validateImageRef`'s tradition: its job is to stop a future
+	// contributor from "tightening" this into an `op://` regex. What parses a reference is a script the
+	// operator wrote, so a Vault path, a Doppler name and a bare word are all correct inputs here.
+	for (const reference of ["op://ci-vault/stripe/api-key", "secret/data/ci#stripe", "STRIPE_KEY", "projects/1/secrets/x/versions/2", "a b c"]) {
+		const [t] = parse([withRun(LABEL, { secrets: { A: reference } })]);
+		assert.equal(t.run.secrets.A, reference);
+	}
+});
+
+test("more than the cap is refused -- the ceiling bounds a concurrency slot, not tidiness", () => {
+	const seventeen = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`K${i}`, "op://a/b/c"]));
+	assert.throws(
+		() => parse([withRun(LABEL, { secrets: seventeen })]),
+		(e) => isConfigError(e) && /17 variables, over the 16 cap/.test(e.message),
+	);
+	const sixteen = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`K${i}`, "op://a/b/c"]));
+	assert.equal(Object.keys(parse([withRun(LABEL, { secrets: sixteen })])[0].run.secrets).length, 16);
+});
+
+test("run.secrets beside run.resume: true refuses, naming BOTH fields, on every kind that can resume", () => {
+	// get-token.mjs refuses the `gh` token source on a resumed job for this exact argument: a credential
+	// is safe because it is an env value that dies with the container, while a transcript is a FILE on
+	// host disk replayed into the next job on that key. A resolved vault value is an env value the agent
+	// can echo, and nothing in this project redacts a transcript.
+	for (const { kind, entry } of KINDS.filter((k) => k.kind !== "cron")) {
+		assert.throws(
+			() => parse([withRun(entry, { secrets: { A: "op://a/b/c" }, resume: true })]),
+			(e) => isConfigError(e) && /run\.secrets/.test(e.message) && /run\.resume/.test(e.message),
+			`${kind} must refuse the combination`,
+		);
+	}
+});
+
+test("run.secretsProfile: a name is accepted, a path or a separator is not", () => {
+	const [t] = parse([withRun(LABEL, { secrets: { A: "op://a/b/c" }, secretsProfile: "prod" })]);
+	assert.equal(t.run.secretsProfile, "prod");
+	// A NAME, never a path: DES-SERVICE-ENV-SETUP-SEAM rejected letting a trigger file name an exec, and
+	// this field is allowed to exist only because it selects among execs the operator already declared.
+	// The `,` and `:` refusals are load-bearing twice over -- PI_SECRET_PROFILES is a comma-separated
+	// list of name:path pairs, so a name carrying either could not round-trip through its own declaration.
+	for (const bad of ["/opt/pi/resolve.sh", "prod:staging", "a,b", "with space", "", "  ", 7, true, null]) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { A: "op://a/b/c" }, secretsProfile: bad })]),
+			(e) => isConfigError(e) && /run\.secretsProfile/.test(e.message),
+			`profile ${JSON.stringify(bad)} must refuse`,
+		);
+	}
+});
+
+test("run.secretsProfile without run.secrets is refused on all four kinds", () => {
+	for (const { kind, entry, mentions } of KINDS) {
+		assert.throws(
+			() => parse([withRun(entry, { secretsProfile: "prod" })]),
+			(e) => isConfigError(e) && e.message.includes(mentions) && /names nothing/.test(e.message),
+			`${kind} must refuse a profile that resolves nothing`,
+		);
+	}
+});
+
+test("whether the named profile EXISTS is not decided here -- that is deployment state", () => {
+	// parseTriggers is pure and fs-free, so it cannot see PI_SECRET_PROFILES. Accepting an unknown name
+	// here is correct and the refusal lands pre-spend per delivery, exactly as run.resume splits against
+	// PI_SESSIONS_DIR. A validator that guessed would refuse a file that is fine on the real worker.
+	const [t] = parse([withRun(LABEL, { secrets: { A: "op://a/b/c" }, secretsProfile: "nothing-declares-this" })]);
+	assert.equal(t.run.secretsProfile, "nothing-declares-this");
+});
+
+test("run.secrets is orthogonal to the other run fields -- each survives beside it", () => {
+	const [t] = parse([withRun(LABEL, { secrets: { A: "op://a/b/c" }, secretsProfile: "prod", packages: false, image: "pi-job:x", replicas: 2 })]);
+	assert.equal(t.run.packages, false);
+	assert.equal(t.run.image, "pi-job:x");
+	assert.equal(t.run.replicas, 2);
+	assert.equal(t.run.secretsProfile, "prod");
+	assert.deepEqual(t.run.secrets, { A: "op://a/b/c" });
 });

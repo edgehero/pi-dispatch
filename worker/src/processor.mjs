@@ -1,6 +1,7 @@
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
+import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 
 /**
@@ -70,6 +71,20 @@ export async function runJob(job, deps) {
 				return false;
 			}
 		},
+		// (job) => { ok: true, secrets } | { profileUnknown } | { unresolved, ... }. The wiring binds the
+		// abort signal into it (index.mjs), the way it binds name+signal into runContainer.
+		// REQ-TRIGGER-SECRETS. Resolves this trigger's `run.secrets` references through the operator's own
+		// resolver, HOST-SIDE, before anything spends. Injected so the gate is testable without a real script.
+		//
+		// The default FAILS CLOSED, deliberately unlike imagePreflight's and egressPreflight's
+		// admit-everything defaults, and for the reason the sessionsDir default states above: an admitting
+		// default would let a job that armed run.secrets start with those variables UNSET under any wiring
+		// that omits this key. That is a false success which looks exactly like the feature working, and it
+		// is the inversion this whole gate exists to prevent. It can be UNCONDITIONALLY refusing because the
+		// gate below only calls it when the job is armed -- putting the arming test in the default instead
+		// would leave an INJECTED resolver running on every job, which is how a probe nobody wanted starts
+		// spawning a subprocess per delivery to learn nothing.
+		resolveSecrets = async (job) => ({ profileUnknown: job.secretsProfile ?? DEFAULT_SECRETS_PROFILE }),
 		// (job) => scoped short-lived token. Takes the JOB, not the repo: which forge mints -- and therefore
 		// which credential the container gets -- is a property of `job.kind`, and only the wiring knows the
 		// map. Called for forge-backed jobs and for local jobs opted in via `github: true`; unflagged local
@@ -277,6 +292,37 @@ export async function runJob(job, deps) {
 			// the same restraint refused_sessions_dir_unset keeps.
 			log("refused_skills_dir_missing", { kind: job.kind ?? null });
 			return { outcome: "policy", reason: "skills-dir-missing", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		// REQ-TRIGGER-SECRETS. A trigger that named secret references the worker cannot resolve would run its
+		// flow with those variables UNSET, get a 401 from whatever it was meant to reach, write a plausible
+		// report about why the integration is down, and exit 0.
+		//
+		// PLACEMENT. Strictly before the mint below, the clone in prepareWorkspace, the token-cap read and
+		// reserveBudget, so a refusal here costs nothing (CONST-BUDGET-BEFORE-TOKENS). But it is NOT one of the
+		// "free, determinate, credential-less and I/O-less" gates above, and this comment must not claim it is:
+		// resolving spawns a subprocess per reference against the operator's manager, which is none of those
+		// four things. The precedent it actually follows is one gate LATER -- prepareWorkspace already performs
+		// a full network clone before the budget is reserved. An I/O-bound pre-budget step is established here;
+		// a free one it is not. It sits last among the pre-mint gates because it is both the narrowest and the
+		// only one that can block, so every cheaper answer is already in hand when it runs.
+		//
+		// There is deliberately no cheap "would this resolve?" probe. The reference grammar belongs to the
+		// resolver (#206, #209: the seam is a command), so this project has nothing it could validate short of
+		// asking -- the same shape the branch-protection check takes, where the check IS the real call.
+		//
+		// Guarded by `secretsArmed` at the CALL SITE, not inside the resolver: an unflagged job must not reach
+		// it under ANY wiring, and a guard that lives in the default is a guard an injected resolver skips.
+		const resolved = secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		if (resolved.profileUnknown) {
+			await comment(job, "Refused: this trigger set `run.secrets`, and the resolver profile it names is not usable on this worker host. No profile of that name is declared, or its resolver is absent or not executable. The job would have started with those variables unset, and an agent that gets a 401 writes a plausible report and exits 0. Run `pi-dispatch doctor` on the worker to see which profiles it has. Not run.");
+			// The operator's own profile LABEL, and never a path, a reference, or a byte the resolver printed.
+			// `comment` posts publicly on the issue: a resolver path there publishes the operator's filesystem
+			// layout, and the DECLARED profile names would publish their vault topology -- which is why the
+			// message points at doctor for the list instead of enumerating it. The label itself is
+			// operator-authored trigger config, the same class as the image ref the job-image refusals name.
+			log("refused_secret_profile_unknown", { kind: job.kind ?? null, profile: resolved.profileUnknown });
+			return { outcome: "policy", reason: "secret-profile-unknown", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		if (wantsForgeToken) {

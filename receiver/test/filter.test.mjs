@@ -906,3 +906,16 @@ test("a mixed group routes per rule: the flow label rule still emits a byte-iden
 	assert.equal("command" in r.job, false, "a flow job grows no command key -- its enqueued bytes must not change");
 	assert.deepEqual(Object.keys(r.job), ["repo", "target", "flow", "trigger"]);
 });
+
+test("secrets and secretsProfile ride the JOB from the matched rule, never inside trigger (#225)", () => {
+	const t = forgeCfg({ triggers: { ...cfgRaw.triggers, label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" }] } });
+	const subset = issuesSubset({ issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] } });
+	const r = filter("issues", subset, t, SELF_ID, "d-secrets");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" });
+	assert.equal(r.job.secretsProfile, "prod");
+	// `trigger` becomes /job/event.json, which the agent reads: a reference list there would hand it the
+	// map of the operator's vault, which is precisely what this feature exists to avoid.
+	assert.equal("secrets" in r.job.trigger, false);
+	assert.equal("secretsProfile" in r.job.trigger, false);
+});

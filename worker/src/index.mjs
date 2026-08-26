@@ -101,6 +101,14 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				tokenCap: settings.dailyTokenCap,
 				...deps,
 				runContainer: (ctx) => deps.runContainer({ ...ctx, name, signal }),
+				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
+				// to be abortable for the same reason runContainer does: a resolver blocking on an unreachable
+				// vault would otherwise hold its slot until its own timeout, and an abort landing mid-resolution
+				// would neither stop it nor keep the job from going on to mint, clone and reserve budget for a
+				// container that runContainer will refuse at entry anyway. Injected here, mirroring runContainer,
+				// because `signal` exists only in this scope. Omitted when unwired so a bare processor keeps
+				// runJob's own fail-closed default.
+				...(deps.resolveSecrets ? { resolveSecrets: (j) => deps.resolveSecrets(j, { signal }) } : {}),
 				// collectChain (INT-OUTBOX-CONTRACT) reads the completed parent's REAL BullMQ job: its `.id`
 				// (the parent id children carry) and `.data` (kind/chainDepth). runJob's own `job` is the
 				// effectiveJob -- a spread of job.data with no `.id`/`.data` -- so inject the real wrapper here,

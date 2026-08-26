@@ -23,8 +23,9 @@
  * Custom: triggers validated inline per config.mjs/schedules.mjs precedent; zod not in deps
  */
 
-import { configError } from "./config.mjs";
-import { FORGE_KINDS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
+import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
+import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
+import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 
 const ON_TYPES = new Set(["cron", "label", "comment", "pull_request"]);
 
@@ -99,6 +100,41 @@ const ID_CHARSET = /^[A-Za-z0-9._-]+$/;
  * is the operator who can raise this line too, in a reviewed commit.
  */
 const REPLICAS_MAX = 3;
+
+/**
+ * The ceiling on how many references one trigger may name (issue #225). Not tidiness: the worker resolves
+ * them SEQUENTIALLY, before the container, each with its own timeout, so N references hold a
+ * `PI_CONCURRENCY` slot for up to N x PI_SECRET_RESOLVE_TIMEOUT_MS inside the job's own 30-minute kill
+ * timer. A cap at load turns an unbounded slot occupancy into a bounded one for free, before anything
+ * runs. It bounds the host argv too: every resolved value is pushed as `-e NAME=VALUE` (docker-run.mjs).
+ *
+ * Sixteen rather than three: unlike `REPLICAS_MAX` this multiplies no spend, and a deploy job legitimately
+ * wants a handful of credentials. A literal for REPLICAS_MAX's reason -- this validator is pure and fs-free.
+ */
+const SECRETS_MAX = 16;
+
+/**
+ * A POSIX environment variable name. Nothing in this repo validated one before `run.secrets` (checked), so
+ * this is the definition rather than a copy of one. Deliberately stricter than what `execve` would accept:
+ * a name is `-e NAME=VALUE` in the docker argv, so `=` would split in the wrong place, and the leading
+ * digit is excluded because a shell cannot expand `$1FOO` as that variable.
+ */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The env variable names a trigger may NOT bind, and why each set is here.
+ *
+ * These are the STATICALLY KNOWABLE half. `parseTriggers` is pure, fs-free and env-free, so it cannot see
+ * the resolved provider's credential variable names (they come from `findEnvKeys(provider, hostEnv)`) or
+ * the deployment's `PI_FORWARD_ENV` list. Those two are refused PRE-SPEND in the processor, where both are
+ * in hand -- the same load-time / deployment-state split `run.resume` already makes against
+ * `PI_SESSIONS_DIR`. Refusing here what can be answered here keeps the file's own mistakes in the file's
+ * own error.
+ *
+ * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
+ * forge added to the table later must not need a second edit here to stay covered.
+ */
+const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES]);
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
@@ -228,6 +264,8 @@ function normalizeCron(on, run, index, path, state) {
 	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
 	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
 	validateReplicas(run, `cron trigger "${id}"`, path);
+	const secrets = validateSecrets(run, `cron trigger "${id}"`, path);
+	const secretsProfile = validateSecretsProfile(run, `cron trigger "${id}"`, path);
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -236,7 +274,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
 	};
 }
 
@@ -635,6 +673,122 @@ function validateReplicas(run, at, path) {
 	return replicas;
 }
 
+/**
+ * `run.secrets` -- the env variables this trigger's job receives, and the opaque references an operator's
+ * own resolver turns into values (REQ-TRIGGER-SECRETS, issue #225).
+ *
+ * THE GRAMMAR OF THE VALUES IS NOT OURS. `op://vault/item/field`, `secret/data/ci#stripe` and a bare name
+ * are all valid here, because what parses them is a script the operator wrote and named in
+ * `PI_SECRET_PROFILES`. This file validates the SHAPE of the map and never the meaning of a reference --
+ * the posture #206 and #209 already set ("the seam is a command"), and the same one
+ * `DES-SERVICE-ENV-SETUP-SEAM` implements one layer up. A regex over `op://` here would bless a vendor.
+ *
+ * WHY EACH REFUSAL:
+ *   - not a plain object, or a value that is not a non-empty string. An array or a nested object is an
+ *     operator writing a different feature than the one that exists.
+ *   - more than SECRETS_MAX entries -- see that constant: it bounds a worker slot, not a preference.
+ *   - a key that is not an environment variable name. There is no downstream check: `-e NAME=VALUE` goes
+ *     into the docker argv as written, so a key with an `=` in it silently binds a different variable.
+ *   - a key in RESERVED_ENV_NAMES. The mint, the egress policy and the closed map all write AFTER this
+ *     feature does, so such a key would be accepted, overwritten, and the job would run without the value
+ *     it named on a clean exit 0. Ordering is the backstop; this is the refusal, which is the same
+ *     division of labour `PI_FORWARD_ENV` already keeps (config.mjs refuses the names, env-allowlist.mjs
+ *     orders the assignments so a slip cannot matter).
+ *   - a reference starting with `-`. It is passed as `argv[1]` of the resolver, where a leading dash
+ *     parses as a flag -- exactly `validateImageRef`'s reason for the same refusal on `run.image`. We do
+ *     NOT pass `--` before it instead: that would be a claim about the resolver's option parser, and the
+ *     option parser is the operator's.
+ *   - `run.resume: true`. `assertResumeAllowedOnGhSource` (get-token.mjs) already refuses the `gh` token
+ *     source for a resumed job, and states the argument this inherits whole: every property
+ *     CONST-TOKEN-SCOPED-PER-JOB relies on assumes the credential is an ENV VALUE that dies with the
+ *     container, while a persisted transcript is a FILE on host disk, replayed into the next job on that
+ *     key. A resolved vault value is an env value the agent can echo, and nothing here redacts a
+ *     transcript. Refused with NO escape hatch, unlike that one's PI_SESSIONS_ALLOW_GH_SOURCE: a pure
+ *     validator cannot read an env var to find one, and the reason is stronger anyway, since that refusal
+ *     complains a `gh` login is "full-scope and NON-EXPIRING" and a vault password does not expire either.
+ *
+ * Called from ALL FOUR normalizers, cron included. Unlike `run.replicas` this is NOT refused on a local
+ * job: nothing about resolving a secret is forge-specific, and a nightly deploy is the obvious user. The
+ * replica refusal turns on a local `/workspace` being the operator's own folder with no clone, which is a
+ * fact about two agents sharing a working tree, not about a credential. That folder does bring its own
+ * hazard (an agent that writes a credential into `.env` writes it into the operator's real repository),
+ * and `doctor` warns about exactly that rather than this validator refusing the use case outright.
+ *
+ * Returns the map, undefined when absent, so an unflagged trigger normalizes byte-identically.
+ */
+function validateSecrets(run, at, path) {
+	const secrets = run.secrets;
+	if (secrets === undefined) return undefined;
+	if (secrets === null || typeof secrets !== "object" || Array.isArray(secrets)) {
+		throw configError(`${at}: run.secrets must be an object mapping environment variable names to references when present (got ${JSON.stringify(secrets)}): ${path}`);
+	}
+	const names = Object.keys(secrets);
+	if (names.length === 0) {
+		throw configError(`${at}: run.secrets is empty -- an empty map is a field that does nothing, and this trigger reads as though it binds a secret: ${path}`);
+	}
+	if (names.length > SECRETS_MAX) {
+		throw configError(`${at}: run.secrets names ${names.length} variables, over the ${SECRETS_MAX} cap -- each one is resolved before the container starts, holding a concurrency slot while it runs: ${path}`);
+	}
+	for (const name of names) {
+		if (!ENV_NAME.test(name)) {
+			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
+		}
+		if (RESERVED_ENV_NAMES.has(name)) {
+			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is a variable the worker sets itself -- the job container would receive the worker's value, not this trigger's, and the trigger would look like it worked: ${path}`);
+		}
+		const reference = secrets[name];
+		if (!isNonEmptyString(reference)) {
+			throw configError(`${at}: run.secrets.${name} must be a non-empty string reference for your resolver to read (got ${JSON.stringify(reference)}): ${path}`);
+		}
+		if (reference !== reference.trim()) {
+			throw configError(`${at}: run.secrets.${name} must not have leading or trailing whitespace -- the file is the reviewed artifact and silently trimming it would make the file disagree with what the resolver is asked for: ${path}`);
+		}
+		if (reference.startsWith("-")) {
+			throw configError(`${at}: run.secrets.${name} must not start with "-" -- it is passed as the resolver's first argument, where a leading dash parses as a flag: ${path}`);
+		}
+	}
+	if (run.resume === true) {
+		throw configError(`${at}: run.secrets and run.resume cannot be combined -- a resumed job replays a transcript kept on host disk, and any command the agent ran that echoed a resolved value wrote it into that transcript, which is then prefilled into every later job on the same key: ${path}`);
+	}
+	return { ...secrets };
+}
+
+/**
+ * `run.secretsProfile` -- WHICH of the operator's declared resolvers reads this trigger's references.
+ *
+ * A NAME, never a path, and that distinction is the whole reason this field is allowed to exist.
+ * `DES-SERVICE-ENV-SETUP-SEAM` rejected "making this reachable from configuration, which would turn a
+ * boot-time root-adjacent exec into something a trigger file could name". A profile name selects among
+ * execs the operator already declared in `PI_SECRET_PROFILES`; it cannot introduce one, cannot name a
+ * path, and cannot reach a script nobody wired. The rejected thing is a trigger file NAMING an exec.
+ *
+ * The charset is `ID_CHARSET`, shared with cron ids, for two reasons that both bite: the name is echoed in
+ * a refusal that `comment` posts PUBLICLY on the issue, and `PI_SECRET_PROFILES` is a `,`-separated list
+ * of `name:path` pairs, so a name containing either separator could not round-trip through the very
+ * variable that declares it.
+ *
+ * WHETHER the named profile exists is NOT checked here and cannot be: which profiles a deployment declares
+ * is env and overlay state, and this validator is pure and fs-free. That is refused pre-spend, per
+ * delivery, as `secret-profile-unknown` -- the same split `run.resume` makes against `PI_SESSIONS_DIR`,
+ * where the file answers what the file knows and `doctor` plus a per-delivery refusal carry the rest.
+ *
+ * Absent selects the profile named `default`, so a single-manager deployment never writes the field.
+ */
+function validateSecretsProfile(run, at, path) {
+	const profile = run.secretsProfile;
+	if (profile === undefined) return undefined;
+	if (!isNonEmptyString(profile)) {
+		throw configError(`${at}: run.secretsProfile must be a non-empty string naming one of the resolver profiles this deployment declares (got ${JSON.stringify(profile)}): ${path}`);
+	}
+	if (!ID_CHARSET.test(profile)) {
+		throw configError(`${at}: run.secretsProfile ${JSON.stringify(profile)} may use letters, digits, dot, dash and underscore only -- PI_SECRET_PROFILES is a comma-separated list of name:path pairs, so a name carrying either separator cannot be declared: ${path}`);
+	}
+	if (run.secrets === undefined) {
+		throw configError(`${at}: run.secretsProfile is set but run.secrets names nothing -- a profile that resolves no references is a field that does nothing: ${path}`);
+	}
+	return profile;
+}
+
 function normalizeLabel(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 	const predicate = validatePredicate(on, index, path, true);
@@ -650,9 +804,11 @@ function normalizeLabel(on, run, index, path) {
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "label", at, path);
 	const replicas = validateReplicas(run, at, path);
+	const secrets = validateSecrets(run, at, path);
+	const secretsProfile = validateSecretsProfile(run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
 	};
 }
 
@@ -682,9 +838,11 @@ function normalizeComment(on, run, index, path, state) {
 	const resume = validateResumeFlag(run, at, path);
 	const repository = validateRepository(run, "comment", at, path);
 	const replicas = validateReplicas(run, at, path);
+	const secrets = validateSecrets(run, at, path);
+	const secretsProfile = validateSecretsProfile(run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
 	};
 }
 
@@ -737,6 +895,8 @@ function normalizePullRequest(on, run, index, path) {
 	const resume = validateResumeFlag(run, at, path);
 	validateRepository(run, "pull_request", at, path);
 	const replicas = validateReplicas(run, at, path);
+	const secrets = validateSecrets(run, at, path);
+	const secretsProfile = validateSecretsProfile(run, at, path);
 	return {
 		on: {
 			type: "pull_request",
@@ -748,7 +908,7 @@ function normalizePullRequest(on, run, index, path) {
 			all: predicate.all,
 			none: predicate.none,
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
 	};
 }
 

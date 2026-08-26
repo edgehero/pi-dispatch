@@ -107,6 +107,11 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		// REQ-TRIGGER-SECRETS. Conditional exactly like skillsDir above, so a trigger that binds no
+		// secret enqueues the job data it always has. The map holds REFERENCES, never values: the
+		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
+		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
+		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
@@ -147,6 +152,8 @@ function routeLabel(subset, triggers, targetType) {
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -208,6 +215,8 @@ function mrResult(subset, rule, matched) {
 		packages: rule.packages,
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -255,6 +264,8 @@ function routeNote(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		secrets: triggers.comment.secrets,
+		secretsProfile: triggers.comment.secretsProfile,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,

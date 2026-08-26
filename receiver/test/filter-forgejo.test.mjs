@@ -255,3 +255,15 @@ test("forgejo: replicas rides the matched rule onto the job, at JOB level and ne
 test("forgejo: an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
 	assert.equal("replicas" in run("issues", issuePayload()).job, false);
 });
+
+test("secrets and secretsProfile ride the JOB from the matched rule, never inside trigger (#225)", () => {
+	const t = { ...triggersRaw, label: [{ index: 0, predicate: { any: ["pi:go"] }, flow: "fix", secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" }] };
+	const r = filterForgejo("issues", parseForgejoSubset(issuePayload()), t, knownFlows, SELF_ID, true, "fj-secrets");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" });
+	assert.equal(r.job.secretsProfile, "prod");
+	// `trigger` is copied verbatim into /job/event.json, which the agent reads: a reference list there
+	// would hand it the map of the operator's vault.
+	assert.equal("secrets" in r.job.trigger, false);
+	assert.equal("secretsProfile" in r.job.trigger, false);
+});

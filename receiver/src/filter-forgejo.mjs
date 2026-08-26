@@ -116,6 +116,11 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
 		// basename(folder) restraint already exists to prevent.
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
+		// REQ-TRIGGER-SECRETS. Conditional exactly like skillsDir above, so a trigger that binds no
+		// secret enqueues the job data it always has. The map holds REFERENCES, never values: the
+		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
+		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
+		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -149,6 +154,8 @@ function routeIssueLabel(subset, triggers) {
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image,
 		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -195,6 +202,8 @@ function routeComment(subset, triggers, knownFlows) {
 		packages: triggers.comment.packages,
 		image: triggers.comment.image,
 		skillsDir: triggers.comment.skillsDir,
+		secrets: triggers.comment.secrets,
+		secretsProfile: triggers.comment.secretsProfile,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,
@@ -223,6 +232,8 @@ function routePullRequest(subset, triggers, action) {
 			packages: rule.packages,
 			image: rule.image,
 			skillsDir: rule.skillsDir,
+			secrets: rule.secrets,
+			secretsProfile: rule.secretsProfile,
 			instructions: rule.instructions,
 			resume: rule.resume,
 			replicas: rule.replicas,

@@ -489,3 +489,35 @@ test("an unflagged job's data keys and dedup id are byte-identical to before the
 	assert.equal(captured.opts.jobId, "gh-guid-plain", "no -r suffix on a job that carries no replica");
 	assert.equal(captured.opts.deduplication.id, "owner/repo#7:frontend-fix", "no :r suffix either");
 });
+
+test("secrets and secretsProfile ride a forge job's data, and an unflagged job's keys are unchanged (#225)", async () => {
+	// The Object.keys pins above are the byte-identity guarantee; this is its other half. Conditional
+	// spreads mean an unflagged job grows neither key, so those deepEquals stay valid untouched.
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const cap = (q) => ({ add: (name, data, opts) => ((q.got = { name, data, opts }), { id: opts.jobId }) });
+	const trigger = { event: "issues", action: "labeled", deliveryId: "guid-secrets", sender: { id: 42 } };
+	const target = { type: "issue", number: 7, title: "T", body: "B" };
+
+	const armed = {};
+	await enqueueGitHubJob(cap(armed), { repo: "owner/repo", target, flow: "deploy", trigger, secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" });
+	assert.deepEqual(armed.got.data.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" });
+	assert.equal(armed.got.data.secretsProfile, "prod");
+	// A REFERENCE reached the queue, never a value. Job data is durable in Redis, so a resolved credential
+	// here would outlive by days the container it was scoped to -- which is why the worker resolves at job
+	// start and the receiver, which holds no manager credential at all, never can.
+	assert.equal(armed.got.data.secrets.STRIPE_KEY.startsWith("op://"), true);
+
+	const plain = {};
+	await enqueueGitHubJob(cap(plain), { repo: "owner/repo", target, flow: "deploy", trigger });
+	assert.equal("secrets" in plain.got.data, false);
+	assert.equal("secretsProfile" in plain.got.data, false);
+});
+
+test("a local (cron) job may carry secrets too -- unlike replicas, which a local job is refused (#225)", async () => {
+	const { enqueueLocalJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	await enqueueLocalJob(fakeQueue, { folder: "/srv/site", flow: "deploy", task: "ship", secrets: { DEPLOY_KEY: "op://ci/deploy/key" }, secretsProfile: "prod" });
+	assert.deepEqual(captured.data.secrets, { DEPLOY_KEY: "op://ci/deploy/key" });
+	assert.equal(captured.data.secretsProfile, "prod");
+});

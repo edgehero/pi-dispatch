@@ -16,7 +16,7 @@ export function makeQueue(connection) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, skillsDir, chainDepth, parentJobId, jobId, now = new Date() }) {
+export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -47,6 +47,11 @@ export async function enqueueLocalJob(queue, { folder, flow, task, command, prov
 		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the
 		// delivery -- and `trigger` is the object copied into /job/event.json.
 		...(skillsDir !== undefined && { skillsDir }),
+		// REQ-TRIGGER-SECRETS, on the forge path's terms: references only, resolved by the worker at job
+		// start. A cron trigger may bind secrets (a nightly deploy is the obvious user), which is where
+		// this differs from `replicas` -- that one is refused on a local job and this one is not.
+		...(secrets !== undefined && { secrets }),
+		...(secretsProfile !== undefined && { secretsProfile }),
 		...(chainDepth !== undefined && { chainDepth }),
 		...(parentJobId !== undefined && { parentJobId }),
 	};
@@ -124,7 +129,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -162,6 +167,13 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// delivery, and `trigger` is what /job/event.json is built from.
 		...(instructions !== undefined && { instructions }),
 		...(resume !== undefined && { resume }),
+		// REQ-TRIGGER-SECRETS. The env variables this trigger binds and the profile whose resolver reads
+		// them. REFERENCES only: no value is ever enqueued, because a queued job is durable and a resolved
+		// credential in Redis would outlive the container it was scoped to. The worker resolves them at job
+		// start, pre-spend. At JOB level rather than inside `trigger` for image/skillsDir's reason: `trigger`
+		// is copied verbatim into /job/event.json, which an agent reads.
+		...(secrets !== undefined && { secrets }),
+		...(secretsProfile !== undefined && { secretsProfile }),
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;
 		// both are integers, so the run record they land in stays PII-free by construction.

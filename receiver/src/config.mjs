@@ -283,13 +283,13 @@ function loadTriggers(env, readFile, fileExists) {
 		}
 		const group = groups[run.kind];
 		if (on.type === "label") {
-			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository });
+			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas, repository: run.repository });
 		} else if (on.type === "comment") {
-			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
+			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
 			// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
 			// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
-			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, replicas: run.replicas });
+			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas });
 		}
 	}
 

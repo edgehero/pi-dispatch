@@ -941,3 +941,69 @@ test("the skills-dir refusal names the FIELD and never the host path -- the comm
 	assert.ok(said[0].includes("run.skillsDir"), "the operator must be told which field");
 	assert.ok(!said.join(" ").includes("acme-internal"), "a host path was published on the issue");
 });
+
+// --- run.secrets: the pre-spend gate (REQ-TRIGGER-SECRETS, issue #225) ---
+
+test("an unflagged job never calls the resolver at all -- the probe must not even run", async () => {
+	// The call-order pin one test up asserts the happy path stays byte-identical; this asserts the
+	// mechanism. A dep that ran unconditionally would spawn a subprocess for every job on the host to
+	// learn nothing, and would make the "free gates cost nothing when the feature is off" claim false.
+	const probes = [];
+	const { deps: d, calls } = deps({ resolveSecrets: async () => (probes.push("resolve"), { ok: true, secrets: {} }) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.deepEqual(probes, [], "an unflagged job must not reach the resolver");
+	assert.deepEqual(calls, ["mint:org/repo", "branch-check", "prepare", "run-container", "collect-chain", "cleanup"]);
+});
+
+test("a job whose profile cannot be resolved refuses BEFORE the mint, the clone and the budget", async () => {
+	const { deps: d, calls } = deps({ resolveSecrets: async () => ({ profileUnknown: "prod" }) });
+	const r = await runJob({ ...ghJob, secrets: { A: "op://a/b/c" }, secretsProfile: "prod" }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "secret-profile-unknown");
+	assert.equal(r.budgetReserved, false);
+	// Every one of these is money or a credential, and CONST-BUDGET-BEFORE-TOKENS puts all of them after
+	// a determinate refusal. Asserting the ABSENCE is what proves the placement, not the outcome string.
+	assert.ok(!calls.includes("run-container"), "must not spend");
+	assert.ok(!calls.includes("prepare"), "must not clone");
+	assert.ok(!calls.some((c) => c.startsWith("mint:")), "must not create a credential only to discard it");
+	assert.equal(d.redis.incrCalls, 0, "must not reserve a budget slot");
+});
+
+test("the refusal names the FIELD and the operator's own profile label, never a path or a reference", async () => {
+	// `comment` posts publicly on the issue. A resolver path there publishes the operator's filesystem
+	// layout; a reference publishes their vault topology. This is processor.mjs's oldest restraint,
+	// applied to a field that carries more of both than any before it.
+	let posted = "";
+	const { deps: d } = deps({ resolveSecrets: async () => ({ profileUnknown: "prod" }), comment: async (_j, t) => { posted = t; } });
+	await runJob({ ...ghJob, secrets: { STRIPE_KEY: "op://Engineering-Prod/aws-root/password" }, secretsProfile: "prod" }, d);
+	assert.match(posted, /run\.secrets/);
+	assert.equal(/op:\/\//.test(posted), false, "a reference must never be published");
+	assert.equal(/Engineering-Prod|aws-root|password/.test(posted), false, "no part of a reference, either");
+	assert.equal(/\/opt\/|\.sh\b/.test(posted), false, "no resolver path may be published");
+	assert.match(posted, /doctor/, "it must point somewhere the operator can actually look");
+});
+
+test("the resolver dep FAILS CLOSED: an armed job under a wiring that omits it refuses, never runs", async () => {
+	// The default is the security property, not a convenience. imagePreflight and egressPreflight default
+	// to admitting because a deployment without those features is the normal case; a job that ASKED for
+	// secrets and got none is never normal, and starting it would look exactly like the feature working.
+	for (const armed of [{ secrets: { A: "op://a/b/c" } }, { secretsProfile: "prod", secrets: { A: "x" } }]) {
+		const { deps: d, calls } = deps(); // no resolveSecrets override: the real default runs
+		const r = await runJob({ ...ghJob, ...armed }, d);
+		assert.equal(r.outcome, "policy", `${JSON.stringify(armed)} must refuse`);
+		assert.equal(r.reason, "secret-profile-unknown");
+		assert.ok(!calls.includes("run-container"));
+	}
+});
+
+test("a cron job may bind secrets, and its refusal reaches the operator through the log seam", async () => {
+	// Extending to local jobs is deliberate (run.replicas refuses them for a reason that does not
+	// transfer), so the gate must be reachable there. A local job has no issue to comment on; the
+	// `comment` seam falls through to stdout, which REQ-LOCAL-JOB-VISIBILITY makes the completion signal.
+	const { deps: d, calls } = deps({ resolveSecrets: async () => ({ profileUnknown: "default" }) });
+	const r = await runJob({ kind: "local", folder: "/srv/site", flow: "deploy", provider: "anthropic", model: "m", maxTurns: 20, secrets: { DEPLOY_KEY: "op://ci/deploy/key" } }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "secret-profile-unknown");
+	assert.ok(calls.some((c) => c.startsWith("comment:")), "the operator must still be told");
+});

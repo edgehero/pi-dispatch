@@ -136,6 +136,20 @@ export function forgeSpec(kind) {
 export const MINTED_TOKEN_VARS = new Set(FORGE_KINDS.flatMap((kind) => FORGES[kind].tokenVars));
 
 /**
+ * Every environment variable name any forge's SELF-HOSTED INSTANCE URL can land in. A sibling of
+ * `MINTED_TOKEN_VARS` and derived the same way, from the table rather than by hand, so a forge added
+ * later cannot be missed here either.
+ *
+ * Separate from `MINTED_TOKEN_VARS` because `hostVar` is a separate column: the token set is
+ * `tokenVars` only, so a name like `GITLAB_HOST` is in NEITHER set until this one exists. That gap is
+ * not theoretical -- `buildContainerEnv` writes this variable after the mint, so a trigger field able
+ * to name it would be silently overwritten, and the job would run without the value it asked for on a
+ * clean exit 0. github's row is `null` and contributes nothing, which is why the filter is here and
+ * not at the call site.
+ */
+export const FORGE_HOST_VARS = new Set(FORGE_KINDS.map((kind) => FORGES[kind].hostVar).filter((name) => typeof name === "string"));
+
+/**
  * The separator between a repo label and a target number, for this forge and this target type: the
  * forge's own notation for a pull/merge request, and `#` for an issue everywhere.
  *
