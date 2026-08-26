@@ -264,3 +264,43 @@ test("an unarmed job is not this module's business -- secretsArmed is what the g
 	// predicate also guards the fail-closed default under wirings that never saw the validator.
 	assert.equal(secretsArmed({ secretsProfile: "prod" }), true);
 });
+
+// --- the reserved names parseTriggers structurally cannot know (issue #225) ---
+
+test("a key matching the RESOLVED provider's credential variable is refused, and never spawns", async () => {
+	// The sharpest one. buildContainerEnv writes the provider credential before this feature's values, so
+	// binding ANTHROPIC_API_KEY would silently redirect which credential every job of that trigger spends.
+	// parseTriggers cannot catch it: the name comes from findEnvKeys(provider, hostEnv), which is this
+	// host's state, and that validator is pure, fs-free and env-free by construction.
+	const fn = makeSecretsResolver({
+		envProfiles: PROFILES,
+		realExecutablePath: (p) => p,
+		hostEnv: { ANTHROPIC_API_KEY: "sk-ant-real" },
+		spawnFn: () => assert.fail("a reserved name must refuse before any resolver runs"),
+	});
+	const r = await fn(job({ ANTHROPIC_API_KEY: "op://ci/anthropic/key" }, { provider: "anthropic" }));
+	assert.equal(r.reserved, "ANTHROPIC_API_KEY");
+});
+
+test("a key matching a PI_FORWARD_ENV name is refused -- the second route to the same place", async () => {
+	// PI_FORWARD_ENV is documented as how a CUSTOM provider's key (one pi's table does not know) reaches
+	// the container, so leaving this open would reintroduce the provider hazard on every such provider.
+	const fn = makeSecretsResolver({
+		envProfiles: PROFILES,
+		realExecutablePath: (p) => p,
+		forwardEnv: ["MY_CUSTOM_KEY"],
+		hostEnv: {},
+		spawnFn: () => assert.fail("a reserved name must refuse before any resolver runs"),
+	});
+	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://a/b/c" }))).reserved, "MY_CUSTOM_KEY");
+});
+
+test("a provider variable this host does NOT set is not reserved -- the check follows reality, not a list", async () => {
+	// findEnvKeys returns the names actually PRESENT, so an anthropic job on a host with no OpenAI key may
+	// legitimately bind OPENAI_API_KEY for a flow that talks to OpenAI itself. Refusing it would be this
+	// project inventing a namespace it does not own.
+	const { fn } = resolver({}, { hostEnv: { ANTHROPIC_API_KEY: "sk-ant" } });
+	const r = await fn(job({ OPENAI_API_KEY: "op://ci/openai/key" }, { provider: "anthropic" }));
+	assert.equal(r.reserved, undefined);
+	assert.equal(r.secrets.OPENAI_API_KEY, "value-for-op://ci/openai/key");
+});

@@ -176,6 +176,14 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// same operator's flows and, without them, would look up a skill that is not there, write a
 					// plausible report and exit 0. It is NOT part of chainedJobId, for the reason stated below.
 					skillsDir: job.data?.skillsDir,
+					// `secrets`/`secretsProfile` are deliberately ABSENT, and the two lines above are exactly why
+					// this comment exists: their reasoning reads as though it should apply here too, and it must
+					// not. An image and a skills directory are toolchain; a resolved credential is a capability.
+					// A child's `task` is AGENT-AUTHORED (read off the request file below), so inheriting the
+					// binding would let a completed agent re-run itself against the operator's vault with a prompt
+					// it wrote for itself. The operator's grant was to the trigger they reviewed, not to whatever
+					// that job decides to queue next. A chained child that genuinely needs a secret gets it from a
+					// trigger of its own, which is an operator edit to a reviewed file.
 					chainDepth: childDepth,
 					parentJobId: job.id,
 					// chainedJobId deliberately does NOT take the image: the child's identity is (parent, flow, task).

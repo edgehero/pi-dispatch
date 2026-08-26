@@ -2030,3 +2030,82 @@ test("doctor: a VALID triggers file says nothing about parsing -- the check is s
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), imgDeps(out, green));
 	assert.doesNotMatch(text(), /does not parse/);
 });
+
+// --- run.secrets (REQ-TRIGGER-SECRETS, issue #225) ---
+
+/**
+ * A validating triggers file that binds secrets. It must be a file the SHARED parseTriggers really accepts,
+ * or readTriggerFacts swallows the refusal to zeroes and every assertion below passes for the wrong reason
+ * -- the trap the resume fixture above documents.
+ */
+function secretsTriggersFile({ profile, kind = "github", folder } = {}) {
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-secrets-")), "triggers.json");
+	const run = { kind, flow: "deploy", secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, ...(profile ? { secretsProfile: profile } : {}) };
+	const on = kind === "local" ? { type: "cron", id: "nightly", pattern: "0 3 * * *" } : { type: "label", any: ["pi:deploy"] };
+	if (kind === "local") Object.assign(run, { folder: folder ?? "/srv/site", task: "ship it" });
+	writeFileSync(path, JSON.stringify({ triggers: [{ on, run }] }));
+	return path;
+}
+
+const secretsSeams = () => collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true });
+
+test("doctor: a trigger binding secrets with NO profile declared FAILS, and says the jobs refuse until fixed", async () => {
+	// A hard fail rather than a warning, worded like the run.resume/PI_SESSIONS_DIR check: these jobs
+	// refuse pre-spend on purpose, rather than running without their secrets and looking like they worked.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile() };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /bind secrets/.test(c.label));
+	assert.ok(hit, "the finding must exist at all");
+	assert.equal(hit.ok, false);
+	assert.match(hit.label, /not declared: default/, "it names the profile the worker will actually look up");
+	assert.match(hit.fix, /refuse pre-spend/);
+});
+
+test("doctor: with the profile declared, the check passes and the table is printed", async () => {
+	// The table exists so an operator sees what is wired without reading .env.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /bind secrets/.test(c.label));
+	assert.equal(hit.ok, true);
+	assert.ok(checks.some((c) => /Secret resolver profiles declared: prod -> \/opt\/pi\/resolve\.sh/.test(c.label)));
+});
+
+test("doctor: a garbled PI_SECRET_PROFILES is REPORTED, never thrown", async () => {
+	// The operator running doctor is very likely running it because the worker refused to boot on that
+	// exact line. A stack trace instead of a check is the least useful possible answer.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile(), PI_SECRET_PROFILES: "prod" };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /PI_SECRET_PROFILES does not parse/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+});
+
+test("doctor: the panel-authoring bound reads as SAFE when closed and as a disclosure when open", async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const closed = await collectChecks(base, secretsSeams());
+	const shut = closed.find((c) => /PI_SECRET_RESOLVER_ROOTS is unset/.test(c.label));
+	assert.ok(shut && shut.ok === true && !shut.warn, "the fail-closed default is a fact, not a defect");
+
+	const open = await collectChecks({ ...base, PI_SECRET_RESOLVER_ROOTS: "/opt/pi" }, secretsSeams());
+	const wide = open.find((c) => /admits panel-declared resolvers/.test(c.label));
+	assert.ok(wide && wide.warn === true, "opening it is a disclosure the operator should see");
+	assert.match(wide.fix, /run code as the worker/);
+});
+
+test("doctor: a LOCAL trigger binding secrets warns that /workspace is the operator's real folder", async () => {
+	// The hazard extending this to cron created: a local job edits the folder in place with no clone, so a
+	// credential the agent persists lands in a real repository and survives in a retained sandbox.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ kind: "local", folder: "/srv/site", profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /run IN the operator's own folder/.test(c.label));
+	assert.ok(hit, "the warning must exist");
+	assert.equal(hit.warn, true, "a warning, not a failure: a nightly deploy binding a secret is the use case");
+	assert.match(hit.label, /\/srv\/site/);
+	assert.match(hit.fix, /Nothing scans for that/);
+});
+
+test("doctor: a deployment that binds no secrets is told nothing about them at all", async () => {
+	// The run.resume block's rule, inherited: a deployment that does not use the feature should not be told
+	// about a variable it has no reason to set.
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, secretsSeams());
+	assert.equal(checks.some((c) => /secret/i.test(c.label ?? "")), false);
+});

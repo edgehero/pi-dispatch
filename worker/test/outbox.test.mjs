@@ -417,3 +417,24 @@ test("kind guard: a github parent is a no-op with no fs access", async () => {
 	assert.equal(fs.calls.readdir, 0, "a github parent's outbox is never even listed");
 	assert.equal(cap.enqueued.length, 0);
 });
+
+test("a chained child inherits NO secrets, from the parent or from the request file (#225)", async () => {
+	// `image` and `skillsDir` two lines up ARE inherited, with reasoning that reads as though it should
+	// apply here. It must not: a toolchain is not a capability. The parent's `task` is agent-authored, so
+	// inheriting the binding would let a completed agent re-run itself against the operator's vault with a
+	// prompt it wrote for itself. The operator granted the trigger they reviewed, not its descendants.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", secrets: { STOLEN: "op://ci/root/password" }, secretsProfile: "prod" }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+
+	const parent = localJob();
+	parent.data = { ...parent.data, secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" };
+	await collect({ job: parent, prepared: PREPARED });
+
+	const { args } = cap.enqueued[0];
+	assert.equal("secrets" in args, false, "the parent's binding must not follow the child");
+	assert.equal("secretsProfile" in args, false, "nor the profile that would resolve it");
+	// And nothing the agent wrote in the request file reaches it either -- explicit property reads only.
+	assert.equal(JSON.stringify(args).includes("STOLEN"), false);
+	assert.equal(JSON.stringify(args).includes("op://"), false);
+});

@@ -46,7 +46,7 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
@@ -58,6 +58,7 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
+import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -263,7 +264,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, commands, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, secretProfiles, localSecretFolders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -1096,6 +1097,52 @@ export async function collectChecks(env, seams) {
 		});
 	}
 
+	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
+	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
+	// reason to set.
+	if (secreting > 0) {
+		const declared = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
+		const names = Object.keys(declared).sort();
+		if (declared.error) {
+			checks.push({ ok: false, label: "PI_SECRET_PROFILES does not parse", fix: `${declared.error} -- the worker refuses to boot until this is fixed, rather than dropping the entry and leaving you a profile you believe is wired` });
+		} else {
+			// A HARD FAIL, not a warning, and worded like the run.resume/PI_SESSIONS_DIR check below for the
+			// same reason: these jobs refuse pre-spend until it is set, deliberately, rather than running
+			// without their secrets and looking like they worked.
+			const missing = secretProfiles.filter((name) => !(name in declared));
+			checks.push({
+				ok: missing.length === 0,
+				label: missing.length === 0 ? `${secreting} trigger(s) bind secrets, and every profile they name is declared` : `${secreting} trigger(s) bind secrets, but ${missing.length} named profile(s) are not declared: ${missing.join(", ")}`,
+				fix: `declare them in PI_SECRET_PROFILES as name:/absolute/path pairs (a resolver is one line, e.g. \`exec op read --no-newline "$1"\`) -- these jobs refuse pre-spend until you do`,
+			});
+			// The declared table, so an operator sees what is wired without reading .env. NAMES and paths only:
+			// this is doctor's own stdout on the operator's host, not a public issue comment.
+			if (names.length > 0) {
+				checks.push({ ok: true, label: `Secret resolver profiles declared: ${names.map((n) => `${n} -> ${declared[n]}`).join(", ")}` });
+			}
+			// The panel-authoring bound. Unset is the SAFE default rather than a defect, so this is a fact line
+			// when closed and a disclosure when open.
+			const roots = (env.PI_SECRET_RESOLVER_ROOTS ?? "").split(delimiter).map((r) => r.trim()).filter(Boolean);
+			checks.push({
+				ok: true,
+				...(roots.length === 0
+					? { label: "PI_SECRET_RESOLVER_ROOTS is unset, so only PI_SECRET_PROFILES declares resolvers (the panel can declare none)" }
+					: { warn: true, label: `PI_SECRET_RESOLVER_ROOTS admits panel-declared resolvers under: ${roots.join(", ")}`, fix: "keep those directories writable by nobody but the account the worker runs as: whoever can write a resolver there can run code as the worker" }),
+			});
+		}
+		// The local-workspace disclosure. Not a failure: a nightly deploy binding a secret is exactly what
+		// this feature is for. But a local job's /workspace IS the folder, read-write and un-cloned, so an
+		// agent that persists a credential to make its next command simpler writes it into a real repository.
+		if (localSecretFolders.length > 0) {
+			checks.push({
+				ok: true,
+				warn: true,
+				label: `${localSecretFolders.length} local trigger(s) bind secrets and run IN the operator's own folder: ${localSecretFolders.join(", ")}`,
+				fix: "a local job edits that folder in place, so a credential the agent writes to .env, .netrc or .git-credentials lands in your real repository (and survives in a retained sandbox for PI_SANDBOX_RETENTION_HOURS). Nothing scans for that: keep those folders out of anything you push",
+			});
+		}
+	}
+
 	// REQ-RESUMABLE-SESSION. Only reported when a trigger actually asked for it: a deployment that does
 	// not use resume should not be told about a directory it has no reason to create.
 	if (resuming > 0) {
@@ -1410,8 +1457,22 @@ async function repoFlowAtHead(spawn, folder, flow) {
 	return mode === "100644" && type === "blob" ? "present" : "absent";
 }
 
+/**
+ * `parseSecretProfiles`, but doctor never throws. A malformed PI_SECRET_PROFILES is a finding to REPORT,
+ * not a reason for the diagnostic tool to die: the operator running doctor is very likely running it
+ * BECAUSE the worker refused to boot on that exact line, and a stack trace instead of a check is the least
+ * useful possible answer. Returns the table, or `{ error }` carrying the parser's own message.
+ */
+function parseSecretProfilesSafe(raw) {
+	try {
+		return parseSecretProfiles(raw);
+	} catch (err) {
+		return { error: err?.message ?? "unparseable" };
+	}
+}
+
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, secretProfiles: [], localSecretFolders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1432,6 +1493,17 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// tuple list already filters to `typeof f.flow === "string"`, so a command trigger drops out
 			// of the flow-tier probes naturally -- no exclusion needed there.
 			commands: triggers.filter((t) => typeof t.run.command === "string").length,
+			// REQ-TRIGGER-SECRETS. Counted beside `instructing` for its reason: a per-trigger choice that
+			// changes what every job of it can reach, and one that lives only in triggers.json.
+			secreting: triggers.filter((t) => t.run.secrets !== undefined).length,
+			// The distinct profile NAMES the file selects, deduped like `images`/`skillsDirs`: the checks below
+			// cost a stat each, and two triggers naming one profile are one question. `default` is substituted
+			// for an absent field so the table answers what the worker will actually look up.
+			secretProfiles: [...new Set(triggers.filter((t) => t.run.secrets !== undefined).map((t) => t.run.secretsProfile ?? "default"))].sort(),
+			// LOCAL triggers that bind secrets, by folder. A local job's /workspace IS this folder, bind-mounted
+			// read-write with no clone, so a credential an agent writes into .env lands in the operator's real
+			// repository rather than a temp dir that gets swept. Deduped for skillsDirs' reason.
+			localSecretFolders: [...new Set(triggers.filter((t) => t.run.secrets !== undefined && t.run.kind === "local" && typeof t.run.folder === "string").map((t) => t.run.folder))].sort(),
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,

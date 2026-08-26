@@ -338,6 +338,22 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "secret-profile-ambiguous", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		if (resolved.reserved) {
+			// A key the worker itself writes, and one parseTriggers could not have caught: the provider
+			// credential's variable names depend on this job's resolved provider and on what this host has set,
+			// and PI_FORWARD_ENV is an operator env list. Both are deployment state, so this is the same
+			// load-time / pre-spend split run.resume makes against PI_SESSIONS_DIR.
+			//
+			// It matters most in the direction that is hardest to see: buildContainerEnv writes the provider
+			// credential BEFORE this feature's values, so a trigger binding ANTHROPIC_API_KEY would silently
+			// redirect which credential every job of that trigger spends.
+			await comment(job, `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, and the worker sets that variable itself for every job. The container would receive the worker's value rather than this trigger's, and the trigger would look like it worked. Rename it in the triggers file. Not run.`);
+			// The variable NAME only. It is the operator's own choice of name, not payload, and naming it is what
+			// makes the refusal actionable -- but the REFERENCE behind it never appears.
+			log("refused_secret_name_reserved", { kind: job.kind ?? null, name: resolved.reserved });
+			return { outcome: "policy", reason: "secret-name-reserved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
 		if (resolved.unresolved) {
 			// DETERMINATE: the resolver said exit 2, printed nothing, overran the size cap, or returned a value
 			// with a NUL in it. Retrying cannot change any of those, so this RETURNS (CONST-RETRY-INFRA-ONLY).

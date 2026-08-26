@@ -435,7 +435,7 @@ export async function startWorker(
 			// because the settings file is read at each job start and an operator who declares a profile in
 			// the panel should not have to restart the worker to use it. A deployment that declares nothing
 			// spawns nothing at all: the gate only calls this when a trigger is armed.
-			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, log }),
+			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, log }),
 			runContainer: makeRunContainerFn({
 				image: config.jobImage,
 				hostEnv: env,

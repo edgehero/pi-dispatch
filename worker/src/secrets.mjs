@@ -25,7 +25,8 @@
 
 import { spawn } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
+import { providerKeyVars } from "./env-allowlist.mjs";
+import { EXIT_POLICY } from "./exit-code.mjs";
 import { mergeSecretProfiles, withinRoots } from "./secret-profiles.mjs";
 
 /**
@@ -222,6 +223,9 @@ function stripOneNewline(text) {
 export function makeSecretsResolver({
 	envProfiles = {},
 	roots = [],
+	// The operator's PI_FORWARD_ENV names. Needed here rather than in triggers.mjs because that validator
+	// is env-free: see the reserved-name check below.
+	forwardEnv = [],
 	timeoutMs = 10000,
 	spawnFn = spawn,
 	hostEnv = process.env,
@@ -267,6 +271,27 @@ export function makeSecretsResolver({
 		if (fromOverlay && !withinRoots(path, roots)) return { profileUnknown: wanted };
 
 		const references = job?.secrets ?? {};
+
+		// The half of the reserved-name refusal that parseTriggers structurally cannot make. It refuses every
+		// STATICALLY knowable name (the mint's, each forge's host var, the worker-only secrets, the egress
+		// policy's, and the closed map's own PI_*/PLAYWRIGHT_*), but two more sets are DEPLOYMENT STATE:
+		//
+		//   - the provider credential's variable names, which come from `findEnvKeys(provider, hostEnv)` and so
+		//     depend on the job's resolved provider AND on what this host has set;
+		//   - PI_FORWARD_ENV, which is an operator env list.
+		//
+		// Both are load-bearing rather than tidy. buildContainerEnv writes the provider credential BEFORE this
+		// feature's assignment, so a trigger binding ANTHROPIC_API_KEY would silently replace the credential
+		// every job of that trigger spends -- verbatim the failure env-allowlist.mjs's header exists to
+		// prevent, arriving through a new door. PI_FORWARD_ENV is a second route to the same place, because
+		// that list is how a CUSTOM provider's key reaches the container.
+		//
+		// Refused rather than resolved by ordering, which is the division of labour the mint already keeps:
+		// ordering is the backstop, the refusal is the gate.
+		const reserved = new Set([...(providerKeyVars(job?.provider, hostEnv) ?? []), ...forwardEnv]);
+		for (const name of Object.keys(references)) {
+			if (reserved.has(name)) return { reserved: name };
+		}
 		const secrets = {};
 		const seen = new Map();
 		for (const [name, reference] of Object.entries(references)) {
