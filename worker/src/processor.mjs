@@ -455,7 +455,8 @@ export async function runJob(job, deps) {
  * and with one number alone it is indistinguishable from an ordinary cold start.
  *
  * The runner's verdict WINS on `resumed`, because it is the one that observed the outcome. The host's
- * reason is kept when the runner has none to give (a container that died before its exit line).
+ * reason is kept when the runner has none to give (a container that died before its exit line), AND when
+ * the host itself refused -- see the second precedence rule below.
  *
  * PII-free by construction: a boolean, a fixed enum, an integer. The key and the branch name are
  * deliberately absent -- this record holds no attacker-chosen string, and a branch name is one.
@@ -463,12 +464,30 @@ export async function runJob(job, deps) {
 function mergeSession(prepared, fromRunner, promoted = null) {
 	const host = prepared?.session;
 	if (!host && !fromRunner) return null;
+	// A HOST GATE THAT REFUSED OUTRANKS THE RUNNER'S `absent`, and without this rule it never reached a
+	// record at all. A refused read stages a 0-byte file rather than nothing (session-store.mjs, where the
+	// reasoning is pi's EEXIST race), the container is handed that file either way, and pi opens it and
+	// finds no messages -- so the runner reports `absent` on EVERY host refusal. Letting that win overwrote
+	// the answer with a restatement of the question: `expired` and `pi-version-changed` reached no
+	// completed record in the feature's whole life, and `docs/sessions.md`'s promise that every cold start
+	// is nameable in the record was false for them.
+	//
+	// Narrow on purpose, `host.resume === false` and the runner's token exactly `absent`. When the host
+	// DID stage a transcript and the runner still reports `absent`, the two genuinely disagree, and that
+	// disagreement is the event this object exists to show; the runner keeps winning there. So does its
+	// `unparseable`, which reports a degrade the host could not see.
+	const hostRefused = host?.resume === false && typeof host.reason === "string";
 	return {
 		resumed: fromRunner ? fromRunner.resumed : false,
 		// A promotion that was refused is the more useful reason to surface: "locked" or
 		// "not-a-regular-file" says why the NEXT run will cold-start, which is the thing an operator
 		// chasing "it never resumes" needs. It only ever replaces a reason on the completed path.
-		reason: (promoted && !promoted.promoted ? promoted.reason : null) ?? fromRunner?.reason ?? host?.reason ?? null,
+		reason:
+			(promoted && !promoted.promoted ? promoted.reason : null) ??
+			(hostRefused && fromRunner?.reason === "absent" ? host.reason : null) ??
+			fromRunner?.reason ??
+			host?.reason ??
+			null,
 		bytes: promoted?.bytes ?? host?.bytes ?? null,
 	};
 }

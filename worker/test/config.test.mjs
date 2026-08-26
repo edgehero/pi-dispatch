@@ -500,3 +500,35 @@ test("PI_FORWARD_ENV refuses the policy's own variables WHILE ARMED, and permits
 		assert.deepEqual(loadConfig({ PI_EGRESS: "0", PI_FORWARD_ENV: name }).forwardEnv, [name], `${name} is fine with no policy`);
 	}
 });
+
+
+test("the session-store bounds default to their shipped values, pinned as literals", () => {
+	// LITERAL numbers, not expressions derived from the constants they pin: a test that says
+	// `c.sessionMaxBytes === 8 * 1024 * 1024` is correct at every value and therefore blind to a change in
+	// THAT value, which is the one thing it exists to catch.
+	const c = loadConfig({});
+	assert.equal(c.sessionsTtlDays, 14);
+	assert.equal(c.sessionMaxBytes, 8388608);
+	assert.equal(c.sessionMaxAgeDays, 0, "the conversation-age bound is OFF unless an operator chooses an age");
+	assert.equal(c.sessionsDir, null, "no default: unset means the feature is unavailable, not defaulted into a temp dir");
+});
+
+test("the session-store bounds take explicit values and accept their 0 sentinels", () => {
+	const set = loadConfig({ PI_SESSIONS_TTL_DAYS: "7", PI_SESSION_MAX_BYTES: "1024", PI_SESSION_MAX_AGE_DAYS: "30" });
+	assert.equal(set.sessionsTtlDays, 7);
+	assert.equal(set.sessionMaxBytes, 1024);
+	assert.equal(set.sessionMaxAgeDays, 30);
+
+	const off = loadConfig({ PI_SESSIONS_TTL_DAYS: "0", PI_SESSION_MAX_BYTES: "0", PI_SESSION_MAX_AGE_DAYS: "0" });
+	assert.equal(off.sessionsTtlDays, 0, "0 = keep forever");
+	assert.equal(off.sessionMaxBytes, 0, "0 = no cap");
+	assert.equal(off.sessionMaxAgeDays, 0, "0 = no age bound");
+});
+
+test("the session-store bounds reject negatives and non-integers as config errors", () => {
+	for (const name of ["PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_BYTES", "PI_SESSION_MAX_AGE_DAYS"]) {
+		for (const bad of ["-1", "abc", "1.5"]) {
+			assert.throws(() => loadConfig({ [name]: bad }), (e) => e.piDispatchConfig === true, `${name}=${bad}`);
+		}
+	}
+});

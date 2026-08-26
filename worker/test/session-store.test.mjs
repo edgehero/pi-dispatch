@@ -9,16 +9,21 @@ import { sessionKeyFor } from "../src/session-key.mjs";
 
 const HEADER = `${JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/workspace" })}\n`;
 const PI = "0.80.7";
+/** The fake clock every fixture runs on, so a header timestamp can be placed relative to it. */
+const NOW = 1_000_000_000;
+/** A header the way pi actually writes one: `timestamp` is the instant the session was created. */
+const headerAt = (ms) => `${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: new Date(ms).toISOString(), cwd: "/workspace" })}\n`;
+const daysAgo = (n) => NOW - n * 86400000;
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
-function fixture({ ttlDays = 14, maxBytes = 1_000_000, now = () => 1_000_000_000, fs } = {}) {
+function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, now = () => NOW, fs } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];
 	// `fs` omitted = the store's own real-fs default. Passing one is how a disk fault is injected on a
 	// specific call without a chmod, which root ignores and Windows spells differently.
-	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
+	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
 	const jobDir = mkdtempSync(join(root, "job-"));
 	return { root, sessionsDir, store, jobDir, logs };
 }
@@ -228,4 +233,68 @@ test("a disk fault mid-promotion is named promote-failed, and does not wedge the
 		logs.some(([event, fields]) => event === "session_store_failed" && fields.phase === "promote"),
 		"the fault is logged with its phase, so an operator can tell a refused promotion from a broken one",
 	);
+});
+
+
+test("the conversation-age bound reads the header's clock, which mtime cannot see", () => {
+	// The whole point of the bound: mtime is FRESH here (seed just wrote the file), so `expired` passes and
+	// only the header's own timestamp can tell that the lineage is old.
+	const { store, jobDir, sessionsDir } = fixture({ maxAgeDays: 30 });
+	seed(sessionsDir, sessionKeyFor(ghIssue), { body: headerAt(daysAgo(45)) });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.resume, false);
+	assert.equal(s.reason, "conversation-too-old");
+	assert.notEqual(s.reason, "expired", "the two clocks must stay distinguishable in the record");
+});
+
+test("a conversation inside the age bound still resumes", () => {
+	const { store, jobDir, sessionsDir } = fixture({ maxAgeDays: 30 });
+	seed(sessionsDir, sessionKeyFor(ghIssue), { body: headerAt(daysAgo(29)) });
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("an unreadable conversation clock fails CLOSED, and a future one does not", () => {
+	// Three causes, one token, exactly as `pi-version-changed` covers three: a header that cannot say how
+	// old it is cannot be shown to be young enough.
+	for (const body of [
+		HEADER, // no timestamp key at all
+		`${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: 12345, cwd: "/w" })}\n`, // not a string
+		`${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: "not a date", cwd: "/w" })}\n`,
+	]) {
+		const f = fixture({ maxAgeDays: 30 });
+		seed(f.sessionsDir, sessionKeyFor(ghIssue), { body });
+		assert.equal(f.store.resolveSession(ghIssue, { jobDir: f.jobDir, piVersion: PI }).reason, "conversation-too-old");
+	}
+
+	// A future timestamp passes deliberately: the agent owns /session, so anything able to write one is
+	// equally able to write the current instant, and refusing would turn container/host clock skew into a
+	// cold start for every key. Both magnitudes are pinned -- a minute of skew, which is the real case, and
+	// a year, which is the one an "impossible timestamps are hostile" rewrite would start refusing.
+	for (const ahead of [60000, 365 * 86400000]) {
+		const skewed = fixture({ maxAgeDays: 30 });
+		seed(skewed.sessionsDir, sessionKeyFor(ghIssue), { body: headerAt(NOW + ahead) });
+		assert.equal(skewed.store.resolveSession(ghIssue, { jobDir: skewed.jobDir, piVersion: PI }).reason, "resumed");
+	}
+});
+
+test("an unset age bound ignores the header clock entirely", () => {
+	// The inert case, and it is the one that must not regress: with the knob absent, a decade-old
+	// conversation resumes exactly as it did before this gate existed.
+	const { store, jobDir, sessionsDir } = fixture();
+	seed(sessionsDir, sessionKeyFor(ghIssue), { body: headerAt(daysAgo(3650)) });
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("a corrupt transcript is corrupt, not old: unparseable still wins over the age bound", () => {
+	// Both halves of the shape check, because they are separate branches: a line that is not JSON at all,
+	// and one that parses into something that is not a session header. Each carries an ancient timestamp,
+	// so an arm ordered the other way round would report the lineage as aged out and hide the damage.
+	for (const body of [
+		"not a session\n",
+		`${JSON.stringify({ type: "message", timestamp: new Date(daysAgo(9999)).toISOString() })}\n`,
+	]) {
+		const { store, jobDir, sessionsDir } = fixture({ maxAgeDays: 1 });
+		seed(sessionsDir, sessionKeyFor(ghIssue), { body });
+		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "unparseable");
+	}
 });

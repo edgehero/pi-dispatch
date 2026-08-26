@@ -373,7 +373,10 @@ Stated openly rather than discovered later:
   Store transcripts on a disk you would put issue text on, mode `0700`, with the shortest
   `PI_SESSIONS_TTL_DAYS` you can work with, and **check that `PI_SESSIONS_DIR` is outside any repository
   you commit** — the shipped `.gitignore` covers the conventional layout and cannot cover a path it has
-  never seen.
+  never seen. `PI_SESSIONS_TTL_DAYS` alone does not bound a lineage an operator actually uses: it reads
+  the file's mtime, which every run on the key refreshes, so a pull request worked on daily never ages
+  out however far back its first turn goes. `PI_SESSION_MAX_AGE_DAYS` bounds the conversation itself, and
+  it is the knob that puts a ceiling on how much history one attacker-reachable transcript can accumulate.
 
 ## Operator responsibilities
 
@@ -542,6 +545,8 @@ Stated openly rather than discovered later:
   a trigger that asked for it is refused before it costs anything — deliberately, so nobody ends up with
   transcripts in a temp directory they never chose. Put it on the same disk you would put
   `PI_CAPTURE_JOB_LOGS` output on, mode `0700`, outside every git repository, and set
-  `PI_SESSIONS_TTL_DAYS`. Retention here is not disk hygiene: a stale transcript is a **live input to a
-  future job**, so an old file is a correctness problem before it is a capacity problem.
+  `PI_SESSIONS_TTL_DAYS` together with `PI_SESSION_MAX_AGE_DAYS`, which bound two different clocks: the
+  first is time since the last run on a key, the second is the age of the conversation itself. Retention
+  here is not disk hygiene: a stale transcript is a **live input to a future job**, so an old file is a
+  correctness problem before it is a capacity problem.
   `pi-dispatch doctor` reports the store and warns whenever a trigger arms the flag.

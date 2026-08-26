@@ -298,6 +298,7 @@ export async function startWorker(
 		sessionsDir: config.sessionsDir,
 		ttlDays: config.sessionsTtlDays,
 		maxBytes: config.sessionMaxBytes,
+		maxAgeDays: config.sessionMaxAgeDays,
 		log,
 	});
 	// Boot sweep, beside the log reaper and for the same reason it is beside rather than inside it: these

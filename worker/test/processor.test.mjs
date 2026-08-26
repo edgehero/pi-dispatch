@@ -628,6 +628,61 @@ test("the record's session merges host intent with what the container actually d
 	assert.equal(JSON.stringify(degraded.session).includes(prepared.session.key), false);
 });
 
+test("a host gate that refused outranks the runner's absent, so the record names WHICH gate", async () => {
+	// The repair. A refused read stages a 0-byte file rather than nothing, the container is handed it
+	// either way, and pi opens it and finds no messages -- so the runner reports `absent` on EVERY host
+	// refusal. While that won, `expired` and `pi-version-changed` reached no completed record at all and
+	// docs/sessions.md's promise that every cold start is nameable in the record was false for them.
+	for (const token of ["expired", "conversation-too-old", "pi-version-changed", "too-large", "not-a-regular-file", "unparseable"]) {
+		const prepared = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: false, reason: token, bytes: null } };
+		const { deps: d } = deps({
+			prepareWorkspace: async () => prepared,
+			imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }),
+			promoteSession: () => ({ promoted: true, reason: "promoted", bytes: 1234 }),
+		});
+		const r = await runJob(ghJob, { ...d, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: false, reason: "absent" } }) });
+		assert.equal(r.outcome, "completed");
+		assert.equal(r.session.reason, token, `a completed run must name the gate that refused, not the container's restatement of it`);
+		assert.equal(r.session.resumed, false);
+	}
+
+	// Not exit-code specific: a policy exit masked it identically before the repair.
+	const prepared = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: false, reason: "expired", bytes: null } };
+	const { deps: d } = deps({ prepareWorkspace: async () => prepared, imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }) });
+	const policy = await runJob(ghJob, { ...d, runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: null, session: { resumed: false, reason: "absent" } }) });
+	assert.equal(policy.session.reason, "expired");
+});
+
+test("the override is narrow: a staged transcript the runner would not resume still reports the runner", async () => {
+	// The disagreement this object exists to show. The host resolved a real transcript (resume:true) and
+	// the container found nothing usable in it -- a corrupt file, a degrade -- and collapsing that into the
+	// host's cheerful `resumed` would hide the one event worth seeing.
+	const prepared = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: true, reason: "resumed", bytes: 7 } };
+	const { deps: d } = deps({ prepareWorkspace: async () => prepared, imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }) });
+
+	const disagree = await runJob(ghJob, { ...d, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: false, reason: "absent" } }) });
+	assert.equal(disagree.session.reason, "absent", "host said resume, runner says absent: that is the degrade, not a gate");
+	assert.equal(disagree.session.resumed, false);
+
+	// The other half of "narrow": the override is keyed on the runner's token being exactly `absent`. A
+	// host gate that refused AND a runner that quarantined the file it was handed is a mount fault worth
+	// seeing, and a wider override would report the gate and hide it.
+	const refused = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: false, reason: "expired", bytes: null } };
+	const { deps: q } = deps({ prepareWorkspace: async () => refused, imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }) });
+	const quarantined = await runJob(ghJob, { ...q, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: false, reason: "unparseable" } }) });
+	assert.equal(quarantined.session.reason, "unparseable", "the runner saw something the host could not, so it keeps the line");
+
+	// And a refused PROMOTION still outranks both, because it says why the NEXT run will cold start.
+	const refusedPrepared = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: false, reason: "expired", bytes: null } };
+	const { deps: locked } = deps({
+		prepareWorkspace: async () => refusedPrepared,
+		imagePreflight: async () => ({ ok: true, piVersion: "0.80.7" }),
+		promoteSession: () => ({ promoted: false, reason: "locked" }),
+	});
+	const r = await runJob(ghJob, { ...locked, runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, session: { resumed: false, reason: "absent" } }) });
+	assert.equal(r.session.reason, "locked");
+});
+
 test("a job with no session records session:null and never calls the store", async () => {
 	let promoted = 0;
 	const { deps: d } = deps({ prepareWorkspace: async () => ({ workspace: "/w", jobDir: "/j" }), promoteSession: () => { promoted += 1; return null; } });

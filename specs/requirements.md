@@ -1282,11 +1282,24 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the design had to serve. What makes it affordable is that the join already exists: an issue-triggered
   job is told to push to `pi/issue-<n>`, so the pull request's head ref IS the issue's branch, and the
   host can compute both without recording anything.
-- **Fail OPEN, and say so.** A missing, expired, oversized, unparseable, locked or foreign transcript, an
-  unresolvable head ref, or a fork — every one degrades to a cold start and **never fails the job**. Each
-  is a NAMED reason in the run record (`INT-RUN-HISTORY-FILE-CONTRACT`), because a feature that fails open
-  is otherwise indistinguishable from a feature nobody switched on, which is how "we never resumed once in
-  three months" goes unnoticed.
+- **Fail OPEN, and say so.** A missing, expired, oversized, unparseable, locked or foreign transcript, a
+  conversation past its age bound, an unresolvable head ref, or a fork — every one degrades to a cold
+  start and **never fails the job**. Each is a NAMED reason in the run record
+  (`INT-RUN-HISTORY-FILE-CONTRACT`), because a feature that fails open is otherwise indistinguishable from
+  a feature nobody switched on, which is how "we never resumed once in three months" goes unnoticed.
+  **Naming it in the record is half the requirement, and for its first year only half was met**: a refused
+  read stages a 0-byte transcript, the container is handed it regardless, pi finds no messages in it and
+  reports `absent`, and the record took the container's word — so `expired` and `pi-version-changed`
+  reached no completed record at all. A host gate that refused now outranks that one runner token, which
+  is a restatement of the question rather than an answer to it. The container keeps every verdict it is
+  the only one able to give.
+- **Eligibility bounds are OPT-IN and measure their own quantity.** Beyond the file's own shape, an
+  operator may bound how old the CONVERSATION is (the session header's timestamp, which is a different
+  clock from the TTL: mtime is refreshed by every run on the key, so a lineage worked on daily never ages
+  out however old its first turn is). Each bound is off unless set, each trip is a cold start with its own
+  reason token, and an unset bound leaves the read path byte-identical. A bound that cannot obtain its
+  measurement neither invents one nor guesses: where the quantity is on the transcript's own header it
+  fails CLOSED, since a conversation that cannot say how old it is has not been shown to be young enough.
 - **One case fails CLOSED.** A trigger that armed `run.resume` while `PI_SESSIONS_DIR` is unset refuses
   **pre-spend** rather than running unpersisted. Running it silently would be the failure
   `validatePackagesFlag`'s own comment describes one flag over: an operator who believes a thing is on
@@ -1302,7 +1315,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   armed trigger whose key resolves and whose previous run completed, the job's prompt is the resumed shape
   and the record reads `session.resumed: true`. Given a fork pull request, no key resolves. Given a
   non-completed exit, the canonical transcript is unchanged. Given an armed trigger with `PI_SESSIONS_DIR`
-  unset, the job is refused before a budget slot is reserved.
+  unset, the job is refused before a budget slot is reserved. Given `PI_SESSION_MAX_AGE_DAYS` set and a
+  transcript whose header timestamp predates it, the job runs cold with `session.reason:
+  conversation-too-old` even though the file's mtime is fresh, and that token is what the record shows.
+  Given every bound unset, the staged file, the mount set and the record are byte-identical to a
+  pre-bounds run.
 
 ## REQ-RESURRECTABLE-SANDBOX
 

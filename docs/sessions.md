@@ -27,6 +27,7 @@ mkdir -p ~/.pi-dispatch/sessions && chmod 700 ~/.pi-dispatch/sessions
 PI_SESSIONS_DIR=/home/you/.pi-dispatch/sessions
 PI_SESSIONS_TTL_DAYS=14        # default 14; 0 = keep forever
 PI_SESSION_MAX_BYTES=8388608   # default 8 MiB; 0 = no cap
+PI_SESSION_MAX_AGE_DAYS=       # unset/0 = no bound; how old the conversation itself may be
 ```
 
 `pi-dispatch doctor` reports the store whenever a trigger arms the flag, and fails that check when
@@ -115,12 +116,19 @@ rather than a permanent limit ([`workflows.md`](workflows.md)).
 ## When it silently doesn't resume
 
 Every one of these is a **cold start, never a failed job**, and every one is named in the run record's
-`session.reason` so you can tell them apart:
+`session.reason` so you can tell them apart. That last part was not true until recently: a refused read
+stages an empty transcript, the container opens it and reports `absent`, and that used to overwrite the
+host's answer, so `expired` and `pi-version-changed` never reached a record at all. A gate that refused
+now keeps its own name on the record. What the container found is still what you see whenever the
+container is the one that found it: `unparseable` below is reported by both, and a run whose transcript
+the host resolved and the container could not use still reads `absent`, which is the disagreement worth
+seeing rather than an ordinary cold start.
 
 | reason | meaning |
 |---|---|
 | `absent` | first run for this key, or the previous one produced nothing |
-| `expired` | older than `PI_SESSIONS_TTL_DAYS` |
+| `expired` | older than `PI_SESSIONS_TTL_DAYS`, measured from the last run on the key |
+| `conversation-too-old` | the conversation itself started more than `PI_SESSION_MAX_AGE_DAYS` ago. A different clock from `expired`: that one reads the file's mtime, which every run refreshes, so a lineage worked on daily never ages out however old its first turn is. A header whose timestamp is missing or unreadable lands here too, because a conversation that cannot say how old it is has not been shown to be young enough |
 | `too-large` | over `PI_SESSION_MAX_BYTES` |
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
 | `not-a-regular-file` | ignored, not refused: the check is an `lstat`, so a symlink planted in `/session` is never followed, and the job runs cold |
@@ -134,7 +142,8 @@ next completed run rewrites both the transcript and the stamp.
 
 Two further reasons reach `session.reason` without being read-path outcomes at all. Both come from
 `promoteSession`, so both appear only on a **completed** run, and both describe the *write* back to the
-store rather than the read that started the job:
+store rather than the read that started the job. A refused promotion outranks everything else on the
+line, because it says why the NEXT run for this key will cold start:
 
 | reason | meaning |
 |---|---|

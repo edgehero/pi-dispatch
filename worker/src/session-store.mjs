@@ -56,6 +56,7 @@ export function makeSessionStore({
 	sessionsDir,
 	ttlDays,
 	maxBytes,
+	maxAgeDays = 0,
 	log = () => {},
 	now = () => Date.now(),
 	fs = { copyFileSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
@@ -192,14 +193,43 @@ export function makeSessionStore({
 		}
 		if (stamped !== piVersion) return COLD("pi-version-changed");
 
-		// Cheapest real shape check, and the last one: the first line must be a pi session header. Anything
-		// else the runner would throw on, so refusing here keeps the container's degrade path for genuine
-		// surprises rather than for a file we could already tell was wrong.
+		// Cheapest real shape check, and the last one before the header's own contents are used: the first
+		// line must be a pi session header. Anything else the runner would throw on, so refusing here keeps
+		// the container's degrade path for genuine surprises rather than for a file we could already tell
+		// was wrong.
+		let header = null;
 		try {
 			const head = String(fs.readFileSync(file, "utf8")).split("\n", 1)[0];
-			if (JSON.parse(head)?.type !== "session") return COLD("unparseable");
+			header = JSON.parse(head);
+			if (header?.type !== "session") return COLD("unparseable");
 		} catch {
 			return COLD("unparseable");
+		}
+
+		// The CONVERSATION's age, and it is a DIFFERENT CLOCK from `expired` above rather than a finer
+		// setting of it. The TTL reads mtime, which both the resolve copy and the promote rename refresh, so
+		// it measures time since the last completed run on this key: a lineage touched daily never expires
+		// however old its first turn is. pi's header carries the instant the session was created, so this
+		// costs no new persisted state -- the line is already read and parsed one gate up, and until now
+		// only its `type` was looked at.
+		//
+		// The arm is LAST because the earlier gates are cheaper and because a corrupt file is corrupt rather
+		// than old: `unparseable` must keep winning over this, or a damaged transcript would be reported as
+		// a lineage that aged out.
+		//
+		// UNREADABLE FAILS CLOSED, on the pi-version gate's precedent one arm up: a header with no usable
+		// timestamp cannot be shown to be young enough, and "assume it matches" is the direction that
+		// silently keeps resuming. Like `pi-version-changed`, one token covers all three causes (absent,
+		// wrong type, unparseable).
+		//
+		// A timestamp in the FUTURE passes, deliberately. It buys nothing to refuse one: the agent owns
+		// /session, so anything able to write a future timestamp is equally able to write the current one,
+		// and refusing would convert ordinary clock skew between a container and its host into a cold start
+		// for every key on the deployment.
+		if (maxAgeDays > 0) {
+			const started = Date.parse(typeof header.timestamp === "string" ? header.timestamp : "");
+			if (!Number.isFinite(started)) return COLD("conversation-too-old");
+			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
 		return { resume: true, reason: "resumed", bytes: check.bytes };
 	}

@@ -258,6 +258,13 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// A bound on how large a transcript may be before it stops being resumed. Not disk hygiene: an
 		// oversized transcript is a prefill an operator never sized PI_MAX_TOKENS for.
 		sessionMaxBytes: nonNegativeInt(env, "PI_SESSION_MAX_BYTES", 8 * 1024 * 1024), // 0 = no cap
+		// How old the CONVERSATION may be, which is a different clock from sessionsTtlDays above and not a
+		// finer setting of it: the TTL reads mtime, and mtime is refreshed by every resolve copy and every
+		// promote rename, so it measures time since the last completed run on this key. A key touched daily
+		// never expires however old its first turn is. This one reads the session header's own timestamp.
+		// OFF by default (0) rather than defaulted to a number: an age an operator did not choose is an
+		// opinion about their lineages that this project has no basis for.
+		sessionMaxAgeDays: nonNegativeInt(env, "PI_SESSION_MAX_AGE_DAYS", 0), // 0 = no age bound
 		chainDepthMax: nonNegativeInt(env, "PI_CHAIN_DEPTH_MAX", CHAIN_DEPTH_MAX_DEFAULT), // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
 		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", CHAIN_MAX_PER_JOB_DEFAULT), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 		dispatchRunPerHour: nonNegativeInt(env, "PI_DISPATCH_RUN_PER_HOUR", 3), // DES-ADMIN-VIA-PI-EXTENSION; 0 = disable dispatch_run

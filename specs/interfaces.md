@@ -2044,7 +2044,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
   ```
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
@@ -2058,13 +2058,24 @@ validator rather than a second copy of it.
 
   | Producer | Tokens |
   |---|---|
-  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
   | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
 
+  Precedence has **two** rules, and for the feature's first year this entry recorded only the first.
   A refused promotion **wins** over the other two (`mergeSession`, `worker/src/processor.mjs`): on a
   completed run it is the more useful reason, because it says why the NEXT run for this key will cold
-  start. Three things follow that the list cannot show. `expired` never arrives from the promote path,
+  start. Then **a resolve-path gate that REFUSED outranks the runner's `absent`**, and without that rule
+  `expired` and `pi-version-changed` were unreachable in any record whose container emitted an exit line —
+  which is every ordinary run. The mechanism is not obvious from either half of the code: a refused read
+  stages a **0-byte** file rather than nothing (`INT-SESSION-STORE-CONTRACT`, where the reasoning is pi's
+  EEXIST race), `PI_SESSION_FILE` is emitted whenever a session exists at all rather than only when it
+  resumes, and pi's `setSessionFile` gates its own refusal on `size > 0` — so the container opens the
+  empty file successfully, finds no messages, and reports `absent` on EVERY host refusal. That token is a
+  restatement of the question, not an answer to it. The rule is deliberately narrow, `resume === false`
+  on the host side and exactly `absent` on the runner's: a host that DID stage a transcript while the
+  runner reports `absent` is the disagreement this object exists to show, and the runner's `unparseable`
+  reports a degrade the host could not see. Three further things follow that the list cannot show. `expired` never arrives from the promote path,
   which checks the file but not the TTL. `promoted` is a `promoteSession` return value that reaches no
   record, because the merge reads a promotion's reason only when it refused. And `promote-failed` is the
   one an operator meets in the wild: a full disk or a permissions change mid-promotion produces it.
@@ -2252,8 +2263,12 @@ validator rather than a second copy of it.
 - **Read path**, host-side, fail-open at the first miss, every miss a named cold start: key resolves ->
   canonical file exists -> **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
   -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `pi-version` matches the job image's label -> first
-  parsed line is a `{"type":"session"}` header -> copy into the per-job dir. A cold start stages a
-  **0-byte file** rather than nothing.
+  parsed line is a `{"type":"session"}` header -> that header's `timestamp` is within
+  `PI_SESSION_MAX_AGE_DAYS` -> copy into the per-job dir. A cold start stages a **0-byte file** rather
+  than nothing. The order is the contract, not an implementation detail, because the first miss is the one
+  that names itself: the shape check stays AHEAD of the age bound so a damaged transcript reads as
+  `unparseable` rather than as a lineage that aged out, and the age bound is the only arm that reads
+  anything from the header beyond its `type`.
 - **Write path**, after a `completed` exit **only**: the same `lstat` and size checks on the container's
   output, then an atomic rename under the per-key lock. A job that cannot take the lock discards rather
   than clobbers. Everything else the agent left in `/session` is deleted unread with the job dir.

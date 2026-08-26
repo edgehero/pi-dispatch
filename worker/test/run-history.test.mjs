@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitTokens, parseExitTurns, parseExitUsage, sanitizeJobId } from "../src/run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, sanitizeJobId } from "../src/run-history.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
 /**
@@ -206,6 +206,42 @@ test("parseExitTokens rejects a malformed tokens value rather than storing a par
 test("parseExitTokens never throws across the same corpus that stresses parseExitTurns", () => {
 	for (const input of ['{"event":"exit","tokens":{"total":1}}', '{"event":"exi', "", undefined, null, 42, "null"]) {
 		assert.doesNotThrow(() => parseExitTokens(input), `input=${JSON.stringify(input)}`);
+	}
+});
+
+// ---- parseExitSession: the container's own verdict on the transcript it was handed ----
+
+test("parseExitSession reads the session object off the success exit line", () => {
+	assert.deepEqual(parseExitSession('{"event":"exit","code":0,"session":{"resumed":true,"reason":"resumed"}}'), { resumed: true, reason: "resumed" });
+	assert.deepEqual(parseExitSession('{"event":"exit","code":0,"session":{"resumed":false,"reason":"absent"}}'), { resumed: false, reason: "absent" });
+});
+
+test("parseExitSession returns null when the container gave no verdict", () => {
+	// The catch-path exit line carries {code, reason, message} and no session, and a runner image
+	// predating the field emits none either. Both mean "the host's own reason stands" downstream, so this
+	// null is load-bearing rather than merely defensive.
+	assert.equal(parseExitSession('{"event":"exit","code":2,"reason":"config"}'), null);
+	assert.equal(parseExitSession('{"event":"exit","code":0,"turns":3}'), null);
+});
+
+test("parseExitSession returns the LAST exit line's session when two are present", () => {
+	const text = '{"event":"exit","session":{"resumed":true,"reason":"resumed"}}\n{"event":"exit","session":{"resumed":false,"reason":"unparseable"}}';
+	assert.deepEqual(parseExitSession(text), { resumed: false, reason: "unparseable" });
+});
+
+test("parseExitSession refuses a malformed session rather than storing a partial", () => {
+	// `resumed` is the required field: without a boolean there is no verdict, whatever else is present.
+	assert.equal(parseExitSession('{"event":"exit","session":42}'), null);
+	assert.equal(parseExitSession('{"event":"exit","session":[true]}'), null);
+	assert.equal(parseExitSession('{"event":"exit","session":{"reason":"resumed"}}'), null, "no boolean resumed -> no verdict");
+	assert.equal(parseExitSession('{"event":"exit","session":{"resumed":"yes"}}'), null);
+	// A non-string reason is dropped to null while the verdict survives: the boolean is the fact.
+	assert.deepEqual(parseExitSession('{"event":"exit","session":{"resumed":false,"reason":7}}'), { resumed: false, reason: null });
+});
+
+test("parseExitSession never throws across the same corpus that stresses parseExitTurns", () => {
+	for (const input of ['{"event":"exit","session":{"resumed":true}}', '{"event":"exi', "", undefined, null, 42, "null"]) {
+		assert.doesNotThrow(() => parseExitSession(input), `input=${JSON.stringify(input)}`);
 	}
 });
 

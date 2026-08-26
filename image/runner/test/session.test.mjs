@@ -28,9 +28,14 @@ test("no PI_SESSION_FILE builds pi's ephemeral session, exactly as before the fe
 
 test("a host-staged 0-byte file is flushed to a real header at open, so _persist never takes its wx branch", { skip }, () => {
 	const { file } = stage("");
-	const { sessionManager, resumed } = openSessionManager({ sessionFile: file, cwd: "/workspace" });
+	const { sessionManager, resumed, reason } = openSessionManager({ sessionFile: file, cwd: "/workspace" });
 
 	assert.equal(resumed, false, "an empty transcript has no messages, so this is a cold start");
+	// The token matters beyond this file. The host stages 0 bytes on EVERY read-path refusal, so `absent`
+	// is what the container reports whenever a host gate said no -- which is why the record's merge treats
+	// it as the one runner token a host gate outranks (mergeSession, worker/src/processor.mjs). Pin it, or
+	// a rename here silently turns that rule off and the host's reason starts winning everywhere.
+	assert.equal(reason, "absent");
 	assert.ok(statSync(file).size > 0, "pi must write its header at open");
 	const header = JSON.parse(readFileSync(file, "utf8").split("\n")[0]);
 	assert.equal(header.type, "session");
