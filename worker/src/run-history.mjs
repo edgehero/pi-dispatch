@@ -110,6 +110,39 @@ export function parseExitSession(text) {
 	return null;
 }
 
+/**
+ * The container's report of how full its context was when the run ended (issue #186). Shaped exactly
+ * like `parseExitSession` above and, like it, PASSED THROUGH rather than rebuilt: both integers are
+ * host-bounded numbers, so `parseExitUsage`'s revalidating rebuild is not what this needs -- that one
+ * exists because the ledger carries id STRINGS.
+ *
+ * Absent means ABSENT, never zero. A runner predating this field, a run pi could give no context window
+ * for, and a compaction that left the count unknown all produce no key at all, and the session store
+ * reads that as "no measurement" and passes rather than inventing a denominator.
+ */
+export function parseExitContext(text) {
+	if (typeof text !== "string") return null;
+	const lines = text.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i].trim();
+		if (line === "") continue;
+		let parsed;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue; // docker/agent noise or a truncated final line
+		}
+		if (parsed?.event !== "exit") continue;
+		const c = parsed?.context;
+		// A window of 0 is not a denominator, and a negative count is not a measurement.
+		if (c && typeof c === "object" && !Array.isArray(c) && Number.isInteger(c.tokens) && Number.isInteger(c.window) && c.tokens >= 0 && c.window > 0) {
+			return { tokens: c.tokens, window: c.window };
+		}
+		return null;
+	}
+	return null;
+}
+
 export function parseExitTokens(text) {
 	if (typeof text !== "string") return null;
 	const lines = text.split("\n");
@@ -389,11 +422,12 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 		}
 
 		async function close({ timeoutMs = 2000 } = {}) {
-			// Capture turns/tokens/session/usage from the tail first, so they survive even if the flush errors or times out.
+			// Capture turns/tokens/session/usage/context from the tail first, so they survive even if the flush errors or times out.
 			const turns = parseExitTurns(tail);
 			const tokens = parseExitTokens(tail);
 			const session = parseExitSession(tail);
 			const usage = parseExitUsage(tail);
+			const context = parseExitContext(tail);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -417,7 +451,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
-			return { turns, tokens, session, usage };
+			return { turns, tokens, session, usage, context };
 		}
 
 		return { write, close };

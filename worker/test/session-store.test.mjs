@@ -16,14 +16,14 @@ const headerAt = (ms) => `${JSON.stringify({ type: "session", version: 3, id: "s
 const daysAgo = (n) => NOW - n * 86400000;
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
-function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, now = () => NOW, fs } = {}) {
+function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, maxContextPct = null, now = () => NOW, fs } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];
 	// `fs` omitted = the store's own real-fs default. Passing one is how a disk fault is injected on a
 	// specific call without a chmod, which root ignores and Windows spells differently.
-	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, maxResumeChain, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
+	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, maxResumeChain, maxContextPct, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
 	const jobDir = mkdtempSync(join(root, "job-"));
 	return { root, sessionsDir, store, jobDir, logs };
 }
@@ -397,4 +397,63 @@ test("a promotion that never happened leaves the counter alone", () => {
 	assert.equal(p.promoted, false);
 	assert.equal(p.reason, "absent");
 	assert.equal(existsSync(join(sessionsDir, key, "resume-chain")), false, "no promotion, no counter");
+});
+
+
+test("the context bound refuses at or above the threshold and resumes below it", () => {
+	// 80% of a 200k window is 160000 tokens. At the line and over it refuse; one token under resumes.
+	for (const [tokens, expected] of [
+		[160000, "context-too-full"],
+		[180000, "context-too-full"],
+		[159999, "resumed"],
+	]) {
+		const { store, jobDir, sessionsDir } = fixture({ maxContextPct: 80 });
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key);
+		writeFileSync(join(sessionsDir, key, "context"), `${tokens} 200000`);
+		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, expected, `tokens=${tokens}`);
+	}
+});
+
+test("with no measurement the context gate passes and invents no denominator", () => {
+	// Every key promoted before this shipped has no sidecar, and so does every key under an image whose
+	// runner predates the field. A gate with nothing to act on must pass, not guess: a bytes-against-window
+	// fallback would over-read exactly past the compaction threshold this bound exists to catch.
+	// Every corrupt value here would read as NEARLY FULL if it were accepted, so a parser that truncated
+	// "199999.5" to 199999 would refuse rather than pass and this test would catch it. A corrupt value that
+	// happens to truncate to something small proves nothing.
+	for (const body of [null, "", "   ", "not numbers", "199999", "199999 0", "-1 200000", "199999.5 200000", "199999 200000.7", "199999 abc"]) {
+		const { store, jobDir, sessionsDir } = fixture({ maxContextPct: 1 });
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key);
+		if (body !== null) writeFileSync(join(sessionsDir, key, "context"), body);
+		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed", `sidecar=${JSON.stringify(body)}`);
+	}
+});
+
+test("an unset context bound never reads the sidecar at all", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	writeFileSync(join(sessionsDir, key, "context"), "199999 200000");
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("promotion stores the container's context reading, and never erases one it cannot replace", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const sidecar = join(sessionsDir, key, "context");
+
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(first, { piVersion: PI, resumed: true, context: { tokens: 12345, window: 200000 } });
+	assert.equal(readFileSync(sidecar, "utf8"), "12345 200000", "both numbers, so a later reader can see what the refusal was judged against");
+
+	// A run that measured nothing (a compaction left pi's count unknown, or an older runner) must leave the
+	// last real reading in place: writing 0 would read as "the context emptied", which cannot have happened.
+	const second = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(second.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(second, { piVersion: PI, resumed: true });
+	assert.equal(readFileSync(sidecar, "utf8"), "12345 200000");
 });

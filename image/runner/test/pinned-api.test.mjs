@@ -159,6 +159,30 @@ test("the registry methods the meter installs through still exist at the pin", {
 	assert.ok(sessions.includes("getSessionId"), "SessionManager.getSessionId missing -- run-job.mjs reads the root id from it");
 });
 
+test("getContextUsage and the ContextUsage shape the session store's bound is written against still exist", { skip }, () => {
+	// The context bound (issue #186) is the only place this project asks pi how full a session is, and
+	// there is no fallback: a bytes-against-window estimate has no calibration here, and the transcript is
+	// the whole branch INCLUDING what compaction folded away, so it over-reads exactly past the threshold
+	// the bound exists for. If this method goes, the bound must be redesigned rather than re-aimed.
+	const sessionMethods = Object.getOwnPropertyNames(mod.AgentSession?.prototype ?? {});
+	assert.ok(sessionMethods.includes("getContextUsage"), "AgentSession.getContextUsage missing at the pin -- run-job.mjs reads the context reading off it");
+
+	// A TYPE contract, so `typeof` is the wrong tool. Both field NAMES are load-bearing: run-job.mjs reads
+	// `tokens` and `contextWindow` off the object and renames the second to `window` on the exit line, so
+	// a rename upstream would silently produce `undefined` on every run and the host would read that as an
+	// old runner rather than as a break.
+	const types = agentDistFile("core", "extensions", "types.d.ts");
+	assert.match(types, /export interface ContextUsage \{/, "ContextUsage is gone from the pinned types");
+	assert.match(types, /ContextUsage \{[^}]*\btokens\b/, "ContextUsage.tokens is gone -- the exit line's numerator");
+	assert.match(types, /ContextUsage \{[^}]*\bcontextWindow\b/, "ContextUsage.contextWindow is gone -- the exit line's denominator");
+
+	// NULLABILITY is the half a reader gets wrong. `tokens` is null right after a compaction, before the
+	// next assistant message re-establishes a count, and getContextUsage itself returns undefined when pi
+	// has no model or no window. Both are why the runner omits the key entirely rather than emitting a
+	// zero, and why the host's gate passes on absence instead of inventing a denominator.
+	assert.match(types, /tokens: number \| null;/, "ContextUsage.tokens stopped being nullable -- re-check whether the runner still needs its guard");
+});
+
 test("ProviderConfigInput still accepts the { api, streamSimple } pair the meter registers", { skip }, () => {
 	// A TYPE contract, so `typeof` is the wrong tool -- assert the pinned .d.ts still declares it. If
 	// registerProvider stopped accepting a bare streamSimple override (say it started requiring

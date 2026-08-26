@@ -511,6 +511,7 @@ test("the session-store bounds default to their shipped values, pinned as litera
 	assert.equal(c.sessionMaxBytes, 8388608);
 	assert.equal(c.sessionMaxAgeDays, 0, "the conversation-age bound is OFF unless an operator chooses an age");
 	assert.equal(c.sessionMaxResumeChain, 0, "and so is the chain bound");
+	assert.equal(c.sessionMaxContextPct, null, "the context bound is absent rather than 0: 0% would mean never resume anything");
 	assert.equal(c.sessionsDir, null, "no default: unset means the feature is unavailable, not defaulted into a temp dir");
 });
 
@@ -526,6 +527,16 @@ test("the session-store bounds take explicit values and accept their 0 sentinels
 	assert.equal(off.sessionMaxBytes, 0, "0 = no cap");
 	assert.equal(off.sessionMaxAgeDays, 0, "0 = no age bound");
 	assert.equal(off.sessionMaxResumeChain, 0, "0 = no chain bound");
+});
+
+test("the context bound is a percentage, so its range is 1-100 and absence is how it is disabled", () => {
+	assert.equal(loadConfig({ PI_SESSION_MAX_CONTEXT_PCT: "80" }).sessionMaxContextPct, 80);
+	assert.equal(loadConfig({ PI_SESSION_MAX_CONTEXT_PCT: "1" }).sessionMaxContextPct, 1);
+	assert.equal(loadConfig({ PI_SESSION_MAX_CONTEXT_PCT: "100" }).sessionMaxContextPct, 100);
+	assert.equal(loadConfig({ PI_SESSION_MAX_CONTEXT_PCT: "" }).sessionMaxContextPct, null, "an empty scaffolded line means unset");
+	for (const bad of ["0", "101", "-1", "abc", "1.5", "80%"]) {
+		assert.throws(() => loadConfig({ PI_SESSION_MAX_CONTEXT_PCT: bad }), (e) => e.piDispatchConfig === true, `PI_SESSION_MAX_CONTEXT_PCT=${bad}`);
+	}
 });
 
 test("the session-store bounds reject negatives and non-integers as config errors", () => {

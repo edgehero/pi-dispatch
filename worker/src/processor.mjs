@@ -44,7 +44,7 @@ export async function runJob(job, deps) {
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
-		// (session, { piVersion }) => { promoted, reason, bytes }. Promotes this job's transcript back into
+		// (session, { piVersion, resumed, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
 		// it behaves exactly as before -- no store, no promotion, no session in the record.
 		promoteSession = () => null,
@@ -351,7 +351,7 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 		}
 
-		const { code, aborted, turns, tokens, session, usage } = await runContainer({ job, token, prepared });
+		const { code, aborted, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared });
 		log("container_exit", { exitCode: code, aborted });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
@@ -388,7 +388,7 @@ export async function runJob(job, deps) {
 				// (CONST-RETRY-INFRA-ONLY). Same completed-only rule INT-OUTBOX-CONTRACT already uses, and
 				// it sits beside the chain collection for the same reason: both must happen before the
 				// `finally` deletes jobDir. Never throws.
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, resumed: session?.resumed }) : null;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, resumed: session?.resumed, context }) : null;
 				return {
 					outcome: "completed",
 					exitCode: code,

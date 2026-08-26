@@ -268,6 +268,11 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// How many times in a row one key may be resumed before the next job starts fresh. The bound a long
 		// lineage actually needs: age and size both grow slowly while a chain grows once per run.
 		sessionMaxResumeChain: nonNegativeInt(env, "PI_SESSION_MAX_RESUME_CHAIN", 0), // 0 = no chain bound
+		// How full the saved context may be before a resume is refused, as a percentage of the model's own
+		// window. A PERCENTAGE, so `optionalBoundedInt` on softHoldPct's precedent rather than the 0 = off
+		// sentinel its two neighbours use: 0% would mean "never resume anything", which is a different
+		// request from "no bound", and 101 is a typo rather than a ceiling.
+		sessionMaxContextPct: optionalBoundedInt(env, "PI_SESSION_MAX_CONTEXT_PCT", 1, 100), // null = no context bound
 		chainDepthMax: nonNegativeInt(env, "PI_CHAIN_DEPTH_MAX", CHAIN_DEPTH_MAX_DEFAULT), // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
 		chainMaxPerJob: nonNegativeInt(env, "PI_CHAIN_MAX_PER_JOB", CHAIN_MAX_PER_JOB_DEFAULT), // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 		dispatchRunPerHour: nonNegativeInt(env, "PI_DISPATCH_RUN_PER_HOUR", 3), // DES-ADMIN-VIA-PI-EXTENSION; 0 = disable dispatch_run

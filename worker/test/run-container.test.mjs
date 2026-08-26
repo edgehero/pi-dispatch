@@ -106,7 +106,7 @@ test("an already-aborted signal returns {code:137, aborted:true} and NEVER spawn
 	const ac = new AbortController();
 	ac.abort();
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: ac.signal });
-	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null });
+	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null });
 	assert.equal(rec.cmd, undefined, "no container may start once the timeout has fired");
 });
 
@@ -126,20 +126,20 @@ test("launches docker with the isolation argv and returns the container's exit c
 test("exit 1 (infra) is returned, not thrown -- it is retryable, not a spawn error", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 1) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null });
+	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null });
 });
 
 test("close 137 while the worker aborted => {code:137, aborted:true} (our docker stop is POLICY)", { skip }, async () => {
 	const ac = new AbortController();
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnAbortedThenClose(ac, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: ac.signal });
-	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null });
+	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null });
 });
 
 test("close 137 with a signal that never aborted => {code:137, aborted:false} (kernel OOM stays infra)", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null });
+	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null });
 });
 
 test("refuses before spawning if the provider is unconfigured (pre-spend guard)", { skip }, async () => {
@@ -268,7 +268,7 @@ test("hostile sink: a throwing write and a rejecting close neither hang nor cras
 		spawnFn: fakeSpawnWithData({}, { chunks: ["x"], exitCode: 0 }),
 	});
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage null");
+	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage/context null");
 });
 
 test("never-started: the sink is still closed (best-effort teardown) and the reject reason is unchanged", { skip }, async () => {

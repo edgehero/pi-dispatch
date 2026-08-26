@@ -53,6 +53,17 @@ const LOCK_FILE = "lock";
  * surface. Maintained even when no bound is set, deliberately -- see the write in promoteSession.
  */
 const RESUME_CHAIN_FILE = "resume-chain";
+/**
+ * How full the context was when the run that wrote this transcript ended, as `<tokens> <window>`. Both
+ * numbers, not a precomputed percentage: the denominator is what makes the numerator readable later, and
+ * an operator looking at a refusal should be able to see what it was judged against.
+ *
+ * Reported BY THE CONTAINER, which is the only place the number exists: pi computes it from the session
+ * it is holding. That puts it at the same trust level as `turns` and `tokens`, and the residual is
+ * recorded in OQ-003 rather than papered over -- there is no host-side alternative that is not equally
+ * agent-influenced, since the transcript itself is agent-written.
+ */
+const CONTEXT_FILE = "context";
 
 /**
  * Read-path outcomes. Every one is a named cold start rather than a bare `false`: a feature that fails
@@ -67,6 +78,7 @@ export function makeSessionStore({
 	maxBytes,
 	maxAgeDays = 0,
 	maxResumeChain = 0,
+	maxContextPct = null,
 	log = () => {},
 	now = () => Date.now(),
 	fs = { copyFileSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
@@ -125,7 +137,7 @@ export function makeSessionStore({
 	 * one key is a real shape (REQ-QUEUE-BURST-NO-DROP), and last-write-wins there would interleave two
 	 * agents' turns into one transcript.
 	 */
-	function promoteSession(session, { piVersion = null, resumed = null } = {}) {
+	function promoteSession(session, { piVersion = null, resumed = null, context = null } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
 		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
@@ -172,6 +184,12 @@ export function makeSessionStore({
 				// off failure this project keeps arriving at from new directions.
 				const continued = typeof resumed === "boolean" ? resumed : session.resume === true;
 				fs.writeFileSync(join(dir, RESUME_CHAIN_FILE), String(continued ? readResumeChain(session.key) + 1 : 0));
+				// Only when the container actually reported one. A run that measured nothing must leave the
+				// previous measurement in place rather than erase it: the sidecar describes the transcript,
+				// the transcript has just been replaced by one this run extended, and the closest true
+				// statement available about it is the last real reading. Writing a zero here would read as
+				// "the context emptied", which is the one thing that cannot have happened.
+				if (context) fs.writeFileSync(join(dir, CONTEXT_FILE), `${context.tokens} ${context.window}`);
 			} finally {
 				fs.closeSync(fd);
 				try {
@@ -232,6 +250,25 @@ export function makeSessionStore({
 		// would cold-start an operator's entire store the day they set the bound.
 		if (maxResumeChain > 0 && readResumeChain(key) >= maxResumeChain) return COLD("resume-chain-too-long");
 
+		// How full the context already is, against a ceiling the HOST owns. Not a duplicate of pi's own
+		// compaction threshold and deliberately not read from it: pi's is settable in a serviced repo's
+		// .pi/settings.json, so it is a line the repository can move, and this one cannot be. Past that
+		// threshold what a resumed job replays is not the transcript but a model-written summary of it,
+		// produced while that model was reading attacker-authored text (OQ-003), so this is a safety bound
+		// before it is an economic one.
+		//
+		// FAILS OPEN and INVENTS NO DENOMINATOR. No sidecar (every key promoted before this shipped, and
+		// every key under an image whose runner predates it), a compaction that left pi's own count
+		// unknown, or a window of zero all mean the gate has nothing to act on, and a gate with nothing to
+		// act on passes. A bytes-against-window guess was rejected rather than used as a fallback: the
+		// transcript is the whole branch INCLUDING what compaction folded away, so it over-reads exactly
+		// past the threshold this exists to catch, and there is no bytes-to-tokens calibration here to
+		// make it mean anything.
+		if (maxContextPct !== null) {
+			const seen = readContext(key);
+			if (seen !== null && (seen.tokens * 100) / seen.window >= maxContextPct) return COLD("context-too-full");
+		}
+
 		// Cheapest real shape check, and the last one before the header's own contents are used: the first
 		// line must be a pi session header. Anything else the runner would throw on, so refusing here keeps
 		// the container's degrade path for genuine surprises rather than for a file we could already tell
@@ -287,6 +324,24 @@ export function makeSessionStore({
 			return Number.isInteger(n) && n > 0 && String(n) === raw ? n : 0;
 		} catch {
 			return 0;
+		}
+	}
+
+	/**
+	 * The stored context occupancy for a key, or `null` when there is no measurement. Never throws, never
+	 * guesses, and never returns a partial: anything it cannot read as two positive integers is no
+	 * measurement at all, which the caller treats as "pass" rather than as zero.
+	 */
+	function readContext(key) {
+		try {
+			const [rawTokens, rawWindow] = String(fs.readFileSync(join(keyDir(key), CONTEXT_FILE), "utf8")).trim().split(/\s+/);
+			const tokens = Number.parseInt(rawTokens, 10);
+			const window = Number.parseInt(rawWindow, 10);
+			if (!Number.isInteger(tokens) || !Number.isInteger(window) || tokens < 0 || window <= 0) return null;
+			if (String(tokens) !== rawTokens || String(window) !== rawWindow) return null;
+			return { tokens, window };
+		} catch {
+			return null;
 		}
 	}
 

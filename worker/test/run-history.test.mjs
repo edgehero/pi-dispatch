@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, sanitizeJobId } from "../src/run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, parseExitContext, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, sanitizeJobId } from "../src/run-history.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 
 /**
@@ -242,6 +242,38 @@ test("parseExitSession refuses a malformed session rather than storing a partial
 test("parseExitSession never throws across the same corpus that stresses parseExitTurns", () => {
 	for (const input of ['{"event":"exit","session":{"resumed":true}}', '{"event":"exi', "", undefined, null, 42, "null"]) {
 		assert.doesNotThrow(() => parseExitSession(input), `input=${JSON.stringify(input)}`);
+	}
+});
+
+// ---- parseExitContext (issue #186): how full the context was when the run ended ----
+
+test("parseExitContext reads the context object off the success exit line", () => {
+	assert.deepEqual(parseExitContext('{"event":"exit","code":0,"context":{"tokens":12345,"window":200000}}'), { tokens: 12345, window: 200000 });
+	assert.deepEqual(parseExitContext('{"event":"exit","code":0,"context":{"tokens":0,"window":200000}}'), { tokens: 0, window: 200000 }, "an empty context is a measurement, not an absent one");
+});
+
+test("parseExitContext returns null when there is no measurement to read", () => {
+	// A runner predating the field, a run pi could give no context window for, and a compaction that left
+	// the count unknown all omit the key. The store reads that null as "no measurement" and passes, so
+	// this must never come back as a zero.
+	assert.equal(parseExitContext('{"event":"exit","code":0,"turns":3}'), null);
+	assert.equal(parseExitContext('{"event":"exit","code":2,"reason":"config"}'), null);
+});
+
+test("parseExitContext refuses a measurement that is not one", () => {
+	assert.equal(parseExitContext('{"event":"exit","context":42}'), null);
+	assert.equal(parseExitContext('{"event":"exit","context":[1,2]}'), null);
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":100}}'), null, "no window is no denominator");
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":100,"window":0}}'), null, "a zero window is not a denominator either");
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":-1,"window":200000}}'), null);
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":1.5,"window":200000}}'), null);
+	assert.equal(parseExitContext('{"event":"exit","context":{"tokens":"100","window":"200000"}}'), null);
+});
+
+test("parseExitContext returns the LAST exit line's context and never throws", () => {
+	assert.deepEqual(parseExitContext('{"event":"exit","context":{"tokens":1,"window":10}}\n{"event":"exit","context":{"tokens":9,"window":10}}'), { tokens: 9, window: 10 });
+	for (const input of ['{"event":"exit","context":{"tokens":1,"window":10}}', '{"event":"exi', "", undefined, null, 42, "null"]) {
+		assert.doesNotThrow(() => parseExitContext(input), `input=${JSON.stringify(input)}`);
 	}
 });
 

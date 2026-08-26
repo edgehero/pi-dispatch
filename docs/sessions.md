@@ -29,6 +29,7 @@ PI_SESSIONS_TTL_DAYS=14        # default 14; 0 = keep forever
 PI_SESSION_MAX_BYTES=8388608   # default 8 MiB; 0 = no cap
 PI_SESSION_MAX_AGE_DAYS=       # unset/0 = no bound; how old the conversation itself may be
 PI_SESSION_MAX_RESUME_CHAIN=   # unset/0 = no bound; how many times in a row one key may be resumed
+PI_SESSION_MAX_CONTEXT_PCT=    # unset = no bound; 1-100, e.g. 80: refuse a resume into a context already this full
 ```
 
 `pi-dispatch doctor` reports the store whenever a trigger arms the flag, and fails that check when
@@ -134,6 +135,7 @@ seeing rather than an ordinary cold start.
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
 | `not-a-regular-file` | ignored, not refused: the check is an `lstat`, so a symlink planted in `/session` is never followed, and the job runs cold |
 | `pi-version-changed` | the job image ships a different pi than wrote the transcript |
+| `context-too-full` | the saved session's context was already at or above `PI_SESSION_MAX_CONTEXT_PCT` of the model's window when it was last written. The measurement comes from the job image's runner, so this bound is inert until you run an image that reports it and each key has completed one run since; where there is no measurement the gate passes rather than guessing, and it never estimates one from the transcript's size |
 | `resume-chain-too-long` | this key has already been resumed `PI_SESSION_MAX_RESUME_CHAIN` times in a row. The count is kept for every key whether or not the bound is set, so setting it takes effect on the next job rather than that many jobs later, and the cold start it causes resets the count so the lineage begins again |
 
 `pi-version-changed` is the one that surprises people. A transcript can outlive the pi that wrote it, and
@@ -181,6 +183,7 @@ that bounds how long a conversation accumulates.
 <PI_SESSIONS_DIR>/<hash>/current.jsonl   the transcript
 <PI_SESSIONS_DIR>/<hash>/pi-version      which pi wrote it
 <PI_SESSIONS_DIR>/<hash>/resume-chain    how many times in a row it has been resumed
+<PI_SESSIONS_DIR>/<hash>/context         how full the context was when it was last written
 <PI_SESSIONS_DIR>/<hash>/lock            the one-writer promotion lock; absent when free
 ```
 

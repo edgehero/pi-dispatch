@@ -300,6 +300,7 @@ export async function startWorker(
 		maxBytes: config.sessionMaxBytes,
 		maxAgeDays: config.sessionMaxAgeDays,
 		maxResumeChain: config.sessionMaxResumeChain,
+		maxContextPct: config.sessionMaxContextPct,
 		log,
 	});
 	// Boot sweep, beside the log reaper and for the same reason it is beside rather than inside it: these

@@ -30,7 +30,7 @@ export function makeRunContainer({
 	image, // the DEPLOYMENT default (PI_JOB_IMAGE); a trigger's own run.image overrides it per job
 	hostEnv = process.env,
 	onOutput = (c) => process.stdout.write(c),
-	openJobLog = () => ({ write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null }) }),
+	openJobLog = () => ({ write() {}, close: async () => ({ turns: null, tokens: null, session: null, usage: null, context: null }) }),
 	spawnFn = spawn,
 	globalPiDir = null, // REQ-GLOBAL-PI-OVERLAY: operator's global pi overlay dir, mounted :ro; null = off
 	allowGlobalExtensions = true, // REQ-GLOBAL-PI-OVERLAY: the staged overlay's extensions load unless PI_GLOBAL_ALLOW_EXTENSIONS=0
@@ -47,7 +47,7 @@ export function makeRunContainer({
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
 	return async function runContainer({ job, token, prepared, name, signal }) {
-		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null }; // killed before it could start
+		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
 		// the provider is unconfigured -- the processor turns that into a pre-spend refusal.
@@ -147,20 +147,25 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
-				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage fall back to null.
+				// A rejecting sink.close is swallowed so a misbehaving sink cannot hang the run; turns/tokens/session/usage/context fall back to null.
 				let turns = null;
 				let tokens = null;
 				let session = null;
 				let usage = null;
+				let context = null;
 				try {
-					({ turns, tokens, session, usage } = await sink.close());
+					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
+					// predates the field returns no such key, and `undefined` would then reach the record's
+					// shape where every other absence is spelled `null`.
+					({ turns, tokens, session, usage, context = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
 					session = null;
 					usage = null;
+					context = null;
 				}
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage } : { code: code ?? 1, aborted: false, turns, tokens, session, usage });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context });
 			});
 		});
 

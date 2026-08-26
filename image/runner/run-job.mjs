@@ -196,6 +196,9 @@ async function main() {
 
 	// Declared before the meter so onBreach can close over it; assigned the moment the session exists.
 	let session;
+	// Read off the session before it is disposed, reported on the exit line, and persisted host-side
+	// beside the transcript so the NEXT job on this key can bound what it resumes into.
+	let contextUsage;
 
 	/** One log shape for both meters -- an operator must not have to learn which one fired. */
 	const onTokenAbort = (tokens) => log("token_budget_exceeded", { tokens, maxTokens: cfg.maxTokens });
@@ -320,6 +323,19 @@ async function main() {
 		usageMeter.uninstall();
 		unsubscribeTerminal();
 		unsubscribeCommandErrors?.();
+		// Captured ABOVE dispose() rather than read at the exit line, and the reason is smaller than it
+		// first looks. At the 0.80.7 pin dispose() aborts the agent, invalidates the extension ctx and
+		// drops the listeners; it leaves the model and the session manager alone, so the reading DOES
+		// survive it -- measured inside the built image, not assumed. What remains is that reading state
+		// off an object which has been told it is finished is not a supported thing anywhere upstream,
+		// and the ordering costs nothing. Defensive, then, not load-bearing, and the test pins the order
+		// so a refactor cannot quietly invert it and find out when a pin bump does start clearing here.
+		//
+		// Three shapes come back and all three are honest answers. `undefined` when pi has no model or no
+		// context window for it; an object whose `tokens` is null right after a compaction, before the
+		// next assistant message re-establishes a count; or real numbers. Only the third is reported --
+		// the host's bound is written to act on a measurement and invent nothing when there is none.
+		contextUsage = session.getContextUsage();
 		// Runs the cleanup callbacks providers register via registerSessionResourceCleanup. Every
 		// official SDK example disposes; skipping it can leak a provider transport and hang the
 		// container until the 30-minute timeout -- a completed job turned into a timeout failure.
@@ -351,7 +367,14 @@ async function main() {
 	// intent separately, and the pair is what makes a degrade visible: a host that resolved a key while
 	// the container reports resumed:false is a real event, and without both numbers it is indist-
 	// inguishable from an ordinary cold start. A feature that fails open must still say that it did.
-	log("exit", { ...outcome, turns: budget.state.turns, tokens, ...(usage ? { usage } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
+	// How full the context was when this run ended, which is what the NEXT run on this key would resume
+	// into. A SIBLING of `tokens` rather than a widening of it, for the reason the ledger is one: `tokens`
+	// is a per-run BILLING snapshot with two possible producers, and occupancy is neither billing nor
+	// per-run. Omitted entirely rather than emitted as null when there is no measurement, exactly as
+	// `usage` is, so an exit line with nothing to say stays byte-identical to what every existing consumer
+	// already parses -- and the host gate reads that absence as "no measurement" rather than as zero.
+	const context = Number.isFinite(contextUsage?.tokens) && Number.isFinite(contextUsage?.contextWindow) && contextUsage.contextWindow > 0 ? { tokens: contextUsage.tokens, window: contextUsage.contextWindow } : null;
+	log("exit", { ...outcome, turns: budget.state.turns, tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason } });
 	return outcome.code;
 }
 

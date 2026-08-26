@@ -75,6 +75,42 @@ test("run-job.mjs staples `turns` onto the success-path exit line -- worker pars
 	// require every exit line to carry turns, so that omission is allowed by design.
 });
 
+test("run-job.mjs staples `context` onto the success-path exit line -- worker parseExitContext depends on it", () => {
+	// Same tactic and same reason as the two guards below. Like `usage`, the key is CONDITIONAL: a run pi
+	// could give no context window for, and a compaction that left its own count unknown, both OMIT it
+	// rather than emit null, because the host's bound reads absence as "no measurement" and a null that
+	// arrived as a zero would be a denominator nobody computed.
+	// The `[^}]*` the two guards below use cannot reach this key: it sits after `...(usage ? { usage } :
+	// {})`, whose braces close the character class early. The call is one line, so the line is the bound.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(
+		src,
+		/log\("exit",[^\n]*\bcontext\b/,
+		"run-job.mjs success exit line must carry the context reading -- worker parseExitContext depends on it",
+	);
+	// ...and it must come from pi's own accounting rather than a hand-rolled estimate. There is no
+	// bytes-to-tokens calibration anywhere in this project, which is exactly why the host does not compute
+	// this itself.
+	assert.match(src, /getContextUsage\(\)/, "the reading must be pi's own ContextUsage, not an estimate");
+	// The ORDER is the part a refactor breaks silently: getContextUsage() walks the session's branch, so a
+	// disposed session has nothing to walk and the reading would come back undefined on every run, which
+	// the host cannot tell apart from an old runner. Pin that the capture precedes dispose().
+	// Anchored on the ASSIGNMENT rather than the call: `getContextUsage()` also appears in the comment
+	// above it, and an indexOf on the bare call would keep finding that comment however far the real line
+	// moved. The ordering is DEFENSIVE rather than load-bearing -- at the pin the reading survives
+	// dispose(), measured in the image -- so this pins an order a refactor should not silently invert,
+	// not a bug that exists today.
+	assert.ok(
+		src.indexOf("contextUsage = session.getContextUsage()") < src.indexOf("session.dispose()"),
+		"the context reading must be captured before session.dispose(), so no pin bump that starts clearing session state there can turn this into a silent no-measurement",
+	);
+	// And the key must be spread CONDITIONALLY. Emitting it as an explicit null would parse to the same
+	// "no measurement" host-side, so no behaviour test can tell the two apart -- but it would change every
+	// exit line that has nothing to report, which is the property the `usage` key was given for the same
+	// reason and which existing consumers are pinned against.
+	assert.match(src, /\.\.\.\(context \?/, "the context key must be omitted when absent, not emitted as null");
+});
+
 test("run-job.mjs staples `usage` onto the success-path exit line -- worker parseExitUsage depends on it", () => {
 	// Same tactic and same reason as the `turns` guard above: main() self-runs on import and `log` is
 	// unexported, so the worker<->runner contract is guarded against the source. The ledger key is
