@@ -33,7 +33,10 @@ PI_SESSION_MAX_CONTEXT_PCT=    # unset = no bound; 1-100, e.g. 80: refuse a resu
 ```
 
 `pi-dispatch doctor` reports the store whenever a trigger arms the flag, and fails that check when
-`PI_SESSIONS_DIR` is unset. **One case fails closed**: a trigger that sets `"resume": true` with no store
+`PI_SESSIONS_DIR` is unset. It also prints which of the four bounds are on, because a knob that is silent
+when unset gives you no way to tell a deliberate "no bound" from a forgotten one, and it warns when
+`PI_SESSION_MAX_CONTEXT_PCT` is set, since that one needs a job image whose runner reports the
+measurement and does nothing at all on an older one. **One case fails closed**: a trigger that sets `"resume": true` with no store
 configured is refused **before it costs anything**, as a policy refusal that reserves no budget slot and
 starts no container, rather than running unpersisted and looking like it worked. That is the whole reason
 the refusal exists: a green run is exactly how an operator comes to believe a feature is on while it is

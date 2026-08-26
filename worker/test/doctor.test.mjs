@@ -1451,6 +1451,46 @@ test("doctor --fix: accepting the valkey offer runs the exact loopback docker ru
 	assert.equal(code, 0);
 });
 
+test("doctor prints which resume bounds are on, so an unset one is legible as a choice", async () => {
+	const { out, text } = capture();
+	await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" },
+		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true },
+	);
+	// Defaults: the TTL ships at 14 and the three eligibility bounds ship off. All four are printed, because
+	// a knob that is silent when unset gives an operator no way to tell a deliberate "no bound" from a
+	// forgotten one.
+	assert.match(text(), /Resume bounds: PI_SESSIONS_TTL_DAYS=14, PI_SESSION_MAX_AGE_DAYS=off, PI_SESSION_MAX_RESUME_CHAIN=off, PI_SESSION_MAX_CONTEXT_PCT=off/);
+});
+
+test("doctor warns that the context bound is inert until the job image reports a measurement", async () => {
+	// The one bound that can be set and still do nothing. Its measurement comes from the image's runner,
+	// and there is deliberately no capability label to check against, so this warning is the entire
+	// detection surface for "you set it and nothing is happening".
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_TRIGGERS_FILE: resumeTriggersFile(), GITHUB_AUTH_SOURCE: "pat" };
+	const opts = { spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true };
+
+	const on = capture();
+	await runDoctor({ ...env, PI_SESSION_MAX_CONTEXT_PCT: "80" }, { ...opts, out: on.out });
+	assert.match(on.text(), /PI_SESSION_MAX_CONTEXT_PCT=80 needs a job image whose runner reports context usage/);
+
+	const off = capture();
+	await runDoctor(env, { ...opts, out: off.out });
+	assert.doesNotMatch(off.text(), /needs a job image whose runner reports context usage/, "unset means unset: no warning about a bound nobody asked for");
+});
+
+test("the resume-bound lines appear only for a deployment that actually resumes", async () => {
+	// Same restraint the store checks keep: a deployment with no armed trigger is told nothing about a
+	// feature it does not use.
+	const { out, text } = capture();
+	await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SESSIONS_DIR: "/srv/pi-sessions", PI_SESSION_MAX_CONTEXT_PCT: "80", GITHUB_AUTH_SOURCE: "pat" },
+		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: () => true },
+	);
+	assert.doesNotMatch(text(), /Resume bounds:/);
+	assert.doesNotMatch(text(), /needs a job image whose runner reports context usage/);
+});
+
 test("doctor --fix: the declared-but-absent session store is created silently -- mkdir -p, chmod 700, no prompt", async () => {
 	const sessionsDir = "/srv/pi-sessions";
 	const made = [];

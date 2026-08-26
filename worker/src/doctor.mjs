@@ -1132,8 +1132,37 @@ export async function collectChecks(env, seams) {
 				ok: true,
 				warn: true,
 				label: `${resuming} trigger(s) persist agent transcripts to ${sessionsDir} -- PII-bearing, host-only, never committed`,
-				fix: "confirm it is outside every git repo and on a disk you would put issue text on; PI_SESSIONS_TTL_DAYS bounds how long a transcript stays resumable",
+				fix: "confirm it is outside every git repo and on a disk you would put issue text on; PI_SESSIONS_TTL_DAYS, PI_SESSION_MAX_AGE_DAYS, PI_SESSION_MAX_RESUME_CHAIN and PI_SESSION_MAX_CONTEXT_PCT each bound a different thing about how much history one key accumulates (docs/sessions.md)",
 			});
+			// Which of the four bounds are actually on, as a FACT LINE rather than a warning: how long a
+			// lineage may run is an operator's call, not a defect, and doctor's warnings are for things that
+			// need a decision. The line exists because these knobs are unset by default and silent when
+			// unset, so the only way to tell a deliberate "no bound" from a forgotten one is to print it.
+			const bounds = [
+				["PI_SESSIONS_TTL_DAYS", env.PI_SESSIONS_TTL_DAYS, "14"],
+				["PI_SESSION_MAX_AGE_DAYS", env.PI_SESSION_MAX_AGE_DAYS, "off"],
+				["PI_SESSION_MAX_RESUME_CHAIN", env.PI_SESSION_MAX_RESUME_CHAIN, "off"],
+				["PI_SESSION_MAX_CONTEXT_PCT", env.PI_SESSION_MAX_CONTEXT_PCT, "off"],
+			];
+			checks.push({
+				ok: true,
+				label: `Resume bounds: ${bounds.map(([name, value, fallback]) => `${name}=${value === undefined || value === "" ? fallback : value}`).join(", ")}`,
+			});
+			// The one bound that can be set and still do nothing, and the operator cannot see it from here.
+			// Its measurement is reported by the JOB IMAGE's runner (INT-RUNNER-EXIT-CODE-PROTOCOL), so an
+			// image older than that field reports none, the gate passes on no measurement by design, and the
+			// bound is inert with nothing anywhere saying so. There is deliberately no image capability to
+			// check against -- capabilities are an inclusion list for what the host DEMANDS of an image, and
+			// telemetry is not that -- so this warning is the whole detection surface, which is exactly why
+			// it exists rather than being left to a doc.
+			if (env.PI_SESSION_MAX_CONTEXT_PCT) {
+				checks.push({
+					ok: true,
+					warn: true,
+					label: `PI_SESSION_MAX_CONTEXT_PCT=${env.PI_SESSION_MAX_CONTEXT_PCT} needs a job image whose runner reports context usage`,
+					fix: `an older image reports none, and a bound with no measurement passes rather than guessing: after upgrading the image, each key needs one completed run before the bound can refuse anything. Each run's own record (${env.PI_LOGS_DIR || "the logs directory"}/<jobId>.json) carries session.reason, which names the gate that refused`,
+				});
+			}
 		}
 	}
 
