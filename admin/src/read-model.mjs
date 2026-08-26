@@ -761,6 +761,17 @@ export function normalizeTriggerForDisplay(entry) {
   // sharpest version of the reason `image` and `resume` are shown at all. Carried on the three webhook kinds
   // and absent on cron, like `forge`: the loader refuses `run.replicas` on a cron entry outright.
   const replicas = Number.isInteger(run.replicas) && run.replicas > 1 ? run.replicas : null;
+  // Whether this trigger binds vault secrets, and which resolver profile reads them (REQ-TRIGGER-SECRETS,
+  // issue #225). A COUNT and a NAME, never the references: the reference list is the map of the operator's
+  // vault, and this object reaches the model-callable `dispatch_triggers` read tool. The count is what makes
+  // the badge honest, and `secretsProfile` is the operator's own label, the same class as `image`.
+  //
+  // Shown at all for `resume`'s reason, in its sharpest form yet: what a job can REACH is what the agent can
+  // do, and unlike a flow (which lives in the repo, behind a merge) this lives only in triggers.json, so
+  // nothing else would put it in front of the operator. Carried on all four kinds, because unlike
+  // `replicas` the loader accepts this on cron too.
+  const secrets = run.secrets !== null && typeof run.secrets === "object" && !Array.isArray(run.secrets) ? Object.keys(run.secrets).length : 0;
+  const secretsProfile = typeof run.secretsProfile === "string" && run.secretsProfile.trim() !== "" ? run.secretsProfile : null;
   switch (on.type) {
     case "cron":
       return {
@@ -778,11 +789,13 @@ export function normalizeTriggerForDisplay(entry) {
         skillsDir,
         instructions,
         resume,
+        secrets,
+        secretsProfile,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, skillsDir, instructions, resume, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, skillsDir, instructions, resume, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "pull_request":
       return {
         type: "pull_request",
@@ -797,6 +810,8 @@ export function normalizeTriggerForDisplay(entry) {
         skillsDir,
         instructions,
         resume,
+        secrets,
+        secretsProfile,
         replicas,
         forge,
       };

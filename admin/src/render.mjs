@@ -188,17 +188,22 @@ function triggerLine(t) {
   // [resume]: not a preference an operator can skim past, but the field that multiplies the bill. Absent on
   // an unreplicated trigger, appended last, so every existing line is byte-identical.
   const rep = t?.replicas > 1 ? `  [x${t.replicas}]` : "";
+  // A trigger that hands its job live vault credentials says so, and it is the badge with the strongest
+  // claim to being here: [image] and [skills] change what the agent CAN DO, this changes what it can REACH.
+  // The COUNT and the profile name, never the references -- the reference list is the map of the operator's
+  // vault. Appended last, absent when unbound, so every existing line is byte-identical.
+  const sec = t?.secrets > 0 ? `  [secrets ${t.secrets}${t.secretsProfile ? ` via ${t.secretsProfile}` : ""}]` : "";
   switch (t?.type) {
     case "cron":
-      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
+      return `cron  ${t.id ?? "-"}  ${t.pattern ?? "-"} → ${t.folder ?? "-"}/${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
     case "label":
-      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
+      return `label  ${ruleClauses(t) || "(no selector)"} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
     case "comment":
-      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
+      return `comment  "${t.phrase ?? "-"}" → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
-      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}`;
+      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
     }
     default:
       return "(unknown trigger)";

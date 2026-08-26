@@ -165,7 +165,7 @@ const REBUILT_NOTICE = (reason: string) =>
   `replaced invalid settings file (${reason}) — other keys were lost`;
 
 const USAGE =
-  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup>";
+  "usage: /dispatch <status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup|secrets>";
 
 const KNOWN_SUBCOMMANDS = [
   "status",
@@ -181,6 +181,7 @@ const KNOWN_SUBCOMMANDS = [
   "set",
   "unset",
   "setup",
+  "secrets",
 ] as const;
 
 export default function admin(pi: ExtensionAPI): void {
@@ -993,6 +994,23 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
     }
     case "unset": {
       applyUnset(paths.settingsFile, tokens, notify);
+      return;
+    }
+    case "secrets": {
+      // REQ-TRIGGER-SECRETS. Declaring a resolver profile means naming an absolute host path the WORKER
+      // EXECUTES, so it lives here, on the operator-typed command surface, and nowhere else.
+      //
+      // THE SEPARATION IS STRUCTURAL, not a convention this file invented. `registerCommand` has no
+      // parameter schema and no LLM-facing surface; pi reaches a command handler only from its own
+      // `prompt()` path, which assistant text and tool results never enter, and its queueing APIs throw
+      // outright on a slash-leading string. That is the same mechanism that makes `/dispatch setup`
+      // operator-typed only, and it is why this is a subcommand rather than a fifteenth tool.
+      //
+      // The worker still does not trust what lands here. Every overlay-declared path is re-checked against
+      // PI_SECRET_RESOLVER_ROOTS at resolution time, because this file is written to a settings.json whose
+      // default location is the OS temp directory. A panel-side check alone would be cosmetic.
+      const { runSecretsCommand } = await import("./secrets-command.ts");
+      await runSecretsCommand(paths, ctx, notify, tokens.slice(1));
       return;
     }
     case "setup": {

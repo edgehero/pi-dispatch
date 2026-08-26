@@ -120,6 +120,36 @@ cannot, and that it is an edit they make to `triggers.json` themselves.** Do not
 built or pulled on the worker's own host, because jobs run with `--pull=never` and nothing is fetched at
 job time; and `pi-dispatch doctor` lists every image their triggers name and flags one that is missing.
 
+## Vault secrets — `run.secrets`, and why you cannot set it
+
+A trigger may carry `run.secrets`: a map of environment variable name to an opaque **reference**, plus
+`run.secretsProfile` naming which of the operator's resolvers reads them. Before the container starts, the
+worker runs that resolver once per reference on the HOST and injects the values into the job's environment.
+It exists so one trigger can hold a deploy key while every other job on the deployment holds none.
+
+Report it when asked, and be precise about the shape of the trade. **The job holds no vault credential.** It
+receives values, never the thing that can fetch values, so it cannot enumerate the vault or reach anything
+the operator did not name in a reviewed file. What that does *not* do is bound where a value can go once the
+agent has it: the agent can read its own environment, and the forge is on the egress allowlist by necessity.
+The panel shows the count and the profile name in the trigger list and in the drill-in, never the references.
+
+**You cannot set it, in either direction.** No `dispatch_*` tool has a `secrets` parameter, and none has a
+`secretsProfile` parameter either. The second absence is worth understanding rather than treating as an
+oversight: a profile that resolves nothing is refused at load, and no tool can write `run.secrets`, so a
+profile picker could never produce a valid trigger even once. It would be a control that looks like a grant
+and is only ever an error.
+
+You also cannot declare a **resolver profile**. That is `/dispatch secrets add`, which the operator types
+themselves, because declaring one means naming an absolute host path the worker executes.
+
+So if a user asks you to give a trigger access to a vault, or to wire up 1Password: **say plainly that you
+cannot, and that both halves are theirs.** Three useful things you *can* say: declaring the manager is
+`/dispatch secrets add`, and it is two questions (a name and the path to a one-line script such as
+`exec op read --no-newline "$1"`); binding it to a trigger is an edit to `triggers.json` beside that
+trigger's `flow`; and `pi-dispatch doctor` lists every declared profile, fails loudly when a trigger names
+one that is not declared, and warns when a **local** trigger binds secrets, because a local job edits the
+operator's own folder in place and a credential the agent writes into `.env` lands in their real repository.
+
 ## The forge a trigger listens to — `run.kind`
 
 A webhook trigger names its forge: `"kind"` is `github`, `gitlab`, `forgejo` or `azure`. Everything else

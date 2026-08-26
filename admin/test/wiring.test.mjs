@@ -783,3 +783,37 @@ test("dispatch_trigger_add can actually SEND every field buildTriggerEntry reads
   assert.ok(keys.includes("repository"), "an azure label/comment trigger needs run.repository");
   assert.ok(keys.includes("forge"), "and the forge that makes it required");
 });
+
+test("NO tool exposes a secrets parameter, and none can reach the overlay key either (#225)", async () => {
+  // Two doors, and both have to stay shut.
+  //
+  // The first is the trigger writers. `run.secrets` binds live vault credentials to a job, which is the
+  // plainest possible "capability the model would GAIN" -- the test index.ts already applies to run.image
+  // and run.resume. Structural, like the replicas absence above.
+  //
+  // A `secretsProfile` parameter is absent too, and for a reason worth writing down rather than treating
+  // as an oversight: parseTriggers refuses a profile that resolves nothing, and no tool can write
+  // `run.secrets`, so a model-callable profile picker could not produce a valid trigger even once. It
+  // would be a control that looks like a grant and is only ever an error.
+  const { calls } = await loadRegistered();
+  for (const tool of calls.registerTool) {
+    const keys = Object.keys(tool.parameters?.properties ?? {});
+    for (const forbidden of ["secrets", "secretsProfile", "secretProfiles"]) {
+      assert.equal(keys.includes(forbidden), false, `${tool.name} must expose no ${forbidden} parameter (got ${keys.join(", ")})`);
+    }
+  }
+
+  // The second door is `dispatch_set`, whose `key` is an open string narrowed at runtime against
+  // KNOWN_KEYS. `secretProfiles` maps a name to an absolute path the worker EXECUTES, so its absence from
+  // that array is the only thing between the model and a host exec path. OPERATOR_ONLY_KEYS exists so the
+  // omission has a name; this asserts the two sets never overlap.
+  const { KNOWN_KEYS, OPERATOR_ONLY_KEYS } = await import("@edgehero/pi-dispatch/runtime-settings");
+  assert.ok(OPERATOR_ONLY_KEYS.includes("secretProfiles"));
+  for (const key of OPERATOR_ONLY_KEYS) {
+    assert.equal(KNOWN_KEYS.includes(key), false, `${key} must stay out of KNOWN_KEYS, or dispatch_set can set it`);
+  }
+
+  // And the tool's own description must not advertise it either: the description is what the model reads.
+  const set = toolByName(calls, "dispatch_set");
+  assert.equal(/secretProfiles/.test(set.description ?? ""), false);
+});

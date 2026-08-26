@@ -1167,6 +1167,16 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     keeps("issue text, file contents, tool output, the agent's own reasoning");
     keeps("replayed into the next job on the same branch; forks never resume");
   }
+  // The sharpest disclosure on this panel, and it belongs where an operator is already reading the trust
+  // model. [image] and [skills] change what the agent can DO; this changes what it can REACH. The COUNT and
+  // the profile NAME, never the references: this view renders on the operator's own host, but the same
+  // record feeds the model-callable read tool, and a reference list is the map of their vault.
+  if (t.secrets > 0) {
+    const holds = (text: string) => out.push(fitLine(styler.fg("border", "· ") + styler.fg("warning", text), inner, styler));
+    holds(`${t.secrets} vault secret(s) injected${t.secretsProfile ? ` via profile ${t.secretsProfile}` : ""}`);
+    holds("resolved on the host before the container; the job holds no vault credential");
+    holds("the agent can read them, and the forge is on the egress allowlist");
+  }
   // Stated beside the trust model rather than only in docs/replicas.md, because the multiplier is the whole
   // of what an operator needs to weigh: N replicas is N HONEST budget reservations, not a bypass, so the
   // daily/weekly/monthly caps stay the ceiling and simply divide by N (CONST-BUDGET-BEFORE-TOKENS).

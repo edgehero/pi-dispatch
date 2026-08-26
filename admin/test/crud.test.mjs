@@ -391,3 +391,66 @@ test("addTrigger: a gitlab MR trigger's action words are gitlab's, and github's 
   assert.equal(read(path2).triggers.length, 0, "a github action word on a gitlab trigger must not be written");
   assert.ok(bad.notes.some((n) => /rejected/.test(n.m)), "and the operator is told why");
 });
+
+// --- /dispatch secrets: declaring a resolver profile (REQ-TRIGGER-SECRETS, issue #225) ---
+
+test("declaring a profile writes the overlay only after a confirm showing the EXACT bytes", async () => {
+  // The deployment pointer's discipline: this file redirects what the worker EXECUTES, so the operator
+  // approves the thing itself rather than a summary of it.
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const files = {};
+  const fs = {
+    readFileSync: (p) => {
+      if (!(p in files)) { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; }
+      return files[p];
+    },
+    writeFileSync: (p, d) => (files[p] = d),
+    renameSync: (a, b) => { files[b] = files[a]; delete files[a]; },
+    mkdirSync: () => {},
+  };
+  const shown = [];
+  const notes = [];
+  const ctx = { ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "/opt/pi/resolve.sh"), confirm: async (_t, m) => (shown.push(m), true), notify: () => {} } };
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add"], { fs });
+
+  assert.match(shown[0], /"secretProfiles"/, "the exact JSON to be written is shown");
+  assert.match(shown[0], /prod/);
+  assert.match(shown[0], /EXECUTES this script/, "the operator is told what they are granting");
+  assert.match(shown[0], /PI_SECRET_RESOLVER_ROOTS/, "and that the worker still has to admit it");
+  assert.deepEqual(JSON.parse(files["/s/settings.json"]), { secretProfiles: { prod: "/opt/pi/resolve.sh" } });
+  assert.ok(notes.some((n) => /triggers\.json/.test(n)), "and the operator is told binding it is still a file edit");
+});
+
+test("declining the confirm writes nothing at all", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  let wrote = false;
+  const fs = {
+    readFileSync: () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; },
+    writeFileSync: () => (wrote = true),
+    renameSync: () => (wrote = true),
+    mkdirSync: () => {},
+  };
+  const ctx = { ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "/opt/pi/resolve.sh"), confirm: async () => false, notify: () => {} } };
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, () => {}, ["add"], { fs });
+  assert.equal(wrote, false);
+});
+
+test("a relative resolver path is refused before any dialog approves it", async () => {
+  // resolveEnvSetup's reason, restated where the operator meets it: a service manager's working directory
+  // is not a login shell's, so a relative path is a different file on every host.
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const notes = [];
+  let confirmed = false;
+  const ctx = { ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "relative/resolve.sh"), confirm: async () => (confirmed = true), notify: () => {} } };
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add"]);
+  assert.equal(confirmed, false, "it must never reach the confirm");
+  assert.ok(notes.some((n) => /ABSOLUTE/.test(n)));
+});
+
+test("a profile name carrying a list separator is refused -- it could not round-trip its declaration", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const notes = [];
+  const ctx = { ui: { input: async () => "pro,d", confirm: async () => assert.fail("must not reach the confirm"), notify: () => {} } };
+  await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add"]);
+  assert.ok(notes.some((n) => /letters, digits/.test(n)));
+});
