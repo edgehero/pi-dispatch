@@ -242,3 +242,16 @@ test("a mixed group routes per rule: the flow label rule still emits a byte-iden
 	assert.equal("command" in r.job, false, "a flow job grows no command key -- its enqueued bytes must not change");
 	assert.deepEqual(Object.keys(r.job), ["repo", "target", "flow", "trigger"]);
 });
+
+// --- run.replicas rides the matched rule onto the job (REQ-REPLICA-RUNS, #187) ---
+
+test("forgejo: replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
+	const t = { ...triggersRaw, label: [{ ...triggersRaw.label[0], replicas: 2 }] };
+	const r = filterForgejo("issues", parseForgejoSubset(issuePayload()), t, knownFlows, SELF_ID, true, "fj-9");
+	assert.equal(r.job.replicas, 2);
+	assert.equal("replicas" in r.job.trigger, false);
+});
+
+test("forgejo: an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
+	assert.equal("replicas" in run("issues", issuePayload()).job, false);
+});

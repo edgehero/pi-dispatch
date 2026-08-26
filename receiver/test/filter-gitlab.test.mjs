@@ -278,3 +278,19 @@ test("a mixed group routes per rule: the flow label rule still emits a byte-iden
 	assert.equal("command" in r.job, false, "a flow job grows no command key -- its enqueued bytes must not change");
 	assert.deepEqual(Object.keys(r.job), ["repo", "projectId", "target", "flow", "trigger"]);
 });
+
+// --- run.replicas rides the matched rule onto the job (REQ-REPLICA-RUNS, #187) ---
+
+test("gitlab: replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
+	// receiver.mjs reads job.replicas to decide how many times to enqueue. Inside `trigger` it would be
+	// copied verbatim into /job/event.json instead, where a count of jobs to create is not a fact about the
+	// delivery -- and the fanout would silently be one, which is the shape this whole feature exists to avoid.
+	const t = { ...triggers, label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", replicas: 2 }] };
+	const r = filterGitLab(parseGitLabSubset(issuePayload()), t, knownFlows, SELF_ID, true, "wh-9");
+	assert.equal(r.job.replicas, 2);
+	assert.equal("replicas" in r.job.trigger, false);
+});
+
+test("gitlab: an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
+	assert.equal("replicas" in run(issuePayload()).job, false);
+});

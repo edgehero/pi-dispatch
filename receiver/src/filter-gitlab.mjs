@@ -111,6 +111,10 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
+		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
+		// unflagged job's data must stay byte-identical to today's.
+		...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
 		trigger: {
 			event: kind,
 			action: subset.action,
@@ -145,6 +149,7 @@ function routeLabel(subset, triggers, targetType) {
 		skillsDir: rule.skillsDir,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(added, rule.predicate) },
 		target: buildTarget(subset, targetType),
 	};
@@ -205,6 +210,7 @@ function mrResult(subset, rule, matched) {
 		skillsDir: rule.skillsDir,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		replicas: rule.replicas,
 		matched,
 		target: buildTarget(subset, "pull_request"),
 	};
@@ -251,6 +257,7 @@ function routeNote(subset, triggers, knownFlows) {
 		skillsDir: triggers.comment.skillsDir,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
+		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		target: buildTarget(subset, targetType),
 		// The invoking comment rides the job as DATA (CONST-ISSUE-TEXT-IS-DATA). No author_association

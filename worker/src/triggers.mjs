@@ -278,8 +278,9 @@ function validatePackagesFlag(run, at, path) {
  * had. `validateReplicas` states the argument in one line and it applies verbatim here: a field accepted
  * where it does nothing is how an operator comes to trust one that does nothing.
  *
- * "NOT YET COVERED", not impossible -- validateReplicas' own distinction, kept because the two are
- * different facts and an operator planning work needs the right one. The local key already exists and is
+ * "NOT YET COVERED", not impossible -- a distinction this file keeps because the two are different facts
+ * and an operator planning work needs the right one. `run.replicas` carried the same wording for the same
+ * reason until #187 closed its gap; this one is still open, which is why the phrasing outlived it. The local key already exists and is
  * the strongest key in this feature: session-key.mjs keys a cron job on its scheduler id, which is
  * operator-authored, unique across the file, stable across fires, and chosen by nobody untrusted. Nothing
  * reaches it. Wiring `resolveSession` into the local path is a feature, and this line is what stops the
@@ -427,8 +428,9 @@ const INSTRUCTIONS_MAX = 2000;
  * `run.instructions` (issue #60): one line of operator standing text, rendered into the USER prompt's
  * envelope above the fenced data region.
  *
- * REFUSED on cron, and it is a DIFFERENT refusal from run.replicas' "not yet covered": cron already has
- * an operator-authored free-text field landing in the same region of the same file. A local job's prompt
+ * REFUSED on cron, and it is a DIFFERENT refusal from the "not yet covered" shape (run.resume's, since
+ * #187 retired run.replicas'): cron already has an operator-authored free-text field landing in the same
+ * region of the same file. A local job's prompt
  * is `flow hint + pointer + run.task` with no envelope, no data heading and no fence (prepare.mjs), so
  * there is no "standing" region distinct from the task for a second field to occupy. Two fields writing
  * one region with an undefined combination order is worse than a field that does nothing, because both
@@ -597,12 +599,12 @@ function validateRepository(run, onType, at, path) {
  *
  * WHY EACH REFUSAL:
  *   - a LOCAL (cron) trigger: its `/workspace` IS the operator's folder, bind-mounted read-write and edited
- *     in place, so two replicas would stomp each other's working tree with no gate and no undo. A github
+ *     in place, so two replicas would stomp each other's working tree with no gate and no undo. A forge
  *     job gets its own `mkdtemp`'d clone, which is the entire reason this is safe there and not here.
- *     Checked FIRST so a cron trigger gets that reason rather than the forge-coverage one below.
- *   - a non-github forge: every forge mints its branch through the same `issueBranch`, so extending this is
- *     mechanical -- but it is not done, and the message says "not yet covered" rather than "impossible"
- *     because those are different facts and an operator planning work needs the right one.
+ *     Checked FIRST, and since #187 that ordering carries the whole kind gate rather than merely picking
+ *     which reason a cron trigger hears. Every forge mints its branch through the same `issueBranch`, so
+ *     anything that is not `local` is now allowed; move this below the range check and a cron entry
+ *     carrying `replicas: 2` would be ACCEPTED, not refused with a different message.
  *   - a non-integer, `< 2`, or `> REPLICAS_MAX`. `1` is REFUSED rather than accepted: a one-member replica
  *     set is a field that does nothing, and this validator's whole job is to make sure nothing does nothing.
  *   - `run.resume: true`. A resumed run continues ONE lineage; replicas exist to fork it. This is the
@@ -623,9 +625,6 @@ function validateReplicas(run, at, path) {
 	if (replicas === undefined) return undefined;
 	if (run.kind === "local") {
 		throw configError(`${at}: run.replicas is not available on a cron trigger -- a local job's /workspace IS the operator's folder, bind-mounted read-write, so two replicas would edit one working tree with no gate and no undo: ${path}`);
-	}
-	if (run.kind !== "github") {
-		throw configError(`${at}: run.replicas is not yet covered for ${run.kind} triggers (github only in this version); every forge mints its branch the same way, so this is a gap to close, not a limit: ${path}`);
 	}
 	if (!Number.isInteger(replicas) || replicas < 2 || replicas > REPLICAS_MAX) {
 		throw configError(`${at}: run.replicas must be an integer between 2 and ${REPLICAS_MAX} when present -- ${REPLICAS_MAX} is the ceiling because PI_CONCURRENCY defaults to 3, so a further replica would queue instead of racing, and 1 is refused because a one-member replica set is a flag that does nothing (got ${JSON.stringify(replicas)}): ${path}`);

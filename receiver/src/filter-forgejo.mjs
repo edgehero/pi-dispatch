@@ -118,6 +118,10 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
+		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
+		// unflagged job's data must stay byte-identical to today's.
+		...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
 		trigger: {
 			event: eventName,
 			// Forgejo's OWN word, not our translation of it. The run record should say what the forge said.
@@ -147,6 +151,7 @@ function routeIssueLabel(subset, triggers) {
 		skillsDir: rule.skillsDir,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.issue?.number, title: subset.issue?.title, body: subset.issue?.body },
 	};
@@ -192,6 +197,7 @@ function routeComment(subset, triggers, knownFlows) {
 		skillsDir: triggers.comment.skillsDir,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
+		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// The invoking comment rides on the trigger. No author_association: Forgejo has none, and the
 		// authority that admitted this comment was resolved from the API, not read off the body.
@@ -219,6 +225,7 @@ function routePullRequest(subset, triggers, action) {
 			skillsDir: rule.skillsDir,
 			instructions: rule.instructions,
 			resume: rule.resume,
+			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {
 				type: "pull_request",

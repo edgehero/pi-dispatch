@@ -116,6 +116,10 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		...(resolved.skillsDir !== undefined ? { skillsDir: resolved.skillsDir } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
+		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
+		// reasons filter.mjs states in full: receiver.mjs reads this to decide how many times to enqueue, and an
+		// unflagged job's data must stay byte-identical to today's.
+		...(resolved.replicas !== undefined ? { replicas: resolved.replicas } : {}),
 		trigger: {
 			event,
 			action: resolved.action,
@@ -179,6 +183,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		skillsDir: rule.skillsDir,
 		instructions: rule.instructions,
 		resume: rule.resume,
+		replicas: rule.replicas,
 		matched: { index: rule.index, type: "label", label: matchedLabel(L, rule.predicate) },
 		target: { type: "issue", number: subset.target?.number, title: subset.target?.title, body: subset.target?.body },
 	};
@@ -219,6 +224,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		skillsDir: triggers.comment.skillsDir,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
+		replicas: triggers.comment.replicas,
 		matched: { index: triggers.comment.index, type: "comment", phrase },
 		// No author_association: Azure has none, and the authority that admitted this comment was resolved
 		// from the graph, not read off the body.
@@ -248,6 +254,7 @@ function routePullRequest(subset, triggers, action) {
 			skillsDir: rule.skillsDir,
 			instructions: rule.instructions,
 			resume: rule.resume,
+			replicas: rule.replicas,
 			matched: { index: rule.index, type: "pull_request", action },
 			target: {
 				type: "pull_request",

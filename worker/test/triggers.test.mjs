@@ -14,6 +14,23 @@ const COMMENT = { on: { type: "comment", phrase: "@pi" }, run: { kind: "github",
 const PR_LABELED = { on: { type: "pull_request", action: ["labeled"], any: ["pi:review"] }, run: { kind: "github", flow: "review" } };
 const PR_AUTO = { on: { type: "pull_request", action: ["opened", "synchronize"] }, run: { kind: "github", flow: "review" } };
 
+// The three forges #187 brought into run.replicas. Spelled out rather than derived from LABEL/COMMENT/
+// PR_LABELED by a `kind` swap, because a swap does not survive contact with the loader: every forge has its
+// OWN pull_request action vocabulary (triggers.mjs PR_ACTIONS), azure refuses a label predicate on a
+// pull_request rule outright, and an azure label/comment rule must carry run.repository. A swapped fixture
+// fails for those reasons instead of the one under test, which reads as the change having broken something.
+const FORGE_ENTRIES = [
+	{ forge: "gitlab", type: "label", entry: { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "frontend-fix" } } },
+	{ forge: "gitlab", type: "comment", entry: { on: { type: "comment", phrase: "@pi" }, run: { kind: "gitlab", flow: "fix" } } },
+	{ forge: "gitlab", type: "pull_request", entry: { on: { type: "pull_request", action: ["open", "update"] }, run: { kind: "gitlab", flow: "review" } } },
+	{ forge: "forgejo", type: "label", entry: { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "forgejo", flow: "frontend-fix" } } },
+	{ forge: "forgejo", type: "comment", entry: { on: { type: "comment", phrase: "@pi" }, run: { kind: "forgejo", flow: "fix" } } },
+	{ forge: "forgejo", type: "pull_request", entry: { on: { type: "pull_request", action: ["label_updated"], any: ["pi:review"] }, run: { kind: "forgejo", flow: "review" } } },
+	{ forge: "azure", type: "label", entry: { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "azure", flow: "frontend-fix", repository: "repo" } } },
+	{ forge: "azure", type: "comment", entry: { on: { type: "comment", phrase: "@pi" }, run: { kind: "azure", flow: "fix", repository: "repo" } } },
+	{ forge: "azure", type: "pull_request", entry: { on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review" } } },
+];
+
 test("invalid JSON is a config error naming the path", () => {
 	assert.throws(() => parseTriggers("{ not json", PATH), (e) => isConfigError(e) && e.message.includes(PATH));
 });
@@ -489,7 +506,8 @@ test("run.resume: true on a cron trigger refuses at load, naming the field and t
 		(e) => isConfigError(e) && /run\.resume/.test(e.message) && /cron trigger/.test(e.message) && e.message.includes("nightly-tidy") && e.message.includes(PATH),
 		"a cron trigger that armed run.resume must fail loud at load, naming itself",
 	);
-	// NOT YET COVERED, not impossible -- validateReplicas' distinction, and the two are different facts.
+	// NOT YET COVERED, not impossible, and the two are different facts. run.replicas carried this same
+	// wording until #187 closed its gap; run.resume's is still open, which is why the phrasing outlived it.
 	// The local key exists (session-key.mjs keys a cron job on its scheduler id); nothing reaches it.
 	assert.throws(() => parse([withRun(CRON, { resume: true })]), (e) => /not yet covered/.test(e.message) && !/never|impossible/.test(e.message));
 });
@@ -563,25 +581,33 @@ test("run.replicas on a cron trigger refuses, naming the shared working tree", (
 		() => parse([withRun(CRON, { replicas: 2 })]),
 		(e) => isConfigError(e) && /cron trigger/.test(e.message) && /working tree/.test(e.message) && e.message.includes("nightly-tidy"),
 	);
+	// The sibling "not yet covered" refusal is gone (#187), so this message must stand on the hazard alone.
+	// It is also the ONLY kind gate left: reorder it below the range check and `replicas: 2` on a cron entry
+	// would be ACCEPTED rather than refused, which is why the ordering is pinned here and not just commented.
+	assert.throws(() => parse([withRun(CRON, { replicas: 2 })]), (e) => !/not yet covered/.test(e.message));
+	assert.throws(() => parse([withRun(CRON, { replicas: 99 })]), (e) => /cron trigger/.test(e.message) && !/between 2 and/.test(e.message));
 });
 
-test("run.replicas on a non-github forge refuses as NOT YET COVERED, not as impossible", () => {
-	// Every forge mints its branch through the same issueBranch, so this is a gap to close. The message has
-	// to say so: an operator planning work needs "not yet" rather than "never".
-	for (const kind of ["gitlab", "forgejo", "azure"]) {
-		const entry = kind === "azure" ? withRun(LABEL, { kind, replicas: 2, repository: "repo" }) : withRun(LABEL, { kind, replicas: 2 });
-		assert.throws(
-			() => parse([entry]),
-			(e) => isConfigError(e) && e.message.includes(kind) && /not yet covered/.test(e.message),
-			`${kind} must refuse and name itself`,
-		);
+test("run.replicas is accepted on every FORGE and every webhook kind (#187)", () => {
+	// The refusal this replaces said "not yet covered", which was the honest word for a gap rather than a
+	// limit. Closing it is what #187 is. Asserted across the whole 3x3 rather than one representative,
+	// because the field is validated once but REACHED through three separate normalizers per forge, and a
+	// normalizer that forgot to call the validator would pass two and fail exactly one.
+	for (const { forge, type, entry } of FORGE_ENTRIES) {
+		for (const n of [2, 3]) {
+			const [t] = parse([withRun(entry, { replicas: n })]);
+			assert.equal(t.run.replicas, n, `${forge} ${type} must carry replicas: ${n}`);
+			assert.equal(t.run.kind, forge, `${forge} ${type} must keep its kind`);
+		}
 	}
 });
 
 test("run.replicas beside run.resume refuses, naming BOTH fields", () => {
 	// The refusal session-key.mjs depends on to keep calling issueBranch with one argument. Relaxing it
 	// makes every replica of an issue resolve the same key, share one transcript and fight the writer lock.
-	for (const entry of [LABEL, COMMENT, PR_LABELED]) {
+	// Swept across every forge since #187: session-key.mjs gates on isForgeKind, not on github, so the
+	// coupling it documents is now four couplings and a refusal that held on one of them is not enough.
+	for (const entry of [LABEL, COMMENT, PR_LABELED, ...FORGE_ENTRIES.map((f) => f.entry)]) {
 		assert.throws(
 			() => parse([withRun(entry, { replicas: 2, resume: true })]),
 			(e) => isConfigError(e) && /run\.replicas/.test(e.message) && /run\.resume/.test(e.message),
@@ -597,7 +623,7 @@ test("run.replicas outside 2..3, or not an integer, refuses at load", () => {
 	// `1` is refused rather than accepted-and-ignored: a one-member replica set is a field that does
 	// nothing, and a field that does nothing is one an operator sets and then trusts.
 	for (const bad of [1, 0, -1, 4, 10, "2", 2.5, null, true, {}, []]) {
-		for (const entry of [LABEL, COMMENT, PR_LABELED]) {
+		for (const entry of [LABEL, COMMENT, PR_LABELED, ...FORGE_ENTRIES.map((f) => f.entry)]) {
 			assert.throws(
 				() => parse([withRun(entry, { replicas: bad })]),
 				/run\.replicas must be an integer between 2 and 3/,
@@ -662,7 +688,8 @@ test("run.instructions absent stays ABSENT -- an unflagged trigger is byte-ident
 });
 
 test("run.instructions on a CRON trigger is refused, and the message names run.task", () => {
-	// A different refusal from run.replicas' "not yet covered": cron ALREADY has operator-authored free
+	// A different refusal from the "not yet covered" shape (run.resume's, since #187 retired run.replicas'):
+	// cron ALREADY has operator-authored free
 	// text landing in the same region of the same file, and a local prompt has no envelope for a second
 	// field to occupy. Two fields writing one region with an undefined order would both appear to work.
 	try {

@@ -404,6 +404,56 @@ test("two replicas of one delivery get two jobIds and two dedup ids, and neither
 	assert.equal("replica" in seen[0].data.trigger, false, "an execution knob must not leak into the descriptive trigger");
 });
 
+test("every forge suffixes BOTH dedup layers, and the pull-request separator rides the semantic key (#187)", async () => {
+	// The github test above proves the mechanism; this proves it is not a github mechanism. Two things are
+	// forge-specific and both are exercised here: the jobId PREFIX comes from the forge table, and the
+	// semantic key's TARGET SEPARATOR does too -- `!` where a forge numbers merge/pull requests in their own
+	// sequence, `#` where one sequence serves both. A replica suffix that landed before the separator, or a
+	// forge whose prefix was forgotten, would still produce two distinct strings and pass a weaker test.
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	const cases = [
+		{ kind: "gitlab", prefix: "gl-", target: { type: "issue", number: 7, title: "t", body: "b" }, key: "owner/repo#7:fix" },
+		{ kind: "gitlab", prefix: "gl-", target: { type: "pull_request", number: 5, title: "t", body: "b" }, key: "owner/repo!5:fix" },
+		{ kind: "forgejo", prefix: "fj-", target: { type: "pull_request", number: 5, title: "t", body: "b" }, key: "owner/repo#5:fix" },
+		{ kind: "azure", prefix: "az-", target: { type: "pull_request", number: 5, title: "t", body: "b" }, key: "owner/repo!5:fix" },
+	];
+
+	for (const { kind, prefix, target, key } of cases) {
+		const seen = [];
+		const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+		const base = { repo: "owner/repo", projectId: 11, target, flow: "fix", trigger: { deliveryId: "d1", sender: { id: 42 } }, replicas: 2 };
+
+		await enqueueForgeJob(fakeQueue, kind, { ...base, replica: 1 });
+		await enqueueForgeJob(fakeQueue, kind, { ...base, replica: 2 });
+
+		assert.deepEqual(seen.map((x) => x.opts.jobId), [`${prefix}d1-r1`, `${prefix}d1-r2`], `${kind} ${target.type} jobIds`);
+		assert.deepEqual(seen.map((x) => x.opts.deduplication.id), [`${key}:r1`, `${key}:r2`], `${kind} ${target.type} dedup ids`);
+		assert.deepEqual(seen.map((x) => x.data.replica), [1, 2], `${kind} ${target.type} replica indices`);
+		assert.deepEqual(seen.map((x) => x.data.replicas), [2, 2], `${kind} ${target.type} set size`);
+		assert.equal("replica" in seen[0].data.trigger, false, `${kind}: an execution knob must not leak into the trigger`);
+	}
+});
+
+test("an unflagged forge job on every kind carries NO replica keys -- byte-identical to before the feature", async () => {
+	// The other half of the guarantee, and the one a fanout bug breaks silently: spread `replica` in
+	// unconditionally and every ordinary job on that forge changes shape, jobId and dedup id at once.
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	for (const kind of ["gitlab", "forgejo", "azure"]) {
+		const seen = [];
+		const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+		await enqueueForgeJob(fakeQueue, kind, {
+			repo: "owner/repo",
+			target: { type: "issue", number: 7, title: "t", body: "b" },
+			flow: "fix",
+			trigger: { deliveryId: "d1", sender: { id: 42 } },
+		});
+		assert.equal("replica" in seen[0].data, false, `${kind} must emit no replica key`);
+		assert.equal("replicas" in seen[0].data, false, `${kind} must emit no replicas key`);
+		assert.equal(seen[0].opts.jobId.endsWith("-r1"), false, `${kind} jobId must not gain a suffix`);
+		assert.equal(seen[0].opts.deduplication.id, "owner/repo#7:fix", `${kind} dedup id must be the pre-feature string`);
+	}
+});
+
 test("a REDELIVERY of one replica still coalesces -- the window dedups re-deliveries, never the replicas", async () => {
 	const { enqueueGitHubJob } = await import("../src/queue.mjs");
 	const seen = [];

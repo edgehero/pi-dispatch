@@ -320,3 +320,16 @@ test("a flow rule still emits a byte-identical flow job -- no command key, same 
 	assert.equal("command" in r.job, false, "a flow job grows no command key");
 	assert.deepEqual(Object.keys(r.job), ["repo", "azure", "target", "flow", "trigger"]);
 });
+
+// --- run.replicas rides the matched rule onto the job (REQ-REPLICA-RUNS, #187) ---
+
+test("azure: replicas rides the matched rule onto the job, at JOB level and never inside trigger", () => {
+	const t = { ...triggers, label: [{ ...triggers.label[0], replicas: 2 }] };
+	const r = filterAzure(parseAzureSubset(workItem()), t, knownFlows, SELF, true, "delivery-guid");
+	assert.equal(r.job.replicas, 2);
+	assert.equal("replicas" in r.job.trigger, false);
+});
+
+test("azure: an unflagged rule emits no replicas key at all -- absent, not present-and-undefined", () => {
+	assert.equal("replicas" in run(workItem()).job, false);
+});
