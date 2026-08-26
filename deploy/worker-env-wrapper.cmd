@@ -72,6 +72,14 @@ if defined ENV_SETUP (
   )
 )
 
+REM WEAKER THAN THE .sh TWIN ON SIGNALS, deliberately and stated rather than discovered (issue #221).
+REM cmd has no `trap`, so there is no wrapper-level handling of a stop that arrives while `.env` is being
+REM read or while the setup script above is still running: whatever the service manager does to the tree
+REM is what happens. nssm stops with a console event to the process group (AppStopMethodConsole), so the
+REM worker is reached directly rather than through this file, which is why the .sh twin's forwarding
+REM problem has no equivalent here. The asymmetry is recorded in DES-SERVICE-ENV-SETUP-SEAM and is not
+REM closed.
+REM
 REM The argv runs verbatim -- absolute node, absolute script, composed by `pi-dispatch service` (see
 REM the .sh twin for the whole contract).
 %*

@@ -36,6 +36,34 @@ if [ "$#" -eq 0 ]; then
 	exit 1
 fi
 
+# STOP HANDLING IS ARMED HERE, above everything below that can block (issue #221). It closes two windows,
+# both of which used to swallow a stop in silence.
+#
+# Until this line TERM/INT carry their DEFAULT disposition, and the sourcing below can take arbitrarily
+# long: PI_ENV_SETUP is an operator's secrets manager, so docs/secrets.md's own worked example makes a
+# network round trip inside it. A stop landing there killed this shell where it stood, mid-preparation,
+# with nothing anywhere saying the environment had been half-built. That is reachable from this project's
+# own CLI, not just from the daemon: `pi-dispatch service stop` on macOS is `launchctl kill SIGTERM` at
+# this pid.
+#
+# The other window is two instructions wide, and is closed by the re-send after `child=$!` below. The
+# handler is a FUNCTION rather than a trap string because it is installed twice -- here, and again after
+# the sourcing -- and one behaviour spelled out in two places is one behaviour that can drift.
+signaled=0
+child=
+wrapper_on_stop() {
+	signaled=1
+	# `child` is empty until the fork below has been assigned, and `kill -TERM ""` kills nothing and
+	# fails silently, so a stop arriving before then has no pid to reach. It is not lost: the re-send
+	# after `child=$!` re-delivers it, and the launch gate refuses to start at all if nothing was
+	# started yet.
+	[ -n "$child" ] && kill -TERM "$child" 2>/dev/null
+	# Never leave a nonzero status behind. `rc=$?` is read immediately after the `wait` this interrupts,
+	# and the double wait at the bottom keys on rc >= 128.
+	return 0
+}
+trap wrapper_on_stop TERM INT
+
 # The env-setup seam (issue #209): `pi-dispatch service render|install --env-setup <path>` puts an
 # operator-typed path here -- the plist's EnvironmentVariables dict on macOS, nssm's AppEnvironmentExtra
 # on Windows -- so a secrets manager can fill this process's environment without anyone hand-editing a
@@ -74,6 +102,25 @@ if [ -n "$env_setup" ]; then
 	set +a
 fi
 
+# RE-ASSERTED after the sourcing, and this is not belt-and-braces. A sourced script runs in THIS shell,
+# so a `trap ... TERM` inside one REPLACES the handler above and the drain silently disappears -- a
+# manager's cleanup helper does exactly that. One line restores it. What it cannot undo is a script that
+# IGNORES TERM (`trap '' TERM`): a signal discarded while it was ignored is already gone, and the child
+# forked below would inherit SIG_IGN and be unable to trap TERM at all. That is why docs/secrets.md now
+# tells operators not to touch signals in a setup script.
+trap wrapper_on_stop TERM INT
+
+# A stop that arrived while the environment was being prepared is honoured by NOT STARTING. Launching now
+# would hand the service manager a worker it has already asked to go away: it would reserve a budget slot
+# and take a job, and then need a drain nobody is waiting for. Exit 0 because 0 is the only code launchd's
+# KeepAlive/SuccessfulExit=false leaves stopped -- the same reason the exit-2 conversion at the bottom
+# exists. Not 2, because nothing was refused; not 1, because nothing failed; the manager's own instruction
+# was carried out, and this says so rather than exiting mute.
+if [ "$signaled" -eq 1 ]; then
+	echo "worker-env-wrapper: stopped before the worker started -- a stop signal arrived while the environment was being prepared, so the command was never launched; exiting 0 (nothing to restart)" >&2
+	exit 0
+fi
+
 # `exec` is deliberately GONE here (it used to hand this shell's pid straight to node): intercepting
 # the exit code needs a parent still alive after node exits. launchd's KeepAlive/SuccessfulExit=false
 # relaunches ANY nonzero exit -- including EXIT_POLICY (2, worker/src/exit-code.mjs), the determinate
@@ -81,13 +128,19 @@ fi
 # deliberately never retry. A relaunch loop against a paid provider is a bill, so the conversion at
 # the bottom turns exit 2 into the clean exit KeepAlive leaves stopped.
 #
-# SIGTERM still reaches node without exec: the trap forwards TERM/INT to the child, and `wait` (unlike
-# a foreground command in sh, which blocks trap delivery) is interruptible by a trapped signal, so the
-# forwarding is immediate and node gets its full graceful drain.
-signaled=0
-trap 'signaled=1; kill -TERM "$child" 2>/dev/null' TERM INT
+# SIGTERM still reaches node without exec: the handler armed at the top forwards TERM/INT to the child,
+# and `wait` (unlike a foreground command in sh, which blocks trap delivery) is interruptible by a trapped
+# signal, so the forwarding is immediate and node gets its full graceful drain.
 "$@" &
 child=$!
+# THE FORK WINDOW (issue #221). `$!` is only readable in the parent AFTER the fork, so between the two
+# lines above a child exists and its pid does not. A stop landing there ran the handler with nothing to
+# forward to, set `signaled`, and was then never looked at again -- so this wrapper waited out the
+# command's ENTIRE natural lifetime while the service manager believed it had asked it to stop. Re-sending
+# once the pid is known costs one `[` on the healthy path and is the whole difference between a graceful
+# drain and a hang as long as the job. Issue #207 found this same drop through the test that saw it and
+# fixed only the test; #221 is the same window firing through a different one.
+[ "$signaled" -eq 1 ] && kill -TERM "$child" 2>/dev/null
 wait "$child"
 rc=$?
 # The double wait is load-bearing: a trapped signal interrupts the FIRST wait early (rc = 128+signum)
