@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-admin",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Operator console (a pi extension) + skill for pi-dispatch: run the pi coding agent as a self-hosted service. A /dispatch TUI for the queue, spend caps, run history, editable GitHub, GitLab, Forgejo and Azure DevOps triggers (cron/label/comment/PR/MR/work item), and scheduled pause windows — plus AI-operable, human-confirmed controls. Runs against a live pi-dispatch deployment.",
   "keywords": [
     "pi-package",
