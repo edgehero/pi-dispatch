@@ -15,8 +15,14 @@
  * issue #99) -- an arm whose endpoint does not exist has no guard to arm, and the invariant that matters is
  * that the two are decided by the SAME property, never separately.
  *
- * The receiver resolves identity ONLY. It holds no per-repo tokens: minting a scoped token is the
- * worker's job, per container, per job (CONST-TOKEN-SCOPED-PER-JOB).
+ * The receiver holds no JOB credentials. Minting a job's scoped token is the worker's business, per
+ * container, per job (CONST-TOKEN-SCOPED-PER-JOB), and that claim keeps its full force. What the
+ * receiver ALSO uses, since issue #231, is a per-close-delivery token for a permission QUESTION --
+ * does the account that closed this item hold write access (CONST-TRIGGER-AUTHOR-GATE's close arm).
+ * On the App source that token is minted repo-scoped AND narrowed to metadata:read (the mint passes
+ * the narrowing through, so a leak of it can write nothing); on pat/gh it is the operator's own
+ * standing token, already resident in this process's env, used for one read. Never a job credential
+ * on any source: no container ever receives it, and it exists only for the lookup it served.
  *
  * DES-ADMIN-VIA-PI-EXTENSION: this process exposes exactly one surface, the webhook handler. There is no
  * admin, dashboard, or admin-extension route here -- the admin surface is a pi extension in the
@@ -36,6 +42,7 @@ import { resolveAzureSelfId } from "@edgehero/pi-dispatch/azure-identity";
 import { makeResolveAuthority } from "./gitlab-members.mjs";
 import { makeResolveForgejoAuthority } from "./forgejo-members.mjs";
 import { makeResolveAzureAuthority } from "./azure-members.mjs";
+import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
 
@@ -55,6 +62,7 @@ export async function startReceiver(
 		makeResolveForgejoAuthority: makeResolveForgejoAuthorityFn = makeResolveForgejoAuthority,
 		resolveAzureSelfId: resolveAzureSelfIdFn = resolveAzureSelfId,
 		makeResolveAzureAuthority: makeResolveAzureAuthorityFn = makeResolveAzureAuthority,
+		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
 	} = {},
 ) {
 	// Single-object log line: `makeReceiver` calls `log?.({ event, ... })`, so the sink takes ONE object.
@@ -74,12 +82,25 @@ export async function startReceiver(
 	// harness's own completion comments would re-trigger jobs forever. Read that as: never make one of these
 	// two conditions unconditional without the other.
 	let selfId;
+	let resolveAuthority;
 	if (cfg.servesGithub) {
 		// HARD-FAIL identity resolution -- NO try/catch. A throw here (absent/bad github auth, unresolvable
 		// id) propagates and the server below is never created: without selfId the bot-loop guard cannot
 		// run, so refusing to boot is the only safe outcome.
-		({ selfId } = await makeAuth(cfg.github));
+		//
+		// The WHOLE auth object is kept, not just selfId: the closer resolver below mints its per-delivery
+		// metadata-read token through this same object (issue #231), so identity and mint capability stay
+		// one credential decision -- an arm that resolved its identity is exactly the arm that can answer
+		// a permission question. This is also why the github handler's missing-resolver 503 is unreachable
+		// in a wired receiver: a boot that fails here mounts no `/` at all.
+		const auth = await makeAuth(cfg.github);
+		selfId = auth.selfId;
 		log({ event: "self_identity", id: selfId, source: cfg.github.source });
+		// The lookup token asks the mint to narrow to metadata:read -- the App path honors it GitHub-side,
+		// so the token this process holds for the permission question cannot write even if leaked; the
+		// pat/gh sources cannot narrow (the operator's standing token is what it is, and it already lives
+		// in this process's env), which is why the header above words the claim per source.
+		resolveAuthority = makeResolveGitHubAuthorityFn({ mintToken: (job) => auth.mintToken({ ...job, permissions: { metadata: "read" } }) });
 	} else {
 		// Said out loud, because the alternative is an operator staring at a label trigger that does nothing.
 		// The two ways out are the two signals `decideServesGithub` reads, so the line names both.
@@ -137,7 +158,7 @@ export async function startReceiver(
 		};
 	}
 
-	const handler = makeReceiver({ queue, selfId, cfg, log, gitlab, forgejo, azure });
+	const handler = makeReceiver({ queue, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
 	const server = createServer(handler);
 	server.listen(cfg.port, cfg.bind, () =>
 		log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),

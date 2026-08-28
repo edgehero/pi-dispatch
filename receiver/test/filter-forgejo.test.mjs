@@ -82,7 +82,11 @@ test("synchronized fires a PR trigger -- Forgejo's spelling of synchronize", () 
 test("a recognised-but-ignored action is distinguishable from one we never heard of", () => {
 	// Two reasons because they call for two different operator responses: "that is not a trigger" versus
 	// "check your action vocabulary against your forge's".
-	for (const action of ["closed", "edited", "assigned", "reviewed", "milestoned"]) {
+	//
+	// EVOLUTION (issue #231): `closed` is no longer in this list. It sat in IGNORED_ACTIONS until close
+	// triggers made it routable; a close with nothing armed now drops `no-matching-close-trigger` (pinned
+	// below, in the close section) where it used to drop `action-not-actionable`.
+	for (const action of ["edited", "assigned", "reviewed", "milestoned"]) {
 		assert.equal(run("issues", issuePayload({ action })).reason, "action-not-actionable", action);
 	}
 	for (const action of ["banana", "", "labeled", "synchronize"]) {
@@ -93,7 +97,7 @@ test("a recognised-but-ignored action is distinguishable from one we never heard
 });
 
 test("mapAction and isRecognizedAction agree on what the map covers", () => {
-	for (const action of ["label_updated", "opened", "reopened"]) {
+	for (const action of ["label_updated", "opened", "reopened", "closed"]) {
 		assert.notEqual(mapAction("issues", action), null, `${action} maps`);
 		assert.equal(isRecognizedAction(action), true);
 	}
@@ -101,6 +105,12 @@ test("mapAction and isRecognizedAction agree on what the map covers", () => {
 	assert.equal(isRecognizedAction("label_cleared"), true, "but it IS recognised, which is why it gets its own reason");
 	assert.equal(mapAction("issues", "synchronized"), null, "synchronized is a pull_request action, not an issue one");
 	assert.notEqual(mapAction("pull_request", "synchronized"), null);
+	// `closed` moved OUT of the ignored set when issue #231 made it routable: it must map on BOTH events
+	// (the maps are selected by event name, so this is two routes sharing a spelling, not a double
+	// listing) -- were it still ignored too, the drop table would claim "ignored" for a word that routes.
+	assert.equal(mapAction("issues", "closed"), "closed");
+	assert.equal(mapAction("pull_request", "closed"), "closed");
+	assert.equal(isRecognizedAction("closed"), true);
 });
 
 // --- routing: issue #61's Gap 3 ---
@@ -266,4 +276,95 @@ test("secrets and secretsProfile ride the JOB from the matched rule, never insid
 	// would hand it the map of the operator's vault.
 	assert.equal("secrets" in r.job.trigger, false);
 	assert.equal("secretsProfile" in r.job.trigger, false);
+});
+
+// --- close triggers (issue #231): `closed` routes over the loader's split-out issue/prClose groups ---
+
+// Grouped exactly as loadReceiverConfig emits close rules: `issue` holds the on.type "issue" rules,
+// `prClose` the pull_request rules whose action list is the close word -- split from `pullRequest` at
+// load, so neither close route and neither classic route can ever read the other's rules. `number` and
+// `once` ride as the loader normalized them (absent stays undefined).
+const closeTriggersRaw = {
+	...triggersRaw,
+	issue: [
+		{ index: 4, actions: new Set(["closed"]), number: 7, once: true, flow: "wrapup" },
+		{ index: 5, actions: new Set(["closed"]), number: undefined, once: undefined, flow: "sweep" },
+	],
+	prClose: [{ index: 6, actions: new Set(["closed"]), number: undefined, once: undefined, flow: "pr-wrap" }],
+};
+const runClose = (eventName, payload, { authorized = true } = {}) =>
+	filterForgejo(eventName, parseForgejoSubset(payload), closeTriggersRaw, knownFlows, SELF_ID, authorized, "fj-1");
+
+test("an issue `closed` fires the armed close rule, and a one-shot says so on matched", () => {
+	const r = runClose("issues", issuePayload({ action: "closed" }));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "wrapup", "the number-7 rule is first in file order and names this item");
+	// `once: true` is what tells the enqueue path a disarm is owed -- lose it here and the one-shot
+	// fires forever while the file still says once.
+	assert.deepEqual(r.job.trigger.matched, { index: 4, type: "issue", action: "closed", number: 7, once: true });
+	assert.equal(r.job.trigger.action, "closed", "the record says what the forge said");
+	assert.deepEqual(r.job.target, { type: "issue", number: 7, title: "T", body: "B" });
+});
+
+test("an unnarrowed close rule takes any other item's close -- and matched carries NO once key", () => {
+	const r = runClose("issues", issuePayload({ action: "closed", issue: { number: 9, title: "T9", body: "B9", labels: [] } }));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "sweep", "the narrowed rule skipped #9; the unnarrowed one is next in file order");
+	// Absent, never present-and-undefined: a plain close rule's matched record must stay byte-identical
+	// in shape to the other routes', or every serialized job grows a key today's consumers never saw.
+	assert.deepEqual(r.job.trigger.matched, { index: 5, type: "issue", action: "closed", number: 9 });
+});
+
+test("a pull_request `closed` fires the prClose rule with a full PR target", () => {
+	const r = runClose("pull_request", prPayload({ action: "closed" }));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "pr-wrap");
+	// No `number` on a PR close's matched record, parallel to the classic PR route's -- the item number
+	// is the target's business.
+	assert.deepEqual(r.job.trigger.matched, { index: 6, type: "pull_request", action: "closed" });
+	assert.equal(r.job.target.type, "pull_request");
+	assert.equal(r.job.target.number, 12);
+	assert.equal(r.job.target.head.sha, "abc", "the flow's event.json still gets head/base, same as any PR route");
+});
+
+test("a close rule narrowed to ANOTHER item refuses under its own token", () => {
+	// `close-number-not-matched` and `no-matching-close-trigger` call for different operator responses:
+	// "your one-shot exists and a different item closed" is not "nothing is armed", and a panel must be
+	// able to tell them apart.
+	const t = { ...triggersRaw, issue: [{ index: 4, actions: new Set(["closed"]), number: 8, once: true, flow: "wrapup" }] };
+	const r = filterForgejo("issues", parseForgejoSubset(issuePayload({ action: "closed" })), t, knownFlows, SELF_ID, true, "fj-1");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "close-number-not-matched");
+});
+
+test("a `closed` with nothing armed drops `no-matching-close-trigger` -- it used to be `action-not-actionable`", () => {
+	// EVOLUTION (issue #231): `closed` sat in IGNORED_ACTIONS, so this exact delivery dropped as
+	// "recognised and deliberately ignored". Now the word routes, and the reason names what an operator
+	// should actually check: no close rule is armed for this item. `triggersRaw` has no issue/prClose
+	// groups at all, which is also the every-deployment-before-this-feature shape.
+	assert.equal(run("issues", issuePayload({ action: "closed" })).reason, "no-matching-close-trigger");
+	assert.equal(run("pull_request", prPayload({ action: "closed" })).reason, "no-matching-close-trigger");
+});
+
+test("an unauthorized sender's close dies at the GLOBAL gate: author-not-allowed, never closer-not-allowed", () => {
+	// On a webhook close delivery the sender IS the closer, so the pre-route authority gate already
+	// refused this actor before any close route ran. The route's own closer gate is belt-and-braces
+	// against resolver-shape drift and must stay UNREACHABLE here -- if this ever reports
+	// closer-not-allowed, the global gate moved.
+	for (const [event, payload] of [["issues", issuePayload({ action: "closed" })], ["pull_request", prPayload({ action: "closed" })]]) {
+		const r = runClose(event, payload, { authorized: false });
+		assert.equal(r.enqueue, false);
+		assert.equal(r.reason, "author-not-allowed");
+	}
+});
+
+test("arming close rules changes label and PR routing not at all -- byte-identical jobs", () => {
+	// The close groups are SEPARATE arrays the classic routes never read; adding them to a deployment
+	// must not perturb one byte of what an existing trigger enqueues, or every dedup key and every
+	// downstream consumer shifts under an operator who only added a close rule.
+	for (const [event, payload] of [["issues", issuePayload()], ["pull_request", prPayload()]]) {
+		const plain = run(event, payload);
+		const armed = runClose(event, payload);
+		assert.equal(JSON.stringify(armed.job), JSON.stringify(plain.job));
+	}
 });

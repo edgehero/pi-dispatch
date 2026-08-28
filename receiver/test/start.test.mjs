@@ -286,6 +286,52 @@ test("a github-free deployment 404s `/` -- the skipped identity resolution and t
 	assert.equal(res.statusCode, 404, "not 401: an endpoint that answers is an endpoint an operator can believe is armed");
 });
 
+test("the github closer resolver is built over the boot auth object's OWN mintToken and reaches the wired handler", async () => {
+	// The wiring claim of issue #231, end to end through startReceiver: the SAME auth object that
+	// hard-fail resolved selfId is what the closer resolver mints through -- identity and mint capability
+	// are one credential decision, which is exactly why the receiver-side missing-resolver 503 is
+	// unreachable in a wired receiver. The factory is injected (the DI convention every resolver build in
+	// start.mjs follows) and handed a minter; the test proves that minter is the boot auth object's, by
+	// watching the mint land there when a signed close delivery drives the handler startReceiver built.
+	const dir = mkdtempSync(join(tmpdir(), "receiver-start-close-"));
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "issue", action: ["closed"], number: 40 }, run: { kind: "github", flow: "deploy" } }] }), "utf8");
+
+	const { captured, createServer } = capturingServer();
+	const mints = [];
+	const auth = { selfId: 12345, source: "pat", mintToken: async (job) => (mints.push(job), "ghs_x") };
+	const adds = [];
+	const queue = { add: async (name, data, opts) => (adds.push({ name, data, opts }), { id: opts?.jobId }), close: async () => {} };
+	const makeResolveGitHubAuthority = ({ mintToken }) =>
+		async (repo, login) => {
+			// The resolver the factory hands back mints through what it was given; a wiring that built it
+			// over anything but auth.mintToken leaves `mints` empty and fails below.
+			const token = await mintToken({ repo });
+			assert.equal(token, "ghs_x", "the token is the boot auth object's answer");
+			assert.equal(login, "closer-login", "the subset's sender.login reaches the resolver");
+			return { authorized: true };
+		};
+
+	await bootLogLines(() =>
+		startReceiver({ WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath }, { makeAuth: async () => auth, makeQueueFn: () => queue, createServer, makeResolveGitHubAuthority }),
+	);
+
+	const payload = JSON.stringify({
+		action: "closed",
+		sender: { id: 7, login: "closer-login" },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 40, title: "T", body: "B" },
+	});
+	const res = mockRes();
+	await drive(captured.handler, mockReq({ headers: headersFor("issues", "d-close-wired", payload) }), res, payload);
+
+	assert.equal(res.statusCode, 202, "the close one-shot fired through the wired resolver");
+	assert.deepEqual(mints, [{ repo: "octo/repo", permissions: { metadata: "read" } }], "one mint, job-shaped, repo-scoped AND narrowed to metadata:read -- the lookup token must not be able to write");
+	assert.equal(adds.length, 1);
+	assert.equal(adds[0].data.flow, "deploy");
+	assert.deepEqual(adds[0].data.trigger.sender, { id: 7 }, "the login served the lookup and never entered the job");
+});
+
 test("a config refusal exits 2, so a supervisor stops instead of restart-looping forever", () => {
 	// The unit execs THIS file, not cli.mjs, so cli.mjs's entryExitCode -- and the reason it exists,
 	// "a supervisor restarting on exit 2 would loop on a config that can never parse" -- never reached a

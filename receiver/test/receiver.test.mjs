@@ -536,3 +536,154 @@ test("an unflagged trigger still enqueues EXACTLY once, with no replica key and 
 	assert.equal("replicas" in calls[0].data, false);
 	assert.equal(res.statusCode, 202);
 });
+
+// --- close triggers: the closer-authority lookup (issue #231) --------------------------------------
+
+/**
+ * A deployment with an issue close one-shot armed, beside the label/comment rules the base cfg carries,
+ * so the zero-lookup pins below can drive NON-close deliveries against a config where close rules exist.
+ */
+const closeCfg = {
+	webhookSecret: SECRET,
+	servesGithub: true,
+	triggers: forgeTriggers({
+		label: [{ index: 0, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix" }],
+		comment: { index: 1, phrase: "@pi", defaultFlow: "triage" },
+		pullRequest: [],
+		issue: [{ index: 2, actions: new Set(["closed"]), number: 40, once: true, flow: "deploy" }],
+		prClose: [],
+		knownFlows: new Set(["frontend-fix", "triage", "deploy"]),
+	}),
+};
+
+/** A signed-shape `issues.closed` payload for the armed one-shot's item, overridable per case. */
+function closedPayload({ number = 40, senderId = 7 } = {}) {
+	return {
+		action: "closed",
+		sender: { id: senderId, login: "closer-login-marker" },
+		repository: { full_name: "octo/repo" },
+		issue: { number, title: "T", body: "B" },
+	};
+}
+
+/** A resolver fake recording every (repo, login) it was asked, answering `result`. */
+function resolverFake(result) {
+	const calls = [];
+	return { calls, resolveAuthority: async (repo, login) => (calls.push([repo, login]), result) };
+}
+
+test("an authorized closer: the resolver is asked ONCE with (repo, login), 202, and trigger.sender carries the id ONLY", async () => {
+	const delivery = "d-close-ok";
+	const raw = JSON.stringify(closedPayload());
+	const { calls, queue } = recordingQueue();
+	const resolver = resolverFake({ authorized: true });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: (o) => logs.push(o), resolveAuthority: resolver.resolveAuthority });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 202);
+	assert.deepEqual(resolver.calls, [["octo/repo", "closer-login-marker"]], "one lookup, addressed by the subset's repo and the closer's login");
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].data.flow, "deploy");
+	// THE pin: the login entered the subset for the lookup and must go NO further. The job's descriptive
+	// trigger context stays `{ id }`, byte-identical to every pre-#231 job.
+	assert.deepEqual(calls[0].data.trigger.sender, { id: 7 });
+	assert.equal(JSON.stringify(calls[0].data).includes("closer-login-marker"), false, "no login anywhere in the enqueued job");
+	assert.equal(JSON.stringify(logs).includes("closer-login-marker"), false, "and none in any log line (no-pii-in-logs)");
+});
+
+test("an unauthorized closer is dropped 204, and the LOG says the closer gate refused it", async () => {
+	const delivery = "d-close-refused";
+	const raw = JSON.stringify(closedPayload());
+	const { calls, queue } = recordingQueue();
+	const resolver = resolverFake({ authorized: false });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: (o) => logs.push(o), resolveAuthority: resolver.resolveAuthority });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 204);
+	assert.equal(calls.length, 0, "a stranger's close must not fire the one-shot");
+	assert.deepEqual(logs.at(-1), { event: "dropped", delivery, reason: "closer-not-allowed" });
+});
+
+test("an indeterminate lookup is 503 permission-lookup-failed (redeliverable), never 204, and the log names the lookup", async () => {
+	// 204 would drop real work during an outage, and on the wire it is indistinguishable from a stranger
+	// being correctly refused. GitHub redelivers; the GUID jobId coalesces the retry.
+	const delivery = "d-close-indet";
+	const raw = JSON.stringify(closedPayload());
+	const { calls, queue } = recordingQueue();
+	const resolver = resolverFake({ indeterminate: "status-502" });
+	const logs = [];
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: (o) => logs.push(o), resolveAuthority: resolver.resolveAuthority });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 503);
+	assert.deepEqual(JSON.parse(res.body), { error: "permission-lookup-failed" });
+	assert.equal(calls.length, 0);
+	assert.deepEqual(logs.at(-1), { event: "github_permission_lookup_failed", delivery, reason: "status-502" });
+	assert.equal(JSON.stringify(logs).includes("closer-login-marker"), false, "the reason names the lookup, never the actor (no-pii-in-logs)");
+});
+
+test("ZERO lookups for every delivery no armed close rule wants -- label, comment, wrong number, self-close", async () => {
+	// The acceptance pins from CONST-TRIGGER-AUTHOR-GATE's close arm: the lookup is a paid network step,
+	// and every path but "a close an armed rule matches" must stay payload-only. The resolver fake WOULD
+	// authorize, so any stray call also shows up as a wrongly-enqueued job -- but the call count is the
+	// assertion.
+	const { calls, queue } = recordingQueue();
+	const resolver = resolverFake({ authorized: true });
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: () => {}, resolveAuthority: resolver.resolveAuthority });
+
+	// A labeled delivery, close rules armed elsewhere in the same group: the label route asks no
+	// authority question, and its job still enqueues.
+	const labeled = JSON.stringify(LABELED_PAYLOAD);
+	await drive(handler, mockReq({ headers: headersFor("issues", "d-close-z1", labeled) }), mockRes(), labeled);
+	assert.equal(resolver.calls.length, 0, "a labeled delivery costs no lookup");
+	assert.equal(calls.length, 1, "and still enqueues on its own gate");
+
+	// A comment delivery: author_association is the gate, payload-only as ever.
+	const comment = JSON.stringify({
+		action: "created",
+		sender: { id: 7, login: "closer-login-marker" },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 42, title: "T", body: "B" },
+		comment: { author_association: "OWNER", body: "@pi" },
+	});
+	await drive(handler, mockReq({ headers: headersFor("issue_comment", "d-close-z2", comment) }), mockRes(), comment);
+	assert.equal(resolver.calls.length, 0, "a comment delivery costs no lookup");
+
+	// A close the one-shot does not name: findCloseRule misses, so there is nothing to gate.
+	const wrongNumber = JSON.stringify(closedPayload({ number: 41 }));
+	const missRes = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", "d-close-z3", wrongNumber) }), missRes, wrongNumber);
+	assert.equal(resolver.calls.length, 0, "a close matching no armed rule costs no lookup");
+	assert.equal(missRes.statusCode, 204);
+
+	// The harness closing its own issue -- the natural last act of the very flow the trigger armed. The
+	// self guard runs BEFORE the lookup, so it costs nothing and can never 503-loop on an outage.
+	const selfClose = JSON.stringify(closedPayload({ senderId: SELF_ID }));
+	const selfRes = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", "d-close-z4", selfClose) }), selfRes, selfClose);
+	assert.equal(resolver.calls.length, 0, "a self-close costs no lookup");
+	assert.equal(selfRes.statusCode, 204);
+
+	assert.equal(calls.length, 2, "exactly the label and comment jobs -- no close enqueued anywhere here");
+});
+
+test("an armed close rule with NO resolver wired answers 503, never an unbacked verdict", async () => {
+	// Defensive-only in a wired receiver (start.mjs hard-fails on github auth before mounting `/`), so the
+	// handler is constructed directly without the dep, which is the only way to reach the branch. Fail
+	// closed but retryable: a wiring fault must not read as a stranger being correctly refused.
+	const delivery = "d-close-nodep";
+	const raw = JSON.stringify(closedPayload());
+	const { calls, queue } = recordingQueue();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: closeCfg, log: () => {} });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 503);
+	assert.deepEqual(JSON.parse(res.body), { error: "permission-lookup-failed" });
+	assert.equal(calls.length, 0);
+});

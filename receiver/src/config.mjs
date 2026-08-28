@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { configError, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
-import { FORGE_KINDS, parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, PR_CLOSE_ACTIONS, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
 // default must be the file init just told the operator it created, not a demo buried in the repo.
@@ -102,7 +102,13 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
  * credential lying around is not a statement that this receiver terminates GitHub webhooks.
  */
 function decideServesGithub(env, githubGroup) {
-	const hasGithubTriggers = githubGroup.label.length > 0 || githubGroup.comment !== null || githubGroup.pullRequest.length > 0;
+	// The close groups count too (issue #231): a deployment whose ONLY github rule is a close trigger
+	// must still mount `/`, require WEBHOOK_SECRET and build auth, or the one-shot the operator armed
+	// can never fire -- and the receiver would report nothing, the silent no-op this file's header
+	// calls the worst outcome. Conversely a deployment whose last github one-shot is SPENT stops
+	// counting here at its next boot (the sentinel groups nowhere), which is deliberate: nothing is
+	// left to serve, and INT-TRIGGERS-FILE-CONTRACT states it.
+	const hasGithubTriggers = githubGroup.label.length > 0 || githubGroup.comment !== null || githubGroup.pullRequest.length > 0 || githubGroup.issue.length > 0 || githubGroup.prClose.length > 0;
 	// `loadGitHubAuth` has already refused a garbled value by the time we get here, so anything non-empty
 	// here is one of pat|gh|app -- a real choice, not a typo we would be reading as consent.
 	const explicitAuthSource = env.GITHUB_AUTH_SOURCE !== undefined && env.GITHUB_AUTH_SOURCE !== "";
@@ -228,7 +234,11 @@ function loadAzureConfig(env) {
  * `{ github: <group>, gitlab: <group>, knownFlows }` where each group is:
  *   - `label`:       ordered `{ index, predicate, flow, command, packages, image }` rules (first match wins in the filter).
  *   - `comment`:     the single `{ index, phrase, defaultFlow, command, packages, image }` (or null when no comment trigger is configured).
- *   - `pullRequest`: ordered `{ index, actions:Set, predicate, flow, command, packages, image }` rules.
+ *   - `pullRequest`: ordered `{ index, actions:Set, predicate, flow, command, packages, image }` rules (never a close-only rule).
+ *   - `issue`:       ordered `{ index, actions:Set, number?, once?, ... }` close rules (issue #231).
+ *   - `prClose`:     ordered close-only pull_request rules, same shape as `issue` -- split from
+ *                    `pullRequest` so the closer-gated route and the author-gated route can never read
+ *                    each other's rules (the loader's no-mixing refusal makes the split total).
  * and `knownFlows` is every webhook `run.flow`, so a comment's `<phrase> <flow>` override cannot summon an
  * unlisted flow. A rule carries EITHER `flow` or `command` (issue #189; the shared parser enforces the
  * exclusivity): a command rule's match dispatches a registered pi extension command in the container, so
@@ -287,9 +297,24 @@ function loadTriggers(env, readFile, fileExists) {
 		} else if (on.type === "comment") {
 			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
-			// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
-			// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
-			group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas });
+			// The close-only split (issue #231): a close rule routes through the close gate (the CLOSER's
+			// resolved authority) and every other PR rule through the author gate, so they live in separate
+			// groups and neither route ever re-derives the distinction -- the loader already refused any
+			// list mixing the close word with another action, which is what makes this split total. The
+			// split reads the SHARED close-word table, never a re-typed word.
+			const closeWord = PR_CLOSE_ACTIONS[run.kind];
+			if (closeWord !== undefined && on.action.includes(closeWord)) {
+				group.prClose.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas });
+			} else {
+				// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
+				// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
+				group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas });
+			}
+		} else if (on.type === "issue") {
+			// The close-trigger kind (issue #231). No predicate and no reviewStates by construction (the
+			// loader refused both), and `number`/`once` ride conditionally-present exactly as the loader
+			// normalized them -- the filter's close route reads them, nothing else does.
+			group.issue.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, replicas: run.replicas });
 		}
 	}
 
@@ -297,7 +322,7 @@ function loadTriggers(env, readFile, fileExists) {
 }
 
 function emptyGroup() {
-	return { label: [], comment: null, pullRequest: [] };
+	return { label: [], comment: null, pullRequest: [], issue: [], prClose: [] };
 }
 
 /** The triggers file path the receiver reads (env override or the cwd default matching what `pi-dispatch init` scaffolds). */

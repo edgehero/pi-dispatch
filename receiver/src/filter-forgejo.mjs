@@ -34,6 +34,7 @@
  */
 
 import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } from "./predicate.mjs";
+import { findCloseRule } from "./close.mjs";
 import { isRecognizedAction, mapAction } from "./forgejo-subset.mjs";
 
 const LABEL_ACTIONS = new Set(["opened", "labeled", "reopened"]);
@@ -84,6 +85,17 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		if (action === null) return unactionable();
 		if (eventName === "issues" && LABEL_ACTIONS.has(action)) {
 			resolved = routeIssueLabel(subset, group);
+		} else if (eventName === "issues" && action === "closed") {
+			// The close trigger (issue #231). `group.issue` holds ONLY close rules (the loader admits no
+			// other issue kind), and this arm can never contend with the label one: `closed` is not in
+			// LABEL_ACTIONS and must not become so -- a close is a statement about an item, not a label move.
+			resolved = routeIssueClose(subset, group, authorized);
+		} else if (eventName === "pull_request" && raw === "closed") {
+			// The RAW word, for routePullRequest's reason below: the close vocabulary is the forge's own
+			// (PR_CLOSE_ACTIONS, which the loader validated the rule against). Checked BEFORE the PR_ACTIONS
+			// arm, though today they cannot overlap; `group.prClose` was split from `group.pullRequest` at
+			// load, so a close rule is unreachable from routePullRequest and vice versa.
+			resolved = routePullRequestClose(subset, group, authorized);
 		} else if (eventName === "pull_request" && PR_ACTIONS.has(action)) {
 			// The RAW word, not the mapped one. A trigger file names actions in the forge's own vocabulary
 			// (`label_updated`, `synchronized`) because that is what an operator reads in Forgejo's docs and
@@ -249,4 +261,93 @@ function routePullRequest(subset, triggers, action) {
 		};
 	}
 	return { enqueue: false, reason: "no-matching-pr-trigger" };
+}
+
+/**
+ * Issue close path (issue #231). `findCloseRule` is the ONE derivation of "which close rule wants
+ * this delivery" (close.mjs), shared with the receiver's pre-lookup check -- two hand-rolled copies
+ * a network call apart is the drift that module's header warns against.
+ *
+ * The `closer-not-allowed` gate below is belt-and-braces and UNREACHABLE today: gate (2) in
+ * `filterForgejo` already refused every non-true verdict before routing, and on a webhook close
+ * delivery the SENDER is the closer, so the verdict that gate consumed is the closer's. It stays
+ * anyway, because this route's own contract is the closer's authority: if the global gate ever moves,
+ * or a resolver starts returning a shape it never has, a close must fail closed under its own token
+ * rather than route on a stale assumption about the caller.
+ */
+function routeIssueClose(subset, triggers, authorized) {
+	const number = subset.issue?.number;
+	// Integer or refuse, the github arms' rule: an UNNARROWED rule matches an undefined number, so a
+	// degenerate shape would otherwise enqueue a numberless target.
+	if (!Number.isInteger(number)) {
+		return { enqueue: false, reason: "missing-issue-number" };
+	}
+	// "closed" is PR_CLOSE_ACTIONS.forgejo -- the forge's own word, the one the loader validated the
+	// rule's action list against, exactly as routePullRequest matches raw vocabulary.
+	const found = findCloseRule(triggers.issue, "closed", number);
+	if (found.rule === undefined) {
+		return { enqueue: false, reason: found.reason };
+	}
+	if (authorized !== true) {
+		return { enqueue: false, reason: "closer-not-allowed" };
+	}
+	const rule = found.rule;
+	return {
+		enqueue: true,
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
+		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
+		image: rule.image,
+		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
+		instructions: rule.instructions,
+		resume: rule.resume,
+		replicas: rule.replicas,
+		// `once: true` rides `matched` ONLY when armed (spreading false is a no-op), so the enqueue path
+		// can see a disarm is owed without re-reading the rule table -- and a plain close rule's matched
+		// record stays byte-identical to the other routes' shape.
+		matched: { index: rule.index, type: "issue", action: "closed", number, ...(rule.once === true && { once: true }) },
+		target: { type: "issue", number, title: subset.issue?.title, body: subset.issue?.body },
+	};
+}
+
+/** PR close path (issue #231). Same shape and same belt-and-braces closer gate as routeIssueClose. */
+function routePullRequestClose(subset, triggers, authorized) {
+	const pr = subset.pull_request;
+	// Object AND integer number, the github arm's rule: a shape without a usable number must refuse
+	// before any rule is consulted.
+	if (!pr || !Number.isInteger(pr.number)) {
+		return { enqueue: false, reason: "missing-pull-request" };
+	}
+	const found = findCloseRule(triggers.prClose, "closed", pr.number);
+	if (found.rule === undefined) {
+		return { enqueue: false, reason: found.reason };
+	}
+	if (authorized !== true) {
+		return { enqueue: false, reason: "closer-not-allowed" }; // unreachable behind gate (2) -- see routeIssueClose
+	}
+	const rule = found.rule;
+	return {
+		enqueue: true,
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
+		packages: rule.packages,
+		image: rule.image,
+		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
+		instructions: rule.instructions,
+		resume: rule.resume,
+		replicas: rule.replicas,
+		// No `number` on a PR close's matched record -- parallel to routePullRequest's, where the item
+		// number is the target's business; the issue route carries it because the github design does.
+		matched: { index: rule.index, type: "pull_request", action: "closed", ...(rule.once === true && { once: true }) },
+		target: {
+			type: "pull_request",
+			number: pr.number,
+			title: pr.title,
+			body: pr.body,
+			head: pr.head,
+			base: pr.base,
+		},
+	};
 }

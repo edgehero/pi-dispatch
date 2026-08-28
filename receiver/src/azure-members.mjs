@@ -88,7 +88,10 @@ export function makeResolveAzureAuthority({ orgUrl, token, fetchFn = fetch }) {
 		try {
 			return { body: await res.json(), continuation: continuation || null };
 		} catch (err) {
-			return { indeterminate: `azure lookup returned unparseable JSON: ${err?.message ?? "unknown"}` };
+			// A FIXED reason, never err.message: V8's JSON.parse errors quote the offending input,
+			// so a failed res.json() here would carry response-body bytes into a log line -- the
+			// no-pii-in-logs rule the github resolver states, applied to its elders (issue #231).
+			return { indeterminate: "azure lookup returned unparseable JSON" };
 		}
 	}
 

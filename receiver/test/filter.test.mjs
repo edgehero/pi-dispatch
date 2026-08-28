@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filter } from "../src/filter.mjs";
+import { filter, hasCloseTriggers, wantsCloserAuthority } from "../src/filter.mjs";
 
 /**
  * Wrap a flat trigger group in the shape `loadReceiverConfig` now produces: rules are grouped PER FORGE
@@ -397,10 +397,14 @@ test("a PR labeled action does NOT require the author gate (collaborator-applied
 	assert.equal(r.job.flow, "review");
 });
 
-test("an unsupported PR action (closed) is dropped as unhandled-event", () => {
+test("pull_request.closed with nothing armed refuses on the CLOSE route, not as unhandled-event", () => {
+	// EVOLUTION (issue #231): this pin read `unhandled-event` before close triggers existed. `closed`
+	// now has a route of its own over `triggers.prClose`, so the refusal names the real fact an
+	// operator can act on -- "nothing armed wants this close" -- rather than "the harness does not
+	// speak this event", which stopped being true the day the route landed.
 	const r = filter("pull_request", prSubset({ action: "closed" }), prCfg, SELF_ID, "d-prclosed");
 	assert.equal(r.enqueue, false);
-	assert.equal(r.reason, "unhandled-event");
+	assert.equal(r.reason, "no-matching-close-trigger");
 });
 
 // -- pull_request_review: the INVERTED author gate (issue #66) ------------------------------------
@@ -758,10 +762,18 @@ test("an unhandled event is dropped as unhandled-event", () => {
 	assert.equal(r.reason, "unhandled-event");
 });
 
-test("an unhandled action on a handled event is dropped as unhandled-event", () => {
-	const r = filter("issues", issuesSubset({ action: "closed" }), cfg, SELF_ID, "d-closed");
-	assert.equal(r.enqueue, false);
-	assert.equal(r.reason, "unhandled-event");
+test("issues.closed now routes the close arm; a genuinely unhandled action still reads unhandled-event", () => {
+	// EVOLUTION (issue #231): the first half of this pin read `unhandled-event` before close triggers
+	// existed. `closed` is a routed action now, so an unarmed config reports `no-matching-close-trigger`
+	// -- the fact an operator can act on. The `edited` half keeps the original pin's point alive: an
+	// action no route owns is still refused as unhandled, never silently matched to anything.
+	const closed = filter("issues", issuesSubset({ action: "closed" }), cfg, SELF_ID, "d-closed");
+	assert.equal(closed.enqueue, false);
+	assert.equal(closed.reason, "no-matching-close-trigger");
+
+	const edited = filter("issues", issuesSubset({ action: "edited" }), cfg, SELF_ID, "d-edited");
+	assert.equal(edited.enqueue, false);
+	assert.equal(edited.reason, "unhandled-event");
 });
 
 // run.resume rides the MATCHED rule, exactly as packages/image do -- rules in one file may differ on it,
@@ -918,4 +930,229 @@ test("secrets and secretsProfile ride the JOB from the matched rule, never insid
 	// map of the operator's vault, which is precisely what this feature exists to avoid.
 	assert.equal("secrets" in r.job.trigger, false);
 	assert.equal("secretsProfile" in r.job.trigger, false);
+});
+
+// -- close triggers (issue #231): the closer-authority gate ---------------------------------------
+
+// Grouped exactly as loadReceiverConfig emits close rules: `issue` and `prClose` are split from the
+// author-gated groups at load, and `number`/`once` ride the rule as the loader normalized them. The
+// label and pullRequest rules are byte-copies of cfgRaw's / prCfgRaw's entries so the byte-identity
+// test below can deepEqual WHOLE verdicts across the armed and close-free configs.
+const closeCfgRaw = {
+	triggers: {
+		label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix" }],
+		comment: null,
+		pullRequest: [{ index: 6, actions: new Set(["opened", "synchronize", "reopened"]), predicate: {}, flow: "autoreview" }],
+		issue: [{ index: 1, actions: new Set(["closed"]), number: 40, once: true, flow: "deploy" }],
+		prClose: [{ index: 3, actions: new Set(["closed"]), number: 12, once: true, flow: "announce" }],
+		knownFlows: new Set(["frontend-fix", "autoreview", "deploy", "announce"]),
+	},
+};
+const closeCfg = forgeCfg(closeCfgRaw);
+
+/** A well-formed `issues.closed` subset for the armed one-shot's item, overridable per case. */
+function issueClosedSubset(number = 40) {
+	return issuesSubset({ action: "closed", issue: { number, title: "T", body: "B" } });
+}
+
+test("a closed issue matching an armed close rule, closer authorized, enqueues the full job", () => {
+	const r = filter("issues", issueClosedSubset(), closeCfg, SELF_ID, "d-close-hit", true);
+	assert.equal(r.enqueue, true);
+	assert.equal(r.reason, undefined);
+	// The whole literal, pinned: same execution-field handling as every other route (nothing here, so
+	// no keys), matched carrying the close decision record, target mirroring the issue-target builder.
+	assert.deepEqual(r.job, {
+		repo: "octo/repo",
+		target: { type: "issue", number: 40, title: "T", body: "B" },
+		flow: "deploy",
+		trigger: {
+			event: "issues",
+			action: "closed",
+			deliveryId: "d-close-hit",
+			sender: { id: 7 },
+			matched: { index: 1, type: "issue", action: "closed", number: 40, once: true },
+		},
+	});
+});
+
+test("an UNNARROWED close rule fires for any number, and matched.number names the item that closed", () => {
+	const anyCfg = forgeCfg({ triggers: { ...closeCfgRaw.triggers, issue: [{ index: 1, actions: new Set(["closed"]), once: true, flow: "deploy" }] } });
+	const r = filter("issues", issueClosedSubset(77), anyCfg, SELF_ID, "d-close-any", true);
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.trigger.matched.number, 77, "the decision record names the CLOSED ITEM, not the rule's (absent) narrowing -- a once spend must be explainable back to one issue");
+});
+
+test("a close on a different number than the armed one-shot refuses close-number-not-matched", () => {
+	// closerAuthorized true on purpose: the refusal must come from the rule miss, never the gate.
+	const r = filter("issues", issueClosedSubset(41), closeCfg, SELF_ID, "d-close-miss", true);
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "close-number-not-matched", "distinct from no-matching-close-trigger: 'your one-shot exists and a different item closed' asks a different operator response than 'nothing is armed'");
+});
+
+test("a close with no close rules armed refuses no-matching-close-trigger even with authority granted", () => {
+	const r = filter("issues", issueClosedSubset(), cfg, SELF_ID, "d-close-none", true);
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "no-matching-close-trigger");
+});
+
+test("the closer gate is STRICT true: false, absence, the string 'true' and 1 all refuse closer-not-allowed", () => {
+	// The value is the receiver's RESOLVED authority answer; anything but the literal boolean reaching
+	// the gate -- an unwired caller, an indeterminate lookup, a header string, a count -- is a wiring
+	// bug and must fail CLOSED, not truthy-open.
+	for (const bad of [false, undefined, "true", 1]) {
+		const r = filter("issues", issueClosedSubset(), closeCfg, SELF_ID, "d-close-gate", bad);
+		assert.equal(r.enqueue, false, `closerAuthorized=${JSON.stringify(bad)} must not enqueue`);
+		assert.equal(r.reason, "closer-not-allowed");
+	}
+});
+
+test("the harness closing its own issue drops as `self` BEFORE the closer gate runs", () => {
+	// Step 1 stays unconditional: a flow's own `gh issue close` fires issues.closed as the harness's
+	// identity, and closerAuthorized is deliberately left undefined here -- if the self guard did not
+	// run first, this would read `closer-not-allowed`, a token claiming a lookup that never happened.
+	const r = filter("issues", { ...issueClosedSubset(), sender: { id: SELF_ID } }, closeCfg, SELF_ID, "d-close-self");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "self");
+});
+
+// The inversion PAIR, in the review-arm convention (see the pull_request_review pair above): each
+// delivery sets pull_request.author_association and closerAuthorized to OPPOSITE answers, so a gate
+// that reads the wrong person's field -- the PR AUTHOR's payload association instead of the CLOSER's
+// resolved authority -- fails exactly one of the two. A suite where the two always agree would pass
+// against that inverted gate.
+
+test("a COLLABORATOR-authored PR closed by an unauthorized closer refuses -- the author's standing must not rescue it", () => {
+	const r = filter("pull_request", prSubset({ action: "closed", author: "COLLABORATOR" }), closeCfg, SELF_ID, "d-close-inv1", false);
+	assert.equal(r.enqueue, false, "reading pull_request.author_association here would let ANYONE fire the one-shot by closing a collaborator's PR");
+	assert.equal(r.reason, "closer-not-allowed");
+});
+
+test("a stranger-authored PR (association NONE) closed by an AUTHORIZED closer enqueues -- the gate is the CLOSER's", () => {
+	const r = filter("pull_request", prSubset({ action: "closed", author: "NONE" }), closeCfg, SELF_ID, "d-close-inv2", true);
+	assert.equal(r.enqueue, true, "reading pull_request.author_association here would refuse a maintainer closing a fork PR");
+	assert.equal(r.job.flow, "announce");
+	// No number on the PR matched shape -- the target carries it, exactly as on every other PR match.
+	assert.deepEqual(r.job.trigger.matched, { index: 3, type: "pull_request", action: "closed", once: true });
+	assert.deepEqual(r.job.target, {
+		type: "pull_request",
+		number: 12,
+		title: "PR T",
+		body: "PR B",
+		head: { ref: "feat", sha: "abc", repo: "fork/x" },
+		base: { ref: "main" },
+	});
+});
+
+test("a once:false close rule emits NO once key on matched -- absent, not present-and-false", () => {
+	const reusable = forgeCfg({ triggers: { ...closeCfgRaw.triggers, issue: [{ index: 1, actions: new Set(["closed"]), number: 40, once: false, flow: "deploy" }] } });
+	const r = filter("issues", issueClosedSubset(), reusable, SELF_ID, "d-close-reuse", true);
+	assert.equal(r.enqueue, true);
+	assert.equal("once" in r.job.trigger.matched, false, "matched.once is the downstream disarm signal and its consumers test PRESENCE -- a present-and-false key would quietly flip them to truthiness tests");
+});
+
+test("a pull_request close with no pull_request object keeps the existing guard's reason", () => {
+	const subset = prSubset({ action: "closed" });
+	delete subset.pull_request;
+	const r = filter("pull_request", subset, closeCfg, SELF_ID, "d-close-nopr", true);
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "missing-pull-request");
+});
+
+test("a close rule's execution fields ride the JOB as on every route, and a close command rule carries no flow key", () => {
+	const armed = forgeCfg({
+		triggers: {
+			...closeCfgRaw.triggers,
+			issue: [{ index: 1, actions: new Set(["closed"]), number: 40, once: true, flow: "deploy", packages: true, image: "deployer:1.0", skillsDir: "/srv/skills", instructions: "ship it", resume: true, secrets: { KEY: "op://ci/deploy/key" }, secretsProfile: "prod", replicas: 2 }],
+			prClose: [{ index: 3, actions: new Set(["closed"]), number: 12, flow: undefined, command: "announce" }],
+		},
+	});
+	const r = filter("issues", issueClosedSubset(), armed, SELF_ID, "d-close-exec", true);
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.packages, true);
+	assert.equal(r.job.image, "deployer:1.0");
+	assert.equal(r.job.skillsDir, "/srv/skills");
+	assert.equal(r.job.instructions, "ship it");
+	assert.equal(r.job.resume, true);
+	assert.deepEqual(r.job.secrets, { KEY: "op://ci/deploy/key" });
+	assert.equal(r.job.secretsProfile, "prod");
+	assert.equal(r.job.replicas, 2);
+	for (const knob of ["packages", "image", "skillsDir", "instructions", "resume", "secrets", "secretsProfile", "replicas"]) {
+		assert.equal(knob in r.job.trigger, false, `${knob} is an execution knob and must not ride into /job/event.json`);
+	}
+
+	const cmd = filter("pull_request", prSubset({ action: "closed" }), armed, SELF_ID, "d-close-cmd", true);
+	assert.equal(cmd.enqueue, true);
+	assert.equal(cmd.job.command, "announce");
+	assert.equal("flow" in cmd.job, false, "a command job carries NO flow key -- absent, not present-and-undefined");
+	assert.deepEqual(Object.keys(cmd.job), ["repo", "target", "command", "trigger"]);
+});
+
+test("arming close rules changes NOTHING for the existing routes -- label and PR verdicts stay byte-identical", () => {
+	// Five-argument calls (closerAuthorized undefined, as every existing call site passes) against a
+	// config WITH close rules armed must deepEqual the same delivery against the close-free configs:
+	// neither the sixth parameter nor the new groups may perturb a byte of the routes already there.
+	const labelWith = filter("issues", issuesSubset(), closeCfg, SELF_ID, "d-close-bi1");
+	const labelWithout = filter("issues", issuesSubset(), cfg, SELF_ID, "d-close-bi1");
+	assert.deepEqual(labelWith, labelWithout);
+
+	const prWith = filter("pull_request", prSubset({ action: "opened" }), closeCfg, SELF_ID, "d-close-bi2");
+	const prWithout = filter("pull_request", prSubset({ action: "opened" }), prCfg, SELF_ID, "d-close-bi2");
+	assert.deepEqual(prWith, prWithout);
+});
+
+test("wantsCloserAuthority: filter's own guards first, then the SAME findCloseRule answer the route uses", () => {
+	const group = closeCfg.triggers.github;
+
+	// Step-0/1 replicas: neither malformed identity nor the harness itself may cost a lookup.
+	assert.equal(wantsCloserAuthority("issues", { ...issueClosedSubset(), sender: { id: "7" } }, group, SELF_ID), false, "a non-numeric sender fails closed BEFORE any lookup, exactly as the filter's step 0 does");
+	assert.equal(wantsCloserAuthority("issues", { ...issueClosedSubset(), sender: { id: SELF_ID } }, group, SELF_ID), false, "the harness closing its own issue must not cost a lookup");
+
+	// Not a close delivery at all.
+	assert.equal(wantsCloserAuthority("issues", issuesSubset(), group, SELF_ID), false, "a labeled delivery asks no authority question");
+
+	// A close nothing wants: no rules armed, or a one-shot naming a different item.
+	assert.equal(wantsCloserAuthority("issues", issueClosedSubset(), cfg.triggers.github, SELF_ID), false, "no close rules armed -> no lookup");
+	assert.equal(wantsCloserAuthority("issues", issueClosedSubset(41), group, SELF_ID), false, "a close the one-shot does not name -> no lookup to then drop");
+
+	// The matches: exactly the deliveries the route would gate, on both arms.
+	assert.equal(wantsCloserAuthority("issues", issueClosedSubset(), group, SELF_ID), true);
+	assert.equal(wantsCloserAuthority("pull_request", prSubset({ action: "closed" }), group, SELF_ID), true);
+	assert.equal(wantsCloserAuthority("pull_request", prSubset({ action: "opened" }), group, SELF_ID), false, "a non-close PR action asks no authority question");
+
+	// The routes' shape guards, replicated: an UNNARROWED rule matches an undefined number, so without
+	// them a degenerate payload would cost a token mint and a lookup the route then drops -- the
+	// one-derivation property's sharpest corner.
+	const unnarrowedPr = { ...closeCfg.triggers.github, prClose: [{ index: 0, actions: new Set(["closed"]), flow: "fix" }] };
+	const noPr = { ...prSubset({ action: "closed" }) };
+	delete noPr.pull_request;
+	assert.equal(wantsCloserAuthority("pull_request", noPr, unnarrowedPr, SELF_ID), false, "a PR close without a pull_request object must not cost a lookup the route will drop");
+	const unnarrowedIssue = { ...closeCfg.triggers.github, issue: [{ index: 0, actions: new Set(["closed"]), flow: "fix" }] };
+	const numberless = issueClosedSubset();
+	numberless.issue = { title: "t", body: "b" };
+	assert.equal(wantsCloserAuthority("issues", numberless, unnarrowedIssue, SELF_ID), false, "an issue close without an integer number must not cost a lookup either");
+});
+
+test("degenerate close shapes refuse before any rule: numberless and string-numbered issues, numberless PRs", () => {
+	// parseSubset always fabricates subset.issue as an object, so object presence proves nothing on
+	// the issue arm; an unnarrowed rule matches on the action alone. Without the integer guards, a
+	// signed body replayed under a swapped event header enqueues a paid job with target.number
+	// undefined -- and a crafted string number would ride verbatim into event.json.
+	const unnarrowed = { ...closeCfg, triggers: { ...closeCfg.triggers, github: { ...closeCfg.triggers.github, issue: [{ index: 0, actions: new Set(["closed"]), flow: "fix" }], prClose: [{ index: 1, actions: new Set(["closed"]), flow: "fix" }] } } };
+	const numberless = issueClosedSubset();
+	numberless.issue = { title: "t", body: "b" };
+	assert.equal(filter("issues", numberless, unnarrowed, SELF_ID, "d1", true).reason, "missing-issue-number", "no integer number, no job -- whoever authorized the close");
+	const stringNumber = issueClosedSubset();
+	stringNumber.issue = { ...stringNumber.issue, number: "40" };
+	assert.equal(filter("issues", stringNumber, unnarrowed, SELF_ID, "d2", true).reason, "missing-issue-number", "a string number is the same degenerate shape, refused rather than polluting event.json");
+	const prNoNumber = prSubset({ action: "closed" });
+	prNoNumber.pull_request = { ...prNoNumber.pull_request, number: undefined };
+	assert.equal(filter("pull_request", prNoNumber, unnarrowed, SELF_ID, "d3", true).reason, "missing-pull-request", "a PR object without an integer number is the same malformed delivery wearing a shape");
+});
+
+test("hasCloseTriggers answers per group: empty false, issue-only true, prClose-only true", () => {
+	assert.equal(hasCloseTriggers({ label: [], comment: null, pullRequest: [], issue: [], prClose: [] }), false);
+	assert.equal(hasCloseTriggers({ label: [], comment: null, pullRequest: [], issue: [{ index: 0 }], prClose: [] }), true);
+	assert.equal(hasCloseTriggers({ label: [], comment: null, pullRequest: [], issue: [], prClose: [{ index: 0 }] }), true);
+	assert.equal(hasCloseTriggers(undefined), false, "an unconfigured forge group arms nothing");
+	assert.equal(hasCloseTriggers(cfg.triggers.github), false, "a pre-#231 group without the close keys arms nothing");
 });

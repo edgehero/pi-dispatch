@@ -20,7 +20,7 @@
  */
 
 import { makeVerifiedHandler } from "./verify.mjs";
-import { filter } from "./filter.mjs";
+import { filter, wantsCloserAuthority } from "./filter.mjs";
 import { enqueueForgeJob, enqueueGitHubJob, enqueueGitLabJob } from "@edgehero/pi-dispatch/queue";
 import { filterGitLab } from "./filter-gitlab.mjs";
 import { parseGitLabSubset } from "./gitlab-subset.mjs";
@@ -51,7 +51,14 @@ export function parseSubset(payload) {
 	const pr = payload.pull_request;
 	return {
 		action: payload.action,
-		sender: { id: payload.sender?.id },
+		// `login` is CARRIED since issue #231, where this subset deliberately excluded it before. It is
+		// personal data, and it is here for exactly one consumer -- the CLOSER's collaborator-permission
+		// lookup, which is by username because that is the only key GitHub's endpoint takes. Same
+		// justification, and same obligation, as `sender.login` in the Forgejo subset: it exists to have
+		// been asked about, it is never logged (no-pii-in-logs covers everything the resolution path
+		// writes down), and it is never enqueued -- the filter's job literal keeps `trigger.sender` at
+		// `{ id }` alone.
+		sender: { id: payload.sender?.id, login: payload.sender?.login },
 		issue: {
 			number: payload.issue?.number,
 			title: payload.issue?.title,
@@ -127,12 +134,16 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority }) {
 	// Built only when the deployment serves GitHub. Construction is not free of the secret either: the
 	// `new Webhooks({ secret })` inside makeVerifiedHandler throws "options.secret required" on an absent
 	// one, so not building the arm is what lets a github-free deployment legitimately have no secret --
 	// no placeholder, nothing papered over, and no handler holding a secret nobody chose.
-	const github = cfg.servesGithub ? makeGitHubHandler({ queue, selfId, cfg, log }) : null;
+	//
+	// `resolveAuthority` is the GITHUB closer resolver (issue #231), riding top-level beside `selfId`
+	// because github's dependencies always have -- the other forges bundle theirs in per-forge objects.
+	// Optional, because only a close delivery an armed close rule matches ever consults it.
+	const github = cfg.servesGithub ? makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) : null;
 
 	// A TABLE, built once, rather than one `if` per forge. Two forges made that a single branch; four make
 	// it a chain, and a chain is where one arm quietly ends up checked after the fallthrough. A path present
@@ -204,8 +215,15 @@ async function fanout(job, enqueue) {
  * The GitHub arm. Returns `makeVerifiedHandler`'s handler directly, so it only ever sees an already-verified
  * request. `onVerified` owns parse, filter, enqueue, and response; a good signature is the sole
  * precondition D2 guarantees before it runs.
+ *
+ * One step the pre-#231 arm did not have, and the ONLY GitHub path that pays a network call before the
+ * gate: a close delivery an armed close rule matches has the CLOSER's authority resolved here, between
+ * verification and the gate, because the payload carries no association for the closer at all
+ * (github-members.mjs). `wantsCloserAuthority` is the same findCloseRule derivation the filter's route
+ * uses, so a lookup is never spent on a delivery the gate then ignores -- every label, comment, PR and
+ * review delivery, and every close nothing wants, stays payload-only and byte-identical to before.
  */
-function makeGitHubHandler({ queue, selfId, cfg, log }) {
+function makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) {
 	return makeVerifiedHandler({ secret: cfg.webhookSecret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -214,7 +232,30 @@ function makeGitHubHandler({ queue, selfId, cfg, log }) {
 			return respond(res, 400, { error: "invalid-json" });
 		}
 
-		const result = filter(event, subset, cfg, selfId, delivery);
+		let closerAuthorized;
+		if (wantsCloserAuthority(event, subset, cfg?.triggers?.github, selfId)) {
+			if (!resolveAuthority) {
+				// Defensive only: unreachable in a wired receiver -- start.mjs hard-fails on github auth
+				// before `/` is ever mounted, and the resolver is built over that same auth object. Fail
+				// closed but RETRYABLE, because a wiring fault must not read on the wire as a stranger
+				// being correctly refused.
+				return respond(res, 503, { error: "permission-lookup-failed" });
+			}
+			const resolved = await resolveAuthority(subset.repository?.full_name, subset.sender?.login);
+			if (resolved.indeterminate) {
+				// The reason names the lookup, never the actor -- `sender.login` is personal data and exists
+				// here only to have been asked about (no-pii-in-logs).
+				log?.({ event: "github_permission_lookup_failed", delivery, reason: resolved.indeterminate });
+				// 503: GitHub redelivers, the GUID jobId coalesces the retry. GitHub's auto-redelivery is
+				// weaker than GitLab's, so a lookup outage outlasting the window loses the close -- the
+				// poller slice's closed source is what will backstop that; until it lands, webhooks are
+				// the only close transport and the residual stands as stated.
+				return respond(res, 503, { error: "permission-lookup-failed" });
+			}
+			closerAuthorized = resolved.authorized;
+		}
+
+		const result = filter(event, subset, cfg, selfId, delivery, closerAuthorized);
 		if (!result.enqueue) {
 			log?.({ event: "dropped", delivery, reason: result.reason });
 			return respond(res, 204);

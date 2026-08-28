@@ -78,7 +78,10 @@ export function makeResolveAuthority({ apiUrl, token, fetchFn = fetch }) {
 		try {
 			body = await res.json();
 		} catch (err) {
-			return { indeterminate: `members lookup returned unparseable JSON: ${err?.message ?? "unknown"}` };
+			// A FIXED reason, never err.message: V8's JSON.parse errors quote the offending input,
+			// so a failed res.json() here would carry response-body bytes into a log line -- the
+			// no-pii-in-logs rule the github resolver states, applied to its elders (issue #231).
+			return { indeterminate: "members lookup returned unparseable JSON" };
 		}
 		const level = body?.access_level;
 		if (!Number.isInteger(level)) {

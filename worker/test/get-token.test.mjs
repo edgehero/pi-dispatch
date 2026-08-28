@@ -178,6 +178,25 @@ test("app mint strips the owner: repositoryNames gets the bare repo name", async
 	await auth.mintToken({ kind: "github", repo: "acme-corp/widgets" });
 	assert.deepEqual(calls[0].repositoryNames, ["widgets"]);
 	assert.equal(calls[0].type, "installation");
+	assert.equal("permissions" in calls[0], false, "a job mint passes NO narrowing -- the installation's full grant is the job token's contract");
+});
+
+test("app mint passes a caller's permissions narrowing through to the installation token (issue #231)", async () => {
+	// The receiver's closer-permission lookup mints with { metadata: "read" }, so the token it holds
+	// for that one question cannot write anything even if leaked. The narrowing is the CALLER's
+	// statement; absent means the full grant (the job path above pins that half).
+	const calls = [];
+	const auth = await makeGitHubAuth(
+		{ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" },
+		{
+			Octokit: FakeOctokit(APP_ROUTES),
+			createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls }),
+			readFile: async () => "PEM",
+		},
+	);
+	await auth.mintToken({ repo: "acme-corp/widgets", permissions: { metadata: "read" } });
+	assert.deepEqual(calls[0].permissions, { metadata: "read" }, "the narrowing reaches GitHub, not just our own bookkeeping");
+	assert.deepEqual(calls[0].repositoryNames, ["widgets"], "narrowing never loosens the repo scope");
 });
 
 test("app mintToken with no repo (local run.github job) is a config error steering to gh/pat", async () => {

@@ -458,7 +458,7 @@ test("rules are grouped per forge -- an identically-labelled rule lands on ONE f
 
 test("a forge the file never mentions still gets an empty group -- the gate needs no presence check", () => {
 	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, validTriggers);
-	assert.deepEqual(c.triggers.gitlab, { label: [], comment: null, pullRequest: [] });
+	assert.deepEqual(c.triggers.gitlab, { label: [], comment: null, pullRequest: [], issue: [], prClose: [] });
 });
 
 // --- the gitlab endpoint's configuration (issue #42) ---
@@ -640,9 +640,10 @@ function flankedByLabels(entry) {
 	});
 }
 
-/** Every rule a forge's group holds, all three shapes -- "contributes nothing ANYWHERE" must read them all. */
+/** Every rule a forge's group holds, ALL FIVE shapes -- "contributes nothing ANYWHERE" must read them
+ * all, and a group added later without a line here would let a phantom rule hide from these pins. */
 function rulesOf(group) {
-	return [...group.label, ...(group.comment ? [group.comment] : []), ...group.pullRequest];
+	return [...group.label, ...(group.comment ? [group.comment] : []), ...group.pullRequest, ...group.issue, ...group.prClose];
 }
 
 test("a disarmed one-shot loads clean and its neighbours keep RAW indexes 0 and 2 -- never compacted to 0 and 1", () => {
@@ -661,21 +662,27 @@ test("a disarmed one-shot loads clean and its neighbours keep RAW indexes 0 and 
 	}
 });
 
-test("an ARMED issue entry is inert in this phase: no rule on any forge, and reloadTriggers accepts the file", () => {
-	// Issue routing lands in a later change. Until it does, the one acceptable degradation for an
-	// unrouted type is INERT -- never a throw inside loadTriggers, because reloadTriggers catches
-	// everything and KEEPS the previous rules: the operator would see one "invalid" line while
-	// yesterday's triggers went on firing, the exact masked-edit failure the emptyGroup pin describes.
+test("an ARMED issue entry groups into the issue close-group with its narrowing intact", () => {
+	// The close routing is live: an issue entry is a real rule now, in its own group, carrying the
+	// number/once narrowing the close route reads -- and still at its RAW index, inside the if/else-if
+	// chain (an unguarded push throwing inside reloadTriggers would keep yesterday's rules firing
+	// behind one "invalid" line, the masked-edit failure the emptyGroup pin describes).
 	const files = { fileExists: () => true, readFile: () => flankedByLabels(ARMED_ISSUE_ENTRY) };
 	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, files);
-	assert.deepEqual(c.triggers.github.label.map((r) => r.index), [0, 2], "the armed entry still occupies index 1 even though nothing routes it yet");
+	assert.deepEqual(c.triggers.github.label.map((r) => r.index), [0, 2], "neighbours keep raw indexes around the issue rule");
+	assert.equal(c.triggers.github.issue.length, 1, "the armed issue entry is a live close rule");
+	const rule = c.triggers.github.issue[0];
+	assert.equal(rule.index, 1, "at its raw file position");
+	assert.equal(rule.number, 4, "the item narrowing rides the rule -- without it a one-shot fires on every close");
+	assert.equal(rule.once, true);
+	assert.ok(rule.actions.has("closed"));
 	for (const kind of FORGE_KINDS) {
-		assert.equal(rulesOf(c.triggers[kind]).length, kind === "github" ? 2 : 0, `${kind}: an unrouted issue entry degrades to inert, never to a phantom rule`);
+		assert.equal(rulesOf(c.triggers[kind]).length, kind === "github" ? 3 : 0, `${kind}: exactly the three armed rules, nowhere else`);
 	}
-	// The live-edit face of the same pin: the reload path reports ok, not "invalid" + stale rules kept.
+	// The live-edit face: the reload path reports ok and rebuilds the same groups.
 	const cfg = { triggers: null };
 	assert.deepEqual(reloadTriggers({}, cfg, files), { ok: true });
-	assert.equal(cfg.triggers.github.label.length, 2);
+	assert.equal(cfg.triggers.github.issue.length, 1);
 });
 
 test("knownFlows: an ARMED issue entry's flow joins the vocabulary; a DISARMED one's does not", () => {
@@ -694,20 +701,24 @@ test("knownFlows: an ARMED issue entry's flow joins the vocabulary; a DISARMED o
 });
 
 test("reloadTriggers swaps an armed close one-shot for its disarmed twin: the rule disappears, later indexes hold", () => {
-	// The armed entry here is a pull_request CLOSE one-shot -- in this phase the only once-capable shape
-	// the receiver actually groups into a rule, so it is the one whose disarm makes a rule visibly vanish.
+	// The armed entry is a pull_request CLOSE one-shot. Since the close routing landed it groups into
+	// prClose, the close-gate group, never pullRequest -- the split the loader's no-mixing refusal
+	// makes total, so the author-gated route can never see a close rule.
 	const armedEntry = { on: { type: "pull_request", action: ["closed"], number: 7, once: true }, run: { kind: "github", flow: "cleanup" } };
 	const spentEntry = { on: { ...armedEntry.on, disarmed: { at: "2026-08-28T00:00:00Z" } }, run: armedEntry.run };
 	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => flankedByLabels(armedEntry) });
-	assert.equal(cfg.triggers.github.pullRequest.length, 1, "armed: the close rule is live");
-	assert.equal(cfg.triggers.github.pullRequest[0].index, 1);
+	assert.equal(cfg.triggers.github.prClose.length, 1, "armed: the close rule is live, in the close group");
+	assert.equal(cfg.triggers.github.pullRequest.length, 0, "and NOT in the author-gated PR group");
+	assert.equal(cfg.triggers.github.prClose[0].index, 1);
+	assert.equal(cfg.triggers.github.prClose[0].number, 7, "the narrowing rides the grouped rule -- without it a #7 one-shot fires on every close");
+	assert.equal(cfg.triggers.github.prClose[0].once, true);
 	assert.ok(cfg.triggers.knownFlows.has("cleanup"));
 
 	// The worker fires the one-shot and writes on.disarmed back into the SAME entry; the receiver's
 	// watcher reloads. In place, on the cfg the wired handler closed over -- no restart.
 	const res = reloadTriggers({}, cfg, { fileExists: () => true, readFile: () => flankedByLabels(spentEntry) });
 	assert.deepEqual(res, { ok: true }, "a disarm write-back is a VALID edit, never 'invalid' + stale rules kept");
-	assert.equal(cfg.triggers.github.pullRequest.length, 0, "the spent rule is gone -- the sentinel matches nothing");
+	assert.equal(cfg.triggers.github.prClose.length, 0, "the spent rule is gone -- the sentinel matches nothing");
 	assert.deepEqual(cfg.triggers.github.label.map((r) => r.index), [0, 2], "the disarm shifted NO later index: file entry 2 is still rule index 2");
 	assert.equal(cfg.triggers.knownFlows.has("cleanup"), false, "and its flow left the armed-intent allowlist with it");
 });

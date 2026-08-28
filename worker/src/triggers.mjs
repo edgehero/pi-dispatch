@@ -100,12 +100,16 @@ const PR_ACTIONS = {
  * once because three places turn on it: the close-only refusal in `normalizePullRequest` (a close rule
  * gates on the CLOSER's write access, every other PR rule gates on the author's association or a
  * collaborator's label, and one rule cannot gate on two different actors), the `capable` switch that
- * admits `on.number`/`on.once` there, and -- once close routing lands -- the queue's semantic-key
- * discriminant. Azure is absent for
+ * admits `on.number`/`on.once` there, and the queue's semantic-key discriminant. Azure is absent for
  * the subset reason the table above records, so `PR_ACTIONS.azure` simply never grows the word and the
  * existing vocabulary refusal names azure on its own.
+ *
+ * EXPORTED for the two consumers that must never re-derive it: the receiver's grouping (a close-only
+ * rule routes through the close gate, every other PR rule through the author gate, and the split must
+ * be THIS table's) and the queue's semantic-key discriminant (a matched close action word is what
+ * marks a close job).
  */
-const PR_CLOSE_ACTIONS = { github: "closed", gitlab: "close", forgejo: "closed" };
+export const PR_CLOSE_ACTIONS = { github: "closed", gitlab: "close", forgejo: "closed" };
 
 /**
  * The `issue` action vocabulary, per forge, in each forge's own words (issue #231). One word each so

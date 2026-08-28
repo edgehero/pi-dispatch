@@ -320,3 +320,155 @@ test("the receiver enqueues REFERENCES and never a value -- it has no resolver a
 	assert.equal(r.job.secrets.A, reference);
 	assert.equal("secretsProfile" in r.job, false, "an unset profile stays absent, never present-and-undefined");
 });
+
+// --- close triggers (issue #231): `close` routes over the loader's split-out issue/prClose groups ---
+
+// Grouped exactly as loadReceiverConfig emits close rules: `issue` holds the on.type "issue" rules,
+// `prClose` the pull_request rules whose action list is the close word ("close" -- GitLab's own word,
+// not GitHub's "closed") -- split from `pullRequest` at load, so neither close route and neither classic
+// route can ever read the other's rules. `number`/`once` ride as the loader normalized them.
+const closeTriggers = {
+	...triggers,
+	issue: [
+		{ index: 10, actions: new Set(["close"]), number: 5, once: true, flow: "wrapup" },
+		{ index: 11, actions: new Set(["close"]), number: undefined, once: undefined, flow: "sweep" },
+	],
+	prClose: [{ index: 12, actions: new Set(["close"]), number: undefined, once: undefined, flow: "mr-wrap" }],
+};
+const runClose = (payload, { authorized = true } = {}) => filterGitLab(parseGitLabSubset(payload), closeTriggers, knownFlows, SELF_ID, authorized, "wh-1");
+
+/** An issue `close` delivery that moved NO labels: `changes` empty, which is how GitLab sends a plain close. */
+const issueClosePayload = (over = {}) =>
+	issuePayload({
+		object_attributes: { iid: 5, title: "T", description: "B", action: "close", labels: [] },
+		changes: {},
+		...over,
+	});
+
+test("an issue `close` fires the armed close rule, and a one-shot says so on matched", () => {
+	const r = runClose(issueClosePayload());
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "wrapup", "the iid-5 rule is first in file order and names this item");
+	// `once: true` is what tells the enqueue path a disarm is owed -- lose it here and the one-shot
+	// fires forever while the file still says once.
+	assert.deepEqual(r.job.trigger.matched, { index: 10, type: "issue", action: "close", number: 5, once: true });
+	assert.equal(r.job.trigger.action, "close", "the record says what the forge said");
+	assert.deepEqual(r.job.target, { type: "issue", number: 5, title: "T", body: "B" });
+});
+
+test("an unnarrowed close rule takes any other item's close -- and matched carries NO once key", () => {
+	const r = runClose(issueClosePayload({ object_attributes: { iid: 9, title: "T9", description: "B9", action: "close", labels: [] } }));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "sweep", "the narrowed rule skipped iid 9; the unnarrowed one is next in file order");
+	// Absent, never present-and-undefined: a plain close rule's matched record must stay byte-identical
+	// in shape to the other routes', or every serialized job grows a key today's consumers never saw.
+	assert.deepEqual(r.job.trigger.matched, { index: 11, type: "issue", action: "close", number: 9 });
+});
+
+test("a merge request `close` fires the prClose rule", () => {
+	const r = runClose(mrPayload({ object_attributes: { iid: 12, title: "MR", description: "D", action: "close", labels: [] } }));
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "mr-wrap");
+	// No `number` on an MR close's matched record, parallel to the classic MR route's -- the item number
+	// is the target's business.
+	assert.deepEqual(r.job.trigger.matched, { index: 12, type: "pull_request", action: "close" });
+	assert.deepEqual(r.job.target, { type: "pull_request", number: 12, title: "MR", body: "D" });
+});
+
+test("a close rule narrowed to ANOTHER item refuses under its own token", () => {
+	// `close-number-not-matched` and `no-matching-close-trigger` call for different operator responses:
+	// "your one-shot exists and a different item closed" is not "nothing is armed", and a panel must be
+	// able to tell them apart.
+	const t = { ...triggers, issue: [{ index: 10, actions: new Set(["close"]), number: 8, once: true, flow: "wrapup" }] };
+	const r = filterGitLab(parseGitLabSubset(issueClosePayload()), t, knownFlows, SELF_ID, true, "wh-1");
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "close-number-not-matched");
+});
+
+test("an issue `close` with nothing armed and no label movement drops `no-matching-close-trigger` -- it used to be `no-label-change`", () => {
+	// EVOLUTION (issue #231): before close routing, an issue `close` walked routeLabel like any other
+	// non-open action, found no `changes.labels`, and dropped as `no-label-change` -- a reason about a
+	// label event this never was. Now the close route answers first, and the reason names what an
+	// operator should actually check: no close rule is armed for this item.
+	const r = run(issueClosePayload());
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "no-matching-close-trigger");
+});
+
+test("a merge request `close` with nothing armed drops `no-matching-close-trigger` -- it used to be `unhandled-event`", () => {
+	// EVOLUTION (issue #231): "close" was simply not in MR_ACTIONS, so a closing MR read as an event this
+	// project had never heard of. It is heard of now; what is missing is a rule, and the reason says so.
+	const r = run(mrPayload({ object_attributes: { iid: 12, title: "MR", description: "D", action: "close", labels: [] } }));
+	assert.equal(r.enqueue, false);
+	assert.equal(r.reason, "no-matching-close-trigger");
+});
+
+// A real GitLab delivery can close AND label in one call (a `/close /label ~x` quick action, or the
+// sidebar edited during close). The pair below pins both halves of that coexistence: label rules keep
+// firing on such closes exactly as they did before close routing existed, and an armed close rule takes
+// the delivery INSTEAD -- one delivery, one job, close first, so the two rule kinds cannot double-bill
+// a single click.
+const closeAndLabelPayload = () =>
+	issuePayload({
+		object_attributes: { iid: 5, title: "T", description: "B", action: "close", labels: [label("pi:frontend")] },
+		changes: { labels: { previous: [], current: [label("pi:frontend")] } },
+	});
+
+test("a close-and-label delivery with NO close rules fires the label rule byte-identically to today", () => {
+	const r = run(closeAndLabelPayload());
+	assert.equal(r.enqueue, true);
+	// The FULL job literal, pinned: this is the byte-identity claim. The fallback hands the delivery to
+	// routeLabel untouched, so nothing about the job -- not even trigger.action, which stays GitLab's
+	// own "close" -- may differ from what this delivery enqueued before close routing existed.
+	assert.deepEqual(r.job, {
+		repo: "group/sub/proj",
+		projectId: 42,
+		target: { type: "issue", number: 5, title: "T", body: "B" },
+		flow: "frontend-fix",
+		trigger: {
+			event: "issue",
+			action: "close",
+			deliveryId: "wh-1",
+			sender: { id: MEMBER },
+			matched: { index: 2, type: "label", label: "pi:frontend" },
+		},
+	});
+});
+
+test("a close-and-label delivery with a matching close rule fires the CLOSE rule and the label rule not at all", () => {
+	const r = runClose(closeAndLabelPayload());
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "wrapup", "close takes precedence; the label rule must not also fire");
+	assert.deepEqual(r.job.trigger.matched, { index: 10, type: "issue", action: "close", number: 5, once: true });
+});
+
+test("a close-and-label delivery whose close rule names ANOTHER item still fires the label rule", () => {
+	// The fallback runs on ANY close refusal, number mismatch included: this delivery fired the label
+	// rule before close routing existed, and a one-shot armed for a DIFFERENT item must not eat it.
+	const t = { ...triggers, issue: [{ index: 10, actions: new Set(["close"]), number: 8, once: true, flow: "wrapup" }] };
+	const r = filterGitLab(parseGitLabSubset(closeAndLabelPayload()), t, knownFlows, SELF_ID, true, "wh-1");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.flow, "frontend-fix");
+	assert.deepEqual(r.job.trigger.matched, { index: 2, type: "label", label: "pi:frontend" });
+});
+
+test("an unauthorized actor's close dies at the GLOBAL gate: author-not-allowed, never closer-not-allowed", () => {
+	// On a webhook close delivery the actor IS the closer, so the pre-route access gate already refused
+	// them before any close route ran. The route's own closer gate is belt-and-braces against
+	// resolver-shape drift and must stay UNREACHABLE here -- if this ever reports closer-not-allowed,
+	// the global gate moved.
+	for (const payload of [issueClosePayload(), closeAndLabelPayload(), mrPayload({ object_attributes: { iid: 12, title: "MR", description: "D", action: "close", labels: [] } })]) {
+		const r = runClose(payload, { authorized: false });
+		assert.equal(r.enqueue, false);
+		assert.equal(r.reason, "author-not-allowed");
+	}
+});
+
+test("an `update` still walks routeLabel byte-identically with close rules armed", () => {
+	// The close arm keys on the action, so every non-close issue delivery must reach routeLabel exactly
+	// as before -- arming a close rule must not perturb one byte of what a label trigger enqueues.
+	const plain = run(issuePayload());
+	const armed = runClose(issuePayload());
+	assert.equal(plain.enqueue, true);
+	assert.equal(JSON.stringify(armed.job), JSON.stringify(plain.job));
+});

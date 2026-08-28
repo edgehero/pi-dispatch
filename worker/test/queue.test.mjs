@@ -291,6 +291,105 @@ test("enqueueForgeJob: the dedup key's flow slot becomes cmd:<command> -- comman
 	assert.equal("command" in seen[1].data, false, "a flow job's data keeps exactly today's keys");
 });
 
+// --- close-triggered jobs (issue #231): the `closed:` semantic-key discriminant ---
+
+test("a close-triggered issue job leads the semantic key's flow slot with closed:", async () => {
+	// Without the discriminant, a label/comment job on the same target and flow inside the 10-minute
+	// window would silently swallow the close job -- and a swallowed close job writes no run record,
+	// so the once trigger it was meant to spend never disarms: a permanently dead one-shot with
+	// nothing in the panel to say why.
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "o/r",
+		target: { type: "issue", number: 40, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "closed", deliveryId: "guid-close", sender: { id: 42 }, matched: { index: 1, type: "issue", action: "closed", number: 40, once: true } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	});
+	assert.equal(captured.opts.deduplication.id, "o/r#40:closed:fix");
+	// DERIVED from trigger.matched, never carried: the discriminant is dedup's business, so job data
+	// (and with it /job/event.json) keeps exactly the keys a non-close job has.
+	assert.deepEqual(Object.keys(captured.data), ["kind", "repo", "target", "flow", "trigger", "provider", "model", "maxTurns"]);
+});
+
+test("a gitlab MR close composes the forge separator with the discriminant: grp/proj!5:closed:fix", async () => {
+	// Two forge facts must compose, both from tables and neither re-typed: gitlab's close word is
+	// `close` (PR_CLOSE_ACTIONS.gitlab -- the matched action this trigger carries), and its merge
+	// requests number in their own sequence, so the separator is `!`. A discriminant keyed to the
+	// github spelling alone would leave every gitlab close job coalescing against ordinary MR jobs.
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	await enqueueForgeJob(fakeQueue, "gitlab", {
+		repo: "grp/proj",
+		projectId: 11,
+		target: { type: "pull_request", number: 5, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { deliveryId: "d1", sender: { id: 42 }, matched: { index: 0, type: "pull_request", action: "close" } },
+	});
+	assert.equal(captured.opts.deduplication.id, "grp/proj!5:closed:fix");
+});
+
+test("a close-dispatched command composes discriminant-first: o/r#40:closed:cmd:x", async () => {
+	// Outermost discriminant first, then the entry-point prefix -- the composition the queue comment
+	// promises. `:` is outside the skill-name charset, so neither prefixed form is spellable by a flow.
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "o/r",
+		target: { type: "issue", number: 40, title: "t", body: "b" },
+		command: "x",
+		trigger: { event: "issues", action: "closed", deliveryId: "guid-close-cmd", sender: { id: 42 }, matched: { index: 1, type: "issue", action: "closed", number: 40 } },
+	});
+	assert.equal(captured.opts.deduplication.id, "o/r#40:closed:cmd:x");
+});
+
+test("a close replica suffixes AFTER the discriminant: o/r#40:closed:fix:r2", async () => {
+	// The replica suffix stays outermost on the right, as on every other job: replicas must not
+	// coalesce against each other, and a re-delivery of THIS replica must still coalesce with itself.
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "o/r",
+		target: { type: "issue", number: 40, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "closed", deliveryId: "guid-close-rep", sender: { id: 42 }, matched: { index: 1, type: "issue", action: "closed", number: 40 } },
+		replica: 2,
+		replicas: 2,
+	});
+	assert.equal(captured.opts.deduplication.id, "o/r#40:closed:fix:r2");
+	assert.equal(captured.opts.jobId, "gh-guid-close-rep-r2");
+});
+
+test("non-close jobs keep their pre-#231 semantic keys byte-identical (label and PR literals pinned)", async () => {
+	// Red if the flowSlot refactor drifts them: these are the EXACT strings enqueued before the close
+	// discriminant existed, and every live 10-minute window keyed on them must keep coalescing across
+	// a deploy of this change. A matched label rule and a matched non-close PR action are the two
+	// shapes the discriminant test must answer "no" for.
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const seen = [];
+	const fakeQueue = { add: (name, data, opts) => (seen.push({ data, opts }), { id: opts.jobId }) };
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "frontend-fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-l", sender: { id: 42 }, matched: { index: 2, type: "label", label: "bug" } },
+	});
+	await enqueueGitHubJob(fakeQueue, {
+		repo: "owner/repo",
+		target: { type: "pull_request", number: 12, title: "t", body: "b" },
+		flow: "review",
+		trigger: { event: "pull_request", action: "labeled", deliveryId: "guid-p", sender: { id: 42 }, matched: { index: 3, type: "pull_request", action: "labeled" } },
+	});
+	assert.deepEqual(seen.map((s) => s.opts.deduplication.id), ["owner/repo#7:frontend-fix", "owner/repo#12:review"]);
+});
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";

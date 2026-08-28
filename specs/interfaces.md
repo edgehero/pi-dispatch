@@ -736,6 +736,12 @@ exit into a refusal would permanently burn a delivery over a transient vault out
     `matched.index` and `matched.type` — and only those two — host-side on the run record as
     `triggerIndex`/`triggerType` (`INT-RUN-HISTORY-FILE-CONTRACT`); the third key stays in `event.json`
     alone, inside the container, because it can carry collaborator-applied text.
+    On a CLOSE-triggered job (issue #231) `matched` additionally carries `number` (the closed item's
+    number, on the `issue` shape — a harness-computed integer, never payload text) and, only when the
+    rule was a one-shot, `once: true` — conditional keys on `reviewState`'s absent-stays-absent terms,
+    so every non-close job's `matched` is byte-identical to before. `once` is what the worker's disarm
+    hook keys on, and `number`/the job's own target number are the identity the disarm re-checks; both
+    are the admissible integer/boolean class, so the run record's PII-free property is untouched.
   - **On a review-triggered job `matched.action` and the record's own `action` deliberately DIFFER**, and
     this is the first GitHub case where they do. The record's `event`/`action` pair is byte-for-byte what
     GitHub sent (`pull_request_review` / `submitted`); `matched.action` is the `triggers.json` word that
@@ -1280,6 +1286,11 @@ different shape rather than an extension of this one.)*
 - **Contract**:
   - Events consumed: `issues`, `issue_comment`, `pull_request`, `pull_request_review`. Everything else
     drops as `unhandled-event`.
+  - **The `closed` action is consumed on `issues` and on `pull_request`** (issue #231), routed to the
+    close rules (`INT-TRIGGERS-FILE-CONTRACT`'s `issue` type and close-only `pull_request` rules) and
+    gated on the CLOSER per `CONST-TRIGGER-AUTHOR-GATE`'s close arm. A merged PR's delivery carries
+    `action: closed` too, so a close rule fires on merge-closes and plain closes alike — stated so
+    nobody reads the `merge` word's absence from the trigger vocabulary as merge-closes not firing.
   - **`pull_request_review` is a second event name on ONE trigger type** (issue #66). Its `submitted`
     action routes exactly as a `pull_request` action does, under the trigger word `review_submitted`
     (`INT-TRIGGERS-FILE-CONTRACT`); `edited` and `dismissed` drop as `unhandled-event`, because an edit
@@ -1287,7 +1298,10 @@ different shape rather than an extension of this one.)*
   - Headers consumed: `X-Hub-Signature-256`, `X-GitHub-Event`, `X-GitHub-Delivery`
   - Body fields consumed: `action`, `issue.number`, `issue.title`, `issue.body`, `issue.labels[].name`,
     `issue.pull_request` (presence marker only — an `issue_comment` on a PR carries it), `comment.body`,
-    `comment.author_association`, `sender.id`, `repository.full_name`, and for a `pull_request` event:
+    `comment.author_association`, `sender.id`, **`sender.login`** (issue #231 — carried for EXACTLY ONE
+    consumer, the closer-permission lookup on close routes; never logged, never enqueued: the job's
+    `trigger.sender` stays `{ id }`, the forgejo subset's own justification for its `login` applied
+    here), `repository.full_name`, and for a `pull_request` event:
     `pull_request.number`, `pull_request.title`, `pull_request.body`, `pull_request.author_association`,
     `pull_request.labels[].name`, `pull_request.head.ref`, `pull_request.head.sha`,
     `pull_request.head.repo.full_name`, `pull_request.base.ref`; and for a `pull_request_review` event
@@ -1334,9 +1348,12 @@ different shape rather than an extension of this one.)*
     become `poll-e<event>`/`poll-c<comment>`/`poll-pr<n>-<sha7>`/`poll-rv<review>`, disjoint from webhook
     GUIDs inside
     the same `gh-` dedup space. The reviews source (issue #66) sweeps only OPEN pull requests, so a review
-    on a closed one is never synthesized — the same call `merge` and `close` get in the action vocabulary —
+    on a closed one is never synthesized — the call `merge` still gets in the action vocabulary, and the
+    call `close` got until #231 made it a gated action of its own —
     and it exists at all because the alternative was a `review_submitted` trigger that loads clean under
     polling and can never fire, the silently dead trigger `INT-TRIGGERS-FILE-CONTRACT` refuses at load.
+    The polling transport's `closed` source lands with this issue's poller slice; until it does, close
+    triggers fire over webhooks only.
     The headers row above does not apply to synthesized subsets — there is
     no HMAC because there is no inbound delivery to authenticate; TLS + the operator's own credential
     against api.github.com is the transport trust (`SECURITY.md`).
@@ -1381,7 +1398,13 @@ payload is a different shape rather than an extension of GitHub's.
     and for a note event the noteable's `{iid, title, description, labels[].title}` under `issue` or
     `merge_request`.
   - **Everything else is ignored.**
-- **Three fields have no GitHub counterpart**, and they are why this is a separate projection:
+  - **The `close` action is consumed** (issue #231), on issues and merge requests, routed to the close
+    rules and gated by the existing every-delivery member lookup — the sender IS the closer, so no new
+    field and no new mechanism. On an issue, the close route runs FIRST and, when the same delivery also
+    carries a `changes.labels` addition, falls back to the label route: a real GitLab call can close and
+    label at once, that delivery fires label rules today, and it must keep doing so — one delivery, one
+    job, close taking precedence when both match. **No field is added by #231**: `object_attributes.action`
+    was already in the list above.
   - **`changes.labels` — the DIFF is the trigger.** GitLab has no `labeled` action; adding a label arrives
     as `action: "update"` with a before/after pair. The label set a rule is tested against is
     `current \ previous`, and an `update` carrying no `changes.labels` matches nothing. Testing the
@@ -1438,6 +1461,11 @@ it — which is precisely why it is separate. "Almost the same" is the shape tha
   deliberately ignore" is distinguishable from "we did not recognise this".
 - **`label_cleared` maps to nothing, permanently.** It has no GitHub counterpart, so there is no rule for
   it to inherit: removing a label must never start a paid run, and it has to be stated rather than assumed.
+- **`closed` moved OUT of the recognised-but-not-actionable set** (issue #231) into both action maps —
+  a word sits in the ignored set or an action map, never both — and routes to the close rules, gated by
+  the existing every-delivery permission lookup (the sender IS the closer). A close matching no armed
+  close rule now drops `no-matching-close-trigger` where it dropped `action-not-actionable`. **No field
+  is added by #231.**
 - **`is_pull` is TOP-LEVEL**, where GitHub carries `issue.pull_request`. Reading the wrong one routes every
   pull-request comment as an issue, and the envelope then tells the agent to open `pi/issue-<n>` for
   something that is already a pull request: wrong work, no error, and it reads as a successful run.
@@ -2198,7 +2226,7 @@ validator rather than a second copy of it.
     "replica":  <int> | null,       // this job's 1-based index within its replica set; null = an ordinary run
     "replicas": <int> | null,       // the set size, so `r2` is legible without finding the sibling row
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
-    "triggerType": "label" | "comment" | "pull_request" | null,   // that entry's on.type; null on cron, chained, and manual jobs
+    "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
                  "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null }   // null when the job had no session at all
@@ -2766,6 +2794,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-28 | Issue #231, receiver slice. **`INT-WEBHOOK-PAYLOAD-SUBSET` AMENDED**: `closed` consumed on `issues` and `pull_request` (merge-closes emit `closed` too, stated); `sender.login` joins the body-field list with exactly one consumer, the closer-permission lookup -- never logged, never enqueued, the job's `trigger.sender` stays `{ id }`; the reviews-source sentence that cited `close` as never-actionable is corrected, and the polling transport's `closed` source is marked as the poller slice's. **`INT-GITLAB-PAYLOAD-SUBSET` AMENDED**: `close` actionable on issues (close route first, label-route fallback when the same delivery adds labels -- a close-and-label call fires label rules today and keeps doing so) and merge requests; NO field added. **`INT-FORGEJO-PAYLOAD-SUBSET` AMENDED**: `closed` leaves the recognised-but-not-actionable set into both action maps; a rule-less close drops `no-matching-close-trigger`; NO field added. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `triggerType` enum gains `"issue"` (a passthrough of `matched.type`; PR closes reuse `"pull_request"`, zero record-shape change for them). **`INT-AZURE-PAYLOAD-SUBSET` UNCHANGED, checked**: azure close triggers are refused at load, so nothing new is consumed. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `matched` gains `number` (issue shape, harness-computed integer) and conditional `once: true` on close jobs only -- reviewState's absent-stays-absent terms, every non-close job's `matched` byte-identical; the entry's matched clause names both. |
 | 2026-08-28 | Issue #231, first slice (schema). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: new `on.type: "issue"` (close events; github/forgejo `closed`, gitlab `close`, azure refused at load as *not yet covered*) and the close-only `pull_request` rule (the close word joins the PR vocabulary but never mixes with other actions -- a close gates on the CLOSER, everything else on the author); `on.number` narrows a close rule to one item; `on.once` is the one-shot (strict boolean, `true` requires `number`, refused beside `run.replicas`); `on.disarmed { at, jobId? }` is the worker-written spent mark, and a disarmed entry validates in full, keeps its raw position, and normalizes to the validator-only sentinel `{ on: { type: "disarmed" }, run: {} }` so nothing downstream can match it. `run.flow` on the webhook kinds now must match the skill-name charset -- the file's one narrowing: it converts materialize's post-budget refusal into a free load-time one and keeps `:` out of the semantic dedup key's flow slot. The "merge and close are omitted, nothing left to act on" sentence is REWRITTEN: a job about the closed thing stays refused, a close that releases separately-armed work is the new case. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing new crosses into the container in this slice -- close jobs' `data`/`event.json` shape lands with the receiver slice. **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED in this slice, checked**: no subset field moves until the receiver routes closes. |
 | 2026-08-28 | Issue #224. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the five exit-line parsers repair a GLUED line (a partial write from whatever shares the container's stdout, landing as `<stray bytes><runner line>` in one line) by re-anchoring on the runner writers' first-key bytes before skipping it, and both runner writers are newline-DELIMITED rather than merely newline-terminated -- the reader edge covers logs an older image already wrote, the writer edge covers everything downstream of a pull. A repaired value stays read-only telemetry. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: classification never read this line and still does not -- a repaired line changes what the record reports, never the queue outcome. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing new crosses into the container; the leading newline is output discipline, not an input. |
 | 2026-08-26 | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** (issue #225): `run.secrets` and `run.secretsProfile` on all four kinds, with the load-time refusals and the pre-spend ones split by what a pure, fs-free validator can answer. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: resolved values join the closed map, assigned after `PI_FORWARD_ENV` and before both the egress variables and the minted token, so a trigger outranks the operator's blanket host list and outranks neither the network policy nor the per-job credential. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: five new `reason` tokens, plus four the code already emitted and this enum had drifted from (`job-image-forge-unsupported`, `job-image-commands-unsupported`, `daily-token-cap`, `soft-hold`). Every new token was checked against the nested `session.reason` enum for the collision rule. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: `secretProfiles`, deliberately absent from `KNOWN_KEYS` so `dispatch_set` cannot reach it. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a second participant, speaking the same three codes for the same reason. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: a chained child inherits neither field, and the explicit-property-reads rule is what makes that true by construction. |

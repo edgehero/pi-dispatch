@@ -104,10 +104,15 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 				);
 			}
 			const repositoryNames = [repoNameOf(repo)]; // scope to the ONE repo; owner stripped
+			// An optional PERMISSIONS narrowing (issue #231): the receiver's closer-permission lookup asks
+			// for `{ metadata: "read" }`, so the token it holds for that one question cannot write anything
+			// even if leaked. Job mints never pass this and keep the installation's full grant -- narrowing
+			// is the caller's statement of intent, not a default this mint could guess.
+			const permissions = job?.permissions;
 			let minted;
 			try {
 				const appAuth = createAppAuth(auth);
-				minted = await appAuth({ type: "installation", repositoryNames });
+				minted = await appAuth({ type: "installation", repositoryNames, ...(permissions && { permissions }) });
 			} catch (error) {
 				throw classifyAppMintError(error);
 			}

@@ -44,6 +44,11 @@ const ISSUE_ACTIONS = {
 	opened: "opened",
 	reopened: "reopened",
 	label_updated: "labeled",
+	// The close trigger (issue #231) made `closed` actionable, so it moved OUT of IGNORED_ACTIONS
+	// below. It sits in BOTH maps deliberately: the maps are selected by EVENT NAME, so `closed` on
+	// `issues` and `closed` on `pull_request` are two different routes sharing a spelling, not one
+	// word listed twice -- the never-in-two rule below is about a map versus the ignored set.
+	closed: "closed",
 };
 
 const PR_ACTIONS = {
@@ -51,12 +56,19 @@ const PR_ACTIONS = {
 	reopened: "reopened",
 	label_updated: "labeled",
 	synchronized: "synchronize",
+	closed: "closed", // issue #231 -- see the note on ISSUE_ACTIONS
 };
 
-/** Recognised, and deliberately not actionable. Named so the drop reason can say which it was. */
+/**
+ * Recognised, and deliberately not actionable. Named so the drop reason can say which it was.
+ *
+ * DISJOINT from both action maps, and that is an invariant rather than an accident: `mapAction`
+ * would happily route a word that also sat here, and this set's claim of "ignored" would then be a
+ * lie the drop reason repeats to an operator. `closed` lived here until issue #231 made closes
+ * routable; it MOVED into the maps rather than gaining a twin.
+ */
 const IGNORED_ACTIONS = new Set([
 	"label_cleared", // removing a label must never start a paid run
-	"closed",
 	"edited",
 	"assigned",
 	"unassigned",

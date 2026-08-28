@@ -77,7 +77,10 @@ export function makeResolveForgejoAuthority({ apiUrl, token, fetchFn = fetch }) 
 		try {
 			body = await res.json();
 		} catch (err) {
-			return { indeterminate: `collaborator permission lookup returned unparseable JSON: ${err?.message ?? "unknown"}` };
+			// A FIXED reason, never err.message: V8's JSON.parse errors quote the offending input,
+			// so a failed res.json() here would carry response-body bytes into a log line -- the
+			// no-pii-in-logs rule the github resolver states, applied to its elders (issue #231).
+			return { indeterminate: "collaborator permission lookup returned unparseable JSON" };
 		}
 		const permission = body?.permission;
 		if (typeof permission !== "string" || permission === "") {

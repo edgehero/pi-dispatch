@@ -1,6 +1,11 @@
 import { Queue } from "bullmq";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
+import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
+
+// The close words in every forge's spelling, derived from the one table (never re-typed here): a
+// matched PR action in this set marks a close job for the semantic-key discriminant below.
+const PR_CLOSE_WORDS = new Set(Object.values(PR_CLOSE_ACTIONS));
 
 export const QUEUE = "pi-jobs";
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId };
@@ -180,6 +185,21 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		...(replica !== undefined && { replica }),
 		...(replicas !== undefined && { replicas }),
 	};
+	// A close-triggered job (issue #231) leads the semantic key's flow slot with `closed:`. Without it,
+	// a label/comment/PR job on the same target and flow inside the 10-minute window silently swallows
+	// the close job -- and because a swallowed close job writes no run record, the once trigger it was
+	// meant to spend never disarms: a permanently dead one-shot with nothing in the panel to say why.
+	// The discriminant is DERIVED from the matched rule (`issue` type, or a PR close action word) rather
+	// than carried as a job field: an execution detail of dedup is not a fact about the delivery, and
+	// `data`/`event.json` stay byte-identical. `:` is outside the skill-name charset -- enforced at load
+	// since #231 -- so no real flow can spell either prefixed form, and `closed:cmd:<name>` composes for
+	// close-dispatched commands (outermost discriminant first, then the entry-point prefix).
+	const matched = trigger?.matched;
+	// `type === "issue"` reads as "close" only while the issue vocabulary is close-only (it is; the
+	// tables say "one word each so far"). If that type ever grows a non-close action, this test must
+	// narrow to the matched action word, like the PR half already does.
+	const isCloseJob = matched?.type === "issue" || (matched?.type === "pull_request" && PR_CLOSE_WORDS.has(matched?.action));
+	const flowSlot = `${isCloseJob ? "closed:" : ""}${command !== undefined ? `cmd:${command}` : flow}`;
 	await queue.add(kind, data, {
 		jobId,
 		// A command job (issue #189) fills the semantic key's flow slot with `cmd:<command>`: a command
@@ -188,7 +208,7 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
 		// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
 		// stays byte-identical to before the feature.
-		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${command !== undefined ? `cmd:${command}` : flow}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
+		deduplication: { id: `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${replica !== undefined ? `:r${replica}` : ""}`, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 		attempts: 2,
 		backoff: { type: "exponential", delay: 60_000 },
 		removeOnComplete: { age: 31 * 24 * 3600 }, // age in seconds -- do not cross units with the ms ttl above

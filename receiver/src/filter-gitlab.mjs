@@ -41,6 +41,7 @@
  */
 
 import { firstMatchingRule, labelSet, matchedLabel } from "./predicate.mjs";
+import { findCloseRule } from "./close.mjs";
 
 /**
 /** The merge-request actions a trigger may name, mirrored from the loader's gitlab vocabulary. */
@@ -75,9 +76,32 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 	const kind = subset.objectKind;
 	let resolved;
 	if (kind === "issue") {
-		resolved = routeLabel(subset, triggers, "issue");
+		if (subset.action === "close") {
+			// The close trigger (issue #231), tried FIRST -- and the label walk only as a FALLBACK -- because
+			// a real GitLab delivery can close and label in one call (a quick action comment, or the sidebar
+			// edited during close). One delivery, one job: when an armed close rule wants this close it fires
+			// and the label rule does NOT, so the two rule kinds cannot double-bill a single click.
+			resolved = routeIssueClose(subset, triggers, authorized);
+			if (!resolved.enqueue && resolved.reason !== "closer-not-allowed" && subset.labelChanges) {
+				// No close rule took it, and this close also MOVED labels (`changes.labels`, the exact field
+				// `addedLabels` reads for every non-open action). Label rules fired on such closes before close
+				// routing existed and must keep doing so byte-identically -- including on ANY close refusal, so
+				// a one-shot armed for a DIFFERENT item cannot eat a label trigger it was never about, and
+				// including the label walk's own refusal reasons when nothing matches. The `closer-not-allowed`
+				// exclusion is belt-and-braces with the route's own unreachable gate: a close a drifted
+				// resolver refused must stay refused, never demoted into a label job.
+				resolved = routeLabel(subset, triggers, "issue");
+			}
+		} else {
+			resolved = routeLabel(subset, triggers, "issue");
+		}
 	} else if (kind === "merge_request") {
-		resolved = routeMergeRequest(subset, triggers);
+		// An MR close routes over `group.prClose` ALONE (issue #231), with no label fallback: unlike the
+		// issue arm above, MR_ACTIONS never contained "close", so no MR rule ever fired on a close and
+		// there is nothing for a fallback to keep working. MR_ACTIONS stays untouched for the same reason
+		// in the other direction -- close rules can never reach routeMergeRequest, because the loader split
+		// them into `prClose` at group time, so the two rule kinds are mutually unreachable by construction.
+		resolved = subset.action === "close" ? routeMergeRequestClose(subset, triggers, authorized) : routeMergeRequest(subset, triggers);
 	} else if (kind === "note") {
 		resolved = routeNote(subset, triggers, knownFlows);
 	} else {
@@ -221,6 +245,86 @@ function mrResult(subset, rule, matched) {
 		resume: rule.resume,
 		replicas: rule.replicas,
 		matched,
+		target: buildTarget(subset, "pull_request"),
+	};
+}
+
+/**
+ * Issue close path (issue #231). `findCloseRule` is the ONE derivation of "which close rule wants
+ * this delivery" (close.mjs), shared with the receiver's pre-lookup check -- two hand-rolled copies
+ * a network call apart is the drift that module's header warns against.
+ *
+ * The `closer-not-allowed` gate below is belt-and-braces and UNREACHABLE today: gate (2) in
+ * `filterGitLab` already refused every non-true verdict before routing, and on a webhook close
+ * delivery the ACTOR is the closer, so the verdict that gate consumed is the closer's. It stays
+ * anyway, because this route's own contract is the closer's authority: if the global gate ever
+ * moves, or a resolver starts returning a shape it never has, a close must fail closed under its own
+ * token rather than route on a stale assumption about the caller.
+ */
+function routeIssueClose(subset, triggers, authorized) {
+	const number = subset.target?.iid;
+	// Integer or refuse, the github arms' rule: an UNNARROWED rule matches an undefined number, so a
+	// degenerate shape would otherwise enqueue a numberless target. GitLab sends integer iids.
+	if (!Number.isInteger(number)) {
+		return { enqueue: false, reason: "missing-issue-number" };
+	}
+	// "close" is PR_CLOSE_ACTIONS.gitlab -- the forge's own word, the one the loader validated the
+	// rule's action list against. GitLab really does say "close", not "closed".
+	const found = findCloseRule(triggers?.issue, "close", number);
+	if (found.rule === undefined) {
+		return { enqueue: false, reason: found.reason };
+	}
+	if (authorized !== true) {
+		return { enqueue: false, reason: "closer-not-allowed" };
+	}
+	const rule = found.rule;
+	return {
+		enqueue: true,
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
+		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
+		image: rule.image,
+		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
+		instructions: rule.instructions,
+		resume: rule.resume,
+		replicas: rule.replicas,
+		// `once: true` rides `matched` ONLY when armed (spreading false is a no-op), so the enqueue path
+		// can see a disarm is owed without re-reading the rule table -- and a plain close rule's matched
+		// record stays byte-identical to the other routes' shape.
+		matched: { index: rule.index, type: "issue", action: "close", number, ...(rule.once === true && { once: true }) },
+		target: buildTarget(subset, "issue"),
+	};
+}
+
+/** MR close path (issue #231). Same shape and same belt-and-braces closer gate as routeIssueClose. */
+function routeMergeRequestClose(subset, triggers, authorized) {
+	// The issue arm's integer guard, same reason.
+	if (!Number.isInteger(subset.target?.iid)) {
+		return { enqueue: false, reason: "missing-pull-request" };
+	}
+	const found = findCloseRule(triggers?.prClose, "close", subset.target?.iid);
+	if (found.rule === undefined) {
+		return { enqueue: false, reason: found.reason };
+	}
+	if (authorized !== true) {
+		return { enqueue: false, reason: "closer-not-allowed" }; // unreachable behind gate (2) -- see routeIssueClose
+	}
+	const rule = found.rule;
+	return {
+		enqueue: true,
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
+		packages: rule.packages,
+		image: rule.image,
+		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
+		instructions: rule.instructions,
+		resume: rule.resume,
+		replicas: rule.replicas,
+		// No `number` on an MR close's matched record -- parallel to routeMergeRequest's, where the item
+		// number is the target's business; the issue route carries it because the github design does.
+		matched: { index: rule.index, type: "pull_request", action: "close", ...(rule.once === true && { once: true }) },
 		target: buildTarget(subset, "pull_request"),
 	};
 }

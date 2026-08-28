@@ -33,9 +33,19 @@
  * All three are hard-coded here, never config-optional -- an ungated auto-trigger is an unbounded paid run
  * started by whoever opens a fork PR (CONST-TRIGGER-AUTHOR-GATE, job-budget rules).
  *
+ * CLOSE ROUTES (issue #231): `issues.closed` and `pull_request.closed` route over the close-trigger
+ * groups (`triggers.issue` / `triggers.prClose`) via the ONE shared derivation in ./close.mjs. Their
+ * gate is `closerAuthorized`, the OPTIONAL sixth parameter: the receiver's pre-resolved answer to
+ * "does the account that closed this item hold write access". It is a parameter because this module
+ * is pure and that answer needs a network lookup the receiver performs (only when
+ * `wantsCloserAuthority` below says a rule wants this close). Strict `=== true` -- anything else,
+ * absence included, fails closed -- so every existing five-argument call site behaves byte-identically:
+ * their routes never read the value.
+ *
  * `selfId` is the numeric id of whichever identity posts as the harness (the App's bot user, or the PAT
  * user); `deliveryId` is the `X-GitHub-Delivery` GUID, carried into the job for downstream dedup.
  */
+import { findCloseRule } from "./close.mjs";
 import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } from "./predicate.mjs";
 
 const AUTHOR_ALLOWLIST = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -48,8 +58,17 @@ const REVIEW_ACTION = "review_submitted";
 const REVIEW_EVENT_ACTION = "submitted";
 // PR_AUTO_ACTIONS is deliberately NOT extended with REVIEW_ACTION: it exists only to select the
 // `pr-author-not-allowed` drop reason, and the review path has reasons of its own.
+//
+// GitHub's close word (issue #231), byte-equal to PR_CLOSE_ACTIONS.github in the shared forge table
+// (worker/src/triggers.mjs). Spelled here rather than imported, deliberately: this file is the GITHUB
+// gate and already spells GitHub's action vocabulary in its own Sets above -- pulling the per-forge
+// table into it would suggest this gate routes other forges' words, which it never does (each forge
+// has a filter of its own, and the config grouping already consumed the table to build the groups this
+// file reads). The word cannot drift: it is what the wire sends, and the route arm below matches the
+// raw payload action against it.
+const CLOSE_ACTION = "closed";
 
-export function filter(eventName, subset, cfg, selfId, deliveryId) {
+export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthorized) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header, ordering constraint.
 	if (typeof subset?.sender?.id !== "number") {
 		return { enqueue: false, reason: "missing-sender-id" };
@@ -85,6 +104,16 @@ export function filter(eventName, subset, cfg, selfId, deliveryId) {
 		// text the harness has already been paid to read, and a dismissal removes a verdict rather than
 		// stating one.
 		resolved = routePullRequest(subset, triggers, REVIEW_ACTION);
+	} else if (eventName === "issues" && action === CLOSE_ACTION) {
+		// The issue close-trigger route (issue #231). The closer-authority gate lives INSIDE the route,
+		// after the rule match -- see routeClose for why it cannot sit up here.
+		resolved = routeIssueClose(subset, triggers, closerAuthorized);
+	} else if (eventName === "pull_request" && action === CLOSE_ACTION) {
+		// `closed` is deliberately NOT in PR_ACTIONS: a close rule gates on the CLOSER's resolved write
+		// access while every other PR rule gates on the author's association or a collaborator's label,
+		// and one route cannot gate on two different actors -- the same line config.mjs's prClose split
+		// draws, which is what makes `triggers.prClose` the only list this arm ever reads.
+		resolved = routePrClose(subset, triggers, closerAuthorized);
 	} else {
 		return { enqueue: false, reason: "unhandled-event" };
 	}
@@ -357,4 +386,136 @@ function buildPrTarget(pr) {
 	if (pr.head) target.head = { ref: pr.head.ref, sha: pr.head.sha, repo: pr.head.repo?.full_name };
 	if (pr.base) target.base = { ref: pr.base.ref };
 	return target;
+}
+
+/**
+ * Issue close path (issue #231). `matched.number` is the CLOSED ITEM's number, not the rule's
+ * narrowing -- an unnarrowed rule fires for any issue, and the decision record must still name which
+ * one spent it, or a once disarm is unexplainable back to an item.
+ */
+function routeIssueClose(subset, triggers, closerAuthorized) {
+	const number = subset.issue?.number;
+	// Integer or refuse, the PR arm's missing-object guard sharpened for BOTH arms: parseSubset always
+	// fabricates `subset.issue` as an object, so object presence proves nothing here, and an UNNARROWED
+	// rule matches on the action alone -- without this line a signed body replayed under a swapped
+	// event header enqueues a paid job whose target has no number at all (and a crafted string number
+	// would ride verbatim into event.json). GitHub only ever sends integers; anything else is a shape
+	// this route must not spend on.
+	if (!Number.isInteger(number)) {
+		return { enqueue: false, reason: "missing-issue-number" };
+	}
+	return routeClose(
+		triggers.issue,
+		number,
+		closerAuthorized,
+		(rule) => ({ index: rule.index, type: "issue", action: CLOSE_ACTION, number, ...(rule.once === true && { once: true }) }),
+		() => ({ type: "issue", number, title: subset.issue?.title, body: subset.issue?.body }),
+	);
+}
+
+/**
+ * PR close path (issue #231), the same guard shape routePullRequest opens with: no pull_request
+ * object is a malformed delivery, refused before any rule is consulted. `matched` carries no number
+ * here -- the target does, exactly as on every other pull_request match.
+ */
+function routePrClose(subset, triggers, closerAuthorized) {
+	const pr = subset.pull_request;
+	// Object AND integer number, the issue arm's rule: a pull_request object without an integer
+	// number is the same malformed delivery wearing a shape, and the dedup key would otherwise read
+	// `#undefined`. One reason for both cases -- to an operator they are one fact.
+	if (pr === null || typeof pr !== "object" || !Number.isInteger(pr.number)) {
+		return { enqueue: false, reason: "missing-pull-request" };
+	}
+	return routeClose(
+		triggers.prClose,
+		pr.number,
+		closerAuthorized,
+		(rule) => ({ index: rule.index, type: "pull_request", action: CLOSE_ACTION, ...(rule.once === true && { once: true }) }),
+		() => buildPrTarget(pr),
+	);
+}
+
+/**
+ * The shared close route: one body for both arms, driving the ONE rule derivation in ./close.mjs --
+ * the same findCloseRule call `wantsCloserAuthority` makes, so "which close does a rule want" can
+ * never drift between the receiver's pre-lookup question and this routing answer.
+ *
+ * `once` rides `matched` only when literally true, mirroring how every optional job field is absent
+ * rather than present-and-false: matched is the downstream disarm signal, and its consumers test
+ * presence, not truthiness.
+ */
+function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
+	const found = findCloseRule(rules, CLOSE_ACTION, number);
+	if (found.rule === undefined) {
+		return { enqueue: false, reason: found.reason };
+	}
+	// The authority gate sits INSIDE the route and AFTER the match, deliberately. The receiver performs
+	// the closer's permission lookup only for a delivery some close rule actually wants (that is what
+	// `wantsCloserAuthority` exists for), so a gate BEFORE the rule loop would emit `closer-not-allowed`
+	// for closes no rule matches -- a security token no lookup ever backed, telling an operator an
+	// authority decision was made about a delivery nobody ever resolved. A close nothing wants is
+	// `no-matching-close-trigger`, whoever closed it.
+	//
+	// Strict `!== true`, never truthiness: the value is the receiver's RESOLVED answer, and anything
+	// else reaching here -- undefined from an unwired caller, an indeterminate lookup, a "true" string
+	// or a count from a parse bug -- is a wiring fault that must fail CLOSED, the direction every gate
+	// in this file already takes (CONST-TRIGGER-AUTHOR-GATE).
+	if (closerAuthorized !== true) {
+		return { enqueue: false, reason: "closer-not-allowed" };
+	}
+	const rule = found.rule;
+	return {
+		enqueue: true,
+		// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
+		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
+		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
+		image: rule.image,
+		skillsDir: rule.skillsDir,
+		secrets: rule.secrets,
+		secretsProfile: rule.secretsProfile,
+		instructions: rule.instructions,
+		resume: rule.resume,
+		replicas: rule.replicas,
+		matched: matchedFor(rule),
+		target: targetFor(),
+	};
+}
+
+/**
+ * Does this forge group arm any close trigger at all? Pure, for the receiver/poller arm: whether the
+ * closer-authority machinery is worth wiring up for a delivery stream is a per-group fact, and
+ * deriving it anywhere else would be a second spelling of "which groups are the close groups".
+ */
+export function hasCloseTriggers(group) {
+	return group?.issue?.length > 0 || group?.prClose?.length > 0;
+}
+
+/**
+ * Should the receiver spend a permission lookup on this delivery before calling `filter`? Pure, and
+ * the SINGLE derivation shared with the route above: it calls the same findCloseRule over the same
+ * groups, so the pre-lookup question and the routing answer cannot drift -- a delivery never costs a
+ * lookup the route then ignores, and never routes a close the lookup never gated (./close.mjs's
+ * header names exactly this hazard).
+ */
+export function wantsCloserAuthority(eventName, subset, group, selfId) {
+	// Filter's own step-0/1 guards, replicated FIRST and in the same order (fail-closed identity, then
+	// the unconditional bot-loop guard): the harness closing its own issue -- the natural last act of
+	// the very flow a close trigger arms -- must not cost a lookup, and an INDETERMINATE lookup on a
+	// self-delivery would 503 (so: redeliver, retry, loop) traffic the filter would only ever drop as
+	// `self`.
+	if (typeof subset?.sender?.id !== "number") return false;
+	if (subset.sender.id === selfId) return false;
+	if (eventName === "issues" && subset.action === CLOSE_ACTION) {
+		// The routes' own shape guards, replicated for the same one-derivation reason as the step-0/1
+		// guards above: an UNNARROWED rule matches an undefined number, so without these lines a
+		// degenerate payload costs a token mint and a lookup the route then drops -- the exact "lookup
+		// the route ignores" this function exists to make impossible.
+		if (!Number.isInteger(subset.issue?.number)) return false;
+		return findCloseRule(group?.issue, CLOSE_ACTION, subset.issue.number).rule !== undefined;
+	}
+	if (eventName === "pull_request" && subset.action === CLOSE_ACTION) {
+		if (subset.pull_request === null || typeof subset.pull_request !== "object" || !Number.isInteger(subset.pull_request.number)) return false;
+		return findCloseRule(group?.prClose, CLOSE_ACTION, subset.pull_request.number).rule !== undefined;
+	}
+	return false;
 }
