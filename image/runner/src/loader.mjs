@@ -50,7 +50,7 @@ function readIfExists(path) {
  * about: a caller that forgets to pass a log must still leave the drop in the run log.
  */
 function defaultLog(event, fields = {}) {
-	process.stdout.write(`${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
+	process.stdout.write(`\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
 }
 
 /**

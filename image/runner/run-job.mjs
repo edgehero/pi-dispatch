@@ -28,9 +28,14 @@ import { createUsageMeter, installProcessUsageMeter } from "./src/usage-meter.mj
 
 const PROMPT_PATH = "/job/prompt.md";
 
-/** Log a stable identifier, never task content. Issue bodies are user-authored personal data. */
+/** Log a stable identifier, never task content. Issue bodies are user-authored personal data.
+ *  Newline-DELIMITED, not merely newline-terminated: the leading \n closes whatever un-newlined
+ *  write a subprocess sharing this stdout left dangling, which otherwise glues onto this line and
+ *  costs the host every exit-line field at once (issue #224, OQ-003). The host also repairs glued
+ *  lines on its side (`parseTailLine`), because this fix only reaches deployments that pull a new
+ *  image; both halves are deliberate. */
 function log(event, fields = {}) {
-	process.stdout.write(`${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
+	process.stdout.write(`\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
 }
 
 /** The four fields the exit line's `tokens` object always carries, whichever meter produced them. */

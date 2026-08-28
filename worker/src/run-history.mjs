@@ -35,12 +35,52 @@ export function sanitizeJobId(id) {
 }
 
 /**
+ * Parse one line of the buffered tail as a runner-emitted JSON line, or `null` for noise -- repairing
+ * the GLUED case (issue #224, OQ-003).
+ *
+ * The hazard: the runner's writes used to be newline-terminated but not newline-delimited, so a
+ * partial write from anything sharing the container's stdout (a subprocess that never flushed its
+ * trailing newline) lands as `<stray bytes><runner line>` in ONE line. A plain JSON.parse skips it,
+ * and because every parseExit* scan walks backwards past what does not parse, one un-newlined byte
+ * used to lose turns, tokens, usage, session and context at once -- or worse, hand the scan to a
+ * forged exit line placed earlier.
+ *
+ * The repair re-anchors on `{"event":"`, which is collision-free by construction: `event` is the
+ * first key both runner writers serialise, and JSON.stringify escapes every quote inside a string
+ * value, so these raw bytes cannot occur INSIDE a runner line -- only where one starts. Suffixes are
+ * tried left to right; a suffix beginning inside the stray bytes cannot parse to the line's end
+ * (nothing can close a JSON container after bytes the runner appended later, and the runner's own
+ * quotes terminate any string opened before them), so the first success is the glued runner object
+ * itself. A line truncated at the HEAD of the capped tail stays skipped: the cap's cut either
+ * removes the anchor or lands exactly on it, and then the line is whole and parses as itself.
+ * A line truncated at the END (a mid-write death) has no complete object and stays skipped too.
+ *
+ * NEVER throws, like the five scanners that call it.
+ */
+function parseTailLine(line) {
+	try {
+		return JSON.parse(line);
+	} catch {
+		// docker/agent noise, a truncated line, or a glued one -- try the repair before giving up.
+	}
+	let from = line.indexOf('{"event":"', 1);
+	while (from !== -1) {
+		try {
+			return JSON.parse(line.slice(from));
+		} catch {
+			from = line.indexOf('{"event":"', from + 1);
+		}
+	}
+	return null;
+}
+
+/**
  * Recover the agent's turn count from buffered container stdout, or `null` if it is not reported.
  *
  * The stream interleaves docker/agent noise and other JSON events (`pi_auto_retry`) with the runner's
  * own lines. Only the success exit line carries `turns` (`image/runner/run-job.mjs:263`); the
  * catch-path exit line (`:277`) omits it. Scan from the end and return the turns of the last `exit`
- * event that reports an integer count.
+ * event that reports an integer count, repairing a glued line on the way (`parseTailLine`).
  *
  * This is read-only telemetry: it MUST NEVER throw and MUST NOT feed exit-code or retry
  * classification -- that is the container exit code's job (INT-RUNNER-EXIT-CODE-PROTOCOL). Every parse
@@ -52,12 +92,7 @@ export function parseExitTurns(text) {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (line === "") continue;
-		let parsed;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue; // docker/agent noise or a truncated final line
-		}
+		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		return Number.isInteger(parsed?.turns) ? parsed.turns : null;
 	}
@@ -94,12 +129,7 @@ export function parseExitSession(text) {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (line === "") continue;
-		let parsed;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue; // docker/agent noise or a truncated final line
-		}
+		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		const sess = parsed?.session;
 		if (sess && typeof sess === "object" && !Array.isArray(sess) && typeof sess.resumed === "boolean") {
@@ -126,12 +156,7 @@ export function parseExitContext(text) {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (line === "") continue;
-		let parsed;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue; // docker/agent noise or a truncated final line
-		}
+		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		const c = parsed?.context;
 		// A window of 0 is not a denominator, and a negative count is not a measurement. SAFE integers
@@ -153,12 +178,7 @@ export function parseExitTokens(text) {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (line === "") continue;
-		let parsed;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue; // docker/agent noise or a truncated final line
-		}
+		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		const t = parsed?.tokens;
 		if (t && typeof t === "object" && !Array.isArray(t) && typeof t.total === "number") return t;
@@ -204,12 +224,7 @@ export function parseExitUsage(text) {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i].trim();
 		if (line === "") continue;
-		let parsed;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			continue; // docker/agent noise or a truncated final line
-		}
+		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		return rebuildUsage(parsed?.usage);
 	}

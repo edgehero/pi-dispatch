@@ -1097,3 +1097,19 @@ test("enforceProtectedPromptPrecedence displaces only package-won protected name
 	assert.deepEqual(loaderModule.enforceProtectedPromptPrecedence(base, { packageRoots: [], protectedPrompts }), { prompts: base.prompts, diagnostics: base.diagnostics });
 	assert.deepEqual(loaderModule.enforceProtectedPromptPrecedence(base, { packageRoots: ["/pkg"], protectedPrompts: null }), { prompts: base.prompts, diagnostics: base.diagnostics });
 });
+
+// ---- issue #224: the runner's lines must be newline-DELIMITED, not merely newline-terminated ----
+
+test("both runner log writers open with a newline, closing any un-newlined write before them", () => {
+	// A source pin, not a behaviour test, on purpose: the property is the exact write template, and
+	// a regression here is one deleted character that no unit seam observes (both writers are
+	// module-private and write to the real stdout). The leading \n is what stops a subprocess's
+	// partial write from gluing onto the exit line and costing the host every exit-line field at
+	// once (issue #224, OQ-003); the host-side repair in run-history.mjs covers old images, this
+	// covers new ones.
+	const shape = 'process.stdout.write(`\\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\\n`);';
+	for (const rel of ["../run-job.mjs", "../src/loader.mjs"]) {
+		const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+		assert.ok(src.includes(shape), `${rel}: the runner's log writer must lead with a closing newline (issue #224)`);
+	}
+});

@@ -172,12 +172,63 @@ const HOSTILE_CORPUS = [
 	"123",
 	'{"event":"exit","usage":{"v":1,"piAi":"0.80.7","truncated":0,"models":[{"provider":"anthropic","model":"m","total":9}]}}',
 	'{"event":"exit","usage":{"v":"1","models":"nope"}}',
+	'stray{"event":"exit","turns":5}',
+	'{"event":"exit","turns":99{"event":"exit","turns":4}',
+	'{"event":"exit","turns":99}{"event":"exit","turns":6}',
+	'x{"event":"',
+	'stray{"event":"exit","turns":7',
 ];
 
 test("parseExitTurns never throws across the full corpus", () => {
 	for (const input of HOSTILE_CORPUS) {
 		assert.doesNotThrow(() => parseExitTurns(input), `input=${JSON.stringify(input)}`);
 	}
+});
+
+// ---- glued-line repair (issue #224): one un-newlined write before the runner's exit line used to
+// lose all five exit-line values at once, or hand the scan to a forged line placed earlier ----
+
+const GLUED_FULL_EXIT =
+	'un-newlined stray{"event":"exit","code":0,"turns":5,' +
+	'"tokens":{"input":10,"output":2,"total":12,"cost":0.5},' +
+	'"usage":{"v":1,"piAi":"0.80.7","truncated":0,"models":[{"provider":"anthropic","model":"m","calls":1,"total":12,"cost":0.5}]},' +
+	'"session":{"resumed":true,"reason":"resumed"},"context":{"tokens":900,"window":2000}}';
+
+test("a glued exit line is repaired: all five values survive one un-newlined write", () => {
+	assert.equal(parseExitTurns(GLUED_FULL_EXIT), 5);
+	assert.equal(parseExitTokens(GLUED_FULL_EXIT)?.total, 12);
+	assert.deepEqual(parseExitSession(GLUED_FULL_EXIT), { resumed: true, reason: "resumed" });
+	assert.deepEqual(parseExitContext(GLUED_FULL_EXIT), { tokens: 900, window: 2000 });
+	assert.equal(parseExitUsage(GLUED_FULL_EXIT)?.models?.[0]?.model, "m");
+});
+
+test("a glued genuine line beats a forged exit line placed earlier -- the no-race forgery is closed", () => {
+	const text = '{"event":"exit","turns":99,"tokens":{"total":9999}}\nstray{"event":"exit","turns":3,"tokens":{"total":12}}';
+	assert.equal(parseExitTurns(text), 3);
+	assert.deepEqual(parseExitTokens(text), { total: 12 });
+});
+
+test("a stray prefix that itself opens a runner-shaped line cannot win the repair", () => {
+	// The prefix is an UNTERMINATED forged line: a parse from its anchor cannot reach the line's
+	// end (nothing closes a JSON container after bytes the runner appended later), so the scan
+	// advances to the complete object -- the suffix the runner wrote last.
+	assert.equal(parseExitTurns('{"event":"exit","turns":99{"event":"exit","turns":4}'), 4);
+});
+
+test("a stray COMPLETE forged object glued before the genuine line loses to the suffix", () => {
+	assert.equal(parseExitTurns('{"event":"exit","turns":99}{"event":"exit","turns":6}'), 6);
+});
+
+test("a line truncated at the head of the capped tail is still skipped, not misread", () => {
+	// The cap's cut removed the line's opening bytes: no anchor survives, no repair is attempted,
+	// and the scan keeps walking to the intact line above. The fragment's numbers must not leak.
+	const text = '{"event":"exit","turns":8}\nokens":{"total":123}}';
+	assert.equal(parseExitTurns(text), 8);
+	assert.equal(parseExitTokens(text), null);
+});
+
+test("a glued line truncated at the END (a mid-write death) stays skipped", () => {
+	assert.equal(parseExitTurns('stray{"event":"exit","turns":7'), null);
 });
 
 // ---- parseExitTokens (issue #25): mirrors parseExitTurns, reads the usage object off the exit line ----
