@@ -515,6 +515,82 @@ test("readTriggers normalizes each on.type into its discriminated display record
   ]);
 });
 
+test("normalizeTriggerForDisplay renders an issue trigger: action + number + the one-shot fields (#231)", () => {
+  // The armed one-shot, pinned whole: number and once ride the on side, the run side mirrors the other
+  // webhook kinds. No `disarmed` key at all while the rule is armed -- consumers test presence.
+  const armed = normalizeTriggerForDisplay({
+    on: { type: "issue", action: ["closed"], number: 40, once: true },
+    run: { kind: "github", flow: "deploy" },
+  });
+  assert.deepEqual(armed, {
+    type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", command: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github",
+  });
+
+  // An unnarrowed standing rule: `null` is the every-item sentinel, and `once` takes resume's opt-IN
+  // polarity -- an omitted flag is today's default, not a one-shot.
+  const standing = normalizeTriggerForDisplay({ on: { type: "issue", action: ["close"] }, run: { kind: "gitlab", flow: "announce" } });
+  assert.equal(standing.number, null);
+  assert.equal(standing.once, false);
+  assert.equal("disarmed" in standing, false, "an armed rule must not carry a disarmed key at all");
+  assert.equal(standing.forge, "gitlab");
+});
+
+test("a DISARMED one-shot still produces an issue display record, carrying the mark verbatim (#231)", () => {
+  // The worker's loader collapses a disarmed entry to a never-matches sentinel for dispatch, but the
+  // display reads the RAW file: an operator asking "why did nothing fire" needs the spent row in front
+  // of them, not a hole where a trigger used to be.
+  const spent = normalizeTriggerForDisplay({
+    on: { type: "issue", action: ["closed"], number: 40, once: true, disarmed: { at: "2026-08-27T09:00:00.000Z", jobId: "j-9" } },
+    run: { kind: "github", flow: "deploy" },
+  });
+  assert.equal(spent.type, "issue");
+  assert.equal(spent.once, true);
+  assert.deepEqual(spent.disarmed, { at: "2026-08-27T09:00:00.000Z", jobId: "j-9" }, "the raw { at, jobId } mark, verbatim -- the loader already refused any other shape");
+
+  // jobId is optional in the mark (a hand-written disarm has no run record to join to).
+  const handDisarmed = normalizeTriggerForDisplay({
+    on: { type: "issue", action: ["closed"], number: 7, once: true, disarmed: { at: "2026-08-27T09:00:00.000Z" } },
+    run: { kind: "github", flow: "deploy" },
+  });
+  assert.deepEqual(handDisarmed.disarmed, { at: "2026-08-27T09:00:00.000Z" });
+
+  // And through readTriggers the spent row keeps its RAW file position (issue #54): the disarm mark must
+  // never shift a later row's attribution.
+  const files = {
+    "triggers.json": JSON.stringify({
+      triggers: [
+        { on: { type: "issue", action: ["closed"], number: 40, once: true, disarmed: { at: "2026-08-27T09:00:00.000Z" } }, run: { kind: "github", flow: "deploy" } },
+        { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } },
+      ],
+    }),
+  };
+  const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
+  assert.equal(res.triggers.length, 2, "the spent one-shot still renders in the list");
+  assert.equal(res.triggers[0].type, "issue");
+  assert.equal(res.triggers[0].index, 0);
+  assert.equal(res.triggers[1].index, 1);
+});
+
+test("the issue arm is fail-soft on the close-trigger fields, mirroring the loader rather than re-validating", () => {
+  // The loader refused every one of these fail-loud, so the display's job is to degrade to the sentinel,
+  // never to throw or to invent a state the running system cannot be in -- the packages/image doctrine.
+  for (const number of [undefined, 0, -1, "40", 1.5, null]) {
+    const rec = normalizeTriggerForDisplay({ on: { type: "issue", action: ["closed"], number }, run: { kind: "github", flow: "deploy" } });
+    assert.equal(rec.number, null, `on.number ${JSON.stringify(number)} degrades to the every-item sentinel`);
+  }
+  for (const once of [undefined, false, "true", 1, null]) {
+    const rec = normalizeTriggerForDisplay({ on: { type: "issue", action: ["closed"], once }, run: { kind: "github", flow: "deploy" } });
+    assert.equal(rec.once, false, `on.once ${JSON.stringify(once)} is not an armed one-shot`);
+  }
+  for (const disarmed of [undefined, null, "spent", 42, ["at"]]) {
+    const rec = normalizeTriggerForDisplay({ on: { type: "issue", action: ["closed"], disarmed }, run: { kind: "github", flow: "deploy" } });
+    assert.equal("disarmed" in rec, false, `on.disarmed ${JSON.stringify(disarmed)} is not a usable mark, so the key stays absent`);
+  }
+  // A malformed action list degrades member-wise like every other selector, and the record still renders.
+  const junkAction = normalizeTriggerForDisplay({ on: { type: "issue", action: ["closed", 42, null] }, run: { kind: "github", flow: "deploy" } });
+  assert.deepEqual(junkAction.action, ["closed"]);
+});
+
 test("normalizeTriggerForDisplay carries run.packages on all four kinds, with the opt-out polarity", () => {
   const entries = [
     { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/p", flow: "tidy" } },

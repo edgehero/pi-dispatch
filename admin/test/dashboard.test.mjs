@@ -354,6 +354,29 @@ test("the TRIGGERS section unifies the label allowlist with the schedulers block
   assert.match(out, /bug → github fix/, "the label trigger row: match → target flow");
 });
 
+test("an issue trigger renders a list row: [action] #number → forge flow (#231)", async () => {
+  // The colored twin of render.mjs's issue line: same facts, this file's [action]-first idiom. The
+  // number is the row's only match clause, so a narrowed rule must show it -- a one-shot on issue #40
+  // that renders like "every close" hides exactly what the operator armed.
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({
+        ...SNAPSHOT,
+        triggers: { triggers: [{ type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", forge: "github", packages: false }] },
+      }),
+    }),
+  });
+  await flush();
+  const out = comp.render(80).join("\n");
+  await comp.dispose();
+
+  assert.match(out, /issue\s+\[closed\] #40 → github deploy/, "the issue row: kind badge, action, item number, forge target");
+});
+
 // --- staged packages (REQ-GLOBAL-PI-OVERLAY): which triggers load the operator's third-party code ---
 
 /** A one-trigger snapshot: `packages` is the trigger's normalized flag, `staged` the overlay's manifest read. */

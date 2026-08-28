@@ -608,6 +608,12 @@ export function triggerMatchLabel(t) {
       return `"${t.phrase ?? "-"}"`;
     case "pull_request":
       return `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
+    case "issue": {
+      // pull_request's vocabulary plus the one narrowing an issue rule can carry: `#<n>` is the forge's own
+      // spelling of the item, so the label reads back the way the operator wrote the rule (issue #231).
+      const action = `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
+      return Number.isInteger(t.number) ? `${action} #${t.number}` : action;
+    }
     default:
       return "(unknown)";
   }

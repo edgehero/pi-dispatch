@@ -208,7 +208,9 @@ test("PR trigger with an empty or non-array action is a config error", () => {
 });
 
 test("PR trigger with an unsupported action is a config error", () => {
-	assert.throws(() => parse([{ on: { type: "pull_request", action: ["closed"] }, run: { kind: "github", flow: "x" } }]), (e) => isConfigError(e) && /closed/.test(e.message));
+	// `merged` rather than `closed` since #231 made the close word actionable: `merged` is the word the
+	// vocabulary table deliberately keeps out everywhere (a merge that should release work is a close).
+	assert.throws(() => parse([{ on: { type: "pull_request", action: ["merged"] }, run: { kind: "github", flow: "x" } }]), (e) => isConfigError(e) && /merged/.test(e.message));
 });
 
 test("PR trigger missing run.flow is a config error", () => {
@@ -394,14 +396,17 @@ test("pull_request actions are validated against the vocabulary of the forge the
 	// trigger loads clean and then never matches an event -- a silently dead trigger, not an error.
 	assert.throws(
 		() => parse([{ on: { type: "pull_request", action: ["synchronize"] }, run: { kind: "gitlab", flow: "review" } }]),
-		(e) => isConfigError(e) && e.message.includes("gitlab") && e.message.includes("open|update|reopen|approved"),
+		// The pin is the FULL joined vocabulary, moved here by #231's close word: a prefix `.includes`
+		// stays green while the message grows, which is exactly how a new action would ship unpinned.
+		(e) => isConfigError(e) && e.message.includes("gitlab") && e.message.includes("open|update|reopen|approved|close"),
 		"a github action word on a gitlab trigger must refuse at load",
 	);
 	assert.throws(
 		() => parse([{ on: { type: "pull_request", action: ["update"] }, run: { kind: "github", flow: "review" } }]),
-		// The FULL github vocabulary, not a prefix of it. `.includes` on a shorter string would still pass
-		// against a message that had grown a word, which is exactly how a new action ships unpinned.
-		(e) => isConfigError(e) && e.message.includes("github") && e.message.includes("labeled|opened|synchronize|reopened|review_submitted"),
+		// The FULL github vocabulary, not a prefix of it (#231 grew it by `closed`). `.includes` on a shorter
+		// string would still pass against a message that had grown a word, which is exactly how a new action
+		// ships unpinned.
+		(e) => isConfigError(e) && e.message.includes("github") && e.message.includes("labeled|opened|synchronize|reopened|review_submitted|closed"),
 		"a gitlab action word on a github trigger must refuse at load",
 	);
 });
@@ -1076,4 +1081,297 @@ test("run.secrets is orthogonal to the other run fields -- each survives beside 
 	assert.equal(t.run.replicas, 2);
 	assert.equal(t.run.secretsProfile, "prod");
 	assert.deepEqual(t.run.secrets, { A: "op://a/b/c" });
+});
+
+// --- close triggers: on.type "issue", PR close, on.number, on.once, on.disarmed (issue #231, INT-TRIGGERS-FILE-CONTRACT) ---
+
+// The close is the starting gun, not the subject: an operator wrote "when this closes, run that", so the
+// close family gets its own on.type for issues, a close-ONLY action list on pull_request, and a narrowing
+// pair (on.number, on.once) no other kind may carry. A spent one-shot normalizes to the DISARMED sentinel
+// in place rather than being filtered out, so raw-array positions survive for triggerIndex attribution.
+const ISSUE_ONCE = { on: { type: "issue", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy" } };
+const ISSUE_CLOSE = { on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "deploy" } };
+const withOn = (entry, over) => ({ ...entry, on: { ...entry.on, ...over } });
+const DISARMED = withOn(ISSUE_ONCE, { disarmed: { at: "2026-08-27T09:00:00Z", jobId: "job-40" } });
+
+test("an issue one-shot normalizes: the full on, and a run shaped exactly like a label trigger's", () => {
+	const [t] = parse([ISSUE_ONCE]);
+	// The WHOLE on, not one field: a normalizer that grew or dropped a key must fail here, not
+	// downstream where `data` is built by spreading these.
+	assert.deepEqual(t.on, { type: "issue", action: ["closed"], number: 40, once: true });
+	// Byte-identical to the label run literal at :156: the issue kind is a fifth normalizer over the
+	// same run vocabulary, not a new run shape for consumers to special-case.
+	assert.deepEqual(t.run, { kind: "github", flow: "deploy", packages: undefined, image: undefined, resume: undefined, replicas: undefined });
+});
+
+test("a standing issue close rule loads, and number/once absent stay ABSENT, not present-and-undefined", () => {
+	// reviewState's rule (:416): an unnarrowed rule's normalized shape must not grow keys the operator
+	// never wrote, or every stored pre-#231 rule would re-serialize differently after a reload.
+	const [t] = parse([ISSUE_CLOSE]);
+	assert.deepEqual(t.on, { type: "issue", action: ["closed"] });
+	assert.equal("number" in t.on, false, "an unnarrowed rule must not grow a number key");
+	assert.equal("once" in t.on, false, "a standing rule must not grow a once key");
+});
+
+test("issue on.action speaks each forge's own words, and the wrong forge's word refuses at load", () => {
+	// The :394 sharp case restated for the issue kind: "closed" on gitlab is not malformed, it is
+	// GitHub's word, and unrefused it would load clean and never match an event.
+	for (const [kind, word] of [["github", "closed"], ["forgejo", "closed"], ["gitlab", "close"]]) {
+		const [t] = parse([{ on: { type: "issue", action: [word] }, run: { kind, flow: "deploy" } }]);
+		assert.deepEqual(t.on.action, [word], `${kind} must take its own close word`);
+	}
+	// The FULL parenthesized join, the :399 doctrine -- each vocabulary is one word today, and a second
+	// word growing in unpinned is how it would ship.
+	assert.throws(
+		() => parse([{ on: { type: "issue", action: ["closed"] }, run: { kind: "gitlab", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("gitlab") && e.message.includes("(expected close)"),
+		"GitHub's word on a gitlab trigger must refuse at load, naming gitlab's own",
+	);
+	assert.throws(
+		() => parse([{ on: { type: "issue", action: ["close"] }, run: { kind: "github", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("github") && e.message.includes("(expected closed)"),
+		"GitLab's word on a github trigger must refuse at load, naming github's own",
+	);
+	assert.throws(() => parse([{ on: { type: "issue", action: [] }, run: { kind: "github", flow: "deploy" } }]), (e) => isConfigError(e) && /non-empty array/.test(e.message));
+});
+
+test("an azure issue trigger refuses as NOT YET COVERED -- the payload subset cannot see a work item close", () => {
+	// validateResumeFlag's distinction, kept on purpose: a work item's close is a System.State transition
+	// whose terminal names vary by process template, and the projected subset carries only System.Tags.
+	// The gap is the subset, not the idea, and an operator planning work needs the right fact.
+	assert.throws(
+		() => parse([{ on: { type: "issue", action: ["closed"] }, run: { kind: "azure", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("azure") && e.message.includes("not yet covered"),
+	);
+});
+
+test("a close-only pull_request rule loads on the three forges with a close word, gaining number and once", () => {
+	for (const [kind, word] of [["github", "closed"], ["gitlab", "close"], ["forgejo", "closed"]]) {
+		const [t] = parse([{ on: { type: "pull_request", action: [word], number: 7, once: true }, run: { kind, flow: "deploy" } }]);
+		assert.equal(t.on.number, 7, `${kind} must carry the narrowing`);
+		assert.equal(t.on.once, true, `${kind} must carry the one-shot`);
+		// The ordered key list pins WHERE the pair lands: the trailing conditional spread, after the
+		// always-present predicate keys -- and doubles as a no-extra-keys pin (no reviewState here).
+		assert.deepEqual(Object.keys(t.on), ["type", "action", "any", "all", "none", "number", "once"], `${kind} must spread the pair after the predicate keys`);
+	}
+	// An unflagged PR rule grows NEITHER key -- the absence rule again, on the kind where a
+	// present-and-undefined slip is likeliest because the pair is conditional there.
+	const [plain] = parse([PR_AUTO]);
+	assert.equal("number" in plain.on, false);
+	assert.equal("once" in plain.on, false);
+});
+
+test("mixing the close word with any other action refuses -- one rule cannot gate on two actors", () => {
+	// A close rule gates on the CLOSER's write access, every other PR action on the author's
+	// association or a collaborator's label; a mixed list would need both gates at once.
+	assert.throws(
+		() => parse([{ on: { type: "pull_request", action: ["closed", "opened"] }, run: { kind: "github", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("cannot mix"),
+	);
+	assert.throws(
+		() => parse([{ on: { type: "pull_request", action: ["close", "update"] }, run: { kind: "gitlab", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("cannot mix"),
+	);
+});
+
+test("a label predicate refuses on a close-only PR rule and on every issue rule -- the close route reads no label diff", () => {
+	// Accepted-and-ignored is the failure class (validateRepository's posture): the route matches
+	// action and number alone, so any/all/none would sit in the file looking configured.
+	assert.throws(
+		() => parse([{ on: { type: "pull_request", action: ["closed"], any: ["pi:release"] }, run: { kind: "github", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("label predicate"),
+	);
+	for (const key of ["any", "all", "none"]) {
+		assert.throws(
+			() => parse([withOn(ISSUE_CLOSE, { [key]: ["pi:release"] })]),
+			(e) => isConfigError(e) && e.message.includes("label predicate"),
+			`issue with on.${key} must refuse`,
+		);
+	}
+});
+
+test("on.once is strictly boolean, false is CARRIED, true requires on.number, and once+replicas refuse together", () => {
+	for (const bad of ["true", 1]) {
+		assert.throws(
+			() => parse([withOn(ISSUE_ONCE, { once: bad })]),
+			(e) => isConfigError(e) && e.message.includes("must be true or false"),
+			`once=${JSON.stringify(bad)} must refuse -- a truthy string arming a one-shot is the drift the boolean rule exists for`,
+		);
+	}
+	// false is today's default written down (validateResumeFlag's argument), and it is CARRIED rather
+	// than collapsed to absent, so the file and the stored rule keep saying the same thing.
+	const [f] = parse([withOn(ISSUE_CLOSE, { once: false })]);
+	assert.deepEqual(f.on, { type: "issue", action: ["closed"], once: false });
+	// A numberless one-shot is a race: two items closing inside one dedup window coin-flip for it. The
+	// refusal must name BOTH fields, or the operator deletes the wrong one.
+	assert.throws(
+		() => parse([{ on: { type: "issue", action: ["closed"], once: true }, run: { kind: "github", flow: "deploy" } }]),
+		(e) => isConfigError(e) && e.message.includes("on.once") && e.message.includes("on.number"),
+	);
+	// "exactly one run" and "N sandboxes race" contradict on their face, and with N run records the
+	// disarm no longer says which one spent the trigger.
+	assert.throws(
+		() => parse([withRun(ISSUE_ONCE, { replicas: 2 })]),
+		(e) => isConfigError(e) && e.message.includes("cannot be combined"),
+	);
+});
+
+test("on.number must be an integer >= 1, and rides WITHOUT once as a standing narrowing", () => {
+	for (const bad of [0, -1, 1.5, "40"]) {
+		assert.throws(
+			() => parse([withOn(ISSUE_CLOSE, { number: bad })]),
+			(e) => isConfigError(e) && e.message.includes("integer >= 1"),
+			`number=${JSON.stringify(bad)} must refuse -- the forge's own numbering starts at 1`,
+		);
+	}
+	// Number-without-once is coherent narrowing, on.reviewState's shape: a standing "every close of
+	// #40" rule, not a one-shot -- refusing it would weld two orthogonal fields together.
+	const [t] = parse([withOn(ISSUE_CLOSE, { number: 40 })]);
+	assert.deepEqual(t.on, { type: "issue", action: ["closed"], number: 40 });
+});
+
+test("number, once and disarmed each refuse on cron and on the non-close kinds, keeping the two facts apart", () => {
+	// The KINDS discipline: one shared validator per field, reached through every normalizer, so a
+	// normalizer that forgot a call would pass the rest and fail exactly one. Cron's refusal is a
+	// different FACT from the webhook kinds' ("not available" vs "not yet covered") and the messages
+	// must keep the difference -- run.resume's doctrine at :514. Each field rides ALONE so its own
+	// refusal is the one that fires, not its neighbour's.
+	const overlays = [
+		["number", { number: 40 }],
+		["once", { once: true }],
+		["disarmed", { disarmed: { at: "2026-08-27T09:00:00Z" } }],
+	];
+	const nonClose = [
+		{ kind: "label", entry: LABEL },
+		{ kind: "comment", entry: COMMENT },
+		{ kind: "pull_request", entry: PR_AUTO },
+	];
+	for (const [field, over] of overlays) {
+		assert.throws(
+			() => parse([withOn(CRON, over)]),
+			(e) => isConfigError(e) && e.message.includes("not available on a cron trigger"),
+			`cron must refuse on.${field} as unavailable, not as a coverage gap`,
+		);
+		for (const { kind, entry } of nonClose) {
+			assert.throws(
+				() => parse([withOn(entry, over)]),
+				(e) => isConfigError(e) && e.message.includes("not yet covered"),
+				`${kind} must refuse on.${field} as a gap to close, not a limit`,
+			);
+		}
+	}
+});
+
+test("a disarmed one-shot normalizes to the sentinel IN PLACE -- the position is the pin, not just the shape", () => {
+	// The lazy revert this must catch is FILTERING: dropping the spent entry re-indexes every later
+	// trigger, and triggerIndex attribution -- the join between a run record and the entry that spent
+	// itself -- silently points one entry left. So the LABEL rule must still be at [2].
+	const result = parse([CRON, DISARMED, LABEL]);
+	assert.equal(result.length, 3, "a spent one-shot keeps its slot; deleting it shifts every later entry's index");
+	// EXACT: no selectors, no actions, no run.kind, no flow -- unmatchable by construction, so a
+	// consumer that forgot to skip it still cannot select it. Any extra key weakens that.
+	assert.deepEqual(result[1], { on: { type: "disarmed" }, run: {} });
+	assert.equal(result[2].on.type, "label", "the entry AFTER the spent one must keep its own position");
+	// jobId is optional: a hand-written disarm has no run record to join to.
+	assert.deepEqual(parse([withOn(ISSUE_ONCE, { disarmed: { at: "2026-08-27T09:00:00Z" } })])[0], { on: { type: "disarmed" }, run: {} });
+});
+
+test("every malformed on.disarmed is a load refusal, never a silently-still-armed rule", () => {
+	// The worker writes this mark; a corrupted write that still loaded as armed would be a one-shot
+	// firing again, the exact bug the sentinel exists to make unwritable.
+	const cases = [
+		[true, /must be an object/],
+		[[], /must be an object/],
+		[{}, /disarmed\.at must be a non-empty string/],
+		[{ at: "" }, /disarmed\.at must be a non-empty string/],
+		[{ at: 1 }, /disarmed\.at must be a non-empty string/],
+		[{ at: "2026-08-27T09:00:00Z", jobId: "" }, /disarmed\.jobId must be a non-empty string/],
+		[{ at: "2026-08-27T09:00:00Z", extra: 1 }, /unsupported key/],
+	];
+	for (const [bad, needle] of cases) {
+		assert.throws(
+			() => parse([withOn(ISSUE_ONCE, { disarmed: bad })]),
+			(e) => isConfigError(e) && needle.test(e.message),
+			`disarmed=${JSON.stringify(bad)} must refuse`,
+		);
+	}
+	// Without once: true there is nothing the mark could record having spent.
+	assert.throws(
+		() => parse([withOn(ISSUE_CLOSE, { number: 40, disarmed: { at: "2026-08-27T09:00:00Z" } })]),
+		(e) => isConfigError(e) && e.message.includes("only meaningful beside"),
+	);
+	// And on a kind that cannot carry once at all, the refusal says so rather than shape-checking a
+	// mark that could never have been written.
+	assert.throws(
+		() => parse([withOn(LABEL, { disarmed: { at: "2026-08-27T09:00:00Z" } })]),
+		(e) => isConfigError(e) && e.message.includes("marks a spent one-shot"),
+	);
+});
+
+test("a disarmed entry still validates IN FULL -- a malformed run refuses the file before the sentinel wins", () => {
+	// The lazy revert: short-circuiting to the sentinel on seeing on.disarmed. writeTriggers'
+	// fail-closed contract needs the WHOLE file valid, and the worker's disarm only ever ADDS one key
+	// to an entry that already passed -- so a disarmed entry that stopped validating would let a bad
+	// hand edit hide behind a spent one-shot.
+	const bad = { on: { ...DISARMED.on }, run: { kind: "github", flow: "BAD FLOW" } };
+	assert.throws(() => parse([bad]), (e) => isConfigError(e) && /skill-name charset/.test(e.message));
+});
+
+test('authoring on.type "disarmed" refuses as an unknown type, and the type message now names "issue"', () => {
+	// DISARMED_TYPE is producible only by the validator: ON_TYPES excludes it on purpose, so a
+	// hand-written sentinel cannot smuggle in an entry that LOOKS spent and dodges validation.
+	assert.throws(
+		() => parse([{ on: { type: "disarmed" }, run: {} }]),
+		(e) => isConfigError(e) && e.message.includes("on.type must be one of"),
+	);
+	// The FULL joined type vocabulary, the :399 doctrine: #231 grew it by "issue", and a prefix pin
+	// would have stayed green while it grew.
+	assert.throws(
+		() => parse([{ on: { type: "disarmed" }, run: {} }]),
+		(e) => e.message.includes("cron|label|comment|pull_request|issue"),
+	);
+});
+
+test("run.flow is charset-gated on the webhook kinds, and cron is DELIBERATELY exempt", () => {
+	// The colon cases are the load-bearing ones: ":" is the separator in the queue's semantic dedup
+	// key, where the command jobs' "cmd:" prefix lives and the close jobs' discriminant sits once
+	// close routing lands. The
+	// rest could until #231 only ever fail in a paid container (materialize.mjs refuses them at job
+	// start, after the budget slot is reserved), so refusing at load turns a paid failure into a free one.
+	for (const [kind, entry] of [["label", LABEL], ["comment", COMMENT], ["pull_request", PR_AUTO], ["issue", ISSUE_CLOSE]]) {
+		for (const bad of ["closed:deploy", "cmd:x", "Fix", "a b"]) {
+			assert.throws(
+				() => parse([withRun(entry, { flow: bad })]),
+				(e) => isConfigError(e) && /skill-name charset/.test(e.message),
+				`${kind} must refuse flow=${JSON.stringify(bad)} before a budget slot can be reserved`,
+			);
+		}
+	}
+	// Cron loads the very name the webhook kinds refuse: a local flow resolves inside the operator's
+	// own folder by pi itself, and the semantic key does not apply to repeat jobs -- narrowing cron
+	// would refuse working deployments this hazard cannot reach.
+	const [c] = parse([withRun(CRON, { flow: "Weird:Flow" })]);
+	assert.equal(c.run.flow, "Weird:Flow");
+});
+
+test("an issue one-shot is orthogonal to the run vocabulary -- each field survives beside it", () => {
+	// The :333 shape: arming a one-shot must not cost a trigger its container fields, and none of them
+	// may drop the narrowing pair. secrets rides with its profile; replicas is the one deliberate
+	// absentee, because once and replicas refuse together above.
+	const cases = [
+		[{ packages: false }, (r) => assert.equal(r.packages, false)],
+		[{ image: "my-python:1.2.0" }, (r) => assert.equal(r.image, "my-python:1.2.0")],
+		[{ skillsDir: "/srv/skills" }, (r) => assert.equal(r.skillsDir, "/srv/skills")],
+		[{ instructions: "Tests run with pnpm." }, (r) => assert.equal(r.instructions, "Tests run with pnpm.")],
+		[{ secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, secretsProfile: "prod" }, (r) => {
+			assert.deepEqual(r.secrets, { STRIPE_KEY: "op://ci/stripe/api-key" });
+			assert.equal(r.secretsProfile, "prod");
+		}],
+		[{ resume: true }, (r) => assert.equal(r.resume, true)],
+	];
+	for (const [over, check] of cases) {
+		const [t] = parse([withRun(ISSUE_ONCE, over)]);
+		check(t.run);
+		assert.deepEqual(t.on, { type: "issue", action: ["closed"], number: 40, once: true }, `${Object.keys(over).join("+")} must not disturb the on`);
+	}
 });

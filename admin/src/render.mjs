@@ -203,7 +203,19 @@ function triggerLine(t) {
     case "pull_request": {
       const clauses = ruleClauses(t);
       const action = `action[${(t.action ?? []).join(",")}]`;
-      return `pull_request  ${action}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
+      // A close-only rule's `#<n>` narrowing renders exactly as the issue arm's does (issue #231): a
+      // one-shot on PR #40 that renders like "every close" hides exactly what the operator armed.
+      const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
+      return `pull_request  ${action}${num}${clauses ? ` ${clauses}` : ""} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
+    }
+    case "issue": {
+      // pull_request's shape with `#<n>` in the clause slot (issue #231): this plain line and the colored
+      // dashboard row must state the same facts -- renderRunList's rule, the monochrome surface must not
+      // silently tell a different story than the colored one -- and an issue rule's only clause is the
+      // item number it may be narrowed to.
+      const action = `action[${(t.action ?? []).join(",")}]`;
+      const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
+      return `issue  ${action}${num} → ${flow}${forge}${pkgs}${img}${skl}${ins}${res}${rep}${sec}`;
     }
     default:
       return "(unknown trigger)";

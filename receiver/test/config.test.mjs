@@ -617,3 +617,97 @@ test("a present WEBHOOK_SECRET on a github-free deployment is passed through unt
 	assert.equal(c.servesGithub, false);
 	assert.equal(c.webhookSecret, "shh");
 });
+
+// --- disarmed sentinel + not-yet-grouped issue entries hold their positions (issue #231) ---
+//
+// The shared validator normalizes a SPENT one-shot to `{ on: { type: "disarmed" }, run: {} }` at its
+// ORIGINAL array position -- it is never spliced out, because the raw index is every LATER rule's
+// identity (matched.index). This phase's receiver has no issue/prClose grouping yet, so two shapes must
+// fall through every grouping branch contributing NO rule while their neighbours keep raw indexes: the
+// sentinel, and an armed issue-type entry whose routing lands in a later change.
+
+const DISARMED_ISSUE_ENTRY = { on: { type: "issue", action: ["closed"], number: 4, once: true, disarmed: { at: "2026-08-28T00:00:00Z" } }, run: { kind: "github", flow: "deploy" } };
+const ARMED_ISSUE_ENTRY = { on: { type: "issue", action: ["closed"], number: 4, once: true }, run: { kind: "github", flow: "deploy" } };
+
+/** [label@0, entry@1, label@2] -- the trailing neighbour is what makes a compacted index visible. */
+function flankedByLabels(entry) {
+	return JSON.stringify({
+		triggers: [
+			{ on: { type: "label", any: ["pi:a"] }, run: { kind: "github", flow: "a-fix" } },
+			entry,
+			{ on: { type: "label", any: ["pi:b"] }, run: { kind: "github", flow: "b-fix" } },
+		],
+	});
+}
+
+/** Every rule a forge's group holds, all three shapes -- "contributes nothing ANYWHERE" must read them all. */
+function rulesOf(group) {
+	return [...group.label, ...(group.comment ? [group.comment] : []), ...group.pullRequest];
+}
+
+test("a disarmed one-shot loads clean and its neighbours keep RAW indexes 0 and 2 -- never compacted to 0 and 1", () => {
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => flankedByLabels(DISARMED_ISSUE_ENTRY) });
+	// The pin that goes red if anyone ever FILTERS the parsed array instead of letting the sentinel flow
+	// through positionally: index 2 collapsing to 1 would point matched.index at the wrong file entry for
+	// every rule behind the spent one.
+	assert.equal(c.triggers.github.label.length, 2);
+	assert.deepEqual(c.triggers.github.label.map((r) => r.index), [0, 2], "raw file positions -- a spent entry between two rules occupies its slot, it does not vanish from the numbering");
+	assert.deepEqual(c.triggers.github.label.map((r) => r.flow), ["a-fix", "b-fix"]);
+	// And the sentinel itself grouped NOWHERE. Its normalized run is {}, so it does not even have a kind
+	// to land on -- but the loop asserts every forge, every rule shape, so a future grouping change that
+	// routes it anywhere at all fails here by name.
+	for (const kind of FORGE_KINDS) {
+		assert.equal(rulesOf(c.triggers[kind]).length, kind === "github" ? 2 : 0, `${kind}: a spent one-shot must not survive as a matchable rule`);
+	}
+});
+
+test("an ARMED issue entry is inert in this phase: no rule on any forge, and reloadTriggers accepts the file", () => {
+	// Issue routing lands in a later change. Until it does, the one acceptable degradation for an
+	// unrouted type is INERT -- never a throw inside loadTriggers, because reloadTriggers catches
+	// everything and KEEPS the previous rules: the operator would see one "invalid" line while
+	// yesterday's triggers went on firing, the exact masked-edit failure the emptyGroup pin describes.
+	const files = { fileExists: () => true, readFile: () => flankedByLabels(ARMED_ISSUE_ENTRY) };
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, files);
+	assert.deepEqual(c.triggers.github.label.map((r) => r.index), [0, 2], "the armed entry still occupies index 1 even though nothing routes it yet");
+	for (const kind of FORGE_KINDS) {
+		assert.equal(rulesOf(c.triggers[kind]).length, kind === "github" ? 2 : 0, `${kind}: an unrouted issue entry degrades to inert, never to a phantom rule`);
+	}
+	// The live-edit face of the same pin: the reload path reports ok, not "invalid" + stale rules kept.
+	const cfg = { triggers: null };
+	assert.deepEqual(reloadTriggers({}, cfg, files), { ok: true });
+	assert.equal(cfg.triggers.github.label.length, 2);
+});
+
+test("knownFlows: an ARMED issue entry's flow joins the vocabulary; a DISARMED one's does not", () => {
+	// Pinned as observed: the knownFlows add sits BEFORE the per-type grouping branches, so any non-cron
+	// entry with a string run.flow joins the comment `<phrase> <flow>` override allowlist even while
+	// nothing routes its type -- authored, armed intent counts from the moment the file loads.
+	const armed = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => flankedByLabels(ARMED_ISSUE_ENTRY) });
+	assert.deepEqual([...armed.triggers.knownFlows].sort(), ["a-fix", "b-fix", "deploy"], "an armed one-shot's flow stays summonable by a comment override");
+	// The disarmed half is the one that matters: the sentinel normalizes with run: {}, so the spent
+	// flow's name is gone before the add can see it. Deliberate, not an accident of the sentinel shape --
+	// knownFlows is an allowlist of ARMED intent, and a spent one-shot's flow lingering there would keep
+	// a comment able to summon the run the file says already happened.
+	const spent = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => flankedByLabels(DISARMED_ISSUE_ENTRY) });
+	assert.deepEqual([...spent.triggers.knownFlows].sort(), ["a-fix", "b-fix"], "a spent one-shot's flow has left the override allowlist");
+	assert.equal(spent.triggers.knownFlows.has("deploy"), false, "the disarm removed a summonable name, which is the point of disarming");
+});
+
+test("reloadTriggers swaps an armed close one-shot for its disarmed twin: the rule disappears, later indexes hold", () => {
+	// The armed entry here is a pull_request CLOSE one-shot -- in this phase the only once-capable shape
+	// the receiver actually groups into a rule, so it is the one whose disarm makes a rule visibly vanish.
+	const armedEntry = { on: { type: "pull_request", action: ["closed"], number: 7, once: true }, run: { kind: "github", flow: "cleanup" } };
+	const spentEntry = { on: { ...armedEntry.on, disarmed: { at: "2026-08-28T00:00:00Z" } }, run: armedEntry.run };
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => flankedByLabels(armedEntry) });
+	assert.equal(cfg.triggers.github.pullRequest.length, 1, "armed: the close rule is live");
+	assert.equal(cfg.triggers.github.pullRequest[0].index, 1);
+	assert.ok(cfg.triggers.knownFlows.has("cleanup"));
+
+	// The worker fires the one-shot and writes on.disarmed back into the SAME entry; the receiver's
+	// watcher reloads. In place, on the cfg the wired handler closed over -- no restart.
+	const res = reloadTriggers({}, cfg, { fileExists: () => true, readFile: () => flankedByLabels(spentEntry) });
+	assert.deepEqual(res, { ok: true }, "a disarm write-back is a VALID edit, never 'invalid' + stale rules kept");
+	assert.equal(cfg.triggers.github.pullRequest.length, 0, "the spent rule is gone -- the sentinel matches nothing");
+	assert.deepEqual(cfg.triggers.github.label.map((r) => r.index), [0, 2], "the disarm shifted NO later index: file entry 2 is still rule index 2");
+	assert.equal(cfg.triggers.knownFlows.has("cleanup"), false, "and its flow left the armed-intent allowlist with it");
+});

@@ -1518,7 +1518,7 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 ## INT-TRIGGERS-FILE-CONTRACT
 
 **operator → worker + receiver.** One unified file, read by both services; each validates the WHOLE file
-and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`, `pull_request`).
+and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`, `pull_request`, `issue`).
 
 - **Contract**:
   ```
@@ -1555,20 +1555,33 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
     { "on": { "type": "pull_request",
-              "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted", ...],
+              "action": ["labeled"|"opened"|"synchronize"|"reopened"|"review_submitted"|"closed", ...],
+                                                                    // the close word is close-ONLY:
+                                                                    // never mixed with other actions
               "reviewState": ["approved"|"changes_requested"|"commented", ...],  // optional; github only,
                                                                     // and only beside review_submitted
-              "any": [...], "all": [...], "none": [...] },
+              "any": [...], "all": [...], "none": [...],            // refused on a close-only rule
+              "number": <optional int >= 1; close-only rules>,
+              "once": <optional boolean; close-only rules; true requires number>,
+              "disarmed": { "at": "<time>", "jobId": "<optional>" } },  // written by the worker; only
+                                                                    // beside once: true
       "run": { "kind": "github", "flow": "<flow name>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
-               "replicas": <optional int 2..3; webhook kinds only>,
+               "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
                "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
-               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } } ] }
+               "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>" } },
+    { "on": { "type": "issue", "action": ["closed"|"close", ...],   // per forge; azure refused at load
+              "number": <optional int >= 1>,
+              "once": <optional boolean; true requires number>,
+              "disarmed": { "at": "<time>", "jobId": "<optional>" } },  // written by the worker
+      "run": { "kind": "github", "flow": "<flow name>",
+               "command": "<see cron — exactly one of flow/command>",
+               "<the label entry's optional run fields apply unchanged; replicas never beside once: true>": "" } } ] }
   ```
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
-  every webhook type (`label`, `comment`, `pull_request`) `⟹ run.kind ∈ {"github", "gitlab"}` — a forge
+  every webhook type (`label`, `comment`, `pull_request`, `issue`) `⟹ run.kind ∈ {"github", "gitlab", "forgejo", "azure"}` — a forge
   job, never a local one. Off-matrix throws a `piDispatchConfig` error — a `cron` trigger has no webhook
   delivery, issue/PR number, title, or body to supply a forge run, and a webhook trigger is adversarial
   input that always produces a forge job.
@@ -1677,12 +1690,16 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **`run.kind` selects the forge; `on.type` is shared.** A label is a label and a comment is a comment on
   any forge, so the trigger types and their `{any, all, none}` predicates are identical. The **action**
   vocabulary is not, and is validated against the vocabulary of whichever forge the entry names:
-  `github` takes `labeled|opened|synchronize|reopened|review_submitted`, `gitlab` takes
-  `open|update|reopen|approved` — each
+  `github` takes `labeled|opened|synchronize|reopened|review_submitted|closed`, `gitlab` takes
+  `open|update|reopen|approved|close` — each
   in that forge's own words, so an operator can grep their own documentation for them. GitLab has no
   `labeled` (a label added to a merge request arrives as `update` with a `changes.labels` diff) and no
-  `synchronize` (an `update` carrying `oldrev` is the analogue); `merge` and `close` are omitted because a
-  job started by either has nothing left to act on.
+  `synchronize` (an `update` carrying `oldrev` is the analogue). The close words carry a distinction the
+  pre-#231 wording ("nothing left to act on") folded flat: a job **about** the closed thing still has
+  nothing left to act on, and that refusal stands, but a close can **release separately-armed work** — an
+  operator wrote "when this closes, run that" into this file, and the close is the starting gun, not the
+  subject. `merge` stays omitted everywhere: a merge that should release work is a close too, and GitHub's
+  events feed emits `closed` for merged PRs.
   **The refusal matters more than it looks**: an action word from the wrong forge is not malformed and
   breaks nothing downstream — it simply never matches an event, so the trigger loads clean and is
   silently dead. Refusing at load is what turns that into a message.
@@ -1713,6 +1730,69 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **At most one `comment` trigger PER FORGE.** The receiver holds one comment rule per forge and a second
   would be silently unreachable, so the cap is on ambiguity rather than on count — and a deployment
   serving both forges is entitled to answer `@pi` on each.
+- **`on.type: "issue"` and the close-only `pull_request` rule (issue #231)** are the close triggers: fire
+  when an item closes, on the authority of the actor who CLOSED it (`CONST-TRIGGER-AUTHOR-GATE`'s close
+  arm). **#231 lands in slices, and each clause below names its slice where it is not this one**: the
+  schema slice (this row's) makes the shapes load, validate, refuse, and display; the receiver slice
+  routes closes and extends `decideServesGithub` and the close groups; the worker slice writes the
+  disarm. Until its slice lands, a close rule loads clean and is deliberately inert — grouped by neither
+  service, matched by nothing — which is the loud-skew widening `DES-TRIGGERS-UNIFIED-FILE` records, not
+  the silent-no-op it forbids. An issue close is a TYPE because every other issue event already has a home (`label` for label
+  predicates, `comment` for phrases) and neither shape fits a close — no label diff, no phrase, only an
+  action, an item number and an actor. A PULL REQUEST's close is an ACTION on `pull_request`, the
+  `review_submitted` rule applied again: one forge's PR lifecycle must not be a type while another's is an
+  action. The split also settles what a single both-kinds type could not: GitLab and Azure number issues
+  and merge/pull requests from **separate sequences**, so under one type `on.number` would be ambiguous
+  exactly where a one-shot spending itself on the wrong `#5` hurts most — the type IS the discriminator.
+  **A close word never mixes with other actions in one rule** (refused at load): a close rule is gated on
+  the closer's write access, every other PR action on the author's association or a collaborator-applied
+  label, and one rule cannot gate on two different actors. **Label predicates are refused on both close
+  shapes** — the close route matches action and `number` alone, so `any`/`all`/`none` would sit in the
+  file looking configured and never match. **`azure` is refused at load for both** — *not yet covered*,
+  `run.resume`'s vocabulary: a work item's close is a `System.State` transition whose terminal names vary
+  by process template, the projected subset carries only `System.Tags`, and a PR abandon arrives as
+  `git.pullrequest.updated` with nothing in the subset to tell it from any other update, so support waits
+  on a payload-subset widening, not on a decision.
+- **`on.number` (close shapes only, optional int >= 1)** narrows the rule to ONE item, by the number the
+  forge itself assigns (on GitLab, the iid). Legal with or without `once` — a standing "every close of
+  #40" rule is coherent narrowing, `on.reviewState`'s precedent. On any other trigger shape it is refused
+  at load (*not yet covered* on the webhook kinds, not available on cron), never accepted-and-ignored.
+- **`on.once` (close shapes only, optional strict boolean) — the one-shot** (`DES-ONE-SHOT-DISARM-IN-THE-FILE`).
+  `false` is legal and carried (an operator who wrote down today's default is not refused for it).
+  **`true` requires `on.number`**, a race analysis rather than taste: a numberless one-shot matched by two
+  different items' closes inside one dedup window enqueues both before either disarm lands, and which item
+  "spent" the trigger is a coin flip — with a number, concurrent duplicates are duplicates of the SAME
+  item, which is what the delivery GUID and the semantic window actually bound. The number is also the
+  identity the disarm re-checks before it writes. **`once: true` is refused beside `run.replicas`**
+  (`false`, the written-down default, is carried): "exactly one run" and
+  "N sandboxes race" contradict, and with N run records the disarm no longer says which one spent the
+  trigger.
+- **`on.disarmed` (`{ at, jobId? }`, only beside `once: true`) — the spent mark, and the sentinel.** The
+  WORKER writes it (its disarm writer is the worker slice) after the one-shot's run record exists, by
+  adding exactly this key to exactly this entry; an operator may hand-write it to disarm deliberately,
+  and deletes it to re-arm. A disarmed entry
+  **still validates in full** (a corrupted disarm mark is a load refusal, never a silently-still-armed
+  rule) and **still occupies its raw array position** — deleting it would shift `triggerIndex` attribution
+  for every later entry — but it **normalizes to the sentinel `{ on: { type: "disarmed" }, run: {} }`**,
+  producible only by the validator (`ON_TYPES` excludes the word, so an authored `on.type: "disarmed"`
+  refuses like any unknown type). The sentinel carries no selectors, no actions, no `run.kind` and no
+  flow, so no receiver group, no schedule, no flow allowlist and no doctor fact can ever pick it up:
+  "nothing downstream can match a spent one-shot" is a validator guarantee, not a consumer discipline.
+  Two deliberate consequences are part of the contract rather than side effects: a spent entry's flow
+  leaves the receiver's `knownFlows` comment-override allowlist (an allowlist of ARMED intent), and a
+  spent sole-github-rule deployment recomputes `servesGithub` accordingly at its next boot — the second
+  becomes decidable for both close shapes only when the receiver slice teaches `decideServesGithub` the
+  close groups, and that extension is part of that slice's contract, not an option.
+- **`run.flow` must match the skill-name charset on the webhook kinds** (issue #231): materialize refuses
+  a name outside it at job start, AFTER the budget slot is reserved, so until #231 a charset-invalid forge
+  flow loaded clean and could only ever fail in-container (the graph's `charset-invalid` defect). Refusing
+  at load turns a paid failure into a free one — and it is what keeps `:` out of the flow slot of the
+  semantic dedup key, where the `cmd:` prefix lives and the receiver slice's close-job discriminant will
+  sit beside it. Cron is deliberately exempt: a
+  local flow resolves inside the operator's own folder by pi itself, and the semantic key does not apply
+  to repeat jobs. This is the file's one **narrowing** since the widening doctrine was written: an old
+  file carrying such a flow now refuses loudly at boot (or keeps last-good on live reload) instead of
+  failing paid — named in the release notes because the refusal is new, not because the flow ever worked.
 - **`run.github` (cron only, optional boolean)**: absent or `false` = no token — the zero-GitHub default;
   `true` = the worker mints the same per-job token the GitHub path mints and injects it as
   `GITHUB_TOKEN`/`GH_TOKEN` (`INT-CONTAINER-RUNTIME-CONTRACT`), so the flow can use the `gh` CLI. A
@@ -1930,6 +2010,20 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   kind, then both services throw. Given a comment delivery `@pi review` matching a command rule, then the
   enqueued job runs the rule's own command with the trailing word untouched as data — never a flow
   override, never a suppression.
+  The byte-match admits `number` and `once` on `reviewState`'s terms: both stay **absent** when the rule
+  omits them, so an unflagged trigger's normalized shape, job `data` and run record are byte-identical to
+  the pre-#231 shape. Given `on.once` that is not a boolean, `once: true` without `on.number`, `on.number`
+  that is not an integer >= 1, `once: true` beside `run.replicas`, a `pull_request` action list mixing the close
+  word with any other action, a label predicate on an `issue` or close-only rule, any of the three fields
+  on a `cron`/`label`/`comment`/non-close-`pull_request` entry, an `issue` entry naming `azure`, or a
+  webhook `run.flow` outside the skill-name charset, when the config loads, then **every loader throws** —
+  worker, receiver, and the admin console's bundled copy — naming the field. Given a three-entry file
+  whose middle entry is disarmed, when it parses, then the result has **three** entries, the middle one is
+  exactly the sentinel `{ on: { type: "disarmed" }, run: {} }`, and the third keeps its raw index in every
+  consumer — the receiver's rule groups, the run-record join, and the panel. Given a disarmed entry whose
+  `run` is malformed, then the whole file still refuses. Given `on.disarmed` that is not `{ at, jobId? }`
+  with non-empty strings, carries an unknown key, or appears without `once: true`, then every loader
+  throws.
 
 ## INT-PI-PACKAGES-FILE-CONTRACT
 
@@ -2672,6 +2766,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-28 | Issue #231, first slice (schema). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: new `on.type: "issue"` (close events; github/forgejo `closed`, gitlab `close`, azure refused at load as *not yet covered*) and the close-only `pull_request` rule (the close word joins the PR vocabulary but never mixes with other actions -- a close gates on the CLOSER, everything else on the author); `on.number` narrows a close rule to one item; `on.once` is the one-shot (strict boolean, `true` requires `number`, refused beside `run.replicas`); `on.disarmed { at, jobId? }` is the worker-written spent mark, and a disarmed entry validates in full, keeps its raw position, and normalizes to the validator-only sentinel `{ on: { type: "disarmed" }, run: {} }` so nothing downstream can match it. `run.flow` on the webhook kinds now must match the skill-name charset -- the file's one narrowing: it converts materialize's post-budget refusal into a free load-time one and keeps `:` out of the semantic dedup key's flow slot. The "merge and close are omitted, nothing left to act on" sentence is REWRITTEN: a job about the closed thing stays refused, a close that releases separately-armed work is the new case. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing new crosses into the container in this slice -- close jobs' `data`/`event.json` shape lands with the receiver slice. **`INT-WEBHOOK-PAYLOAD-SUBSET` UNCHANGED in this slice, checked**: no subset field moves until the receiver routes closes. |
 | 2026-08-28 | Issue #224. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the five exit-line parsers repair a GLUED line (a partial write from whatever shares the container's stdout, landing as `<stray bytes><runner line>` in one line) by re-anchoring on the runner writers' first-key bytes before skipping it, and both runner writers are newline-DELIMITED rather than merely newline-terminated -- the reader edge covers logs an older image already wrote, the writer edge covers everything downstream of a pull. A repaired value stays read-only telemetry. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: classification never read this line and still does not -- a repaired line changes what the record reports, never the queue outcome. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing new crosses into the container; the leading newline is output discipline, not an input. |
 | 2026-08-26 | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** (issue #225): `run.secrets` and `run.secretsProfile` on all four kinds, with the load-time refusals and the pre-spend ones split by what a pure, fs-free validator can answer. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: resolved values join the closed map, assigned after `PI_FORWARD_ENV` and before both the egress variables and the minted token, so a trigger outranks the operator's blanket host list and outranks neither the network policy nor the per-job credential. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: five new `reason` tokens, plus four the code already emitted and this enum had drifted from (`job-image-forge-unsupported`, `job-image-commands-unsupported`, `daily-token-cap`, `soft-hold`). Every new token was checked against the nested `session.reason` enum for the collision rule. **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: `secretProfiles`, deliberately absent from `KNOWN_KEYS` so `dispatch_set` cannot reach it. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a second participant, speaking the same three codes for the same reason. **`INT-OUTBOX-CONTRACT` UNCHANGED, checked**: a chained child inherits neither field, and the explicit-property-reads rule is what makes that true by construction. |
 | 2026-08-26 | Issue #186 (resume eligibility bounds). **INT-SESSION-STORE-CONTRACT AMENDED**, four edits. The key directory's file enumeration was CLOSED at three files and grows to five: `resume-chain` and `context`, both written inside the existing promotion lock and the same atomic swap, so neither can ever describe a transcript other than the one beside it. The read-path order gains two arms and, for the first time, says why the order is itself the contract rather than an implementation detail: the first miss is the one that names itself, so the shape check stays AHEAD of the age bound (a damaged transcript must read `unparseable`, not as a lineage that aged out) while the chain and context arms sit BEHIND `pi-version` and ahead of the header read, because they are sidecar reads that ask about the LINEAGE rather than the file and refusing on them need not pull a transcript that may be megabytes. The cost of that placement is recorded rather than left to be discovered: a transcript both chain-exhausted and corrupt reports the chain, and the corruption is deferred by exactly one run, since that cold start's own promotion resets the counter. Two new bullets carry the sidecars' own contracts, including the three decisions each: the chain counter counts the HOST's deliveries, is maintained whether or not a bound is set (a counter that starts when the knob does is a bound that does nothing for its first N runs), and reads absence as zero. It counted the container's `resumed` first, and an adversarial pass refuted that: the agent owns `/session`, so a transcript carrying a valid header with its payload on lines pi's parser DROPS is delivered every run while pi reports zero messages, which reset the counter every run and meant the bound never fired. Measured against the pinned pi. The host's decision to hand the file over is the only half of the exchange nothing in the container can influence, so that is what it counts; the context sidecar stores both numbers rather than a percentage so a refusal can be read against what judged it, stamps the MODEL beside them (a key is `(kind, repo, ref)` and carries none, so two triggers on one issue may name different models and the same token count is most of a small window and almost none of a large one; a foreign reading is ignored, unknown on either side stays usable), is left in place by a RESUMED promotion that measured nothing (a zero would read as "the context emptied", the one thing that cannot have happened) but CLEARED by a cold start (keeping it there made one high reading refuse a key forever, since the gate cold-started on a stale number and the cold start left it behind, and nothing releases it because every promotion refreshes the transcript's mtime), and records the rejected `bytes`-against-`contextWindow` fallback -- no bytes-to-tokens calibration exists here, and `bytes` is the whole branch INCLUDING what compaction folded away, so it over-reads exactly past the threshold the bound exists for and would fire hardest on the sessions that had just become safe. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: three nested `session.reason` tokens (`conversation-too-old`, `resume-chain-too-long`, `context-too-full`), the producer table's resolve row, and **the second precedence rule this entry never recorded**. It documented promote-beats-the-rest and was silent on runner-beats-host, and that silence was load-bearing: a reader told which tokens are unreachable concludes the rest are reachable, while in fact `expired` and `pi-version-changed` could reach no record whose container emitted an exit line, which is every ordinary run. The mechanism is spelled out because it is invisible from either half of the code alone (0-byte staging, `PI_SESSION_FILE` emitted whenever a session exists at all, and pi's `setSessionFile` gating its own refusal on `size > 0`), and so is the narrowness of the fix, `resume === false` on the host side and exactly `absent` on the runner's. Every new token was checked against the terminal enum for the collision rule at `:649-652`. Four further clauses came out of an adversarial review of the shipped branch and are recorded because each was a real defect rather than a hardening idea: **every read in a key directory is now an `lstat` first and every write goes through a rename**, since `readFileSync` follows a link (deciding a gate on another file's contents) and `writeFileSync`/`copyFileSync` follow one at the destination (turning a promotion into a truncating write of any worker-writable file), and the directory NAME is derived rather than random so the path is precomputable -- `pi-version` inherited the guard as the one unguarded read that predated the sidecars; **sidecar reads are size-bounded**, because `PI_SESSION_MAX_BYTES` never covered them and a huge one costs wall clock on the job's own path; **a sidecar write that fails is logged, never fatal**, because it runs after the transcript is already promoted and throwing returned `promote-failed` for a promotion that demonstrably happened, which told an operator the next run would cold start when it would in fact resume and froze the counter below its bound forever; and **`locked` means EEXIST and nothing else**, since a read-only directory or a full disk also fail to create the lock and reporting those as a concurrency event sends an operator looking for a stuck file that does not exist. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `context` joins `turns`, `tokens` and `usage` as read-only telemetry that feeds no classification, a SIBLING of `tokens` for the reason the ledger is one (`tokens` is a per-run BILLING snapshot with two producers; occupancy is neither billing nor per-run), OMITTED rather than nulled when there is no measurement, and deliberately given no `dev.pi-dispatch.capabilities` entry -- capabilities are an INCLUSION list for what the host DEMANDS of an image, and additive telemetry has nothing `verify-image.sh` could grep that would mean anything. What that costs is on the record too: the bound it feeds is inert on an old image and stays inert forever on one that is never rebuilt. **INT-TRIGGERS-FILE-CONTRACT UNCHANGED, checked**: all three bounds are deployment state rather than trigger content, and a per-trigger relaxation of a safety bound is the shape `run.network` was refused for. **INT-CONTAINER-RUNTIME-CONTRACT UNCHANGED, checked**: no mount, no flag and no env var moved, and the container is handed exactly what it was before. **INT-SDK-SESSION-OPTIONS UNCHANGED, checked**: `getContextUsage()` is read off the session the runner already built, and no option changed. |

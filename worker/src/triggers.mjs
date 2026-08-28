@@ -1,7 +1,7 @@
 /**
  * Shared trigger-file schema + validator (issue #20). One `triggers.json` of `{ on, run }` entries is
  * the single reviewed source of standing triggers for BOTH services: the worker owns `on.type:"cron"`
- * (local jobs), the receiver owns the webhook types (`label|comment|pull_request` -> a forge job). Each
+ * (local jobs), the receiver owns the webhook types (`label|comment|pull_request|issue` -> a forge job). Each
  * service validates the WHOLE file, then selects the `on.type` it owns, so a malformed file fails both
  * identically and the two cannot drift.
  *
@@ -24,10 +24,25 @@
  */
 
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
+// SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
+// materialize.mjs and the admin already import it, and a keep-in-sync copy would drift where a
+// traversal guard cannot). flow-gate's module body is import-inert, so this keeps parseTriggers pure.
+import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 
-const ON_TYPES = new Set(["cron", "label", "comment", "pull_request"]);
+const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
+
+/**
+ * The `on.type` a DISARMED one-shot normalizes to (issue #231). Producible only by this validator:
+ * `ON_TYPES` excludes it, so an authored `on.type: "disarmed"` refuses like any unknown type. The
+ * sentinel keeps the entry's raw array position (deleting it would shift `triggerIndex` attribution
+ * for every later entry) while making it unmatchable BY CONSTRUCTION -- it carries no selectors, no
+ * actions, no run.kind and no flow, so no receiver group, no schedule and no flow allowlist can ever
+ * pick it up. A marker flag on the original type was rejected: one consumer forgetting to check it
+ * is a spent one-shot firing again, and this shape makes that bug unwritable.
+ */
+export const DISARMED_TYPE = "disarmed";
 
 // `RUN_KINDS` and `FORGE_KINDS` come from the forge table (forges.mjs) rather than being written out
 // here. They differ by exactly `local`, and that difference IS the on x run matrix below: a webhook
@@ -41,8 +56,15 @@ export { FORGE_KINDS };
  * what their forge's documentation says and can grep for it there.
  *
  * GitLab has no `labeled`: adding a label to a merge request arrives as `update` carrying a
- * `changes.labels` diff, and `open`/`reopen` are its spellings of `opened`/`reopened`. `merge` and
- * `close` are omitted on purpose: a job started by a merge or a close has nothing left to act on.
+ * `changes.labels` diff, and `open`/`reopen` are its spellings of `opened`/`reopened`.
+ *
+ * The close words (issue #231) carry a distinction the old "nothing left to act on" wording folded
+ * flat. A job ABOUT the closed thing still has nothing left to act on, and `run.replicas`' neighbour
+ * refusal still stands; what a close CAN do is release separately-armed work -- an operator wrote
+ * "when this closes, run that" into this file, and the close is the starting gun, not the subject.
+ * So `closed`/`close` are close-ONLY action lists (mixing them with other actions is refused below:
+ * the two families gate on different actors), while `merge` stays omitted everywhere -- a merge that
+ * should release work is a close too, and GitHub's events feed emits `closed` for merged PRs.
  *
  * `review_submitted` (issue #66) is github's fifth and the one compound word here. It names the
  * `pull_request_review` event's `submitted` action, so both halves are greppable in GitHub's own docs, the
@@ -53,21 +75,55 @@ export { FORGE_KINDS };
  * `author_association`, never the PR author's -- see filter.mjs and CONST-TRIGGER-AUTHOR-GATE.
  */
 const PR_ACTIONS = {
-	github: new Set(["labeled", "opened", "synchronize", "reopened", "review_submitted"]),
+	github: new Set(["labeled", "opened", "synchronize", "reopened", "review_submitted", "closed"]),
 	// GitLab's `approved` is its review gate (a member approved the MR). It is NOT github's
 	// `review_submitted` renamed: `approved` is one verdict, `review_submitted` is every verdict, which is
-	// what `on.reviewState` below exists to narrow.
-	gitlab: new Set(["open", "update", "reopen", "approved"]),
+	// what `on.reviewState` below exists to narrow. `close` is GitLab's own spelling of the close action.
+	gitlab: new Set(["open", "update", "reopen", "approved", "close"]),
 	// Forgejo's own spellings. `label_updated` is its `labeled` and `synchronized` its `synchronize` -- a
 	// one-letter difference that an operator would otherwise discover as a trigger that loads clean and
 	// never fires. `label_cleared` is deliberately ABSENT and always will be: REMOVING a label must never
 	// start a paid run, and it has no GitHub counterpart to inherit that rule from.
-	forgejo: new Set(["label_updated", "opened", "synchronized", "reopened"]),
+	forgejo: new Set(["label_updated", "opened", "synchronized", "reopened", "closed"]),
 	// Azure's Service Hook events reduced to the two that leave something to act on. `git.pullrequest.merged`
-	// is omitted for the same reason GitLab's `merge` and `close` are: a job started by a merge has nothing
-	// left to do. There is no label action at all -- Azure attaches tags to WORK ITEMS, never to pull
-	// requests -- which is why azure's `prLabelAction` is null and a predicated PR rule is refused below.
+	// is omitted for the reason the close words' own comment above records, and there is no close word here at
+	// all: an abandon arrives as `git.pullrequest.updated` with nothing in the projected subset to tell it from
+	// any other update, so an azure close rule could only ever fire on the wrong events or never. Widening
+	// INT-AZURE-PAYLOAD-SUBSET (a PR status field) is the gap to close before this set can grow. There is no
+	// label action either -- Azure attaches tags to WORK ITEMS, never to pull requests -- which is why azure's
+	// `prLabelAction` is null and a predicated PR rule is refused below.
 	azure: new Set(["created", "updated"]),
+};
+
+/**
+ * The one action per forge that closes a pull request, in that forge's own words (issue #231). Spelled
+ * once because three places turn on it: the close-only refusal in `normalizePullRequest` (a close rule
+ * gates on the CLOSER's write access, every other PR rule gates on the author's association or a
+ * collaborator's label, and one rule cannot gate on two different actors), the `capable` switch that
+ * admits `on.number`/`on.once` there, and -- once close routing lands -- the queue's semantic-key
+ * discriminant. Azure is absent for
+ * the subset reason the table above records, so `PR_ACTIONS.azure` simply never grows the word and the
+ * existing vocabulary refusal names azure on its own.
+ */
+const PR_CLOSE_ACTIONS = { github: "closed", gitlab: "close", forgejo: "closed" };
+
+/**
+ * The `issue` action vocabulary, per forge, in each forge's own words (issue #231). One word each so
+ * far: the type exists for "when issue #40 closes, run deploy", and every other issue event already
+ * has a home (`label` for label predicates, `comment` for phrases). GitLab's word is `close` (its
+ * `object_attributes.action`), GitHub's and Forgejo's is `closed`.
+ *
+ * Azure is REFUSED rather than absent-and-unhandled, with its own message: a work item's close is a
+ * `System.State` transition whose terminal names vary by process template (Agile "Closed", Scrum
+ * "Done", plus "Resolved"), and the projected subset carries only `System.Tags` -- so matching a
+ * close needs both an INT-AZURE-PAYLOAD-SUBSET widening and a state vocabulary this version does not
+ * guess at. Not yet covered, not impossible -- validateResumeFlag's distinction, kept for the same
+ * reason.
+ */
+const ISSUE_ACTIONS = {
+	github: new Set(["closed"]),
+	gitlab: new Set(["close"]),
+	forgejo: new Set(["closed"]),
 };
 
 /**
@@ -175,8 +231,12 @@ function normalizeTrigger(entry, index, path, state) {
 	if (run === null || typeof run !== "object") {
 		throw configError(`${at}: "run" must be an object: ${path}`);
 	}
+	// Joined from the set for the joined-vocabulary rule stated over the run.kind check below -- a type
+	// added to the vocabulary can never be
+	// refused by a message that does not mention it. This is also what keeps `DISARMED_TYPE` refused
+	// when authored: it is deliberately not in ON_TYPES, so it reads here as any other unknown type.
 	if (!ON_TYPES.has(on.type)) {
-		throw configError(`${at}: on.type must be one of cron|label|comment|pull_request (got ${JSON.stringify(on.type)}): ${path}`);
+		throw configError(`${at}: on.type must be one of ${[...ON_TYPES].join("|")} (got ${JSON.stringify(on.type)}): ${path}`);
 	}
 	// The legal-values half of every message below is JOINED from the table rather than typed out, so a
 	// forge added to the table can never be refused by a message that does not mention it -- which reads
@@ -195,9 +255,18 @@ function normalizeTrigger(entry, index, path, state) {
 	if (!isForgeKind(run.kind)) {
 		throw configError(`${at}: a ${on.type} trigger is webhook-driven and produces a forge job; run.kind must be one of ${FORGE_KINDS.join("|")} (got ${JSON.stringify(run.kind)}): ${path}`);
 	}
-	if (on.type === "label") return normalizeLabel(on, run, index, path);
-	if (on.type === "comment") return normalizeComment(on, run, index, path, state);
-	return normalizePullRequest(on, run, index, path);
+	let normalized;
+	if (on.type === "label") normalized = normalizeLabel(on, run, index, path);
+	else if (on.type === "comment") normalized = normalizeComment(on, run, index, path, state);
+	else if (on.type === "issue") normalized = normalizeIssue(on, run, index, path);
+	else normalized = normalizePullRequest(on, run, index, path);
+
+	// A disarmed one-shot has validated IN FULL above (a disarmed entry with a malformed run still
+	// refuses the file -- writeTriggers' fail-closed contract needs the whole file valid, and the
+	// worker's disarm only ever ADDS one key to an entry that already passed). Only then does it
+	// normalize to the sentinel, so its raw index survives and nothing downstream can match it.
+	if (on.disarmed !== undefined) return { on: { type: DISARMED_TYPE }, run: {} };
+	return normalized;
 }
 
 function normalizeCron(on, run, index, path, state) {
@@ -264,6 +333,10 @@ function normalizeCron(on, run, index, path, state) {
 	// Called and DISCARDED: on a cron trigger this can only refuse, and the refusal is the point. The
 	// returned `run` below deliberately grows no `replicas` key -- a cron entry can never carry one.
 	validateReplicas(run, `cron trigger "${id}"`, path);
+	// Same posture for the close-trigger fields (issue #231): none has a legal value on cron.
+	validateNumber(on, `cron trigger "${id}"`, path, { onType: "cron" });
+	validateOnce(on, run, `cron trigger "${id}"`, path, { onType: "cron" });
+	validateDisarmed(on, `cron trigger "${id}"`, path, { onType: "cron" });
 	const secrets = validateSecrets(run, `cron trigger "${id}"`, path);
 	const secretsProfile = validateSecretsProfile(run, `cron trigger "${id}"`, path);
 
@@ -600,6 +673,122 @@ function validatePredicate(on, index, path, requirePositive) {
 	return { any: on.any, all: on.all, none: on.none };
 }
 
+/**
+ * `on.number` -- narrow a close-capable trigger to ONE item, by the number the forge itself assigns
+ * (issue #231). Legal with or without `on.once`: a standing "every close of #40" rule is coherent
+ * narrowing, exactly as `on.reviewState` narrows without changing what the rule is. Called from ALL
+ * normalizers, `validateReplicas`' posture -- where it cannot apply it refuses, never ignores.
+ * `capable` is passed only by the close-capable paths (the `issue` normalizer, and a `pull_request`
+ * rule whose only action is the forge's close word).
+ */
+function validateNumber(on, at, path, { capable = false, onType } = {}) {
+	const number = on.number;
+	if (number === undefined) return undefined;
+	if (!capable) {
+		if (onType === "cron") {
+			throw configError(`${at}: on.number is not available on a cron trigger -- a schedule fires on time, not on an item, so there is no delivery for a number to narrow: ${path}`);
+		}
+		throw configError(`${at}: on.number is not yet covered for ${onType} triggers here -- only the close routes read it, so on a rule they never serve it would sit in the file looking configured; narrowing labels, comments or non-close pull_request rules is a gap to close, not a limit: ${path}`);
+	}
+	if (!Number.isInteger(number) || number < 1) {
+		throw configError(`${at}: on.number must be an integer >= 1 when present -- the item number the forge itself assigns (on GitLab, the iid) (got ${JSON.stringify(number)}): ${path}`);
+	}
+	return number;
+}
+
+/**
+ * `on.once` -- a one-shot: the trigger fires, produces a run record, and the worker disarms it by
+ * adding `on.disarmed` to this entry (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE). Strictly boolean
+ * and fail-loud, the house rule; `false` is legal and carried, validateResumeFlag's argument -- an
+ * operator who wrote down today's default must not be refused for stating present behaviour.
+ *
+ * `once: true` REQUIRES `on.number`, and the requirement is a race analysis, not taste: a numberless
+ * one-shot matched by two different items' closes inside one dedup window enqueues both before either
+ * disarm lands, and which item "spent" the trigger is a coin flip. With a number, concurrent
+ * duplicates are duplicates of the SAME item, which is what the delivery GUID and the semantic window
+ * actually bound -- and the number is the identity the disarm re-checks before it writes, so a file
+ * edited between enqueue and disarm refuses loudly instead of disarming a stranger.
+ *
+ * `once: true` is refused beside `run.replicas` (`false`, the written-down default, is not): "exactly
+ * one run" and "N sandboxes race" contradict on their face,
+ * and with N run records the disarm no longer says which one spent the trigger.
+ */
+function validateOnce(on, run, at, path, { capable = false, onType } = {}) {
+	const once = on.once;
+	if (once === undefined) return undefined;
+	if (!capable) {
+		if (onType === "cron") {
+			throw configError(`${at}: on.once is not available on a cron trigger -- a one-shot that can re-arm is a schedule, and a cron job carries no matched delivery for the disarm to name; delete the entry when the work is done: ${path}`);
+		}
+		// The close-word hint is JOINED from the table (the same rule the vocabulary messages follow), so a
+		// forge gaining a close word later can never be pointed away from it by a stale sentence here.
+		const closeWords = Object.entries(PR_CLOSE_ACTIONS).map(([k, w]) => `${k} has ${JSON.stringify(w)}`).join(", ");
+		throw configError(`${at}: on.once is not yet covered here -- the disarm writes back to the one entry a delivery matched, and only a close delivery names the single item that spends it; use on.type "issue", or a pull_request rule whose only action is the close word (${closeWords}; azure has no close trigger yet): ${path}`);
+	}
+	if (typeof once !== "boolean") {
+		throw configError(`${at}: on.once must be true or false when present -- a truthy string arming a one-shot is exactly the drift this validator exists to refuse (got ${JSON.stringify(once)}): ${path}`);
+	}
+	if (once === true && on.number === undefined) {
+		throw configError(`${at}: on.once requires on.number -- a one-shot without a named item is spent by whichever close arrives first, and two different items closing inside one dedup window would race for it; the number is also the identity the disarm re-checks before it writes: ${path}`);
+	}
+	if (once === true && run.replicas !== undefined) {
+		throw configError(`${at}: on.once and run.replicas cannot be combined -- "exactly one run" and "N sandboxes race" contradict, and with N run records the disarm no longer says which one spent the trigger: ${path}`);
+	}
+	return once;
+}
+
+/**
+ * `on.disarmed` -- the mark the worker writes when a one-shot fires: `{ at, jobId? }`, provenance an
+ * operator can read a year later when the run record is long reaped (issue #231). Hand-writable too
+ * (jobId optional), which is how an operator disarms deliberately; deleting the key is how they
+ * re-arm. The entry it sits on normalizes to the DISARMED_TYPE sentinel -- see normalizeTrigger --
+ * but only AFTER this shape check and the full entry validation pass, so a corrupted disarm mark is
+ * a load refusal, never a silently-still-armed rule.
+ */
+function validateDisarmed(on, at, path, { capable = false, onType } = {}) {
+	const disarmed = on.disarmed;
+	if (disarmed === undefined) return undefined;
+	if (!capable) {
+		throw configError(`${at}: on.disarmed marks a spent one-shot, and on.once is not ${onType === "cron" ? "available on a cron trigger" : "yet covered here"}, so there is nothing this entry could have spent: ${path}`);
+	}
+	if (disarmed === null || typeof disarmed !== "object" || Array.isArray(disarmed)) {
+		throw configError(`${at}: on.disarmed must be an object with a non-empty string "at" (and optionally a non-empty string "jobId") -- the worker writes it when the one-shot fires, and a hand-written one disarms the entry deliberately (got ${JSON.stringify(disarmed)}): ${path}`);
+	}
+	for (const key of Object.keys(disarmed)) {
+		if (key !== "at" && key !== "jobId") {
+			throw configError(`${at}: on.disarmed has an unsupported key ${JSON.stringify(key)} (expected at|jobId): ${path}`);
+		}
+	}
+	if (!isNonEmptyString(disarmed.at)) {
+		throw configError(`${at}: on.disarmed.at must be a non-empty string (the time the one-shot fired): ${path}`);
+	}
+	if (disarmed.jobId !== undefined && !isNonEmptyString(disarmed.jobId)) {
+		throw configError(`${at}: on.disarmed.jobId must be a non-empty string when present (the run record it joins to): ${path}`);
+	}
+	if (on.once !== true) {
+		throw configError(`${at}: on.disarmed is only meaningful beside on.once: true -- an entry that was never a one-shot has nothing to spend: ${path}`);
+	}
+	return disarmed;
+}
+
+/**
+ * `run.flow` charset for the WEBHOOK kinds (issue #231). materialize.mjs refuses a name outside
+ * SKILL_NAME_RE at job start, AFTER the budget slot is reserved -- so until now a charset-invalid
+ * forge flow loaded clean and could only ever fail in-container (graph-model already renders it as
+ * the `charset-invalid` defect). Refusing at load turns that paid failure into a free one, and it is
+ * also what keeps `:` out of the flow slot of the queue's semantic dedup key, where the command jobs'
+ * `cmd:` prefix lives and the close jobs' discriminant sits beside it once close routing lands.
+ * Deliberately NOT called on cron:
+ * a local flow resolves inside the operator's own folder by pi itself, and the semantic key does not
+ * apply to repeat jobs -- narrowing there would refuse deployments this hazard cannot reach.
+ */
+function validateFlowName(run, at, path) {
+	if (run.flow === undefined) return;
+	if (!SKILL_NAME_RE.test(run.flow)) {
+		throw configError(`${at}: run.flow ${JSON.stringify(run.flow)} fails the skill-name charset (lowercase letters, digits, dash and underscore, 1-64 chars, starting and ending alphanumeric) -- a name outside it can never materialise, so this trigger could only ever fail after the budget slot was reserved: ${path}`);
+	}
+}
+
 
 /**
  * `run.repository` -- WHICH repository a job clones, for a forge whose trigger subject does not name one.
@@ -792,11 +981,15 @@ function validateSecretsProfile(run, at, path) {
 function normalizeLabel(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 	const predicate = validatePredicate(on, index, path, true);
+	validateNumber(on, at, path, { onType: "label" });
+	validateOnce(on, run, at, path, { onType: "label" });
+	validateDisarmed(on, at, path, { onType: "label" });
 	// First among the run checks, before the flow-required check -- validateCommand says why.
 	const command = validateCommand(run, at, path, { onType: "label" });
 	if (command === undefined && !isNonEmptyString(run.flow)) {
 		throw configError(`${at}: label trigger run.flow must be a non-empty string (or use run.command): ${path}`);
 	}
+	validateFlowName(run, at, path);
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
 	const skillsDir = validateSkillsDir(run, at, path);
@@ -817,6 +1010,9 @@ function normalizeComment(on, run, index, path, state) {
 	if (!isNonEmptyString(on.phrase)) {
 		throw configError(`${at}: comment trigger on.phrase must be a non-empty string: ${path}`);
 	}
+	validateNumber(on, at, path, { onType: "comment" });
+	validateOnce(on, run, at, path, { onType: "comment" });
+	validateDisarmed(on, at, path, { onType: "comment" });
 	// First among the run checks, before the flow-required check -- validateCommand says why. A command
 	// trigger has NO default flow for the `<phrase> <flow>` comment override to replace; making that
 	// token inert is the receiver filter's job, not a shape this validator can see.
@@ -824,6 +1020,7 @@ function normalizeComment(on, run, index, path, state) {
 	if (command === undefined && !isNonEmptyString(run.flow)) {
 		throw configError(`${at}: comment trigger run.flow (the default flow) must be a non-empty string (or use run.command): ${path}`);
 	}
+	validateFlowName(run, at, path);
 	// At most one comment trigger PER FORGE. The cap exists because the receiver holds one comment rule
 	// per forge and a second would be silently unreachable -- so it is a cap on ambiguity, not on count,
 	// and a deployment serving GitHub and GitLab is entitled to the same `@pi` phrase on each.
@@ -846,6 +1043,78 @@ function normalizeComment(on, run, index, path, state) {
 	};
 }
 
+/**
+ * `on.type: "issue"` (issue #231): fire when an ISSUE's lifecycle action happens -- one word so far,
+ * the close. The type exists because every other issue event already has a home (`label` for label
+ * predicates, `comment` for phrases) and neither of those shapes fits a close: there is no label diff
+ * to match and no phrase to read, only an action, an item number, and the actor who performed it.
+ * A PULL REQUEST's close is deliberately NOT this type -- it rides `on.type: "pull_request"` as an
+ * action, the #66 rule (one forge's PR lifecycle must not be a type while another's is an action),
+ * and because GitLab and Azure number issues and merge/pull requests from SEPARATE sequences, a
+ * both-kinds type narrowed by `on.number` would be ambiguous exactly where a one-shot spending
+ * itself on the wrong #5 hurts most. Under the split, the type IS the discriminator.
+ */
+function normalizeIssue(on, run, index, path) {
+	const at = `trigger at index ${index}`;
+
+	// Kind first: on azure the whole TYPE is unsupported, and hearing that beats hearing that one
+	// action word is. See ISSUE_ACTIONS for why, and validateResumeFlag for the "not yet covered"
+	// vocabulary this reuses.
+	if (run.kind === "azure") {
+		throw configError(`${at}: an issue trigger is not yet covered for azure -- a work item's close is a System.State transition whose terminal names vary by process template (Agile "Closed", Scrum "Done"), and the projected subset carries only System.Tags, so nothing in the delivery says the item closed; widening the payload subset is the gap to close, not a limit: ${path}`);
+	}
+
+	const actions = on.action;
+	if (!Array.isArray(actions) || actions.length === 0) {
+		throw configError(`${at}: issue on.action must be a non-empty array: ${path}`);
+	}
+	// Validated against THIS entry's forge, in that forge's own words -- normalizePullRequest's rule.
+	const allowed = ISSUE_ACTIONS[run.kind];
+	const expected = [...allowed].join("|");
+	for (const a of actions) {
+		if (!allowed.has(a)) {
+			throw configError(`${at}: issue on.action has an unsupported ${run.kind} action ${JSON.stringify(a)} (expected ${expected}): ${path}`);
+		}
+	}
+
+	// The close route matches action and number alone, so a predicate here would be accepted-and-
+	// ignored -- the exact thing validateRepository's posture forbids. Refused, not dropped.
+	if (on.any !== undefined || on.all !== undefined || on.none !== undefined) {
+		throw configError(`${at}: an issue trigger cannot carry a label predicate -- it fires on a lifecycle action, not a label diff, so any/all/none could never match; a label-predicated rule is on.type "label": ${path}`);
+	}
+
+	const number = validateNumber(on, at, path, { capable: true, onType: "issue" });
+	const once = validateOnce(on, run, at, path, { capable: true, onType: "issue" });
+	validateDisarmed(on, at, path, { capable: true, onType: "issue" });
+
+	// First among the run checks, before the flow-required check -- validateCommand says why.
+	const command = validateCommand(run, at, path, { onType: "issue" });
+	if (command === undefined && !isNonEmptyString(run.flow)) {
+		throw configError(`${at}: issue trigger run.flow must be a non-empty string (or use run.command): ${path}`);
+	}
+	validateFlowName(run, at, path);
+	const packages = validatePackagesFlag(run, at, path);
+	const image = validateImageRef(run, at, path);
+	const skillsDir = validateSkillsDir(run, at, path);
+	const instructions = validateInstructions(run, at, path);
+	const resume = validateResumeFlag(run, at, path);
+	validateRepository(run, "issue", at, path);
+	const replicas = validateReplicas(run, at, path);
+	const secrets = validateSecrets(run, at, path);
+	const secretsProfile = validateSecretsProfile(run, at, path);
+	return {
+		on: {
+			type: "issue",
+			action: [...actions],
+			// Absent rather than present-and-undefined, reviewState's rule below: an unnarrowed rule's
+			// normalized shape must not grow keys.
+			...(number !== undefined && { number }),
+			...(once !== undefined && { once }),
+		},
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+	};
+}
+
 function normalizePullRequest(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 
@@ -861,6 +1130,16 @@ function normalizePullRequest(on, run, index, path) {
 		if (!allowed.has(a)) {
 			throw configError(`${at}: pull_request on.action has an unsupported ${run.kind} action ${JSON.stringify(a)} (expected ${expected}): ${path}`);
 		}
+	}
+
+	// The close-only split (issue #231). A close rule gates on the CLOSER's write access; every other
+	// PR action gates on the author's association or a collaborator-applied label. One rule cannot
+	// gate on two different actors, so a list mixing the close word with anything else is refused --
+	// which is also what lets the receiver group close rules separately without re-deriving this.
+	const closeWord = PR_CLOSE_ACTIONS[run.kind];
+	const isClose = closeWord !== undefined && actions.includes(closeWord);
+	if (isClose && actions.some((a) => a !== closeWord)) {
+		throw configError(`${at}: pull_request on.action cannot mix ${JSON.stringify(closeWord)} with other actions -- a close rule is gated on the closer's write access and every other action on the author's, and one rule cannot gate on two different actors; split it into two entries: ${path}`);
 	}
 
 	const reviewState = validateReviewState(on, actions, run, at, path);
@@ -882,12 +1161,21 @@ function normalizePullRequest(on, run, index, path) {
 	if (run.kind === "azure" && (on.any !== undefined || on.all !== undefined || on.none !== undefined)) {
 		throw configError(`${at}: an azure pull_request trigger cannot carry a label predicate -- Azure DevOps attaches tags to work items, never to pull requests, so any/all/none could never match: ${path}`);
 	}
+	// A close-only rule reads no label diff either -- its route matches action and number alone -- so
+	// a predicate on it is normalizeIssue's refusal arriving on the PR side.
+	if (isClose && (on.any !== undefined || on.all !== undefined || on.none !== undefined)) {
+		throw configError(`${at}: a close pull_request rule cannot carry a label predicate -- the close route matches the action and on.number alone, so any/all/none would sit in the file looking configured and never match anything: ${path}`);
+	}
 	const predicate = validatePredicate(on, index, path, requirePositive);
+	const number = validateNumber(on, at, path, { capable: isClose, onType: "pull_request" });
+	const once = validateOnce(on, run, at, path, { capable: isClose, onType: "pull_request" });
+	validateDisarmed(on, at, path, { capable: isClose, onType: "pull_request" });
 	// First among the run checks, before the flow-required check -- validateCommand says why.
 	const command = validateCommand(run, at, path, { onType: "pull_request" });
 	if (command === undefined && !isNonEmptyString(run.flow)) {
 		throw configError(`${at}: pull_request trigger run.flow must be a non-empty string (or use run.command): ${path}`);
 	}
+	validateFlowName(run, at, path);
 	const packages = validatePackagesFlag(run, at, path);
 	const image = validateImageRef(run, at, path);
 	const skillsDir = validateSkillsDir(run, at, path);
@@ -907,6 +1195,9 @@ function normalizePullRequest(on, run, index, path) {
 			any: predicate.any,
 			all: predicate.all,
 			none: predicate.none,
+			// Same rule for the close-narrowing pair (issue #231): only a close-only rule can carry them.
+			...(number !== undefined && { number }),
+			...(once !== undefined && { once }),
 		},
 		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
 	};

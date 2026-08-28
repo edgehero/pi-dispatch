@@ -148,6 +148,23 @@ test("renderTriggers renders each of the four on.types", () => {
   assert.match(out, /pull_request {2}action\[labeled\] any\[pi:review\] → review/);
 });
 
+test("renderTriggers renders an issue trigger: action word, and #number when narrowed (#231)", () => {
+  // pull_request's line shape with the item number in the clause slot -- the plain twin of the dashboard's
+  // issue row, which must state the same facts. A disarmed one-shot's raw entry still normalizes to an
+  // issue record, so this line is also what a SPENT rule renders as (the marker is a later phase).
+  const out = renderTriggers({
+    schedulers: [],
+    triggers: {
+      triggers: [
+        { type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", forge: "github", packages: false },
+        { type: "issue", action: ["close"], number: null, once: false, flow: "announce", forge: "gitlab", packages: false },
+      ],
+    },
+  });
+  assert.match(out, /issue {2}action\[closed\] #40 → deploy$/m, "a narrowed one-shot names its item");
+  assert.match(out, /issue {2}action\[close\] → announce {2}\[gitlab\]$/m, "an unnarrowed rule ends at the action, and a non-github forge is named");
+});
+
 test("renderTriggers shows a command trigger as /name in the flow position; flow triggers unchanged", () => {
   // The NAME only (the first space-delimited token), slash-prefixed: the slash marks "dispatches a
   // registered extension command" apart from a flow, and the args stay in the detail view so the line

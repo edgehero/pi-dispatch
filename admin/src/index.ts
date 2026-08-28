@@ -455,8 +455,9 @@ function registerTools(pi: ExtensionAPI): void {
       "label needs labels[]+flow; comment needs phrase+flow; pull_request needs action[] (+ optional labels[]) + " +
       "flow. Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
       "also decides which action words pull_request accepts: github is " +
-      "labeled|opened|synchronize|reopened|review_submitted, gitlab is open|update|reopen|approved, forgejo " +
-      "is label_updated|opened|synchronized|reopened, azure is created|updated. An azure label or comment " +
+      "labeled|opened|synchronize|reopened|review_submitted|closed, gitlab is open|update|reopen|approved|close, " +
+      "forgejo is label_updated|opened|synchronized|reopened|closed, azure is created|updated (no close word). " +
+      "The close word rides alone: it cannot be mixed with other actions in one entry. An azure label or comment " +
       "trigger must also set `repository` (a work item belongs to a project, not a repository), and an azure " +
       "pull_request trigger may not carry labels[] at all. A github review_submitted trigger may also set " +
       "reviewState[] (approved|changes_requested|commented) to narrow which verdicts fire; omitted, all " +
@@ -749,9 +750,12 @@ function triggerList(paths: any): any[] {
  */
 const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
 const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
-  github: { hint: "labeled opened synchronize reopened review_submitted", dflt: "labeled" },
-  gitlab: { hint: "open update reopen approved", dflt: "update" },
-  forgejo: { hint: "label_updated opened synchronized reopened", dflt: "label_updated" },
+  // The close words ride the hint too (issue #231): the dialog passes whatever is typed through the
+  // shared validator, so a close-only rule IS authorable here, and a hint that omits the word reads
+  // as the word not existing. The loader refuses a list mixing a close word with any other action.
+  github: { hint: "labeled opened synchronize reopened review_submitted closed", dflt: "labeled" },
+  gitlab: { hint: "open update reopen approved close", dflt: "update" },
+  forgejo: { hint: "label_updated opened synchronized reopened closed", dflt: "label_updated" },
   azure: { hint: "created updated", dflt: "updated" },
 };
 

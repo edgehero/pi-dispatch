@@ -663,7 +663,7 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
  * Read the unified committed `triggers.json` for display (OQ-008). Unlike the worker/receiver fail-loud
  * `parseTriggers` (boot semantics), a viewer degrades: an absent file is `{ missing: true }`, JSON or
  * shape errors are `{ invalid }`, and each entry normalizes into `{ triggers: [ { type, ... } ] }`
- * discriminated on `on.type` (cron | label | comment | pull_request). Missing selectors default to `[]`
+ * discriminated on `on.type` (cron | label | comment | pull_request | issue). Missing selectors default to `[]`
  * and non-string members are dropped; an entry that is not a usable `{ on, run }` object is skipped, not
  * fatal.
  *
@@ -718,14 +718,14 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
  * at load, so a string "false" never reaches this function; a display that "failed closed" on it would be
  * inventing a state the system cannot be in, and would disagree with the job that actually runs.
  *
- * `image` -- the trigger's own container image (INT-TRIGGERS-FILE-CONTRACT, issue #41) -- is carried on all
- * four kinds for the same reason and shown for a sharper one: which image a job runs IS which code it runs
+ * `image` -- the trigger's own container image (INT-TRIGGERS-FILE-CONTRACT, issue #41) -- is carried on every
+ * kind for the same reason and shown for a sharper one: which image a job runs IS which code it runs
  * (the pi version, the runner, the guardrail floor and the loader posture all come from it). `null` is the
  * default-image sentinel, matching this function's own `flow`/`model`/`phrase` convention, and anything that
  * is not a non-empty string reads as the default -- mirroring the worker's `job.image ?? config.jobImage`
  * rather than re-validating a value the loader already refused.
  *
- * `forge` -- which forge a webhook trigger listens to (issue #42) -- is carried on the three webhook kinds
+ * `forge` -- which forge a webhook trigger listens to (issue #42) -- is carried on the webhook kinds
  * and is `null` on cron, which has no forge at all. It is `run.kind` VERBATIM rather than a validated enum:
  * this normalizer is fail-soft by design (a viewer degrades, it never throws), and showing an operator the
  * kind their file actually contains is more useful than mapping an unknown one onto a plausible default --
@@ -744,7 +744,7 @@ export function normalizeTriggerForDisplay(entry) {
   const command = typeof run.command === "string" ? run.command : null;
   const packages = run.packages !== false;
   const image = typeof run.image === "string" && run.image.trim() !== "" ? run.image : null;
-  // The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS, issue #60). Carried on all four kinds like
+  // The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS, issue #60). Carried on every kind like
   // `image`, and shown for the same reason: which skills a job loads IS what the agent can do. `null` is
   // the none sentinel, matching this function's own convention.
   const skillsDir = typeof run.skillsDir === "string" && run.skillsDir.trim() !== "" ? run.skillsDir : null;
@@ -770,7 +770,7 @@ export function normalizeTriggerForDisplay(entry) {
   //
   // Shown at all for `resume`'s reason, in its sharpest form yet: what a job can REACH is what the agent can
   // do, and unlike a flow (which lives in the repo, behind a merge) this lives only in triggers.json, so
-  // nothing else would put it in front of the operator. Carried on all four kinds, because unlike
+  // nothing else would put it in front of the operator. Carried on every kind, because unlike
   // `replicas` the loader accepts this on cron too.
   const secrets = run.secrets !== null && typeof run.secrets === "object" && !Array.isArray(run.secrets) ? Object.keys(run.secrets).length : 0;
   const secretsProfile = typeof run.secretsProfile === "string" && run.secretsProfile.trim() !== "" ? run.secretsProfile : null;
@@ -798,13 +798,22 @@ export function normalizeTriggerForDisplay(entry) {
       return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "comment":
       return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
-    case "pull_request":
+    case "pull_request": {
+      // A close-only PR rule carries the same #231 trio the issue arm does, on the issue arm's terms
+      // (see its comments): without them here, a spent PR one-shot renders byte-identical to an armed
+      // one on every surface INCLUDING the model-callable dispatch_triggers -- the exact confusion the
+      // spent-row-in-front-of-them rationale below exists to prevent. Conditionally spread so every
+      // pre-#231 rule's record stays key-identical.
+      const prDisarmed = on.disarmed !== null && typeof on.disarmed === "object" && !Array.isArray(on.disarmed) ? on.disarmed : null;
       return {
         type: "pull_request",
         action: normalizeSelector(on.action),
         any: normalizeSelector(on.any),
         all: normalizeSelector(on.all),
         none: normalizeSelector(on.none),
+        ...(Number.isInteger(on.number) && on.number >= 1 && { number: on.number }),
+        ...(on.once === true && { once: true }),
+        ...(prDisarmed !== null && { disarmed: prDisarmed }),
         flow,
         command,
         packages,
@@ -817,6 +826,40 @@ export function normalizeTriggerForDisplay(entry) {
         replicas,
         forge,
       };
+    }
+    case "issue": {
+      // The close-trigger kind (issue #231). A spent one-shot KEEPS its raw entry -- the worker's loader
+      // collapses `on.disarmed` to a never-matches sentinel for dispatch, but this normalizer reads the RAW
+      // file, and an operator asking "why did nothing fire" needs the spent row in front of them, not a hole
+      // where a trigger used to be. So this arm returns a record disarmed or not, and carries the mark
+      // verbatim when it is a usable object: the loader refused any other shape fail-loud, so re-validating
+      // here would invent a state the file cannot be in -- the packages/image doctrine restated.
+      const disarmed = on.disarmed !== null && typeof on.disarmed === "object" && !Array.isArray(on.disarmed) ? on.disarmed : null;
+      return {
+        type: "issue",
+        action: normalizeSelector(on.action),
+        // `null` is the every-item sentinel, this function's own flow/model/phrase convention; the loader
+        // refused anything but an integer >= 1, so the display mirrors rather than re-validates.
+        number: Number.isInteger(on.number) && on.number >= 1 ? on.number : null,
+        // An opt-IN, `=== true` like `resume` above and NOT `!== false`: the rendering mistake that costs
+        // is a one-shot with no marker, never a standing rule with a spurious one.
+        once: on.once === true,
+        // Absent, not null, when unspent: `disarmed` is a mark the worker adds, and a key that is usually
+        // missing reads truer than a fifth null sentinel -- consumers test presence, not value.
+        ...(disarmed !== null && { disarmed }),
+        flow,
+        command,
+        packages,
+        image,
+        skillsDir,
+        instructions,
+        resume,
+        secrets,
+        secretsProfile,
+        replicas,
+        forge,
+      };
+    }
     default:
       return null;
   }

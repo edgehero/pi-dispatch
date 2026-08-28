@@ -692,7 +692,9 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
 
 // ── colored LIST builders (overlay-only; every returned line is exactly `inner` visible columns) ────────
 
-const KIND_COLOR: Record<string, string> = { cron: "accent", label: "syntaxType", comment: "syntaxKeyword", pull_request: "syntaxFunction" };
+// One hue per kind so the badge column scans; issue takes a syntax color the other kinds left free, and
+// not an amber one -- warning stays reserved for the risk badges appended after layout.
+const KIND_COLOR: Record<string, string> = { cron: "accent", label: "syntaxType", comment: "syntaxKeyword", pull_request: "syntaxFunction", issue: "syntaxString" };
 const KIND_WIDTH = 13; // fits "pull_request "
 
 /** Pad an already-colored line up to `inner` visible columns; if it overflows, clip its plain form. */
@@ -920,10 +922,21 @@ function matchColored(t: any, styler: any): string {
   switch (t?.type) {
     case "cron": return styler.fg("text", `${t.id ?? "-"}  ${t.pattern ?? "-"}`);
     case "comment": return styler.fg("text", `"${t.phrase ?? "-"}"`);
+    case "issue": {
+      // The pull_request idiom below -- muted [action] first -- then the one narrowing an issue rule can
+      // carry: the item number, in `success` because it is the positive match term, exactly what a green
+      // label is in the arm below (issue #231). An unnarrowed rule ends at the action: it matches every
+      // item, and there is no selector for a placeholder to stand in for.
+      const num = Number.isInteger(t.number) ? " " + styler.fg("success", `#${t.number}`) : "";
+      return styler.fg("muted", `[${(t.action ?? []).join(",")}]`) + num;
+    }
     case "label":
     case "pull_request": {
       const parts: string[] = [];
       if (t.type === "pull_request") parts.push(styler.fg("muted", `[${(t.action ?? []).join(",")}]`));
+      // A close-only rule's narrowing renders as the issue arm's does (issue #231): the number IS the
+      // positive match term, and a one-shot on #40 must not render like "every close".
+      if (t.type === "pull_request" && Number.isInteger(t.number)) parts.push(styler.fg("success", `#${t.number}`));
       for (const x of t.any ?? []) parts.push(styler.fg("success", x));
       for (const x of t.all ?? []) parts.push(styler.fg("success", `+${x}`));
       for (const x of t.none ?? []) parts.push(styler.fg("error", `!${x}`));
@@ -1104,11 +1117,22 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     }
   } else if (t.type === "label" || t.type === "pull_request") {
     if (t.type === "pull_request") out.push(kv("PR actions", (t.action ?? []).join(", ") || "-"));
+    // A close-only rule's narrowing and one-shot state render here too (issue #231): the list row
+    // shows both, and this detail view must not tell less than the row it drills into.
+    if (t.type === "pull_request" && Number.isInteger(t.number)) out.push(kv("item", `#${t.number}`, "success"));
+    if (t.once === true) out.push(kv("one-shot", t.disarmed ? `spent ${t.disarmed.at ?? "-"}${t.disarmed.jobId ? ` by ${t.disarmed.jobId}` : ""}` : "armed", t.disarmed ? "dim" : "accent"));
     out.push(kv("any of", (t.any ?? []).join(" · ") || "-", "success"));
     out.push(kv("all of", (t.all ?? []).join(" · ") || "-", "success"));
     out.push(kv("none of", (t.none ?? []).join(" · ") || "-", "error"));
   } else if (t.type === "comment") {
     out.push(kv("phrase", `"${t.phrase ?? "-"}"`));
+  } else if (t.type === "issue") {
+    // The close-trigger kind (issue #231): the action word, the item it is narrowed to, and the
+    // one-shot state. `spent` renders dim rather than warning: a spent one-shot is a rule that
+    // finished its job, not a risk.
+    out.push(kv("issue actions", (t.action ?? []).join(", ") || "-"));
+    if (Number.isInteger(t.number)) out.push(kv("item", `#${t.number}`, "success"));
+    if (t.once === true) out.push(kv("one-shot", t.disarmed ? `spent ${t.disarmed.at ?? "-"}${t.disarmed.jobId ? ` by ${t.disarmed.jobId}` : ""}` : "armed", t.disarmed ? "dim" : "accent"));
   }
 
   // RUNS — what it produces when it fires. One fact per row.
