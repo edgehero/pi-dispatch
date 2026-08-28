@@ -453,6 +453,79 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (unnecessary — the one-way worker dependency already exists).
 - **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `REQ-CRON-SCHEDULED-JOBS`, `REQ-TRIGGER-AUTHOR-GATE`
 
+## DES-ONE-SHOT-DISARM-IN-THE-FILE
+
+- **Decision**: A spent one-shot (issue #231) is recorded **in the triggers file itself**, by the WORKER,
+  as one added key: `on.disarmed = { at, jobId }` on the exact entry the job matched, written after the
+  run record exists. The entry is never deleted (its raw index is the attribution identity for every
+  historical run record) and its authored fields are never rewritten (`once: true` stays as the operator
+  typed it; the machine only adds). The shared validator collapses a disarmed entry to the sentinel
+  `INT-TRIGGERS-FILE-CONTRACT` specifies, so "spent cannot match" is the parser's guarantee, not a
+  consumer discipline. Both authors — the console's CRUD and the worker's disarm — serialize through ONE
+  shared writer (`worker` package, `./triggers-file`, re-exported by the admin), which takes `<path>.lock`
+  by exclusive create around every read-modify-write.
+- **The lock, and its one new mechanism.** The session store's promotion lock supplies the doctrine
+  (EEXIST is the only failure that means locked; unlink in `finally`; a leaked lock is logged, never
+  thrown) and the two postures split by caller: the console's sync writer **gives up immediately** on
+  contention with `{ invalid }` naming the lock (its callers sit on the pi TUI event loop, where a
+  bounded-retry sleep is a frozen panel; the operator re-presses), while the worker's async
+  `disarmTrigger` retries ~5 times with 100-300ms jitter (nobody is at the keyboard, and what it races
+  clears in milliseconds). NEW, with no in-repo precedent and stated as such: a lock whose mtime is older
+  than 10s is **unlinked and retaken once**. The session store can discard on contention and let its
+  reaper sweep a leak; this file has no reaper, and a crashed writer's lock would otherwise wedge every
+  trigger add/edit/delete/disarm on the deployment forever. The residual is the classic
+  unlink-then-create window, milliseconds wide, replacing the always-open window two writers had before
+  the lock existed; the loser's write still validates through the shared parser, so the file stays
+  loadable and the lost update is one edit or one disarm — the disarm retries, the operator re-presses.
+  Each write stages through a **per-writer tmp name** (pid + sequence), never a shared `.tmp`: with one
+  author a fixed tmp was self-cleaning and harmless, with two it would void the tmp+rename atomicity in
+  exactly the double-take window (renaming a rival's half-flushed tmp over the destination), and the
+  atomicity claim must hold precisely when the lock does not.
+- **The disarm verifies identity before it writes — every field the job knows.** `index` is positional
+  and the file can change between enqueue and disarm, so the writer refuses unless the entry at
+  `index` is still an armed one-shot naming the exact item number AND dispatching the exact flow or
+  command the job carried. What that confirms is the matched **item and target, not the trigger
+  instance**: an operator who deletes an in-flight one-shot and re-arms an IDENTICAL one (same index,
+  number, and flow) inside the job's run window has re-armed something the writer cannot tell from
+  the original, and the earlier job's disarm will spend it — a residual named rather than closed,
+  because a per-trigger id is the thing this design rejects (the raw index IS the identity), and
+  every DIFFERING re-arm refuses loudly. Already-disarmed is `{ already }`, an idempotent success (a
+  sibling replica of the same delivery, or a redelivery, lost the race by design). An unreadable file
+  refuses WITHOUT repair: the CRUD writer's repair-from-empty posture (missing file + "add trigger" =
+  scaffold) would here overwrite a trigger set the worker failed to read, to record one disarm.
+  One collateral both writers share, stated because the disarm makes it fire AUTONOMOUSLY: the file
+  is re-emitted canonical (2-space, JSON-normalized), so a hand-formatted file's first one-shot fire
+  produces a whole-file reformat in the operator's diff — the write's content delta is one key, its
+  byte delta is canonicalization, and canonical 2-space has been the written contract since OQ-008.
+- **What disarms, and when, is the worker slice's contract** (stated here once so the code lands against
+  a decided design): the hook sits strictly AFTER the run-record write at the worker's one recordRun
+  funnel — "fired" means "produced a run record", the issue's own definition — and fires for every
+  record, per-attempt failure records included; the pre-spend check that closes the re-fire window
+  excuses the job's OWN `jobId` (so BullMQ's second attempt of the same delivery still runs — without
+  that exception, disarm-on-attempt-one's-failure silently turns `attempts: 2` into `attempts: 1` for
+  every once job) and refuses only on POSITIVE foreign disarmed evidence. A crash between the record and
+  the disarm leaves the chosen failure direction: an armed one-shot with a record, which may fire again
+  on a NEW close — bounded by the delivery-GUID dedup, the semantic window, and the pre-spend check —
+  and never a disarm without a record.
+- **No implicit `mkdir`**, a deliberate divergence from `writeOverlay`: the overlay's directory is
+  worker-managed state, while `triggers.json`'s location is operator-authored config — creating a typo'd
+  directory would succeed into a file no service reads (the split-host hazard), where a loud `ENOENT` is
+  the honest answer.
+- **Rejected**: deleting the fired entry (shifts `triggerIndex`, re-attributes history — the issue's own
+  refusal) · rewriting `once` to a `"fired"` value (the schema stays strictly boolean, the operator's
+  authored intent is never edited, and the `{ at, jobId }` object is the only provenance that outlives
+  run-record retention) · the receiver as writer (its compose mount is `:ro`, and it knows a job was
+  enqueued, not that it ran) · a held/delayed queue job as the one-shot state (authorization in Redis;
+  `docker compose down -v` deletes it silently — the OQ-008 failure mode) · a separate archive file (a
+  second retention policy and a second panel view; the flag plus `git log` is the archive) · a blocking
+  sync retry in the console writer (freezes the panel) · a lockfile dependency with lease/renewal
+  machinery (two writers whose critical section is two syscalls do not need a daemon).
+- **Code evidence**: `worker/src/triggers-file.mjs` → `writeTriggers`, `disarmTrigger`,
+  `readDisarmState`; `admin/src/read-model.mjs` → the re-export; `worker/src/session-store.mjs` → the
+  lock idiom inherited.
+- **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `OQ-008`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `REQ-DEDUP-BY-DELIVERY-GUID`
+
 ## DES-PER-TRIGGER-JOB-IMAGE
 
 - **Decision**: The job image is resolved **per job** — `job.image ?? PI_JOB_IMAGE` — from an optional
@@ -2436,6 +2509,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-28 | Issue #231, second slice (writer). **NEW `DES-ONE-SHOT-DISARM-IN-THE-FILE`**: the shared locked triggers-file writer moves to the worker package (`./triggers-file`, admin re-exports), both authors serialize through `<path>.lock` (session-store idiom, plus the one new mechanism -- stale takeover at 10s, argued from this file having no reaper), the disarm verifies index+number identity before writing and never repairs an unreadable file, and the worker-slice lifecycle contract (record-first, all records disarm, own-jobId pre-spend exception) is stated once here. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: the parser stays where it was; only the writer moved in beside it. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` UNCHANGED, checked**: `writeOverlay` keeps its own mkdir posture, and the divergence (no implicit mkdir for triggers.json) is argued in the new entry. |
 | 2026-08-28 | Issue #231, first slice (schema). **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: the receiver's type set gains `issue`, and the widening-vs-narrowing row gains the third case -- a new `on.type` or action word is the LOUD-skew widening (an old parser throws at its closed vocabulary instead of silently dropping `on.once` and keeping a "disarmed" trigger firing), bought at #187's release-ordering price; `run.flow`'s webhook charset check is recorded as the file's second true narrowing and argued safe (such a flow could never materialise, so the refusal only reaches files that already failed post-budget). **`DES-PR-TRIGGER-ROUTES-TO-FLOW` UNCHANGED, checked**: close routing lands with the receiver slice; nothing in this slice touches PR routing. **`DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked**: `on.once`/`on.number`/`on.disarmed` are refused on cron precisely so the scheduler's identity model (id, not index) stays untouched. |
 | 2026-08-26 | **NEW `DES-PER-TRIGGER-SECRET-PROFILE`** (issue #225). **`DES-SERVICE-ENV-SETUP-SEAM` AMENDED by scope, not reversed**: its Rejected row refuses "making this reachable from configuration, which would turn a boot-time root-adjacent exec into something a trigger file could name", and that still holds -- a trigger names a profile NAME, never a path, so it selects among execs the operator already declared and cannot introduce one. A first draft of the new entry also argued the resolver's blast radius is smaller because it runs mid-life as the worker's user rather than root-adjacent at boot; that claim was WITHDRAWN before merge, because `SECURITY.md` names the `--env-setup` radius as "the account that holds every credential this deployment has", which IS the worker's user. What bounds the new surface is the fail-closed `PI_SECRET_RESOLVER_ROOTS`, not a weaker radius. **`DES-PER-TRIGGER-JOB-IMAGE` UNCHANGED, checked**: its "if a future tool ever takes an image parameter, the allowlist arrives with that tool" row is the reason the roots allowlist exists, and it predicted this correctly. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` UNCHANGED, checked**: `secretProfiles` is validated by the overlay but kept out of `KNOWN_KEYS`, and it takes no `overlay > env` precedence -- a name declared in both sources refuses. **`DES-AI-TRIGGER-FLOW-GATE` UNCHANGED, checked**: a flow still supplies only a boolean, and a flow-declared profile is in the new entry's Rejected list. |
 | 2026-08-26 | Issue #186 (resume eligibility bounds). **DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED AMENDED**: one rejected alternative, *counting a key's resume chain from the run records*. It is worth refusing in writing because it looks like reading rather than indexing, and because it is not available at any price: the record deliberately carries no session key (that absence is what keeps it PII-free by construction), forge job ids are delivery GUIDs so one key's lineage leaves records with unrelated filenames, and joining them would mean recording the key against each, which is the index this entry already refused. The counter that ships instead is one integer INSIDE the key directory, written under the promotion lock beside the transcript it counts, and the entry states why that is not the same thing: it is keyed state stored where the key already is, it answers one question rather than offering a query surface, and it degrades to a cold start like everything else there when the store is deleted. **DES-RUN-HISTORY-FLAT-FILES-NO-DB UNCHANGED, checked**, and it is the entry the alternative above would have violated: a cross-record content query is the database by another name. **DES-JOB-OUTBOX-CHAINING UNCHANGED, checked** despite the name collision an unwary reader will make -- `PI_CHAIN_DEPTH_MAX` bounds how far one job may spawn another, and `PI_SESSION_MAX_RESUME_CHAIN` bounds how many times one key may be resumed; they share a word and nothing else, which is why the reason token is `resume-chain-too-long` rather than anything shorter. |

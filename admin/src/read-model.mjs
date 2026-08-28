@@ -22,7 +22,6 @@ import { defaultLogsDir, defaultSandboxDir, defaultGraphDir, CHAIN_DEPTH_MAX_DEF
 import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
-import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -334,38 +333,18 @@ export function writeSettings({ settingsFile, mutate, fs = nodeFs }) {
 }
 
 /**
- * Read-modify-write the unified triggers.json. `mutate(entries)` receives a copy of the current raw
- * `{ on, run }` entry array and returns the new array; the result is re-serialized to the
- * `{ triggers: [...] }` file shape, VALIDATED through the SHARED `parseTriggers` (fail-closed -- an invalid
- * result is NEVER written, so the worker/receiver loaders can always parse the file), and written
- * ATOMICALLY (tmp + rename), so a live-reload watcher never observes a half-written file.
- *
- * Human-approved writes only: reached from the operator-typed `/dispatch trigger …` handlers AND from the
- * `dispatch_trigger_*` LLM tools, but the tools route through `confirmedWrite`, which requires an operator to
- * approve a confirm dialog before this runs. The human keypress is the approval, so CONST-TRIGGER-AUTHOR-GATE's
- * principle holds either way. A missing or unparseable existing file starts from an empty set; the validated
- * write repairs it. Returns `{ ok: true }` or `{ invalid }` with the parser's reason.
+ * Read-modify-write the unified triggers.json. MOVED to the worker package (issue #231,
+ * `@edgehero/pi-dispatch/triggers-file`) and re-exported here so the console's six tool/dialog call
+ * sites and the wizard's injection seam keep their import path: the worker's one-shot disarm made the
+ * file a two-author surface, and both authors must serialize through the one locked writer -- the same
+ * "reuse, never re-derive" that single-sources `parseTriggers` itself. Semantics unchanged for every
+ * caller (validated fail-closed, tmp+rename atomic, missing-file repair), plus three caller-visible
+ * deltas: `{ invalid }` naming the `.lock` when another write holds it (the operator answers by
+ * re-pressing the key); a transient EPERM on the rename retries once before it throws (writeOverlay's
+ * Windows-AV posture); and a missing parent directory now throws from the lock create naming `.lock`
+ * rather than from the tmp write -- same throw contract, different message.
  */
-export function writeTriggers({ triggersPath, mutate, fs = nodeFs }) {
-  let current = [];
-  try {
-    const raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
-    if (Array.isArray(raw?.triggers)) current = raw.triggers;
-  } catch {
-    // Missing/invalid file: start from empty; the validated atomic write below repairs it.
-  }
-  const next = mutate(current.map((t) => ({ ...t })));
-  const text = `${JSON.stringify({ triggers: next }, null, 2)}\n`;
-  try {
-    parseTriggers(text, triggersPath); // the loaders' own validator -- never write a file they would reject
-  } catch (e) {
-    return { invalid: e?.message ?? String(e) };
-  }
-  const tmp = `${triggersPath}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644 });
-  fs.renameSync(tmp, triggersPath);
-  return { ok: true };
-}
+export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 
 /**
  * Read + validate the pause-windows file for display (REQ-SCOPED-PAUSE-WINDOWS). Returns `{ windows }` of

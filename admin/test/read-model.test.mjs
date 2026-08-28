@@ -41,21 +41,45 @@ import {
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 
-// In-memory fs for the triggers write tests: readFileSync/writeFileSync/renameSync over a plain object.
+// In-memory fs for the triggers write tests, extended with the lock methods the shared writer took on
+// in #231 (openSync "wx" + statSync mtime + unlinkSync): the fake models the lock as a file entry with
+// an mtime, so the contention and stale-takeover paths are testable without a real disk.
 function triggerFs(initial = {}) {
   const files = { ...initial };
+  const mtimes = {};
+  let nextFd = 3;
   return {
     files,
+    mtimes,
     readFileSync(p) {
       if (!(p in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       return files[p];
     },
     writeFileSync(p, data) {
       files[p] = String(data);
+      mtimes[p] = Date.now();
     },
     renameSync(a, b) {
       files[b] = files[a];
+      mtimes[b] = mtimes[a] ?? Date.now();
       delete files[a];
+      delete mtimes[a];
+    },
+    openSync(p, flags) {
+      if (flags === "wx" && p in files) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+      files[p] = "";
+      mtimes[p] = Date.now();
+      return nextFd++;
+    },
+    closeSync() {},
+    unlinkSync(p) {
+      if (!(p in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      delete files[p];
+      delete mtimes[p];
+    },
+    statSync(p) {
+      if (!(p in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return { mtimeMs: mtimes[p] ?? Date.now() };
     },
   };
 }
