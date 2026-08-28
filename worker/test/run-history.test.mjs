@@ -219,12 +219,32 @@ test("a stray COMPLETE forged object glued before the genuine line loses to the 
 	assert.equal(parseExitTurns('{"event":"exit","turns":99}{"event":"exit","turns":6}'), 6);
 });
 
-test("a line truncated at the head of the capped tail is still skipped, not misread", () => {
-	// The cap's cut removed the line's opening bytes: no anchor survives, no repair is attempted,
-	// and the scan keeps walking to the intact line above. The fragment's numbers must not leak.
-	const text = '{"event":"exit","turns":8}\nokens":{"total":123}}';
+test("the repair ADVANCES past an unparseable earlier anchor -- it is a loop, not one attempt", () => {
+	// stray prefix + two complete objects on one line. The first surviving anchor's slice spans BOTH
+	// objects and fails to parse, so the loop MUST advance to the second anchor. A degraded repair that
+	// tried the first anchor once and gave up on failure returns null here; the shipped loop returns 6.
+	// (The no-stray sibling above does NOT pin this: there the index-1 start skips straight to the
+	// second, parseable anchor on the first attempt.)
+	assert.equal(parseExitTurns('stray{"event":"exit","turns":99}{"event":"exit","turns":6}'), 6);
+});
+
+test("a trailing anchorless fragment is skipped, and the real line's values survive intact", () => {
+	// A mid-write death or noise leaves a fragment with no {"event":" anchor as the LAST line. It fails
+	// to parse, is not repairable, and the scan walks back to the intact exit line. The intact line
+	// carries its OWN tokens so the assertion is not vacuous: the fragment's 123 must never leak.
+	const text = '{"event":"exit","turns":8,"tokens":{"total":50}}\nokens":{"total":123}}';
 	assert.equal(parseExitTurns(text), 8);
-	assert.equal(parseExitTokens(text), null);
+	assert.deepEqual(parseExitTokens(text), { total: 50 });
+});
+
+test("a head-cut fragment (the cap sliced its opening bytes) carries no anchor and is skipped", () => {
+	// The capped tail can BEGIN mid-line. A first line whose {"event":" anchor did not survive the cut
+	// is skipped and the intact exit line below it wins -- the fragment's 123 must not be misread as a
+	// value. (A cut landing in a GLUED line's stray PREFIX instead leaves the anchor intact and
+	// correctly repairs the genuine object; that direction is covered by the repair tests above.)
+	const text = 'urns":8,"tokens":{"total":123}}\n{"event":"exit","turns":9,"tokens":{"total":50}}';
+	assert.equal(parseExitTurns(text), 9);
+	assert.deepEqual(parseExitTokens(text), { total: 50 });
 });
 
 test("a glued line truncated at the END (a mid-write death) stays skipped", () => {
@@ -329,7 +349,9 @@ test("parseExitContext refuses a measurement that is not one", () => {
 
 test("parseExitContext returns the LAST exit line's context and never throws", () => {
 	assert.deepEqual(parseExitContext('{"event":"exit","context":{"tokens":1,"window":10}}\n{"event":"exit","context":{"tokens":9,"window":10}}'), { tokens: 9, window: 10 });
-	for (const input of ['{"event":"exit","context":{"tokens":1,"window":10}}', '{"event":"exi', "", undefined, null, 42, "null"]) {
+	// The SHARED corpus, not a hand-picked subset -- the glued/truncated shapes must sweep this parser
+	// too, which is the reason HOSTILE_CORPUS exists (see its comment).
+	for (const input of HOSTILE_CORPUS) {
 		assert.doesNotThrow(() => parseExitContext(input), `input=${JSON.stringify(input)}`);
 	}
 });

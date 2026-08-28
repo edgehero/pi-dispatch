@@ -2201,12 +2201,14 @@ validator rather than a second copy of it.
   from anything sharing the container's stdout lands as `<stray bytes><runner line>` in ONE line; a
   reader that merely skipped it lost `turns`, `tokens`, `usage`, `session` and `context` at once -- or
   handed the backward scan to a forged exit line placed earlier, with no race to win. The repair
-  re-anchors on the runner writers' own first-key bytes (`{"event":"`), collision-free because
-  JSON.stringify escapes every quote inside a string value; the writers themselves newline-DELIMIT since
-  the same issue, and both edges ship because only the reader's reaches logs an older image already
-  wrote. A line truncated at either end of the capped tail still parses to nothing and stays skipped,
-  and a repaired value remains read-only telemetry -- classification stays the container exit code's
-  job.
+  re-anchors on the runner writers' own first-key bytes (`{"event":"`) and takes the leftmost complete
+  object: JSON.stringify escapes every quote inside a string value so those raw bytes cannot occur mid-
+  line, and the left-to-right scan is what makes the outer object win over any nested one. The writers
+  themselves newline-DELIMIT since the same issue, and both edges ship because only the reader's reaches
+  logs an older image already wrote. A line truncated at the END parses to nothing and stays skipped;
+  one truncated at the HEAD is skipped when no anchor survives the cut and correctly repaired when the
+  cut fell in a glued line's stray prefix -- either way a fragment is never misread as a value. A
+  repaired value remains read-only telemetry -- classification stays the container exit code's job.
   **The process-wide meter widened the object, not the contract.** `tokens` grew `metered`, the
   `rootTotal`/`otherTotal`/`looseTotal` split, and the `sessions`/`calls`/`unresolved`/`unpriced` counters
   — additive inside an already-additive field, and still **nullable as a whole** (a container that died

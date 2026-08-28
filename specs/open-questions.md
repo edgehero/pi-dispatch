@@ -105,7 +105,12 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   deliberately tolerates into lost telemetry. On a channel the agent shares, no reader policy can
   distinguish the runner's bytes from an imitation of them; only an accounting channel the agent cannot
   write (a descriptor or file outside the container user's reach, a materially larger change) closes
-  this half, and this row is where that stays written down.
+  this half, and this row is where that stays written down. One boundary condition on the accidental
+  half, recorded so the close is not read as unconditional: the leading newline closes a dangling write
+  only because the runner emits its own line in a single `write()` that lands atomically, which holds
+  because the success exit line (the one carrying all five values) is well under a pipe's atomic-write
+  size; the catch-path line can in principle exceed it and interleave mid-line, but it carries none of
+  the five values, so nothing measured is at risk there.
 
 ## OQ-004 — Egress from the job container is unrestricted in v1
 

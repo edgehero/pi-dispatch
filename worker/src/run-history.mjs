@@ -48,12 +48,16 @@ export function sanitizeJobId(id) {
  * The repair re-anchors on `{"event":"`, which is collision-free by construction: `event` is the
  * first key both runner writers serialise, and JSON.stringify escapes every quote inside a string
  * value, so these raw bytes cannot occur INSIDE a runner line -- only where one starts. Suffixes are
- * tried left to right; a suffix beginning inside the stray bytes cannot parse to the line's end
- * (nothing can close a JSON container after bytes the runner appended later, and the runner's own
- * quotes terminate any string opened before them), so the first success is the glued runner object
- * itself. A line truncated at the HEAD of the capped tail stays skipped: the cap's cut either
- * removes the anchor or lands exactly on it, and then the line is whole and parses as itself.
- * A line truncated at the END (a mid-write death) has no complete object and stays skipped too.
+ * tried left to right, so the leftmost complete object wins: a suffix beginning inside the stray
+ * bytes cannot parse to the line's end (nothing can close a JSON container after bytes the runner
+ * appended later, and the runner's own quotes terminate any string opened before them), so the first
+ * success is the glued runner object itself -- and this left-to-right scan, not just the quote
+ * escaping, is what keeps a would-be inner `{"event":"` from being chosen over the outer one.
+ * A line whose HEAD the capped tail sliced off is handled correctly either way: if the cut fell in a
+ * glued line's stray PREFIX the anchor survives and the genuine object is still repaired, and if it
+ * fell in or past the anchor no `{"event":"` survives and the line is skipped. A line truncated at the
+ * END (a mid-write death) has no complete object and is skipped too. A fragment is never MISREAD as a
+ * value: a broken one does not parse and an anchorless one is not repaired.
  *
  * NEVER throws, like the five scanners that call it.
  */

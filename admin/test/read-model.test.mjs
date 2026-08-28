@@ -284,6 +284,14 @@ test("readLogTail returns the last N lines, dropping the trailing-newline segmen
   assert.deepEqual(rec.lines, ["l4", "l5"]);
 });
 
+test("readLogTail drops blank lines so newline-delimited runner events do not eat viewport slots", () => {
+  // The runner writes `\n{event}\n` per line (issue #224), so the raw .log interleaves a blank line
+  // before every event. Three real events must fill a 3-line viewport, not one event and two blanks.
+  const content = '\n{"event":"a"}\n\n{"event":"b"}\n\n{"event":"exit"}\n';
+  const rec = readLogTail({ logsDir: "/logs", jobId: "x", lines: 3, fs: fakeFs({ "x.log": content }) });
+  assert.deepEqual(rec.lines, ['{"event":"a"}', '{"event":"b"}', '{"event":"exit"}']);
+});
+
 test("readBudget GETs the day/week/month/token keys and never mutates", async () => {
   const commands = [];
   const values = { [dayKey()]: "7", [weekKey()]: "20", [monthKey()]: "55", [tokenDayKey()]: "123456" };

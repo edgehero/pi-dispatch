@@ -1108,8 +1108,13 @@ test("both runner log writers open with a newline, closing any un-newlined write
 	// once (issue #224, OQ-003); the host-side repair in run-history.mjs covers old images, this
 	// covers new ones.
 	const shape = 'process.stdout.write(`\\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\\n`);';
+	// The un-delimited form (no leading \n) must be ABSENT: this catches BOTH a regression that drops
+	// the newline from an existing writer AND a new, second writer added later without it -- the
+	// presence check alone would pass in that case (issue #224).
+	const undelimited = 'process.stdout.write(`${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\\n`);';
 	for (const rel of ["../run-job.mjs", "../src/loader.mjs"]) {
 		const src = readFileSync(new URL(rel, import.meta.url), "utf8");
 		assert.ok(src.includes(shape), `${rel}: the runner's log writer must lead with a closing newline (issue #224)`);
+		assert.ok(!src.includes(undelimited), `${rel}: no un-delimited stdout writer may reappear (issue #224)`);
 	}
 });

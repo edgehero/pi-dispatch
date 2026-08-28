@@ -644,8 +644,10 @@ export function readLogTail({ logsDir, jobId, lines = 200, fs = nodeFs }) {
   } catch {
     return { missing: true };
   }
-  const all = text.split("\n");
-  if (all.length > 0 && all[all.length - 1] === "") all.pop(); // drop the trailing-newline empty segment
+  // The runner newline-DELIMITS its events (issue #224): each line is written `\n{...}\n`, so the raw
+  // .log carries a blank line before every runner event plus the trailing-newline segment. Drop every
+  // empty segment, not just the last, so the delimiters do not consume slots in the overlay viewport.
+  const all = text.split("\n").filter((line) => line !== "");
   const cap = clampLines(lines);
   return { lines: all.slice(Math.max(0, all.length - cap)) };
 }
