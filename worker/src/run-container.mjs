@@ -7,7 +7,7 @@ import { InfraRetry } from "./processor.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
- * `{ code, aborted, turns, tokens, session, usage }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
+ * `{ code, aborted, turns, tokens, session, usage, context }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
  * INT-RUNNER-EXIT-CODE-PROTOCOL. The numeric `code` alone cannot say this: a worker SIGKILL and a
  * kernel OOM both surface as 137, so the abort FLAG -- not the code -- is the discriminator.

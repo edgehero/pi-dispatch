@@ -266,7 +266,7 @@ Because resolution happens before anything spends, a wrong reference costs nothi
 repository is cloned, no budget slot is reserved. You get a refusal on the issue naming the VARIABLE that
 failed, and never the reference, the resolver's path, or a byte of what it printed.
 
-### Three things worth knowing before you wire one
+### Four things worth knowing before you wire one
 
 1. **Your exit code decides whether the job retries.** This is the same question this page asks of every
    manager, and here it is load-bearing rather than advisory. Exit 2 means "that reference is wrong" and the
@@ -279,6 +279,14 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    An agent handed a credential often persists it to make its next command simpler, and on a local job that
    `.env` lands in your real repository. Nothing scans for it. `pi-dispatch doctor` warns when a local
    trigger binds secrets; keep those folders out of anything you push.
+4. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
+   ships in `@edgehero/pi-dispatch` 1.3.0, `@edgehero/pi-dispatch-admin` 1.3.0 and
+   `@edgehero/pi-dispatch-receiver` 1.2.0; that is the floor. The skew that matters is a stale receiver:
+   it matches the rule, enqueues the job WITHOUT the secrets, and the worker sees an unarmed job -- the
+   container then runs with the variable unset on a clean exit, which is exactly the silent no-op this
+   feature is built to refuse. A stale admin fails the other way, visibly, refusing every trigger write
+   while the file holds a `run.secrets` entry. Upgrade the receiver in the same `npm install` as the
+   worker, before you bind the first secret.
 
 ### From the panel
 
