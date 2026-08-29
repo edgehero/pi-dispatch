@@ -52,7 +52,7 @@ type Notify = ((message: string, type?: string) => void) | undefined;
  * version, so a release bump stays atomic: bump the worker and the test fails here until this literal
  * follows in the same change.
  */
-export const RUNTIME_VERSION = "1.3.0";
+export const RUNTIME_VERSION = "1.4.0";
 
 /**
  * The `@edgehero/pi-dispatch-receiver` version the trigger-edge step installs -- pinned for exactly the
@@ -62,7 +62,7 @@ export const RUNTIME_VERSION = "1.3.0";
  * independently (the receiver's dependency range on the runtime is `^`), and pretending otherwise would
  * install a version that does not exist the first time they diverge.
  */
-export const RECEIVER_VERSION = "1.2.0";
+export const RECEIVER_VERSION = "1.3.0";
 
 /** The two npm package names, spelled once. Literals of this module -- see npmInstallArgsFor's argument. */
 const RUNTIME_PKG = "@edgehero/pi-dispatch";
