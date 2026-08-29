@@ -135,6 +135,13 @@ function fakeRedis() {
 		async expire(key, ttl) {
 			if (kv.has(key) || hashes.has(key)) ttls.set(key, ttl);
 		},
+		// ioredis INCR: missing key counts as 0, the incremented value is stored as a string and
+		// returned as a number. The close-gate retry counter (issue #231) is the only consumer.
+		async incr(key) {
+			const next = (Number(kv.get(key)) || 0) + 1;
+			kv.set(key, String(next));
+			return next;
+		},
 		async quit() {},
 	};
 }
@@ -539,6 +546,252 @@ test("a comment command trigger fires through the poller: command on the job, no
 	assert.equal("flow" in job, false, "a trailing known-flow word must not turn the command job into a flow job (or into a no-flow drop)");
 	assert.deepEqual(job.trigger.matched, { index: 1, type: "comment", phrase: "@pi-run" });
 	assert.equal(job.trigger.comment.body, "@pi-run fix this", "the trailing words ride as data for the handler, via event.json");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The closed source (issue #231)
+// ---------------------------------------------------------------------------------------------------
+
+// A trigger file with BOTH close groups armed, plus the label rule so the no-lookup-for-other-sources
+// pin below runs against a file where close rules genuinely exist. Indices are raw-file positions.
+const CLOSE_TRIGGERS_JSON = JSON.stringify({
+	triggers: [
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "post-close" } },
+		{ on: { type: "pull_request", action: ["closed"] }, run: { kind: "github", flow: "post-merge" } },
+	],
+});
+const CLOSE_FS = { fileExists: () => true, readFile: () => CLOSE_TRIGGERS_JSON };
+
+const ISSUE20 = { number: 20, title: "T20", body: "B20", labels: [] };
+// The closer rides `actor` in the events feed (live-verified against api.github.com: `closed`
+// entries carry actor {id, login}, a PR appears with issue.pull_request set, and a MERGED PR emits
+// a `closed` entry too). EV701 reuses ISSUE8, whose pull_request marker routes it down the PR arm.
+const EV700 = { id: 700, event: "closed", actor: { id: 5, login: "alice" }, issue: ISSUE20 };
+const EV701 = { id: 701, event: "closed", actor: { id: 5, login: "alice" }, issue: ISSUE8 };
+// The inert seed every scenario keeps at the tail of the feed, scenarioRoutes' own convention: the
+// events endpoint pages while the OLDEST fetched entry is newer than the cursor, and fakeFetch
+// repeats its last reply -- an armed-at-empty feed would page the same reply MAX_EVENT_PAGES times
+// and hand the loop five copies of every event.
+const EV698 = { id: 698, event: "assigned", actor: { id: 5, login: "alice" }, issue: ISSUE20 };
+
+/** Routes for the closed scenarios. `/collaborators/` and `/pulls/8` are registered FIRST: fakeFetch
+ *  matches by substring, first hit wins, and the broader routes would otherwise shadow them. */
+function closeRoutes({ events, permission = [ghResponse(200, { permission: "admin" })] }) {
+	return [
+		{ path: "/collaborators/", replies: permission },
+		{ path: "/repos/o/r/pulls/8", replies: [ghResponse(200, PR8)] },
+		{ path: "/repos/o/r/issues/events", replies: events },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+	];
+}
+
+const collaboratorCalls = (fetch) => fetch.calls.filter((c) => c.url.includes("/collaborators/"));
+
+test("SUBSET PARITY for a close: issue and PR `closed` events enqueue what their webhook twins would (issue #231)", async () => {
+	const cfg = loadPollerConfig({ POLL_REPOS: "o/r" }, CLOSE_FS);
+	const { queued, out, fetch } = await runPoller({
+		cycles: 2,
+		routes: closeRoutes({ events: [ghResponse(200, [EV698]), ghResponse(200, [EV701, EV700, EV698])] }),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.equal(queued.length, 2, "one job per fresh close: the issue and the PR");
+	const byDelivery = new Map(queued.map((j) => [j.trigger.deliveryId, j]));
+
+	// The webhook twins, built from the SAME upstream objects, with the closer PRE-AUTHORIZED (the
+	// sixth argument) exactly as the receiver hands it to filter after its own lookup.
+	const twins = [
+		["poll-e700", "issues", { action: "closed", sender: { id: 5, login: "alice" }, issue: ISSUE20, repository: REPOSITORY }],
+		["poll-e701", "pull_request", { action: "closed", sender: { id: 5, login: "alice" }, pull_request: PR8, repository: REPOSITORY }],
+	];
+	for (const [pollDelivery, eventName, webhookPayload] of twins) {
+		const verdict = filter(eventName, parseSubset(webhookPayload), cfg, SELF, `wh-${pollDelivery}`, true);
+		assert.equal(verdict.enqueue, true, `the webhook twin of ${pollDelivery} must clear the gate`);
+		const polled = byDelivery.get(pollDelivery);
+		assert.ok(polled, `the poller must have enqueued ${pollDelivery} (got ${[...byDelivery.keys()].join(", ")})`);
+		assert.deepEqual(stripDelivery(polled), stripDelivery(verdict.job), `${pollDelivery}: enqueue payloads must match field-for-field`);
+	}
+	assert.equal(byDelivery.get("poll-e700").flow, "post-close");
+	assert.equal(byDelivery.get("poll-e700").target.type, "issue");
+	assert.equal(byDelivery.get("poll-e701").flow, "post-merge");
+	assert.equal(byDelivery.get("poll-e701").target.type, "pull_request");
+
+	// The resolver saw (repo, login) -- by username, the only key the endpoint takes -- once per close,
+	// authenticated with the poller's OWN cached token, never a job credential.
+	const lookups = collaboratorCalls(fetch);
+	assert.deepEqual(
+		lookups.map((c) => c.url),
+		[
+			"https://api.github.com/repos/o/r/collaborators/alice/permission",
+			"https://api.github.com/repos/o/r/collaborators/alice/permission",
+		],
+	);
+	assert.equal(lookups[0].headers.authorization, "Bearer poll-token");
+	// The PR arm pays its object fetch ONCE per closed event.
+	assert.equal(fetch.calls.filter((c) => c.url.endsWith("/repos/o/r/pulls/8")).length, 1, "the PR object is fetched once, only for the PR close");
+});
+
+test("an unauthorized closer is the filter's own drop, and the cursor advances -- a stranger's close never wedges the feed", async () => {
+	const { queued, out, redis, fetch } = await runPoller({
+		cycles: 3,
+		routes: closeRoutes({
+			events: [ghResponse(200, [EV698]), ghResponse(200, [EV700, EV698])],
+			permission: [ghResponse(200, { permission: "read" })],
+		}),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.equal(queued.length, 0, "read access cannot start a paid job");
+	assert.ok(
+		out.some((o) => o.event === "dropped" && o.reason === "closer-not-allowed" && o.delivery === "poll-e700"),
+		"the refusal is the shared filter's verdict, observable per delivery",
+	);
+	assert.equal(redis.kv.get("poll:o/r:cursor:events"), "700", "the events cursor advances past the refused close");
+	assert.equal(collaboratorCalls(fetch).length, 1, "cycle 3 does not refetch or re-resolve the already-advanced-past close");
+});
+
+test("an INDETERMINATE closer lookup fails the repo's cycle LOUDLY and the next cycle retries exactly that event", async () => {
+	const { queued, out, redis, fetch } = await runPoller({
+		cycles: 3,
+		routes: closeRoutes({
+			events: [ghResponse(200, [EV698]), ghResponse(200, [EV700, EV698])],
+			permission: [ghResponse(500, { message: "boom" })],
+		}),
+		fsDeps: CLOSE_FS,
+	});
+	assert.equal(queued.length, 0, "no verdict, no spend");
+	// The failure is SCOPED to the events feed (poll_close_gate_retry), never the whole repo: a
+	// close-gate spell must not starve the comment and pull feeds, which run on their own cursors --
+	// so the per-repo poll_repo_failed line must NOT appear for what is one feed holding one event.
+	assertNoRepoFailure(out);
+	const failures = out.filter((o) => o.event === "poll_close_gate_retry" && o.repo === "o/r" && o.delivery === "poll-e700");
+	assert.equal(failures.length, 2, "cycles 2 and 3 each surface the outage instead of guessing an answer");
+	assert.match(failures[0].reason, /indeterminate.*status-500/, "the reason names the lookup outcome, never the actor");
+	assert.equal(redis.kv.get("poll:o/r:cursor:events"), "698", "the cursor stays BEFORE the event, so the retry resumes exactly there");
+	assert.equal(collaboratorCalls(fetch).length, 2, "cycle 3 re-resolved exactly the failed close");
+	assert.equal(redis.kv.get("poll:o/r:close-gate:poll-e700"), "2", "the retry counter is per event, in redis, so a restart cannot reset the bound");
+	assert.equal(redis.ttls.get("poll:o/r:close-gate:poll-e700"), 24 * 3600, "the counter decays with the outage (~1 day), outside the touched cursor family");
+	assert.ok(!out.some((o) => o.event === "poll_close_gate_gave_up"), "below the bound the poller never gives up");
+	// The non-starvation pin: the comment feed still fetched on both post-arming cycles, spell
+	// included (cycle 1 arms without a fetch) -- the scoped catch ends only the events feed, and
+	// reverting it to a repo-wide throw drops this to zero.
+	const commentFetches = fetch.calls.filter((c) => c.url.includes("/issues/comments"));
+	assert.equal(commentFetches.length, 2, "a close-gate spell must not starve the repo's other feeds");
+});
+
+test("at the retry bound the close gate gives up LOUDLY: logged with the delivery, cursor advanced, nothing enqueued", async () => {
+	const redis = fakeRedis();
+	// Seed the counter one below the bound: 19 failed cycles already happened -- a real outage, not a blip.
+	redis.kv.set("poll:o/r:close-gate:poll-e700", "19");
+	const { queued, out, fetch } = await runPoller({
+		cycles: 3,
+		redis,
+		routes: closeRoutes({
+			events: [ghResponse(200, [EV698]), ghResponse(200, [EV700, EV698])],
+			permission: [ghResponse(500, { message: "still down" })],
+		}),
+		fsDeps: CLOSE_FS,
+	});
+	// The give-up is deliberately NOT a repo failure: the cycle completes and the sources behind the
+	// same cursor keep working. One close dropped loudly beats the whole repo wedged forever.
+	assertNoRepoFailure(out);
+	assert.ok(
+		out.some((o) => o.event === "poll_close_gate_gave_up" && o.repo === "o/r" && o.delivery === "poll-e700" && o.reason === "status-500"),
+		"the drop is said out loud with the delivery id an operator can act on",
+	);
+	assert.deepEqual(queued, [], "a close whose authority was never established must not spend");
+	assert.equal(redis.kv.get("poll:o/r:cursor:events"), "700", "the cursor advances past the given-up close");
+	assert.equal(collaboratorCalls(fetch).length, 1, "cycle 3 does not resurrect the given-up close");
+});
+
+test("no close rule armed: a closed event costs NOTHING -- the cycle is byte-identical to the unhandled-event path", async () => {
+	// Default FS: the close-less trigger file. The twin run carries the SAME ids wearing an event this
+	// poller has never handled, i.e. the pre-#231 do-nothing path, and every observable output -- log
+	// lines, cycle stats, request traffic, cursors -- must be indistinguishable.
+	const run = (cycle2Events) =>
+		runPoller({
+			cycles: 2,
+			routes: [
+				{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV698]), ghResponse(200, [...cycle2Events, EV698])] },
+				{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+				{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+			],
+		});
+	const withCloses = await run([EV701, EV700]);
+	const withInert = await run([{ ...EV701, event: "assigned" }, { ...EV700, event: "assigned" }]);
+	assertNoRepoFailure(withCloses.out);
+	assert.deepEqual(withCloses.queued, []);
+	assert.equal(withCloses.fetch.calls.some((c) => c.url.includes("/collaborators/")), false, "zero permission traffic");
+	assert.equal(withCloses.fetch.calls.some((c) => c.url.includes("/pulls/8")), false, "zero PR fetches for the closed PR");
+	assert.deepEqual(withCloses.out, withInert.out, "log and stat output identical to a run where the closes were any unhandled event");
+	assert.deepEqual(
+		withCloses.fetch.calls.map((c) => c.url),
+		withInert.fetch.calls.map((c) => c.url),
+		"request traffic identical too",
+	);
+});
+
+test("arming replay safety: closes fetched on the arming cycle set the high-water mark and enqueue NOTHING", async () => {
+	const { queued, out, redis, fetch } = await runPoller({
+		cycles: 2,
+		routes: closeRoutes({ events: [ghResponse(200, [EV701, EV700])] }),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.ok(
+		out.some((o) => o.event === "poll_armed" && o.endpoint === "events" && o.cursor === 701),
+		"the backlog's closes arm the cursor, exactly as the labeled source pins it",
+	);
+	assert.deepEqual(queued, [], "a close from before arming was an approval for THAT moment, not a standing order");
+	assert.equal(collaboratorCalls(fetch).length, 0, "pre-arm closes cost no lookup");
+	assert.equal(fetch.calls.filter((c) => c.url.endsWith("/repos/o/r/pulls/8")).length, 0, "and no PR fetch");
+	assert.equal(redis.kv.get("poll:o/r:cursor:events"), "701");
+});
+
+test("self-closer: the harness closing its own issue costs no lookup and starts no job", async () => {
+	// The natural last act of the very flow a close trigger arms. wantsCloserAuthority refuses the
+	// lookup before it is spent; the shared filter's bot-loop guard makes the drop observable.
+	const selfClose = { id: 702, event: "closed", actor: { id: SELF, login: "pi-bot" }, issue: ISSUE20 };
+	const { queued, out, fetch } = await runPoller({
+		cycles: 2,
+		routes: closeRoutes({ events: [ghResponse(200, [EV698]), ghResponse(200, [selfClose, EV698])] }),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.equal(collaboratorCalls(fetch).length, 0, "no permission traffic for a self-close");
+	assert.deepEqual(queued, []);
+	assert.ok(out.some((o) => o.event === "dropped" && o.reason === "self" && o.delivery === "poll-e702"), "the drop is the filter's own `self` verdict");
+});
+
+test("a closed event with NO issue field is skipped without throwing, and the cursor advances past it", async () => {
+	const noIssue = { id: 703, event: "closed", actor: { id: 5, login: "alice" } };
+	const { queued, out, redis, fetch } = await runPoller({
+		cycles: 2,
+		routes: closeRoutes({ events: [ghResponse(200, [EV698]), ghResponse(200, [noIssue, EV698])] }),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(queued, []);
+	assert.equal(collaboratorCalls(fetch).length, 0);
+	assert.equal(redis.kv.get("poll:o/r:cursor:events"), "703", "a malformed entry advances past like any unhandled event");
+});
+
+test("non-close sources never take the authority path, even with close rules armed", async () => {
+	// wantsCloserAuthority is false for them by construction -- this pins it end-to-end: a labeled
+	// event under a file that ALSO arms close rules fires its label job with zero permission traffic.
+	const labeled = { ...EV201, id: 705 };
+	const { queued, out, fetch } = await runPoller({
+		cycles: 2,
+		routes: closeRoutes({ events: [ghResponse(200, [EV698]), ghResponse(200, [labeled, EV698])] }),
+		fsDeps: CLOSE_FS,
+	});
+	assertNoRepoFailure(out);
+	assert.equal(queued.length, 1, "the label rule fires as it always has");
+	assert.equal(queued[0].trigger.deliveryId, "poll-e705");
+	assert.equal(queued[0].flow, "fix");
+	assert.equal(collaboratorCalls(fetch).length, 0, "no lookup rides along with a labeled event");
 });
 
 // ---------------------------------------------------------------------------------------------------

@@ -247,9 +247,9 @@ function makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) {
 				// here only to have been asked about (no-pii-in-logs).
 				log?.({ event: "github_permission_lookup_failed", delivery, reason: resolved.indeterminate });
 				// 503: GitHub redelivers, the GUID jobId coalesces the retry. GitHub's auto-redelivery is
-				// weaker than GitLab's, so a lookup outage outlasting the window loses the close -- the
-				// poller slice's closed source is what will backstop that; until it lands, webhooks are
-				// the only close transport and the residual stands as stated.
+				// weaker than GitLab's, so a lookup outage outlasting the window can lose a webhook-only
+				// deployment's close -- the polling transport's closed source is the backstop where the
+				// poller runs, with its own bounded retry against the same lookup.
 				return respond(res, 503, { error: "permission-lookup-failed" });
 			}
 			closerAuthorized = resolved.authorized;

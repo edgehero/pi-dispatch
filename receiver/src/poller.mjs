@@ -43,9 +43,18 @@
  *                   a closed PR has nothing left to act on, the same call `merge`/`close` get in the
  *                   action vocabulary. REST spells `state` in upper case where the webhook spells it
  *                   lower; `parseSubset` folds it, so both transports produce the same job.
+ *   - closed:       the SAME /issues/events feed as `label` -- `closed` entries carry the CLOSER as
+ *                   `actor` and cover issues AND PRs (`issue.pull_request` is the discriminator again,
+ *                   and a MERGED PR emits `closed` here too, which is what lets a close trigger release
+ *                   post-merge work). Consumed only when a close rule is armed (hasCloseTriggers), so an
+ *                   unarmed deployment's cycle stays byte-identical to a pre-#231 run: no PR fetch, no
+ *                   permission traffic. The closer's write access is resolved via the shared
+ *                   collaborator-permission lookup BEFORE the gate, mirroring the webhook arm
+ *                   (issue #231; see `gate` for the indeterminate-lookup retry bound).
  *
  * DEDUP IDS (REQ-DEDUP-BY-DELIVERY-GUID): polling has no delivery GUID, so each source mints a
- * deterministic stand-in that is stable across retried cycles -- `poll-e<eventId>` (label events),
+ * deterministic stand-in that is stable across retried cycles -- `poll-e<eventId>` (the /issues/events
+ * feed: label AND close entries, one feed so one id family),
  * `poll-c<commentId>` (comments), `poll-pr<number>-<headSha7>` (PR actions; sha-keyed so a retried
  * cycle cannot double-enqueue while a real new push mints a new id -- with the honest corollary that
  * a same-sha reopen inside the retention window coalesces with its own `opened` job), and
@@ -62,6 +71,10 @@
  *   poll:<owner/repo>:etag:reviews     hash: PR number -> that PR's reviews-endpoint validator. A HASH
  *                                      rather than a key per PR, so the family below stays enumerable
  *                                      and `touchRepo` can still refresh it as a unit.
+ *   poll:<owner/repo>:close-gate:<delivery>  consecutive INDETERMINATE closer-lookup attempts for ONE
+ *                                      close event (issue #231). Deliberately OUTSIDE the touched
+ *                                      family, with a short ~1-day TTL of its own: the counter must
+ *                                      decay with the outage it measures, not live with the repo.
  * All keys carry a ~35-day TTL and are refreshed TOGETHER after each successful repo poll. 35 days
  * deliberately exceeds the 31-day gh-* jobId retention (REQ-DEDUP-BY-DELIVERY-GUID): the cursor and
  * the jobId are the poller's two dedup layers, and refreshing/expiring the cursor family as a unit
@@ -98,7 +111,8 @@ import { configError } from "@edgehero/pi-dispatch/config";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
-import { filter } from "./filter.mjs";
+import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
+import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
 import { loadPollerConfig } from "./poller-config.mjs";
 
@@ -119,6 +133,13 @@ const MAX_PR_PAGES = 10;
 const MAX_REVIEW_PRS = 50;
 // The hash value marking a PR that left the open list. Cannot collide with a head sha (hex only).
 const CLOSED_MARKER = "closed";
+// The closer-authority retry bound (issue #231): how many consecutive cycles an INDETERMINATE
+// collaborator-permission lookup may hold the events cursor before the close is dropped loudly.
+// ~20 cycles at the default 60s interval is a real outage, not a blip; see `gate` for the tradeoff.
+const CLOSE_GATE_MAX_ATTEMPTS = 20;
+// The retry counter's own TTL: it measures ONE outage around ONE event, so it decays in a day rather
+// than riding the 35-day cursor family (touchRepo never refreshes it -- see the module header).
+const CLOSE_GATE_TTL_SECONDS = 24 * 3600;
 
 /** Thrown by the API helper when the credential's quota is exhausted; carries the reset time in ms. */
 class RateLimited extends Error {
@@ -151,6 +172,7 @@ export async function startPoller(env = process.env, deps = {}) {
 		fsDeps = {},
 		makeAuth = makeGitHubAuth,
 		makeQueueFn = makeQueue,
+		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
 	} = deps;
 
 	const cfg = loadPollerConfig(env, fsDeps);
@@ -172,6 +194,16 @@ export async function startPoller(env = process.env, deps = {}) {
 	const mintToken = tokenFn ?? (cfg.github.source === "app"
 		? makeAppInstallationTokenFn(cfg.github, { fetchFn, readFile, now })
 		: async () => (await getAuth()).mintToken());
+
+	// The closer-authority resolver (issue #231), built over the poller's OWN mint above -- the injected
+	// factory default, start.mjs's convention. On the app source that mint hands back the CACHED,
+	// UNSCOPED installation token (makeAppInstallationTokenFn below), and the resolver's job-shaped
+	// `{ repo }` argument is simply ignored by it. That is fine for what this token does here: one
+	// read-only permission lookup that never leaves this process. The webhook arm's per-delivery
+	// metadata:read narrowing (start.mjs) is the stricter posture; the poller's cache is the deliberate
+	// cost tradeoff its own header already records (the credential must read every polled repo anyway),
+	// and github-members.mjs names this cache as the recorded fallback to per-delivery minting.
+	const resolveCloserAuthority = makeResolveGitHubAuthorityFn({ mintToken, fetchFn });
 
 	// Cursor store. ioredis is imported lazily so tests injecting a fake never load the driver. The
 	// client rides out disconnects (ioredis reconnects on its own) -- same posture as the receiver's
@@ -198,7 +230,7 @@ export async function startPoller(env = process.env, deps = {}) {
 		if (ownRedis) await redisClient.quit();
 	};
 
-	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, out, now, random };
+	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, out, now, random, resolveCloserAuthority };
 
 	// The repo set: explicit POLL_REPOS, or the App installation's list (cfg.repos === null only when
 	// the source is app -- poller-config enforces it). An empty discovery is a config error, not an
@@ -493,9 +525,29 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 	for (const ev of fresh) {
 		if (ev.event === "labeled" && ev.issue) {
 			await handleLabeledEvent(ctx, api, repo, ev, stats);
+		} else if (ev.event === "closed" && ev.issue && hasCloseTriggers(ctx.cfg?.triggers?.github)) {
+			// The coarse hasCloseTriggers guard IS the byte-identity switch (issue #231): with no close
+			// rule armed, a `closed` entry takes the same do-nothing path every unhandled event always
+			// has -- no PR fetch, no permission traffic, a cycle indistinguishable from a pre-#231 run.
+			// An entry with no `issue` field is malformed and skipped the same way, never thrown on.
+			try {
+				await handleClosedEvent(ctx, api, repo, ev, stats);
+			} catch (err) {
+				// The scoped catch that keeps a close-gate spell from starving the WHOLE repo: a throw
+				// here (an indeterminate closer lookup below its bound, a PR fetch blip) must hold THIS
+				// feed's cursor before the failed event -- a monotone cursor cannot skip one entry and
+				// come back -- but the comment and pull feeds have their OWN cursors and their own real
+				// work, so ending only the events feed for this cycle lets pollRepo continue to them.
+				// RateLimited still propagates: the quota is credential-global and pollRepo's caller
+				// sleeps the whole roster out, which no per-feed catch may swallow.
+				if (err instanceof RateLimited) throw err;
+				ctx.out({ event: "poll_close_gate_retry", repo, delivery: `poll-e${ev.id}`, reason: err?.message });
+				return;
+			}
 		}
 		// Advance ONLY after the event is handled: an enqueue/fetch failure above leaves the cursor on
-		// the last success, so the retry next cycle resumes at the exact failed event.
+		// the last success, so the retry next cycle resumes at the exact failed event. Unmatched and
+		// unarmed closes advance past here exactly like every unhandled event always has.
 		await setWithTtl(ctx, k.events, String(ev.id));
 	}
 }
@@ -523,6 +575,42 @@ async function handleLabeledEvent(ctx, api, repo, ev, stats) {
 		await gate(ctx, "pull_request", payload, deliveryId, stats);
 	} else {
 		const payload = { action: "labeled", sender: { id: ev.actor?.id }, issue: ev.issue, repository: { full_name: repo } };
+		await gate(ctx, "issues", payload, deliveryId, stats);
+	}
+}
+
+/**
+ * One `closed` event -> the webhook payload it corresponds to -> the unchanged gate (issue #231).
+ * handleLabeledEvent's twin, split on the same discriminator: the events feed hands us the ISSUE
+ * view, and `issue.pull_request` marks a PR. An issue routes as `issues closed` with the issue object
+ * as-is; a PR must route as `pull_request closed`, and the issue view lacks the PR fields the job's
+ * target carries (title/body/head/base as the webhook subset shapes them), so the PR object is
+ * fetched once per event -- field-for-field parity again, paid only on NEW closed events under an
+ * ARMED close rule (the caller's hasCloseTriggers guard). A MERGED PR emits `closed` in this feed
+ * too, exactly as the webhook's `closed` action covers merged -- which is what lets a prClose
+ * trigger release post-merge work over polling.
+ *
+ * A failing PR fetch rides the labeled twin's own retry discipline: the throw holds the events
+ * cursor and retries next cycle (scoped to this feed since #231). Unbounded on purpose -- unlike an
+ * indeterminate LOOKUP, a fetch failure here has no counter, because the one input that could make
+ * it permanent (a deleted PR) is a GitHub-support-only operation the labeled path has carried
+ * unbounded since it shipped, and a bound would spend its complexity on a case nobody can produce.
+ *
+ * `sender` carries the closer's LOGIN as well as the id, alone among this module's synthesized
+ * payloads: the collaborator-permission lookup is by username because that is the only key GitHub's
+ * endpoint takes. Same justification and same obligation as the webhook subset's `sender.login`
+ * (parseSubset): it exists to have been asked about, it is never logged, and the job literal keeps
+ * `trigger.sender` at `{ id }` alone.
+ */
+async function handleClosedEvent(ctx, api, repo, ev, stats) {
+	const deliveryId = `poll-e${ev.id}`;
+	const sender = { id: ev.actor?.id, login: ev.actor?.login };
+	if (ev.issue.pull_request != null) {
+		const pr = (await api.get(`/repos/${repo}/pulls/${ev.issue.number}`)).json;
+		const payload = { action: "closed", sender, pull_request: pr, repository: { full_name: repo } };
+		await gate(ctx, "pull_request", payload, deliveryId, stats);
+	} else {
+		const payload = { action: "closed", sender, issue: ev.issue, repository: { full_name: repo } };
 		await gate(ctx, "issues", payload, deliveryId, stats);
 	}
 }
@@ -770,12 +858,59 @@ async function pollReviews(ctx, api, repo, open, stats) {
 
 /**
  * The single choke point every synthesized payload passes through, and deliberately the receiver's
- * exact pipeline: parseSubset -> filter (UNCHANGED, same cfg/selfId) -> replica fanout ->
- * enqueueGitHubJob, with the receiver's own log shapes. Partial replica failure is idempotent for the
- * same reason it is there: the failed cycle re-runs, replicas 1..k-1 dedup on their taken jobIds.
+ * exact pipeline: parseSubset -> (closer-authority resolution, close deliveries only) -> filter
+ * (UNCHANGED, same cfg/selfId) -> replica fanout -> enqueueGitHubJob, with the receiver's own log
+ * shapes. Partial replica failure is idempotent for the same reason it is there: the failed cycle
+ * re-runs, replicas 1..k-1 dedup on their taken jobIds.
+ *
+ * The authority step (issue #231) mirrors the webhook arm's placement exactly -- after the subset,
+ * before the gate -- and `wantsCloserAuthority` is the same shared derivation, so only a close
+ * delivery an armed close rule matches ever costs a lookup: it is false by construction for every
+ * other source this module synthesizes (label, comment, PR diff, review), for a self-close, and for
+ * a close nothing wants. A DETERMINATE answer rides into filter as the sixth argument, so a
+ * stranger's close is the filter's own `closer-not-allowed` drop and the events cursor advances
+ * past it -- an unauthorized close never wedges the feed.
+ *
+ * An INDETERMINATE lookup has no honest verdict, and the webhook arm's answer (503, forge
+ * redelivers) has no analogue here -- the poller IS its own redelivery. So: bounded retry, then a
+ * loud skip. Below the bound this THROWS, on purpose, into pollLabelEvents' scoped catch: the cycle
+ * logs `poll_close_gate_retry`, the events cursor is still sitting BEFORE this event (the caller
+ * advances it only after a handler returns), so the next cycle retries exactly this close -- and
+ * only the EVENTS feed ends for the cycle, because a monotone cursor cannot skip an entry and come
+ * back, while the comment and pull feeds run on their own cursors and must not starve behind a
+ * close-gate spell. The attempt counter lives in redis (INCR + its own short TTL), not in memory,
+ * so a restart mid-outage cannot reset the bound. AT the bound the close is dropped WITHOUT
+ * enqueueing and the cursor advances: one close dropped loudly (`poll_close_gate_gave_up`, with the
+ * delivery id an operator can act on) beats later label and close events wedged forever behind a
+ * lookup that may never come back -- after ~20 cycles this is an outage, not a blip. A crash
+ * between the give-up log and the cursor write re-logs the give-up once on restart (attempt 21):
+ * self-limiting, and preferable to advancing before the operator has a line to act on. The counter
+ * is not deleted on a determinate answer; its TTL decays it, and the cursor has moved past the
+ * delivery id for good.
  */
 async function gate(ctx, eventName, payload, deliveryId, stats) {
-	const result = filter(eventName, parseSubset(payload), ctx.cfg, ctx.selfId, deliveryId);
+	const subset = parseSubset(payload);
+
+	let closerAuthorized;
+	if (wantsCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId)) {
+		const repo = subset.repository?.full_name;
+		const resolved = await ctx.resolveCloserAuthority(repo, subset.sender?.login);
+		if (resolved.indeterminate) {
+			const counterKey = `poll:${repo}:close-gate:${deliveryId}`;
+			const attempts = await ctx.redis.incr(counterKey);
+			await ctx.redis.expire(counterKey, CLOSE_GATE_TTL_SECONDS);
+			if (attempts < CLOSE_GATE_MAX_ATTEMPTS) {
+				// The reason names the lookup, never the actor (no-pii-in-logs): resolver reasons are
+				// fixed tokens, and this message becomes pollRepo's poll_repo_failed line.
+				throw new Error(`closer permission lookup indeterminate (${resolved.indeterminate})`);
+			}
+			ctx.out({ event: "poll_close_gate_gave_up", repo, delivery: deliveryId, reason: resolved.indeterminate });
+			return;
+		}
+		closerAuthorized = resolved.authorized;
+	}
+
+	const result = filter(eventName, subset, ctx.cfg, ctx.selfId, deliveryId, closerAuthorized);
 	if (!result.enqueue) {
 		ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
 		return;
