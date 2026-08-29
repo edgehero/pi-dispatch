@@ -264,7 +264,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, secretProfiles, localSecretFolders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -1242,6 +1242,31 @@ export async function collectChecks(env, seams) {
 		});
 	}
 
+	// One-shot close triggers (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE). Advisory only -- doctor
+	// never touches triggers -- and counted from the RAW file (readTriggerFacts says why). Two lines
+	// with different lives: the armed line names the count and, when PI_TRIGGERS_FILE is unset, warns
+	// that the disarm resolves ./triggers.json against the WORKER SERVICE's working directory -- a
+	// service unit whose WorkingDirectory differs from the receiver's would disarm a file nobody
+	// matches against, the split-file hazard no mechanism can detect. The spent line states the
+	// deliberate degradation: a spent entry counts toward NO parsed fact above (forges, flows,
+	// webhook-secret), mirroring what the receiver serves at its next boot.
+	if (onceArmed > 0) {
+		checks.push({
+			ok: true,
+			warn: env.PI_TRIGGERS_FILE === undefined,
+			label: `${onceArmed} one-shot trigger(s) armed (on.once) -- the worker disarms the entry in ${env.PI_TRIGGERS_FILE === undefined ? "./triggers.json resolved against the worker service's working directory; set PI_TRIGGERS_FILE so worker and receiver name the same file from anywhere" : "PI_TRIGGERS_FILE"} after the run record exists`,
+			fix: "set PI_TRIGGERS_FILE to an absolute path in both services' environments",
+		});
+	}
+	if (onceSpent > 0) {
+		checks.push({
+			ok: true,
+			warn: false,
+			label: `${onceSpent} one-shot trigger(s) already spent (on.disarmed) -- spent entries match nothing and count toward no credential or flow check; delete on.disarmed to re-arm, or delete the entry once its history no longer matters`,
+			fix: "",
+		});
+	}
+
 	// REQ-SCOPED-PAUSE-WINDOWS, the panel-writes-what-the-worker-ignores trap (issue #99). Three defaults
 	// that are individually defensible and together silent:
 	//
@@ -1472,15 +1497,25 @@ function parseSecretProfilesSafe(raw) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, secretProfiles: [], localSecretFolders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
 		// the receiver will not boot. An absent file still means "no triggers at all", exactly as before.
 		const path = env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json");
 		if (!fileExists(path)) return none;
-		const triggers = parseTriggers(readFileSync(path, "utf8"), path);
+		const text = readFileSync(path, "utf8");
+		const triggers = parseTriggers(text, path);
+		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
+		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
+		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
+		// count above. Doctor is the surface that must still SEE the spent entry: "why did nothing
+		// fire" is answered by a spent row, and only the raw file still holds it. Safe unguarded:
+		// parseTriggers just accepted this same text, so JSON.parse cannot throw here.
+		const rawEntries = JSON.parse(text)?.triggers ?? [];
 		return {
+			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
+			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
 			requiring: triggers.filter((t) => t.run.packages === true).length,
 			resuming: triggers.filter((t) => t.run.resume === true).length,
 			// REQ-PER-TRIGGER-INSTRUCTION. Counted beside `resuming` for the same reason: it is a per-trigger

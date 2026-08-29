@@ -49,7 +49,11 @@ services:
       PI_TRIGGERS_FILE: /config/triggers.json
     # The repo-root triggers.json (`pi-dispatch init` scaffolds it -- run that first: mounting a path
     # that does not exist makes Docker create it as a DIRECTORY and the boot fails confusingly).
-    # Read-only: the receiver live-reloads this file on change; it never writes it.
+    # Read-only: the receiver live-reloads this file on change; it never writes it. One consequence of
+    # a single-FILE bind mount (issue #231): every write to this file is an atomic tmp+rename that
+    # SWAPS THE INODE, and the mount stays pinned to the old one -- so the worker's one-shot disarm is
+    # invisible in here until the container restarts, and the worker's own pre-spend check is what
+    # keeps a spent one-shot from running again in the meantime. A restart picks up the current file.
     volumes:
       - ../triggers.json:/config/triggers.json:ro
     # Loopback only, like Valkey's port above: the operator's reverse proxy or tunnel (TLS, public

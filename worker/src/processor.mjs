@@ -42,6 +42,11 @@ export async function runJob(job, deps) {
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
 		// omits it behaves exactly as before -- the container's own failure stays the backstop.
 		imagePreflight = async () => ({ ok: true }),
+		// (job) => { ok } | { refused, at, jobId }. The one-shot pre-spend check (issue #231,
+		// DES-ONE-SHOT-DISARM-IN-THE-FILE). Default admits everything -- an unwired processor behaves
+		// exactly as before, and the gate below only calls it for a job whose matched rule was a
+		// one-shot, so the default is never a probe running on every delivery.
+		checkOnceSpent = async () => ({ ok: true }),
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
@@ -121,6 +126,27 @@ export async function runJob(job, deps) {
 	let reserved = false;
 
 	try {
+		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
+		// the docker inspect below, free, determinate, credential-less. Only a FOREIGN positive
+		// disarmed mark refuses -- the check excuses this queue job's own id, so a retry of the
+		// delivery that spent the trigger still runs (attempts:2 stays attempts:2) -- and anything
+		// unreadable or changed means "run": fail-open, because the disarm writer owns the loud
+		// refusals, and a broken read must never wedge every once job. In the compose topology the
+		// receiver reads a dead inode until restart, so this check is the once-enforcement layer
+		// there, not optional hardening.
+		if (job.trigger?.matched?.once === true) {
+			const spent = await checkOnceSpent(job);
+			if (spent.refused) {
+				// Commented like every sibling policy refusal: explainability is this refusal's whole
+				// purpose, and only a DISTINCT re-close reaches it past the GUID dedup, so the noise
+				// bound is the operator's own reopen-close rate. `at`/`jobId` are harness-written
+				// provenance, never payload text.
+				await comment(job, `Refused: this one-shot trigger was already spent${spent.at ? ` at ${spent.at}` : ""}${spent.jobId ? ` by job ${spent.jobId}` : ""}. The close that armed it has already produced a run; delete on.disarmed from the trigger entry to re-arm it. Not run.`);
+				log("refused_once_already_spent", { triggerIndex: job.trigger?.matched?.index ?? null });
+				return { outcome: "policy", reason: "once-already-spent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+		}
+
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
 		// credential-less, so it precedes the mint, the clone and the reservation: a host that cannot run the
 		// image refuses without minting a credential it will not use, cloning a repo it will not read, or

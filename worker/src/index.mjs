@@ -125,6 +125,11 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// `queueJobId`, mirroring the collectChain injection above. Omitted when unwired so a bare
 				// processor keeps runJob's plain (job, token) call.
 				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t) => deps.prepareWorkspace(j, t, { queueJobId: job.id }) } : {}),
+				// The one-shot pre-spend check (issue #231) needs the REAL BullMQ job's `.id` to excuse this
+				// delivery's own earlier attempt -- runJob's effectiveJob has no `.id`, prepareWorkspace's
+				// own injection above states why, and this one mirrors it. Omitted when unwired so a bare
+				// processor keeps runJob's admit-everything default.
+				...(deps.checkOnceSpent ? { checkOnceSpent: (j) => deps.checkOnceSpent(j, { queueJobId: job.id }) } : {}),
 			});
 			recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 			return result;

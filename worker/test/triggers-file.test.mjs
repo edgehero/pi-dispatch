@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync as realReadFileSync, rmSync, unlinkSync as realUnlinkSync, writeFileSync as realWriteFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeTriggers, disarmTrigger, readDisarmState } from "../src/triggers-file.mjs";
+import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
 
 // In-memory fs modelled on the admin read-model tests' fake (files + mtimes + openSync "wx"/EEXIST +
@@ -461,6 +461,183 @@ test("readDisarmState: armed, disarmed, and every unknown fold to their states (
 		const res = readDisarmState({ triggersPath: T_PATH, index: c.index, number: c.number, flow: c.flow, command: c.command, fs: triggerFs(c.files) });
 		assert.deepEqual(res, c.expect, `${c.name}: readDisarmState must fold to ${JSON.stringify(c.expect)}`);
 	}
+});
+
+// ── makeDisarmOnce: the post-record hook ────────────────────────────────────────────────────────────────
+
+// The BullMQ wrapper shape recordRun hands the hook: id on the WRAPPER, everything else under data --
+// the mirror image of makeCheckOnceSpent's effectiveJob below, which has no id at all.
+const onceWrapperJob = (id = "gh-x", index = 1) => ({
+	id,
+	data: {
+		flow: "deploy",
+		target: { number: 40 },
+		trigger: { matched: { index, type: "issue", action: "closed", number: 40, once: true } },
+	},
+});
+
+test("makeDisarmOnce is a pure no-op for a job whose matched rule was not a one-shot: zero fs calls", async () => {
+	// Issue #231's blast-radius promise: every unflagged job takes ZERO new code paths. A label job
+	// carries matched without `once`; a cron job carries `trigger: { id, pattern }` with no matched at
+	// all. Neither may read the file, take the lock, write a byte, or log a line -- silence is the
+	// correct trace for a path not taken.
+	const { events, log } = collectLog();
+	const fs = triggerFs({ [T_PATH]: fileOf([cronTrigger(), onceTrigger(40)]) });
+	const disarmOnce = makeDisarmOnce({ triggersPath: T_PATH, fs, log });
+	const labelJob = { id: "gh-1", data: { flow: "fix", target: { number: 7 }, trigger: { matched: { index: 0, type: "label", label: "dispatch" } } } };
+	const cronJob = { id: "repeat:nightly:123", data: { flow: "audit", trigger: { id: "nightly", pattern: "0 3 * * *" } } };
+	await disarmOnce({ job: labelJob, endedAt: AT });
+	await disarmOnce({ job: cronJob, endedAt: AT });
+	assert.deepEqual(fs.calls, [], "a job without matched.once === true must not touch the fs at all");
+	assert.deepEqual(events, [], "and must not log -- an unflagged job leaves no one-shot trace");
+});
+
+test("makeDisarmOnce disarms the matched entry through the real writer and logs trigger_disarmed", async () => {
+	const { events, log } = collectLog();
+	const fs = triggerFs({ [T_PATH]: fileOf([cronTrigger(), onceTrigger(40), labelTrigger()]) });
+	const disarmOnce = makeDisarmOnce({ triggersPath: T_PATH, fs, log });
+	await disarmOnce({ job: onceWrapperJob("gh-x", 1), endedAt: AT });
+	// The real disarmTrigger ran (default `disarm`): the mark carries the record's endedAt and the
+	// queue job id -- the provenance the pre-spend check's own-jobId exception reads back.
+	assert.deepEqual(JSON.parse(fs.files[T_PATH]).triggers[1].on.disarmed, { at: AT, jobId: "gh-x" });
+	assert.deepEqual(events, [{ event: "trigger_disarmed", fields: { jobId: "gh-x", triggerIndex: 1 } }]);
+});
+
+test("makeDisarmOnce takes the item number from target.number when matched carries none (the PR shape)", async () => {
+	// An issue delivery writes matched.number; a pull_request one does not -- its number rides the
+	// job's target. If this fallback drifted, every PR one-shot's disarm would refuse as a number
+	// mismatch (undefined !== 40) and the trigger would stay armed forever, silently.
+	const { events, log } = collectLog();
+	const fs = triggerFs({ [T_PATH]: fileOf([onceTrigger(40)]) });
+	const disarmOnce = makeDisarmOnce({ triggersPath: T_PATH, fs, log });
+	const prJob = { id: "gh-pr", data: { flow: "deploy", target: { number: 40 }, trigger: { matched: { index: 0, type: "pull_request", action: "closed", once: true } } } };
+	await disarmOnce({ job: prJob, endedAt: AT });
+	assert.deepEqual(JSON.parse(fs.files[T_PATH]).triggers[0].on.disarmed, { at: AT, jobId: "gh-pr" }, "the disarm landed, so the writer's number check was satisfied by target.number");
+	assert.deepEqual(events, [{ event: "trigger_disarmed", fields: { jobId: "gh-pr", triggerIndex: 0 } }]);
+});
+
+test("makeDisarmOnce maps the writer's non-ok answers to their own log events, unavailable touching nothing", async () => {
+	// { already } -> trigger_already_disarmed: a sibling replica or a redelivery won the race, which is
+	// idempotent success at the writer and stays a distinct, non-alarming event here.
+	{
+		const { events, log } = collectLog();
+		const spent = onceTrigger(40);
+		spent.on.disarmed = { at: "2026-08-27T00:00:00.000Z", jobId: "job-first" };
+		const fs = triggerFs({ [T_PATH]: fileOf([cronTrigger(), spent]) });
+		await makeDisarmOnce({ triggersPath: T_PATH, fs, log })({ job: onceWrapperJob("gh-2", 1), endedAt: AT });
+		assert.deepEqual(events, [{ event: "trigger_already_disarmed", fields: { jobId: "gh-2", triggerIndex: 1 } }]);
+	}
+	// { invalid } -> trigger_disarm_failed carrying the writer's own operator-actionable reason.
+	{
+		const { events, log } = collectLog();
+		const fs = triggerFs({ [T_PATH]: fileOf([cronTrigger(), onceTrigger(41)]) });
+		await makeDisarmOnce({ triggersPath: T_PATH, fs, log })({ job: onceWrapperJob("gh-3", 1), endedAt: AT });
+		assert.equal(events.length, 1, "exactly one line per failed disarm");
+		assert.equal(events[0].event, "trigger_disarm_failed");
+		assert.equal(events[0].fields.jobId, "gh-3");
+		assert.equal(events[0].fields.triggerIndex, 1);
+		assert.match(events[0].fields.reason, /disarming a stranger/, "the reason is the writer's own refusal, not a summary of it");
+	}
+	// No resolvable path -> trigger_disarm_unavailable, and the fs is NEVER touched: there is no file
+	// to guess at, and a hook that probed anyway would invent a write target the operator never named.
+	for (const triggersPath of [undefined, ""]) {
+		const { events, log } = collectLog();
+		const fs = triggerFs({ [T_PATH]: fileOf([onceTrigger(40)]) });
+		await makeDisarmOnce({ triggersPath, fs, log })({ job: onceWrapperJob("gh-4", 1), endedAt: AT });
+		assert.deepEqual(events, [{ event: "trigger_disarm_unavailable", fields: { jobId: "gh-4", triggerIndex: 1, reason: "triggers file unresolvable" } }], `triggersPath ${JSON.stringify(triggersPath)} must log unavailable`);
+		assert.deepEqual(fs.calls, [], "zero fs calls when the path is unresolvable");
+	}
+});
+
+test("makeDisarmOnce never rejects: an injected disarm that THROWS resolves and logs trigger_disarm_failed", async () => {
+	// The catch is unreachable through the real disarmTrigger (it never throws), and that is exactly why
+	// it needs a pin: the hook sits on the record path, and a run record must never be lost to disarm
+	// bookkeeping. A coded error keeps its code as the reason; a bare one degrades to the fixed
+	// "disarm-error" token, so neither direction logs an undefined.
+	const cases = [
+		{ name: "coded error", err: Object.assign(new Error("boom"), { code: "EBOOM" }), reason: "EBOOM" },
+		{ name: "bare error", err: new Error("boom"), reason: "disarm-error" },
+	];
+	for (const c of cases) {
+		const { events, log } = collectLog();
+		const disarmOnce = makeDisarmOnce({
+			triggersPath: T_PATH,
+			fs: triggerFs(),
+			log,
+			disarm: async () => {
+				throw c.err;
+			},
+		});
+		await assert.doesNotReject(() => disarmOnce({ job: onceWrapperJob("gh-x", 1), endedAt: AT }), `${c.name}: the returned promise must resolve -- recordRun fire-and-forgets this`);
+		assert.deepEqual(events, [{ event: "trigger_disarm_failed", fields: { jobId: "gh-x", triggerIndex: 1, reason: c.reason } }], `${c.name}: the failure is a loud log line, never a rejection`);
+	}
+});
+
+// ── makeCheckOnceSpent: the pre-spend read ──────────────────────────────────────────────────────────────
+
+test("makeCheckOnceSpent: armed runs, a foreign mark refuses with provenance, and every unknown fails open", async () => {
+	// The job here is the EFFECTIVE job (a spread of job.data): trigger/target/flow sit directly on it
+	// and it has no `.id` -- the queue job id arrives separately, injected by index.mjs, which is the
+	// whole reason the second parameter exists.
+	const onceJob = { flow: "deploy", target: { number: 40 }, trigger: { matched: { index: 0, type: "issue", action: "closed", number: 40, once: true } } };
+	const spentBy = (jobId) => {
+		const t = onceTrigger(40);
+		t.on.disarmed = jobId === undefined ? { at: AT } : { at: AT, jobId };
+		return t;
+	};
+	const check = (files, triggersPath = T_PATH) => makeCheckOnceSpent({ triggersPath, fs: triggerFs(files) });
+
+	// An armed entry runs.
+	assert.deepEqual(await check({ [T_PATH]: fileOf([onceTrigger(40)]) })(onceJob, { queueJobId: "gh-x" }), { ok: true });
+
+	// A FOREIGN mark refuses, carrying the provenance the processor's refusal comment prints.
+	assert.deepEqual(
+		await check({ [T_PATH]: fileOf([spentBy("job-first")]) })(onceJob, { queueJobId: "job-second" }),
+		{ refused: true, at: AT, jobId: "job-first" },
+	);
+
+	// The PR shape: matched carries NO number (the target does -- filter.mjs's own literal), and the
+	// check must still find the entry. Deleting the `?? job.target.number` fallback leg would fold
+	// every PR one-shot to "entry-changed" and fail OPEN -- once-enforcement silently off in exactly
+	// the compose topology where this check is declared the enforcement layer.
+	const prOnce = { on: { type: "pull_request", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy" } };
+	prOnce.on.disarmed = { at: AT, jobId: "job-first" };
+	const prJob = { flow: "deploy", target: { type: "pull_request", number: 40 }, trigger: { matched: { index: 0, type: "pull_request", action: "closed", once: true } } };
+	assert.deepEqual(
+		await check({ [T_PATH]: fileOf([prOnce]) })(prJob, { queueJobId: "job-second" }),
+		{ refused: true, at: AT, jobId: "job-first" },
+		"a spent PR one-shot must refuse a foreign job even though its matched carries no number",
+	);
+
+	// THE attempts:2 COMPOSITION PIN. The disarm hook fires after EVERY record -- attempt one's failed
+	// record included -- so BullMQ's second attempt of the SAME delivery arrives here with its own mark
+	// already in the file. Without the own-jobId exception, that composition silently turns attempts:2
+	// into attempts:1 for every once job; with it the retry runs, and only a DIFFERENT delivery refuses.
+	assert.deepEqual(
+		await check({ [T_PATH]: fileOf([spentBy("job-first")]) })(onceJob, { queueJobId: "job-first" }),
+		{ ok: true },
+	);
+
+	// A hand-written mark carries no jobId and reads as FOREIGN -- an operator disarming by hand means
+	// exactly "do not run", and no queue job may claim a null provenance as its own.
+	assert.deepEqual(
+		await check({ [T_PATH]: fileOf([spentBy(undefined)]) })(onceJob, { queueJobId: "job-first" }),
+		{ refused: true, at: AT, jobId: null },
+	);
+
+	// Fail-open: entry changed and unreadable file both mean "run". Refusal is built only on POSITIVE
+	// foreign evidence, so a broken read can never wedge every once job -- the identity mismatches are
+	// the disarm WRITER's to refuse loudly, not this reader's.
+	assert.deepEqual(await check({ [T_PATH]: fileOf([labelTrigger()]) })(onceJob, { queueJobId: "gh-x" }), { ok: true }, "entry no longer a one-shot => run");
+	assert.deepEqual(await check({})(onceJob, { queueJobId: "gh-x" }), { ok: true }, "missing file => run");
+
+	// An unresolvable path answers { ok } without touching the fs at all -- even a file that WOULD have
+	// refused, because there is no path under which the check could honestly claim to have read it.
+	const untouched = triggerFs({ [T_PATH]: fileOf([spentBy("job-first")]) });
+	for (const triggersPath of [undefined, ""]) {
+		assert.deepEqual(await makeCheckOnceSpent({ triggersPath, fs: untouched })(onceJob, { queueJobId: "gh-x" }), { ok: true }, `triggersPath ${JSON.stringify(triggersPath)} => run`);
+	}
+	assert.deepEqual(untouched.calls, [], "zero fs calls when the path is unresolvable");
 });
 
 // ── cross-writer race, real fs ──────────────────────────────────────────────────────────────────────────

@@ -298,6 +298,84 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
  * "unknown" (unreadable file, index gone, entry no longer a one-shot) means "run": a broken read must
  * never wedge every once job, and the identity mismatch cases are the disarm writer's to refuse.
  */
+/**
+ * The post-record disarm hook (issue #231): wired around the worker's one recordRun funnel, called
+ * strictly AFTER writeRecord returns, for EVERY record -- completed, policy, and per-attempt failed
+ * alike, because "fired" means "produced a run record" (the issue's own definition) and the
+ * pre-spend check's own-jobId exception is what keeps BullMQ's second attempt of the same delivery
+ * runnable. NEVER throws and never rejects: a disarm failure is a loud log line, not a crashed
+ * record path.
+ *
+ * `triggersPath` may be null only when even the cwd fallback could not be formed; the caller
+ * resolves `PI_TRIGGERS_FILE ?? join(cwd, "triggers.json")` -- doctor's own precedent, NOT the
+ * worker config's `triggersFile` (whose null means "cron disabled" and must keep meaning that;
+ * under that knob the DEFAULT single-host deployment would have a firing receiver and a worker
+ * that can neither disarm nor pre-spend-check).
+ */
+export function makeDisarmOnce({ triggersPath, fs = nodeFs, log = () => {}, disarm = disarmTrigger }) {
+	return async function disarmOnce({ job, endedAt }) {
+		try {
+			const matched = job?.data?.trigger?.matched;
+			if (matched?.once !== true) return; // every unflagged job takes zero new code paths
+			const triggerIndex = matched.index ?? null;
+			if (typeof triggersPath !== "string" || triggersPath === "") {
+				log("trigger_disarm_unavailable", { jobId: job?.id ?? null, triggerIndex, reason: "triggers file unresolvable" });
+				return;
+			}
+			// The identity the writer re-checks: the item number (the issue shape carries it on matched,
+			// the PR shape on the target) and the dispatch lane the job actually carried.
+			const number = matched.number ?? job?.data?.target?.number;
+			const res = await disarm({
+				triggersPath,
+				index: matched.index,
+				number,
+				flow: job?.data?.flow,
+				command: job?.data?.command,
+				jobId: job?.id,
+				at: endedAt,
+				fs,
+				log,
+			});
+			if (res.ok) log("trigger_disarmed", { jobId: job?.id ?? null, triggerIndex });
+			else if (res.already) log("trigger_already_disarmed", { jobId: job?.id ?? null, triggerIndex });
+			else log("trigger_disarm_failed", { jobId: job?.id ?? null, triggerIndex, reason: res.invalid });
+		} catch (err) {
+			// Unreachable by construction (disarmTrigger never throws), kept because this hook sits on
+			// the record path and a record must never be lost to bookkeeping.
+			log("trigger_disarm_failed", { jobId: job?.id ?? null, triggerIndex: job?.data?.trigger?.matched?.index ?? null, reason: err?.code ?? "disarm-error" });
+		}
+	};
+}
+
+/**
+ * The pre-spend check's factory (issue #231): `(job, { queueJobId }) => { ok } | { refused, at, jobId }`.
+ * Refuses ONLY on positive FOREIGN disarmed evidence -- a mark whose jobId is this very queue job
+ * means BullMQ's second attempt of the delivery that spent the trigger, which must still run
+ * (without the exception, a disarm on attempt one's failure record silently turns attempts:2 into
+ * attempts:1 for every once job). A hand-written mark carries no jobId and reads as foreign, which
+ * is exactly what an operator disarming by hand intends. Everything else -- unreadable file, index
+ * gone, entry changed -- is "run": fail-open, the disarm writer owns the loud refusals, and in the
+ * compose topology (single-file :ro bind mount pinned to a dead inode, so the receiver never sees
+ * the disarm until restart) this check IS the once-enforcement layer, which is why it exists at all.
+ */
+export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
+	return async function checkOnceSpent(job, { queueJobId } = {}) {
+		if (typeof triggersPath !== "string" || triggersPath === "") return { ok: true };
+		const matched = job?.trigger?.matched;
+		const state = readDisarmState({
+			triggersPath,
+			index: matched?.index,
+			number: matched?.number ?? job?.target?.number,
+			flow: job?.flow,
+			command: job?.command,
+			fs,
+		});
+		if (state.state !== "disarmed") return { ok: true };
+		if (state.jobId !== null && state.jobId === queueJobId) return { ok: true }; // our own earlier attempt
+		return { refused: true, at: state.at, jobId: state.jobId };
+	};
+}
+
 export function readDisarmState({ triggersPath, index, number, flow, command, fs = nodeFs }) {
 	let raw;
 	try {

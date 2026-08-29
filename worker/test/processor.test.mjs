@@ -1007,3 +1007,80 @@ test("a cron job may bind secrets, and its refusal reaches the operator through 
 	assert.equal(r.reason, "secret-profile-unknown");
 	assert.ok(calls.some((c) => c.startsWith("comment:")), "the operator must still be told");
 });
+
+// --- the one-shot pre-spend gate (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE) ---
+
+// runJob's job is the effectiveJob: the receiver's matched rides trigger.matched directly on it.
+const onceJob = { ...ghJob, target: { type: "issue", number: 40 }, trigger: { matched: { index: 0, type: "issue", action: "closed", number: 40, once: true } } };
+
+test("a once job with a foreign-spent check refuses FIRST on the ladder -- nothing else runs at all", async () => {
+	const redis = fakeRedis();
+	const posted = [];
+	const events = [];
+	const { deps: d, calls } = deps({
+		redis,
+		checkOnceSpent: async () => (calls.push("check-once"), { refused: true, at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" }),
+		// The deps factory leaves imagePreflight to runJob's default, which the calls trace never sees --
+		// so this override exists purely to make its ABSENCE from the trace provable.
+		imagePreflight: async () => (calls.push("image-preflight"), { ok: true }),
+		comment: async (_j, t) => (posted.push(t), calls.push("comment")),
+		log: (event) => events.push(event),
+	});
+	const r = await runJob(onceJob, d);
+	assert.equal(r.outcome, "policy", "a spent one-shot is a determinate refusal, RETURNED (never retried)");
+	assert.equal(r.reason, "once-already-spent");
+	assert.equal(r.budgetReserved, false, "refused before reserveBudget, so no cap slot was consumed");
+	assert.deepEqual([r.exitCode, r.turns, r.tokens], [null, null, null], "refused pre-container: no exit, turn or token count exists");
+	assert.deepEqual([r.provider, r.model], ["anthropic", "m"], "attribution rides even this refusal");
+	// THE LADDER-POSITION PIN. The trace IS the assertion: the check ran, the comment posted, and
+	// NOTHING else -- not the image inspect (this check is one file read, cheaper than the docker
+	// inspect, so it goes first), not the mint, not the clone, not the reservation, not a container.
+	assert.deepEqual(calls, ["check-once", "comment"], "one file read and one comment are the refusal's entire cost");
+	assert.equal(redis.incrCalls, 0, "reserveBudget never reached");
+	assert.equal(posted.length, 1, "the comment posts exactly once");
+	assert.ok(posted[0].includes("already spent"), "the comment names the condition");
+	assert.ok(posted[0].includes("Not run."), "and the outcome, in the family wording every refusal ends with");
+	assert.ok(posted[0].includes("at 2026-08-28T09:00:00.000Z"), "the mark's harness-written at rides the comment");
+	assert.ok(posted[0].includes("by job gh-first"), "and its provenance jobId -- never payload text");
+	assert.ok(events.includes("refused_once_already_spent"), "the refusal leaves its log line");
+});
+
+test("a once job whose check answers ok runs exactly the happy path, with the check in front", async () => {
+	const { deps: d, calls } = deps({ checkOnceSpent: async () => (calls.push("check-once"), { ok: true }) });
+	const r = await runJob(onceJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.deepEqual(
+		calls,
+		["check-once", "mint:org/repo", "branch-check", "prepare", "run-container", "collect-chain", "cleanup"],
+		"an armed-and-unspent one-shot changes nothing but the one read in front of the ladder",
+	);
+});
+
+test("a NON-once job never calls checkOnceSpent -- the probe must not even run", async () => {
+	// The arming test lives at the CALL SITE (job.trigger?.matched?.once === true), not inside the dep:
+	// an injected checker running on every delivery would be a per-job file read nobody asked for, the
+	// probe-nobody-wanted shape the resolveSecrets comment warns about.
+	const probes = [];
+	for (const job of [ghJob, { ...ghJob, trigger: { matched: { index: 0, type: "label", label: "dispatch" } } }]) {
+		const { deps: d, calls } = deps({
+			checkOnceSpent: async () => {
+				probes.push(job);
+				return { refused: true, at: null, jobId: null };
+			},
+		});
+		const r = await runJob(job, d);
+		assert.equal(r.outcome, "completed", "even a checker that would REFUSE cannot touch an unflagged job");
+		assert.ok(calls.includes("run-container"), "the job runs exactly as before the gate existed");
+	}
+	assert.deepEqual(probes, [], "zero probes for jobs without matched.once === true");
+});
+
+test("the default admits everything: a once job under a deps set WITHOUT checkOnceSpent runs", async () => {
+	// An unwired processor behaves exactly as before the gate existed -- imagePreflight's and
+	// egressPreflight's posture, and the opposite of resolveSecrets' fail-closed default, because an
+	// omitted wiring here risks one duplicate run, not a silently inverted credential.
+	const { deps: d, calls } = deps(); // deliberately no checkOnceSpent key
+	const r = await runJob(onceJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.ok(calls.includes("run-container"), "the job runs; once-enforcement is the wired deployment's property");
+});

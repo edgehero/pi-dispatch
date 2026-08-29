@@ -2109,3 +2109,67 @@ test("doctor: a deployment that binds no secrets is told nothing about them at a
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, secretsSeams());
 	assert.equal(checks.some((c) => /secret/i.test(c.label ?? "")), false);
 });
+
+// --- one-shot close triggers (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE) ---
+
+/**
+ * A validating file holding one ARMED one-shot, one SPENT one, and a label neighbour. It must really
+ * parse (the resume/secrets fixtures' trap): readTriggerFacts swallows a refusing file to zeroes, and
+ * every count below would then pass for the wrong reason. Written into `dir` when given, so the
+ * PI_TRIGGERS_FILE-unset case can plant it at the injected cwd's ./triggers.json.
+ */
+function onceTriggersFile(dir = mkdtempSync(join(tmpdir(), "pi-triggers-once-")), { armed = true, spent = true } = {}) {
+	const triggers = [];
+	if (armed) triggers.push({ on: { type: "issue", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy" } });
+	if (spent) triggers.push({ on: { type: "issue", action: ["closed"], number: 41, once: true, disarmed: { at: "2026-08-01T00:00:00.000Z", jobId: "gh-old" } }, run: { kind: "github", flow: "deploy" } });
+	triggers.push({ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } });
+	const path = join(dir, "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers }));
+	return path;
+}
+const onceSeams = (extra = {}) => collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true, ...extra });
+
+test("doctor: the armed one-shot line counts from the raw file and WARNS only when PI_TRIGGERS_FILE is unset", async () => {
+	// Unset PI_TRIGGERS_FILE: doctor resolves ./triggers.json against the injected cwd, and the armed
+	// line warns about the split-file hazard -- a worker service whose WorkingDirectory differs from
+	// the receiver's disarms a file nobody matches against, and no mechanism can detect that.
+	const dir = mkdtempSync(join(tmpdir(), "pi-once-doctor-"));
+	onceTriggersFile(dir);
+	const unset = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, onceSeams({ cwd: dir }));
+	const armedUnset = unset.find((c) => /one-shot trigger\(s\) armed/.test(c.label));
+	assert.ok(armedUnset, "the armed advisory must exist");
+	assert.match(armedUnset.label, /^1 one-shot/, "counted 1 from the RAW entries: the spent sibling does not inflate the armed count");
+	assert.equal(armedUnset.ok, true, "advisory, never a failure: doctor never touches triggers");
+	assert.equal(armedUnset.warn, true, "unset PI_TRIGGERS_FILE is the split-file hazard, so the line warns");
+	assert.match(armedUnset.label, /resolved against the worker service's working directory/);
+	assert.match(armedUnset.fix, /absolute path in both services/);
+
+	// Set: the same file by explicit path, and the warning goes away -- worker and receiver now name
+	// the same file from anywhere, so the label names the variable instead of the hazard.
+	const set = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: join(dir, "triggers.json") }, onceSeams());
+	const armedSet = set.find((c) => /one-shot trigger\(s\) armed/.test(c.label));
+	assert.ok(armedSet, "the armed advisory still appears -- only its warn flag changes");
+	assert.equal(armedSet.warn, false, "with the variable set there is no split-file hazard to warn about");
+	assert.match(armedSet.label, /in PI_TRIGGERS_FILE after the run record exists/);
+});
+
+test("doctor: the spent one-shot line counts 1, says 'spent', and states the deliberate degradation", async () => {
+	// The spent count exists only because readTriggerFacts reads the RAW file: the shared parser
+	// collapses a disarmed entry to a sentinel that matches nothing, which also erases it from every
+	// parsed count -- and doctor is the surface that must still SEE it to answer "why did nothing fire".
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: onceTriggersFile() }, onceSeams());
+	const spentLine = checks.find((c) => /one-shot trigger\(s\) already spent/.test(c.label));
+	assert.ok(spentLine, "the spent advisory must exist");
+	assert.match(spentLine.label, /^1 one-shot/, "counted 1 from the raw file -- the armed sibling does not inflate the spent count");
+	assert.equal(spentLine.ok, true, "a spent one-shot is history, not a defect");
+	assert.equal(spentLine.warn, false, "and it does not warn -- the entry did exactly what it was armed to do");
+	assert.match(spentLine.label, /spent \(on\.disarmed\)/, "the 'spent' wording, with the key an operator can grep for");
+	assert.match(spentLine.label, /match nothing and count toward no credential or flow check/, "the degradation is stated, not implied");
+	assert.match(spentLine.label, /delete on\.disarmed to re-arm/, "and the re-arm path is named");
+});
+
+test("doctor: zero once triggers means NEITHER one-shot line -- non-adopters hear nothing", async () => {
+	const path = onceTriggersFile(undefined, { armed: false, spent: false });
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: path }, onceSeams());
+	assert.equal(checks.some((c) => /one-shot/.test(c.label ?? "")), false, "no armed line and no spent line: output stays byte-identical for a file that never armed one");
+});

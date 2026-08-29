@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { watch } from "node:fs";
-import { dirname, basename } from "node:path";
+import { dirname, basename, join } from "node:path";
 import { promisify } from "node:util";
 import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
@@ -22,6 +22,7 @@ import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare
 import { listRunningSandboxes } from "./sandbox.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
+import { makeCheckOnceSpent, makeDisarmOnce } from "./triggers-file.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -313,8 +314,25 @@ export async function startWorker(
 	} catch (err) {
 		log("session_reaper_skipped", { reason: err?.message });
 	}
-	const recordRun = ({ job, result, error, startedAt, endedAt }) =>
+	// The one-shot file path (issue #231): PI_TRIGGERS_FILE, else ./triggers.json against this process's
+	// cwd -- doctor's own fallback, chosen for doctor's own reason ("the two must read the same file"),
+	// and deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning
+	// that: under that knob the DEFAULT single-host deployment would have a firing receiver and a worker
+	// that can neither disarm nor pre-spend-check.
+	const onceTriggersFile = env.PI_TRIGGERS_FILE ?? join(process.cwd(), "triggers.json");
+	const disarmOnce = makeDisarmOnce({ triggersPath: onceTriggersFile, log });
+	const recordRun = ({ job, result, error, startedAt, endedAt }) => {
 		writeRecord(buildRecord({ job, result, error, startedAt, endedAt }));
+		// Strictly AFTER the durable record: "fired" means "produced a run record", and the crash
+		// direction this ordering buys is the chosen one -- an armed one-shot with a record, never a
+		// disarm before writeRecord RETURNED. Returned, not succeeded: the record writer swallows fs
+		// errors by contract (run_record_failed), so a full disk still spends the one-shot -- the
+		// alternative, skipping the disarm on a failed record write, would re-fire it unbounded. Fire-and-forget: the hook never rejects, and the record path must not
+		// wait on a lock retry. An uncontended disarm completes synchronously inside this call; the
+		// one loss window is a drain's process.exit landing mid-lock-retry sleep, which loses only
+		// the disarm -- the same chosen direction, met at shutdown instead of a crash.
+		void disarmOnce({ job, endedAt });
+	};
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
 	// closure -- not a value frozen at boot -- is what the processor calls per job. It resolves the eight
@@ -406,6 +424,11 @@ export async function startWorker(
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
 		deps: {
 			collectChain,
+			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
+			// only on a FOREIGN positive mark (index.mjs binds the real queue jobId so a retry of the
+			// spending delivery is excused). In the compose topology this check is the once-enforcement
+			// layer, because the receiver's single-file :ro mount pins a dead inode until restart.
+			checkOnceSpent: makeCheckOnceSpent({ triggersPath: onceTriggersFile }),
 			// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
 			// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
 			// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.

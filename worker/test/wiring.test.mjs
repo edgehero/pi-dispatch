@@ -323,6 +323,49 @@ test("prepareWorkspace receives (effectiveJob, token, { queueJobId: <real BullMQ
 	assert.equal(received.token, null, "an unflagged local job stays tokenless");
 });
 
+test("checkOnceSpent receives (effectiveJob, { queueJobId: <real BullMQ job id> })", { skip }, async () => {
+	// runJob's own `job` is the effectiveJob (a spread of job.data, no `.id`), and the one-shot check
+	// needs the REAL wrapper's id to excuse this delivery's own earlier attempt -- without it, attempt
+	// two of the delivery that spent the trigger reads its own mark as foreign and attempts:2 silently
+	// becomes attempts:1. makeProcessor must inject it, mirroring prepareWorkspace's queueJobId
+	// injection above. This locks that.
+	let received;
+	const job = {
+		id: "gh-42-1699999",
+		attemptsMade: 1,
+		name: "github",
+		data: { kind: "github", repo: "o/r", flow: "deploy", target: { type: "issue", number: 40 }, trigger: { matched: { index: 1, type: "issue", action: "closed", number: 40, once: true } } },
+	};
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs: 100000,
+		deps: {
+			checkOnceSpent: async (j, opts) => {
+				received = { job: j, opts };
+				return { ok: true };
+			},
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({}),
+			runContainer: async () => ({ code: 0, aborted: false, turns: 1 }),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+	});
+
+	const result = await processor(job, "tok", new AbortController().signal);
+
+	assert.equal(result.outcome, "completed");
+	assert.deepEqual(received.opts, { queueJobId: "gh-42-1699999" }, "the real wrapper's id reaches the check as queueJobId");
+	assert.notEqual(received.job, job, "the check receives the effectiveJob (a spread of job.data), not the raw wrapper");
+	assert.equal(received.job.kind, "github");
+	assert.equal(received.job.trigger.matched.once, true, "the matched one-shot facts ride the effectiveJob");
+	assert.equal(received.job.id, undefined, "the effectiveJob has no id of its own -- that is why the injection exists");
+});
+
 // End-to-end money-path acceptance: compose the REAL recordRun = writeRecord(buildRecord(...)) over a
 // fake fs and drive makeProcessor per outcome, asserting the SERIALIZED bytes. This is the only place
 // the whole record path (processor wrapper -> buildRecord -> writeRecord) is exercised end-to-end, so

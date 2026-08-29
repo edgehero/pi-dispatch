@@ -630,3 +630,114 @@ test("every session bound config reads is actually handed to the store", () => {
 		assert.match(call[0], new RegExp(`${option}:\\s*${setting.replace(".", "\\.")}`), `${option} must be wired from ${setting}`);
 	}
 });
+
+// --- one-shot wiring (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE): the file path, the deps entry,
+// --- and the record-before-disarm order. startWorker exposes no factory seam for makeDisarmOnce /
+// --- makeCheckOnceSpent, so these pins drive the REAL closures against a real temp triggers file.
+
+const onceEntry = (number, disarmed) => ({ on: { type: "issue", action: ["closed"], number, once: true, ...(disarmed ? { disarmed } : {}) }, run: { kind: "github", flow: "deploy" } });
+const onceEffectiveJob = (number) => ({ kind: "github", repo: "o/r", flow: "deploy", target: { type: "issue", number }, trigger: { matched: { index: 0, type: "issue", action: "closed", number, once: true } } });
+
+test("once wiring: deps.checkOnceSpent reads PI_TRIGGERS_FILE when set, and excuses only this delivery's own id", { skip }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-once-path-"));
+	try {
+		const triggersPath = join(dir, "triggers.json");
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [onceEntry(40, { at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" })] }));
+		const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+		const { deps } = await runStart({ env: { PI_TRIGGERS_FILE: triggersPath }, makeAuth, makeHost: () => fakeHost() });
+
+		assert.equal(typeof deps.checkOnceSpent, "function", "the one-shot pre-spend check must be wired into deps");
+		assert.deepEqual(
+			await deps.checkOnceSpent(onceEffectiveJob(40), { queueJobId: "gh-other" }),
+			{ refused: true, at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" },
+			"a FOREIGN mark refuses with its provenance -- and it can only have read the file PI_TRIGGERS_FILE names",
+		);
+		assert.deepEqual(
+			await deps.checkOnceSpent(onceEffectiveJob(40), { queueJobId: "gh-first" }),
+			{ ok: true },
+			"the delivery that spent the trigger keeps its second attempt (attempts:2 stays attempts:2)",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("once wiring: with PI_TRIGGERS_FILE unset the fallback is <cwd>/triggers.json -- doctor's own default", { skip }, async () => {
+	// Deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning that:
+	// under that knob the DEFAULT single-host deployment would have a firing receiver and a worker that
+	// can neither disarm nor pre-spend-check. No factory seam exists, so the pin is behavioural: chdir
+	// into a temp dir whose ./triggers.json holds a foreign mark, boot with an env that never names the
+	// file, and the wired check must still find the mark.
+	const dir = mkdtempSync(join(tmpdir(), "pi-once-cwd-"));
+	const prevCwd = process.cwd();
+	try {
+		writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [onceEntry(40, { at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" })] }));
+		process.chdir(dir);
+		const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+		const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() }); // PI_TRIGGERS_FILE absent from env
+		assert.deepEqual(
+			await deps.checkOnceSpent(onceEffectiveJob(40), { queueJobId: "gh-other" }),
+			{ refused: true, at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" },
+			"the check found the mark, so ./triggers.json resolved against the worker's own cwd",
+		);
+	} finally {
+		process.chdir(prevCwd);
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("once wiring: writeRecord lands strictly BEFORE the disarm, for all three record shapes", { skip }, async () => {
+	// The crash direction is the chosen one: an armed one-shot WITH a record, never a disarm without
+	// one. The injected writeRecord reads the triggers file at the instant it runs -- its OWN job's mark
+	// must not exist yet (record strictly before disarm), while every EARLIER job's must (the real
+	// disarm completes inside the prior recordRun call, uncontended). Three shapes because makeProcessor
+	// has three recordRun call sites -- success, catch, and the settings-overlay-invalid refusal -- and
+	// all of them funnel through this one start.mjs closure; driving the closure with each shape proves
+	// the ordering holds wherever it is invoked from.
+	const dir = mkdtempSync(join(tmpdir(), "pi-once-order-"));
+	try {
+		const triggersPath = join(dir, "triggers.json");
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [onceEntry(40), onceEntry(41), onceEntry(42)] }));
+		const observed = [];
+		const makeRecordWriter = () => (record) => {
+			const marks = JSON.parse(readFileSync(triggersPath, "utf8")).triggers.map((t) => t.on.disarmed?.jobId ?? null);
+			observed.push({ jobId: record.jobId, outcome: record.outcome, marks });
+		};
+		const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+		const { captured } = await runStart({ env: { PI_TRIGGERS_FILE: triggersPath }, makeAuth, makeHost: () => fakeHost(), makeRecordWriter });
+
+		const at = "2026-08-28T09:00:00.000Z";
+		const jobFor = (index, number, id) => ({
+			id,
+			attemptsMade: 0,
+			name: "github",
+			data: { kind: "github", repo: "o/r", flow: "deploy", target: { type: "issue", number }, trigger: { matched: { index, type: "issue", action: "closed", number, once: true } } },
+		});
+		// The three shapes the processor's call sites hand this closure (index.mjs).
+		captured.recordRun({ job: jobFor(0, 40, "gh-success"), result: { outcome: "completed", exitCode: 0, turns: 1, tokens: null, budgetReserved: true }, startedAt: at, endedAt: at });
+		captured.recordRun({ job: jobFor(1, 41, "gh-catch"), error: new Error("infra boom"), startedAt: at, endedAt: at });
+		captured.recordRun({ job: jobFor(2, 42, "gh-overlay"), result: { outcome: "policy", reason: "settings-overlay-invalid", exitCode: null, turns: null, tokens: null, budgetReserved: false }, startedAt: at, endedAt: at });
+		await new Promise((resolve) => setImmediate(resolve)); // let the fire-and-forget hooks' microtasks settle
+
+		// The contract, exactly: each record was written while its OWN entry was still armed. (Earlier
+		// jobs' marks may or may not be visible yet -- WHEN the fire-and-forget disarm settles is not
+		// pinned, only that it never precedes its record.)
+		assert.equal(observed.length, 3, "all three shapes reached the durable record");
+		for (const [i, o] of observed.entries()) {
+			assert.equal(o.marks[i], null, `record ${o.jobId}: its own entry must still be armed when writeRecord runs -- the disarm comes strictly after`);
+		}
+		assert.deepEqual(observed.map((o) => o.outcome), ["completed", "failed", "policy"], "the three call-site shapes all reached the durable record");
+		const final = JSON.parse(readFileSync(triggersPath, "utf8")).triggers;
+		assert.deepEqual(
+			final.map((t) => t.on.disarmed),
+			[
+				{ at, jobId: "gh-success" },
+				{ at, jobId: "gh-catch" },
+				{ at, jobId: "gh-overlay" },
+			],
+			"every record shape disarms with the record's own endedAt -- 'fired' means 'produced a run record', per-attempt failures included",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
