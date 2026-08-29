@@ -24,6 +24,7 @@ import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { makeCheckOnceSpent, makeDisarmOnce } from "./triggers-file.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
+import { loadScopedLimits } from "./scoped-limits.mjs";
 import { makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
@@ -100,6 +101,42 @@ function watchPauseWindowsFile(config, ref, log) {
 		log("pause_windows_watching", { path });
 	} catch (err) {
 		log("pause_windows_watch_unavailable", { reason: err?.message });
+	}
+}
+
+/**
+ * The scoped-limits reload, EXPORTED apart from its watcher so keep-last-good is unit-testable without
+ * fs.watch (its two watcher siblings above bind theirs inline; this one is money config, so the
+ * last-good property carries its own test). A bad edit keeps `ref.current` untouched and logs
+ * `scoped_limits_reload_invalid` -- the pause-windows posture, INT-SCOPED-LIMITS-FILE-CONTRACT.
+ */
+export function reloadScopedLimits(config, ref, log) {
+	try {
+		ref.current = loadScopedLimits(config);
+		log("scoped_limits_reloaded", { count: ref.current.length });
+	} catch (err) {
+		log("scoped_limits_reload_invalid", { reason: err?.message });
+	}
+}
+
+/**
+ * Watch the scoped-limits file (issue #242) the way the pause-windows watcher above does: the DIRECTORY,
+ * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort + unref'd.
+ */
+function watchScopedLimitsFile(config, ref, log) {
+	const path = config.scopedLimitsFile;
+	const dir = dirname(path) || ".";
+	const file = basename(path);
+	let timer = null;
+	try {
+		watch(dir, (_event, changed) => {
+			if (changed && changed !== file) return;
+			clearTimeout(timer);
+			timer = setTimeout(() => reloadScopedLimits(config, ref, log), 150);
+		}).unref?.();
+		log("scoped_limits_watching", { path });
+	} catch (err) {
+		log("scoped_limits_watch_unavailable", { reason: err?.message });
 	}
 }
 
@@ -187,6 +224,10 @@ export async function startWorker(
 	// Valkey contact, so a malformed file refuses startup (configError) rather than silently disabling scoped
 	// pauses. Held in a mutable ref so the live-reload watcher can hot-swap it. [] means no scoped pauses.
 	const pauseWindows = { current: loadPauseWindows(config) };
+
+	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
+	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
+	const scopedLimits = { current: loadScopedLimits(config) };
 
 	// The forge a job belongs to is resolved PER JOB from `job.kind`, not bound once for the process.
 	// Each entry is `{ auth, host }`: `auth` is get-token's `{ mintToken, selfId, source }` (null when that
@@ -422,6 +463,9 @@ export async function startWorker(
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
+		// Issue #242: the scoped-limits snapshot the pickup gate and the scoped budget read, once per
+		// pickup, from the live-reloaded ref -- same next-job grain as pauseUntil above.
+		scopedLimits: () => scopedLimits.current,
 		deps: {
 			collectChain,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
@@ -595,6 +639,11 @@ export async function startWorker(
 		watchPauseWindowsFile(config, pauseWindows, log);
 	}
 
+	// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
+	if (config.scopedLimitsFile) {
+		watchScopedLimitsFile(config, scopedLimits, log);
+	}
+
 	log("worker_started", {
 		queue: "pi-jobs",
 		concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
@@ -602,6 +651,8 @@ export async function startWorker(
 		weeklyCap: config.weeklyCap, // null when the weekly window is disabled
 		monthlyCap: config.monthlyCap, // null when the monthly window is disabled
 		softHoldPct: config.softHoldPct, // null when the soft-hold band is disabled
+		scopedLimitsFile: config.scopedLimitsFile, // null = no scoped caps/concurrency (the folder mutex holds regardless)
+		scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
 		image: config.jobImage,
 		valkey: config.valkeyUrl,
 		logsDir: config.logsDir,

@@ -1,6 +1,7 @@
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
+import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 
@@ -37,6 +38,12 @@ export async function runJob(job, deps) {
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
 		softHoldPct, // int 1-99 or null; the soft-hold band applied to every active window
 		tokenCap = null, // int or null; the daily TOKEN cap (issue #25). Check-AFTER, so it gates the NEXT job on prior spend
+		// { scope, caps: { day, week, month } } | null -- this job's scoped budget windows (issue #242,
+		// INT-SCOPED-LIMITS-FILE-CONTRACT), resolved by the wiring from the same watched-limits snapshot the
+		// pickup gate read. Null when the file is unset or the scope's row is concurrency-only; the default
+		// keeps an unwired processor byte-identical. The folder MUTEX does not live here -- it is the pickup
+		// gate's, pre-everything; this is only the money half.
+		scopedCaps = null,
 		recordSpend = recordTokenSpend, // injected so the post-container INCRBY is testable/stubbable
 		// (job) => { ok } | { missing: <ref> } | { unavailable: <ref> }. The pre-spend check that the image
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
@@ -124,6 +131,7 @@ export async function runJob(job, deps) {
 	let token = null;
 	let prepared = null;
 	let reserved = false;
+	let scopedReserved = false;
 
 	try {
 		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
@@ -458,11 +466,51 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "daily-token-cap", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
-		// Budget last-but-before-container. A refusal here spends nothing (no container starts). Reserves across
+		// Per-scope budget windows (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT): the NARROWER ledger
+		// reserves FIRST, so a noisy scope's refusals never consume a global slot -- the global INCR below
+		// runs only for jobs the scope admitted. Same atomic INCR, same refused-still-counts invariant,
+		// through budget.mjs's keyPrefix seam (dayKey/weekKey/monthKey under budget:s:<hash16>). softHoldPct
+		// is deliberately GLOBAL-ONLY: the band is one operator brake on overall spend, not a per-row knob;
+		// scoped windows are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
+		if (scopedCaps) {
+			// A redis fault BETWEEN this reserve and the global one below strands the scoped INCR with no
+			// run and no refund -- the pre-existing mid-reserve posture, shared with the global ledger's
+			// own partial-INCR seam; the compensating release below covers REFUSALS, not faults.
+			const scoped = await reserveBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+			scopedReserved = true;
+			if (!scoped.allowed) {
+				const w = scoped.blockedWindow;
+				const win = scoped.windows[w];
+				// A local job's scope is a full host path and its "comment" is not dropped -- the wiring's
+				// local adapter LOGS the text (start.mjs forgeFor fallthrough) -- so the path must never
+				// enter the message; "this folder" is enough beside the jobId the adapter logs. A forge
+				// scope IS the repo the comment posts on, safe to name.
+				const scopeLabel = job.kind === "local" ? "this folder" : scopedCaps.scope;
+				await comment(job, `Over the ${w} run cap for ${scopeLabel} (${win.cap}). Not run.`);
+				// The scope rides the log as its 16-hex key, NEVER the raw string: a folder-scoped cap would
+				// put a full host path in the worker log against no-pii-in-logs (the record keeps only
+				// basename(folder) for the same reason). The admin recomputes the key from the configured
+				// scope to join it back.
+				log("over_scope_budget", { scopeKey: scopeKeyPrefix(scopedCaps.scope), window: w, reserved: win.reserved, cap: win.cap, kind: job.kind === "local" ? "local" : "forge" });
+				// budgetReserved false: the GLOBAL slot was never touched (scoped reserves first). The scoped
+				// counter did INCR and keeps it -- its own refused-reservation-still-counts, per ledger.
+				return { outcome: "policy", reason: "scope-cap", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+		}
+
+		// GLOBAL budget last-but-before-container. A refusal here spends nothing (no container starts). Reserves across
 		// every active window (day + optional week/month) and the soft-hold band in one atomic pass.
 		const budget = await reserveBudget(redis, { caps, softHoldPct, now });
 		reserved = true;
 		if (!budget.allowed) {
+			// The scoped reserve above committed before this global refusal -- give that slot back. Without
+			// this, an exhausted global window drains every arriving scope's own day/week/month counters
+			// with zero runs to show for it (a storm against a spent global daily cap would empty a repo's
+			// week by noon). The scoped ledger's refused-still-counts covers the SCOPE's own refusal above,
+			// never a refusal it did not issue.
+			if (scopedReserved && scopedCaps) {
+				await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+			}
 			const w = budget.blockedWindow;
 			const win = budget.windows[w];
 			if (budget.reason === "soft-hold") {
@@ -561,8 +609,12 @@ export async function runJob(job, deps) {
 		// budgetReserved reflects whether a slot stays spent: false when never-started refunds below,
 		// true for a real container that ran and spent (exit-1 infra / unknown exit).
 		if (e instanceof InfraRetry) e.budgetReserved = reserved && e.reason !== "container-never-started";
-		if (reserved && e instanceof InfraRetry && e.reason === "container-never-started") {
-			await releaseBudget(redis, { caps, now });
+		if (e instanceof InfraRetry && e.reason === "container-never-started") {
+			// Both-or-neither (issue #242): a never-started container can only follow BOTH reserves (the
+			// scoped one precedes the global one, and the container follows both), so they refund
+			// together -- and a scoped refusal returned above without ever touching the global ledger.
+			if (reserved) await releaseBudget(redis, { caps, now });
+			if (scopedReserved && scopedCaps) await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
 		}
 		throw e;
 	} finally {

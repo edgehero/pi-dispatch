@@ -741,3 +741,71 @@ test("once wiring: writeRecord lands strictly BEFORE the disarm, for all three r
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// ── scoped limits wiring (issue #242) ───────────────────────────────────────────────────────────────
+
+test("scoped limits: a valid file boot-loads into a top-level closure, arms the watcher, and rides worker_started", { skip }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	try {
+		const file = join(dir, "scoped-limits.json");
+		writeFileSync(file, `${JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3, concurrent: 1 }] })}\n`);
+		const { captured, logs } = await runStart({ env: { PI_SCOPED_LIMITS_FILE: file } });
+		assert.equal(typeof captured.scopedLimits, "function", "a closure, beside pauseUntil, at the TOP level (not in deps)");
+		const rows = captured.scopedLimits();
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].day, 3);
+		assert.ok(logs.some((l) => l.event === "scoped_limits_watching" && l.path === file), "the live-edit watcher armed");
+		const started = logs.find((l) => l.event === "worker_started");
+		assert.equal(started.scopedLimitsFile, file);
+		assert.equal(started.scopedLimits, 1, "the row count -- money config gets boot visibility");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scoped limits: unset means [] from the closure, no watcher, and null in worker_started", { skip }, async () => {
+	const { captured, logs } = await runStart({});
+	assert.deepEqual(captured.scopedLimits(), []);
+	assert.ok(!logs.some((l) => l.event === "scoped_limits_watching"), "no file, no watcher");
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.scopedLimitsFile, null);
+	assert.equal(started.scopedLimits, 0);
+});
+
+test("scoped limits: an invalid file refuses BOOT fail-loud (configError), with the operator present", { skip }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	try {
+		const file = join(dir, "scoped-limits.json");
+		writeFileSync(file, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 0 }] }));
+		await assert.rejects(
+			() => runStart({ env: { PI_SCOPED_LIMITS_FILE: file } }),
+			(e) => e.piDispatchConfig === true && /day must be an integer >= 1/.test(e.message),
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good one", { skip }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	try {
+		const file = join(dir, "scoped-limits.json");
+		const config = { scopedLimitsFile: file };
+		const good = [{ scope: "acme/web", day: 3, week: null, month: null, concurrent: null }];
+		const ref = { current: good };
+		const logs = [];
+		const log = (event, fields) => logs.push({ event, fields });
+
+		writeFileSync(file, "{ not json");
+		mod.reloadScopedLimits(config, ref, log);
+		assert.equal(ref.current, good, "the SAME array object -- last-good untouched, not merely equal");
+		assert.equal(logs[0].event, "scoped_limits_reload_invalid");
+
+		writeFileSync(file, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 9 }] }));
+		mod.reloadScopedLimits(config, ref, log);
+		assert.equal(ref.current[0].day, 9, "a good edit swaps the ref");
+		assert.deepEqual(logs[1], { event: "scoped_limits_reloaded", fields: { count: 1 } });
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { InfraRetry, runJob } from "../src/processor.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
@@ -1083,4 +1084,118 @@ test("the default admits everything: a once job under a deps set WITHOUT checkOn
 	const r = await runJob(onceJob, d);
 	assert.equal(r.outcome, "completed");
 	assert.ok(calls.includes("run-container"), "the job runs; once-enforcement is the wired deployment's property");
+});
+
+// ── scoped budget windows (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT) ─────────────────────────────
+
+/**
+ * A KEYED fake redis (budget.test.mjs's shape), because the whole point of these tests is that the
+ * scoped `budget:s:<h16>:*` keys and the global `budget:*` keys move independently -- the
+ * single-counter fake above cannot express that.
+ */
+function keyedRedis(preset = {}) {
+	const store = new Map(Object.entries(preset));
+	return {
+		store,
+		async incr(k) {
+			const v = (store.get(k) ?? 0) + 1;
+			store.set(k, v);
+			return v;
+		},
+		async decr(k) {
+			const v = (store.get(k) ?? 0) - 1;
+			store.set(k, v);
+			return v;
+		},
+		async expire() {},
+		async get() {
+			return null;
+		},
+	};
+}
+
+// deps()'s clock is 2026-07-16, so the day keys are fixed strings the assertions can pin.
+const G_DAY = "budget:2026-07-16";
+const S_PREFIX = scopeKeyPrefix("org/repo");
+const S_DAY = `${S_PREFIX}:2026-07-16`;
+const SCOPED = { scope: "org/repo", caps: { day: 1, week: null, month: null } };
+
+test("scope-cap: the scoped window refuses PRE-SPEND with the global ledger untouched and its own count kept", async () => {
+	const redis = keyedRedis({ [S_DAY]: 1 }); // the scope already spent its day: 1
+	const logs = [];
+	const comments = [];
+	const { deps: d } = deps({ redis, scopedCaps: SCOPED, log: (e, f) => logs.push({ e, f }), comment: async (_j, t) => comments.push(t) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "scope-cap");
+	assert.equal(r.budgetReserved, false, "budgetReserved stays GLOBAL-only: the global slot was never touched");
+	assert.equal(redis.store.get(S_DAY), 2, "the scoped INCR is kept -- refused-still-counts, per ledger");
+	assert.equal(redis.store.has(G_DAY), false, "the global key was never created, let alone incremented");
+	assert.equal(comments[0], "Over the day run cap for org/repo (1). Not run.");
+	const scoped = logs.find((l) => l.e === "over_scope_budget");
+	assert.deepEqual(scoped.f, { scopeKey: S_PREFIX, window: "day", reserved: 2, cap: 1, kind: "forge" });
+	assert.ok(!JSON.stringify(scoped.f).includes("org/repo"), "the raw scope never rides the log line");
+});
+
+test("a GLOBAL refusal after a scoped reserve RELEASES the scoped slot -- a storm cannot drain a scope's windows", async () => {
+	const redis = keyedRedis({ [G_DAY]: 10 }); // the global day cap (10) is already exhausted
+	const { deps: d } = deps({ redis, scopedCaps: { scope: "org/repo", caps: { day: 5, week: null, month: null } } });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "over-budget", "the global window is what refused");
+	assert.equal(r.budgetReserved, true, "the global refused-reservation still counts, as ever");
+	assert.equal(redis.store.get(S_DAY), 0, "the scoped reserve was given back: INCR then DECR, net zero");
+	assert.equal(redis.store.get(G_DAY), 11, "the global counter keeps its refused reservation");
+});
+
+test("container-never-started refunds BOTH ledgers; a container that ran refunds NEITHER", async () => {
+	// exit 125: docker spawn fault -> refund both.
+	{
+		const redis = keyedRedis();
+		const { deps: d } = deps({ redis, scopedCaps: SCOPED, runContainer: async () => ({ code: 125, aborted: false }) });
+		await assert.rejects(() => runJob(ghJob, d), (e) => e.reason === "container-never-started");
+		assert.equal(redis.store.get(S_DAY), 0, "scoped slot refunded");
+		assert.equal(redis.store.get(G_DAY), 0, "global slot refunded");
+	}
+	// exit 1: the container RAN and spent -> both slots stay spent through the infra retry.
+	{
+		const redis = keyedRedis();
+		const { deps: d } = deps({ redis, scopedCaps: SCOPED, runContainer: async () => ({ code: 1, aborted: false }) });
+		await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry && e.reason !== "container-never-started");
+		assert.equal(redis.store.get(S_DAY), 1, "scoped slot kept -- the run spent real money");
+		assert.equal(redis.store.get(G_DAY), 1, "global slot kept");
+	}
+});
+
+test("softHoldPct is GLOBAL-only: a scoped window deep inside what would be its band still admits", async () => {
+	// Scoped day 8/10 spent = 80%, inside a 50% hold band IF the band applied to scoped windows. It must
+	// not: scoped windows are hard caps (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX).
+	const redis = keyedRedis({ [S_DAY]: 8 });
+	const { deps: d } = deps({ redis, softHoldPct: 50, caps: { day: 100, week: null, month: null }, scopedCaps: { scope: "org/repo", caps: { day: 10, week: null, month: null } } });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed", "the scoped window has no soft-hold band");
+});
+
+test("byte-identity: a run with no scopedCaps creates exactly the pre-#242 key set -- no budget:s: key ever", async () => {
+	const redis = keyedRedis();
+	const { deps: d } = deps({ redis }); // scopedCaps takes its null default
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.deepEqual([...redis.store.keys()], [G_DAY], "key for key, the store is what it was before #242");
+});
+
+test("a LOCAL scope-cap keeps the folder path out of the comment text too -- the local adapter LOGS it", async () => {
+	// start.mjs's forgeFor has no `local` entry, so the wiring's comment adapter falls through to
+	// log("comment", { jobId, text }) -- the text reaches the worker log and must be path-free.
+	const localScoped = { scope: "/Users/someone/work/site", caps: { day: 1, week: null, month: null } };
+	const sPrefix = scopeKeyPrefix("/Users/someone/work/site");
+	const redis = keyedRedis({ [`${sPrefix}:2026-07-16`]: 1 });
+	const comments = [];
+	const logs = [];
+	const { deps: d } = deps({ redis, scopedCaps: localScoped, comment: async (_j, t) => comments.push(t), log: (e, f) => logs.push({ e, f }) });
+	const localJob = { kind: "local", folder: "/Users/someone/work/site", flow: "tidy", provider: "anthropic", model: "m" };
+	const r = await runJob(localJob, d);
+	assert.equal(r.reason, "scope-cap");
+	assert.equal(comments[0], "Over the day run cap for this folder (1). Not run.");
+	assert.ok(!comments[0].includes("/Users/"), "the host path never enters the comment text");
+	assert.ok(!JSON.stringify(logs).includes("/Users/someone"), "and never any log field");
 });

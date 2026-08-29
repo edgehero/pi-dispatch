@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import {
 	checkTokenCap,
 	dayKey,
@@ -270,4 +271,48 @@ test("check-before + record-after compose: prior jobs' recorded spend gates the 
 	const gate = await checkTokenCap(redis, { cap: 1000, now: NOW });
 	assert.equal(gate.allowed, false, "the lagging cap stops the NEXT job once the day is over budget");
 	assert.equal(gate.spent, 1100);
+});
+
+// ── the keyPrefix seam under a scoped prefix (issue #242) ───────────────────────────────────────────
+// The first PRODUCTION use of keyPrefix: the scoped budget windows reserve under
+// budget:s:<hash16>:... beside the globals in the same store. These pins hold the two ledgers apart.
+
+test("a scoped reserve lives entirely under its prefix, independent of a same-store global reserve", async () => {
+	const redis = fakeRedis();
+	const prefix = scopeKeyPrefix("acme/web");
+	const scoped = await reserveBudget(redis, { caps: { day: 1, week: null, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(scoped.allowed, true);
+	const global = await reserveBudget(redis, { caps: { day: 1, week: null, month: null }, now: NOW });
+	assert.equal(global.allowed, true, "the global day window did not see the scoped INCR");
+	assert.equal(redis.store.get(`${prefix}:2026-07-16`), 1);
+	assert.equal(redis.store.get("budget:2026-07-16"), 1);
+	const scoped2 = await reserveBudget(redis, { caps: { day: 1, week: null, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(scoped2.allowed, false, "the scope's own cap refuses on the scope's own count");
+	assert.equal(scoped2.blockedWindow, "day");
+	assert.equal(redis.store.get(`${prefix}:2026-07-16`), 2, "refused-still-counts holds per ledger");
+	assert.equal(redis.store.get("budget:2026-07-16"), 1, "the global counter never moved");
+	await releaseBudget(redis, { caps: { day: 1, week: null, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(redis.store.get(`${prefix}:2026-07-16`), 1, "release decrements only the prefixed key");
+	assert.equal(redis.store.get("budget:2026-07-16"), 1);
+});
+
+test("TTLs are set on first INCR under a prefix, exactly as under the default", async () => {
+	const redis = fakeRedis();
+	const prefix = scopeKeyPrefix("/srv/site");
+	await reserveBudget(redis, { caps: { day: 5, week: 10, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(redis.ttl.get(`${prefix}:2026-07-16`), 2 * 24 * 60 * 60);
+	assert.equal(redis.ttl.get(`${prefix}:w:2026-07-13`), 9 * 24 * 60 * 60);
+	await reserveBudget(redis, { caps: { day: 5, week: 10, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(redis.ttl.get(`${prefix}:2026-07-16`), 2 * 24 * 60 * 60, "set once, on reserved === 1 only");
+});
+
+test("a null window under a prefix is disabled, exactly as under the default (budgetCapsFor's shape)", async () => {
+	const redis = fakeRedis();
+	const prefix = scopeKeyPrefix("acme/web");
+	// week-only caps -- the shape budgetCapsFor emits for a { scope, week: N } row.
+	const r = await reserveBudget(redis, { caps: { day: null, week: 2, month: null }, now: NOW, keyPrefix: prefix });
+	assert.equal(r.allowed, true);
+	assert.equal(r.windows.day, null, "a null window is disabled, never a zero cap");
+	assert.equal(redis.store.has(`${prefix}:2026-07-16`), false, "no day key was created");
+	assert.equal(redis.store.get(`${prefix}:w:2026-07-13`), 1);
 });

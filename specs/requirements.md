@@ -359,8 +359,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `kind:"local"` job that flows through the **same** processor as an interactively-triggered local job.
 - **Why**: An unattended recurring trigger spends real money against a paid provider with nobody watching,
   so every failure mode of the scheduler is a money-or-silence failure. Job Schedulers are a Redis-resident
-  object (survives worker and Redis-under-AOF restart) and give no-backfill and structural no-overlap for
-  free — reimplementing those is the four-mechanism drowning `DES-CRON-VIA-BULLMQ-SCHEDULER` refused. The
+  object (survives worker and Redis-under-AOF restart) and give no-backfill and an at-most-one-unstarted-
+  occurrence bound for free — NOT no-overlap, which this entry falsely claimed until issue #242: the next
+  occurrence is minted at pickup and promoted on time alone, so a slow run overlaps its successor whenever
+  a concurrency slot is free, and same-folder serialization is supplied by the worker's folder mutex
+  (`REQ-SCOPED-LIMITS`), not the scheduler. Reimplementing the scheduler's own properties is still the
+  four-mechanism drowning `DES-CRON-VIA-BULLMQ-SCHEDULER` refused. The
   scheduler is also the one path that **bypasses `maxStalledCount`** (`CONST-RETRY-INFRA-ONLY`), so the
   stall backstop must be rebuilt explicitly; and because it fires while nobody watches, a `-10`/`-11`
   silent no-op or an in-tick retry storm would be invisible without the loud-surfacing and no-retry rules
@@ -376,8 +380,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     stall is observed, then the scheduler is torn down via `removeJobScheduler` — the explicit backstop for
     the `maxStalledCount` carve-out.
   - Given a worker that was down across one or more due ticks, when it restarts, then exactly one job is
-    emitted (no backfill) and no second job for a schedule is created while that schedule's prior job is
-    still processing (no overlap).
+    emitted (no backfill), and at most one UNSTARTED next occurrence exists for a schedule at any time.
+    Two occurrences of one schedule CAN be in flight together when a slot is free — the false "no
+    overlap" claim this line carried until issue #242 — except on one folder: two local jobs naming one
+    `run.folder` (by resolved path, within one worker process) never run concurrently, the second
+    deferred to the delayed set with its attempt count untouched (`REQ-SCOPED-LIMITS`, the mutex).
   - Given a scheduler resident in Redis but absent from the current config, when the worker performs its
     startup reconcile, then the orphaned scheduler is removed.
   - Given a schedule entry with `kind:"github"`, when the config loads, then the entry is rejected — a
@@ -570,6 +577,40 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (and no `PI_WEEKLY_CAP`), when a job starts, then the weekly window is neither counted nor evaluated; given
   a `softHoldPct` set live in the overlay, when the next job starts, then the band takes effect with no
   restart; given a refused reservation, when the window rolls over, then its counter is reclaimed by TTL.
+
+## REQ-SCOPED-LIMITS
+
+- **Statement**: The worker shall enforce limits that attach to a **scope** — the resolved folder for a
+  local job, the repo for a forge one — beside the deployment-global controls: per-scope day/week/month
+  run caps refused **pre-spend** under the fixed reason `scope-cap` (the blocking window named in the
+  forge comment and the `over_scope_budget` log, never in the reason token), per-scope concurrency
+  enforced by **deferral** through the delayed set (never a refusal — a busy scope is transient state,
+  `CONST-RETRY-INFRA-ONLY`), and an always-on **one-job-per-folder mutex** for local jobs: two local jobs
+  naming one folder, by resolved path within one worker process, shall never run concurrently — including
+  two occurrences of one cron trigger — with no configuration, no tool, and no off-switch. Caps and
+  concurrency shall be operator-editable live via the confirm-gated tools and the `/dispatch` panel
+  (`INT-SCOPED-LIMITS-FILE-CONTRACT`; that admin surface lands in a later slice of issue #242 — the
+  file-and-watcher half is live now); the mutex alone is code.
+- **Why**: Every prior limit was deployment-global: one noisy repo emptied the daily cap for every other
+  scope with nothing naming the culprit, and nothing serialized a working tree — two same-folder jobs ran
+  containers concurrently in one read-write bind mount, reachable by a single cron trigger with no
+  operator mistake (`DES-CRON-VIA-BULLMQ-SCHEDULER`, corrected). A cap is a bound, not a capability, which
+  is why live editability is allowed here while `run.image`/`run.packages`/`run.secrets` stay file-only:
+  a limit only ever narrows what may spend.
+- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `REQ-SPEND-CAPS-MULTI-WINDOW`,
+  `REQ-SCOPED-PAUSE-WINDOWS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-CONCURRENCY-3`,
+  `INT-SCOPED-LIMITS-FILE-CONTRACT`
+- **Acceptance**: Given a scoped daily cap of N on repo X, when X's N+1th job of the day starts, then it
+  is refused `scope-cap` before any provider token is spent or slot reserved on the global ledger, X's own counter
+  keeps the refused reservation, and every other scope keeps running under the global windows; given the
+  GLOBAL window refusing after a scoped reserve committed, then the scoped reservation is released — a
+  storm against a spent global cap drains no scope's week or month. Given a scope concurrency of K, when
+  job K+1 arrives, then it is deferred pre-spend (no record, no mint, no budget key) and runs after a
+  slot frees, its attempt count untouched. Given two local jobs naming one folder in ANY spelling
+  (trailing slash, `..` segments, padding), when both are picked up, then their containers never overlap
+  and the second defers on a fixed re-check — with no file configured. Given a deployment that configures
+  nothing new, then it behaves byte-identically, key for key and record for record, except where the
+  mutex serializes — which is the feature.
 
 ## REQ-TOKEN-ACCOUNTING-AND-CAPS
 
@@ -1432,14 +1473,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Local and cron are out of scope for a hazard, not for tidiness.** A local job's `/workspace` *is* the
   operator's folder, bind-mounted read-write and edited in place, so two replicas would edit one working
   tree with no gate and no undo. A forge job gets its own `mkdtemp`'d clone, which is the whole reason it
-  is safe there. Cron additionally must not overlap itself (`DES-CRON-VIA-BULLMQ-SCHEDULER`).
+  is safe there. Cron's own self-overlap turned out to be REAL (`DES-CRON-VIA-BULLMQ-SCHEDULER`,
+  corrected in issue #242) and is closed for folders by the mutex `REQ-SCOPED-LIMITS` specifies — this
+  entry's refusal of local replicas was the position that mutex generalizes.
 - **Chain fanout is already bounded, and was checked rather than newly closed.** `outbox.mjs` returns
   early for any non-`local` job and a forge job has no `/outbox` mount at all, so a replica — always a
   forge job, on any of the four — can never chain. No new bound was needed; the existing guard covers it.
 - **Budget is deliberately untouched, and that is the feature.** N replicas make N honest reservations,
   each before its own tokens in its own processor (`CONST-BUDGET-BEFORE-TOKENS`). The daily, weekly and
-  monthly caps remain the ceiling and simply divide by N. Softening them for replicas would have turned a
-  cost multiplier into a cap bypass.
+  monthly caps remain the ceiling and simply divide by N — and since issue #242 a repo's own scoped
+  windows join those ceilings: N replicas are N reservations on ONE scope, so a scoped refusal truncates
+  a replica set exactly as the global cap always could, now with a scope-naming reason (`scope-cap`).
+  Softening them for replicas would have turned a cost multiplier into a cap bypass.
 - **A stale image is refused pre-spend.** The feature is half prompt and half **safety floor**: a
   replica's user prompt names `pi/issue-<n>-r2`, while an image built before this change bakes a
   `HARD_RULES.md` whose rule 3 hard-codes `pi/issue-<n>` as a **system** rule — authoritative over the
@@ -1593,8 +1638,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   bootstrap would erase. Fix tiers are closed sets (`DES-CLI-SURFACE`): silent = init's create-only
   scaffolds + `mkdir` of env-declared paths; prompted = the deployment's own default image, the
   loopback Valkey, an overlay `auth.json` delete, an `import-pi` restage under its own gates; never =
-  malformed-config rewrites, triggers/pause-windows content, trigger-named images, semantic env
-  guesses, an env-setup script's mode or location. `up` may set `WEBHOOK_SECRET` in a scaffolded
+  malformed-config rewrites, triggers/pause-windows/scoped-limits content, trigger-named images,
+  semantic env guesses, an env-setup script's mode or location. `up` may set `WEBHOOK_SECRET` in a scaffolded
   `.env` **only when the key is empty** — a generated secret is never printed and an operator's value
   is never replaced.
 - **Traces to**: `DES-CLI-SURFACE`, `CONST-BUDGET-BEFORE-TOKENS`, `SECURITY.md` (pull-it-yourself),
@@ -1633,6 +1678,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-29 | Issue #242, enforcement slice, one CORRECTION and one new entry. **`REQ-CRON-SCHEDULED-JOBS` CORRECTED**: its Why and its restart acceptance claimed "structural no-overlap" — false since the entry was written (the scheduler mints the next occurrence at pickup and promotes on time alone); both now state the true at-most-one-unstarted bound, with same-folder serialization supplied by the mutex `REQ-SCOPED-LIMITS` specifies. **NEW `REQ-SCOPED-LIMITS`**: per-scope day/week/month run caps refused pre-spend as `scope-cap`, per-scope concurrency by deferral, and the always-on one-job-per-folder mutex on resolved paths — with the storm-drain acceptance (a global refusal releases the scoped reserve) and the byte-identity carve-out (identical except where the mutex serializes, which is the feature). **`REQ-REPLICA-RUNS` AMENDED**, two clauses: the local/cron hazard paragraph re-anchors to the corrected cron claim (the refusal of local replicas is the position the mutex generalizes), and the budget paragraph gains the scoped windows among the ceilings that divide by N (a scoped refusal truncates a replica set exactly as the global cap always could). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the never-tier enumeration gains scoped-limits content. **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: the global windows keep their exact semantics; the scoped windows are a sibling ledger under their own keys, reserving first, never altering when or how the global reserve runs. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: "however many windows exist" is scope-agnostic and the scoped reserve is still check-and-increment before the container. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a deferral is neither a policy return nor a retry-throw — `moveToDelayed` passes `skipAttempt: true`, so the attempt ledger is untouched, the pause gate's own posture. |
 | 2026-08-28 | Issue #231, receiver slice. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): close jobs' semantic key leads the flow slot with `closed:`, derived from the matched rule, so a same-target-same-flow label job inside the window can never swallow a close job -- a swallowed close writes no run record and its one-shot never disarms. Every non-close key byte-identical; the GUID layer UNCHANGED, checked. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the close arm lives in `CONST-TRIGGER-AUTHOR-GATE`, and the offline-testable split (lookup in the receiver, verdict into the pure gate) is exactly the shape this requirement already mandates. |
 | 2026-08-26 | **NEW `REQ-TRIGGER-SECRETS`** (issue #225): a trigger names secret REFERENCES and the worker resolves them host-side, pre-spend, through an operator-declared resolver. Legal on all four kinds INCLUDING cron, unlike `run.replicas`, whose local refusal turns on two agents sharing one bind-mounted working tree rather than on anything about a credential. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: `--env-setup` still gives the WORKER an environment, and this gives one TRIGGER a value; the two seams do not overlap. **`REQ-GLOBAL-PI-OVERLAY` UNCHANGED, checked**: its "the overlay must hold no secret" clause is untouched, because nothing here is staged into the overlay. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the resolver runs on the HOST, outside the job's `--internal` network entirely, so no allowlist entry is needed and none was added. **`REQ-PER-TRIGGER-SKILLS`, `REQ-PER-TRIGGER-INSTRUCTION`, `REQ-REPLICA-RUNS`, `REQ-RESUMABLE-SESSION` UNCHANGED, checked** (`run.secrets` beside `run.resume` is refused at load, so the two features never co-exist on one trigger). |
 | 2026-08-26 | Issue #186 (resume eligibility bounds: conversation age, context fullness, chain length). **REQ-RESUMABLE-SESSION AMENDED**, two edits. The fail-open list gains a conversation past its age bound, and its *"each is a NAMED reason in the run record"* half is restated as the requirement it always was, because for the feature's first year only half of it was met: a refused read stages a 0-byte transcript, the container is handed it regardless, pi finds no messages and reports `absent`, and the record took the container's word -- so `expired` and `pi-version-changed` reached no completed record at all while this clause promised they did. A host gate that refused now outranks that one runner token, which is a restatement of the question rather than an answer to it. The second edit is a **new bullet on opt-in eligibility bounds**, which exists to record the two polarity rules a later reader would otherwise re-litigate one bound at a time: a bound is off unless set and an unset bound leaves the read path byte-identical, and a bound that cannot obtain its measurement neither invents one nor guesses -- where the quantity is on the transcript's own header it fails CLOSED, since a conversation that cannot say how old it is has not been shown to be young enough, and where the quantity is reported by the container it fails OPEN, since absence there means an image that predates the field rather than a fact about the lineage. Acceptance gains the age case (a header timestamp past the bound refuses while mtime is fresh, and that token is what the record shows), the chain case, and an all-bounds-unset case that says what is and is NOT identical: the staged file and the mount set are, while a completed promotion also writes the chain counter and a refused host gate records the gate's own token where it used to record the container's `absent`. A second new bullet states what these bounds are and are not, because an adversarial review found the honest scope missing from the one place an operator would look: they bound how much history accumulates, two of the three read values the agent itself writes (the header timestamp; the reported occupancy), an agent with code execution can defeat those two and can carry content across runs in the transcript it owns regardless, and the one bound resting on nothing inside the container is the resume chain, which is why it counts the host's deliveries rather than what pi made of them. **REQ-DEPLOYMENT-BOOTSTRAP AMENDED**: `doctor` reports a bound that is set and asleep, made normative by `PI_SESSION_MAX_CONTEXT_PCT`, whose measurement comes from the job image's runner and which therefore does nothing at all on an older image with no capability label to check against; the four resume bounds are also printed as a fact line, since three are off by default and silent when unset. Neither line carries a `fixAction`: how long a lineage may run is an operator's decision, not a mechanical remainder. **REQ-TOKEN-ACCOUNTING-AND-CAPS UNCHANGED, checked**, and the check is the interesting one: the context bound reads pi's `getContextUsage()`, which is context OCCUPANCY, not billed tokens, and it feeds no cap, no counter and no classification -- reusing `tokens.total` for it would have been wrong twice over, since that total is cumulative across a run and counts every turn's re-sent prefix again. **REQ-QUEUE-BURST-NO-DROP UNCHANGED, checked**: both new per-key files are written inside the promotion lock that clause already governs, so one-writer-per-key covers them without a word moving. One correction this issue carries beyond its own scope, because it was propagated from the issue text into four files before anyone checked it: the TTL's mtime is refreshed by the PROMOTE rename and **not** by the resolve copy (`copyFileSync` stamps its destination, never its source, measured), so `expired` has always meant time since the last COMPLETED run rather than the last run. |

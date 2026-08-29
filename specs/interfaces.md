@@ -1940,7 +1940,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   accepted-and-ignored** — a one-member replica set is a field that does nothing, and a field that does
   nothing is one an operator sets and then trusts. `3` is the ceiling because `PI_CONCURRENCY` defaults to
   3, so a fourth replica would queue rather than race, promising a comparison the deployment cannot
-  deliver. Finally, **`run.replicas` beside `run.resume: true`** is refused, naming both fields: a resumed
+  deliver. Since issue #242 a repo's own `concurrent` limit (`INT-SCOPED-LIMITS-FILE-CONTRACT`) can bound
+  a replica set below this ceiling too — by DEFERRAL, the set serializing rather than racing (subject to
+  that contract's no-FIFO terms); the ceiling's rationale gains a second bounding axis, not an exception. Finally, **`run.replicas` beside `run.resume: true`** is refused, naming both fields: a resumed
   run continues one lineage and replicas exist to fork it, and this refusal is what lets `session-key.mjs`
   keep deriving its key from the unsuffixed branch — without it every replica of one issue resolves the
   **same** key, sharing a transcript and contending for the store's one-writer lock.
@@ -2217,7 +2219,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|once-already-spent|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|once-already-spent|scope-cap|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2672,9 +2674,9 @@ validator rather than a second copy of it.
 ## INT-SCOPED-LIMITS-FILE-CONTRACT
 
 - **Producer/Consumer**: The admin extension (operator dialogs + confirm-gated tools) writes; the worker
-  reads and enforces. The receiver does not read it. The enforcement and the admin/worker wiring land in
-  issue #242's later slices — this entry is the file's contract from day one so the sides cannot drift,
-  and its Validation/Write-protocol/Enforcement bullets state those slices' terms up front.
+  reads and enforces. The receiver does not read it. The worker's enforcement is landed; the ADMIN wiring
+  (tools, panel, counter display) lands in a later slice of issue #242 — this entry has been the file's
+  contract from day one so the sides cannot drift.
 - **Location**: `PI_SCOPED_LIMITS_FILE` (unset = no scoped caps and no scoped concurrency; the worker loads
   `[]`). The one-job-per-folder mutex for local jobs is CODE, not configuration: it holds with no file, an
   empty file, or any file, and no row can raise it (`min(configured, 1)` for a local scope — scope strings
@@ -2725,11 +2727,12 @@ validator rather than a second copy of it.
   re-stamping an enforcement file's version would launder a newer file's dropped fields into a valid v1 —
   the exact widening the version field exists to prevent. The worker's directory watch hot-swaps on change
   and keeps the last-good set on a bad edit.
-- **Enforcement** (issue #242, next slice): scoped windows reserve FIRST, between the token-cap read and
+- **Enforcement** (issue #242): scoped windows reserve FIRST, between the token-cap read and
   the global `reserveBudget`, under redis keys `budget:s:<16-hex sha256 of the canonical scope>` composed
   by the budget module's own key builders; a scoped refusal returns `reason: "scope-cap"` pre-spend with
   the global ledger untouched and its own counter kept (refused-still-counts, per ledger), and a GLOBAL
-  refusal after a scoped reserve releases the scoped slot — neither ledger may drain the other. The
+  refusal after a scoped reserve releases the scoped slot — neither ledger's REFUSALS may drain the
+  other (a mid-reserve redis fault keeps the existing partial-INCR posture, on both ledgers alike). The
   refusal record's `budgetReserved` stays global-only (false on a `scope-cap` even though a scoped slot
   was spent). The worker log names the scope by its 16-hex key, never the raw string (a folder path in the
   log would breach no-PII-in-logs); the forge comment may name the repo it posts on. Concurrency defers at
@@ -2741,7 +2744,9 @@ validator rather than a second copy of it.
   longer than that window admits the next identical delivery — unchanged from pause behavior. Each wake's
   re-delay call is one more transient-redis-failure exposure (the job's `attempts: 2` absorbs a single
   blip). The in-flight counter is process memory with no TTL: a hold leaked past the release seam (none is
-  known; the seam is guarded) recovers only by worker restart. A deployment with no limits file behaves
+  known; the seam is guarded) recovers only by worker restart. `worker_started`'s two new fields (file
+  path, row count) and the four `scoped_limits_*` watcher events are LOG-ONLY — telemetry, not contract;
+  nothing may parse them. A deployment with no limits file behaves
   byte-identically, key for key and record for record, EXCEPT where the mutex serializes two same-folder
   local jobs — which is the feature, visible in wall-clock and the queue's delayed count, never in keys or
   records.
@@ -2895,6 +2900,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-29 | Issue #242, enforcement slice. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `scope-cap` — the pre-spend policy refusal for a job over its scope's day/week/month window; a fixed token like every sibling, with the scope named only in the forge comment and, as its 16-hex key, in the worker log (no-PII-in-logs); `budgetReserved` keeps its global-only meaning, false on a scope-cap even though the scoped counter kept its refused reservation. **`INT-SCOPED-LIMITS-FILE-CONTRACT`'s Enforcement section is now landed code, checked against it**: scoped-reserves-first between the token-cap read and the global reserve, the compensating release on a global refusal, both-or-neither refund on `container-never-started`, the 5s re-check deferral above the processor's try, the setup guard, and the release-first finally. **The `REPLICAS_MAX` rationale AMENDED**, one sentence: a repo's `concurrent` limit can bound a replica set below the ceiling too, by deferral — a second bounding axis, not an exception. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: scoped limits deliberately do NOT ride the overlay (the gate reads a watched ref above the per-job settings read); the design entry's stale key list was corrected in the same PR. |
 | 2026-08-29 | Issue #242, schema slice. **NEW `INT-SCOPED-LIMITS-FILE-CONTRACT`**: `scoped-limits.json` (`PI_SCOPED_LIMITS_FILE`), per-scope day/week/month run caps and per-scope concurrency on the pause-windows scope vocabulary, shared-parser validated (`./scoped-limits`), versioned fail-loud-on-newer with a refuse-never-repair write rule, canonical (resolved) local scopes so one directory's spellings share one counter and one mutex slot. The enforcement and the admin/worker wiring land in this issue's later slices; the contract states their terms up front so the slices implement it rather than re-derive it. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` UNCHANGED, checked**: `scopeOf` stays the single folder-vs-repo split and the pause matcher keeps matching the RAW scope — the new file's canonicalization is its own, recorded in both entries' terms. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` UNCHANGED, checked**: its version rule is adopted by the new contract, its write-repair rule deliberately is not (analytics may repair; enforcement config must refuse), stated in the new entry. |
 | 2026-08-29 | Issue #231, surfaces slice, one CORRECTION. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the close-words paragraph claimed a merge that should release work "is a close too" unqualified; that holds on GitHub and Forgejo (both emit `closed` for a merged PR) and is FALSE on GitLab, whose `merge` is its own action no rule takes, so a GitLab close rule fires on an explicit close only. Stated as a per-forge gap rather than glossed; the READMEs, the operator skill and docs/gitlab.md carry the same qualification. No behavior changed, only the claim. |
 | 2026-08-29 | Issue #231, worker slice. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `once-already-spent` -- the pre-spend policy refusal for a close job whose one-shot a FOREIGN job already spent (the job's own earlier attempt is excused, so BullMQ's attempts:2 survives; the refusal posts the sibling-pattern forge comment). Same admissible class as every policy reason: a fixed token, never payload text. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: the disarm writes exactly the `on.disarmed` mark that contract already specifies; the writer landed two slices ago and only its callers are new. |

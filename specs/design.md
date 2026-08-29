@@ -258,8 +258,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   Since issue #80 the invariant is *enforced* where units are minted: `pi-dispatch service install`
   refuses to install a worker unit when one exists in the other scope (user vs system LaunchAgent/
   LaunchDaemon, `systemctl --user` vs `/etc/systemd/system`) — before this, the paragraph above was the
-  only thing standing between an operator and two workers sharing one daemon.
-- **Traces to**: `OQ-002`, `REQ-QUEUE-BURST-NO-DROP`
+  only thing standing between an operator and two workers sharing one daemon. `pi-dispatch worker` run
+  by hand holds no lock, so the enforcement covers installed units only; two hand-run workers are
+  already catastrophic (the second one's reaper kills the first's live containers) and stay unsupported.
+- **A second axis since issue #242 — per-SCOPE concurrency, by deferral**: the global knob bounds how
+  many jobs run at once; it says nothing about WHERE they run. The pickup gate now also holds an
+  in-process in-flight count per scope (`scopeOf`'s folder-or-repo, resolved for local paths): a job
+  over its scope's ceiling is deferred through the delayed set on a fixed re-check (`moveToDelayed` +
+  `DelayedError`, the pause-gate seam), never refused — a busy scope is transient state
+  (`CONST-RETRY-INFRA-ONLY`). Local folders carry a structural ceiling of ONE with no configuration and
+  no off-switch (the working-tree race `run.replicas` is already refused for); forge scopes are
+  unbounded unless a `scoped-limits.json` row lowers them. The count lives in PROCESS MEMORY
+  deliberately, on this entry's own invariant: one worker per daemon means no second process holds
+  containers the map cannot see, the boot reaper clears survivors before draining starts (so a fresh
+  empty map is never wrong about a live container, except on `reaper_skipped` where no new container
+  can start either), and a Redis-held count would survive a crash WRONGLY — a claim for a container the
+  reaper just killed, the two-sources-of-truth failure mode `OQ-008` exists to refuse. See
+  `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` for the file, the money windows and the rejected alternatives.
+- **Traces to**: `OQ-002`, `REQ-QUEUE-BURST-NO-DROP`, `REQ-SCOPED-LIMITS`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`
 
 ## DES-CRON-VIA-BULLMQ-SCHEDULER
 
@@ -270,15 +286,26 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   parsing, persistence, missed-tick policy and overlap control — four mechanisms, the exact drowning
   `DES-QUEUE-BULLMQ-OVER-CUSTOM` refused. BullMQ's scheduler is a **Redis object, not a JS timer**
   (`ZADD repeat <nextMillis> <id>` + `HMSET`), so it survives a worker restart with nothing to lose and a
-  Redis restart under the AOF we already require. Three of its properties are exactly what a
-  money-spending harness needs, and all three are verified rather than assumed:
+  Redis restart under the AOF we already require. Three of its properties matter to a money-spending
+  harness, and each is verified rather than assumed — the second one was verified WRONG and corrected
+  (issue #242; the original claim shipped unevidenced and stood for a month):
   - **No backfill.** Six hours down with an hourly schedule costs **one** paid run on restart, not six —
     the `every` path aligns forward to a single next slot; the `pattern` path asks cron-parser for one
     `next`. Neither loops. This is the difference between a reboot and a bill.
-  - **No overlap, structurally.** The next job is only created when the current one *starts processing*,
-    so a 30-minute flow on a 10-minute schedule yields one job every 30 minutes rather than three
-    concurrent agent runs. The cost is silent under-firing — actual cadence degrades below the configured
-    one under load, so the admin extension should surface `next` drift rather than let it look healthy.
+  - **At most one UNSTARTED occurrence — which is NOT no-overlap.** The scheduler mints the next
+    occurrence when the current one is PICKED UP (`bullmq → worker.js → nextJobFromJobData →
+    jobScheduler.upsertJobScheduler`, `override: false`), it lands in the delayed set, and promotion is
+    on time alone (`bullmq → commands/includes/promoteDelayedJobs.lua`, a ZRANGEBYSCORE by timestamp
+    that consults nothing about active jobs). So a 30-minute flow on a 10-minute schedule DOES run
+    concurrently with its own successor whenever `PI_CONCURRENCY` has a free slot — this entry used to
+    claim the opposite ("no overlap, structurally"), and the claim was false at every version that
+    carried it. What holds structurally is the weaker bound: at most one unstarted next occurrence
+    exists at a time, so the queue cannot flood. Same-FOLDER no-overlap is real again as of issue #242,
+    supplied by the worker's one-job-per-folder mutex at the pickup gate, keyed on the RESOLVED folder
+    path so spelling variants converge — and it is the mutex's property, holding within one worker
+    process (the one-worker-per-daemon boundary this design already assumes above), never the
+    scheduler's. A deferral consumes no attempt (`bullmq → job.js → moveToDelayed → skipAttempt: true`),
+    so the scheduled path's single-attempt posture survives any number of deferrals.
   - **Deterministic `jobId`** — `repeat:<schedulerId>:<nextMillis>` — so scheduler jobs get
     `REQ-DEDUP-BY-DELIVERY-GUID`-equivalent dedup for free, with no GUID to supply.
   - **Local-only this slice.** The on × run diagonal rejects a `cron → github` trigger at load
@@ -705,7 +732,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   property nobody wrote down. Recording which tier each subcommand sits on makes "may this be
   automated?" a lookup instead of a debate.
 - **The never-tier is load-bearing**: no subcommand, flag, or fix path may rewrite malformed config
-  (fail-loud/keep-last-good is doctrine), write triggers/pause-windows *content*, pull a
+  (fail-loud/keep-last-good is doctrine), write triggers/pause-windows/scoped-limits *content*, pull a
   trigger-named `run.image` (each image is a separate per-flow trust posture — only the deployment's
   default is ever offered, and the consent keypress is the "pulled it onto this host yourself" act
   `SECURITY.md` requires), guess a semantic env value, touch branch protection on a forge, or **name an
@@ -1512,8 +1539,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Decision**: Runtime-tunable settings are a flat `settings.json` **overlay** — path `PI_SETTINGS_FILE`,
   default `<OS temp>/pi-dispatch/settings.json` — written **atomically** (tmp + rename) by the admin
   extension and **re-read by the worker at each job start**. The keys are exactly `model`, `provider`
-  (non-empty strings), `maxTurns`, `dailyCap`, `weeklyCap`, `monthlyCap` (int ≥1), `concurrency` (int 1–10),
-  and `softHoldPct` (int 1–99). `weeklyCap`/`monthlyCap`/`softHoldPct` are optional ceilings/band that
+  (non-empty strings), `maxTurns`, `dailyCap`, `weeklyCap`, `monthlyCap`, `maxTokens`, `dailyTokenCap`
+  (int ≥1), `concurrency` (int 1–10), and `softHoldPct` (int 1–99) — plus `secretProfiles`, which rides
+  the same file operator-only, deliberately outside `KNOWN_KEYS` (`INT-CONFIG-OVERLAY-CONTRACT`).
+  `weeklyCap`/`monthlyCap`/`softHoldPct` are optional ceilings/band that
   default to **disabled** when unset (the mandatory daily cap is always the primary bound —
   `REQ-SPEND-CAPS-MULTI-WINDOW`). Resolution precedence is **`job.data > overlay > env > default`**;
   producers stop baking env defaults into job data, so an unset job field falls through to the overlay
@@ -2230,6 +2259,50 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ---
 
+## DES-SCOPED-LIMITS-AND-FOLDER-MUTEX
+
+- **Decision** (issue #242): Per-scope run caps and per-scope concurrency live in a watched operator
+  file, `scoped-limits.json` (`INT-SCOPED-LIMITS-FILE-CONTRACT`), on the pause-windows pattern: shared
+  parser, boot-load fail-loud, directory watcher keeping last-good, one mutable ref read once per
+  pickup. The money windows reserve through `reserveBudget`'s existing `keyPrefix` seam under
+  `budget:s:<16-hex sha256 of the canonical scope>` — SCOPED FIRST, so a noisy scope's refusals never
+  consume a global slot, with the compensating release when the GLOBAL window refuses after a scoped
+  reserve committed (either order has a victim: scoped-second lets a scope's storm burn global slots,
+  scoped-first-without-the-release lets a spent global cap drain every arriving scope's week and month
+  with zero runs; the release eliminates the second victim while refused-still-counts stays intact for
+  the scope's OWN refusals). Concurrency is a DEFERRAL at the pickup gate (fixed re-check,
+  `SCOPE_BUSY_RECHECK_MS`), never a refusal. The one-job-per-folder mutex for local jobs is CODE —
+  structural ceiling 1, `min()`-composed with any configured value, no file, no tool, no off-switch —
+  because two agents in one bind-mounted working tree is the race `run.replicas` is refused for, and a
+  cron trigger reaches it with no operator mistake at all (`DES-CRON-VIA-BULLMQ-SCHEDULER`, corrected).
+- **Why a file and not the overlay**: the deferral gate runs ABOVE the per-job settings read, so
+  gate-read config must come from a watched mutable ref; and `KNOWN_KEYS` is a flat scalar list whose
+  one map-shaped resident (`secretProfiles`) is deliberately model-unreachable — the opposite of the
+  editability these limits require.
+- **Why the count is process memory**: recorded on `DES-CONCURRENCY-3`'s second axis — one worker per
+  daemon, reaper-before-drain, and the `OQ-008` two-sources-of-truth refusal of a Redis-held claim.
+- **Deferral economics**: 5s re-check ⇒ at most ~360 wakes across a worst-case 30-minute hold, each
+  ~1ms of synchronous predicate; a same-folder chained child (enqueued before its parent's release)
+  pays exactly one re-check. No per-scope FIFO is promised — deferral is a gate, not a queue, and a
+  sustained same-scope arrival rate can starve an individual waiter. Each wake's re-delay is one more
+  transient-redis exposure; `attempts: 2` absorbs a single blip.
+- **Rejected**:
+  - *BullMQ Pro group concurrency/rate limits* — a paid dependency for exactly this feature, and it
+    moves scope enforcement into the queue layer where a group-held job's budget semantics are
+    undefined against `CONST-BUDGET-BEFORE-TOKENS`.
+  - *The dead `limiter` option* — BullMQ's limiter is global, not per-key (recorded further up this
+    file), and a rate is not a concurrency.
+  - *`PI_CONCURRENCY=1`* — serializes the world to fix one folder, and an overlay edit can silently
+    raise it again; the corrected cron claim must not depend on a setting.
+  - *Per-trigger `run.*` fields* — many triggers feed one repo, so the scope is the wrong shape; and
+    limits are runtime controls, not reviewed trigger content.
+  - *An overlay map key* — see "why a file" above.
+  - *Redis in-flight counters* — see "why process memory" above.
+- **Traces to**: `REQ-SCOPED-LIMITS`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `DES-CONCURRENCY-3`,
+  `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` (the seam), `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+
+---
+
 ## DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED
 
 - **Decision**: Which transcript a job resumes is **computed from the job**, never looked up. A forge job
@@ -2526,6 +2599,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-29 | Issue #242, enforcement slice, one CORRECTION and one new entry. **`DES-CRON-VIA-BULLMQ-SCHEDULER` CORRECTED**: the "No overlap, structurally" bullet was FALSE at every version that carried it — the next occurrence is minted at pickup (`worker.js → nextJobFromJobData → upsertJobScheduler`, `override: false`) and promoted on time alone (`promoteDelayedJobs.lua`), so a slow run overlaps its own successor whenever a slot is free (measured: 301ms of live same-folder container overlap through the real processor). Rewritten to the true bound (at most one UNSTARTED occurrence) with the same-folder no-overlap now supplied, structurally, by the folder mutex landing in this slice — the correction and its mechanism arrive together. **NEW `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`**: the watched `scoped-limits.json`, scoped-reserves-first with the compensating release on a global refusal, deferral-never-refusal concurrency at a fixed 5s re-check, the unconditional folder mutex on canonical paths, process-memory in-flight counts, and the rejected alternatives (BullMQ Pro groups, the dead global `limiter`, `PI_CONCURRENCY=1`, per-trigger fields, an overlay map, Redis in-flight counters). **`DES-CONCURRENCY-3` AMENDED**: gains the per-scope deferral axis, the hand-run-worker qualifier on the daemon invariant, and the process-memory reasoning. **`DES-CLI-SURFACE` AMENDED**: the never-tier enumeration gains scoped-limits content. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` CORRECTED in passing**: its key enumeration had drifted from `KNOWN_KEYS` (missing `maxTokens`, `dailyTokenCap`; `secretProfiles` now named as the operator-only resident) — pre-existing drift, unrelated to this issue, fixed while touching the file. **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` UNCHANGED, checked**: the pause gate, its window-end semantics and its raw-scope matcher are byte-identical; the new gate sits AFTER it and reuses only the seam. |
 | 2026-08-29 | Issue #231, worker slice. **`DES-ONE-SHOT-DISARM-IN-THE-FILE` AMENDED**: the lifecycle paragraph is now landed code (recordRun wrap, all records disarm, the own-jobId pre-spend exception via the injected queue jobId); NEW compose-topology paragraph -- the single-file :ro bind mount pins a dead inode across the disarm's rename, so the worker's `once-already-spent` pre-spend gate is the once-enforcement layer there, stated beside the mount in BOTH compose copies; the disarm path resolves `PI_TRIGGERS_FILE ?? ./triggers.json` on doctor's precedent, never the cron-off `triggersFile` knob. **`DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked**: the hook no-ops on any job without `matched.once`, cron included. |
 | 2026-08-28 | Issue #231, second slice (writer). **NEW `DES-ONE-SHOT-DISARM-IN-THE-FILE`**: the shared locked triggers-file writer moves to the worker package (`./triggers-file`, admin re-exports), both authors serialize through `<path>.lock` (session-store idiom, plus the one new mechanism -- stale takeover at 10s, argued from this file having no reaper), the disarm verifies index+number identity before writing and never repairs an unreadable file, and the worker-slice lifecycle contract (record-first, all records disarm, own-jobId pre-spend exception) is stated once here. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**: the parser stays where it was; only the writer moved in beside it. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` UNCHANGED, checked**: `writeOverlay` keeps its own mkdir posture, and the divergence (no implicit mkdir for triggers.json) is argued in the new entry. |
 | 2026-08-28 | Issue #231, first slice (schema). **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: the receiver's type set gains `issue`, and the widening-vs-narrowing row gains the third case -- a new `on.type` or action word is the LOUD-skew widening (an old parser throws at its closed vocabulary instead of silently dropping `on.once` and keeping a "disarmed" trigger firing), bought at #187's release-ordering price; `run.flow`'s webhook charset check is recorded as the file's second true narrowing and argued safe (such a flow could never materialise, so the refusal only reaches files that already failed post-budget). **`DES-PR-TRIGGER-ROUTES-TO-FLOW` UNCHANGED, checked**: close routing lands with the receiver slice; nothing in this slice touches PR routing. **`DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked**: `on.once`/`on.number`/`on.disarmed` are refused on cron precisely so the scheduler's identity model (id, not index) stays untouched. |

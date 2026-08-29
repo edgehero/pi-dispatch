@@ -2,11 +2,19 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { InfraRetry, runJob } from "./processor.mjs";
+import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
 
 const exec = promisify(execFile);
 
 export const QUEUE = "pi-jobs";
 export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
+// The scope-busy re-check (issue #242): a held scope has no natural "until" (the holder may run to
+// JOB_TIMEOUT_MS), so a deferred job re-tests on a fixed cadence. 5s keeps the worst case trivial
+// (<=360 wakes across a 30-minute hold, each ~1ms of synchronous predicate briefly occupying a slot)
+// while a same-folder CHAINED job -- enqueued by its parent before the parent's finally releases the
+// folder -- pays exactly one re-check, not fifteen seconds of dead air. No jitter: one worker per
+// docker daemon bounds any herd by its own concurrency, and a contended wake just re-defers.
+export const SCOPE_BUSY_RECHECK_MS = 5_000;
 
 /**
  * Build the BullMQ processor.
@@ -27,7 +35,7 @@ export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now() }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now() }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -45,19 +53,68 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			throw new DelayedError();
 		}
 
-		const startedAt = new Date().toISOString();
-		const name = `pi-job-${job.id}`;
-		const timer = setTimeout(() => {
-			// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
-			Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
-		}, timeoutMs);
+		// Per-scope concurrency and the one-job-per-folder mutex (issue #242,
+		// INT-SCOPED-LIMITS-FILE-CONTRACT). SECOND, after the pause gate (a paused job must not burn
+		// re-check wakes) and STRICTLY above the `try` below, like the pause gate and for the same two
+		// reasons: a DelayedError thrown inside the try would be converted to UnrecoverableError by the
+		// catch, and a moveToDelayed rejection here must escape RAW into BullMQ's normal failed-attempt
+		// handling exactly as the pause gate's does (inside the try it would become a permanent failure
+		// plus a failure record for what was a transient blip). The limits snapshot is read ONCE here and
+		// shared with `scopedCaps` below, so the gate and the money ledger cannot disagree mid-job.
+		// tryAcquire is a synchronous check-and-increment -- no await between read and take, so Node's
+		// single thread makes it atomic at any concurrency -- and the local-folder limit is a structural 1
+		// (concurrencyFor) with no file and no off-switch: the scheduler mints a cron trigger's next
+		// occurrence at pickup and promotes it on time alone, so a slow run overlaps its own successor
+		// (measured: 301ms of live container overlap through this very processor) unless this gate holds.
+		// Infinity-limited scopes still acquire, so release stays uniform for every scoped job.
+		const limits = scopedLimits();
+		const scope = canonicalScope(job.data);
+		let held = false;
+		if (scope) {
+			if (!inFlight.tryAcquire(scope, concurrencyFor(job.data, limits))) {
+				// Optional-chained: makeProcessor gives `deps` no default and bare wirings pass deps: {}.
+				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
+				// host path); the delayed count and the job id are what an operator needs to see it.
+				deps?.log?.("scope_busy_deferred", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS });
+				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
+				throw new DelayedError();
+			}
+			held = true;
+		}
 
-		// Abort (timeout OR shutdown) => stop the container. docker stop sends SIGTERM then SIGKILL
-		// after the grace period; the runner exits and runContainer returns/throws.
-		const onAbort = () => {
-			Promise.resolve(stopContainer(name)).catch(() => {});
-		};
-		signal.addEventListener("abort", onAbort, { once: true });
+		let startedAt;
+		let name;
+		let timer;
+		let onAbort;
+		try {
+			// Nothing between the acquire above and the main `try` below may throw unguarded: the releasing
+			// finally belongs to THAT try, so an unguarded throw here would leak the hold and wedge the
+			// scope until a worker restart. Nothing in this block CAN throw today (setTimeout and
+			// addEventListener on the bullmq-allocated controller are total at processor arity 3); the
+			// guard is structural, not observational.
+			startedAt = new Date().toISOString();
+			name = `pi-job-${job.id}`;
+			timer = setTimeout(() => {
+				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
+				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
+			}, timeoutMs);
+
+			// Abort (timeout OR shutdown) => stop the container. docker stop sends SIGTERM then SIGKILL
+			// after the grace period; the runner exits and runContainer returns/throws.
+			onAbort = () => {
+				Promise.resolve(stopContainer(name)).catch(() => {});
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+		} catch (error) {
+			// Release and CLEAR the flag: this throw never reaches the main finally below, but a shared
+			// scope must never be releasable twice -- a double release frees another holder's slot.
+			if (held) {
+				inFlight.release(scope);
+				held = false;
+			}
+			clearTimeout(timer);
+			throw error;
+		}
 
 		try {
 			const settings = await getSettings();
@@ -99,6 +156,10 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// The daily TOKEN cap (issue #25), same overlay > env resolution. Check-AFTER, so it gates the
 				// NEXT job on prior recorded spend; null => the daily token counter is disabled.
 				tokenCap: settings.dailyTokenCap,
+				// This job's scoped budget windows (issue #242), from the SAME limits snapshot the pickup
+				// gate above read -- one read per pickup, so gate and ledger agree for this job's whole
+				// life. Null when no row carries a money window for this scope.
+				scopedCaps: budgetCapsFor(job.data, limits),
 				...deps,
 				runContainer: (ctx) => deps.runContainer({ ...ctx, name, signal }),
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
@@ -140,13 +201,16 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// records it as failed-and-distinct in the queue's failed set without a retry.
 			throw new UnrecoverableError(error.message);
 		} finally {
+			// Release FIRST and never throw (release clamps at zero by construction): a throw here would
+			// mask the job's real error, and a missed release wedges the scope until a worker restart.
+			if (held) inFlight.release(scope);
 			clearTimeout(timer);
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
 }
 
-export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, extraClosers = [] }) {
+export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, extraClosers = [] }) {
 	let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 	const processor = makeProcessor({
 		cancelJob: (id, reason) => worker.cancelJob(id, reason),
@@ -159,6 +223,11 @@ export function createWorker({ connection, concurrency, getSettings, redis, deps
 			if (Number.isInteger(n) && worker.concurrency !== n) worker.concurrency = n;
 		},
 		pauseUntil,
+		// Undefined pass-throughs take makeProcessor's own defaults (no limits; a fresh per-processor
+		// in-flight map -- one per worker process, which under DES-CONCURRENCY-3's one-worker-per-daemon
+		// shape means one per daemon).
+		scopedLimits,
+		inFlight,
 		deps,
 		recordRun,
 	});
