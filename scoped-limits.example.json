@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "limits": [
+    { "scope": "acme/web", "day": 10, "week": 40, "concurrent": 1 },
+    { "scope": "/srv/site", "month": 60 }
+  ]
+}

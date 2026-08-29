@@ -76,6 +76,12 @@ coverage/
 /subscriptions.json
 !subscriptions.example.json
 
+# Scoped limits (issue #242): per repo/folder run caps and concurrency. Holds local folder
+# paths (the scopes), so an operator's real file must never land in a checkout by accident;
+# scoped-limits.example.json is the template. Resolved only via PI_SCOPED_LIMITS_FILE.
+/scoped-limits.json
+!scoped-limits.example.json
+
 # The egress allowlist (issue #202): the hosts THIS deployment's jobs may reach. init scaffolds it into
 # the cwd, so without this rule the scaffold is committable by accident. There is no committed template
 # beside it, deliberately: the shipped default lives in init.mjs, and an example file here would be one

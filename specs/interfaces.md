@@ -2669,6 +2669,91 @@ validator rather than a second copy of it.
 
 ---
 
+## INT-SCOPED-LIMITS-FILE-CONTRACT
+
+- **Producer/Consumer**: The admin extension (operator dialogs + confirm-gated tools) writes; the worker
+  reads and enforces. The receiver does not read it. The enforcement and the admin/worker wiring land in
+  issue #242's later slices — this entry is the file's contract from day one so the sides cannot drift,
+  and its Validation/Write-protocol/Enforcement bullets state those slices' terms up front.
+- **Location**: `PI_SCOPED_LIMITS_FILE` (unset = no scoped caps and no scoped concurrency; the worker loads
+  `[]`). The one-job-per-folder mutex for local jobs is CODE, not configuration: it holds with no file, an
+  empty file, or any file, and no row can raise it (`min(configured, 1)` for a local scope — scope strings
+  are not reliably typeable folder-vs-repo, so the clamp is silent rather than a parse refusal that would
+  misfire on `"a/b"`).
+- **Shape**: `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`.
+  - `version` (required): integer ≥ 1, fail-loud on newer (`scoped-limits file written by a newer
+    pi-dispatch (version N; this build understands 1)`). Adopted from `INT-SUBSCRIPTIONS-FILE-CONTRACT`
+    because this is a MONEY file: unknown fields are silently dropped per the operator-file policy, so a
+    v2 cap field an old worker dropped would be a silently WIDENED spend limit. The protection covers
+    STAMPED files only — a hand-edit that plants a future field in a `version: 1` file drops in silence,
+    the operator-file policy working as designed.
+  - `scope` (required): a forge `"owner/name"` or a local folder path, matched EXACTLY against the job's
+    canonical scope — no prefixes, and any scope containing `"*"` is refused at parse (an exact matcher
+    would make a glob row silently inert). The bare `"*"` carries its own refusal: the only non-redundant
+    reading (a per-scope default) would invert the pause file's `"*"` (one rule matching all scopes); if
+    a later version adopts it, an exact row beats `"*"`. Duplicate scopes (after trimming and
+    absolute-path resolution) refuse the file. Write local folder scopes as ABSOLUTE paths: the job side
+    always resolves, so a relative folder row can never match any local job — and worse, it CAN exactly
+    match a same-named forge repo and silently govern that instead; the doctor advisory flags
+    unreferenced scopes. Path shape is interpreted with the worker platform's own `path` semantics, so a
+    foreign-platform row (a Windows drive path on a POSIX worker) parses, stays verbatim, and is inert on
+    that platform — the one place the shared parser is platform-dependent, and the same advisory names it.
+  - `day` / `week` / `month` (optional): integer ≥ 1 run caps per UTC day / Monday-start UTC week /
+    calendar month, counted per scope beside the global windows. `0` is refused — "never run this scope"
+    already has two honest spellings (delete the trigger; a pause window).
+  - `concurrent` (optional): integer ≥ 1, the scope's in-flight ceiling, enforced by DEFERRAL through the
+    delayed set — never a refusal, a busy scope is transient state. At least one of the four is required.
+- **Canonicalization**: a local job's scope is `path.resolve(folder.trim())` and an absolute-path-shaped
+  row is stored resolved, so every spelling of one directory (`/srv/site/`, `/srv//site`, `/srv/x/../site`)
+  converges on one counter and one mutex slot, and Unicode is NFC-normalized on both sides (macOS's
+  filesystem hands back NFD while a dialog types NFC; ASCII is fixed under NFC so no existing key
+  changes); symlinks and filesystem case-insensitivity are deliberately not resolved (realpath is an fs
+  call on the hot path that can throw; on a case-insensitive volume `/Srv/Site` and `/srv/site` stay two
+  scopes — the pause matcher lives with both residuals). Forge scopes pass through with only the NFC
+  normalization. A
+  resolved local scope is always an absolute path and a repo string never is, so a folder and a repo both
+  named `a/b` cannot share counters. The pause matcher keeps the RAW `scopeOf` value — resolving there
+  would change which jobs an operator's existing trailing-slash window matches; the folder-vs-repo split
+  itself stays defined once, in `scopeOf`.
+- **Validation**: the SHARED `parseScopedLimits` (worker `./scoped-limits`) validates the WHOLE file
+  fail-loud (`configError`, positional labels); the admin reads AND writes through it and the worker
+  boot-loads through it, so the sides cannot drift (mirrors `INT-PAUSE-WINDOWS-FILE-CONTRACT`).
+- **Write protocol**: atomic tmp + rename, validated through `parseScopedLimits` before the write. A
+  MISSING file starts from the empty v1 shape; an EXISTING file with a missing or newer `version` refuses
+  the write (`{ invalid }`) — read and write both refuse, never a silent repair. This deliberately differs
+  from `INT-SUBSCRIPTIONS-FILE-CONTRACT`'s repair rule: repairing an analytics file risks nothing, while
+  re-stamping an enforcement file's version would launder a newer file's dropped fields into a valid v1 —
+  the exact widening the version field exists to prevent. The worker's directory watch hot-swaps on change
+  and keeps the last-good set on a bad edit.
+- **Enforcement** (issue #242, next slice): scoped windows reserve FIRST, between the token-cap read and
+  the global `reserveBudget`, under redis keys `budget:s:<16-hex sha256 of the canonical scope>` composed
+  by the budget module's own key builders; a scoped refusal returns `reason: "scope-cap"` pre-spend with
+  the global ledger untouched and its own counter kept (refused-still-counts, per ledger), and a GLOBAL
+  refusal after a scoped reserve releases the scoped slot — neither ledger may drain the other. The
+  refusal record's `budgetReserved` stays global-only (false on a `scope-cap` even though a scoped slot
+  was spent). The worker log names the scope by its 16-hex key, never the raw string (a folder path in the
+  log would breach no-PII-in-logs); the forge comment may name the repo it posts on. Concurrency defers at
+  the pickup gate with a fixed re-check delay; deferral consumes no attempt, no budget, no record. No
+  per-scope FIFO is promised: a newer job may take a freed scope ahead of an older deferred one, and a
+  sustained same-scope arrival rate can starve a deferred job indefinitely — deferral is a gate, not a
+  queue. A lowered `concurrent` never preempts in-flight jobs (next-pickup grain); a lowered cap applies
+  against counts already accrued. The forge semantic-dedup window is enqueue-time only, so a deferral
+  longer than that window admits the next identical delivery — unchanged from pause behavior. Each wake's
+  re-delay call is one more transient-redis-failure exposure (the job's `attempts: 2` absorbs a single
+  blip). The in-flight counter is process memory with no TTL: a hold leaked past the release seam (none is
+  known; the seam is guarded) recovers only by worker restart. A deployment with no limits file behaves
+  byte-identically, key for key and record for record, EXCEPT where the mutex serializes two same-folder
+  local jobs — which is the feature, visible in wall-clock and the queue's delayed count, never in keys or
+  records.
+- **Acceptance**: Given a file with `version: 2`, when either side reads it, then it is refused loudly
+  naming both versions, and a write against it is refused without touching the file. Given a row with
+  `scope: "*"`, `0` for any bound, a duplicate scope, or no limit field at all, when parsed, then the whole
+  file is refused with a positional message. Given rows `/srv/site` and `/srv/site/`, when parsed, then the
+  duplicate refusal fires — they are one scope. Given no `PI_SCOPED_LIMITS_FILE`, then the worker loads
+  `[]` and no scoped key is ever created.
+
+---
+
 ## INT-SUBSCRIPTIONS-FILE-CONTRACT
 
 - **Producer/Consumer**: operator → admin extension; the worker exports the validator and reads nothing.
@@ -2810,6 +2895,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-29 | Issue #242, schema slice. **NEW `INT-SCOPED-LIMITS-FILE-CONTRACT`**: `scoped-limits.json` (`PI_SCOPED_LIMITS_FILE`), per-scope day/week/month run caps and per-scope concurrency on the pause-windows scope vocabulary, shared-parser validated (`./scoped-limits`), versioned fail-loud-on-newer with a refuse-never-repair write rule, canonical (resolved) local scopes so one directory's spellings share one counter and one mutex slot. The enforcement and the admin/worker wiring land in this issue's later slices; the contract states their terms up front so the slices implement it rather than re-derive it. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` UNCHANGED, checked**: `scopeOf` stays the single folder-vs-repo split and the pause matcher keeps matching the RAW scope — the new file's canonicalization is its own, recorded in both entries' terms. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` UNCHANGED, checked**: its version rule is adopted by the new contract, its write-repair rule deliberately is not (analytics may repair; enforcement config must refuse), stated in the new entry. |
 | 2026-08-29 | Issue #231, surfaces slice, one CORRECTION. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the close-words paragraph claimed a merge that should release work "is a close too" unqualified; that holds on GitHub and Forgejo (both emit `closed` for a merged PR) and is FALSE on GitLab, whose `merge` is its own action no rule takes, so a GitLab close rule fires on an explicit close only. Stated as a per-forge gap rather than glossed; the READMEs, the operator skill and docs/gitlab.md carry the same qualification. No behavior changed, only the claim. |
 | 2026-08-29 | Issue #231, worker slice. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `once-already-spent` -- the pre-spend policy refusal for a close job whose one-shot a FOREIGN job already spent (the job's own earlier attempt is excused, so BullMQ's attempts:2 survives; the refusal posts the sibling-pattern forge comment). Same admissible class as every policy reason: a fixed token, never payload text. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: the disarm writes exactly the `on.disarmed` mark that contract already specifies; the writer landed two slices ago and only its callers are new. |
 | 2026-08-28 | Issue #231, poller slice. **`INT-WEBHOOK-PAYLOAD-SUBSET` AMENDED** (synthesized row): the `closed` source rides the existing `/issues/events` feed -- a `closed` entry's `actor` is the closer with `{ id, login }` (verified live), PRs appear there discriminated by `issue.pull_request` and a merged PR emits `closed`, the PR arm fetches the PR once for shape parity, delivery ids stay `poll-e<event>`; the closer gate runs in the poller's choke point with the webhook arm's one-derivation predicate, an indeterminate lookup holds the cursor and retries, bounded, then drops that one close loudly (`poll_close_gate_gave_up`) -- nothing redelivers to a poller, so the availability half of fail-closed is a bound, not a wedge. Nothing is synthesized from open-PR-list disappearance (it cannot name the closer). The receiver-slice sentence "close triggers fire over webhooks only" is retired. **`REQ-DEDUP-BY-DELIVERY-GUID` UNCHANGED, checked**: `poll-e` ids were already in the `gh-` dedup space; closes add no id family. |

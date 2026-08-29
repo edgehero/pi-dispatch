@@ -279,6 +279,12 @@ test("triggers file is honored verbatim -- no default path, null means cron disa
 	assert.equal(c.triggersFile, "/abs/x.json");
 });
 
+test("scoped-limits file is honored verbatim -- no default path, null means no scoped limits", () => {
+	assert.equal(loadConfig({}).scopedLimitsFile, null);
+	const c = loadConfig({ PI_SCOPED_LIMITS_FILE: "/abs/scoped-limits.json" });
+	assert.equal(c.scopedLimitsFile, "/abs/scoped-limits.json");
+});
+
 test("configError is tagged for clean CLI reporting", () => {
 	assert.equal(configError("x").piDispatchConfig, true);
 });
