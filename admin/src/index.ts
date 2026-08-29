@@ -394,7 +394,10 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch triggers",
     description:
       "Read-only. Lists the configured triggers as `{ index, ...trigger }` entries. Use the `index` to target " +
-      "a specific trigger with dispatch_trigger_edit or dispatch_trigger_delete.",
+      "a specific trigger with dispatch_trigger_edit or dispatch_trigger_delete. A close-capable entry (kind " +
+      "issue, or a pull_request on the forge's close word) may carry `on.number` (narrowed to one item), " +
+      "`on.once` (a one-shot), and `on.disarmed` { at, jobId? } — the worker's mark that the one-shot fired; " +
+      "a disarmed entry still lists here but matches nothing until an operator deletes the key to re-arm it.",
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(process.env);
@@ -449,11 +452,16 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Adds a trigger to triggers.json and applies it live. The operator MUST approve a confirm dialog showing " +
       "the entry; with no interactive operator it is refused. `flow` is the .pi/skills/<name> skill the job runs " +
-      "(its SKILL.md is the agent's instructions). `kind` = cron|label|comment|pull_request. cron (local) needs " +
+      "(its SKILL.md is the agent's instructions). `kind` = cron|label|comment|pull_request|issue. cron (local) needs " +
       "id, pattern, `folder` (absolute host path the job runs in), `flow`, and `task` (the prompt text handed to " +
       "the agent), and may set optional model/provider/maxTurns for that schedule (omit = deployment default). " +
       "label needs labels[]+flow; comment needs phrase+flow; pull_request needs action[] (+ optional labels[]) + " +
-      "flow. Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
+      "flow. issue fires when an ISSUE closes: it needs flow, its action[] defaults to the forge's close word " +
+      "(github/forgejo closed, gitlab close; azure has no close trigger), and it may set `number` (the forge's " +
+      "own item number, narrowing the rule to that one issue) and `once: true` (a one-shot: it fires once, the " +
+      "run is recorded, then the worker disarms the entry by writing on.disarmed; once requires number). A " +
+      "close-only pull_request rule accepts the same number/once narrowing. " +
+      "Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
       "also decides which action words pull_request accepts: github is " +
       "labeled|opened|synchronize|reopened|review_submitted|closed, gitlab is open|update|reopen|approved|close, " +
       "forgejo is label_updated|opened|synchronized|reopened|closed, azure is created|updated (no close word). " +
@@ -479,13 +487,18 @@ function registerTools(pi: ExtensionAPI): void {
       phrase: Type.Optional(Type.String()),
       labels: Type.Optional(Type.Array(Type.String())),
       action: Type.Optional(Type.Array(Type.String())),
+      // The close-trigger narrowings (issue #231), read only by the close-capable arms of
+      // buildTriggerEntry and refused fail-loud by the shared validator everywhere else -- the
+      // `repository` posture above, restated for the two fields whose whole point is narrowing spend.
+      number: Type.Optional(Type.Integer({ minimum: 1 })),
+      once: Type.Optional(Type.Boolean()),
       model: Type.Optional(Type.String()),
       provider: Type.Optional(Type.String()),
       maxTurns: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const entry = buildTriggerEntry(params.kind, params);
-      if (!entry) throw new Error(`unknown trigger kind '${params.kind}' (cron|label|comment|pull_request)`);
+      if (!entry) throw new Error(`unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)`);
       const result = await confirmedWrite(
         ctx,
         { title: `Add ${params.kind} trigger`, message: `Add to triggers.json:\n${JSON.stringify(entry)}` },
@@ -749,6 +762,12 @@ function triggerList(paths: any): any[] {
  * different failure from being refused: they simply never try.
  */
 const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
+// The per-forge issue close word (issue #231), the tool's default `action` for kind "issue": the
+// shared validator's ISSUE_ACTIONS accepts exactly one word per forge today, so defaulting to it
+// makes the kind authorable without knowing three forges' spellings. No azure entry on purpose --
+// the validator refuses the whole type there with its own message (a work item's close is a state
+// transition the projected payload subset cannot see), and a default here would only reword it.
+const ISSUE_CLOSE_WORD: Record<string, string> = { github: "closed", gitlab: "close", forgejo: "closed" };
 const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
   // The close words ride the hint too (issue #231): the dialog passes whatever is typed through the
   // shared validator, so a close-only rule IS authorable here, and a hint that omits the word reads
@@ -787,6 +806,27 @@ export function buildTriggerEntry(kind: string, f: any): any {
     const on: any = { type: "pull_request", action: asWords(f.action) };
     const any = asWords(f.labels ?? f.any);
     if (any.length > 0) on.any = any;
+    // The close-trigger narrowings (issue #231), carried only when set so every pre-#231 call site
+    // writes byte-identical entries. Passed through rather than gated on the action word: the shared
+    // validator refuses number/once on a non-close rule with a message naming why, and pre-judging
+    // that here would be the silent-rewrite posture this function already rejects for `forge`.
+    const prNumber = optInt(f.number);
+    if (prNumber !== undefined) on.number = prNumber;
+    if (typeof f.once === "boolean") on.once = f.once;
+    return { on, run: { kind: forge, flow: f.flow } };
+  }
+  if (kind === "issue") {
+    // The close-trigger kind (issue #231). `action` DEFAULTS to this forge's close word -- the only
+    // word the shared validator accepts today -- so the kind is authorable without knowing three
+    // forges' spellings; an explicit word still passes through verbatim to be refused fail-loud if
+    // wrong. `number`/`once` ride only when set, mirroring the loader's absent-not-undefined shape;
+    // every constraint between them (once requires number, once excludes replicas, azure has no
+    // close trigger at all) lives in the one validator the write goes through.
+    const action = asWords(f.action);
+    const on: any = { type: "issue", action: action.length > 0 ? action : [ISSUE_CLOSE_WORD[forge] ?? "closed"] };
+    const number = optInt(f.number);
+    if (number !== undefined) on.number = number;
+    if (typeof f.once === "boolean") on.once = f.once;
     return { on, run: { kind: forge, flow: f.flow } };
   }
   return null;

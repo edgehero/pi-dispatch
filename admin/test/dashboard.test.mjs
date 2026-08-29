@@ -440,6 +440,71 @@ test("TRIGGER_DETAIL says so when a trigger loads packages but the overlay stage
   assert.match(detail, /packages loaded · \(none staged in the overlay\)/, "loading with nothing staged is stated, not blank");
 });
 
+// --- one-shot badges + the close trust model (issue #231) ---
+
+/** A one-trigger snapshot for the close-capable kinds; `t` is the display record under test. */
+const shotSnap = (t) => ({
+  ...SNAPSHOT,
+  runs: [],
+  activeJobId: null,
+  triggers: { triggers: [t] },
+  stagedPackages: { stagedAt: null, packages: [] },
+});
+
+test("the LIST badges a one-shot: [once] armed, [spent] disarmed, absent otherwise -- both close-capable kinds", async () => {
+  // The colored twin of render.mjs's badge pair, this file's colour doctrine: [once] accent (it
+  // narrows spend -- an override, not a risk), [spent] dim (a rule that finished its job).
+  const armed = { type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", forge: "github", packages: false };
+  const a = await openTrigger(shotSnap(armed));
+  assert.match(a.list, /\[closed\] #40 → github deploy \[once\]/, "an armed one-shot row says so");
+  assert.doesNotMatch(a.list, /\[spent\]/);
+
+  const spent = { ...armed, once: true, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "gh-77" } };
+  const s = await openTrigger(shotSnap(spent));
+  assert.match(s.list, /\[closed\] #40 → github deploy \[spent\]/, "a spent one-shot row says so");
+  assert.doesNotMatch(s.list, /\[once\]/, "the states are mutually exclusive");
+
+  // The close-only pull_request twin carries the same pair.
+  const pr = { type: "pull_request", action: ["closed"], number: 7, once: true, any: [], all: [], none: [], flow: "archive", forge: "github", packages: false };
+  const p = await openTrigger(shotSnap(pr));
+  assert.match(p.list, /\[closed\] #7 → github archive \[once\]/);
+
+  // The negative claim: a standing close rule (no once, no disarmed) renders no badge at all.
+  const standing = { type: "issue", action: ["closed"], number: null, once: false, flow: "announce", forge: "github", packages: false };
+  const n = await openTrigger(shotSnap(standing));
+  assert.doesNotMatch(n.list, /\[once\]|\[spent\]/, "no one-shot fields, no badge -- the row is byte-identical to before");
+});
+
+test("TRIGGER_DETAIL's trust model names the CLOSER gate and the worker's disarm on close-capable rules", async () => {
+  // The gate is the CLOSER's resolved write access, never author_association (GitHub sends none for
+  // a close), and the disarm is the WORKER's write after the run record -- stated where an operator
+  // is already reading who authorizes what.
+  const armed = { type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", forge: "github", packages: false };
+  const a = await openTrigger(shotSnap(armed));
+  assert.match(a.detail, /CLOSER's resolved repository permission/, "the github close gate names the closer");
+  assert.doesNotMatch(a.detail, /collaborator's label/, "the label line would name a gate this rule never runs");
+  // The width-80 frame clips the bullet's tail (the trust lines are written for a real terminal's
+  // width, like the gitlab access-level line above them) -- the visible prefix is the claim.
+  assert.match(a.detail, /one-shot: the WORKER writes on\.disarmed into triggers\.json/);
+  assert.match(a.detail, /one-shot\s+armed/, "the MATCHES section states the armed state");
+
+  const spent = { ...armed, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "gh-77" } };
+  const s = await openTrigger(shotSnap(spent));
+  assert.match(s.detail, /one-shot\s+spent 2026-08-20T09:00:00Z by gh-77/, "the spent state carries its provenance");
+
+  // A close-only gitlab MR rule keeps its own forge lines and gains the disarm bullet.
+  const gl = { type: "pull_request", action: ["close"], number: 7, once: true, any: [], all: [], none: [], flow: "archive", forge: "gitlab", packages: false };
+  const g = await openTrigger(shotSnap(gl));
+  assert.match(g.detail, /resolved project access level/, "the gitlab arm already reads the actor -- the closer, on a close delivery");
+  assert.match(g.detail, /one-shot: the WORKER writes on\.disarmed/);
+
+  // The negative claim: a non-close PR rule keeps the label trust model, and no disarm bullet appears.
+  const labeled = { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", forge: "github", packages: false };
+  const l = await openTrigger(shotSnap(labeled));
+  assert.match(l.detail, /collaborator's label/, "the non-close trust model is unchanged");
+  assert.doesNotMatch(l.detail, /WORKER writes on\.disarmed/, "no one-shot, no disarm line");
+});
+
 // --- the per-trigger job image (issue #41): which image a job runs is which code it runs ---
 
 const imgSnap = (image) => ({

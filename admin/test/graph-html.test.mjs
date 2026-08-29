@@ -503,6 +503,55 @@ test("a permuted tier-bearing model does not move a byte", () => {
   assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }));
 });
 
+// ---- 10d. one-shot rendering (#231) ----
+
+// The CANNED base plus the two states of a one-shot close rule: armed (once, no mark) and spent
+// (the worker's disarmed mark, whose jobId must never reach the page).
+const SHOT = () => {
+  const inputs = CANNED();
+  inputs.triggers.triggers.push(
+    { type: "issue", index: 3, action: ["closed"], number: 40, once: true, flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+    { type: "issue", index: 4, action: ["closed"], number: 41, once: true, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "CANARY-JOB-77" }, flow: "triage", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" },
+  );
+  return inputs;
+};
+
+test("a spent one-shot fades like a disabled chip, both tips state the state, and the disarm jobId stays server-side", () => {
+  const out = buildGraphHtml(buildGraphModel(SHOT()), { now: NOW });
+  assert.ok(out.includes("one-shot (armed)"), "the armed tip says so in words");
+  assert.ok(out.includes("one-shot, spent 2026-08-20T09:00:00Z"), "the spent tip carries the disarm instant");
+  assert.ok(!out.includes("CANARY-JOB-77"), "the mark's jobId is not page material -- the allowlist carries `at` alone");
+  // The disabled treatment: CANNED's two orphan chips + the legend swatch + exactly ONE spent chip.
+  assert.equal((out.match(/stroke-dasharray="8,3"/g) ?? []).length, 4, "the spent trigger chip joins the faded-dash treatment; the armed one does not");
+  assert.ok(out.includes(">◉</text>"), "the issue trigger glyph renders in the icon column");
+  assert.ok(out.includes("action[closed] #41 (spent)"), "the shared label's spent marker reaches the tip");
+  assert.ok(out.includes("action[closed] #40"), "the armed label stays the plain match vocabulary");
+});
+
+test("junk one-shot shapes die at the allowlist: an unusable disarm instant still reads spent, without leaking", () => {
+  const model = buildGraphModel(SHOT());
+  const node = model.nodes.find((n) => n.id === "trigger:4");
+  node.disarmed = { at: { deep: "junk" }, jobId: "CANARY-J2" };
+  const page = buildGraphHtml(model, { now: NOW });
+  assert.ok(page.includes("one-shot, spent"), "the state survives even when the instant does not parse");
+  assert.ok(!page.includes("CANARY-J2"), "no field beyond `at` gets through");
+  assert.ok(!page.includes("[object Object]"), "a non-string instant degrades to absence, never to Object.prototype.toString");
+
+  const armedJunk = buildGraphModel(SHOT());
+  armedJunk.nodes.find((n) => n.id === "trigger:3").once = "yes";
+  assert.ok(!buildGraphHtml(armedJunk, { now: NOW }).includes("one-shot (armed)"), "once is a strict boolean at the allowlist");
+});
+
+test("a permuted one-shot model does not move a byte", () => {
+  const model = buildGraphModel(SHOT());
+  const permuted = buildGraphModel(SHOT());
+  permuted.nodes.reverse();
+  permuted.edges.reverse();
+  permuted.flags.reverse();
+  permuted.folders.reverse();
+  assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }));
+});
+
 // ---- 11. degrades ----
 
 test("no arguments and degraded models still produce a valid page that says what is wrong", () => {

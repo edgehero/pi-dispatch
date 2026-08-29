@@ -171,6 +171,7 @@ Practical consequences:
 | `synchronize` | `update` (carrying `oldrev`) |
 | `labeled` | — *(a label add is `update` with a `changes.labels` diff)* |
 | `review_submitted` | `approved` *(near, not equal — see below)* |
+| `closed` | `close` |
 
 `approved` and `review_submitted` are the closest the two vocabularies come, and treating them as the same
 word would mislead in both directions. `approved` is **one verdict**: GitLab emits it when an approval
@@ -184,7 +185,11 @@ Writing a GitHub word on a GitLab trigger is **refused when the file loads**. It
 otherwise — it would simply never match an event, and the trigger would sit there looking configured and
 doing nothing.
 
-`merge` and `close` are not offered: a job started by either has nothing left to act on.
+`close` is close-only: it never shares a rule with other actions, because a close is gated on the actor
+who closed the MR rather than on the author, and it takes `on.number` (the **iid**, the number in the MR's
+own URL, not the global id) and `on.once` — see the README's close-triggers section. `merge` is still not
+offered, and a merged MR does not fire the close rule either: GitLab reports a merge as its own
+`merge` action, which drops unhandled, so a close rule fires on an explicit close only.
 
 An MR rule with a label predicate fires on the labels that event added. An MR rule without one fires on
 its named actions, which is safe here because every GitLab trigger is access-gated regardless.

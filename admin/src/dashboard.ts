@@ -909,13 +909,20 @@ function triggerRow(t: any, sel: boolean, inner: number, styler: any, sched: any
   // `warning` for the same reason [resume] is: a spend multiplier is a risk badge, not a preference. A
   // trigger without it renders byte-identically -- the badge is purely additive, appended last.
   const rep = t?.replicas > 1 ? " " + styler.fg("warning", `[x${t.replicas}]`) : "";
+  // The one-shot badges (issue #231). [once] in `accent`, NOT `warning`: amber is this file's colour for
+  // a risk badge, and a one-shot NARROWS spend to a single future run -- [x N]'s inverse, an override of
+  // the fire-forever default, which is exactly what `accent` marks ([image], the pinned model). [spent]
+  // in `dim`: a rule that finished its job, not a risk -- the row stays on the list because the raw file
+  // keeps the entry, and it dims so it cannot be misread as armed. Mutually exclusive by construction
+  // (the worker only disarms once rules); absent otherwise, so every existing row is byte-identical.
+  const shot = t?.disarmed ? " " + styler.fg("dim", "[spent]") : t?.once === true ? " " + styler.fg("accent", "[once]") : "";
   // Health is a LIST-level fact, not only a drill-in one: an overdue scheduler or a stall counter at the
   // backstop max is exactly the row an operator must notice without opening it. Amber, appended last like
   // the other risk badges; a healthy or non-cron row renders byte-identically to before.
   const health = sched && (sched.overdueMs || (sched.stallMax > 0 && sched.stalls >= sched.stallMax))
     ? " " + styler.fg("warning", sched.overdueMs ? "⚠ overdue" : "⚠ stalled")
     : "";
-  return fitLine(`${cursor} ${badge} ${matchColored(t, styler)} ${targetColored(t, styler)}${pkgs}${img}${res}${rep}${health}`, inner, styler);
+  return fitLine(`${cursor} ${badge} ${matchColored(t, styler)} ${targetColored(t, styler)}${pkgs}${img}${res}${rep}${shot}${health}`, inner, styler);
 }
 
 function matchColored(t: any, styler: any): string {
@@ -1246,37 +1253,51 @@ function trustModel(t: any): string[] {
   }
   const subject = t?.type === "comment" ? "adversarial comment text" : "adversarial issue/PR text";
   const where = `lives in the receiver · task is ${subject}`;
+  // A close-capable rule (the issue kind, or a pull_request whose action is the forge's close word —
+  // the loader makes the close word ride alone) is gated on the CLOSER, and a one-shot's spend is
+  // bookkept by the worker. Both join the per-forge lines: who may spend the trigger and who writes
+  // the disarm are exactly what an operator reads this panel to learn (issue #231).
+  const closeCapable = t?.type === "issue" || (t?.type === "pull_request" && (t?.action ?? []).some((a: string) => a === "closed" || a === "close"));
+  const oneShot = (lines: string[]) =>
+    closeCapable && (t?.once === true || t?.disarmed)
+      ? [...lines, "one-shot: the WORKER writes on.disarmed into triggers.json, strictly after the run record — spent always has its run"]
+      : lines;
   switch (t?.forge) {
     case "gitlab":
-      return [
+      return oneShot([
         "authorized by the actor's resolved project access level (>= Developer) — a label is NOT approval here",
         "HMAC over the body (19.0+) or a bare X-Gitlab-Token · dedup by webhook-id",
         where,
-      ];
+      ]);
     case "forgejo":
-      return [
+      return oneShot([
         "authorized by the actor's resolved repository permission (admin|write), on every trigger type",
         "HMAC over the body (GitHub-compatible) · dedup by X-GitHub-Delivery GUID",
         where,
-      ];
+      ]);
     case "azure":
-      return [
+      return oneShot([
         "authorized by the actor's resolved project membership — work items name the actor only by email",
         "NO HMAC: a shared secret that covers no bytes · dedup by the payload's own id (OQ-015)",
         where,
-      ];
+      ]);
     default:
-      return [
+      return oneShot([
         // A review trigger reads the REVIEWER's author_association, not the PR author's (issue #66), so it
         // cannot share the generic line: an operator reading "author gate" would picture the wrong person.
-        t?.type === "comment"
-          ? "authorized by a collaborator comment (author_association) + HMAC"
-          : t?.type === "pull_request" && (t?.action ?? []).includes("review_submitted")
-            ? "authorized by the REVIEWER's author_association (not the PR author's) + HMAC"
-            : "authorized by a collaborator's label + HMAC webhook + author gate",
+        // A close rule reads the CLOSER's resolved permission (issue #231), for the inversion's sharper
+        // sibling: GitHub sends NO association for a close at all, so the collaborator-label line would
+        // name a gate this rule never runs — and a wrong trust model is worse than an absent one.
+        closeCapable
+          ? "authorized by the CLOSER's resolved repository permission (admin|write) + HMAC — a close names no author_association"
+          : t?.type === "comment"
+            ? "authorized by a collaborator comment (author_association) + HMAC"
+            : t?.type === "pull_request" && (t?.action ?? []).includes("review_submitted")
+              ? "authorized by the REVIEWER's author_association (not the PR author's) + HMAC"
+              : "authorized by a collaborator's label + HMAC webhook + author gate",
         "dedup by X-GitHub-Delivery GUID (redelivery-safe)",
         where,
-      ];
+      ]);
   }
 }
 

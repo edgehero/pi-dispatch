@@ -150,8 +150,8 @@ test("renderTriggers renders each of the four on.types", () => {
 
 test("renderTriggers renders an issue trigger: action word, and #number when narrowed (#231)", () => {
   // pull_request's line shape with the item number in the clause slot -- the plain twin of the dashboard's
-  // issue row, which must state the same facts. A disarmed one-shot's raw entry still normalizes to an
-  // issue record, so this line is also what a SPENT rule renders as (the marker is a later phase).
+  // issue row, which must state the same facts. An ARMED one-shot now carries [once] (the marker this
+  // comment used to defer to a later phase); a standing rule's line is byte-identical to before.
   const out = renderTriggers({
     schedulers: [],
     triggers: {
@@ -161,8 +161,32 @@ test("renderTriggers renders an issue trigger: action word, and #number when nar
       ],
     },
   });
-  assert.match(out, /issue {2}action\[closed\] #40 → deploy$/m, "a narrowed one-shot names its item");
+  assert.match(out, /issue {2}action\[closed\] #40 → deploy {2}\[once\]$/m, "a narrowed one-shot names its item and its armed state");
   assert.match(out, /issue {2}action\[close\] → announce {2}\[gitlab\]$/m, "an unnarrowed rule ends at the action, and a non-github forge is named");
+});
+
+test("the one-shot badges: [once] armed, [spent] disarmed, absent otherwise -- both close-capable kinds (#231)", () => {
+  // The plain surface must state the same facts as the colored one (renderRunList's rule): an armed
+  // one-shot and a spent one must never share a line shape, and a rule that is neither must render
+  // byte-identically to a deployment that never heard of on.once.
+  const line = (t) => renderTriggers({ schedulers: [], triggers: { triggers: [t] } });
+  const armed = { type: "issue", action: ["closed"], number: 7, once: true, flow: "deploy", forge: "github", packages: false };
+  const spent = { ...armed, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "gh-1" } };
+
+  assert.match(line(armed), /issue {2}action\[closed\] #7 → deploy {2}\[once\]$/m, "armed shows [once]");
+  assert.doesNotMatch(line(armed), /\[spent\]/, "and never [spent]");
+  assert.match(line(spent), /issue {2}action\[closed\] #7 → deploy {2}\[spent\]$/m, "spent shows [spent]");
+  assert.doesNotMatch(line(spent), /\[once\]/, "and never [once] -- the states are mutually exclusive");
+
+  // The close-only pull_request twin carries the same pair.
+  const prArmed = { type: "pull_request", action: ["closed"], number: 40, once: true, any: [], all: [], none: [], flow: "archive", forge: "github", packages: false };
+  assert.match(line(prArmed), /pull_request {2}action\[closed\] #40 → archive {2}\[once\]$/m);
+  const prSpent = { ...prArmed, disarmed: { at: "2026-08-21T10:00:00Z" } };
+  assert.match(line(prSpent), /pull_request {2}action\[closed\] #40 → archive {2}\[spent\]$/m);
+
+  // The negative claim: a rule without the fields is byte-identical to its pre-#231 line.
+  const standing = { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", packages: false };
+  assert.match(line(standing), /pull_request {2}action\[labeled\] any\[pi:review\] → review$/m);
 });
 
 test("renderTriggers shows a command trigger as /name in the flow position; flow triggers unchanged", () => {

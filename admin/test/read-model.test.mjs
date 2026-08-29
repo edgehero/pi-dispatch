@@ -1534,6 +1534,20 @@ test("attributeRunsToTriggers degrades on bad input", () => {
   assert.deepEqual(attributeRunsToTriggers({ records: [runRec()], triggers: null }), { byJobId: {} });
 });
 
+test("attributeRunsToTriggers: a SPENT one-shot keeps its cost attribution, labelled as spent (#231)", () => {
+  // The join is index+type over DISPLAY records, and a disarmed entry still displays (the raw file
+  // keeps it), so the historical runs a one-shot paid for keep their by-trigger row after it spends
+  // -- vanishing them into unattributed on the disarm would rewrite the ledger. The label rides
+  // triggerMatchLabel's spent marker, so the insights breakdown says which rows belong to a rule
+  // that is done.
+  const triggers = [
+    displayTrigger({ index: 0, type: "issue", action: ["closed"], number: 40, once: true, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "gh-1" } }),
+  ];
+  const records = [runRec({ jobId: "gh-1", triggerIndex: 0, triggerType: "issue" })];
+  const { byJobId } = attributeRunsToTriggers({ records, triggers });
+  assert.deepEqual(byJobId["gh-1"], { key: "trigger:0", index: 0, type: "issue", label: "action[closed] #40 (spent)" });
+});
+
 test("observedChainEdges folds child->parent joins per (parentFlow, childFlow, target), self-chains included", () => {
   const records = [
     runRec({ jobId: "local-p", kind: "local", target: "local:proj", flow: "build", chainRefused: 2 }),

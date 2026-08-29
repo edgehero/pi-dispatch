@@ -63,8 +63,10 @@ export { FORGE_KINDS };
  * refusal still stands; what a close CAN do is release separately-armed work -- an operator wrote
  * "when this closes, run that" into this file, and the close is the starting gun, not the subject.
  * So `closed`/`close` are close-ONLY action lists (mixing them with other actions is refused below:
- * the two families gate on different actors), while `merge` stays omitted everywhere -- a merge that
- * should release work is a close too, and GitHub's events feed emits `closed` for merged PRs.
+ * the two families gate on different actors), while `merge` stays omitted everywhere -- GitHub and
+ * Forgejo emit `closed` for a merged PR so close rules cover merges there, and GitLab's `merge` is
+ * its own action no rule takes (an explicit close is what fires a GitLab close rule; the spec names
+ * the gap).
  *
  * `review_submitted` (issue #66) is github's fifth and the one compound word here. It names the
  * `pull_request_review` event's `submitted` action, so both halves are greppable in GitHub's own docs, the

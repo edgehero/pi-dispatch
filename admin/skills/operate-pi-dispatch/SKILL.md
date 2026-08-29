@@ -159,11 +159,14 @@ about the trigger is the same — the `on.type`, the `{any, all, none}` label pr
 Three things are NOT the same, and all of them refuse at load rather than misbehaving quietly:
 
 - **`pull_request` actions are the forge's own words.** GitHub takes
-  `labeled | opened | synchronize | reopened | review_submitted`; GitLab takes
-  `open | update | reopen | approved`; Forgejo takes
-  `label_updated | opened | synchronized | reopened`; Azure takes `created | updated`. A word
+  `labeled | opened | synchronize | reopened | review_submitted | closed`; GitLab takes
+  `open | update | reopen | approved | close`; Forgejo takes
+  `label_updated | opened | synchronized | reopened | closed`; Azure takes `created | updated` and has
+  no close word (a close trigger on azure is refused at load — not yet covered, not declined). A word
   from the wrong forge is refused when the file is written. It would not break anything otherwise — it
   would simply never match an event, and the trigger would look configured while doing nothing.
+  The close word rides **alone**: a rule mixing it with other actions is refused, because a close is
+  gated on the actor who closed the item where every other action gates on the author or a label.
   `review_submitted` is GitHub's `pull_request_review` event: it fires on **every** submitted review, so
   add `reviewState` (`approved | changes_requested | commented`) to narrow which verdicts are worth paying
   for. That field is github-only and legal only beside `review_submitted`; anywhere else it refuses at
@@ -175,6 +178,32 @@ Three things are NOT the same, and all of them refuse at load rather than misbeh
   azure `pull_request` trigger may not carry a label predicate at all: Azure tags work items, never pull
   requests, so `any`/`all`/`none` could never match and a rule that loads clean and never fires reads as a
   broken harness.
+
+## Close triggers and one-shots — `on.once`, and the re-arm
+
+Two shapes fire on a close: the `issue` trigger type (an issue closing, `on.action` in the forge's close
+word), and a `pull_request` rule whose only action is the close word (on GitHub and Forgejo a merged PR
+counts as closed; on GitLab only an explicit close fires it). Both
+may carry `on.number` to pin one specific item, and `once: true` (which requires `number`) makes the rule
+a **one-shot**: after one run the worker marks the entry spent by adding
+`on.disarmed: { at, jobId }` to it in `triggers.json`. The entry is never deleted — run history
+attributes by array position — so `dispatch_triggers` and the panel keep showing it, marked spent,
+matching nothing.
+
+Four things to say when an operator asks:
+
+- **A failed run still spends it.** "Fired" means "produced a run record", so a one-shot whose job failed
+  is spent too. The fix is the re-arm below, after they have read why it failed.
+- **Re-arming is deleting `on.disarmed` from the entry** in `triggers.json`, nothing else. It is an
+  operator file edit: no tool and no panel key writes or removes that mark, so say so plainly rather than
+  reaching for `dispatch_trigger_edit` (which changes the flow only).
+- **Authoring one**: `dispatch_trigger_add` takes `kind: issue` (plus `number` and `once`), behind the
+  same confirm dialog as every trigger write, and a close-only `pull_request` rule accepts the same two
+  fields. The shared validator refuses anything malformed, and `once` requires `number`.
+- **Both services must read the same file.** The disarm is a worker write, so a receiver pointed at a
+  different `triggers.json` stays armed; `PI_TRIGGERS_FILE` set to one absolute path is the fix, and
+  `pi-dispatch doctor` warns about it. In the compose topology the receiver's read-only mount lags a
+  disarm until restart, and the worker's own pre-spend check is what prevents a second run meanwhile.
 
 ## Racing two agents on one event — `run.replicas`
 
@@ -190,9 +219,10 @@ Three things to say when an operator asks about it:
 - **You cannot set it from here.** There is no `replicas` parameter on `dispatch_trigger_add` or
   `_edit`, and no panel key. It is a reviewed edit to `triggers.json`, deliberately: a spend multiplier is
   plainly a capability a model should not gain. Say so rather than looking for a way around it.
-- **It refuses on cron, and beside `resume`.** A local job's `/workspace` IS the operator's folder, so two
-  replicas would edit one working tree with no gate and no undo. And a resumed run continues one lineage
-  where replicas exist to fork it.
+- **It refuses on cron, beside `resume`, and beside `once: true`.** A local job's `/workspace` IS the
+  operator's folder, so two replicas would edit one working tree with no gate and no undo. A resumed run
+  continues one lineage where replicas exist to fork it. And a one-shot promises exactly one run, which N
+  racing sandboxes contradict.
 
 `dispatch_trigger_add` takes an optional `forge` parameter, defaulting to `github`. Unlike `image`, this
 one IS offered to the model — a model that can already add a GitHub trigger can already arm a paid run,

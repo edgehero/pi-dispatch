@@ -129,7 +129,7 @@ receiver (forges), and editable from the panel:
 ] }
 ```
 
-### The four trigger types: what fires each one, and what it runs
+### The five trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and
 **`run` is what it runs**, either a flow or a registered command (`flow` names a `.pi/skills/<flow>` in
@@ -142,7 +142,8 @@ staging a workflow extension).
 | `cron` | your schedule | `id` (unique, no `:`) · `pattern` (5 or 6 cron fields) | nothing: a schedule is its own condition | `run.task`, written in the file |
 | `label` | a label on an **issue** (or an Azure work item), never a pull request | at least one positive selector, `any` or `all` | the label **predicate**: `any` (any of these) · `all` (all of them) · `none` (suppress-only, it can prevent a fire but never cause one) | the issue title and body |
 | `comment` | a comment containing your phrase | `phrase`, for example `@pi` | the phrase, and **one comment trigger per forge** | the comment body plus the issue title and body |
-| `pull_request` | a PR or MR event, including a submitted GitHub review | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState` | the PR title and body, plus the review body when a review fired it |
+| `pull_request` | a PR or MR event, including a submitted GitHub review, and including its close (the close word rides **alone**, never mixed with other actions; on GitHub and Forgejo a merged PR counts as closed, on GitLab only an explicit close fires it) | `action`, a non-empty array in your forge's own words | `action`, plus the same label predicate; where the forge has a label action and you name it, a positive selector becomes **required**; on a GitHub review, also `reviewState`; on a close-only rule, `number` and `once` instead of the predicate | the PR title and body, plus the review body when a review fired it |
+| `issue` | an issue closing, and only that (labels have `label`, phrases have `comment`) | `action`, the close word in your forge's own words | `number` pins it to one issue (on GitLab, the iid); `once: true` makes it a one-shot and requires `number` | the issue title and body |
 
 One variation changes that last column for every type: a trigger that names `run.command` instead of
 `run.flow` gives the agent exactly `/command args` as its whole prompt, and the issue, comment or PR text
@@ -154,6 +155,8 @@ Every type also needs `run.kind` (`local` for cron, else the forge) and exactly 
 needs `folder` (a host path the worker checks exists when it loads the file; make it absolute, since a
 relative path resolves against the worker's own directory) and, with `flow`, a `task`. Azure `label` and
 `comment` triggers need `run.repository`, because a work item belongs to a project and names no repository.
+The webhook types also charset check `run.flow` at load (skill names are lowercase), so a flow that could
+never name a repo skill refuses free at load instead of failing inside a paid container.
 
 Two matching behaviours worth knowing before you arm a paid trigger:
 
@@ -171,10 +174,10 @@ refused rather than silently never matching:
 
 | `run.kind` | `pull_request` actions | Its label action | Notes |
 |---|---|---|---|
-| `github` | `labeled` `opened` `synchronize` `reopened` `review_submitted` | `labeled` | `review_submitted` is the `pull_request_review` event's `submitted` action, so a formal Approve or Request changes starts a job. It is gated on the **reviewer's** permission, never the PR author's, so a collaborator reviewing a stranger's fork PR runs and a stranger reviewing their own PR does not |
-| `gitlab` | `open` `update` `reopen` `approved` | none | a label add arrives as `update` carrying a label diff; a predicate here matches the labels that update added. `approved` is one verdict where GitHub's `review_submitted` is every verdict |
-| `forgejo` | `label_updated` `opened` `synchronized` `reopened` | `label_updated` | `label_cleared` fires nothing, ever: removing a label must never start a paid run |
-| `azure` | `created` `updated` | none | a label predicate on an Azure PR is refused at load: Azure tags work items, never pull requests |
+| `github` | `labeled` `opened` `synchronize` `reopened` `review_submitted` `closed` | `labeled` | `review_submitted` is the `pull_request_review` event's `submitted` action, so a formal Approve or Request changes starts a job. It is gated on the **reviewer's** permission, never the PR author's, so a collaborator reviewing a stranger's fork PR runs and a stranger reviewing their own PR does not |
+| `gitlab` | `open` `update` `reopen` `approved` `close` | none | a label add arrives as `update` carrying a label diff; a predicate here matches the labels that update added. `approved` is one verdict where GitHub's `review_submitted` is every verdict |
+| `forgejo` | `label_updated` `opened` `synchronized` `reopened` `closed` | `label_updated` | `label_cleared` fires nothing, ever: removing a label must never start a paid run |
+| `azure` | `created` `updated` | none | a label predicate on an Azure PR is refused at load: Azure tags work items, never pull requests. A close trigger (`issue`, or a close-only `pull_request` rule) is refused at load too: not yet covered, because a work item's close is a state transition the payload subset cannot see |
 
 **A review trigger is wider than it looks, so narrow it.** `review_submitted` fires on every submitted
 review: an Approve, a Request changes, and a one word "lgtm thanks" alike. Unlike a comment trigger there
@@ -200,6 +203,40 @@ apply a label, which is why the label *is* the approval there; GitLab, Forgejo a
 actor's permission through their APIs because a label proves less on those). The always-on gates that
 every delivery passes, none of them per-trigger, are the signature check, the bot-loop guard, that
 permission check, dedup, quiet hours, the image preflight, branch protection, and the spend caps.
+
+### Close triggers and one-shots
+
+"When this closes, run that, once." An `issue` trigger fires when an issue closes; a PR close rides
+`pull_request` with the close word as the only action in the rule (a close is gated on a different actor
+than every other PR action, so the words never mix). On GitHub and Forgejo a merged PR emits closed and
+fires the rule; GitLab reports a merge as its own action, which no rule takes, so only an explicit close
+fires there. `number` narrows
+the rule to one item, and `once: true` spends it after a single run (`once` requires `number`, and never
+sits beside `run.replicas`):
+
+```json
+{ "on": { "type": "issue", "action": ["closed"], "number": 40, "once": true },
+  "run": { "kind": "github", "flow": "deploy" } }
+```
+
+The gate is the closer's: the actor who closed the item must hold write access. On GitHub that is
+resolved through the collaborator permission API, because the payload names only the author and an
+issue's own author can close it with no access at all; on GitLab and Forgejo the existing member lookup
+already checks the sender, who is the closer.
+
+Spending is written into the file itself. After the run record exists, the worker adds
+`"disarmed": { "at": ..., "jobId": ... }` to the entry's `on`, never deleting the entry (run history
+attributes by array position), and a spent entry still shows in the panel with a spent marker while
+matching nothing. Deleting `on.disarmed` re-arms it, and that is the whole procedure. A one-shot whose
+run **failed** still counts as fired: the record is the definition, so a failed run spends it too, and
+the fix is that same one key deletion.
+
+Four deployment notes. Point both services at the **same** file (`PI_TRIGGERS_FILE`, absolute; `doctor`
+warns). In the shipped compose topology the receiver's read-only single file mount keeps serving the old
+bytes after a disarm until the container restarts, and the worker's own pre-spend check is what prevents
+a second run meanwhile. The polling transport carries closes too (the events feed includes them), so a
+close trigger needs no public URL. And a symlinked `triggers.json` is replaced by a real file on the
+first disarm, so keep the real file at the served path and symlink the other direction.
 
 ### Optional `run` fields
 
@@ -242,7 +279,8 @@ or what it costs):
   scheduled flow can use `gh`.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
-the confirm-gated AI tools; every write is validated and both services reload it live. Every local job
+the confirm-gated AI tools; every write is validated and both services reload it live. The worker itself
+writes exactly one thing back, the `on.disarmed` mark that spends a one-shot. Every local job
 also receives a read-only `/job/event.json` (source, folder, HEAD sha; cron adds its id, pattern and
 schedule instants), so a scheduled flow can triage only what changed since its last run.
 

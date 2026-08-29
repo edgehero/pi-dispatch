@@ -85,6 +85,7 @@ const CHIP_FILL = Object.freeze({
   label: "#d8bfd8",
   comment: "#e7e7ae",
   pull_request: "#c0deed",
+  issue: "#c7e9c0",
   skill: "#fdd0a2",
 });
 const STATUS_COMPLETED = "#3fb950";
@@ -123,6 +124,7 @@ export const GLYPH = Object.freeze({
   label: "◈",
   comment: "❝",
   pull_request: "⇄",
+  issue: "◉",
   skill: "ƒ",
   "skill-missing": "!",
   "skill-unverified": "?",
@@ -266,6 +268,14 @@ function normalizeModel(model) {
         ? [...new Set(n.tiersUnknown.filter((t) => typeof t === "string").map((t) => clip(t, 40)))].sort().slice(0, 4)
         : [],
       replicas: intOr(n.replicas, null),
+      // One-shot facts (#231): `once` is the armed state, and the disarm mark is narrowed to its
+      // instant alone. The mark's jobId stays server-side on purpose: the page answers "spent, and
+      // when", and provenance beyond that belongs to the operator's own console -- a shareable
+      // file:// page should carry no more of a deployment's run history than the question needs.
+      once: n.once === true,
+      disarmed: n.disarmed !== null && n.disarmed !== undefined && typeof n.disarmed === "object" && !Array.isArray(n.disarmed)
+        ? { at: typeof n.disarmed.at === "string" ? clip(n.disarmed.at, 40) : Number.isFinite(n.disarmed.at) ? n.disarmed.at : null }
+        : null,
       folderKey: typeof n.folderKey === "string" ? n.folderKey : null,
       runs: intOr(n.runs, 0),
       lastOutcome: typeof n.lastOutcome === "string" ? n.lastOutcome : null,
@@ -822,6 +832,11 @@ function buildTip(n, flags, groupLabel, nowMs) {
       const nextMs = typeof n.next === "number" ? n.next : typeof n.next === "string" ? Date.parse(n.next) : NaN;
       if (Number.isFinite(nextMs) && Number.isFinite(nowMs) && nextMs > nowMs) lines.push(`next ${relSpan(nextMs - nowMs)}`);
     }
+    // The one-shot state in words (#231): the faded chip only says "spent" to eyes that know the
+    // palette, the tip says it to everyone. The disarm instant renders verbatim, not through
+    // relTime -- it is provenance the worker wrote down, not a freshness for the page to re-derive.
+    if (n.disarmed !== null) lines.push(`one-shot, spent${n.disarmed.at !== null ? ` ${n.disarmed.at}` : ""}`);
+    else if (n.once) lines.push("one-shot (armed)");
   }
   if (n.aiTrigger) lines.push("chainable: ai-trigger allow");
   if (n.kind === "skill" && n.loops.length > 0) {
@@ -865,6 +880,11 @@ function nodeState(n, flagNames) {
   // absent, but an unchecked tier may hold the name -- a third epistemic state, styled as one.
   // Safe below the red arm: the dangling flags ride TRIGGER nodes, never this kind.
   if (n.kind === "skill-not-at-head") return { stroke: PAGE_AMBER, dash: "10,4", faded: false };
+  // A spent one-shot (#231) wears the orphan's disabled treatment: still on the canvas -- the raw
+  // file keeps the entry, and "why did nothing fire" needs the chip visible -- but faded and dashed,
+  // because a full-strength chip claims the trigger can still fire and this one never will. Below
+  // the red arm on purpose: a dangling flow is a defect worth seeing even on a rule that is done.
+  if (n.kind === "trigger" && n.disarmed !== null) return { stroke: CHIP_STROKE, dash: "8,3", faded: true };
   if (flagNames.has("orphan")) return { stroke: CHIP_STROKE, dash: "8,3", faded: true };
   return { stroke: CHIP_STROKE, dash: null, faded: false };
 }

@@ -9,6 +9,7 @@
     { "on": { "type": "pull_request", "action": ["labeled"], "any": ["pi:review"] }, "run": { "kind": "github", "flow": "review" } },
     { "on": { "type": "pull_request", "action": ["opened", "synchronize"] }, "run": { "kind": "github", "flow": "review" } },
     { "on": { "type": "pull_request", "action": ["review_submitted"], "reviewState": ["changes_requested"] }, "run": { "kind": "github", "flow": "address-review" } },
+    { "on": { "type": "issue", "action": ["closed"], "number": 40, "once": true }, "run": { "kind": "github", "flow": "deploy" } },
 
     { "on": { "type": "label", "any": ["pi:frontend"] }, "run": { "kind": "gitlab", "flow": "frontend-fix" } },
     { "on": { "type": "label", "any": ["pi:urgent"] }, "run": { "kind": "gitlab", "flow": "fix", "replicas": 2 } },

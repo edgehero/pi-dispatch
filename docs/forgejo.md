@@ -65,7 +65,7 @@ This is the one that would otherwise cost you an afternoon. Forgejo reports a la
 |---|---|
 | `labeled` | `label_updated` |
 | `synchronize` | `synchronized` |
-| `opened`, `reopened` | the same |
+| `opened`, `reopened`, `closed` | the same |
 
 Write Forgejo's words in your triggers file; the loader refuses the other forge's, so a wrong one is a
 message at load rather than a trigger that never fires.
@@ -74,10 +74,12 @@ message at load rather than a trigger that never fires.
 counterpart to inherit that rule from. It drops under its own reason, so you can see it was recognised and
 refused rather than not understood.
 
-It is not alone in that bucket. `closed`, `edited`, `assigned`, `unassigned`, `milestoned`, `demilestoned`,
+It is not alone in that bucket. `edited`, `assigned`, `unassigned`, `milestoned`, `demilestoned`,
 `reviewed`, `review_requested` and `review_request_removed` are recognised and deliberately not actionable
 too, and all of them drop as `action-not-actionable`. A trigger that never fires on one of those was seen
-and refused, not misunderstood.
+and refused, not misunderstood. `closed` left that bucket with issue #231: a close-only rule (the `issue`
+trigger type, or `closed` alone on `pull_request`) now catches it, gated on the resolved permission of the
+actor who closed the item, with a merged PR counting as closed.
 
 ## Labels match the whole current set, not the diff
 

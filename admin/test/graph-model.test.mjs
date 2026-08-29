@@ -72,7 +72,7 @@ test("findSiblingMentions is total: bad inputs yield [], and a self-shaped name 
 
 // ---- buildGraphModel (the assembler; DES-GRAPH-EDGE-DERIVATION's honesty rules live here) ----
 
-import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_FLAGS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
+import { buildGraphModel, triggerMatchLabel, GRAPH_EDGE_KINDS, GRAPH_FLAGS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
 
 test("the edge, flag and node-kind vocabularies are the LITERAL closed sets, frozen", () => {
   // Every consumer switches on these strings; a producer minting a new one without a renderer arm
@@ -347,6 +347,54 @@ test("triggerCosts is a node FACT: the mapped typed cost rides its trigger node,
   // Spend is a fact, not a flag or an edge: the closed vocabularies must not have grown for it.
   assert.deepEqual([...GRAPH_EDGE_KINDS], ["config", "observed", "potential", "cron-rearm"]);
   assert.ok(!GRAPH_FLAGS.includes("spend"), "no spend flag exists");
+});
+
+test("the one-shot facts ride the trigger node: once means ARMED, disarmed is the mark, no vocabulary grows (#231)", () => {
+  // The triggerCosts precedent one test up, applied to the close-trigger state: a spent entry still
+  // reaches the model (the display normalizer reads the raw file so the spent row stays visible),
+  // and armed/spent must be two node FACTS a renderer can switch on -- never a new flag or kind.
+  const inputs = CANNED();
+  inputs.triggers.triggers.push(
+    { type: "issue", index: 3, action: ["closed"], number: 40, once: true, flow: "deploy", forge: "github", packages: false },
+    { type: "issue", index: 4, action: ["closed"], number: 41, once: true, disarmed: { at: "2026-08-20T09:00:00Z", jobId: "gh-77" }, flow: "deploy", forge: "github", packages: false },
+  );
+  const m = buildGraphModel(inputs);
+
+  const armed = m.nodes.find((n) => n.id === "trigger:3");
+  assert.equal(armed.once, true, "an armed one-shot says so");
+  assert.equal(armed.disarmed, null, "and carries no mark");
+  assert.equal(armed.label, "action[closed] #40", "the armed label is the plain match vocabulary");
+
+  const spent = m.nodes.find((n) => n.id === "trigger:4");
+  assert.equal(spent.once, false, "once is true only while ARMED -- a spent one-shot will not fire once more");
+  assert.deepEqual(spent.disarmed, { at: "2026-08-20T09:00:00Z", jobId: "gh-77" }, "the worker's mark rides verbatim");
+  assert.equal(spent.label, "action[closed] #41 (spent)", "the shared label carries the spent marker");
+
+  assert.equal(m.nodes.find((n) => n.id === "trigger:1").once, false, "a kind that cannot carry the fields reads false/null");
+  assert.equal(m.nodes.find((n) => n.id === "trigger:1").disarmed, null);
+
+  // The inverse of the cron-rearm self-edge: a one-shot never re-arms, so neither state draws one.
+  assert.deepEqual(
+    m.edges.filter((e) => e.from === e.to).map((e) => e.from).sort(),
+    ["trigger:0", "trigger:2"],
+    "self-edges stay the two crons' -- spent is a node fact, not topology",
+  );
+
+  // The #188 rule, restated as the negative claim: new truths are node facts, never new vocabulary.
+  assert.deepEqual([...GRAPH_EDGE_KINDS], ["config", "observed", "potential", "cron-rearm"]);
+  assert.ok(!GRAPH_FLAGS.includes("spent") && !GRAPH_FLAGS.includes("disarmed"), "no spent/disarmed flag exists");
+  assert.ok(!GRAPH_NODE_KINDS.includes("spent"), "no spent node kind exists");
+});
+
+test("triggerMatchLabel marks a spent close rule on both close-capable kinds, and only there (#231)", () => {
+  // One vocabulary for what a trigger is called (issue #175): this label feeds the graph chip AND
+  // the cost tables, so the spent marker lands in both by construction.
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40 }), "action[closed] #40");
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, disarmed: { at: "t" } }), "action[closed] #40 (spent)");
+  assert.equal(triggerMatchLabel({ type: "pull_request", action: ["close"] }), "action[close]");
+  assert.equal(triggerMatchLabel({ type: "pull_request", action: ["close"], disarmed: { at: "t" } }), "action[close] (spent)");
+  // Armed carries no marker: armed is the state every rule has always been in.
+  assert.equal(triggerMatchLabel({ type: "issue", action: ["closed"], number: 40, once: true }), "action[closed] #40");
 });
 
 test("skill nodes carry their loops, and forge groups carry their record-derived repos", () => {

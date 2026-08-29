@@ -421,6 +421,16 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       // (guarded on `typeof t.flow === "string"`) correctly draws nothing for it.
       command: t.command ?? null,
       replicas: t.replicas ?? null,
+      // The one-shot facts (issue #231), carried the way `cost` is: node FACTS, never new vocabulary
+      // -- the #188 rule, and GRAPH_FLAGS/GRAPH_NODE_KINDS are byte-unchanged by this issue too. A
+      // spent entry still arrives here because the display normalizer reads the RAW file (the spent
+      // row must stay visible), so the two states a renderer has to keep apart ride as one boolean
+      // and one mark: `once` is true only while ARMED -- a spent one-shot is not "a rule that will
+      // fire once", and letting both read true would ask every consumer to re-derive the difference
+      // -- and `disarmed` is the worker's mark verbatim ({ at, jobId? }), null like every absent
+      // fact on this literal.
+      once: t.once === true && !t.disarmed,
+      disarmed: t.disarmed !== null && typeof t.disarmed === "object" ? t.disarmed : null,
       folderKey: group?.key ?? null,
       runs: Number.isInteger(stats?.runs) ? stats.runs : 0,
       lastOutcome: stats?.lastOutcome ?? null,
@@ -440,7 +450,9 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       model.flags.push({ nodeId: id, flag: "pr-spend-loop-risk", detail: "fires on opened/synchronize; a flow that pushes can loop with another bot (OQ-020)" });
     }
 
-    // Every cron trigger re-arms by definition: the one self-edge that is config, not history.
+    // Every cron trigger re-arms by definition: the one self-edge that is config, not history. A
+    // one-shot close rule (on.once, issue #231) is its deliberate inverse -- spent is the terminal
+    // state, so it draws NO self-edge; the disarmed mark rides the node as a fact instead.
     if (isCron) model.edges.push({ from: id, to: id, kind: "cron-rearm", label: t.pattern ?? null });
 
     // The config edge -- every trigger that names a flow gets one, ALWAYS.
@@ -606,13 +618,22 @@ export function triggerMatchLabel(t) {
       return selectorLabel(t);
     case "comment":
       return `"${t.phrase ?? "-"}"`;
-    case "pull_request":
-      return `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
+    case "pull_request": {
+      // The spent marker (issue #231): this label feeds the cost tables and the graph chip, and a spent
+      // one-shot's spend history must not read back as an armed rule's. Armed carries no marker -- the
+      // label names the MATCH, and armed is the state every rule has always been in. A close-only rule's
+      // `#<n>` narrowing rides here too, the issue arm's rule: the list row and the drill-in both show
+      // it, and this label must not tell less than the surfaces it feeds.
+      const action = `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
+      const num = Number.isInteger(t.number) ? ` #${t.number}` : "";
+      return t.disarmed ? `${action}${num} (spent)` : `${action}${num}`;
+    }
     case "issue": {
       // pull_request's vocabulary plus the one narrowing an issue rule can carry: `#<n>` is the forge's own
       // spelling of the item, so the label reads back the way the operator wrote the rule (issue #231).
       const action = `action[${(Array.isArray(t.action) ? t.action : []).join(",")}]`;
-      return Number.isInteger(t.number) ? `${action} #${t.number}` : action;
+      const base = Number.isInteger(t.number) ? `${action} #${t.number}` : action;
+      return t.disarmed ? `${base} (spent)` : base;
     }
     default:
       return "(unknown)";

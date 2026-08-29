@@ -105,9 +105,12 @@ An azure `pull_request` trigger takes exactly two action words, `created` and `u
 ```
 
 GitHub's `opened` or GitLab's `open` on an azure rule is **refused when the file loads**, rather than left to
-load clean and never match an event. `git.pullrequest.merged` is deliberately not offered: a job started by a
-merge has nothing left to act on, the same call GitLab's `merge` and `close` get. A label predicate is
-refused here too, for the reason in the unsupported list below.
+load clean and never match an event. There is no close word either: the close triggers the other forges got
+in issue #231 (the `issue` type, and a close-only `pull_request` rule) are **refused at load on azure** — not
+yet covered rather than declined, because a work item's close is a `System.State` transition whose terminal
+names vary by process template, and a PR abandon arrives as `git.pullrequest.updated` with nothing in the
+projected subset to tell it from any other update. `git.pullrequest.merged` stays unoffered with it. A label
+predicate is refused here too, for the reason in the unsupported list below.
 
 ## Who can trigger a job
 

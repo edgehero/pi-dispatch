@@ -236,6 +236,49 @@ test("dispatch_trigger_add: a cron entry carries an approved model/maxTurns over
   assert.equal(t.on.type, "cron");
 });
 
+test("dispatch_trigger_add: kind issue defaults the action to the forge's close word and carries number/once", async () => {
+  // The close-trigger kind (issue #231), round-tripped through the SHARED validator: writeTriggers
+  // refuses anything parseTriggers would, so a landed file is one the worker boots on and the
+  // receiver groups. The action default is the forge's own close word -- the model states the match
+  // it means without knowing three forges' spellings.
+  const path = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_trigger_add").execute("id", { kind: "issue", flow: "deploy", number: 40, once: true }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  const t = read(path).triggers[0];
+  assert.deepEqual(t.on, { type: "issue", action: ["closed"], number: 40, once: true }, "github's close word is the default action");
+  assert.equal(t.run.kind, "github");
+  assert.equal(t.run.flow, "deploy");
+  assert.match(shown[0].message, /"once":true/, "the confirm shows the one-shot the operator is arming");
+
+  // The written bytes round-trip the shared validator directly -- the same parse the worker boots on.
+  const { parseTriggers } = await import("@edgehero/pi-dispatch/triggers");
+  const parsed = parseTriggers(readFileSync(path, "utf8"), path);
+  assert.equal(parsed.length, 1);
+  assert.deepEqual(parsed[0].on, { type: "issue", action: ["closed"], number: 40, once: true });
+
+  // A gitlab entry defaults to gitlab's own spelling of the close.
+  const path2 = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path2;
+  await toolByName("dispatch_trigger_add").execute("id", { kind: "issue", flow: "announce", forge: "gitlab", number: 7, once: true }, undefined, undefined, toolCtx({ answer: true }).ctx);
+  assert.deepEqual(read(path2).triggers[0].on.action, ["close"]);
+  assert.equal(read(path2).triggers[0].run.kind, "gitlab");
+});
+
+test("dispatch_trigger_add: an issue one-shot without a number is refused at the write, nothing lands", async () => {
+  // The tool passes number/once through rather than validating them (the unrecognised-forge rule):
+  // the refusal is the shared validator's, with its race-analysis message, never a silent rewrite.
+  const path = tmpTriggers({ triggers: [] });
+  process.env.PI_TRIGGERS_FILE = path;
+  const { ctx } = toolCtx({ answer: true });
+  await assert.rejects(
+    () => toolByName("dispatch_trigger_add").execute("id", { kind: "issue", flow: "deploy", once: true }, undefined, undefined, ctx),
+    /rejected.*on\.once requires on\.number/,
+  );
+  assert.equal(read(path).triggers.length, 0);
+});
+
 test("dispatch_trigger_edit: an approved confirm changes the flow and shows old->new", async () => {
   const path = tmpTriggers({ triggers: [{ on: { type: "label", any: ["a"] }, run: { kind: "github", flow: "old" } }] });
   process.env.PI_TRIGGERS_FILE = path;
