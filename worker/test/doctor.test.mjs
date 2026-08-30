@@ -1716,10 +1716,15 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 		extensions: true,
 		packages: [pkg(), pkg({ name: "pi-lint", version: "0.4.0", dir: "pi-lint", stage: false }), pkg({ name: "dispatch-admin", version: "0.1.0", dir: "dispatch-admin" })],
 	});
+	// A scoped-limits file wrong in the boot-blocking way (issue #242), plus a dead-folder row route:
+	// without one, none of the three new scoped checks enters this walk and the never-tier pin hollows.
+	const scopedLimitsDir = mkdtempSync(join(tmpdir(), "pi-doctrine-sl-"));
+	writeFileSync(join(scopedLimitsDir, "scoped-limits.json"), JSON.stringify({ version: 1, limits: [{ scope: "/srv/never-runs", day: 1 }] }));
 	const env = {
 		PI_PROVIDER: "anthropic",
 		PI_AUTH_FROM_PI: "0",
 		PI_TRIGGERS_FILE: fullyBrokenTriggersFile(),
+		PI_SCOPED_LIMITS_FILE: join(scopedLimitsDir, "scoped-limits.json"),
 		PI_GLOBAL_PI_DIR: dir,
 		PI_GLOBAL_ALLOW_EXTENSIONS: "maybe",
 		PI_SESSIONS_DIR: join(mkdtempSync(join(tmpdir(), "pi-sessions-parent-")), "absent"),
@@ -2172,4 +2177,109 @@ test("doctor: zero once triggers means NEITHER one-shot line -- non-adopters hea
 	const path = onceTriggersFile(undefined, { armed: false, spent: false });
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: path }, onceSeams());
 	assert.equal(checks.some((c) => /one-shot/.test(c.label ?? "")), false, "no armed line and no spent line: output stays byte-identical for a file that never armed one");
+});
+
+// ── scoped limits (issue #242): the trap check, the boot-blocker line, the membership advisory ──────────
+
+function scopedScaffoldCwd(limits) {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-scaffold-"));
+	writeFileSync(join(dir, "scoped-limits.json"), JSON.stringify({ version: 1, limits: limits ?? [] }));
+	return dir;
+}
+
+test("doctor: a scaffolded scoped-limits.json with PI_SCOPED_LIMITS_FILE unset warns and names the mutex parenthetical", async () => {
+	const cwd = scopedScaffoldCwd();
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.ok(text().includes(`⚠ ${join(cwd, "scoped-limits.json")} exists but PI_SCOPED_LIMITS_FILE is unset`), "the warn names the file it found");
+	assert.ok(text().includes(`set PI_SCOPED_LIMITS_FILE=${join(cwd, "scoped-limits.json")}`), "the fix names the variable AND the absolute path");
+	assert.match(text(), /the built-in one-job-per-folder mutex stays on/, "the check must not imply local folders run ungated");
+	assert.equal(code, 0, "warn, never fail");
+	const checks = await collectChecks(imgEnv(), collectSeams(green, { cwd, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const trap = checks.find((x) => /PI_SCOPED_LIMITS_FILE is unset/.test(x.label));
+	assert.equal(trap.fixAction, undefined, "never-tier: doctor cannot guess which path was meant");
+});
+
+test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY value counts as unset", async () => {
+	const cwd = scopedScaffoldCwd();
+	const wired = capture();
+	await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: join(cwd, "scoped-limits.json") }), scaffoldDeps(wired.out, cwd));
+	assert.doesNotMatch(wired.text(), /PI_SCOPED_LIMITS_FILE is unset/, "a wired deployment gets no trap line");
+	const empty = capture();
+	await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: "   " }), scaffoldDeps(empty.out, cwd));
+	assert.ok(empty.text().includes("PI_SCOPED_LIMITS_FILE is unset"), "blank mirrors the worker's own load gate");
+});
+
+test("doctor: a configured scoped-limits file that will not load is a FAILURE naming the boot refusal, never-tier", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-bad-"));
+	const path = join(dir, "scoped-limits.json");
+	writeFileSync(path, JSON.stringify({ version: 2, limits: [] }));
+	const checks = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const c = checks.find((x) => /scoped-limits file does not load/.test(x.label));
+	assert.ok(c, "the check is present");
+	assert.equal(c.ok, false);
+	assert.notEqual(c.warn, true, "a boot blocker is a failure, not an advisory");
+	assert.match(c.label, /worker will refuse to start/);
+	assert.match(c.label, /newer pi-dispatch/);
+	assert.equal(c.fixAction, undefined, "never-tier: doctor never rewrites limits content");
+	// A configured-but-MISSING file is the same class: the worker's loader refuses boot on it.
+	const gone = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: join(dir, "absent.json") }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(gone.find((x) => /scoped-limits file does not load/.test(x.label) && /does not exist/.test(x.label)));
+});
+
+test("doctor: the dead-scope advisory flags folder-only shapes not in the canonicalized facts; repo shapes stay silent", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-adv-"));
+	const folder = join(dir, "site");
+	writeFileSync(
+		join(dir, "triggers.json"),
+		JSON.stringify({ triggers: [
+			{ on: { type: "cron", id: "t1", pattern: "0 3 * * *" }, run: { kind: "local", folder: `${folder}/`, flow: "tidy", task: "t" } },
+		] }),
+	);
+	const limitsPath = join(dir, "scoped-limits.json");
+	// Row 1 matches the trigger's folder ACROSS spellings; rows 2-4 are folder-only shapes that match
+	// nothing (dead relative, slashless, windows-shaped on POSIX); row 5 is a repo shape -- SILENT, not
+	// caveated: a webhook job's repo comes from the delivery, which triggers.json cannot enumerate, so a
+	// line on every legitimate repo cap would be standing noise.
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [
+		{ scope: folder, day: 3 },
+		{ scope: "./relative-nowhere", day: 1 },
+		{ scope: "sitealone", day: 1 },
+		{ scope: "C:\\srv\\site", day: 1 },
+		{ scope: "acme/web", day: 9 },
+	] }));
+	const env = imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath });
+	const checks = await collectChecks(env, collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	const c = checks.find((x) => /scoped limit\(s\) name a folder no trigger runs in/.test(x.label));
+	assert.ok(c, "the advisory is present");
+	assert.equal(c.ok, true, "an advisory, never a red X (the replica advisory's tier)");
+	assert.equal(c.warn, true);
+	assert.equal(c.fixAction, undefined, "never-tier");
+	assert.ok(!c.label.includes(folder), "the folder row matched across spellings -- not flagged");
+	assert.match(c.label, /\.\/relative-nowhere/, "a dead relative row is folder-only and unmatched -- flagged");
+	assert.match(c.label, /sitealone/, "a slashless scope can never be a repo -- flagged");
+	assert.match(c.label, /C:\\srv/, "a foreign-platform row is inert here -- flagged");
+	assert.ok(!c.label.includes("acme/web"), "a repo shape is never flagged -- doctor cannot enumerate webhook repos");
+	assert.match(c.label, /resolved ABSOLUTE path/, "the actionable content lives in the LABEL -- ok:true never prints fix");
+	// All judgeable scopes referenced: silent (the repo row alone must not keep the line alive).
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: folder, day: 3 }, { scope: "acme/web", day: 9 }] }));
+	const quiet = await collectChecks(env, collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(!quiet.find((x) => /name a folder no trigger runs in/.test(x.label)), "nothing dead: no line");
+});
+
+test("doctor: the dead-scope advisory stays SILENT when the triggers facts are unreadable -- zeroed counts make no claims", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sl-noclaim-"));
+	const limitsPath = join(dir, "scoped-limits.json");
+	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "/srv/never", day: 1 }] }));
+	// Unparseable triggers file: doctor already says the file does not parse; asserting "no trigger
+	// references this scope" on top would be a positive claim over counts it just said it cannot read.
+	writeFileSync(join(dir, "triggers.json"), "{broken");
+	const broken = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(!broken.find((x) => /name a folder no trigger runs in/.test(x.label)), "unparseable triggers: no advisory");
+	// Absent triggers file entirely: same rule.
+	const bare = mkdtempSync(join(tmpdir(), "pi-sl-bare-"));
+	const limits2 = join(bare, "scoped-limits.json");
+	writeFileSync(limits2, JSON.stringify({ version: 1, limits: [{ scope: "/srv/never", day: 1 }] }));
+	const absent = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: limits2 }), collectSeams(green, { cwd: bare, nodeVersion: "22.19.0", probeValkey: async () => true }));
+	assert.ok(!absent.find((x) => /name a folder no trigger runs in/.test(x.label)), "no triggers file: no advisory");
 });

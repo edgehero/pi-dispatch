@@ -12,7 +12,7 @@ function capture() {
 	return { out: (s) => buf.push(s), text: () => buf.join("") };
 }
 
-test("init scaffolds the five config files with the empty templates the loaders validate against", () => {
+test("init scaffolds the six config files with the empty templates the loaders validate against", () => {
 	const dir = tmp();
 	writeFileSync(join(dir, ".env.example"), "ANTHROPIC_API_KEY=\n"); // stand in for the repo's example
 	const { out, text } = capture();
@@ -27,6 +27,10 @@ test("init scaffolds the five config files with the empty templates the loaders 
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "pi-packages.json"), "utf8")), { packages: [] });
 	// Versioned from the first byte: a later reader must be able to refuse a newer file loudly (issue #53).
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "subscriptions.json"), "utf8")), { version: 1, subscriptions: [] });
+	// Scoped limits (issue #242): versioned for the sharper reason -- enforcement config a newer file
+	// could silently widen. Empty is inert, and the folder mutex needs no scaffold at all.
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "scoped-limits.json"), "utf8")), { version: 1, limits: [] });
+	assert.match(text(), /the folder mutex needs no file/, "the scaffold line says what is NOT configuration");
 	assert.match(text(), /pi install npm:@edgehero\/pi-dispatch-admin/, "next steps name the operator panel");
 });
 
@@ -46,6 +50,7 @@ test("init is idempotent and never overwrites operator edits", () => {
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "pi-packages.json"), "utf8")), { packages: [{ name: "@a/b", version: "1.0.0" }] }, "a pinned package list is never overwritten");
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "pause-windows.json"), "utf8")), { windows: [] }, "the missing ones are still created");
 	assert.deepEqual(JSON.parse(readFileSync(join(dir, "subscriptions.json"), "utf8")), { version: 1, subscriptions: [] });
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "scoped-limits.json"), "utf8")), { version: 1, limits: [] });
 	assert.match(text(), /kept.*\.env/, "an existing file is reported as kept");
 });
 

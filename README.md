@@ -14,7 +14,7 @@ checked before a single token is spent, and a live admin panel shows everything 
 thing off. This is not another agent to weigh against the one you already use; it is the queue, the
 budget and the box for the pi you already run, steered by the `.pi/` setup your repo already has.
 
-![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request, and a command trigger shown as its /name; selectable and editable), scheduled pause windows, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=1.0.0)
+![The /dispatch dashboard overlay, theme-colored: live queue state, day/week/month spend meters plus a daily token counter, the unified triggers pane (cron, label, comment, pull_request, and a command trigger shown as its /name; selectable and editable), scheduled pause windows, scoped limits, and the interactive runs list, in one framed TUI](docs/images/dispatch-dashboard.svg?v=1.0.0)
 
 ![Transcript of /dispatch status, runs, and triggers: queue counts, the run-history table with per-job token, cost, chain and replica accounting, and the unified {on,run} triggers list including a command trigger shown as its /name](docs/images/dispatch-commands.svg?v=1.0.0)
 
@@ -23,8 +23,8 @@ README, no permission system. pi-dispatch is exactly that missing operational la
 
 - **The container is the boundary.** Every job runs `--cap-drop=ALL`, non-root, ephemeral, with its
   instructions mounted read-only. That is pi's missing permission system, enforced by Docker.
-- **Spend is bounded before a container starts**: a per-job turn budget plus daily, weekly and monthly
-  caps, checked before a single token is spent. And analyzed after: the insights page shows spend
+- **Spend is bounded before a container starts**: a per-job turn budget plus daily, weekly and
+  monthly caps, per deployment and per-repo or per-folder, checked before a single token is spent. And analyzed after: the insights page shows spend
   per flow, trigger, model, day and repo, what a subscription actually saves, what a flow would
   cost on another model, and the budget dials themselves ([`docs/costs.md`](docs/costs.md)).
 - **The image is yours to shape.** Bake a project's toolchain into [`image/Dockerfile`](image/Dockerfile);
@@ -298,6 +298,24 @@ timezone-aware) and resume automatically. A paused job is deferred, never droppe
 Manage them with `w` in the panel or `PI_PAUSE_WINDOWS_FILE` by hand
 ([`docs/pause-windows.md`](docs/pause-windows.md)).
 
+### Scoped limits
+
+Cap how many jobs a repo or folder may run per day, week or month, and how many at once. Over a budget
+cap the job is refused before any spend (reason `scope-cap`); over the concurrency ceiling it is
+deferred, never dropped. Local jobs also carry a built-in guard with no switch: at most one job per
+folder at a time (within the worker process, and one worker per docker daemon is the supported shape),
+because two agents editing one working tree race each other with no gate and no undo.
+
+```json
+{ "version": 1, "limits": [
+  { "scope": "acme/web", "day": 10, "week": 40, "concurrent": 1 },
+  { "scope": "/srv/site", "month": 60 }
+] }
+```
+
+Manage them with `m` in the panel or `PI_SCOPED_LIMITS_FILE` by hand
+([`docs/scoped-limits.md`](docs/scoped-limits.md)).
+
 ## Flows: the custom prompt a trigger runs
 
 A **flow** is a pi skill committed to the target repo at `.pi/skills/<flow>/SKILL.md`. That file is the
@@ -403,7 +421,7 @@ between a cron job and a forge job: [`docs/workflows.md`](docs/workflows.md).
 ```mermaid
 flowchart LR
   CLI["pi-dispatch run ./folder --task ..."] -->|enqueue| Q[("Valkey + BullMQ<br/>the wait-list, AOF")]
-  Q --> B{"under the daily cap<br/>and turn budget?"}
+  Q --> B{"under the deployment and scope caps<br/>and turn budget?"}
   B -->|no| STOP["refused before any spend"]
   B -->|yes| C["docker run --rm: one ephemeral container<br/>--cap-drop=ALL, non-root, no-new-privileges<br/>/job read-only, /workspace = your folder"]
   C --> PI["pi + Playwright + git + gh<br/>guardrails + your .pi/"]
@@ -529,7 +547,7 @@ banner: setup is offered when there is nothing, never over an outage.
 
 Inside the panel: `p`/`r` pause and resume the queue, arrows and `Enter` drill into triggers and runs,
 `a`/`e`/`x` add, edit and delete triggers (validated, atomic, reloaded live by both services), `s` edits
-a limit, `w` manages quiet hours, `i` opens the insights page. `Enter` on a run opens its full
+a limit, `w` manages quiet hours, `m` manages scoped limits, `i` opens the insights page. `Enter` on a run opens its full
 record:
 
 ![The RUN_DETAIL drill-in, a colored post-mortem of one run's PII-free record: outcome, target, timing with duration, turns/exit/budget slot, tokens and cost, and a chain line naming spawned children](docs/images/dispatch-run-detail.svg)
@@ -540,7 +558,8 @@ insights | run | pause | resume | set | unset`), all local, no model involvement
 ### Operating pi-dispatch from your AI
 
 The package also ships the `operate-pi-dispatch` **skill**, so your assistant knows the deployment's
-tools: ask in plain language ("raise the daily cap to 30", "add a nightly tidy trigger for /srv/site").
+tools: ask in plain language: "raise the daily cap to 30", "cap acme/web at ten runs a day", or "add a
+nightly tidy trigger for /srv/site".
 Reads need no confirmation. Every config write pops **an operator confirmation the model cannot answer**,
 and refuses when no operator is present, so a prompt-injected session cannot raise your cap or add a paid
 trigger. One tool is deliberately not money-safe: `dispatch_run` enqueues a paid run without a confirm,

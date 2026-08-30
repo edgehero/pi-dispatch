@@ -76,12 +76,16 @@ therefore a turn-budget question before it is anything else: raise `PI_MAX_TURNS
 stages coarse. Nothing about a workflow multiplies the daily cap either, which is the one thing an operator
 usually wants to hear: a workflow costs one container start, however many stages it has.
 
-**Concurrency is yours to gate, on local jobs only.** Each job is its own container, so two jobs never share
-a pi session. What they can share is a **directory**: a `cron` or CLI job bind-mounts your folder, and
-`PI_CONCURRENCY` defaults to 3, so two triggers pointing at the same folder can run at the same time and
-write the same workflow state. `@juicesharp/rpiv-workflow` says as much about its own run-name claim, which
-is atomic per write but holds no cross-process lock. One trigger per folder is the simple answer; quiet
-hours on that scope is the other. Forge jobs are immune by construction, since each one gets its own clone.
+**Concurrency is gated for you on local jobs.** Each job is its own container, so two jobs never share
+a pi session. What they can share is a **directory**: a `cron` or CLI job bind-mounts your folder
+read-write. The worker therefore holds at most **one local job per folder** in flight (within the worker
+process; one worker per docker daemon is the supported shape) — always on, no configuration, no off
+switch — and defers the rest to the delayed set: a second job targeting the same
+folder runs when the first finishes, never concurrently and never dropped. `@juicesharp/rpiv-workflow`
+says as much about its own run-name claim, which is atomic per write but holds no cross-process lock;
+the mutex is what closes that gap. To bound a scope further (jobs per day/week/month, or a concurrency
+ceiling on a repo), see [`docs/scoped-limits.md`](scoped-limits.md). Forge jobs are immune to the
+working-tree race by construction, since each one gets its own clone.
 
 ## The simple case: a flow that calls skills
 

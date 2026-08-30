@@ -50,6 +50,7 @@ import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
+import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
@@ -264,7 +265,8 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -1308,6 +1310,58 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
+	// The same trap, scoped-limits edition (issue #242): init scaffolds ./scoped-limits.json, the admin
+	// defaults to it, and the worker reads only PI_SCOPED_LIMITS_FILE. The label's mutex parenthetical is
+	// load-bearing -- the check must not imply local folders run ungated when the file is off.
+	{
+		const scopedLimitsFile = env.PI_SCOPED_LIMITS_FILE;
+		const scaffolded = join(cwd, "scoped-limits.json");
+		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
+				fix: `set PI_SCOPED_LIMITS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker enforces no scoped limits at all, while the admin panel defaults to this same file and reports each limit it writes as applied live; delete the file if this deployment has no scoped limits`,
+			});
+		}
+	}
+
+	// Issue #242: a CONFIGURED scoped-limits file is boot-load fail-loud, so a file that does not load
+	// refuses the next worker start -- doctor says it before the restart does. Never-tier: doctor never
+	// rewrites limits content (DES-CLI-SURFACE).
+	if (scopedLimitFacts.path !== null && scopedLimitFacts.parseError !== null) {
+		checks.push({
+			ok: false,
+			label: `scoped-limits file does not load -- the worker will refuse to start: ${scopedLimitFacts.parseError}`,
+			fix: `fix ${scopedLimitFacts.path} by hand, or through the dispatch_limit_* tools / the panel's m key once it parses again -- doctor never rewrites limits content`,
+		});
+	}
+
+	// The dead-scope advisory (issue #242), honest about what doctor can actually judge. A forge repo
+	// always contains "/" and never begins "/", "./" or "../" or carries a backslash, so a scope in any
+	// of THOSE shapes can only ever be a folder -- and a folder row that matches no trigger's canonical
+	// run.folder guards nothing. Rows that COULD be a repo (an "a/b" shape) stay silent, not caveated:
+	// webhook jobs carry their repo in the delivery, which triggers.json cannot enumerate, so a line on
+	// every legitimate repo cap would be standing noise that teaches skimming (`repositories` is empty
+	// for every valid file today -- run.repository is azure-only, its own fact says so). Guarded on the
+	// TRIGGERS facts being readable too: a zeroed `folders` from an absent or unparseable triggers file
+	// has no honest claim to make (readTriggerFacts' own rule). ok:true -- the replica advisory's tier,
+	// and like it, everything the operator needs lives in the LABEL: an ok:true check never prints its
+	// fix line.
+	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0 && parseError === null && triggersFilePath !== null) {
+		const folderSet = new Set(folders);
+		const folderOnly = (s) => s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || !s.includes("/") || /^[A-Za-z]:/.test(s);
+		const dead = scopedLimitFacts.limits.map((l) => l.scope).filter((s) => folderOnly(s) && !folderSet.has(s));
+		if (dead.length > 0) {
+			checks.push({
+				ok: true,
+				warn: true,
+				label: `${dead.length} scoped limit(s) name a folder no trigger runs in (${dead.join(", ")}) -- the cap guards nothing; scopes match exactly (no globs, folders by resolved ABSOLUTE path), so check the spelling against triggers.json run.folder or delete the entry`,
+				fix: `edit ${scopedLimitFacts.path} by hand or via dispatch_limit_edit/_delete -- repo-shaped scopes are never flagged here, because a webhook job's repo comes from the delivery, which triggers.json cannot enumerate`,
+			});
+		}
+	}
+
 	// REQ-RESURRECTABLE-SANDBOX. A warning, never a failure: retention is a convenience, and the only thing
 	// worth surfacing is that finished runs' directories -- a repository clone plus the run's prompt.md and
 	// event.json, so issue text -- are sitting on disk, and how many. An operator who never opens a sandbox
@@ -1496,8 +1550,30 @@ function parseSecretProfilesSafe(raw) {
 	}
 }
 
+/**
+ * The scoped-limits facts (issue #242): the parsed rows when PI_SCOPED_LIMITS_FILE is set, or the
+ * boot-blocking reason when it will not load. Unset is `none` -- the worker enforces no scoped limits
+ * and doctor has nothing to say (the mutex is code and needs no check). A configured-but-missing file
+ * IS a parseError here: loadScopedLimits refuses boot on it, so doctor must too. Raw fs errors
+ * (EACCES, EISDIR) are reported the same way, deliberately unlike readTriggerFacts' tagged-only
+ * filter: the worker's own boot load is an unguarded readFileSync, so those throws refuse startup
+ * exactly as a parse failure does, and the check's claim is "will the worker start", not "is the
+ * content valid".
+ */
+function readScopedLimitFacts(env, fileExists) {
+	const none = { limits: [], parseError: null, path: null };
+	const path = env.PI_SCOPED_LIMITS_FILE;
+	if (typeof path !== "string" || path.trim() === "") return none;
+	if (!fileExists(path)) return { limits: [], parseError: `scoped-limits file does not exist: ${path}`, path };
+	try {
+		return { limits: parseScopedLimits(readFileSync(path, "utf8"), path), parseError: null, path };
+	} catch (e) {
+		return { limits: [], parseError: e?.message ?? String(e), path };
+	}
+}
+
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1539,6 +1615,10 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// read-write with no clone, so a credential an agent writes into .env lands in the operator's real
 			// repository rather than a temp dir that gets swept. Deduped for skillsDirs' reason.
 			localSecretFolders: [...new Set(triggers.filter((t) => t.run.secrets !== undefined && t.run.kind === "local" && typeof t.run.folder === "string").map((t) => t.run.folder))].sort(),
+			// Issue #242: every local run.folder, CANONICALIZED the way the scoped-limits matcher
+			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so
+			// the unreferenced-scope advisory compares like with like across spelling variants.
+			folders: [...new Set(triggers.filter((t) => t.run.kind === "local" && typeof t.run.folder === "string").map((t) => canonicalScope({ kind: "local", folder: t.run.folder })))].sort(),
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,
@@ -1569,6 +1649,11 @@ function readTriggerFacts(env, fileExists, cwd) {
 					packages: t.run.packages !== false,
 				}))
 				.filter((f) => typeof f.flow === "string"),
+			// Explicit on the success path too (issue #242): the dead-scope advisory distinguishes
+			// "facts read clean" (path set, no error) from the zeroed `none` -- an implicit undefined
+			// here made that test silently false for every deployment.
+			parseError: null,
+			path,
 		};
 	} catch (e) {
 		// REPORTED, not swallowed. This catch used to justify itself with "a malformed triggers file already

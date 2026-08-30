@@ -19,6 +19,11 @@ const EMPTY_PACKAGES = `${JSON.stringify({ packages: [] }, null, 2)}\n`;
 // Operator-declared subscription plans (issue #53), read by the admin extension only — never at job
 // time. Versioned because a newer file must fail loud, and that cannot be retrofitted into a v1 reader.
 const EMPTY_SUBSCRIPTIONS = `${JSON.stringify({ version: 1, subscriptions: [] }, null, 2)}\n`;
+// Scoped limits (issue #242): per repo/folder run caps and concurrency. Empty is inert -- and the
+// one-job-per-folder mutex for local jobs is code, not configuration, so it needs no scaffold line.
+// Versioned for the subscriptions reason, sharpened: this is enforcement config, and a silently
+// down-read newer file would be a silently widened spend limit.
+const EMPTY_SCOPED_LIMITS = `${JSON.stringify({ version: 1, limits: [] }, null, 2)}\n`;
 /**
  * The egress allowlist (REQ-EGRESS-ALLOWLIST): the hosts a job container may reach, one bare hostname per
  * line. Scaffolded with the three a job cannot work without, and NOT empty -- unlike every other scaffold
@@ -73,6 +78,7 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 	scaffold(fs, results, join(cwd, "pause-windows.json"), EMPTY_PAUSE_WINDOWS, "empty pause-windows list");
 	scaffold(fs, results, join(cwd, "pi-packages.json"), EMPTY_PACKAGES, "empty pi package list (stage with import-pi --with-packages)");
 	scaffold(fs, results, join(cwd, "subscriptions.json"), EMPTY_SUBSCRIPTIONS, "empty subscription list (declare plan prices for the admin's cost analytics)");
+	scaffold(fs, results, join(cwd, "scoped-limits.json"), EMPTY_SCOPED_LIMITS, "empty scoped-limits list (per repo/folder caps; the folder mutex needs no file)");
 	scaffold(fs, results, join(cwd, "egress-allowlist.conf"), DEFAULT_EGRESS_ALLOWLIST, "egress allowlist (provider + forge + registry; the egress policy is on unless PI_EGRESS=0)");
 
 	for (const [verb, name, note] of results) {
