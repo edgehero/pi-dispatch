@@ -2012,7 +2012,7 @@ test("readHosts lists the fleet, and keeps 'none' distinct from 'could not ask'"
 });
 
 test("resolveWorkerCount prefers the registry, because getWorkers rests on CLIENT SETNAME", () => {
-  assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "b" }, { name: "a" }], workerCount: 9 }), { count: 2, names: ["a", "b"] });
+  assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "b", routes: "true" }, { name: "a", routes: "true" }], workerCount: 9 }), { count: 2, names: ["a", "b"] });
   assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 2 }), { count: 2, names: [] }, "an unnamed fleet still counts");
   assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 0 }), { count: "unknown", names: [] }, "and neither answering is still unknown");
 });
@@ -2077,6 +2077,19 @@ test("a pause that fails PARTWAY names what it already stopped", async () => {
   assert.match(res.unreachable, /down/);
   assert.deepEqual(res.partial.done, ["pi-jobs", "pi-jobs@mini1"], "and says exactly which queues it did stop");
   assert.equal(res.partial.failed, "pi-jobs@mini2", "and which one it did not, so an operator can finish the job");
+});
+
+test("a ONE-host deployment shows a bare count, exactly as it always did", () => {
+	// Every worker publishes a registry row, named or not, so a plain one-worker deployment has one too.
+	// Returning its name here made the status line read `workers: 1 (my-mac)` where it has always read
+	// `workers: 1` -- a byte-identity break for no gain, since with one host the name answers a question
+	// nobody asked. This is the assertion the old byte-identity test could not make, because it hand-built
+	// a state the system never produces.
+	assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "my-mac", routes: "false" }] }), { count: 1, names: [] });
+	// Declaring is the discriminator, not the count: an operator who named two minis and has one up wants
+	// to be told WHICH one is up, which is precisely where a "only show names for a fleet" rule goes quiet.
+	assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "mini1", routes: "true" }] }), { count: 1, names: ["mini1"] });
+	assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "mini2", routes: "true" }, { name: "mini1", routes: "true" }] }), { count: 2, names: ["mini1", "mini2"] });
 });
 
 test("an UNDECLARED host gets no queue, so a single-host deployment is untouched", async () => {

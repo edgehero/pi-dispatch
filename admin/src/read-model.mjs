@@ -669,7 +669,15 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
  */
 export function resolveWorkerCount({ hosts, workerCount }) {
   if (Array.isArray(hosts) && hosts.length > 0) {
-    return { count: hosts.length, names: hosts.map((h) => h.name).filter(Boolean).sort() };
+    // NAMES ONLY WHERE A NAME WAS DECLARED. Every worker publishes a registry row, named or not, so a
+    // plain one-worker deployment has a row too -- and returning its hostname here made the status line
+    // read `workers: 1 (my-mac)` where it has always read `workers: 1`, breaking #57's own acceptance line
+    // for no gain. Declaring is the right discriminator rather than counting hosts: an operator who named
+    // two minis and has one up wants to be told WHICH one, and that is exactly the case a `length > 1`
+    // rule would go quiet for.
+    const declared = hosts.filter((h) => h?.routes === true || h?.routes === "true");
+    const names = declared.map((h) => h.name).filter(Boolean).sort();
+    return { count: hosts.length, names };
   }
   if (typeof workerCount === "number" && workerCount > 0) return { count: workerCount, names: [] };
   return { count: "unknown", names: [] };
