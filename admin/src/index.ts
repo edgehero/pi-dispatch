@@ -68,6 +68,8 @@ import {
   readPauseWindows,
   readScopedLimits,
   readScopedBudget,
+  readHeldJobs,
+  cancelHeldJob,
   listRunIds,
   setQueuePaused,
   writeSettings,
@@ -690,6 +692,53 @@ function registerTools(pi: ExtensionAPI): void {
       const counters = await readScopedBudget({ url: paths.valkeyUrl, limits: (p as any).limits });
       const rows = (p as any).limits.map((l: any, index: number) => ({ index, ...l, used: (counters as any).rows?.[index] ?? null }));
       return toolText(JSON.stringify(rows));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_waits",
+    label: "pi-dispatch held jobs",
+    description:
+      "Read-only. Lists the jobs the worker is currently HOLDING on a trigger's run.waitFor condition: the " +
+      "job id, an id-only target, the operator's own words for what it is waiting on, and how long it has " +
+      "waited. A held job has reserved no budget slot and started no container. This is a different set from " +
+      "the queue's `delayed` count, which also mixes cron next-occurrences, retry backoff and quiet hours; " +
+      "only waits appear here. Use the job id for dispatch_wait_cancel.",
+    parameters: Type.Object({}),
+    async execute() {
+      const paths = resolvePaths(process.env);
+      const held = await readHeldJobs({ url: paths.valkeyUrl });
+      return toolText(JSON.stringify(held));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_wait_cancel",
+    label: "pi-dispatch cancel a held job",
+    description:
+      "Removes a job that is waiting on a run.waitFor condition, so it never runs. The operator MUST approve " +
+      "a confirm dialog naming the job and what it was waiting on; refused with no interactive operator. " +
+      "Use dispatch_waits for the job id. This is the ONLY way to stop a held job short of editing redis: a " +
+      "held job has spent nothing, so no budget cap will ever stop it, and deleting the trigger does not " +
+      "reach a job already enqueued. Cancelling writes no run record, because the job never ran.",
+    executionMode: "sequential",
+    parameters: Type.Object({ jobId: Type.String({ minLength: 1 }) }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(process.env);
+      const held = await readHeldJobs({ url: paths.valkeyUrl });
+      if ((held as any).unreachable) throw new Error(`queue unreachable: ${(held as any).unreachable}`);
+      const row = ((held as any).rows ?? []).find((r: any) => r.jobId === params.jobId);
+      if (!row) throw new Error(`no held job ${params.jobId} (dispatch_waits lists the ids that are waiting)`);
+      const result = await confirmedWrite(
+        ctx,
+        { title: `Cancel held job ${row.jobId}`, message: `Cancel ${row.target ?? row.jobId}, waiting on ${row.label ?? "a condition"}. It will never run.` },
+        async () => {
+          const res = await cancelHeldJob({ url: paths.valkeyUrl, jobId: params.jobId });
+          if ((res as any).invalid) throw new Error(`rejected: ${(res as any).invalid}`);
+          return { applied: true, jobId: params.jobId };
+        },
+      );
+      return toolText(JSON.stringify(result));
     },
   });
 

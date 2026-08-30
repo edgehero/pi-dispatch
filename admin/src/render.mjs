@@ -113,6 +113,37 @@ export function renderBudget({ budget, settings } = {}) {
  * in-flight is worker-process state, so no live count is ever invented here. Degrades in place on a
  * missing (no lines) or invalid (one error line) file, like renderTriggers.
  */
+/**
+ * The held-jobs block for the NO-COLOR / non-TTY path (issue #230). Returns null when nothing is held, so
+ * the caller adds no empty section.
+ *
+ * It has to exist for `renderRunList`'s stated reason: this is the renderer a non-TTY panel uses, and "a
+ * job is being held, and for how long" must not be a fact only the pretty one tells. Every cell is the same
+ * host-chosen, PII-free set the framed row carries -- an id-only target, an operator-authored label, a
+ * duration -- because both read the worker's own hashes rather than a delayed job's data.
+ */
+export function renderHeldJobs({ held } = {}) {
+	if (!held) return null;
+	if (held.unreachable) return `unreadable (${held.unreachable})`;
+	const rows = Array.isArray(held.rows) ? held.rows : [];
+	if (rows.length === 0) return null;
+	const more = Number(held.more) || 0;
+	const lines = rows.map((r) => `${r.target ?? r.jobId ?? "-"}  ${r.label ?? "-"}  waited ${plainDuration(r.waitedMs)}`);
+	if (more > 0) lines.push(`... and ${more} more`);
+	return lines.join("\n");
+}
+
+/** `?` rather than a fabricated zero when the worker recorded no hold clock. Mirrors the framed twin. */
+function plainDuration(ms) {
+	if (!Number.isFinite(ms) || ms < 0) return "?";
+	const s = Math.floor(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m`;
+	const h = Math.floor(m / 60);
+	return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d${h % 24}h`;
+}
+
 export function renderScopedLimits({ limits, scopedBudget } = {}) {
   if (limits?.invalid) return `Scoped limits: file invalid (${limits.invalid})`;
   const list = Array.isArray(limits?.limits) ? limits.limits : [];

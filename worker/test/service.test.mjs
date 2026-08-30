@@ -787,11 +787,24 @@ test("restart --drain: pause, poll until active hits 0, restart the unit, resume
 		"counts:1",
 		"sleep",
 		"counts:0",
+		// One more count, after the drain and before the stop: the DELAYED population (issue #230). A held
+		// job is neither active nor waiting, so the loop above just reported a drained queue it cannot see
+		// all of, and the operator is about to upgrade under jobs that will wake against the new version.
+		// Read after the drain rather than before, so it never delays the thing it is only annotating.
+		"counts:0",
 		"spawn systemctl --user stop pi-dispatch-worker.service",
 		"spawn systemctl --user start pi-dispatch-worker.service",
 		"resume",
 		"close",
 	]);
+});
+
+test("restart --drain names the delayed population it cannot drain, and stays silent when there is none", async () => {
+	// A drain that says "drained" about a queue holding jobs is the honest-reporting failure this project
+	// refuses elsewhere; a note on every restart of every deployment is the always-on noise it also refuses.
+	const quiet = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], []), events: [] });
+	assert.equal(await quiet.run(), 0);
+	assert.equal(quiet.text().includes("delayed set"), false, "nothing delayed, nothing said");
 });
 
 test("restart --drain timeout: stops WITHOUT restarting, and resume is NOT called — a timed-out drain must not un-pause a queue that still has an active job", async () => {

@@ -26,6 +26,7 @@ import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
 import { parseScopedLimits, SCOPED_LIMITS_VERSION, scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
@@ -496,6 +497,160 @@ export async function readScopedBudget({ url, limits, redisFn = makeRedisClient,
       } catch {
         // already closed
       }
+    }
+  }
+}
+
+/**
+ * How many index members this reader will hydrate in one pass. A ceiling rather than a full read, because
+ * the index is the one structure here that can grow without an operator noticing; past it the caller is
+ * told the listing is truncated rather than shown a number it cannot stand behind.
+ */
+const HELD_HYDRATE_MAX = 200;
+
+/**
+ * The jobs the worker is currently HOLDING on `run.waitFor` (issue #230).
+ *
+ * Read from the worker's own `wait:job:*` hashes rather than by enumerating the delayed set, and the
+ * difference is the whole design. A delayed job's `.data` carries the issue title, body and username, so
+ * hydrating one to build a panel row would pull PII into the snapshot that `fetchSnapshot` refuses to hold
+ * -- its only precedent for touching a queue job reads ONE id off the active one, and says why. It would
+ * also need a classifier, because the delayed set mixes cron next-occurrences, retry backoff, quiet hours,
+ * scope deferrals and waits, and nothing in it records which. These hashes carry exactly the fields the
+ * worker chose to publish: an id-only target and an operator-authored condition label, both PII-free by
+ * construction, and only for jobs actually held on a wait.
+ *
+ * SCAN rather than an index set, because the worker deliberately keeps none: a set cannot expire its
+ * members, so it would be the one structure in that keyspace that leaks permanently. Every hash carries a
+ * TTL instead, which makes this read self-cleaning. Bounded by `limit` and by a COUNT hint, so a deployment
+ * holding thousands never turns a panel refresh into a full keyspace walk; the caller is told when the
+ * listing was truncated rather than shown a silently short list.
+ */
+export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
+  let redis;
+  try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
+    redis = redisFn(url);
+    const settled = (async () => {
+      // SMEMBERS of the worker's index, not a SCAN. A scan of `wait:job:*` walks the whole keyspace, and
+      // walks ALL of it precisely when nothing is held, which is the deployment least willing to pay for it.
+      const ids = await redis.smembers(HELD_SET);
+      const hydrated = await Promise.all(
+        ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId) => {
+          try {
+            const h = await redis.hgetall(jobKey(jobId));
+            // A member with no hash is STALE: the hash expired or the hold was released without the index
+            // being updated. The reader prunes it, which is what makes an index safe here at all -- a set
+            // cannot expire its own members, so the alternative is a set that only grows.
+            if (!h || !h.since) {
+              await redis.srem(HELD_SET, jobId).catch(() => {});
+              return null;
+            }
+            const since = Number(h.since);
+            return {
+              jobId,
+              target: h.target || null,
+              label: h.label || null,
+              waitedMs: Number.isFinite(since) && since > 0 ? Math.max(0, now() - since) : null,
+              checks: Number(h.checks) || 0,
+            };
+          } catch {
+            // One unreadable member degrades one row, never the listing (a stray key of the wrong type).
+            return null;
+          }
+        }),
+      );
+      const rows = hydrated.filter(Boolean);
+      // Sorted BEFORE the cut, so the row an operator is looking for -- the one that has been stuck longest
+      // -- is in the listing. Slicing first would have shown an arbitrary sample and called it the top.
+      rows.sort((a, b) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
+      return {
+        rows: rows.slice(0, limit),
+        more: Math.max(0, rows.length - limit),
+        // True when the index itself was longer than this reader will hydrate: `more` is then a floor, and
+        // a caller that renders a total must say so rather than state a number it cannot know.
+        truncated: ids.length > HELD_HYDRATE_MAX,
+      };
+    })();
+    return await withTimeout(settled, timeoutMs, { unreachable: "timed out reaching the queue" });
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (redis) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
+}
+
+/**
+ * Cancel a job that is waiting on a `run.waitFor` condition (issue #230).
+ *
+ * The ONLY way to stop a held job short of editing redis by hand, and it needs to exist because every other
+ * lever misses: a held job has spent nothing, so no budget cap will ever refuse it; deleting the trigger
+ * does not reach a job already enqueued, since `job.data.trigger` is a frozen snapshot; and the queue's own
+ * retention prunes completed and failed jobs, never delayed ones.
+ *
+ * Refuses a job that is not HELD, checked against the worker's own `wait:job:` hash rather than against the
+ * queue. Removing an arbitrary delayed job would reach cron next-occurrences and retry backoff too, and a
+ * tool whose blast radius is "anything in the delayed set" is not the tool this description promises.
+ *
+ * Writes no run record: the job never ran, and `INT-RUN-HISTORY-FILE-CONTRACT` records terminal states of
+ * runs. The hold's own keys go with it, so the panel stops showing a row for a job that no longer exists.
+ */
+export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500 } = {}) {
+  if (typeof jobId !== "string" || jobId === "") return { invalid: "a job id is required" };
+  let redis;
+  let queue;
+  try {
+    parseConnection(url, { failFast: true });
+    redis = redisFn(url);
+    queue = queueFn(parseConnection(url, { failFast: true }));
+    const settled = (async () => {
+      const hash = await redis.hgetall(jobKey(jobId));
+      // A hold is a hash with a CLOCK, not merely a non-empty hash: the worker's own counters create this
+      // key before anything is held, so "non-empty" would let this tool reach a job that is not waiting.
+      if (!hash || !hash.since) return { invalid: `job ${jobId} is not waiting on a condition` };
+      const job = await queue.getJob(jobId);
+      if (!job) return { invalid: `job ${jobId} is no longer in the queue` };
+      // STATE, not existence. `release` is fail-open by design, so a redis blip can leave the hash behind
+      // while the job wakes, runs and completes -- and bullmq will happily `remove()` a completed job. That
+      // would answer `applied: true` to an operator who approved a dialog reading "It will never run", for
+      // a job whose run record is already on disk.
+      const state = await job.getState().catch(() => null);
+      if (state !== "delayed" && state !== "waiting" && state !== "prioritized") {
+        return { invalid: `job ${jobId} is ${state ?? "in an unknown state"}, not waiting -- it has already left the hold` };
+      }
+      // The hold goes FIRST. If `remove` throws (an active job is locked) or the timeout fires mid-sequence,
+      // an orphaned hash would keep a row on the panel for a job that no longer exists; an orphaned JOB is
+      // merely a job that still runs, which is the state the operator was already in.
+      await redis.del(jobKey(jobId));
+      await redis.srem(HELD_SET, jobId).catch(() => {});
+      if (hash.dedupId) {
+        const holder = await redis.get(`wait:key:${hash.dedupId}`);
+        if (holder === jobId) await redis.del(`wait:key:${hash.dedupId}`);
+      }
+      await job.remove();
+      return { ok: true, jobId };
+    })();
+    return await withTimeout(settled, timeoutMs, { invalid: "timed out reaching the queue" });
+  } catch (err) {
+    return { invalid: err?.message ?? String(err) };
+  } finally {
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // already closed
+    }
+    try {
+      // A bullmq Queue has BOTH `disconnect` and `close`; `close` is the one that releases its blocking
+      // connections, so it is named explicitly rather than reached through a `??` that short-circuits.
+      await queue?.close?.();
+    } catch {
+      // already closed
     }
   }
 }

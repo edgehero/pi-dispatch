@@ -57,6 +57,7 @@
     "./pause-windows": "./src/pause-windows.mjs",
     "./scoped-limits": "./src/scoped-limits.mjs",
     "./wait-for": "./src/wait-for.mjs",
+    "./wait-state": "./src/wait-state.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",
     "./forgejo-identity": "./src/forgejo-identity.mjs",

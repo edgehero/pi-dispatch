@@ -1632,3 +1632,67 @@ test("the status header shows the delayed count ONLY when nonzero, neutral, and 
   assert.match(shown, /1 active · 4 delayed · 3 failed/, "delayed sits between active and failed");
   assert.doesNotMatch(plain, /delayed/, "absent at zero -- the header is byte-identical to before the count existed");
 });
+
+// --- the held-jobs section (issue #230) ---------------------------------------------------------------
+
+const HELD_ROWS = [
+  { jobId: "gh-1", target: "acme/web#7", label: "jira", waitedMs: 7_200_000 },
+  { jobId: "gh-2", target: "acme/web#9", label: "after 2026-09-01T09:00:00Z", waitedMs: 300_000 },
+  { jobId: "gh-3", target: "acme/api#3", label: "deploy", waitedMs: 45_000 },
+  { jobId: "gh-4", target: "acme/api#4", label: "deploy", waitedMs: 1_000 },
+];
+
+test("the HELD section is absent when nothing is held -- byte-identical to before the feature", async () => {
+  // Conditional, not merely empty. `buildListLines` charges a RULE plus a divider for every section it is
+  // given and its row budget is `chrome + sections.length - 1`, so an unconditional section would move the
+  // floor on every deployment, including the ones that never wait.
+  const without = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  const withEmpty = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: [], more: 0 } }) }) });
+  await flush();
+  const scrub = (lines) => lines.map((l) => l.replace(/\d\d:\d\d:\d\d/, "HH:MM:SS"));
+  const a = scrub(without.render(80));
+  const b = scrub(withEmpty.render(80));
+  await without.dispose();
+  await withEmpty.dispose();
+  assert.deepEqual(b, a, "an empty held read renders exactly nothing");
+  assert.doesNotMatch(a.join("\n"), /held/i);
+});
+
+test("the HELD section bounds itself and counts the rest, rather than growing with the queue", async () => {
+  // Self-bounding like `runs`, not collapsible like the config sections: it carries no priority and no
+  // viewKey, because a held row has nothing to drill into and a priority without a keybinding would render
+  // "(N hidden — undefined to view)".
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: HELD_ROWS, more: 6 } }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+
+  assert.match(text, /10 waiting on conditions/, "the divider counts everything, including what the read truncated");
+  assert.match(text, /acme\/web#7/);
+  assert.match(text, /waited 2h0m/, "a duration a human reads");
+  assert.doesNotMatch(text, /acme\/api#4/, "the fourth row is past the section's own bound");
+  assert.match(text, /↓ 7 more/, "and the remainder is counted, not lost");
+  assert.doesNotMatch(text, /undefined to view/, "no keybinding is claimed for a section that has no view");
+});
+
+test("an unreadable held view degrades that section alone", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { unreachable: "timed out reaching the queue" } }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(text, /unreadable \(timed out reaching the queue\)/);
+  assert.match(text, /SPEND & LIMITS/, "and the rest of the panel still renders");
+});
+
+test("a held row carries no job data, whatever the reader hands it", async () => {
+  // The reader takes the worker's own hashes precisely so a delayed job's `.data` -- issue title, body,
+  // username -- never reaches this component. If a future reader regressed, this row must still not print it.
+  const poisoned = [{ jobId: "gh-1", target: "acme/web#7", label: "jira", waitedMs: 1000, data: { issue: { title: "SECRET TITLE", body: "SECRET BODY" } } }];
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: poisoned, more: 0 } }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.doesNotMatch(text, /SECRET TITLE/);
+  assert.doesNotMatch(text, /SECRET BODY/);
+  assert.match(text, /acme\/web#7/, "only the fields the row names");
+});

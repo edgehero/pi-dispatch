@@ -26,7 +26,7 @@ import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
-import { renderStatus, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
+import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -65,6 +65,47 @@ function centerBlock(lines: string[], overlayWidth: number, blockWidth: number):
  * `getWorkers` is EMPTY on Redis providers without CLIENT SETNAME, so an error or empty list degrades to
  * "unknown" rather than reporting zero live workers.
  */
+/** How many held rows the panel will hold at once. The section shows fewer; the rest are counted, not lost. */
+const HELD_LIMIT = 20;
+
+/** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
+const HELD_HYDRATE_MAX = 200;
+
+/**
+ * The held-jobs read, on the panel's own held client. A thin twin of `read-model.mjs`'s `readHeldJobs` --
+ * duplicated for the reason `readScopedBudget` is duplicated here: that module opens its own connection per
+ * call, and the panel refreshes every second off one it already holds. Field-for-field identical to it
+ * apart from `checks`, which no row renders.
+ */
+async function heldJobs(redis: any) {
+  const ids: string[] = await redis.smembers("wait:held");
+  const at = Date.now();
+  const hydrated = await Promise.all(
+    ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId: string) => {
+      try {
+        const h = await redis.hgetall(`wait:job:${jobId}`);
+        if (!h || !h.since) {
+          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire.
+          await redis.srem("wait:held", jobId).catch(() => {});
+          return null;
+        }
+        const since = Number(h.since);
+        return {
+          jobId,
+          target: h.target || null,
+          label: h.label || null,
+          waitedMs: Number.isFinite(since) && since > 0 ? Math.max(0, at - since) : null,
+        };
+      } catch {
+        return null; // one unreadable member degrades one row, never the section
+      }
+    }),
+  );
+  const rows = hydrated.filter(Boolean) as any[];
+  rows.sort((a: any, b: any) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
+  return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
+}
+
 export function createDashboardDeps(paths: any) {
   const queue = makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }));
   const redis = makeRedisClient(paths.valkeyUrl);
@@ -104,7 +145,14 @@ export function createDashboardDeps(paths: any) {
           }),
         ),
       };
+      // Jobs the worker is holding on run.waitFor (issue #230). Caught individually like the scoped cells
+      // above, so a dead key or a slow SCAN degrades one section rather than the whole snapshot. Reads the
+      // worker's own `wait:job:*` hashes and never a delayed Job: a delayed job's `.data` holds the issue
+      // title and body, which is why the only queue-job read in this function takes an id and nothing else.
+      const held = await heldJobs(redis).catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
+
       return {
+        held,
         scopedLimits,
         scopedBudget,
         queue: { pausedState, counts, workers },
@@ -714,6 +762,10 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   // null for the nothing-configured case, and a section with no lines would render an empty box.
   const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget });
   if (scopedText) sections.splice(2, 0, { title: "SCOPED LIMITS", lines: toLines(scopedText) });
+  // Held jobs appear only when something is held, for the same reason: a section with no lines renders an
+  // empty box, and a deployment that never waits must look exactly as it did before the feature existed.
+  const heldText = renderHeldJobs({ held: snapshot.held });
+  if (heldText) sections.push({ title: "HELD", lines: toLines(heldText) });
   const plain = [title];
   for (const section of sections) plain.push(section.title, ...section.lines);
   plain.push(KEY_HINTS);
@@ -792,6 +844,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     // collapse budget. The key hint lives in this divider, not the footer -- the footer's width
     // arithmetic has no headroom for another hint (its own comment), the s/o/Tab precedent.
     { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
+    ...heldSection(snapshot.held, inner, styler),
     { key: "runs", head: ["runs", `last ${runCount} · o ${runSort}`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
   ];
@@ -809,13 +862,73 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     if (i > 0) lines.push(RULE);
     if (collapsed.has(s.key)) {
       // The divider line alone, its meta now saying what folded away and which key gets it back.
-      lines.push(styler.divider(s.head[0], `(${s.body.length} hidden — ${s.viewKey} to view)`, inner));
+      // Only name a key when there IS one. A section can be foldable without being openable -- held jobs
+      // have no view to bind -- and "(N hidden — undefined to view)" is worse than saying nothing.
+      lines.push(styler.divider(s.head[0], s.viewKey ? `(${s.body.length} hidden — ${s.viewKey} to view)` : `(${s.body.length} hidden)`, inner));
       return;
     }
     if (s.head) lines.push(styler.divider(s.head[0], s.head[1], inner));
     for (const l of s.body) lines.push(l);
   });
   return lines;
+}
+
+/** How many held rows the section shows before it stops and counts the rest. */
+const HELD_ON_DASHBOARD = 3;
+
+/**
+ * The held-jobs section, or NOTHING when nothing is held (issue #230).
+ *
+ * CONDITIONAL, which is the difference between a section and a lie. `buildListLines` charges one RULE plus
+ * a divider for every section it is given, and its row budget is `chrome + sections.length - 1`, so an
+ * unconditional section moves the floor on every deployment -- including those that never wait -- and the
+ * byte-identity assertion this panel keeps would be false for a feature nobody enabled.
+ *
+ * SELF-BOUNDING like `runs`, rather than collapsible like the config sections. It carries no `priority` and
+ * no `viewKey` on purpose: a priority without a keybinding renders "(N hidden — undefined to view)", and
+ * there is no view to bind, because a held row has nothing to drill into. It bounds itself instead, the way
+ * the runs viewport does, so it can never blow the frame however many jobs are waiting.
+ */
+function heldSection(held: any, inner: number, styler: any): any[] {
+  if (!held) return [];
+  if (held.unreachable) {
+    return [{ key: "held", priority: 5, head: ["held", "waiting on conditions"], body: [styler.cell(`unreadable (${held.unreachable})`, inner, { color: "error" })] }];
+  }
+  const rows: any[] = Array.isArray(held.rows) ? held.rows : [];
+  if (rows.length === 0) return [];
+  const shown = rows.slice(0, HELD_ON_DASHBOARD);
+  const hidden = rows.length - shown.length + (Number(held.more) || 0);
+  const body = shown.map((r: any) => heldRow(r, inner, styler));
+  if (hidden > 0) body.push(styler.cell(styler.fg("dim", `↓ ${hidden} more`), inner));
+  const total = rows.length + (Number(held.more) || 0);
+  // `truncated` means the index was longer than the reader would hydrate, so the count is a FLOOR. Said as
+  // "200+" rather than stated flat: a header that names a number it cannot stand behind is the invented
+  // figure this panel refuses everywhere else.
+  return [{ key: "held", priority: 5, head: ["held", `${total}${held.truncated ? "+" : ""} waiting on conditions`], body }];
+}
+
+/** One held row: `○ owner/repo#7  after 2026-09-01T09:00Z + jira  waited 2h14m`. */
+function heldRow(r: any, inner: number, styler: any): string {
+  // Every cell is host-chosen: an id-only target the worker derived, an operator-authored condition label,
+  // and a duration. No `.data` reaches this function, which is why the reader takes the worker's own hashes
+  // rather than a delayed job -- a delayed job's data holds the issue title and body.
+  const bits = [
+    `${styler.fg("dim", "○")} ${styler.fg("accent", r.target ?? r.jobId ?? "-")}`,
+    styler.fg("text", r.label ?? "-"),
+    styler.fg("dim", `waited ${fmtDuration(r.waitedMs)}`),
+  ];
+  return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
+}
+
+/** A compact, honest duration. `?` when the worker recorded no hold clock, never a fabricated zero. */
+function fmtDuration(ms: any): string {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
 /** The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. */
@@ -832,8 +945,11 @@ function statusHeader(queue: any, inner: number, styler: any): string {
   const sep = styler.fg("dim", " · ");
   // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
   // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,
-  // quiet-hours and scope deferrals -- an always-on amber would teach operators to ignore it. Absent at
-  // zero, the header is byte-identical to before the count existed.
+  // quiet-hours, scope deferrals and -- since issue #230 -- jobs held on `run.waitFor`. That fifth
+  // population is the only one with a section of its own, which is the point: the count stays an
+  // undifferentiated number, and the operator reads the HELD section to learn what is actually waiting.
+  // An always-on amber here would teach them to ignore it. Absent at zero, the header is byte-identical
+  // to before the count existed.
   const delayed = Number(c.delayed ?? 0);
   const vitals =
     `${c.waiting ?? 0} waiting` + sep + `${c.active ?? 0} active` + sep +

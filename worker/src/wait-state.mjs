@@ -28,6 +28,7 @@
  * stale panel row, never work that is dropped.
  *
  * The keys, all under one prefix so an operator can see the whole feature with one `KEYS wait:*`:
+ *   wait:held                 SET of held job ids -- an index the READER prunes, never a source of truth
  *   wait:job:<jobId>          HASH { since, faults, throttles, target, label, dedupId }, TTL sized to the hold
  *   wait:done:<dedupId>       STRING jobId -- this target's wait was satisfied, briefly remembered
  *   wait:key:<dedupId>        STRING jobId -- the supersede lease, TTL sized to the expected hold
@@ -39,10 +40,19 @@ const LEASE_SLACK_MS = 60 * 60 * 1000;
 /** The floor on a lease, so a short hold still leaves a trace long enough for a panel refresh to see it. */
 const LEASE_MIN_MS = 5 * 60 * 1000;
 
-// Deliberately NO index set. A SET cannot expire its members, so a `wait:held` would be the one structure
-// here that leaks permanently: every hold ending by any route except the clean one would leave a member
-// nothing can remove. A reader enumerates `wait:job:*` instead, which is self-cleaning because every hash
-// carries a TTL, and which cannot disagree with itself about who is held.
+// An INDEX SET, with the leak handled by the reader rather than by not having one.
+//
+// The first cut of this file had no index, on the reasoning that a SET cannot expire its members, so every
+// hold ending by any route except the clean one would leave a member nothing removes. That reasoning was
+// right about the leak and wrong about the cost of avoiding it: enumerating `wait:job:*` instead means a
+// SCAN of the whole keyspace, and the panel does it every second -- worst on deployments with NOTHING held,
+// because the exit-early condition never fires. Measured at 200k unrelated keys that is most of a refresh
+// interval, for a feature nobody is using.
+//
+// So the index exists and the READER prunes it: a member whose hash is gone is stale by definition, and the
+// reader removes it as it goes. Staleness is bounded by the next read, the hashes remain the source of
+// truth, and the cost of listing held jobs becomes O(held) instead of O(keyspace).
+export const HELD_SET = "wait:held";
 export const jobKey = (jobId) => `wait:job:${jobId}`;
 export const leaseKey = (dedupId) => `wait:key:${dedupId}`;
 export const satisfiedKey = (dedupId) => `wait:done:${dedupId}`;
@@ -72,6 +82,7 @@ export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25
 				await redis.hsetnx(key, "since", String(now()));
 				await redis.hset(key, "target", target ?? "", "label", label ?? "", "dedupId", dedupId ?? "");
 				await redis.pexpire(key, ttl);
+				await redis.sadd(HELD_SET, jobId);
 				// Refresh OUR lease only, and re-read to find out whether it IS ours: `hold` is no longer
 				// reached solely after a successful claim (the throttle path holds to stamp a clock without
 				// ever winning a lease), so ownership is a question rather than an assumption.
@@ -166,6 +177,7 @@ export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25
 		/** Drop a hold: the job is running, refusing, or expiring. Only clears a lease this job actually owns. */
 		async release(jobId, { dedupId } = {}) {
 			try {
+				await redis.srem(HELD_SET, jobId);
 				await redis.del(jobKey(jobId));
 				if (dedupId) {
 					const holder = await redis.get(leaseKey(dedupId));

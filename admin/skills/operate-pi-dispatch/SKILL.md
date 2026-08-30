@@ -41,6 +41,12 @@ dialog before it takes effect**:
   (per folder/repo "quiet hours": runs for a scope are deferred between certain times and auto-resume after;
   `dispatch_pauses` lists them with their index). `dispatch_pause_edit` is a partial change — pass the index
   plus only the fields to alter. Deferring never drops a job and costs no budget.
+- `dispatch_waits` — list the jobs the worker is HOLDING on a trigger's `run.waitFor` condition: job id,
+  an id-only target, the operator's own words for what it waits on, and how long it has waited. Different
+  from the queue's `delayed` count, which also mixes cron next-occurrences, retry backoff and quiet hours.
+- `dispatch_wait_cancel` — remove a held job so it never runs (confirm-gated). It is the only lever that
+  reaches one: a held job has spent nothing, so no budget cap will ever refuse it, and deleting the trigger
+  does not reach a job already enqueued.
 - `dispatch_limit_add` / `dispatch_limit_edit` / `dispatch_limit_delete` — manage scoped limits (per
   repo/folder budget caps and concurrency: `day`/`week`/`month` job-count caps refuse a job pre-spend with
   reason `scope-cap`, never retried; `concurrent` defers the excess, never drops it; `dispatch_limits`
@@ -241,6 +247,28 @@ If you are asked why a GitLab trigger did not fire, the usual answers in order:
 2. **No label was added by that event.** GitLab has no `labeled` action; the trigger fires on the labels
    an event *added*, so editing an already-labelled issue does nothing. This is deliberate.
 3. **The action word belongs to the other forge.** See above.
+
+## Held jobs — what `waitFor` looks like from here
+
+A trigger may carry `run.waitFor`, and a job whose conditions have not cleared is **held**: deferred, with
+no budget slot reserved, no kill timer armed, no retry attempt consumed, and no run record written. It runs
+exactly once when every condition clears.
+
+What that means when you are asked about a job that "has not run":
+
+- **Look at `dispatch_waits` before the queue counts.** A held job is not `waiting` and not `active`. It is
+  in the delayed set, which also holds every cron trigger's next occurrence, so the panel's `delayed` number
+  is not an answer to "what is stuck".
+- **A held job has cost nothing yet.** Do not reason about it against the spend caps: they count container
+  starts, and this job has started none. The bounds that apply to it are its own (`PI_WAIT_MAX_MS`,
+  `PI_WAIT_MAX_CHECKS`), and when one is reached the job terminates with a run record naming the reason.
+- **The terminal reasons say what to do.** `wait-refused` means the operator's check reported the condition
+  will never clear. `wait-unanswerable` means the check could not answer repeatedly, which usually means the
+  script is broken rather than the condition slow. `wait-expired` means a bound was reached.
+  `wait-skew` / `wait-unreadable` mean two services in the deployment disagree about the field and one needs
+  upgrading or restarting.
+- **Cancelling is an operator decision.** `dispatch_wait_cancel` needs a confirm, writes no run record (the
+  job never ran), and cannot be undone: the delivery is gone, and a webhook does not resend itself.
 
 ## Scoped limits — and the folder mutex you cannot turn off
 

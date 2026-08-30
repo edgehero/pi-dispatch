@@ -255,11 +255,11 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
  * writes cannot interleave. This test is the deliberate record that model-callable writes were added on
  * purpose -- gated by an operator confirm (behaviour proven in crud.test.mjs), not tool absence.
  */
-const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete"];
+const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel"];
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 19, "exactly nineteen tools");
+  assert.equal(calls.registerTool.length, 21, "exactly twenty-one tools");
   assert.deepEqual(names, [
     "dispatch_costs",
     "dispatch_limit_add",
@@ -280,6 +280,8 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_trigger_delete",
     "dispatch_trigger_edit",
     "dispatch_triggers",
+    "dispatch_wait_cancel",
+    "dispatch_waits",
   ]);
   for (const name of names) {
     assert.ok(!/log/.test(name), `no raw-log tool: ${name}`);
