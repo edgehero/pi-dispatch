@@ -157,21 +157,20 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		// The kill switch reads ONLY VALKEY_URL, not the full loadConfig -- it must work even when
 		// GitHub auth is misconfigured, so an operator can always stop the queue.
 		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
-		const { parseConnection } = await import("./connection.mjs");
+		const { parseConnection, makeRedisClient } = await import("./connection.mjs");
 		const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
-		const { makeRedisClient } = await import("./connection.mjs");
 		const { readLiveHosts } = await import("./host-registry.mjs");
 		// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
 		// pausing `pi-jobs` alone would stop forge deliveries while a named host's cron, chained children
 		// and manual runs kept spending -- and would print "paused" for having done it. That is the silent
 		// no-op the comment here already warned about for a mistyped name, arriving through a new door.
 		//
-		// The registry read fails OPEN -- an unreadable one yields the shared queue alone, which is exactly
-		// what this command did before, so a Valkey blip can never make the kill switch refuse. But it fails
-		// open LOUDLY: the `[N queues]` suffix is the only evidence the fleet was spanned, so suppressing it
-		// silently in the one case where it was not would make the failure byte-identical to single-host
-		// success while a named host kept spending. `readLiveHosts` RETURNS `{unreachable}` rather than
-		// rejecting, so this is a branch and not a `.catch`.
+		// Both reads fail OPEN -- between them an unreadable registry and an unreadable keyspace yield the
+		// shared queue alone, which is exactly what this command did before, so a Valkey blip can never make
+		// the kill switch refuse. But it fails open LOUDLY: a degraded read is NAMED in the output rather
+		// than left indistinguishable from a single-host success while a named host keeps spending.
+		// `readLiveHosts` RETURNS `{unreachable}` rather than rejecting, so `blind` is a branch on its
+		// value and the `.catch` below is only for a client that throws before it can answer.
 		const probe = makeRedisClient(url);
 		// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
 		// line -- the exact noise `defaultProbeValkey` exists to suppress.
@@ -188,8 +187,6 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		probe.disconnect?.();
 		const blind = fleet?.unreachable ?? null;
 		const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing);
-		// `[N queues]` when we know, `[fleet unknown: …]` when we do not. Never a bare success line for a
-		// deployment we could not enumerate.
 		// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
 		// found them. Report the count we ACTED on, and name the degraded read separately.
 		const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
