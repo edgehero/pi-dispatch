@@ -302,12 +302,25 @@ timezone-aware) and resume automatically. A paused job is deferred, never droppe
 Manage them with `w` in the panel or `PI_PAUSE_WINDOWS_FILE` by hand
 ([`docs/pause-windows.md`](docs/pause-windows.md)).
 
+### More than one machine
+
+Two boxes, one queue, one budget, one panel. Give each worker a name (`PI_WORKER_NAME`) and point them at
+the same Valkey. Work that only one machine can do (a cron trigger's folder, a chained child, a manual
+run) is routed to that machine; forge deliveries stay on the shared queue and either host takes them.
+Naming a worker is what turns routing on, so a single box behaves exactly as it always did.
+
+Two things that used to be quietly per process become fleet wide with it: the wait check slots, and a
+scoped `concurrent` ceiling on a repository. Divergent trigger files now freeze cron and say so, rather
+than each host deleting the other's schedules. Do not share the sandbox directory
+([`docs/multi-host.md`](docs/multi-host.md) explains why, and what else is worth knowing).
+
 ### Scoped limits
 
 Cap how many jobs a repo or folder may run per day, week or month, and how many at once. Over a budget
 cap the job is refused before any spend (reason `scope-cap`); over the concurrency ceiling it is
 deferred, never dropped. Local jobs also carry a built-in guard with no switch: at most one job per
-folder at a time (within the worker process, and one worker per docker daemon is the supported shape),
+folder at a time (within the worker process, and one worker per docker daemon is the supported shape;
+on several machines a folder lives on one of them, so its jobs are routed there and the guard still holds),
 because two agents editing one working tree race each other with no gate and no undo.
 
 ```json

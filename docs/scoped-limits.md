@@ -20,6 +20,13 @@ Three mechanisms, and they behave differently on purpose:
   on a folder scope is inert — it can never raise the mutex's one-at-a-time, and a resolved folder scope
   matches no forge job.
 
+
+**On more than one machine** ([`multi-host.md`](multi-host.md)): the one-job-per-folder guard is still
+per worker process, and that stays correct because a local folder lives on one machine and its jobs are
+routed there. A `concurrent` limit on a **repository** is different: any host can run a forge job, so
+that ceiling was per process and multiplied by host count until it became fleet-wide. It is shared now,
+once a worker name is declared. The day/week/month caps on the same row were always shared.
+
 ## Enable it
 
 ```sh

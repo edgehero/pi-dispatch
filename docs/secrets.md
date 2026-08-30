@@ -5,6 +5,13 @@ Infisical, Doppler, 1Password or whatever your organisation already runs. Nothin
 nothing here has to change to allow it. The reason is one line of code, and everything below follows
 from it.
 
+
+**On more than one machine** ([`multi-host.md`](multi-host.md)): a resolver is an absolute path on one
+host's disk, so a trigger binding `run.secrets` needs its profile declared on **every** host that might
+pop the delivery. A host without it refuses the job `secret-profile-unknown`, which is returned and never
+retried, so the same trigger succeeds or fails depending on where it landed. Declare the same profiles
+and roots on every host.
+
 ## The one fact everything follows from
 
 **The worker parses no `.env` file.** It reads the environment:

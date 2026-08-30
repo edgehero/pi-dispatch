@@ -8,6 +8,7 @@
 
 > This npm package, **`@edgehero/pi-dispatch-admin`**, is the **operator console** (a pi extension). The service itself is `@edgehero/pi-dispatch` (worker + CLI) and `@edgehero/pi-dispatch-receiver` (the webhook edge); the [main repo](https://github.com/edgehero/pi-dispatch) has the container image, docs, and SECURITY.md.
 
+
 ## How it works
 
 Every trigger produces the same job, through the same path: one queue, one container, one budget.
@@ -72,6 +73,13 @@ One command puts a live TUI over the whole deployment:
 - **Held jobs, with what they are waiting for.** A trigger carrying `run.waitFor` holds its job in the queue, unstarted and unbilled, until an instant passes or a check script the operator wrote exits 0. The panel grows a **held** section while anything waits (the target, the condition, and how long it has waited) and hides it again when nothing does, so a wait stops being an anonymous entry in the delayed count. `dispatch_waits` lists them and `dispatch_wait_cancel` stops one behind the operator confirm, which is the only way to cancel a held job short of editing redis by hand ([`docs/wait-for.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/wait-for.md)).
 - **AI-operable, with a human gate.** Model-callable tools let an agent change limits (global and scoped) and manage triggers and pause windows, and every **config** write pops an operator confirmation the model cannot answer, refusing outright when no operator is present. Two tools sit outside that gate on purpose: `dispatch_pause` and `dispatch_resume` write durable queue state but are reversible and spend nothing, so they carry no confirm. One more sits outside it and is **not** money-safe: `dispatch_run` enqueues a **paid** run that edits a local folder in place with no undo, bounded instead by six independent limits (the `PI_DISPATCH_RUN_ROOTS` folder allowlist, a committed per-flow `ai-trigger: allow` opt-in read at a pre-agent SHA, a dirty-tree refusal with no force option, no spend knobs on the tool, a per-hour rate limit, and the worker's daily cap). Commands sit outside its reach entirely: `dispatch_run` speaks flows only, and a chained job's request naming a `command` is refused outright, with no opt-in. Read [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) on that one before you enable it. The bundled `operate-pi-dispatch` skill teaches the agent those gates.
 - **Logs stay put.** Raw container output renders only in the overlay viewer, never into model context.
+
+## More than one machine
+
+The console reads the whole deployment, not one host. The status line names the workers when they have
+been named, `RUN_DETAIL` names the machine that ran a job, the pause switch stops every queue rather than
+the shared one, and the scheduler view spans hosts. On a single host none of that is visible, because
+there is nothing to distinguish. See [`docs/multi-host.md`](../docs/multi-host.md).
 
 ## Install
 

@@ -22,6 +22,14 @@ Two kinds of condition, and they cost very different amounts:
 Conditions are a **conjunction**: all of them must clear. They are evaluated cheapest first rather than in
 writing order, so an unreached instant never costs you a subprocess.
 
+
+**On more than one machine** ([`multi-host.md`](multi-host.md)): `PI_WAIT_CHECK_SLOTS` is fleet-wide once
+a worker name is declared, so the capacity arithmetic below is for the whole deployment rather than per
+host. It used to be per process, which meant N hosts ran N times the checks against the same external
+system while the only symptom, a denial, got *rarer* per host as you scaled out. A wait profile is also a
+script on one machine's disk: a host that does not have it refuses the job, so declare the same profiles
+everywhere, or accept that a delivery's fate depends on which host popped it.
+
 ## Enable it
 
 `after` needs no configuration at all. `profile` needs the table that says which names exist here:
