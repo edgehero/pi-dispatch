@@ -28,7 +28,8 @@
  * stale panel row, never work that is dropped.
  *
  * The keys, all under one prefix so an operator can see the whole feature with one `KEYS wait:*`:
- *   wait:job:<jobId>          HASH { since, faults, target, label, dedupId }, TTL sized to the hold
+ *   wait:job:<jobId>          HASH { since, faults, throttles, target, label, dedupId }, TTL sized to the hold
+ *   wait:done:<dedupId>       STRING jobId -- this target's wait was satisfied, briefly remembered
  *   wait:key:<dedupId>        STRING jobId -- the supersede lease, TTL sized to the expected hold
  */
 
@@ -44,13 +45,18 @@ const LEASE_MIN_MS = 5 * 60 * 1000;
 // carries a TTL, and which cannot disagree with itself about who is held.
 export const jobKey = (jobId) => `wait:job:${jobId}`;
 export const leaseKey = (dedupId) => `wait:key:${dedupId}`;
+export const satisfiedKey = (dedupId) => `wait:done:${dedupId}`;
+
+// How long "this target's wait has been satisfied" is remembered. The backoff ceiling, because that is the
+// longest two jobs that cleared together can wake apart.
+const SATISFIED_MS = 15 * 60 * 1000;
 
 /**
  * Build the state accessor. `redis` is the same client the budget uses; nothing here is on the paid path,
  * so every method is written to FAIL OPEN: a redis blip must never refuse a job or wedge a hold, it may
  * only cost the panel a row. The one exception is `claim`, whose failure mode is spelled out on it.
  */
-export function makeWaitState({ redis, now = () => Date.now() }) {
+export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25 * 3600 * 1000 }) {
 	const leaseMs = (untilMs) => Math.max(LEASE_MIN_MS, (untilMs ?? 0) - now() + LEASE_SLACK_MS);
 
 	return {
@@ -66,8 +72,9 @@ export function makeWaitState({ redis, now = () => Date.now() }) {
 				await redis.hsetnx(key, "since", String(now()));
 				await redis.hset(key, "target", target ?? "", "label", label ?? "", "dedupId", dedupId ?? "");
 				await redis.pexpire(key, ttl);
-				// Refresh OUR lease only. `hold` is reached only after `claim` returned ok, so this job does own
-				// it -- but re-reading before extending is what keeps that true if a caller ever changes.
+				// Refresh OUR lease only, and re-read to find out whether it IS ours: `hold` is no longer
+				// reached solely after a successful claim (the throttle path holds to stamp a clock without
+				// ever winning a lease), so ownership is a question rather than an assumption.
 				// Extending a lease this job LOST would hand the winner a longer deafening window than its own
 				// hold asked for, which is the failure the three-way claim exists to avoid.
 				if (dedupId && (await redis.get(leaseKey(dedupId))) === jobId) await redis.pexpire(leaseKey(dedupId), ttl);
@@ -124,6 +131,38 @@ export function makeWaitState({ redis, now = () => Date.now() }) {
 			}
 		},
 
+		/**
+		 * Mark a target as SATISFIED by this job, and read who satisfied it.
+		 *
+		 * The lease alone cannot close one window. Two deliveries can both be holding when a worker outage
+		 * outlives the lease TTL -- the delayed jobs survive, being Redis-persisted, while the lease does not
+		 * -- and if the condition cleared during that outage each one wakes, finds no holder, claims cleanly,
+		 * and runs. Two paid runs for one intent, which is the accumulation `REQ-WAIT-FOR` promises against.
+		 *
+		 * So the job that clears a target says so, and a sibling waking after it refuses. The marker lives for
+		 * `SATISFIED_MS` because that is the longest two jobs which cleared TOGETHER can wake apart: the
+		 * backoff ceiling. It is deliberately not longer -- a delivery arriving well after a wait completed is
+		 * a genuinely new intent, and coalescing it would be the dedup-window mistake this design already
+		 * refused once.
+		 */
+		async markSatisfied(jobId, { dedupId }) {
+			if (!dedupId) return;
+			try {
+				await redis.set(satisfiedKey(dedupId), jobId, "PX", SATISFIED_MS);
+			} catch {
+				// Fail open: the cost is the duplicate this marker exists to prevent, not a wrong refusal.
+			}
+		},
+
+		async satisfiedBy(dedupId) {
+			if (!dedupId) return null;
+			try {
+				return await redis.get(satisfiedKey(dedupId));
+			} catch {
+				return null;
+			}
+		},
+
 		/** Drop a hold: the job is running, refusing, or expiring. Only clears a lease this job actually owns. */
 		async release(jobId, { dedupId } = {}) {
 			try {
@@ -137,12 +176,73 @@ export function makeWaitState({ redis, now = () => Date.now() }) {
 			}
 		},
 
+		/**
+		 * The two per-job counters the polled tier keeps: how many checks have run, and how many of them in a
+		 * ROW could not answer. Both live beside `since` so one hash carries the whole hold, and both come
+		 * back 0 when nothing was written -- an unrecorded hold must read as a fresh one rather than as a
+		 * job that has already exhausted its budget.
+		 */
+		async counters(jobId) {
+			try {
+				const h = await redis.hget(jobKey(jobId), "checks");
+				const f = await redis.hget(jobKey(jobId), "faults");
+				const t = await redis.hget(jobKey(jobId), "throttles");
+				return { checks: Number(h) || 0, faults: Number(f) || 0, throttles: Number(t) || 0 };
+			} catch {
+				return { checks: 0, faults: 0, throttles: 0 };
+			}
+		},
+
+		/**
+		 * Count a wake that was denied the check lease, or clear the count when one is granted.
+		 *
+		 * This is the only observable the capacity bound has. The lease caps how much wall-clock a worker
+		 * spends checking, which is what it is for -- but a cap that is being hit constantly means demand
+		 * exceeds it, and the plan's own economics say that arrives quietly: paid jobs starve behind checks
+		 * that spend nothing, and nothing in the product explains why. A consecutive-denial count is the
+		 * symptom an operator can actually see, so it is kept and its overflow is logged rather than absorbed.
+		 */
+		async noteThrottle(jobId, { denied }) {
+			try {
+				if (!denied) return void (await redis.hset(jobKey(jobId), "throttles", "0"));
+				const n = Number(await redis.hincrby(jobKey(jobId), "throttles", 1)) || 0;
+				await redis.pexpire(jobKey(jobId), counterTtlMs); // see noteCheck: a counter may CREATE this hash
+				return n;
+			} catch {
+				return 0;
+			}
+		},
+
+		/**
+		 * Record what a check answered. `checks` only ever grows; `faults` is a CONSECUTIVE count, so a check
+		 * that answered resets it -- a script that works after an outage has not accumulated a debt.
+		 */
+		async noteCheck(jobId, { fault }) {
+			try {
+				await redis.hincrby(jobKey(jobId), "checks", 1);
+				if (fault) await redis.hincrby(jobKey(jobId), "faults", 1);
+				else await redis.hset(jobKey(jobId), "faults", "0");
+				// A counter can CREATE this hash: on a job's first polled wake nothing has held yet, and a path
+				// that exits before `hold` (a lease denial, an unverified supersede) would otherwise leave a
+				// key with NO expiry at all. That breaks the invariant this whole keyspace rests on -- "every
+				// hash carries a TTL", which is why there is no index set to leak instead -- and the panel
+				// would render a held row nothing could ever remove.
+				await redis.pexpire(jobKey(jobId), counterTtlMs);
+			} catch {
+				// Fail open: a lost counter costs a longer wait, never a wrong verdict.
+			}
+		},
+
 		/** How long this job has been held, in ms, or null when nothing was recorded. */
 		async heldForMs(jobId) {
 			try {
 				const since = await redis.hget(jobKey(jobId), "since");
+				// ABSENT IS NOT ZERO, and conflating them is not a rounding error: `Number(null)` is 0, so a
+				// job with no recorded hold would read as held since the epoch and every bound measured from
+				// here -- the maximum hold above all -- would fire on its first check.
+				if (typeof since !== "string" || since.trim() === "") return null;
 				const ms = Number(since);
-				return Number.isFinite(ms) ? Math.max(0, now() - ms) : null;
+				return Number.isFinite(ms) && ms > 0 ? Math.max(0, now() - ms) : null;
 			} catch {
 				return null;
 			}

@@ -4,7 +4,7 @@ import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { InfraRetry, runJob } from "./processor.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
-import { WAIT_AFTER_MAX_DEFAULT_MS, afterMs, unreadableConditions, waitArmed, waitLabel, waitProfileNames } from "./wait-for.mjs";
+import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
 const exec = promisify(execFile);
@@ -25,6 +25,22 @@ export const SCOPE_BUSY_RECHECK_MS = 5_000;
 // waits, and the fault it is waiting out is usually seconds long.
 export const SUPERSEDE_RECHECK_MS = 15_000;
 
+// The one key the check lease counts under. A single global counter rather than one per profile: what it
+// bounds is this worker's wall-clock spent answering questions, and that is shared whatever is being asked.
+const WAIT_CHECK_KEY = "wait-check";
+
+// How many consecutive lease denials one job absorbs before the deployment is told its checking capacity is
+// short. Logged ONCE per run of denials rather than per wake: an alarm that repeats every re-check is the
+// always-on amber this project rejects elsewhere, and the operator only needs telling once per episode.
+const THROTTLE_ALARM = 5;
+
+// The floor under a throttled or aborted re-ask. Its own constant rather than a borrow of
+// SUPERSEDE_RECHECK_MS, which documents an unrelated concern. Deliberately NOT 5s: that is
+// SCOPE_BUSY_RECHECK_MS, and INT-WAIT-PROFILES-CONTRACT rests on wait deferrals being distinguishable from
+// scope deferrals by wake instant -- nothing records WHY a job sits in the delayed set, so the instants are
+// the only evidence there is. A test pins the two apart.
+const THROTTLE_FLOOR_MS = 11_000;
+
 /**
  * Build the BullMQ processor.
  *
@@ -44,7 +60,7 @@ export const SUPERSEDE_RECHECK_MS = 15_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -107,6 +123,16 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// this worker cannot read). Without it the gate would fall through, log `wait_cleared`, and run
 			// the job -- asserting in the log that conditions cleared which it never evaluated, which is the
 			// same undetectable paid run the backward check exists to stop.
+			// A sibling that was held on this same target may already have cleared it. Checked FIRST, because
+			// it is free and determinate, and because the window it closes is one no lease can: two jobs
+			// holding through an outage that outlives their leases would each wake, find no holder, and run.
+			if (dedupId) {
+				const satisfiedBy = await waitState.satisfiedBy(dedupId);
+				if (satisfiedBy && satisfiedBy !== job.id) {
+					return await refuseWait("wait-superseded", "wait_superseded", { satisfiedBy }, "Another delivery for this target already finished waiting on the same conditions. Not run.");
+				}
+			}
+
 			const unreadable = unreadableConditions(job.data);
 			if (unreadable.length > 0) {
 				// Its OWN token, not `wait-skew`. Both are version skew, and the REMEDIES are opposites --
@@ -115,9 +141,16 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				return await refuseWait("wait-unreadable", "refused_wait_unreadable", { conditions: unreadable.length }, `Refused: this job carries ${unreadable.length} wait condition${unreadable.length === 1 ? "" : "s"} this worker cannot read, so it cannot honour them. The worker is older than the service that enqueued this job. Not run.`);
 			}
 
-			// A `profile` condition needs a resolver, and until one is wired NOTHING can answer it. Refused
-			// rather than ignored: a wait the deployment cannot perform must not read as a wait that passed.
+			// A `profile` condition needs a checker, and with none wired NOTHING can answer it. Refused rather
+			// than ignored: a wait the deployment cannot perform must not read as a wait that passed.
 			const profiles = waitProfileNames(job.data);
+			// Declared-ness is a table lookup, so it belongs with the other free refusals rather than inside
+			// the check. Without it here, `[{after: "<tomorrow>"}, {profile: "typo"}]` holds for a day and
+			// THEN refuses -- which is the exact sentence the ordering rule above promises will not happen.
+			const undeclared = deps?.waitProfileDeclared ? profiles.find((name) => !deps.waitProfileDeclared(name)) : undefined;
+			if (undeclared !== undefined) {
+				return await refuseWait("wait-profile-unknown", "wait_profile_unknown", { profile: undeclared }, `Waiting on \`${undeclared}\` is not something this deployment can answer: no such wait profile is declared here. Not run.`);
+			}
 			if (profiles.length > 0 && !deps?.checkWait) {
 				return await refuseWait("wait-profile-unknown", "wait_profile_unknown", { profile: profiles[0] }, `Waiting on \`${profiles[0]}\` is not something this deployment can answer. Not run.`);
 			}
@@ -157,12 +190,166 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				throw new DelayedError();
 			}
 
-			// Every condition this slice can evaluate has cleared. Drop the lease and the row before the job
-			// becomes an ordinary run: a held marker outliving its hold is a panel lying about live state.
+			// TIER 2: the polled conditions. Last, because it is the only part of this gate that spawns a
+			// process -- the free refusals above it are free, and the free hold above it is free.
+			if (profiles.length > 0) {
+				const held = (await waitState.heldForMs(job.id)) ?? 0;
+				const counted = await waitState.counters(job.id);
+
+				// One check at a time, process-wide, and never the worker's last free slot. This is the bound
+				// that keeps a wait from starving the paid work it is waiting for: slots x timeout is the most
+				// wall-clock a worker can spend answering questions instead of running jobs. Computed against
+				// the LIVE concurrency rather than the boot value, because the overlay can lower it.
+				const slots = Math.min(checkSlotCount(), Math.max(1, concurrencyNow() - 1));
+				if (!checkSlots.tryAcquire(WAIT_CHECK_KEY, slots)) {
+					// Denials are counted, and a run of them is the ONE symptom the capacity bound has. The
+					// lease deliberately caps how much wall-clock this worker spends checking; being at that
+					// cap constantly means demand exceeds it, which the issue's own economics say arrives
+					// silently -- paid jobs starve behind checks that spend nothing and nothing says why.
+					const denials = await waitState.noteThrottle(job.id, { denied: true });
+					if (denials === THROTTLE_ALARM) deps?.log?.("wait_capacity_exceeded", { jobId: job.id, denials, slots, hint: "raise PI_WAIT_CHECK_SLOTS or PI_CONCURRENCY, lengthen PI_WAIT_INTERVAL_MS, or hold fewer jobs" });
+					// A starved job still needs a CLOCK and a CEILING, or the lease turns into the very
+					// starvation it exists to bound: without this the hold is stamped only on a wake that won
+					// the lease, so a job that never wins one has no `since`, never reaches the maximum, and
+					// re-wakes forever with no record and no bound. There is no deciding check to run first
+					// here -- that is the whole condition -- so the bound applies directly.
+					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs() });
+					if (held >= maxWaitMs()) {
+						return await refuseWait("wait-expired", "wait_expired", { reason: "max-wait-unchecked", denials, heldForMs: held }, `Gave up waiting: this deployment could not run the check often enough to answer within the maximum wait. Not run.`);
+					}
+					// Denied. Re-ask at a fraction of the cadence rather than the full backoff (which would
+					// turn one lost coin-flip into a fifteen-minute penalty) or a flat few seconds (which at
+					// scale is a herd). Jittered, so a fleet of denied jobs does not return together.
+					const wait = Math.max(THROTTLE_FLOOR_MS, Math.floor(waitBackoffMs(intervalMs(), held) / 4));
+					const delay = wait + Math.floor(wait * 0.1 * random());
+					deps?.log?.("wait_check_throttled", { jobId: job.id, delayMs: delay, slots });
+					await job.moveToDelayed(nowMs + delay, token);
+					throw new DelayedError();
+				}
+
+				// Claimed BEFORE the check, not after: a second delivery for an already-held target is a free
+				// determinate refusal, and paying for a subprocess first inverts the free-before-costly rule
+				// this gate's own header invokes. Tier 1 already claims in this order.
+				const claim = await waitState.claim(job.id, { dedupId, untilMs: nowMs + waitBackoffMs(intervalMs(), held), isLive: deps?.isJobLive });
+				if (claim.heldBy) {
+					return await refuseWait("wait-superseded", "wait_superseded", { heldBy: claim.heldBy }, "Another delivery for this target is already waiting on the same conditions. Not run.");
+				}
+				if (claim.retry) {
+					deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
+					await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
+					throw new DelayedError();
+				}
+
+				await waitState.noteThrottle(job.id, { denied: false }); // granted: the run of denials ends here
+				let verdict = null;
+				let checked = null;
+				try {
+					// Sequential, in the operator's writing order: the resolver's reason applies unchanged --
+					// naming the first condition that did not clear is what makes a held row readable, and a
+					// parallel fan-out would blame whichever lost the race on any given wake.
+					for (const profile of profiles) {
+						checked = profile;
+						verdict = await deps.checkWait(profile, targetFor(job.data?.kind, job.data), { signal });
+						if (verdict?.profileUnknown || verdict?.verdict !== "go") break;
+					}
+				} finally {
+					checkSlots.release(WAIT_CHECK_KEY);
+				}
+
+				if (verdict?.unusableTarget) {
+					// Determinate and unfixable by waiting: the job's own target is a shape no check can be
+					// handed. It belongs with the refusals, not the holds -- holding would spend the fault
+					// budget and then blame the operator's script for a value it was never given.
+					return await refuseWait("wait-unreadable", "refused_wait_unreadable", { profile: checked }, `Refused: this job's target cannot be handed to a wait check, so \`${checked}\` can never be asked. Not run.`);
+				}
+				if (verdict?.profileUnknown) {
+					return await refuseWait("wait-profile-unknown", "wait_profile_unknown", { profile: verdict.profileUnknown }, `Waiting on \`${verdict.profileUnknown}\` is not something this deployment can answer: no such wait profile is declared here. Not run.`);
+				}
+				if (verdict?.verdict === "refuse") {
+					// Exit 2: the check says this will NEVER clear. Terminal by the protocol's own words, and
+					// distinct from every "not yet" above it.
+					return await refuseWait("wait-refused", "wait_refused", { profile: checked, heldForMs: held }, `The check \`${checked}\` reports this will never clear. Not run.`);
+				}
+
+				if (verdict?.aborted) {
+					// The worker is stopping or this job was cancelled. Nothing was learned and nothing is
+					// owed: re-defer at once rather than at the full backoff, and count neither a check nor a
+					// fault, or a rolling deploy would spend a job's whole budget on its own restarts and then
+					// blame the operator's script for it.
+					deps?.log?.("wait_check_aborted", { jobId: job.id, profile: checked });
+					await job.moveToDelayed(nowMs + THROTTLE_FLOOR_MS, token);
+					throw new DelayedError();
+				}
+
+				if (verdict?.verdict === "hold") {
+					const fault = verdict.fault === true;
+					await waitState.noteCheck(job.id, { fault });
+					const faults = fault ? counted.faults + 1 : 0;
+
+					// A check that never answers is a broken script, not a slow condition, and OQ-030 is why
+					// this bound exists: most CLIs exit 1 for everything, so without it a typo would hold for
+					// the whole maximum wait and then blame the CONDITION rather than the check.
+					if (faults >= maxFaults()) {
+						return await refuseWait("wait-unanswerable", "wait_unanswerable", { profile: checked, faults }, `The check \`${checked}\` could not answer ${faults} times in a row. Not run.`);
+					}
+
+					// BOTH terminal bounds are tested AFTER the check and never before it, so a condition that
+					// cleared on the deciding wake runs instead of being recorded as never having cleared.
+					// Without that ordering the backoff's own quantisation makes "cleared at t+1s, declared
+					// never-cleared at t+900s" a structural lie in the durable record and in a public comment.
+					//
+					// The count bound reads `checks + 1` because this wake's check has just run: the job gets
+					// exactly `maxChecks` checks, the last of which is the deciding one. Putting it before the
+					// check instead -- so the act of testing the bound could not exceed it -- was the obvious
+					// spelling, and it silently made this whole guarantee untrue at every shipped default,
+					// because the count bound is the one that fires first there.
+					if (counted.checks + 1 >= maxChecks()) {
+						return await refuseWait("wait-expired", "wait_expired", { reason: "max-checks", checks: counted.checks + 1, profile: checked, heldForMs: held }, `Gave up waiting on \`${checked}\` after ${counted.checks + 1} checks. Not run.`);
+					}
+					if (held >= maxWaitMs()) {
+						return await refuseWait("wait-expired", "wait_expired", { reason: "max-wait", profile: checked, heldForMs: held }, `Gave up waiting on \`${checked}\`. Not run.`);
+					}
+
+					// Clamped to what is LEFT of the budget, never just the cadence. Without this an hourly
+					// interval under a fifteen-minute maximum holds for the full hour -- 400% of the bound the
+					// operator configured -- because the ceiling is only tested when a wake arrives, and the
+					// cadence decides when that is. The two knobs are independent `positiveInt`s and nothing
+					// cross-validates them, so the clamp is what makes the smaller one actually bind.
+					const base = waitBackoffMs(intervalMs(), held);
+					const jittered = base + Math.floor(base * 0.1 * random());
+					const remaining = Math.max(0, maxWaitMs() - held);
+					const delay = Math.max(1000, Math.min(jittered, remaining));
+					await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + delay });
+					deps?.log?.("wait_deferred", { jobId: job.id, profile: checked, fault, heldForMs: held, delayMs: delay });
+					await job.moveToDelayed(nowMs + delay, token);
+					throw new DelayedError();
+				}
+
+				// FAIL CLOSED on anything that is not literally go. Everything above tests for a specific
+				// shape and falls through otherwise, and "otherwise" at this gate means STARTING A PAID
+				// CONTAINER -- so an `undefined`, a `null`, a `{}`, a mis-cased "GO" or a bare string from a
+				// checker would run the job silently, with no record field and no log line to distinguish it
+				// from a job whose check said yes. The shipped checker is total, and that is exactly the
+				// reasoning `unreadableConditions` above rejects: this is a dependency-injection seam, and a
+				// seam's guarantees are the caller's to enforce.
+				if (verdict?.verdict !== "go") {
+					deps?.log?.("wait_check_unintelligible", { jobId: job.id, profile: checked });
+					await waitState.noteCheck(job.id, { fault: true });
+					const base = waitBackoffMs(intervalMs(), held);
+					await job.moveToDelayed(nowMs + base + Math.floor(base * 0.1 * random()), token);
+					throw new DelayedError();
+				}
+
+				// Every profile answered go. Record the last check so the count bound sees it.
+				await waitState.noteCheck(job.id, { fault: false });
+			}
+
 			// Only a job that actually HELD has cleared. Without the check this line fires on the first
 			// pickup of a job whose instant had already passed, and again on every scope-busy re-check
 			// afterwards -- asserting a wait ended that never began.
 			const heldForMs = await waitState.heldForMs(job.id);
+			// Say so before releasing: a sibling held on this target must find the answer, not an empty lease.
+			if (heldForMs !== null) await waitState.markSatisfied(job.id, { dedupId });
 			await waitState.release(job.id, { dedupId });
 			if (heldForMs !== null) deps?.log?.("wait_cleared", { jobId: job.id, label: waitLabel(job.data), heldForMs });
 		}
@@ -327,7 +514,7 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 	};
 }
 
-export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, extraClosers = [] }) {
+export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, checkSlots, checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, extraClosers = [] }) {
 	let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 	const processor = makeProcessor({
 		cancelJob: (id, reason) => worker.cancelJob(id, reason),
@@ -349,6 +536,17 @@ export function createWorker({ connection, concurrency, getSettings, redis, deps
 		// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
 		waitState,
 		afterMaxMs,
+		// Issue #230, the polled tier. `concurrencyNow` reads the LIVE slot count rather than the boot value,
+		// because the overlay can lower it through `dispatch_set` and a check must never take the last free
+		// slot from a paid job. Late-bound over `worker` exactly as `applyConcurrency` is, and for the same
+		// reason: the value it needs does not exist until the Worker is constructed.
+		checkSlots,
+		checkSlotCount,
+		concurrencyNow: concurrencyNow ?? (() => worker?.concurrency ?? concurrency),
+		intervalMs,
+		maxWaitMs,
+		maxChecks,
+		maxFaults,
 		deps,
 		recordRun,
 	});

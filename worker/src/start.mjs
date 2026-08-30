@@ -25,6 +25,7 @@ import { makeSessionStore } from "./session-store.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { loadScopedLimits } from "./scoped-limits.mjs";
+import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -472,6 +473,13 @@ export async function startWorker(
 		// because it describes the same delayed jobs that client already reasons about.
 		afterMaxMs: () => config.waitAfterMaxMs,
 		waitState: makeWaitState({ redis }),
+		// The polled tier's bounds, read per pickup from config so they are one value with one home. The
+		// slot count is a CEILING the gate clamps against the live concurrency, never the final number.
+		checkSlotCount: () => config.waitCheckSlots,
+		intervalMs: () => config.waitIntervalMs,
+		maxWaitMs: () => config.waitMaxMs,
+		maxChecks: () => config.waitMaxChecks,
+		maxFaults: () => config.waitMaxFaults,
 		deps: {
 			collectChain,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
@@ -490,6 +498,14 @@ export async function startWorker(
 			// for that target until it expires -- and a refused forge delivery is gone, since no webhook
 			// resends it. `getJob` answers from the queue rather than from our own bookkeeping, so the two
 			// cannot agree with each other while both being wrong.
+			// REQ-WAIT-FOR's polled tier. Built here for the image and egress preflights' reason: one
+			// deployment value, one place, so the gate that refuses an undeclared profile and the spawn that
+			// runs it cannot disagree about which checks exist. The env-declared table is parsed once at boot
+			// (it is env, not overlay -- the gate reads its config above the per-job settings read).
+			// The free half of the profile check: whether this deployment declares the name at all. A table
+			// lookup, so it belongs with the gate's other free refusals rather than inside the subprocess.
+			waitProfileDeclared: (name) => typeof config.waitProfiles[name] === "string",
+			checkWait: makeWaitChecker({ profiles: config.waitProfiles, timeoutMs: config.waitCheckTimeoutMs, log }),
 			isJobLive: async (id) => {
 				const held = await runtimeQueue.getJob(id);
 				if (!held) return false;

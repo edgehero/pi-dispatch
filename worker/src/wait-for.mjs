@@ -254,6 +254,13 @@ export function afterMs(job) {
  */
 export function unreadableConditions(job) {
 	if (!waitArmed(job)) return [];
+	// A SECOND `after` is unreadable even though each one parses: the conjunction has no defined meaning
+	// with two instants, `afterMs` answers with whichever comes first, and the loader refuses the shape --
+	// so a job carrying one arrived from something newer or something wrong, which is this function's whole
+	// subject. Counted here rather than in the shape filter below, which sees one condition at a time.
+	let afters = 0;
+	for (const c of job.waitFor) if (c && typeof c === "object" && !Array.isArray(c) && Object.keys(c)[0] === "after") afters += 1;
+	if (afters > 1) return [...job.waitFor];
 	return job.waitFor.filter((condition) => {
 		if (condition === null || typeof condition !== "object" || Array.isArray(condition)) return true;
 		const keys = Object.keys(condition);
