@@ -15,7 +15,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const dashboardPath = fileURLToPath(new URL("../src/dashboard.ts", import.meta.url));
-const { makeDashboard, targetUrl } = await jiti.import(dashboardPath);
+const { makeDashboard, targetUrl, createDashboardDeps } = await jiti.import(dashboardPath);
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1715,4 +1715,106 @@ test("RUN_DETAIL names the host when a record carries one, and is unchanged when
   const bare = stripAnsi(plain.render(80).join("\n"));
   await plain.dispose();
   assert.ok(!/^\s*host\s/m.test(bare), "a record from before the field, or from a deployment that never named a host, shows no line");
+});
+
+// --- the panel's REAL deps factory (issue #57) -----------------------------------------------------------
+//
+// This factory had no test, which is how it came to build its own single queue and do its own pausing,
+// counting and scheduler listing while the fleet-aware readers sat unused beside it. Pressing `p` stopped
+// the shared queue alone while every named host kept spending, and the header printed PAUSED for it.
+
+function fakePanelValkey({ hosts = [], existing = [] } = {}) {
+  const queues = new Map();
+  const paused = new Set();
+  const mk = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    if (!queues.has(name)) {
+      queues.set(name, {
+        name,
+        async isPaused() { return paused.has(name); },
+        async pause() { paused.add(name); },
+        async resume() { paused.delete(name); },
+        async getJobCounts() { return { waiting: 1, active: 0, paused: 0, delayed: 0, failed: 0 }; },
+        async getWorkers() { return []; },
+        async getJobSchedulers() { return name === "pi-jobs" ? [] : [{ key: `s-${name}`, pattern: "0 3 * * *", next: Date.now() + 1000 }]; },
+        async getActive() { return []; },
+        async close() {},
+      });
+    }
+    return queues.get(name);
+  };
+  const redis = {
+    async get() { return "0"; },
+    async hgetall() { return {}; },
+    async smembers() { return []; },
+    on() {},
+    disconnect() {},
+  };
+  return {
+    paused,
+    queues,
+    deps: {
+      makeQueueFn: mk,
+      parseConnectionFn: () => ({}),
+      redisFn: () => redis,
+      readLiveHostsFn: async () => ({ hosts }),
+      discoverHostQueuesFn: async () => existing,
+    },
+  };
+}
+
+const panelPaths = { valkeyUrl: "redis://x", logsDir: "/nope", schedulerStallMax: 3 };
+
+test("the panel's kill switch reaches every named host, not just the shared queue", async () => {
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true" }, { name: "mini2", routes: "true" }] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  await deps.pause();
+  assert.deepEqual([...v.paused].sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
+  await deps.resume();
+  assert.deepEqual([...v.paused], [], "and resume reaches the same set");
+  await deps.dispose();
+});
+
+test("a host whose registry row is GONE is still reachable, which is the stranding case", async () => {
+  // Pause with mini1 live durably pauses its queue. If a later resume enumerates only the registry, and
+  // mini1 is down by then, that queue stays paused permanently with no surface able to name it. The
+  // keyspace answers where the registry cannot, because a queue's meta key outlives its worker.
+  const v = fakePanelValkey({ hosts: [], existing: ["pi-jobs@mini1"] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  await deps.pause();
+  assert.deepEqual([...v.paused].sort(), ["pi-jobs", "pi-jobs@mini1"]);
+  await deps.dispose();
+});
+
+test("a HALF paused deployment is reported as neither running nor paused", async () => {
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true" }] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  v.paused.add("pi-jobs@mini1");
+  const snap = await deps.fetchSnapshot();
+  assert.equal(snap.queue.pausedState, false);
+  assert.equal(snap.queue.pausedPartial, true, "so the header can say PART PAUSED rather than round it");
+  assert.equal(snap.queue.counts.waiting, 2, "counts are summed across the fleet");
+  await deps.dispose();
+});
+
+test("the SHARED queue paused while a host still spends must not read as paused", async () => {
+  // The dangerous direction, and the one a `queues[0]` boolean gets wrong: a pause that ran while a host
+  // was invisible leaves `pi-jobs` stopped and that host draining. Reading the shared queue's flag and
+  // calling it the deployment's tells the operator everything is stopped while money is still going out.
+  // The other direction is merely confusing; this one is a lie in the expensive direction.
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true" }] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  v.paused.add("pi-jobs");
+  const snap = await deps.fetchSnapshot();
+  assert.equal(snap.queue.pausedState, false, "not paused: a host is still taking work");
+  assert.equal(snap.queue.pausedPartial, true);
+  await deps.dispose();
+});
+
+test("schedulers are read across the fleet, or TRIGGERS shows zero while cron runs", async () => {
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true" }] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  const snap = await deps.fetchSnapshot();
+  assert.equal(snap.schedulers.length, 1, "the host queue's scheduler is visible");
+  await deps.dispose();
 });

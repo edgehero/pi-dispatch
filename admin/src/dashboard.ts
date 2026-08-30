@@ -110,9 +110,24 @@ async function heldJobs(redis: any) {
 /** How long the panel waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
 
-export function createDashboardDeps(paths: any) {
-  const queue = makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }));
-  const redis = makeRedisClient(paths.valkeyUrl);
+/**
+ * The panel's REAL plumbing. Every module-level dependency it uses to talk to Valkey is injectable through
+ * the second parameter, defaulting to the real one, because this factory had no test at all -- and that is
+ * exactly how it came to build its own single queue and do its own pausing while the fleet-aware readers
+ * sat unused beside it. The panel's kill switch is the last place a silent no-op should be able to hide.
+ */
+export function createDashboardDeps(
+  paths: any,
+  {
+    makeQueueFn = makeQueue,
+    parseConnectionFn = parseConnection,
+    redisFn = makeRedisClient,
+    readLiveHostsFn = readLiveHosts,
+    discoverHostQueuesFn = discoverHostQueues,
+  }: any = {},
+) {
+  const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
+  const redis = redisFn(paths.valkeyUrl);
 
   // EVERY named host drains a queue of its own, so the four things this panel does with a queue -- count,
   // list schedulers, pause, resume -- have to span them. Doing it here rather than through read-model's
@@ -126,7 +141,7 @@ export function createDashboardDeps(paths: any) {
   let fleetDegraded: string | null = null;
 
   const fleetQueues = async () => {
-    const fleet: any = await readLiveHosts(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err: any) => ({
+    const fleet: any = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err: any) => ({
       unreachable: err?.message ?? String(err),
     }));
     if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
@@ -136,7 +151,7 @@ export function createDashboardDeps(paths: any) {
       lastNames = fleetQueueNames(fleet.hosts);
     }
     for (const name of lastNames) {
-      if (!pool.has(name)) pool.set(name, makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }), { name }));
+      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
     }
     // A host that left keeps its queue open until dispose. Closing it here would race a pause already in
     // flight against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
@@ -150,9 +165,9 @@ export function createDashboardDeps(paths: any) {
   // BullMQ's own meta keys, which is far too expensive for a reader that runs every second and entirely
   // affordable for a keypress.
   const killSwitchQueues = async () => {
-    const existing = await discoverHostQueues(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    const existing = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
     for (const name of unionQueueNames(lastNames, existing)) {
-      if (!pool.has(name)) pool.set(name, makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }), { name }));
+      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
     }
     return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
   };
