@@ -35,7 +35,7 @@ import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter } from "./run-history.mjs";
 import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
-import { loadSchedules, servedSchedules } from "./schedules.mjs";
+import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 const exec = promisify(execFile);
@@ -198,8 +198,15 @@ export function makeReaper({ log }) {
 					log("reaped_network", { network: net });
 				} catch {} // still in use, or already gone -- either way not this boot's problem
 			}
+			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
+			// claim naming this host once this host has actually established that it holds no containers.
+			return { reaped: true };
 		} catch (err) {
+			// The `docker ps` itself is inside this try, so on this path nothing was listed and nothing
+			// reaped. Sweeping then would free slots for containers that may STILL BE RUNNING, and another
+			// host would start more alongside them -- a money overrun rather than a tidy-up.
 			log("reaper_skipped", { reason: err?.message });
+			return { reaped: false };
 		}
 	};
 }
@@ -375,7 +382,8 @@ export async function startWorker(
 	// Best-effort and double-wrapped like every other boot sweep: an OPTIMISATION over the TTL, never the
 	// mechanism, so a fault costs one TTL of a stale claim and never a boot.
 	try {
-		await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: scopeKeyPrefix(r.scope).slice("budget:s:".length) })), log })({ reaped });
+		if (config.workerNameDeclared)
+			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: scopeKeyPrefix(r.scope).slice("budget:s:".length) })), log })({ reaped });
 	} catch (err) {
 		log("scope_claims_sweep_skipped", { reason: err?.message });
 	}
@@ -478,8 +486,8 @@ export async function startWorker(
 	const bootConcurrency = bootSettings.invalid ? config.concurrency : bootSettings.concurrency;
 
 	// INT-OUTBOX-CONTRACT chain collector: the host-side reader of a completed local parent's /outbox. It
-	// enqueues chained children onto runtimeQueue via enqueueLocalJob -- the same pi-jobs queue the stall
-	// guard tears down through. Never throws, so a chain fault cannot flip a completed parent
+	// enqueues chained children onto the CRON queue via enqueueLocalJob -- this host's own when one is
+	// armed, since a chained child continues the working tree this machine just used. Never throws, so a chain fault cannot flip a completed parent
 	// (CONST-RETRY-INFRA-ONLY). The processor calls it as the sole COMPLETED-path chain step.
 	// Onto the HOST queue when one is armed. A chained child is same-folder and local-parent-only
 	// (`OQ-009`), so the working tree it needs is the one this machine just used: routing it anywhere
@@ -580,7 +588,7 @@ export async function startWorker(
 		// The cron fingerprint rides every beat from the LIVE ref, so a peer always compares against what
 		// this host believes now rather than what it believed at boot. `null` means abstain: cron disabled
 		// here is no opinion at all, and such a host must never be able to disagree with one that has one.
-		fpCron: () => cronFingerprint(config.triggersFile ? schedules.current : null, { tz: hostTz }) ?? "",
+		fpCron: () => cronFingerprint(authoredCron(config), { tz: hostTz }) ?? "",
 		cronCount: () => schedules.current.length,
 	});
 
@@ -628,11 +636,12 @@ export async function startWorker(
 					redis,
 					holderPrefix: config.workerName,
 					keyFor: checkSlotKey,
-					ttlMs: (Math.max(1, config.waitCheckSlots) + 1) * config.waitCheckTimeoutMs,
+					ttlMs: config.waitCheckTimeoutMs, // a floor; the gate passes the real one, derived from the profile count
 					log,
 				})
 			: null,
 		checkSlotCount: () => config.waitCheckSlots,
+		checkTimeoutMs: () => config.waitCheckTimeoutMs,
 		intervalMs: () => config.waitIntervalMs,
 		maxWaitMs: () => config.waitMaxMs,
 		maxChecks: () => config.waitMaxChecks,
@@ -793,10 +802,13 @@ export async function startWorker(
 	// job-image-missing), never
 	// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
 	// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
-	worker.on("completed", (job, result) =>
+	// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
+	// REQ-LOCAL-JOB-VISIBILITY's whole point is that a missing line is what tells a human a run did nothing.
+	const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
+	for (const w of allWorkers) w.on("completed", (job, result) =>
 		log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) }),
 	);
-	worker.on("failed", (job, err) =>
+	for (const w of allWorkers) w.on("failed", (job, err) =>
 		log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) }),
 	);
 
@@ -806,10 +818,12 @@ export async function startWorker(
 	const guard = makeStallGuard({
 		redis,
 		threshold: config.schedulerStallMax,
-		removeJobScheduler: (id) => runtimeQueue.removeJobScheduler(id),
+		// The queue the schedulers were actually INSTALLED on. Torn down from `runtimeQueue` on a named
+		// host, this money backstop -- a wedged scheduled run is re-paid on every stall -- silently no-ops.
+		removeJobScheduler: (id) => cronQueue.removeJobScheduler(id),
 		log,
 	});
-	worker.on("stalled", (jobId) => void guard.onStalled(jobId));
+	for (const w of allWorkers) w.on("stalled", (jobId) => void guard.onStalled(jobId));
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
 	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
@@ -829,7 +843,7 @@ export async function startWorker(
 		// disagreement, which no queue split can detect.
 		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
 		try {
-			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: schedules.current });
+			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: authoredCron(config) });
 			log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
 		} finally {
 			await rq.close().catch(() => {});

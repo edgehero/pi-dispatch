@@ -1684,6 +1684,9 @@ const collectSeams = (plan, extra = {}) => ({
 	out: () => {},
 	spawn: fakeSpawn(plan),
 	probeValkey: async () => false,
+	// Issue #57: no fleet unless a test says so, which is what keeps every existing doctor assertion --
+	// and a single-host deployment's real output -- byte-identical.
+	readHosts: async () => ({ hosts: [] }),
 	fileExists: existsSync,
 	nodeVersion: "20.10.0",
 	...extra,
@@ -2476,4 +2479,64 @@ test("doctor's stat probe follows SYMLINKS, exactly as the gate's does", async (
 	});
 	assert.deepEqual(await check("jira", "acme/web#7"), { verdict: "go", fault: false });
 	assert.equal(spawned, 1, "the gate resolved the same link doctor resolved");
+});
+
+// --- the fleet (issue #57) ------------------------------------------------------------------------------
+
+const fleetSeams = (hosts, extra = {}) =>
+	collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts }), ...extra });
+
+test("with no peers, doctor says nothing about a fleet at all", async () => {
+	const checks = await collectChecks({ VALKEY_URL: "redis://x" }, fleetSeams([]));
+	assert.equal(checks.filter((c) => /Fleet|host routing|timezone|digest differs/i.test(c.label)).length, 0, "a single-host deployment's output is byte-identical");
+});
+
+test("with peers, doctor names the fleet and warns that routing is OFF without a declared name", async () => {
+	// The one thing that is silently WRONG rather than merely undeclared: without a name this host
+	// enqueues its own folder work to the SHARED queue, where a peer with no such folder can pop it.
+	const checks = await collectChecks({ VALKEY_URL: "redis://x" }, fleetSeams([{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone }]));
+	assert.ok(checks.some((c) => /^Fleet: 2 workers/.test(c.label)));
+	const off = checks.find((c) => /host routing is OFF/.test(c.label));
+	assert.ok(off, "the warning is present");
+	assert.equal(off.warn, true, "a WARN: this command runs on one machine and must not refuse a deployment");
+	assert.ok(off.fix.includes("PI_WORKER_NAME"));
+});
+
+test("a declared name silences the routing warning but keeps the fleet line", async () => {
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone }]));
+	assert.ok(!checks.some((c) => /host routing is OFF/.test(c.label)));
+	assert.ok(checks.some((c) => /^Fleet: 2 workers \(mini1, mini2\)/.test(c.label)), "and it names both hosts, sorted");
+});
+
+test("a timezone disagreement is explained, because a cron pattern carries none", async () => {
+	const here = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const other = here === "UTC" ? "America/New_York" : "UTC";
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([{ name: "mini2", tz: other }]));
+	const c = checks.find((c) => /disagree about the timezone/.test(c.label));
+	assert.ok(c, "the check is present");
+	assert.equal(c.warn, true);
+	assert.ok(c.label.includes(other) && c.label.includes(here), "and names both zones, so the refusal an operator already met is explained");
+});
+
+test("a stale peer row is reported, because it is either a dead worker or a skewed clock", async () => {
+	const checks = await collectChecks(
+		{ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" },
+		fleetSeams([{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone, staleMs: 10 * 60_000 }]),
+	);
+	const c = checks.find((c) => /stale by more than five minutes/.test(c.label));
+	assert.ok(c);
+	assert.equal(c.warn, true);
+	assert.ok(c.label.includes("mini2"));
+});
+
+test("an unreadable registry is SAID, never silently absent", async () => {
+	// "No peers" and "could not ask" are different facts, and a command that shows the second as the first
+	// tells an operator their fleet is fine when Valkey merely blinked.
+	const checks = await collectChecks(
+		{ VALKEY_URL: "redis://x" },
+		collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", readHosts: async () => ({ unreachable: "ECONNREFUSED" }) }),
+	);
+	const c = checks.find((c) => /could not read the host registry/.test(c.label));
+	assert.ok(c);
+	assert.equal(c.ok, true, "not knowing is not a fault of this host");
 });

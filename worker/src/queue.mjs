@@ -25,6 +25,22 @@ export const QUEUE = "pi-jobs";
  */
 export const hostQueueName = (worker) => `${QUEUE}@${worker}`;
 
+/**
+ * Every queue name this deployment drains: the shared one, plus one per named host (issue #57).
+ *
+ * Derived from the REGISTRY rather than from configuration, because the reader is usually the admin or
+ * the CLI, which know their own host at best and the fleet not at all. A deployment with no named worker
+ * yields exactly `[QUEUE]`, so every existing caller is unchanged.
+ *
+ * This exists because a host queue that no reader knows about is worse than no host queue: the panel
+ * would show zero schedulers while cron ran, and `pi-dispatch pause` would stop half a deployment while
+ * reporting success -- the silent no-op its own comment already warns about for a mistyped name.
+ */
+export function fleetQueueNames(hosts) {
+	const names = (hosts ?? []).map((h) => h?.name).filter((n) => typeof n === "string" && n !== "");
+	return [QUEUE, ...names.sort().map(hostQueueName)];
+}
+
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId };
 
 /**

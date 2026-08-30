@@ -155,30 +155,45 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		// GitHub auth is misconfigured, so an operator can always stop the queue.
 		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
 		const { parseConnection } = await import("./connection.mjs");
-		const { makeQueue } = await import("./queue.mjs");
-		// failFast: reach the kill switch in seconds when Valkey is down, not a hang. makeQueue pins
-		// the "pi-jobs" name -- a different name would pause an empty queue (silent no-op).
-		const queue = makeQueue(parseConnection(url, { failFast: true }));
+		const { fleetQueueNames, makeQueue } = await import("./queue.mjs");
+		const { makeRedisClient } = await import("./connection.mjs");
+		const { readLiveHosts } = await import("./host-registry.mjs");
+		// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
+		// pausing `pi-jobs` alone would stop forge deliveries while a named host's cron, chained children
+		// and manual runs kept spending -- and would print "paused" for having done it. That is the silent
+		// no-op the comment here already warned about for a mistyped name, arriving through a new door.
+		//
+		// The registry read is best-effort: an unreadable one yields the shared queue alone, which is
+		// exactly what this command did before, so a Valkey blip can never make the kill switch refuse.
+		const probe = makeRedisClient(url);
+		const fleet = await readLiveHosts(probe).catch(() => ({ hosts: [] }));
+		probe.disconnect?.();
+		const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueue(parseConnection(url, { failFast: true }), { name }));
+		const queue = queues[0];
 		try {
 			if (cmd === "pause") {
-				await queue.pause();
-				process.stdout.write("paused — worker will stop taking new jobs (jobs still enqueue)\n");
+				for (const q of queues) await q.pause();
+				process.stdout.write(`paused — worker will stop taking new jobs (jobs still enqueue)${queues.length > 1 ? ` [${queues.length} queues]` : ""}\n`);
 			} else if (cmd === "resume") {
-				await queue.resume();
-				process.stdout.write("resumed\n");
+				for (const q of queues) await q.resume();
+				process.stdout.write(`resumed${queues.length > 1 ? ` [${queues.length} queues]` : ""}\n`);
 			} else {
 				// "paused" is included in the counts because jobs enqueued while paused land in the
 				// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state
 				// the pause switch creates. `pausedState` (the boolean) is named apart from the
 				// `paused` count `getJobCounts` returns, so the two do not collide in the output.
 				const pausedState = await queue.isPaused();
-				const counts = await queue.getJobCounts("waiting", "active", "paused", "delayed", "failed");
+				const per = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
+				const counts = per.reduce((acc, c) => {
+					for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
+					return acc;
+				}, {});
 				process.stdout.write(`${JSON.stringify({ pausedState, ...counts })}\n`);
 			}
 		} catch (error) {
 			return fail(`could not reach Valkey at ${url} — is it running? (docker compose up)\n  ${error.message}`);
 		} finally {
-			await queue.close().catch(() => {});
+			for (const q of queues) await q.close().catch(() => {});
 		}
 		return 0;
 	}

@@ -407,3 +407,16 @@ test("renderScopedLimits: rows with used/cap and config-only concurrency; null w
   assert.equal(renderScopedLimits({ limits: { missing: true } }), null);
   assert.match(renderScopedLimits({ limits: { invalid: "boom" } }), /file invalid \(boom\)/);
 });
+
+test("the status line NAMES the workers when the registry can, and is unchanged when it cannot", () => {
+  // `getWorkers()` counts CLIENT LIST rows and degrades to "unknown" where CLIENT SETNAME is unsupported,
+  // which is exactly why the registry is authoritative when it answers.
+  const withNames = renderStatus({ pausedState: false, counts: { waiting: 0, active: 0, delayed: 0, failed: 0 }, workers: 2, workerNames: ["mini1", "mini2"] });
+  assert.match(withNames, /workers: 2 \(mini1, mini2\)/);
+
+  const unnamed = renderStatus({ pausedState: false, counts: { waiting: 0, active: 0, delayed: 0, failed: 0 }, workers: 2 });
+  assert.match(unnamed, /workers: 2$/m, "a deployment that declared no names shows exactly what it always did");
+
+  const unknown = renderStatus({ pausedState: false, counts: { waiting: 0, active: 0, delayed: 0, failed: 0 } });
+  assert.match(unknown, /workers: unknown/);
+});

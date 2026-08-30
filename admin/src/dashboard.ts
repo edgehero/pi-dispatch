@@ -1714,6 +1714,12 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const endMs = toMs(r.endedAt);
   const dur = Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs ? ` (${formatDuration(endMs - startMs)})` : "";
   out.push(kv("timing", `${fmtStamp(r.startedAt)} → ${fmtStamp(r.endedAt)}${dur}`));
+  // WHICH MACHINE, beside WHEN (issue #57). A drill-in line rather than a list column, deliberately: the
+  // list row composes six cells into one `fitLine(..., inner)` and a seventh competes with the job id and
+  // the target for the same budget, clipping silently at width 80 -- while this pane is variable-length
+  // and framed at DRILL_WIDTH. Absent on records written before the field existed, and on a deployment
+  // that never declared a name, so a single-host drill-in is byte-identical.
+  if (r.host) out.push(kv("host", String(r.host)));
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];

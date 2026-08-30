@@ -72,14 +72,14 @@ export function makeFleetLease({ redis, holderPrefix, keyFor, ttlMs, now = () =>
 		 * index 0 first, so a host can sit behind a busy slot while a free one exists two along -- a
 		 * starvation that looks exactly like the capacity shortage the bound is meant to report.
 		 */
-		async acquire(id, { slots, keyArgs = [] } = {}) {
+		async acquire(id, { slots, keyArgs = [], ttlMs: perCall } = {}) {
 			if (!Number.isFinite(slots) || slots < 1) return { ok: true, release: async () => {}, refresh: async () => true };
 			const holder = `${holderPrefix}#${id}`;
 			const start = Math.abs(hashCode(String(id))) % slots;
 			for (let n = 0; n < slots; n++) {
 				const key = keyFor(...keyArgs, (start + n) % slots);
 				try {
-					const won = await bounded(redis.set(key, holder, "PX", ttlMs, "NX"));
+					const won = await bounded(redis.set(key, holder, "PX", perCall ?? ttlMs, "NX"));
 					if (!won) continue;
 					return {
 						ok: true,

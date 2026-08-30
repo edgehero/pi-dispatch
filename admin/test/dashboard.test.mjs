@@ -1696,3 +1696,23 @@ test("a held row carries no job data, whatever the reader hands it", async () =>
   assert.doesNotMatch(text, /SECRET BODY/);
   assert.match(text, /acme\/web#7/, "only the fields the row names");
 });
+
+test("RUN_DETAIL names the host when a record carries one, and is unchanged when it does not", async () => {
+  // A drill-in LINE rather than a list column: the list row composes six cells into one fitLine and a
+  // seventh competes with the job id and the target for the same budget, clipping silently at width 80.
+  const withHost = await openRunDetail({
+    fetchSnapshot: async () => ({ ...SNAPSHOT, runs: SNAPSHOT.runs.map((r) => ({ ...r, host: "mac-mini-1" })) }),
+  });
+  const out = stripAnsi(withHost.render(80).join("\n"));
+  await withHost.dispose();
+  assert.match(out, /host\s+mac-mini-1/);
+  // The drill-in frames at DRILL_WIDTH and centres inside the panel, so the invariant is that every line
+  // is the SAME width rather than the panel's -- which is what a ragged frame would break.
+  const widths = new Set(withHost.render(80).map((l) => visibleLen(l)));
+  assert.equal(widths.size, 1, `every drill-in line is one width, got ${[...widths].join(", ")}`);
+
+  const plain = await openRunDetail();
+  const bare = stripAnsi(plain.render(80).join("\n"));
+  await plain.dispose();
+  assert.ok(!/^\s*host\s/m.test(bare), "a record from before the field, or from a deployment that never named a host, shows no line");
+});

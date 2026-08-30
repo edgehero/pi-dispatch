@@ -31,7 +31,8 @@ import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { makeQueue, enqueueLocalJob, hostQueueName } from "@edgehero/pi-dispatch/queue";
+import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -124,18 +125,38 @@ function parseNonNegInt(raw, fallback) {
  * `getWorkers` is EMPTY on Redis providers without CLIENT SETNAME, so an empty/absent list degrades to
  * "unknown" rather than reporting zero live workers. Any connection error returns `{ unreachable }`.
  */
-export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
+export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
   let queue;
+  const queuesToClose = [];
   try {
-    queue = makeQueueFn(parseConnectionFn(url, { failFast: true }));
+    // EVERY queue this deployment drains, not just the shared one (issue #57). A named host's cron,
+    // chained children and `dispatch_run` jobs live on `pi-jobs@<name>`, so a status read that looked only
+    // at `pi-jobs` would report an idle queue while that host was busy -- and the pause state would be the
+    // state of half a deployment.
+    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
+    const names = fleetQueueNames(fleet.hosts);
+    const queues = names.map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    queuesToClose.push(...queues);
+    queue = queues[0];
     const pausedState = await queue.isPaused();
-    const counts = await queue.getJobCounts("waiting", "active", "paused", "delayed", "failed");
-    const workers = await readWorkerCount(queue);
-    return { pausedState, counts, workers };
+    const perQueue = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
+    // Summed, because an operator asking "what is this deployment doing" means the deployment.
+    const counts = perQueue.reduce((acc, c) => {
+      for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
+      return acc;
+    }, {});
+    const workerCount = await readWorkerCount(queue);
+    // Issue #57. The registry is authoritative when it answers, because it is ordinary keys;
+    // `getWorkers()` rests on CLIENT SETNAME, which some providers do not support -- the very degradation
+    // the "unknown" fallback has always been papering over. Its own client, its own timeout, caught here
+    // rather than allowed to fail the whole status read: a fleet this panel cannot see is a fleet it says
+    // nothing about, never a status line that vanishes.
+    const resolved = resolveWorkerCount({ hosts: fleet.hosts ?? [], workerCount: typeof workerCount === "number" ? workerCount : 0 });
+    return { pausedState, counts, workers: resolved.count, workerNames: resolved.names };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    if (queue) await queue.close().catch(() => {});
+    for (const q of queuesToClose) await q.close().catch(() => {});
   }
 }
 
@@ -144,17 +165,27 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
  * mirror the CLI kill switch (cli.mjs:90-95): the state survives a worker restart. Returns
  * `{ ok: true, paused }` on success, or `{ unreachable }` on a connection error, closing in `finally`.
  */
-export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
+export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
   let queue;
+  const opened = [];
   try {
-    queue = makeQueueFn(parseConnectionFn(url, { failFast: true }));
-    if (paused) await queue.pause();
-    else await queue.resume();
+    // EVERY queue in the fleet (issue #57). This is the kill switch: pausing only `pi-jobs` would stop
+    // forge deliveries while a named host's cron, chained children and manual runs kept spending, and it
+    // would report success for having done it. `cli.mjs`'s own comment already warns that a queue name
+    // that names nothing is a silent no-op; half a deployment is the same failure, halved.
+    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
+    const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    opened.push(...queues);
+    queue = queues[0];
+    for (const q of queues) {
+      if (paused) await q.pause();
+      else await q.resume();
+    }
     return { ok: true, paused };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    if (queue) await queue.close().catch(() => {});
+    for (const q of opened) await q.close().catch(() => {});
   }
 }
 
@@ -532,6 +563,52 @@ const HELD_HYDRATE_MAX = 200;
  * holding thousands never turns a panel refresh into a full keyspace walk; the caller is told when the
  * listing was truncated rather than shown a silently short list.
  */
+/**
+ * The fleet (issue #57): every live worker's own row, newest heartbeat first, pruned as it is read.
+ *
+ * A sibling of `readHeldJobs` rather than a leg of `readQueueState`: its own client, its own timeout, and
+ * one responsibility. It reuses the WORKER's `readLiveHosts` rather than reimplementing the walk, so the
+ * panel and the worker can never disagree about which hosts are live or about when a row is stale --
+ * the `scopeKeyPrefix` doctrine of one export and N consumers.
+ *
+ * `{ unreachable }` and an empty list stay distinguishable all the way to the renderer. "There are no
+ * other hosts" and "I could not find out" are different facts, and a panel that shows the second as the
+ * first tells an operator their fleet is gone when Valkey merely blinked.
+ */
+export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
+  let redis;
+  try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
+    redis = redisFn(url);
+    const res = await withTimeout(readLiveHosts(redis, { now }), timeoutMs, { unreachable: "timed out reaching the registry" });
+    if (res.unreachable) return { unreachable: res.unreachable };
+    return { hosts: res.hosts };
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (redis) redis.disconnect?.();
+  }
+}
+
+/**
+ * How many workers this deployment has, and what they are called.
+ *
+ * TWO SOURCES, and the precedence is the point. The registry is authoritative because it is ordinary
+ * keys; `getWorkers()` rests on CLIENT SETNAME, which BullMQ's own doc-comment says some providers do not
+ * support -- which is exactly what `readWorkerCount`'s `"unknown"` fallback has always been papering
+ * over. So a registry that answers wins, `getWorkers()` is the fallback for a fleet that has not been
+ * named yet, and `"unknown"` survives only when neither can say.
+ *
+ * Pure, so the panel, the plain renderer and the MCP tool cannot drift on it.
+ */
+export function resolveWorkerCount({ hosts, workerCount }) {
+  if (Array.isArray(hosts) && hosts.length > 0) {
+    return { count: hosts.length, names: hosts.map((h) => h.name).filter(Boolean).sort() };
+  }
+  if (typeof workerCount === "number" && workerCount > 0) return { count: workerCount, names: [] };
+  return { count: "unknown", names: [] };
+}
+
 export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
   let redis;
   try {
@@ -730,17 +807,28 @@ export async function readSchedulers({
   url,
   makeQueueFn = makeQueue,
   parseConnectionFn = parseConnection,
+  redisFn = makeRedisClient,
+  timeoutMs = 2500,
   now = Date.now,
 } = {}) {
-  let queue;
+  const opened = [];
   try {
-    queue = makeQueueFn(parseConnectionFn(url, { failFast: true }));
-    const list = await queue.getJobSchedulers(0, -1, true);
-    return mapSchedulers(list, now());
+    // ACROSS EVERY QUEUE (issue #57). A named host installs its own schedulers on `pi-jobs@<name>`, so a
+    // read of the shared queue alone would show ZERO schedulers while cron was running -- a panel that
+    // contradicts a working deployment is worse than one that says nothing.
+    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
+    const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    opened.push(...queues);
+    // The SHARED queue's failure is a real connection failure and must surface as `{ unreachable }`;
+    // an additional HOST queue's is caught, because one unreadable host must degrade to its own rows
+    // missing rather than to a panel that says the whole deployment is unreachable.
+    const [primary, ...rest] = queues;
+    const lists = [await primary.getJobSchedulers(0, -1, true), ...(await Promise.all(rest.map((q) => q.getJobSchedulers(0, -1, true).catch(() => []))))];
+    return mapSchedulers(lists.flat(), now());
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    if (queue) await queue.close().catch(() => {});
+    for (const q of opened) await q.close().catch(() => {});
   }
 }
 

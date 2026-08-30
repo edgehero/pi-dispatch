@@ -37,6 +37,34 @@ export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSyn
 }
 
 /**
+ * The cron set AS AUTHORED, before any placement decision (issue #57).
+ *
+ * This is the object two hosts have to agree about, and it is deliberately not `loadSchedules`'s output.
+ * That function resolves PLACEMENT -- it replaces every trigger whose folder is on another machine with
+ * a stub -- so its result differs per host BY CONSTRUCTION. Fingerprinting it would make every correctly
+ * configured fleet refuse itself forever: mini1 owns `/a`, mini2 owns `/b`, their sets never match, and
+ * neither ever reconciles again. What they share is the FILE, so the file is what gets hashed.
+ *
+ * Pure and fs-free apart from the read: no `existsSync`, because existence is exactly the question that
+ * makes two honest hosts differ.
+ */
+export function authoredCron(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
+	const path = config.triggersFile;
+	if (path === null || path === undefined) return null; // cron disabled: no opinion at all (see cronFingerprint)
+	if (!existsSync(path)) return null;
+	try {
+		return parseTriggers(readFileSync(path, "utf8"), path)
+			.filter((t) => t.on.type === "cron")
+			.map((t) => ({ schedulerId: t.on.id, pattern: t.on.pattern, run: t.run }));
+	} catch {
+		// A file this host cannot parse is not an opinion about what should be scheduled. It refuses boot
+		// elsewhere and keeps last-good on reload; here it must not become a fingerprint that disagrees
+		// with every peer.
+		return null;
+	}
+}
+
+/**
  * Split a schedule set into the triggers THIS host serves and the ones it does not (issue #57).
  *
  * `loadSchedules` already refused everything a pure validator could refuse and everything the filesystem

@@ -62,7 +62,11 @@ export function renderStatus(queue) {
     .map((k) => `${k} ${counts[k] ?? 0}`)
     .join("  ");
   const workers = queue.workers === undefined ? "unknown" : queue.workers;
-  return [`Queue: ${queue.pausedState ? "paused" : "running"}`, `  ${line}`, `  workers: ${workers}`].join("\n");
+  // Issue #57: name them when the registry can. `getWorkers()` counts CLIENT LIST rows and reports
+  // "unknown" where CLIENT SETNAME is unsupported, so a fleet that has declared its names deserves to see
+  // them -- and a deployment that has not is unchanged, because there are no names to show.
+  const named = Array.isArray(queue.workerNames) && queue.workerNames.length > 0 ? ` (${queue.workerNames.join(", ")})` : "";
+  return [`Queue: ${queue.pausedState ? "paused" : "running"}`, `  ${line}`, `  workers: ${workers}${named}`].join("\n");
 }
 
 /** Render the run history as aligned columns; a null field is "-", an unreachable/empty set degrades. */

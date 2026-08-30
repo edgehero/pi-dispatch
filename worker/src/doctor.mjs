@@ -49,7 +49,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
-import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
+import { defaultSandboxDir, defaultWorkerName, globalExtensionsEnabled } from "./config.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -89,6 +89,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		out = (s) => process.stdout.write(s),
 		spawn = nodeSpawn,
 		probeValkey = defaultProbeValkey,
+		readHosts = defaultReadHosts,
 		fileExists = existsSync,
 		nodeVersion = process.versions.node,
 		// --fix (REQ-DEPLOYMENT-BOOTSTRAP): offer to run the exact fixes doctor already prints. The prompt
@@ -111,7 +112,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		platform = process.platform,
 		home = homedir(),
 	} = deps;
-	const seams = { cwd, out, spawn, probeValkey, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -213,7 +214,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env) } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env) } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -828,6 +829,80 @@ export async function collectChecks(env, seams) {
 				}
 			: {}),
 	});
+
+	// --- the fleet (issue #57) -------------------------------------------------------------------------
+	//
+	// Every line here is gated on a peer actually existing, so a single-host deployment's output is
+	// byte-identical. And every one is a WARN rather than a failure, with one exception noted below: this
+	// command runs on ONE machine and must not refuse a deployment for a condition that machine cannot fix.
+	// This host's own image id, read through the same seam every other docker probe here uses. Only when
+	// the image is actually present -- an absent one is already reported above, and a second line saying
+	// its digest is unknown would be noise on a fault the operator has been told about.
+	const imageDigest =
+		imageCode === 0 ? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage])).output.trim() || null : null;
+	const fleet = await readHosts(valkeyUrl);
+	const peers = (fleet.hosts ?? []).filter((h) => h.name !== workerNameOf(env));
+	if (peers.length > 0) {
+		const mine = workerNameOf(env);
+		checks.push({ ok: true, label: `Fleet: ${peers.length + 1} worker${peers.length === 0 ? "" : "s"} (${[mine, ...peers.map((h) => h.name)].sort().join(", ")})` });
+
+		// The one thing that is silently WRONG rather than merely undeclared. Without a declared name this
+		// host enqueues its own folder work to the SHARED queue, where a peer that has no such folder can
+		// pop it -- so the routing that makes a fleet safe is simply off, and nothing else says so.
+		if (!env.PI_WORKER_NAME) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: "This worker has peers but no PI_WORKER_NAME, so host routing is OFF here",
+				fix: "set PI_WORKER_NAME in this host's .env and restart: without it, this host's folder work is enqueued where any host can pop it, and its records carry a hostname it never chose",
+			});
+		}
+
+		// Two hosts on two builds of one tag is the failure Gap 6 names: same flow, different behaviour,
+		// undebuggable. A WARN and never a failure, because `{{.Id}}` is the LOCAL image id -- two
+		// independent builds of one Dockerfile differ, and under docker's containerd image store it is the
+		// manifest digest rather than the config digest, so a mixed-store fleet disagrees about identical
+		// content. Suspicious, never wrong.
+		const digests = new Set(peers.map((h) => h.imageDigest).filter(Boolean));
+		if (digests.size > 0 && imageDigest && !digests.has(imageDigest)) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `Job image digest differs from ${peers.length === 1 ? "the other host" : "other hosts"}`,
+				fix: "rebuild or re-pull so every host runs the same image; digests are identical only when both hosts pulled one tag from one registry, so two local builds differ legitimately",
+			});
+		}
+
+		// A cron PATTERN carries no timezone and resolves in each worker's LOCAL time, so one pattern is two
+		// different instants on two hosts in two zones -- and the cron gate refuses that divergence rather
+		// than letting it drift, which is why this reads as an explanation for a refusal an operator has
+		// probably already met.
+		const zones = new Set([Intl.DateTimeFormat().resolvedOptions().timeZone, ...peers.map((h) => h.tz).filter(Boolean)]);
+		if (zones.size > 1) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `Hosts disagree about the timezone (${[...zones].sort().join(", ")}), so one cron pattern is two different instants`,
+				fix: "set the same TZ on every host: a cron trigger carries no timezone of its own, so cron reconcile refuses while they disagree",
+			});
+		}
+
+		// Clocks. The registry's own heartbeats are the measurement, and skew matters here beyond tidiness:
+		// every hold clock, every TTL and the UTC day boundary the budget windows key on are read against
+		// whichever host is looking.
+		const skewed = peers.filter((h) => Number.isFinite(h.staleMs) && h.staleMs > 5 * 60_000);
+		if (skewed.length > 0) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${skewed.length} host row${skewed.length === 1 ? " is" : "s are"} stale by more than five minutes (${skewed.map((h) => h.name).join(", ")})`,
+				fix: "check that those workers are running and that the clocks agree -- a stale row is either a dead worker or a skewed clock, and both matter",
+			});
+		}
+	} else if (fleet.unreachable) {
+		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
+		checks.push({ ok: true, label: `Fleet: could not read the host registry (${fleet.unreachable})` });
+	}
 
 	const keys = PROVIDER_KEYS[provider] ?? [`${provider.toUpperCase()}_API_KEY`];
 	let keyOk = keys.some((k) => (env[k] ?? "").trim().length > 0);
@@ -2212,6 +2287,36 @@ function parseGhTokenScopes(output) {
  * error handler is attached, so a down Valkey is reported as one ✗ line — not the ioredis stack traces
  * a BullMQ Queue's internal client would dump. Reuses `parseConnection`'s fail-fast options (cli.mjs:88).
  */
+/**
+ * The fleet's registry rows (issue #57), through a fail-fast client that is always disconnected.
+ *
+ * A SEAM rather than a direct import so the multi-host checks are testable with no Valkey at all, which
+ * is the posture every other network-touching check here already takes. Never throws: a fleet this
+ * command cannot see is a fleet it says nothing about, not a doctor that fails.
+ */
+/** This host's name as the worker computes it, so doctor and the worker cannot disagree about who "I" am. */
+function workerNameOf(env) {
+	return env.PI_WORKER_NAME || defaultWorkerName();
+}
+
+async function defaultReadHosts(url) {
+	try {
+		const { Redis } = await import("ioredis");
+		const { parseConnection } = await import("./connection.mjs");
+		const { readLiveHosts } = await import("./host-registry.mjs");
+		const client = new Redis({ ...parseConnection(url, { failFast: true }), lazyConnect: true });
+		client.on("error", () => {});
+		try {
+			await client.connect();
+			return await readLiveHosts(client);
+		} finally {
+			client.disconnect();
+		}
+	} catch (err) {
+		return { unreachable: err?.message ?? "registry unreadable" };
+	}
+}
+
 async function defaultProbeValkey(url) {
 	const { Redis } = await import("ioredis");
 	const { parseConnection } = await import("./connection.mjs");

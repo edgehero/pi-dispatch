@@ -41,6 +41,8 @@ import {
   readStagedSkillsList,
   collectGraphInputs,
   forgeRepoTargets,
+  readHosts,
+  resolveWorkerCount,
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 
@@ -443,7 +445,9 @@ test("readSchedulers returns { unreachable } on a connection error", async () =>
     },
     async close() {},
   });
-  const res = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}) });
+  // `redisFn` stubbed so the registry read is not a real connection attempt: this test is about the
+  // QUEUE being down, and a two-second DNS failure would be measuring something else.
+  const res = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
   assert.match(res.unreachable, /down/);
 });
 
@@ -1976,4 +1980,81 @@ test("readScopedBudget GETs only the windows a row caps; absent keys are honest 
   const dead = await readScopedBudget({ url: "not-a-url", limits });
   assert.ok(dead.unreachable, "junk URL degrades synchronously, never a timeout burn");
   assert.deepEqual(await readScopedBudget({ url: "redis://x", limits: [] }), { rows: [] });
+});
+
+// --- the fleet (issue #57) ------------------------------------------------------------------------------
+
+const fakeFleetRedis = (names) => () => ({
+  async smembers() {
+    return names;
+  },
+  async hgetall(key) {
+    const name = key.replace("host:h:", "");
+    return { name, beatAt: String(Date.now()) };
+  },
+  async srem() {},
+  disconnect() {},
+});
+
+test("readHosts lists the fleet, and keeps 'none' distinct from 'could not ask'", async () => {
+  const two = await readHosts({ url: "redis://x", redisFn: fakeFleetRedis(["mini2", "mini1"]) });
+  assert.deepEqual(two.hosts.map((h) => h.name), ["mini1", "mini2"], "sorted, so the panel is stable");
+
+  const none = await readHosts({ url: "redis://x", redisFn: () => ({ async smembers() { return []; }, disconnect() {} }) });
+  assert.deepEqual(none, { hosts: [] });
+
+  const dead = await readHosts({ url: "redis://x", redisFn: () => ({ async smembers() { throw new Error("ECONNREFUSED"); }, disconnect() {} }) });
+  assert.ok(dead.unreachable, "a panel that renders this as 'no hosts' says the fleet is gone when Valkey blinked");
+  assert.equal(dead.hosts, undefined);
+});
+
+test("resolveWorkerCount prefers the registry, because getWorkers rests on CLIENT SETNAME", () => {
+  assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "b" }, { name: "a" }], workerCount: 9 }), { count: 2, names: ["a", "b"] });
+  assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 2 }), { count: 2, names: [] }, "an unnamed fleet still counts");
+  assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 0 }), { count: "unknown", names: [] }, "and neither answering is still unknown");
+});
+
+test("the status read SPANS every queue, so a named host's work is not invisible", async () => {
+  // A read of `pi-jobs` alone would report an idle deployment while a named host was busy, and the pause
+  // state would be the state of half of it.
+  const asked = [];
+  const makeQueueFn = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    asked.push(name);
+    return {
+      async isPaused() { return false; },
+      async getJobCounts() { return name === "pi-jobs" ? { waiting: 1, active: 0 } : { waiting: 2, active: 3 }; },
+      async getWorkers() { return []; },
+      async close() {},
+    };
+  };
+  const res = await readQueueState({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]) });
+  assert.deepEqual(asked.sort(), ["pi-jobs", "pi-jobs@mini1"]);
+  assert.equal(res.counts.waiting, 3, "summed: an operator asking what the deployment is doing means the deployment");
+  assert.equal(res.counts.active, 3);
+  assert.deepEqual(res.workerNames, ["mini1"]);
+});
+
+test("the kill switch reaches EVERY queue, because half a deployment is the same silent no-op", async () => {
+  const paused = [];
+  const makeQueueFn = (_c, opts) => ({
+    async pause() { paused.push(opts?.name ?? "pi-jobs"); },
+    async resume() {},
+    async close() {},
+  });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]) });
+  assert.deepEqual(res, { ok: true, paused: true });
+  assert.deepEqual(paused.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
+});
+
+test("schedulers are read across the fleet, or the panel shows zero while cron runs", async () => {
+  const makeQueueFn = (_c, opts) => ({
+    async getJobSchedulers() {
+      return opts?.name === "pi-jobs@mini1" ? [{ key: "nightly", pattern: "0 3 * * *", next: Date.now() + 1000 }] : [];
+    },
+    async close() {},
+  });
+  const res = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]) });
+  assert.equal(res.length, 1, "a named host installs its schedulers on its OWN queue");
+  assert.equal(res[0].key, "nightly");
 });

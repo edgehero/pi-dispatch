@@ -63,7 +63,7 @@ const THROTTLE_FLOOR_MS = 11_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -243,7 +243,12 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// Null when no peer could exist, so a single-host deployment issues no command at all.
 				let fleetSlot = null;
 				if (checkLease) {
-					fleetSlot = await checkLease.acquire(job.id, { slots: checkSlotCount() });
+					// The TTL is DERIVED from what the lease actually guards: the gate holds it across every profile
+					// in turn, each bounded by `PI_WAIT_CHECK_TIMEOUT_MS`, so it is one timeout per PROFILE plus one
+					// for the overhead between them. Deriving it from the SLOT COUNT instead -- an unrelated
+					// quantity -- made a three-profile job at the shipped defaults hold 30s against a 20s lease,
+					// so the slot expired mid-check and another host took it while this one was still using it.
+					fleetSlot = await checkLease.acquire(job.id, { slots: checkSlotCount(), ttlMs: (profiles.length + 1) * checkTimeoutMs() });
 					if (!fleetSlot) {
 						// The same outcome as a local denial and the same remedy, so the same cadence and the same
 						// event -- with one conditional field, which is what keeps an unarmed deployment's log line
@@ -613,15 +618,19 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// mask the job's real error, and a missed release wedges the scope until a worker restart.
 			if (held) inFlight.release(scope);
 			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
-			// Fire-and-forget: the finally must not become async, and the TTL is the backstop for a lost release.
-			void scopeSlot?.release?.();
+			// AWAITED, not fire-and-forget. Two reasons, and the second is the one that bites: an unawaited
+			// DEL is dropped by `shutdown`'s `process.exit(0)`, stranding the claim for its whole TTL on a
+			// restart -- and the next same-scope job would otherwise race the release, be denied, and sit out a
+			// full re-check interval while the slot it wanted went free behind it. The finally is already inside
+			// an async function, and `release` never throws.
+			await scopeSlot?.release?.();
 			clearTimeout(timer);
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
 }
 
-export function createWorker({ connection, name, hostQueue = null, checkLease = null, scopeLease = null, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
+export function createWorker({ connection, name, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -674,6 +683,7 @@ export function createWorker({ connection, name, hostQueue = null, checkLease = 
 			checkSlots,
 			checkLease,
 			checkSlotCount,
+			checkTimeoutMs,
 			concurrencyNow: concurrencyNow ?? liveConcurrency,
 			intervalMs,
 			maxWaitMs,
