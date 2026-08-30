@@ -23,7 +23,7 @@ import { parseTriggers } from "./triggers.mjs";
  * valid deployment. `readFileSync`/`existsSync` are injectable so tests exercise the full path with no
  * real filesystem.
  */
-export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
+export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync, fleet = false } = {}) {
 	const path = config.triggersFile;
 	if (path === null || path === undefined) return []; // cron disabled
 
@@ -33,14 +33,49 @@ export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSyn
 
 	const triggers = parseTriggers(readFileSync(path, "utf8"), path);
 
-	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync));
+	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet));
 }
 
-function normalizeCronSchedule({ on, run }, path, existsSync) {
+/**
+ * Split a schedule set into the triggers THIS host serves and the ones it does not (issue #57).
+ *
+ * `loadSchedules` already refused everything a pure validator could refuse and everything the filesystem
+ * could answer for a trigger this host owns. What is left is the third question, and it is the one Gap 2
+ * is about: a folder that is not here is not necessarily a mistake, it may simply be another machine's.
+ *
+ * Exported so the split is testable without an fs, and so a caller can report what it will not be running.
+ */
+export function servedSchedules(schedules) {
+	const served = [];
+	const unserved = [];
+	for (const s of schedules) (s.unserved ? unserved : served).push(s);
+	return { served, unserved };
+}
+
+function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// The pure validator already guaranteed a non-empty, `:`-free, charset-valid, unique id and a
 	// well-formed pattern; folder existence is the one fs-dependent check it deferred to here.
+	//
+	// ON A FLEET THAT IS THE WRONG QUESTION. `INT-TRIGGERS-FILE-CONTRACT` splits this as "type here,
+	// reality where it can be known", and issue #57 adds a third level: PLACEMENT, where the fleet is
+	// known. A folder that is absent on THIS machine may simply belong to another one, and refusing the
+	// worker's boot for it takes every unrelated trigger -- every forge job, every other folder -- offline
+	// with it. That is the sentence #57's own acceptance forbids.
+	//
+	// `fleet` is `PI_WORKER_NAME` being DECLARED, deliberately, and not a registry read. Two reasons, and
+	// both are failures I would otherwise have shipped. A registry read here would make a fleet-wide
+	// restart into a fleet-wide boot refusal, because every host would come up seeing no peers yet. And it
+	// would have to happen after the Valkey client exists, which is BELOW the four destructive boot sweeps
+	// -- so a single-host deployment with one typo'd folder would reap containers, prune history and delete
+	// sandboxes on every restart before refusing. Declaring a name is the operator saying "this is a
+	// fleet", it is known before anything runs, and it keeps a single-host deployment byte-identical.
 	if (!existsSync(run.folder)) {
-		throw configError(`cron trigger "${on.id}": run.folder does not exist: ${run.folder} (${path})`);
+		if (!fleet) {
+			throw configError(`cron trigger "${on.id}": run.folder does not exist: ${run.folder} (${path})`);
+		}
+		// Not mine. Its skillsDir is not my business either: `isAbsolute` is OS-dependent, and judging
+		// another host's path on my platform is the exact mistake the shared validator refuses to make.
+		return { schedulerId: on.id, unserved: "folder-absent" };
 	}
 
 	// `run.skillsDir` gets the same treatment, and for the same reason (REQ-PER-TRIGGER-SKILLS): the pure

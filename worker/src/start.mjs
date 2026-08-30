@@ -34,7 +34,7 @@ import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter } from "./run-history.mjs";
 import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
-import { loadSchedules } from "./schedules.mjs";
+import { loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 const exec = promisify(execFile);
@@ -78,7 +78,7 @@ const WORKER_VERSION = (() => {
  * `reloadSchedules`. Best-effort and unref'd so it never blocks shutdown; a platform without `fs.watch`
  * logs and the worker keeps its boot-time schedulers.
  */
-function watchTriggersFile(config, queue, log, ref, registry, tz) {
+function watchTriggersFile(config, queue, log, ref, registry, tz, fleet) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -87,7 +87,7 @@ function watchTriggersFile(config, queue, log, ref, registry, tz) {
 		watch(dir, (_event, changed) => {
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
 			clearTimeout(timer);
-			timer = setTimeout(() => void reloadSchedules(config, queue, { log, ref, registry, tz }), 150);
+			timer = setTimeout(() => void reloadSchedules(config, queue, { log, ref, registry, tz, fleet }), 150);
 		}).unref?.();
 		log("triggers_watching", { path });
 	} catch (err) {
@@ -251,7 +251,7 @@ export async function startWorker(
 	// scheduled, and a `const` frozen at boot would make it publish the pre-edit set forever -- so two
 	// hosts would see each other's fingerprint oscillate on the beat period, refusing or agreeing
 	// depending on which half of a beat a reload happened to land in.
-	const schedules = { current: loadSchedules(config) };
+	const schedules = { current: loadSchedules(config, { fleet: config.workerNameDeclared }) };
 
 	// REQ-SCOPED-PAUSE-WINDOWS: load + validate the pause-windows file with the operator present and before any
 	// Valkey contact, so a malformed file refuses startup (configError) rather than silently disabling scoped
@@ -361,6 +361,22 @@ export async function startWorker(
 	// drains it after the worker.
 	const runtimeQueue = makeQueue(parseConnection(config.valkeyUrl));
 
+	// THE HOST QUEUE (issue #57): work only this machine can do, because the folder lives here.
+	//
+	// Armed by the operator DECLARING a name, not by a peer appearing. Two reasons, and the first is
+	// decisive: which queue a job is enqueued to is a routing decision made by whoever enqueues it, so it
+	// cannot be allowed to flip underneath a running deployment when a second host happens to register --
+	// a cron scheduler upserted on one queue and pruned from another is exactly the mutual teardown this
+	// issue exists to stop. And a second BullMQ Worker is a second blocking connection, which a single-host
+	// deployment should not pay for silently. Declaring a name IS the multi-host declaration; `doctor`
+	// warns when peers exist and nobody has made it.
+	const hostQueue = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
+	// The long-lived handle the cron watcher reloads through. Its own when a host queue is armed, so a
+	// live triggers-file edit lands on the same queue the boot reconcile used; otherwise the shared
+	// runtime queue, exactly as before. Registered as an extraCloser only when it is a NEW handle --
+	// closing `runtimeQueue` twice would be closing another owner's connection.
+	const cronQueue = hostQueue ? makeQueue(parseConnection(config.valkeyUrl), { name: hostQueue }) : runtimeQueue;
+
 	// REQ-LOCAL-JOB-VISIBILITY durable run history, all host-side. The raw `.log` sink is gated on
 	// captureJobLogs (raw container output is user-authored data, opt-in per no-pii-in-logs); the id-only
 	// `.json` record via recordRun is ALWAYS on, so every run leaves a stable, non-PII trace regardless.
@@ -440,7 +456,10 @@ export async function startWorker(
 	// enqueues chained children onto runtimeQueue via enqueueLocalJob -- the same pi-jobs queue the stall
 	// guard tears down through. Never throws, so a chain fault cannot flip a completed parent
 	// (CONST-RETRY-INFRA-ONLY). The processor calls it as the sole COMPLETED-path chain step.
-	const collectChain = makeCollectChain({ queue: runtimeQueue, config, log });
+	// Onto the HOST queue when one is armed. A chained child is same-folder and local-parent-only
+	// (`OQ-009`), so the working tree it needs is the one this machine just used: routing it anywhere
+	// else would enqueue a job only this host can run onto a queue every host drains.
+	const collectChain = makeCollectChain({ queue: cronQueue, config, log });
 
 	// REQ-GLOBAL-PI-OVERLAY staged packages: read the operator's stage manifest at EACH job start, like
 	// getSettings above and the pause-window ref below.
@@ -540,21 +559,6 @@ export async function startWorker(
 		cronCount: () => schedules.current.length,
 	});
 
-	// THE HOST QUEUE (issue #57): work only this machine can do, because the folder lives here.
-	//
-	// Armed by the operator DECLARING a name, not by a peer appearing. Two reasons, and the first is
-	// decisive: which queue a job is enqueued to is a routing decision made by whoever enqueues it, so it
-	// cannot be allowed to flip underneath a running deployment when a second host happens to register --
-	// a cron scheduler upserted on one queue and pruned from another is exactly the mutual teardown this
-	// issue exists to stop. And a second BullMQ Worker is a second blocking connection, which a single-host
-	// deployment should not pay for silently. Declaring a name IS the multi-host declaration; `doctor`
-	// warns when peers exist and nobody has made it.
-	const hostQueue = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
-	// The long-lived handle the cron watcher reloads through. Its own when a host queue is armed, so a
-	// live triggers-file edit lands on the same queue the boot reconcile used; otherwise the shared
-	// runtime queue, exactly as before. Registered as an extraCloser only when it is a NEW handle --
-	// closing `runtimeQueue` twice would be closing another owner's connection.
-	const cronQueue = hostQueue ? makeQueue(parseConnection(config.valkeyUrl), { name: hostQueue }) : runtimeQueue;
 
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
@@ -765,7 +769,14 @@ export async function startWorker(
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
 	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
 	// queue entirely -- no getJobSchedulers Redis hit -- but still logs {0,0} so the operator sees cron is off.
-	if (schedules.current.length > 0) {
+	// What this host will NOT be running, said once at boot and per trigger. A folder that belongs to
+	// another machine is ordinary on a fleet; a folder that belongs to NO machine is a trigger that will
+	// silently never fire, which is the silent no-op this project refuses -- and which `doctor` is the
+	// right place to catch, because it can ask the registry and this cannot.
+	const { served, unserved } = servedSchedules(schedules.current);
+	for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
+
+	if (served.length > 0) {
 		// Onto the HOST queue when one is armed. That makes Gap 1 structural rather than merely gated: a
 		// host queue's resident schedulers are only ever that host's, so `reconcile`'s "resident minus my
 		// config" is correct again by construction and two hosts can no longer prune each other at all. The
@@ -773,20 +784,20 @@ export async function startWorker(
 		// disagreement, which no queue split can detect.
 		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
 		try {
-			const r = await reconcileGated(rq, schedules.current, { registry, log, tz: hostTz });
-			log("schedules_installed", { installed: r.installed, removed: r.removed });
+			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz });
+			log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
 		} finally {
 			await rq.close().catch(() => {});
 		}
 	} else {
-		log("schedules_installed", { installed: 0, removed: 0 });
+		log("schedules_installed", { installed: 0, removed: 0, ...(unserved.length > 0 && { unserved: unserved.length }) });
 	}
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER live edit (OQ-008): watch the triggers file and re-reconcile schedulers
 	// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
 	// Only when a triggers file is configured; best-effort + unref'd; a bad edit keeps the running schedulers.
 	if (config.triggersFile) {
-		watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz);
+		watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared);
 	}
 
 	// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so

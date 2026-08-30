@@ -31,7 +31,7 @@ import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { makeQueue, enqueueLocalJob } from "@edgehero/pi-dispatch/queue";
+import { makeQueue, enqueueLocalJob, hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -280,7 +280,13 @@ export async function enqueueDispatchRun({
   // resolve worker-side against the overlay/env (INT-CONFIG-OVERLAY-CONTRACT).
   let queue;
   try {
-    queue = makeQueueFn(parseConnectionFn(valkeyUrl, { failFast: true }));
+    // Onto THIS host's queue when the deployment declares a worker name (issue #57). The folder was
+    // resolved against PI_DISPATCH_RUN_ROOTS, which is this machine's allowlist, so this machine is the
+    // only one that can run it. Read straight from the environment rather than through the deployment
+    // pointer, deliberately: the pointer carries PATHS and refuses capability grants, and a value that
+    // decides WHICH HOST runs a job is closer to the second than the first.
+    const workerName = process.env.PI_WORKER_NAME;
+    queue = makeQueueFn(parseConnectionFn(valkeyUrl, { failFast: true }), { ...(workerName ? { name: hostQueueName(workerName) } : {}) });
     const jobId = await enqueueLocalJob(queue, { folder, flow, task });
     return { ok: true, jobId };
   } catch (err) {

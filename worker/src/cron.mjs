@@ -15,7 +15,7 @@
 
 import { configError } from "./config.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { loadSchedules } from "./schedules.mjs";
+import { loadSchedules, servedSchedules } from "./schedules.mjs";
 
 function sentinelName(code) {
 	if (code === -10) return "SchedulerJobIdCollision";
@@ -153,10 +153,10 @@ export async function reconcileGated(queue, schedules, { registry, log = () => {
  * never taken down by a malformed trigger file (the OQ-008 live-edit safety). Returns `{ ok }` /
  * `{ invalid }` / `{ failed }`. `loadFn`/`reconcileFn` are injectable so the reload is unit-tested with no fs.
  */
-export async function reloadSchedules(config, queue, { log = () => {}, loadFn = loadSchedules, reconcileFn = reconcileGated, ref = null, registry, tz } = {}) {
+export async function reloadSchedules(config, queue, { log = () => {}, loadFn = loadSchedules, reconcileFn = reconcileGated, ref = null, registry, tz, fleet = false } = {}) {
 	let schedules;
 	try {
-		schedules = loadFn(config);
+		schedules = loadFn(config, { fleet });
 	} catch (error) {
 		log("schedules_reload_invalid", { reason: error?.message ?? String(error), kept: true });
 		return { invalid: error?.message ?? String(error) };
@@ -166,8 +166,13 @@ export async function reloadSchedules(config, queue, { log = () => {}, loadFn = 
 	// edit is what would make two hosts' fingerprints oscillate on the beat period -- refusing or agreeing
 	// depending on which half of a beat a reload landed in.
 	if (ref) ref.current = schedules;
+	// The same split the boot path makes: a trigger whose folder is another host's is not this host's to
+	// install, and the fingerprint is computed over the SERVED set so two hosts owning different folders
+	// do not read each other as divergent.
+	const { served, unserved } = servedSchedules(schedules);
+	for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
 	try {
-		const r = await reconcileFn(queue, schedules, { log, registry, tz });
+		const r = await reconcileFn(queue, served, { log, registry, tz });
 		// A refusal is NOT a reload. Wrapping it as `{ ok: true }` would log
 		// `schedules_reloaded {installed: undefined}` and tell an operator the edit took effect on a fleet
 		// where nothing was installed and nothing pruned -- the silent no-op this project refuses, arriving

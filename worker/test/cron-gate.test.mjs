@@ -198,3 +198,62 @@ test("an INVALID edit keeps the last-good ref as well as the running schedulers"
 	assert.deepEqual(ref.current, [sched("a")], "a typo must not make this host publish an empty opinion");
 	assert.ok(logs.some((l) => l.e === "schedules_reload_invalid"));
 });
+
+// --- placement: a folder that is not here is not necessarily a mistake ---------------------------------
+
+test("SINGLE HOST: a missing cron folder still refuses BOOT, byte-identically", async () => {
+	const { loadSchedules } = await import("../src/schedules.mjs");
+	const file = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/gone", flow: "tidy", task: "t" } }] });
+	assert.throws(
+		() => loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => file, existsSync: (p) => p === "/t.json", fleet: false }),
+		(e) => e.piDispatchConfig === true && e.message.includes("/gone"),
+		"a deployment that declares no worker name behaves exactly as it did before #57",
+	);
+});
+
+test("FLEET: a folder another machine owns makes the trigger UNSERVED, and the worker still boots", async () => {
+	// #57's own acceptance: a missing-folder configuration must fail that trigger's routing loudly instead
+	// of refusing worker boot for unrelated work. Refusing boot takes every forge job and every OTHER
+	// folder offline with it.
+	const { loadSchedules, servedSchedules } = await import("../src/schedules.mjs");
+	const file = JSON.stringify({
+		triggers: [
+			{ on: { type: "cron", id: "theirs", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/on-mini2", flow: "tidy", task: "t" } },
+			{ on: { type: "cron", id: "mine", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/here", flow: "tidy", task: "t" } },
+		],
+	});
+	const loaded = loadSchedules(
+		{ triggersFile: "/t.json" },
+		{ readFileSync: () => file, existsSync: (p) => p === "/t.json" || p === "/here", fleet: true },
+	);
+	const { served, unserved } = servedSchedules(loaded);
+	assert.deepEqual(served.map((s) => s.schedulerId), ["mine"]);
+	assert.deepEqual(unserved.map((s) => s.schedulerId), ["theirs"]);
+	assert.equal(unserved[0].unserved, "folder-absent");
+	assert.equal(served[0].pattern, "0 4 * * *", "and the trigger this host owns is fully normalized");
+});
+
+test("FLEET: an unserved trigger's skillsDir is not this host's business to judge", async () => {
+	// `isAbsolute` is OS-dependent, so judging another machine's path on my platform is the exact mistake
+	// the shared validator refuses to make. The host that owns the folder still validates it at ITS boot.
+	const { loadSchedules } = await import("../src/schedules.mjs");
+	const file = JSON.stringify({
+		triggers: [{ on: { type: "cron", id: "theirs", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/on-mini2", flow: "tidy", task: "t", skillsDir: "relative/not/absolute" } }],
+	});
+	const loaded = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => file, existsSync: (p) => p === "/t.json", fleet: true });
+	assert.equal(loaded[0].unserved, "folder-absent", "no throw: a path on a machine that is not mine is not mine to refuse");
+	// And the same file on the host that DOES have the folder still refuses it loudly.
+	assert.throws(
+		() => loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => file, existsSync: () => true, fleet: true }),
+		(e) => e.message.includes("skillsDir must be an absolute path"),
+	);
+});
+
+test("the host queue name composes unambiguously and only when a name is declared", async () => {
+	const { hostQueueName, QUEUE } = await import("../src/queue.mjs");
+	assert.equal(hostQueueName("mac-mini-1"), "pi-jobs@mac-mini-1");
+	// `@` is outside the worker-name charset, so the name can never contain one and the composition
+	// decomposes. A SUFFIX so `KEYS bull:pi-jobs*` still shows an operator the whole deployment.
+	assert.ok(hostQueueName("x").startsWith(QUEUE));
+	assert.ok(!/[@]/.test("mac-mini-1"), "the charset excludes the separator");
+});

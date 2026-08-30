@@ -42,7 +42,7 @@ function spyJob(id, data) {
  * of the demonstration that measured 301ms of live same-folder container overlap on main before this
  * gate existed.
  */
-function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => null, redis = fakeRedis() } = {}) {
+function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => null, redis = fakeRedis(), hostBound = null } = {}) {
 	const seen = { started: 0, records: [], logs: [] };
 	const releases = [];
 	const processor = mod.makeProcessor({
@@ -54,6 +54,7 @@ function harness({ limits = [], inFlight = makeInFlight(), pauseUntil = () => nu
 		pauseUntil,
 		scopedLimits: () => limits,
 		inFlight,
+		hostBound,
 		now: () => NOW,
 		recordRun: (r) => seen.records.push(r),
 		timeoutMs: 100000,
@@ -350,4 +351,44 @@ test("the limits snapshot is read ONCE per pickup, shared by gate and ledger -- 
 	assert.equal(r.outcome, "completed");
 	assert.equal(reads, 1, "one snapshot per pickup");
 	assert.ok([...keys].some((k) => k.startsWith("budget:s:")), "the scoped budget key landed from the SAME snapshot the gate used");
+});
+
+// --- the host-wide bound (issue #57) -------------------------------------------------------------------
+
+test("PI_CONCURRENCY bounds the HOST, not each queue: a second job defers and the slot comes back", { skip }, async () => {
+	// A worker that drains a host-affine queue as well as the shared one runs two BullMQ Workers, and
+	// BullMQ's concurrency is per Worker -- so two at 3 would run six containers and break the RAM and
+	// provider-throttle reasoning DES-CONCURRENCY-3 rests on. This semaphore restores the bound as a
+	// property of the MACHINE.
+	const hostSlots = makeInFlight();
+	const h = harness({ hostBound: { slots: hostSlots, limit: () => 1 } });
+
+	const a = ghJob("gh-1", "o/a");
+	const first = h.processor(a.job, "tok-a", new AbortController().signal);
+	await h.untilStarted(1);
+	assert.equal(hostSlots.count(mod.HOST_SLOT_KEY), 1);
+
+	// A DIFFERENT repo, so neither the folder mutex nor any scoped ceiling can be what stops it. Only the
+	// machine-wide bound can, which is what makes this a test of that bound rather than of them.
+	const b = ghJob("gh-2", "o/b");
+	const reservedBefore = h.redis.incrCalls; // the FIRST job already reserved; only the delta is this job's
+	await assert.rejects(() => h.processor(b.job, "tok-b", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(b.moves[0].ts, NOW + mod.SCOPE_BUSY_RECHECK_MS, "deferred, never refused: a full host is transient state");
+	assert.ok(h.seen.logs.some((l) => l.event === "host_busy_deferred"));
+	assert.equal(h.redis.incrCalls, reservedBefore, "and the deferred job reserved nothing");
+	assert.equal(hostSlots.count(mod.HOST_SLOT_KEY), 1, "the deferral gave its OWN slot back -- release is not idempotent");
+
+	h.releaseNext();
+	await first;
+	assert.equal(hostSlots.count(mod.HOST_SLOT_KEY), 0, "and the finished job releases too");
+});
+
+test("with no host queue there is no host bound, and the gate is the one it always was", { skip }, async () => {
+	const h = harness(); // hostBound: null
+	const a = ghJob("gh-1", "o/a");
+	const p = h.processor(a.job, "tok-a", new AbortController().signal);
+	await h.untilStarted(1);
+	assert.ok(!h.seen.logs.some((l) => l.event === "host_busy_deferred"), "a single-host deployment never reaches the acquire");
+	h.releaseNext();
+	await p;
 });

@@ -120,9 +120,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
 		const config = loadConfig(env);
 		const { parseConnection } = await import("./connection.mjs");
-		const { makeQueue, enqueueLocalJob } = await import("./queue.mjs");
+		const { makeQueue, enqueueLocalJob, hostQueueName } = await import("./queue.mjs");
 		// failFast: a one-shot enqueue must not hang forever if Valkey is down -- error clearly.
-		const queue = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }));
+		// Onto THIS host's queue when the deployment declares a name (issue #57). The folder was checked
+		// against this machine's filesystem a few lines up, so this machine is the only one that can run it;
+		// enqueueing it where every host drains would be handing a job to a peer that has no such folder.
+		const hq = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
+		const queue = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hq ? { name: hq } : {}) });
 		try {
 			// Absent flags stay absent (undefined) so the value resolves at job start against the
 			// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT).
