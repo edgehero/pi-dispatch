@@ -18,7 +18,7 @@ import { checkSlotKey, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } fro
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { createWorker } from "./index.mjs";
+import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -44,11 +44,12 @@ const exec = promisify(execFile);
 const BOOT_IMAGE_TIMEOUT_MS = 5_000;
 
 /**
- * How long a fleet-wide scope claim outlives its last refresh. The 30-minute job timeout plus slack, so a
- * claim can never expire underneath a container that is still legitimately running -- which would let
- * another host start a second job on a scope the operator limited to one, quietly.
+ * How long a fleet-wide scope claim lives. `JOB_TIMEOUT_MS` plus slack: a container cannot outlive that
+ * ceiling, so the claim cannot expire underneath a live job -- which is what makes a refresh unnecessary
+ * rather than merely unimplemented. DERIVED from that constant rather than written as a number, so the
+ * coupling maintains itself if the timeout ever moves.
  */
-const SCOPE_CLAIM_TTL_MS = 35 * 60 * 1000;
+const SCOPE_CLAIM_TTL_MS = JOB_TIMEOUT_MS + 5 * 60 * 1000;
 
 /**
  * This worker's own package version, for the registry row (issue #57): a rolling upgrade should be
@@ -615,10 +616,12 @@ export async function startWorker(
 		// queue: declaring a name is declaring a fleet. Its TTL is DERIVED rather than guessed -- the gate
 		// holds the lease across every profile in turn, each bounded by the check timeout, so one timeout
 		// per profile plus one for the overhead between them.
-		// The fleet-wide half of a scoped `concurrent` ceiling. Its TTL is the job timeout plus slack rather
-		// than a guess: a container may legitimately run that long, and a claim that expired underneath a
-		// live job would let another host start a second one on a scope the operator limited to one. The
-		// job path refreshes it while the container runs.
+		// The fleet-wide half of a scoped `concurrent` ceiling. Its TTL is DERIVED rather than guessed, and
+		// derived is what makes a heartbeat unnecessary: `JOB_TIMEOUT_MS` is a hard 30-minute ceiling on how
+		// long any container can run, so a TTL above it cannot expire underneath a live job -- which is the
+		// failure that would matter, because it would let another host start a second container on a scope
+		// the operator limited to one. Nothing refreshes this claim, deliberately: a refresher would be a
+		// second thing to get wrong for a window that cannot be reached.
 		scopeLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: scopeSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
 		checkLease: hostQueue
 			? makeFleetLease({
@@ -826,7 +829,7 @@ export async function startWorker(
 		// disagreement, which no queue split can detect.
 		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
 		try {
-			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz });
+			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: schedules.current });
 			log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
 		} finally {
 			await rq.close().catch(() => {});

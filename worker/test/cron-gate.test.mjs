@@ -257,3 +257,29 @@ test("the host queue name composes unambiguously and only when a name is declare
 	assert.ok(hostQueueName("x").startsWith(QUEUE));
 	assert.ok(!/[@]/.test("mac-mini-1"), "the charset excludes the separator");
 });
+
+test("two hosts owning DIFFERENT folders agree, because the fingerprint is over the authored file", async () => {
+	// The defect this pins: hashing the SERVED subset would make every correctly-configured fleet refuse
+	// itself forever. mini1 serves /a, mini2 serves /b, their subsets differ by construction -- and they
+	// are reading the same file, which is the only thing they have to agree about.
+	const authored = [sched("a"), sched("b")];
+	const mineServed = [sched("a")]; // this host has /a only
+	const peerFingerprint = cronFingerprint(authored, { tz: "UTC" }); // what mini2 publishes: the same FILE
+
+	const queue = fakeQueue();
+	const res = await reconcileGated(queue, mineServed, {
+		registry: fakeRegistry([{ name: "mini2", fpCron: peerFingerprint, cronCount: "2" }]),
+		tz: "UTC",
+		authored,
+	});
+	assert.equal(res.installed, 1, "this host installs only what it serves");
+	assert.deepEqual(queue.calls, [["upsert", "a"], ["list"]]);
+
+	// And a genuine file divergence is still caught, so the relaxation did not blind the gate.
+	const refused = await reconcileGated(fakeQueue(), mineServed, {
+		registry: fakeRegistry([{ name: "mini2", fpCron: "deadbeefdeadbeef", cronCount: "2" }]),
+		tz: "UTC",
+		authored,
+	});
+	assert.equal(refused.refused, "cron-divergence");
+});

@@ -107,11 +107,16 @@ export async function reconcile(queue, schedules, { log = () => {} } = {}) {
  * divergent host must still drain the queue. Taking a host's forge capacity offline over a cron
  * disagreement is the sentence this issue's own acceptance forbids.
  */
-export async function reconcileGated(queue, schedules, { registry, log = () => {}, reconcileFn = reconcile, tz } = {}) {
+export async function reconcileGated(queue, schedules, { registry, log = () => {}, reconcileFn = reconcile, tz, authored = schedules } = {}) {
 	// No registry wired is the same answer as a registry that cannot be read: proceed. This is what lets
 	// the gate be the DEFAULT on every path without a caller having to remember to arm it.
 	if (!registry) return await reconcileFn(queue, schedules, { log });
-	const mine = cronFingerprint(schedules, { tz });
+	// THE FINGERPRINT IS OVER THE AUTHORED SET, NOT THE SERVED SUBSET, and the distinction is the whole
+	// reason placement and agreement can coexist. What two hosts must AGREE about is the FILE; what they
+	// legitimately DIFFER about is which of its triggers each one can run, because a folder lives on one
+	// machine. Hashing the served subset would make every correctly-configured fleet refuse itself forever:
+	// mini1 serves /a, mini2 serves /b, their subsets differ, and neither would ever reconcile again.
+	const mine = cronFingerprint(authored, { tz });
 	// Publishes this host's CURRENT facts rather than passing the fingerprint in. Passing it in was the
 	// first shape and it quietly destroyed the mechanism it depends on: the heartbeat installs `fpCron` as
 	// a THUNK over the live schedule ref, and a caller merging a computed string replaced that closure, so
@@ -172,7 +177,7 @@ export async function reloadSchedules(config, queue, { log = () => {}, loadFn = 
 	const { served, unserved } = servedSchedules(schedules);
 	for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
 	try {
-		const r = await reconcileFn(queue, served, { log, registry, tz });
+		const r = await reconcileFn(queue, served, { log, registry, tz, authored: schedules });
 		// A refusal is NOT a reload. Wrapping it as `{ ok: true }` would log
 		// `schedules_reloaded {installed: undefined}` and tell an operator the edit took effect on a fleet
 		// where nothing was installed and nothing pruned -- the silent no-op this project refuses, arriving
