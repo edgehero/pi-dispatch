@@ -138,7 +138,12 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     const queues = names.map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
     queuesToClose.push(...queues);
     queue = queues[0];
-    const pausedState = await queue.isPaused();
+    // Across every queue, because "is this deployment paused" is the question. `queues[0]` alone would
+    // report the shared queue's state and call it the deployment's -- so a half-paused fleet, which
+    // `setQueuePaused` can leave behind if it fails mid-loop, would read as fully one or fully the other.
+    const pausedStates = await Promise.all(queues.map((q) => q.isPaused()));
+    const pausedState = pausedStates.every(Boolean);
+    const pausedPartial = pausedStates.some(Boolean) && !pausedState;
     const perQueue = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
     // Summed, because an operator asking "what is this deployment doing" means the deployment.
     const counts = perQueue.reduce((acc, c) => {
@@ -152,7 +157,7 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // rather than allowed to fail the whole status read: a fleet this panel cannot see is a fleet it says
     // nothing about, never a status line that vanishes.
     const resolved = resolveWorkerCount({ hosts: fleet.hosts ?? [], workerCount: typeof workerCount === "number" ? workerCount : 0 });
-    return { pausedState, counts, workers: resolved.count, workerNames: resolved.names };
+    return { pausedState, ...(pausedPartial && { pausedPartial }), counts, workers: resolved.count, workerNames: resolved.names };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -177,13 +182,21 @@ export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, par
     const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
     opened.push(...queues);
     queue = queues[0];
+    // Track what actually landed. A loop that throws halfway leaves the deployment HALF paused, and
+    // returning a bare `{ unreachable }` for that would be the worst answer available: the operator would
+    // read it as "nothing happened" and walk away from a fleet where one host is stopped and another is
+    // still spending. So the failure carries the names of the queues that did change.
+    const changed = [];
     for (const q of queues) {
-      if (paused) await q.pause();
-      else await q.resume();
+      const name = q?.name ?? "pi-jobs";
+      if (paused) await q.pause().catch((err) => Promise.reject(Object.assign(err, { changed })));
+      else await q.resume().catch((err) => Promise.reject(Object.assign(err, { changed })));
+      changed.push(name);
     }
-    return { ok: true, paused };
+    return { ok: true, paused, queues: changed };
   } catch (err) {
-    return { unreachable: err?.message ?? String(err) };
+    const partial = Array.isArray(err?.changed) && err.changed.length > 0 ? { partial: err.changed } : {};
+    return { unreachable: err?.message ?? String(err), ...partial };
   } finally {
     for (const q of opened) await q.close().catch(() => {});
   }

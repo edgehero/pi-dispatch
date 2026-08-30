@@ -827,8 +827,8 @@ test("setQueuePaused pauses through one queue and closes it in finally", async (
       closed = true;
     },
   });
-  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}) });
-  assert.deepEqual(res, { ok: true, paused: true });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
+  assert.deepEqual(res, { ok: true, paused: true, queues: ["pi-jobs"] });
   assert.deepEqual(calls, ["pause"], "pause, never resume");
   assert.equal(closed, true, "closed in finally");
 });
@@ -844,8 +844,8 @@ test("setQueuePaused resumes when paused is false", async () => {
     },
     async close() {},
   });
-  const res = await setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}) });
-  assert.deepEqual(res, { ok: true, paused: false });
+  const res = await setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
+  assert.deepEqual(res, { ok: true, paused: false, queues: ["pi-jobs"] });
   assert.deepEqual(calls, ["resume"]);
 });
 
@@ -859,7 +859,7 @@ test("setQueuePaused returns { unreachable } and still closes when the queue is 
       closed = true;
     },
   });
-  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}) });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
   assert.match(res.unreachable, /connection down/);
   assert.equal(closed, true, "closed in finally even on error");
 });
@@ -2043,7 +2043,7 @@ test("the kill switch reaches EVERY queue, because half a deployment is the same
     async close() {},
   });
   const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]) });
-  assert.deepEqual(res, { ok: true, paused: true });
+  assert.equal(res.ok, true);
   assert.deepEqual(paused.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
 });
 
@@ -2057,4 +2057,32 @@ test("schedulers are read across the fleet, or the panel shows zero while cron r
   const res = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]) });
   assert.equal(res.length, 1, "a named host installs its schedulers on its OWN queue");
   assert.equal(res[0].key, "nightly");
+});
+
+test("a pause that fails PARTWAY names what it already stopped", async () => {
+  // The worst answer available would be a bare `{ unreachable }`: an operator reads that as "nothing
+  // happened" and walks away from a fleet where one host is stopped and another is still spending.
+  const makeQueueFn = (_c, opts) => ({
+    name: opts?.name ?? "pi-jobs",
+    async pause() {
+      if (this.name === "pi-jobs@mini2") throw new Error("down");
+    },
+    async resume() {},
+    async close() {},
+  });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]) });
+  assert.match(res.unreachable, /down/);
+  assert.deepEqual(res.partial, ["pi-jobs", "pi-jobs@mini1"], "and says exactly which queues it did stop");
+});
+
+test("a HALF paused deployment reads as neither running nor paused", async () => {
+  const makeQueueFn = (_c, opts) => ({
+    async isPaused() { return (opts?.name ?? "pi-jobs") === "pi-jobs"; },
+    async getJobCounts() { return {}; },
+    async getWorkers() { return []; },
+    async close() {},
+  });
+  const res = await readQueueState({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]) });
+  assert.equal(res.pausedState, false, "not fully paused");
+  assert.equal(res.pausedPartial, true, "and the renderer must not call that 'running'");
 });

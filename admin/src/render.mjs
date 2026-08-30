@@ -66,7 +66,11 @@ export function renderStatus(queue) {
   // "unknown" where CLIENT SETNAME is unsupported, so a fleet that has declared its names deserves to see
   // them -- and a deployment that has not is unchanged, because there are no names to show.
   const named = Array.isArray(queue.workerNames) && queue.workerNames.length > 0 ? ` (${queue.workerNames.join(", ")})` : "";
-  return [`Queue: ${queue.pausedState ? "paused" : "running"}`, `  ${line}`, `  workers: ${workers}${named}`].join("\n");
+  // A half-paused deployment is its own state and must not read as either whole one: `setQueuePaused`
+  // can leave one behind if it fails partway through the fleet, and an operator told "running" would
+  // walk away from a host that is stopped.
+  const state = queue.pausedPartial ? "PARTIALLY paused" : queue.pausedState ? "paused" : "running";
+  return [`Queue: ${state}`, `  ${line}`, `  workers: ${workers}${named}`].join("\n");
 }
 
 /** Render the run history as aligned columns; a null field is "-", an unreachable/empty set degrades. */

@@ -1145,10 +1145,58 @@ adversarial passes did.
   a spend-system change rather than a wait-system one.
 - **Raised by**: issue #230.
 
+## OQ-031 — A local folder path is not an identity, so two hosts can both claim one
+
+- **Status**: **ACCEPTED RISK** — opened by `REQ-MULTI-HOST-COORDINATION`.
+- **Position**: routing sends a local job to the host whose filesystem has its `run.folder`, and the
+  one-job-per-folder mutex stays an in-process count because that host is the only one that runs it. Both
+  rest on a folder existing on exactly one machine, and nothing enforces that. `/srv/site` on two hosts is,
+  in the common case, two independent checkouts sharing a layout convention -- which is fine, and is why
+  neither host may treat them as one. But if they ARE the same tree over a network mount, both hosts serve
+  it, both install its cron scheduler on their own queue, and the mutex that exists to stop two agents
+  editing one working tree spans neither of them.
+- **Why it is a risk row and not a defect**: it is a pre-existing multi-host hazard this issue makes
+  REACHABLE rather than one the design introduces. Routing neither concentrates nor scatters such a job:
+  each host serves it locally and never consults the registry about it. And it needs a deliberate act, an
+  operator exporting one working tree to two machines, which is the same act `run.replicas` is refused for
+  on the same reasoning.
+- **What would close it**: a filesystem IDENTITY rather than a path. Device and inode would do it on one OS
+  and not portably; a marker file inside the folder would work and is a write into a directory the operator
+  owns, which this project does not do lightly. Either is a design decision rather than a tweak.
+- **What bounds it meanwhile**: the registry can SEE it. Two hosts publishing the same folder key is
+  detectable, and nothing yet detects it; that is the cheap first move whenever this is picked up.
+- **Raised by**: issue #57.
+
+## OQ-032 — Forge jobs that bind a host-local resource are still not routed
+
+- **Status**: **OPEN** — opened by `REQ-MULTI-HOST-COORDINATION`.
+- **Position**: #57's Gap 2 exempted forge jobs because their workspace is a fresh clone. Two later issues
+  retracted that. A trigger carrying `run.secretsProfile` needs its resolver on whichever host pops it
+  (#225); one carrying `run.waitFor` needs the check script there (#230). Both refuse pre-spend, both
+  refusals are RETURNED and never retried, so the same trigger succeeds or fails depending on which worker
+  took the delivery -- permanently, and reading like a configuration error rather than a placement one.
+- **Why it is still open after the placement slice**: routing happens at ENQUEUE, and forge deliveries are
+  enqueued by the RECEIVER. Routing them means the receiver reads the registry and picks a queue, which is
+  a receiver change and so a receiver release. The worker-side half (cron, chained children, the CLI and
+  `dispatch_run`) is done and is the majority of the risk, because those are the jobs that genuinely cannot
+  run anywhere else.
+- **What bounds it meanwhile**: declaring the same profiles on every host, which `docs/secrets.md` and
+  `docs/wait-for.md` now say plainly. A deployment that does so has no exposure at all.
+- **What would close it**: the receiver reading the host registry at enqueue. It already holds a Valkey
+  connection, so the cost is a read rather than a new dependency.
+- **Deliberately NOT routed either way**: `run.resume`. A session key is `sha256(kind, repo, ref)`, and the
+  store itself records that it is "not random... anyone who knows the repository and the branch can compute
+  it" -- so publishing keys to route on would disclose which repositories and branches a deployment works
+  on, more than everything else in the registry combined. A resume that lands on the wrong host cold-starts
+  and says so in the record; the answer there is a shared session store, not a routing token.
+- **Raised by**: issue #57.
+
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #57. **NEW `OQ-031`**: a local folder PATH is not an identity, so two hosts sharing one working tree over a network mount both serve it and the one-job-per-folder mutex spans neither. Recorded as a pre-existing multi-host hazard this issue makes REACHABLE rather than one the design introduces, since routing neither concentrates nor scatters such a job. What would close it is a filesystem identity rather than a path, which is a design decision; what bounds it meanwhile is that the registry can SEE it, and detecting two hosts publishing one folder key is the cheap first move. **NEW `OQ-032`**: forge jobs binding `run.secretsProfile` or `run.waitFor` profiles are host-affine and still unrouted, because routing happens at enqueue and forge deliveries are enqueued by the RECEIVER, which makes it a receiver release. The worker-side half is done and is the majority of the risk. The row also records why `run.resume` is deliberately never routed: a session key is a guessable preimage of a repository and branch, so publishing keys would disclose more than everything else in the registry combined. **`OQ-008` UNCHANGED, checked**: both rows describe work not done rather than state added. **`OQ-017` UNCHANGED, checked**, and not as a formality: `OQ-031`'s failure is the shared-working-tree race `run.replicas` is refused for, reached by another route. |
 | 2026-08-30 | Issue #57, the shared-bounds slice. **`OQ-030` AMENDED**: the capacity arithmetic it publishes was silently PER WORKER, and is now what it says. Before this, a three-host fleet had roughly 0.3 checks per second and a break-even near N = 270 without anyone having decided that; `PI_WAIT_CHECK_SLOTS` is a fleet-wide ceiling when a name is declared, so capacity is about 0.1 checks per second for the whole deployment and N is counted across it. That is a TIGHTENING an operator can be surprised by, which is why it is written here rather than left to be derived from a log line -- anyone relying on the accidental multiplication must now raise the knob deliberately. The exit-code half of the row is untouched. **`OQ-008` AMENDED, not reversed**: the two fleet leases are not the Redis-held claim this row refuses, and the two halves earn that differently rather than by one argument. A check lease claims no container, so every clause of the refusal -- what a stale claim costs, what contradicts it, how long it can be wrong -- inverts. A scope claim DOES claim a container, and the answer is that the boot reaper owns it: the reaper establishes at boot that this host holds none, so deleting a claim naming this host is the same source of truth writing down what it just established, not a second one. The precondition is checked rather than assumed -- on `reaper_skipped` nothing was enumerated, so the sweep is skipped, because freeing those slots would let another host start containers alongside ones that may still be running. **`OQ-002` UNCHANGED, checked**: `PI_CONCURRENCY`'s unmeasured RAM input is untouched, though the knob now bounds a machine across two queues rather than one. **`OQ-012` UNCHANGED, checked**: nothing about image conformance moves. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor. |
 | 2026-08-30 | Issue #57, the identity slice. **`OQ-008` UNCHANGED, checked, and the check is the load-bearing one**: the new `host:` keyspace is not the Redis-side state this row refuses, and the test that separates them is stated in `DES-HOST-REGISTRY` rather than asserted here -- delete the whole keyspace while the fleet runs and every host behaves exactly as before, because absence is read as "no peers", which is the single-host behaviour. A Redis-side toggle fails that test: deleting it loses the operator's edit. The registry holds no schedule, no trigger and no toggle; it holds each host's self-description, and its only verb is to let a host be SEEN. **`OQ-012` AMENDED**, one sentence in what detection ships: the job image's `{{.Id}}` is now surfaced on the boot line and in the registry, having been fetched on every job and discarded since the inspect grew a fourth field. It is an IDENTITY and not a conformance verdict -- two hosts agreeing on a digest run the same bytes, which says nothing about whether those bytes conform -- and the row's "presence, and only presence" verdict is unchanged. The comparison also has a caveat worth recording before anyone builds a red light on it: `.Id` is the local image id, so two independent local builds of one Dockerfile differ, and under Docker's containerd image store it is the manifest digest rather than the config digest, which makes a mixed-store fleet disagree about identical content. Any surface built on this must warn, never fail. **`OQ-002` UNCHANGED, checked**: `PI_CONCURRENCY`'s unmeasured RAM input is untouched; this slice adds no concurrency axis. **`OQ-007` UNCHANGED, checked**: retention is untouched, and the record gained a field rather than a file. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry; worker/src/image-preflight.mjs -> parseLabels; worker/src/start.mjs -> startWorker. |
 | 2026-08-30 | Issue #230, the doctor and docs slice. **`OQ-030` UNCHANGED, checked**: doctor reports the load-time half of the wait-profile contract and classifies no exit code, so the unenforceable-convention residual is untouched -- though the operator-facing half of it is now written down, since `docs/wait-for.md` states the 2-against-1 distinction as the thing that costs a delivery rather than leaving it to be inferred from a table. **`OQ-029` UNCHANGED, checked**: the SHA-drift residual is documented for operators (a held job's commit is chosen when it starts) and closed by nothing here. **`OQ-008` UNCHANGED, checked**, with one **CORRECTION** to this file's own record: the row for the enforcement slice ended "There is deliberately no index SET", which stopped being true one slice later and reads here as a standing decision rather than the moment in a sequence it was. `wait:held` exists, and the reversal's reasoning is in `INT-WAIT-PROFILES-CONTRACT`'s panel-slice row -- a set cannot expire its members, but the alternative was a whole-keyspace SCAN every second that walked hardest precisely when nothing was held, so the bounded leak is taken and the READER prunes it. The row is corrected here rather than rewritten there because a revision history that edits its own past entries stops being one. **`OQ-017` UNCHANGED, checked**: `run.replicas` is still refused beside `run.waitFor` at load. **Code evidence**: worker/src/doctor.mjs -> collectChecks (the wait block), readTriggerFacts; worker/src/wait-state.mjs -> makeWaitState (hold, release); admin/src/read-model.mjs -> readHeldJobs. |
