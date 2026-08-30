@@ -64,9 +64,15 @@ function canonical(value) {
  * idempotent in the first place.
  */
 export function cronFingerprint(schedules, { tz } = {}) {
+	// Takes the AUTHORED shape (`schedules.mjs -> authoredCron`), never the placement-resolved one.
 	if (schedules === null || schedules === undefined) return null;
 	return fingerprint({
 		tz: tz ?? "",
-		schedules: schedules.map((s) => ({ schedulerId: s.schedulerId, name: s.name, pattern: s.pattern, data: s.data, opts: s.opts })),
+		// EVERY field of an authored entry, projected explicitly. An earlier shape listed the keys of a
+		// NORMALIZED schedule (`name`, `data`, `opts`), which are all `undefined` on an authored one -- so
+		// the hash saw only the id and the pattern, and an operator changing `run.folder`, `run.flow` or
+		// `run.image` on one host and not the other passed the gate silently. That broke this module's own
+		// stated invariant, that the set diverges exactly when the reconcile inputs diverge.
+		schedules: schedules.map((s) => ({ schedulerId: s.schedulerId, pattern: s.pattern, run: s.run })),
 	});
 }

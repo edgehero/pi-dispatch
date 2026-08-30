@@ -6,6 +6,9 @@ import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
 import { gitDirty } from "./git-dirty.mjs";
 
+/** How long the kill switch waits on the host registry before acting on the shared queue alone. */
+const FLEET_READ_TIMEOUT_MS = 2_000;
+
 const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
@@ -155,7 +158,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		// GitHub auth is misconfigured, so an operator can always stop the queue.
 		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
 		const { parseConnection } = await import("./connection.mjs");
-		const { fleetQueueNames, makeQueue } = await import("./queue.mjs");
+		const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
 		const { makeRedisClient } = await import("./connection.mjs");
 		const { readLiveHosts } = await import("./host-registry.mjs");
 		// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
@@ -163,32 +166,70 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		// and manual runs kept spending -- and would print "paused" for having done it. That is the silent
 		// no-op the comment here already warned about for a mistyped name, arriving through a new door.
 		//
-		// The registry read is best-effort: an unreadable one yields the shared queue alone, which is
-		// exactly what this command did before, so a Valkey blip can never make the kill switch refuse.
+		// The registry read fails OPEN -- an unreadable one yields the shared queue alone, which is exactly
+		// what this command did before, so a Valkey blip can never make the kill switch refuse. But it fails
+		// open LOUDLY: the `[N queues]` suffix is the only evidence the fleet was spanned, so suppressing it
+		// silently in the one case where it was not would make the failure byte-identical to single-host
+		// success while a named host kept spending. `readLiveHosts` RETURNS `{unreachable}` rather than
+		// rejecting, so this is a branch and not a `.catch`.
 		const probe = makeRedisClient(url);
-		const fleet = await readLiveHosts(probe).catch(() => ({ hosts: [] }));
+		// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
+		// line -- the exact noise `defaultProbeValkey` exists to suppress.
+		probe.on?.("error", () => {});
+		// Both reads, concurrently, sharing one budget. The registry answers WHO IS LIVE; BullMQ's own meta
+		// keys answer WHICH QUEUES EXIST, and for a kill switch the second is the question that matters. A
+		// host whose registry writes fail for ninety seconds loses its row while its worker keeps draining,
+		// and a resume that misses a queue leaves it paused forever with no surface able to name it. A meta
+		// key outlives its worker; a registry row does not.
+		const [fleet, existing] = await Promise.all([
+			readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
+			discoverHostQueues(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
+		]);
 		probe.disconnect?.();
-		const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueue(parseConnection(url, { failFast: true }), { name }));
-		const queue = queues[0];
+		const blind = fleet?.unreachable ?? null;
+		const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing);
+		// `[N queues]` when we know, `[fleet unknown: …]` when we do not. Never a bare success line for a
+		// deployment we could not enumerate.
+		// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
+		// found them. Report the count we ACTED on, and name the degraded read separately.
+		const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
+		const queues = [];
 		try {
-			if (cmd === "pause") {
-				for (const q of queues) await q.pause();
-				process.stdout.write(`paused — worker will stop taking new jobs (jobs still enqueue)${queues.length > 1 ? ` [${queues.length} queues]` : ""}\n`);
-			} else if (cmd === "resume") {
-				for (const q of queues) await q.resume();
-				process.stdout.write(`resumed${queues.length > 1 ? ` [${queues.length} queues]` : ""}\n`);
+			// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
+			// at index k > 0 would otherwise leak the k connections already opened.
+			for (const name of names) queues.push(makeQueue(parseConnection(url, { failFast: true }), { name }));
+			if (cmd === "pause" || cmd === "resume") {
+				const done = [];
+				try {
+					for (const q of queues) {
+						await (cmd === "pause" ? q.pause() : q.resume());
+						done.push(q.name);
+					}
+				} catch (error) {
+					// A mid-loop failure leaves the deployment HALF switched. Naming what did change is the whole
+					// difference between an operator who knows to finish the job and one who reads "unreachable"
+					// as "nothing happened" and walks away from a fleet with one host still spending.
+					return fail(`could not ${cmd} the whole deployment at ${url}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}`);
+				}
+				process.stdout.write(cmd === "pause" ? `paused — worker will stop taking new jobs (jobs still enqueue)${span}\n` : `resumed${span}\n`);
 			} else {
 				// "paused" is included in the counts because jobs enqueued while paused land in the
 				// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state
 				// the pause switch creates. `pausedState` (the boolean) is named apart from the
 				// `paused` count `getJobCounts` returns, so the two do not collide in the output.
-				const pausedState = await queue.isPaused();
+				const states = await Promise.all(queues.map((q) => q.isPaused()));
 				const per = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
 				const counts = per.reduce((acc, c) => {
 					for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
 					return acc;
 				}, {});
-				process.stdout.write(`${JSON.stringify({ pausedState, ...counts })}\n`);
+				// Summed counts with a boolean from ONE queue would report a half-paused deployment as fully
+				// one or fully the other. `pausedPartial` is the third state, and the dangerous direction is
+				// the one it makes visible: pause ran while a host was invisible, so that host still spends.
+				const pausedState = states.every(Boolean);
+				const pausedPartial = !pausedState && states.some(Boolean);
+				const out = { pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}) };
+				process.stdout.write(`${JSON.stringify(out)}\n`);
 			}
 		} catch (error) {
 			return fail(`could not reach Valkey at ${url} — is it running? (docker compose up)\n  ${error.message}`);

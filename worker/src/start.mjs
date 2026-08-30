@@ -580,6 +580,9 @@ export async function startWorker(
 		// mid-run through `dispatch_set`. A literal here would publish the boot value forever.
 		concurrency: () => worker?.concurrency ?? bootConcurrency,
 		pid: process.pid,
+		// Whether this host DRAINS a queue of its own. Every worker publishes a row; only a host that declared
+		// a name has somewhere for routed work to go, and a reader must not invent a queue for one that has not.
+		routes: config.workerNameDeclared,
 		// The host's IANA zone, because a cron PATTERN carries none: `triggers.json` has no `tz` field and
 		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
 		// On one host that is exactly what an operator means; on two in different zones the same pattern is

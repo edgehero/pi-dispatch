@@ -15,7 +15,7 @@
 
 import { configError } from "./config.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { loadSchedules, servedSchedules } from "./schedules.mjs";
+import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 
 function sentinelName(code) {
 	if (code === -10) return "SchedulerJobIdCollision";
@@ -133,6 +133,17 @@ export async function reconcileGated(queue, schedules, { registry, log = () => {
 	const opinions = others.filter((h) => typeof h.fpCron === "string" && h.fpCron !== "");
 	const disagreeing = opinions.filter((h) => h.fpCron !== mine);
 
+	// I cannot establish agreement with an opinion I do not have. `mine` is null only when the file could
+	// not be read or parsed at THIS instant while `loadSchedules` had just succeeded -- a rename's brief
+	// unlink window, in practice. Proceeding would prune a peer's schedulers on the strength of a
+	// comparison that never happened, so this refuses; refusing deletes nothing and the next watch event
+	// or boot re-decides. It gets its own token because "I could not read my own file" and "we disagree"
+	// send an operator to two different places.
+	if (mine === null && opinions.length > 0) {
+		log("cron_divergence_refused", { mine: null, reason: "own-triggers-unreadable", cronCount: schedules.length, peers: opinions.map((h) => ({ host: h.name, fpCron: h.fpCron, cronCount: Number(h.cronCount) || 0 })) });
+		return { refused: "own-triggers-unreadable", peers: opinions.map((h) => h.name) };
+	}
+
 	if (disagreeing.length > 0) {
 		log("cron_divergence_refused", {
 			mine,
@@ -158,7 +169,7 @@ export async function reconcileGated(queue, schedules, { registry, log = () => {
  * never taken down by a malformed trigger file (the OQ-008 live-edit safety). Returns `{ ok }` /
  * `{ invalid }` / `{ failed }`. `loadFn`/`reconcileFn` are injectable so the reload is unit-tested with no fs.
  */
-export async function reloadSchedules(config, queue, { log = () => {}, loadFn = loadSchedules, reconcileFn = reconcileGated, ref = null, registry, tz, fleet = false } = {}) {
+export async function reloadSchedules(config, queue, { log = () => {}, loadFn = loadSchedules, reconcileFn = reconcileGated, ref = null, registry, tz, fleet = false, authoredFn = authoredCron } = {}) {
 	let schedules;
 	try {
 		schedules = loadFn(config, { fleet });
@@ -177,7 +188,10 @@ export async function reloadSchedules(config, queue, { log = () => {}, loadFn = 
 	const { served, unserved } = servedSchedules(schedules);
 	for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
 	try {
-		const r = await reconcileFn(queue, served, { log, registry, tz, authored: schedules });
+		// The FILE, re-read, not `schedules` -- that is `loadSchedules`'s output, which has already replaced
+		// every foreign trigger with a stub and therefore differs per host by construction. Passing it here
+		// made every live edit on a fleet refuse, permanently, even between hosts running identical files.
+		const r = await reconcileFn(queue, served, { log, registry, tz, authored: authoredFn(config) });
 		// A refusal is NOT a reload. Wrapping it as `{ ok: true }` would log
 		// `schedules_reloaded {installed: undefined}` and tell an operator the edit took effect on a fleet
 		// where nothing was installed and nothing pruned -- the silent no-op this project refuses, arriving

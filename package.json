@@ -1,6 +1,6 @@
 {
   "name": "pi-dispatch",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "private": true,
   "description": "A containerized job harness for the pi coding agent",
   "license": "MIT",

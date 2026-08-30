@@ -21,7 +21,8 @@
  */
 import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/pi-dispatch/budget";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { makeQueue } from "@edgehero/pi-dispatch/queue";
+import { makeQueue, fleetQueueNames } from "@edgehero/pi-dispatch/queue";
+import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
@@ -106,26 +107,71 @@ async function heldJobs(redis: any) {
   return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
 }
 
+/** How long the panel waits on the registry before drawing the fleet it last knew. */
+const FLEET_READ_TIMEOUT_MS = 2_000;
+
 export function createDashboardDeps(paths: any) {
   const queue = makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }));
   const redis = makeRedisClient(paths.valkeyUrl);
+
+  // EVERY named host drains a queue of its own, so the four things this panel does with a queue -- count,
+  // list schedulers, pause, resume -- have to span them. Doing it here rather than through read-model's
+  // fleet-aware readers because this panel is connection-first: it holds its clients for the life of the
+  // overlay and a per-tick open/close of N queues is the quiet load a dashboard must not add.
+  const pool = new Map<string, any>([[queue.name, queue]]);
+  // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the
+  // shared queue: that would silently pause half a deployment and print success, which is the failure this
+  // whole surface exists to prevent. We keep what we last saw and mark the snapshot degraded instead.
+  let lastNames: string[] = [queue.name];
+  let fleetDegraded: string | null = null;
+
+  const fleetQueues = async () => {
+    const fleet: any = await readLiveHosts(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err: any) => ({
+      unreachable: err?.message ?? String(err),
+    }));
+    if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
+      fleetDegraded = fleet?.unreachable ?? "registry unreadable";
+    } else {
+      fleetDegraded = null;
+      lastNames = fleetQueueNames(fleet.hosts);
+    }
+    for (const name of lastNames) {
+      if (!pool.has(name)) pool.set(name, makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }), { name }));
+    }
+    // A host that left keeps its queue open until dispose. Closing it here would race a pause already in
+    // flight against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
+    return lastNames.map((n) => pool.get(n));
+  };
+
   return {
     async fetchSnapshot() {
-      const [pausedState, counts, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerList, activeList, stallHash] = await Promise.all([
-        queue.isPaused(),
-        queue.getJobCounts("waiting", "active", "paused", "delayed", "failed"),
+      const queues = await fleetQueues();
+      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallHash] = await Promise.all([
+        Promise.all(queues.map((q: any) => q.isPaused())),
+        Promise.all(queues.map((q: any) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
         queue.getWorkers().catch(() => []),
         redis.get(dayKey()),
         redis.get(weekKey()),
         redis.get(monthKey()),
         redis.get(tokenDayKey()), // issue #25 daily token spend (budget:t:YYYY-MM-DD)
-        queue.getJobSchedulers(0, -1, true),
-        queue.getActive(0, 0).catch(() => []),
+        // The shared queue's failure is UNCAUGHT (the panel must not draw a scheduler list it could not
+        // read), a host queue's is caught: one unreachable host degrades one host's triggers, never the view.
+        Promise.all(queues.map((q: any, i: number) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
+        Promise.all(queues.map((q: any) => q.getActive(0, 0).catch(() => []))),
         // Per-scheduler stall counts (money backstop) for the cron drill-in; reuses the held client like the
         // budget GETs. HGETALL of an absent key is `{}`, so a never-stalled deployment shows 0 stalls.
         redis.hgetall(STALL_KEY).catch(() => ({})),
       ]);
       const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
+      // Summed across the fleet, because a count of one queue is not a count of the deployment.
+      const counts: any = {};
+      for (const c of countsPer) for (const [k, v] of Object.entries(c ?? {})) counts[k] = (counts[k] ?? 0) + Number(v ?? 0);
+      // A HALF-paused deployment must read as neither whole one: `every` is the honest AND, and `some`
+      // carries the disagreement out so the header can name it rather than rounding it to one side.
+      const pausedState = pausedStates.every(Boolean);
+      const pausedPartial = !pausedState && pausedStates.some(Boolean);
+      const schedulerList = schedulerLists.flat();
+      const activeList = activeLists.flat();
       // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell
       // caught individually so one bad read degrades one cell, never the snapshot. Keys recomputed from
       // the shared scopeKeyPrefix, so this reader and the worker's writer cannot drift.
@@ -155,7 +201,7 @@ export function createDashboardDeps(paths: any) {
         held,
         scopedLimits,
         scopedBudget,
-        queue: { pausedState, counts, workers },
+        queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
         schedulerStalls: stallHash ?? {},
@@ -175,16 +221,20 @@ export function createDashboardDeps(paths: any) {
       };
     },
     async pause() {
-      await queue.pause();
+      for (const q of await fleetQueues()) await q.pause();
     },
     async resume() {
-      await queue.resume();
+      // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while
+      // its host was live, then resumed while that host is down, stays paused with nothing naming it.
+      for (const q of await fleetQueues()) await q.resume();
     },
     async dispose() {
-      try {
-        await queue.close();
-      } catch {
-        // best-effort teardown
+      for (const q of pool.values()) {
+        try {
+          await q.close();
+        } catch {
+          // best-effort teardown
+        }
       }
       try {
         redis.disconnect();
@@ -937,11 +987,13 @@ function statusHeader(queue: any, inner: number, styler: any): string {
     return styler.cell(`queue unreachable (${queue?.unreachable ?? "?"})`, inner, { color: "error" });
   }
   const c = queue.counts ?? {};
-  const running = !queue.pausedState;
+  const running = !queue.pausedState && !queue.pausedPartial;
   const failed = Number(c.failed ?? 0);
+  // Three states, not two. A fleet where one host is paused and another is spending is the state an
+  // operator most needs named, and it is precisely the one a boolean cannot say.
   const stateColor = running ? "success" : "warning";
   const dot = styler.fg(stateColor, "●");
-  const word = styler.bold(styler.fg(stateColor, running ? "RUNNING" : "PAUSED"));
+  const word = styler.bold(styler.fg(stateColor, running ? "RUNNING" : queue.pausedPartial ? "PART PAUSED" : "PAUSED"));
   const sep = styler.fg("dim", " · ");
   // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
   // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,

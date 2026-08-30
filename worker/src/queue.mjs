@@ -30,16 +30,36 @@ export const hostQueueName = (worker) => `${QUEUE}@${worker}`;
  *
  * Derived from the REGISTRY rather than from configuration, because the reader is usually the admin or
  * the CLI, which know their own host at best and the fleet not at all. A deployment with no named worker
- * yields exactly `[QUEUE]`, so every existing caller is unchanged.
+ * that declared NO name yields exactly `[QUEUE]`, so every existing caller is unchanged. Note that this
+ * is derived from `routes`, not from a row existing: every worker publishes a row, named or not.
  *
  * This exists because a host queue that no reader knows about is worse than no host queue: the panel
  * would show zero schedulers while cron ran, and `pi-dispatch pause` would stop half a deployment while
  * reporting success -- the silent no-op its own comment already warns about for a mistyped name.
  */
 export function fleetQueueNames(hosts) {
-	const names = (hosts ?? []).map((h) => h?.name).filter((n) => typeof n === "string" && n !== "");
-	return [QUEUE, ...names.sort().map(hostQueueName)];
+	const seen = new Set();
+	for (const h of hosts ?? []) {
+		// A host has a queue only when it DECLARED a name. Every worker publishes a registry row -- that is
+		// what lets an unnamed fleet be seen at all -- but an undeclared one drains only the shared queue,
+		// so deriving queue names from every row would invent `pi-jobs@<hostname>` for a queue nothing
+		// reads: pausing it would create a real key for a phantom, and the counts would be a queue that can
+		// never have jobs.
+		if (h?.routes !== true && h?.routes !== "true") continue;
+		const name = h?.name;
+		// VALIDATED, because this is peer-written data crossing a trust boundary. `hostQueueName`'s own
+		// contract leans on the charset -- `@` is the separator precisely because a name cannot contain one
+		// -- and nothing else re-checks it. A name with a `:` makes `new Queue` throw, which would take the
+		// kill switch out entirely; one with an `@` would not decompose.
+		if (typeof name !== "string" || !WORKER_NAME_RE.test(name)) continue;
+		seen.add(name);
+	}
+	// Deduped: two rows naming one host would double-count its jobs in a summed status.
+	return [QUEUE, ...[...seen].sort().map(hostQueueName)];
 }
+
+/** The name charset, duplicated from `config.mjs` deliberately: this module imports nothing. */
+const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId };
 
@@ -262,4 +282,67 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		removeOnFail: { age: 31 * 24 * 3600 },
 	});
 	return jobId;
+}
+
+/**
+ * Every host queue that EXISTS, read from BullMQ's own keyspace rather than from the host registry.
+ *
+ * The registry answers "who is alive", and for a kill switch that is the wrong question. A host whose
+ * registry writes fail for ninety seconds loses its row while its BullMQ worker -- a separate connection,
+ * built with `maxRetriesPerRequest: null` precisely to ride out blips -- keeps draining. Pausing "the
+ * fleet" would then miss it and report success. The same gap opens for the ~15s before a booting worker's
+ * first beat lands, and on every `service restart`, since a clean shutdown DELs the row.
+ *
+ * Worse is the direction with no recovery path: pause while a host is live durably pauses its queue, and a
+ * later resume while that host is DOWN enumerates nothing for it. The queue stays paused permanently, and
+ * no surface can see it, because every surface was reading the registry too.
+ *
+ * A queue's meta key is durable and outlives its worker, so this asks the only authority that cannot go
+ * stale: the queues themselves. It also restores what `host-registry.mjs` claims about itself -- delete the
+ * whole `host:*` keyspace and nothing decides differently -- which the registry-derived kill switch had
+ * quietly made false.
+ *
+ * SCAN, not KEYS, and it is why this is NOT on the panel's per-tick path: it is for the rare command where
+ * being wrong costs money, not for a reader that runs every second. Fails open to `[]`, so an unreadable
+ * keyspace degrades to the registry's answer rather than refusing.
+ */
+export async function discoverHostQueues(redis, { timeoutMs = 2_000, count = 500 } = {}) {
+	const prefix = `bull:${QUEUE}@`;
+	const names = new Set();
+	try {
+		const deadline = Date.now() + timeoutMs;
+		let cursor = "0";
+		do {
+			// BOUNDED, because BullMQ's connections carry `maxRetriesPerRequest: null` and a command against
+			// an unreachable server therefore QUEUES FOREVER rather than rejecting -- so an unguarded await
+			// here would hang the kill switch instead of failing it open. The same trap the registry's
+			// `bounded` exists for.
+			const [next, keys] = await Promise.race([
+				redis.scan(cursor, "MATCH", `${prefix}*:meta`, "COUNT", count),
+				new Promise((_, reject) => setTimeout(() => reject(new Error("scan timed out")), Math.max(1, deadline - Date.now()))),
+			]);
+			cursor = next;
+			for (const key of keys ?? []) {
+				const name = String(key).slice(prefix.length, -":meta".length);
+				// Validated like every other peer-derived name: a key an operator hand-created could hold
+				// anything, and `new Queue` throws on a `:`, which would take the kill switch out entirely.
+				if (WORKER_NAME_RE.test(name)) names.add(name);
+			}
+		} while (cursor !== "0" && Date.now() < deadline);
+	} catch {
+		// Fail open: the registry's answer alone is still better than refusing to pause.
+		return [];
+	}
+	return [...names].sort().map(hostQueueName);
+}
+
+/**
+ * The union of what is LIVE (the registry) and what EXISTS (the keyspace), which is the set a kill switch
+ * must act on: a live host with no queue yet has nothing to pause, and a dead host's queue still holds
+ * jobs and still has a paused flag somebody has to be able to clear.
+ */
+export function unionQueueNames(fromRegistry, fromKeyspace) {
+	const seen = new Set([...(fromRegistry ?? []), ...(fromKeyspace ?? [])]);
+	seen.delete(QUEUE);
+	return [QUEUE, ...[...seen].sort()];
 }

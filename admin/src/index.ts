@@ -351,7 +351,12 @@ function registerTools(pi: ExtensionAPI): void {
       if (res.unreachable) {
         throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
       }
-      return toolText("paused");
+      // A PARTIAL result is the dangerous one: some queues switched, one did not, and reporting a bare
+      // "paused" for it tells an operator the deployment is stopped while a host keeps spending.
+      if (res.partial) {
+        throw new Error(`paused ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half paused: ${res.partial.error}`);
+      }
+      return toolText(`paused${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
     },
   });
 
@@ -367,7 +372,10 @@ function registerTools(pi: ExtensionAPI): void {
       if (res.unreachable) {
         throw new Error(`could not reach the queue at ${paths.valkeyUrl}: ${res.unreachable}`);
       }
-      return toolText("resumed");
+      if (res.partial) {
+        throw new Error(`resumed ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half resumed: ${res.partial.error}`);
+      }
+      return toolText(`resumed${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
     },
   });
 
@@ -1229,13 +1237,22 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       const paused = sub === "pause";
       const res = await setQueuePaused({ url: paths.valkeyUrl, paused });
       if (res.unreachable) {
-        notify?.(`could not reach Valkey at ${paths.valkeyUrl} — is it running? (docker compose up)`, "error");
+        // A HALF switched deployment gets its own message. "Could not reach Valkey" reads as "nothing
+        // happened", and walking away from a fleet with one host stopped and another spending is the one
+        // outcome this switch exists to prevent.
+        notify?.(
+          res.partial
+            ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half ${paused ? "paused" : "resumed"}`
+            : `could not reach Valkey at ${paths.valkeyUrl} — is it running? (docker compose up)`,
+          "error",
+        );
         return;
       }
+      const span = res.blind ? ` (fleet unknown: ${res.blind}, only ${res.queues[0]})` : res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
       notify?.(
         paused
-          ? "paused — worker will stop taking new jobs (jobs still enqueue; durable, survives restart)"
-          : "resumed",
+          ? `paused — worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}`
+          : `resumed${span}`,
         "info",
       );
       return;

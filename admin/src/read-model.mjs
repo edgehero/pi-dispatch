@@ -32,7 +32,7 @@ import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
-import { makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -133,8 +133,10 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // chained children and `dispatch_run` jobs live on `pi-jobs@<name>`, so a status read that looked only
     // at `pi-jobs` would report an idle queue while that host was busy -- and the pause state would be the
     // state of half a deployment.
-    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
-    const names = fleetQueueNames(fleet.hosts);
+    // The UNION, not the registry alone: a queue whose host has gone quiet still holds jobs and still has
+    // a paused flag, and a status read that cannot see it cannot tell an operator why work has stopped.
+    const { names, hosts, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
+    const fleet = blind ? { unreachable: blind } : { hosts };
     const queues = names.map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
     queuesToClose.push(...queues);
     queue = queues[0];
@@ -170,33 +172,79 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
  * mirror the CLI kill switch (cli.mjs:90-95): the state survives a worker restart. Returns
  * `{ ok: true, paused }` on success, or `{ unreachable }` on a connection error, closing in `finally`.
  */
+
+/**
+ * The queues a kill switch or a status read must span: what is LIVE (the host registry) unioned with what
+ * EXISTS (BullMQ's own meta keys).
+ *
+ * The registry alone is not enough and the gap is not theoretical. A host whose registry writes fail for
+ * ninety seconds loses its row while its worker keeps draining; a booting worker drains for up to fifteen
+ * seconds before its first beat; and a clean `service restart` DELs the row outright. In all three, a
+ * registry-derived pause misses that host and reports success.
+ *
+ * The unrecoverable direction is resume: pause with a host live durably pauses its queue, and a resume
+ * while that host is down never enumerates it. It stays paused forever, and before this no surface could
+ * even name it. A meta key outlives its worker, so the union always can.
+ *
+ * One client for both reads. Both fail open -- an unreadable registry or keyspace degrades the answer, it
+ * never refuses the command.
+ */
+export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  const redis = redisFn(url);
+  redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
+  try {
+    // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
+    // an unreachable Valkey took twice as long to say the same thing.
+    const [fleet, existing] = await Promise.all([
+      withTimeout(readLiveHosts(redis, { timeoutMs }), timeoutMs, { unreachable: "timed out reaching the registry" }),
+      discoverHostQueues(redis, { timeoutMs }),
+    ]);
+    return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing), blind: fleet?.unreachable ?? null, hosts: fleet?.hosts ?? [] };
+  } catch (err) {
+    return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
+  } finally {
+    try {
+      redis.disconnect?.();
+    } catch {
+      // best-effort teardown
+    }
+  }
+}
+
 export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
-  let queue;
   const opened = [];
   try {
     // EVERY queue in the fleet (issue #57). This is the kill switch: pausing only `pi-jobs` would stop
     // forge deliveries while a named host's cron, chained children and manual runs kept spending, and it
     // would report success for having done it. `cli.mjs`'s own comment already warns that a queue name
     // that names nothing is a silent no-op; half a deployment is the same failure, halved.
-    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
-    const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
-    opened.push(...queues);
-    queue = queues[0];
+    //
+    // `readHosts` RETURNS `{unreachable}` and never rejects, so the fallback is a branch, not a `.catch`.
+    // It matters which: an unreadable registry means we are acting on the shared queue alone, and the
+    // caller has to be able to say so rather than print a success line identical to a single-host one.
+    const { names, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
     // Track what actually landed. A loop that throws halfway leaves the deployment HALF paused, and
     // returning a bare `{ unreachable }` for that would be the worst answer available: the operator would
     // read it as "nothing happened" and walk away from a fleet where one host is stopped and another is
     // still spending. So the failure carries the names of the queues that did change.
-    const changed = [];
-    for (const q of queues) {
-      const name = q?.name ?? "pi-jobs";
-      if (paused) await q.pause().catch((err) => Promise.reject(Object.assign(err, { changed })));
-      else await q.resume().catch((err) => Promise.reject(Object.assign(err, { changed })));
-      changed.push(name);
+    const done = [];
+    for (const name of names) {
+      // Constructed one at a time INSIDE the try, and pushed BEFORE it is used: `makeQueueFn` can throw on
+      // a malformed peer-written name, and building the whole list first would leak every connection
+      // opened before the throw.
+      const q = makeQueueFn(parseConnectionFn(url, { failFast: true }), { name });
+      opened.push(q);
+      try {
+        if (paused) await q.pause();
+        else await q.resume();
+      } catch (err) {
+        return { unreachable: err?.message ?? String(err), partial: { done, failed: name, error: err?.message ?? String(err) }, blind };
+      }
+      done.push(name);
     }
-    return { ok: true, paused, queues: changed };
+    return { ok: true, paused, queues: done, ...(blind ? { blind } : {}) };
   } catch (err) {
-    const partial = Array.isArray(err?.changed) && err.changed.length > 0 ? { partial: err.changed } : {};
-    return { unreachable: err?.message ?? String(err), ...partial };
+    return { unreachable: err?.message ?? String(err) };
   } finally {
     for (const q of opened) await q.close().catch(() => {});
   }
@@ -829,7 +877,7 @@ export async function readSchedulers({
     // ACROSS EVERY QUEUE (issue #57). A named host installs its own schedulers on `pi-jobs@<name>`, so a
     // read of the shared queue alone would show ZERO schedulers while cron was running -- a panel that
     // contradicts a working deployment is worse than one that says nothing.
-    const fleet = await readHosts({ url, redisFn, timeoutMs }).catch(() => ({ unreachable: "registry unreadable" }));
+    const fleet = await readHosts({ url, redisFn, timeoutMs });
     const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
     opened.push(...queues);
     // The SHARED queue's failure is a real connection failure and must surface as `{ unreachable }`;

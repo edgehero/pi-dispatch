@@ -1984,13 +1984,16 @@ test("readScopedBudget GETs only the windows a row caps; absent keys are honest 
 
 // --- the fleet (issue #57) ------------------------------------------------------------------------------
 
-const fakeFleetRedis = (names) => () => ({
+// `routes` is what the worker publishes when a name was DECLARED, and it is what separates a host that
+// drains a queue of its own from one that merely has a registry row. Every worker has a row; only a
+// declared one has a queue. Hash values are strings, as Valkey returns them.
+const fakeFleetRedis = (names, { routes = true } = {}) => () => ({
   async smembers() {
     return names;
   },
   async hgetall(key) {
     const name = key.replace("host:h:", "");
-    return { name, beatAt: String(Date.now()) };
+    return { name, beatAt: String(Date.now()), routes: String(routes) };
   },
   async srem() {},
   disconnect() {},
@@ -2072,7 +2075,57 @@ test("a pause that fails PARTWAY names what it already stopped", async () => {
   });
   const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]) });
   assert.match(res.unreachable, /down/);
-  assert.deepEqual(res.partial, ["pi-jobs", "pi-jobs@mini1"], "and says exactly which queues it did stop");
+  assert.deepEqual(res.partial.done, ["pi-jobs", "pi-jobs@mini1"], "and says exactly which queues it did stop");
+  assert.equal(res.partial.failed, "pi-jobs@mini2", "and which one it did not, so an operator can finish the job");
+});
+
+test("an UNDECLARED host gets no queue, so a single-host deployment is untouched", async () => {
+  // Every worker publishes a registry row, named or not. Deriving queue names from the row's mere
+  // existence gave a plain one-worker deployment a `pi-jobs@<hostname>` queue that nothing drains: pause
+  // created a real Valkey key for a phantom, status opened two connections to count a queue that can
+  // never hold a job, and the panel printed a worker name where it used to print a bare count.
+  const asked = [];
+  const makeQueueFn = (_c, opts) => {
+    asked.push(opts?.name ?? "pi-jobs");
+    return {
+      name: opts?.name ?? "pi-jobs",
+      async isPaused() { return false; },
+      async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; },
+      async getWorkers() { return []; },
+      async close() {},
+    };
+  };
+  const res = await readQueueState({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["my-mac"], { routes: false }) });
+  assert.deepEqual(asked, ["pi-jobs"], "exactly the queue this command opened before any of this existed");
+  assert.equal(res.pausedPartial, undefined, "and no third state to render");
+});
+
+test("RESUME spans the fleet too, which is the direction that strands a deployment", async () => {
+  // Pause with both hosts live, then resume while one is down, and that host's queue stays paused with
+  // nothing naming it: `status` reads the shared queue as running, the panel draws RUNNING, and the host
+  // never takes another job. The stuck direction is the one with no recovery path, so it is pinned here.
+  const resumed = [];
+  const makeQueueFn = (_c, opts) => ({
+    name: opts?.name ?? "pi-jobs",
+    async pause() {},
+    async resume() { resumed.push(this.name); },
+    async close() {},
+  });
+  const res = await setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]) });
+  assert.deepEqual(resumed.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
+  assert.deepEqual(res.queues.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
+});
+
+test("an unreadable registry acts on the shared queue and SAYS it could not see the fleet", async () => {
+  // Failing open is right: a Valkey blip must never make the kill switch refuse. Failing open SILENTLY is
+  // not, because the only evidence the fleet was spanned is the queue count, so suppressing it in exactly
+  // the case where the fleet was not spanned makes the failure byte-identical to single-host success --
+  // while a named host keeps spending.
+  const makeQueueFn = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async pause() {}, async resume() {}, async close() {} });
+  const dead = () => ({ async smembers() { throw new Error("ECONNREFUSED"); }, async hgetall() { return {}; }, async srem() {}, disconnect() {} });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: dead });
+  assert.deepEqual(res.queues, ["pi-jobs"]);
+  assert.match(res.blind, /ECONNREFUSED|registry/, "and the caller can tell the operator WHY it saw one queue");
 });
 
 test("a HALF paused deployment reads as neither running nor paused", async () => {

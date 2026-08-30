@@ -49,11 +49,24 @@ is how a host is *seen*.
 Three things read it. `doctor` and the panel, to tell you what your fleet looks like. The cron reconcile,
 to refuse to act while hosts disagree. And the pause switch and the panel, to find every queue.
 
+The pause switch does not trust it alone. A registry row is a lease that expires ninety seconds after a
+host stops writing, while that host's queue, and its paused flag, are permanent. So `pause`, `resume` and
+`status` also enumerate the queues that *exist* from the queue keyspace itself, and act on the union. That
+is what stops a resume from silently leaving a queue paused forever because its host happened to be down
+when you ran it.
+
 ### Not shared, on purpose
 
 A job's raw log (`PI_CAPTURE_JOB_LOGS`) stays on the host that wrote it. It is the one artifact here that
 holds issue text, comment text and tool output, and mirroring it would move that off the machine the
-operator chose to keep it on. The panel names the host instead of showing bytes it should not have.
+operator chose to keep it on.
+
+The consequence is worth knowing before you go looking: `/dispatch logs <id>` for a job that ran on
+another host reports no captured log, the same as it would for a job whose logs were never captured. The
+run's own record names the host, so `RUN_DETAIL` tells you where to look; the bytes are on that machine.
+
+**The run history is also still per host** unless you share the directory (trap 4). Each host's panel
+lists the runs on its own disk. Merging it is not done yet.
 
 Local folders. That is the whole point of routing.
 
@@ -127,8 +140,10 @@ that names both hosts.
 before deleting anything, so on a shared directory one host cannot see that another's sandbox is in use,
 and will delete a directory an operator is working inside once it is past retention.
 
-`doctor` reports this as a failure rather than a warning. It is the one sharing mistake that destroys
-something.
+**Nothing detects this for you.** It is a rule you have to follow, and it is stated here rather than
+enforced because the obvious detector does not work: a marker file written into that directory is exactly
+what the sandbox reaper deletes. Of everything on this page it is the one sharing mistake that destroys
+something rather than merely confusing something, which is why it gets a trap of its own.
 
 ### 4. Sharing the logs directory is a real option, with a real cost
 
@@ -164,7 +179,19 @@ strays and kill a running job.
 image whose digest differs from the others, explains a timezone disagreement, and flags a host row that
 has gone stale. Every one of those lines is absent on a single-host deployment.
 
+What it does **not** check yet: whether two hosts are sharing a directory they should not be, and whether
+every host declares the secret and wait profiles your triggers name. Both are on you for now.
+
+And what the panel does not do yet: merge the run history across hosts, or route a forge delivery that
+binds a secret or wait profile to a host that has it. Both are tracked; the second is why declaring the
+same profiles everywhere matters today.
+
 The panel's status line names the workers when it can. `RUN_DETAIL` names the host that ran a job.
+
+A deployment where some queues are paused and some are not reads as `PART PAUSED` rather than being
+rounded to one side, and `pi-dispatch status` names the paused queues. A pause or resume that fails partway
+says which queues it changed and which one it failed at, because "could not reach Valkey" reads as
+"nothing happened" and that is the one thing it must not be mistaken for.
 
 An image digest that differs is **suspicious, not wrong**: two independent local builds of one Dockerfile
 produce different digests legitimately. It means "check", not "broken".

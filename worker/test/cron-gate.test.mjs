@@ -184,6 +184,51 @@ test("the WATCH path is gated too, and it updates the live ref it fingerprints f
 	assert.deepEqual(ref.current, [], "the ref tracks what this host now believes, so the next beat fingerprints THAT");
 });
 
+test("the reload fingerprints the FILE, so two hosts serving different folders still agree", async () => {
+	// The bug: this path hashed `loadSchedules`'s output, which has ALREADY replaced every trigger whose
+	// folder is not on this host with a stub. Two hosts running one identical file therefore produced two
+	// different hashes, and every live edit was refused on both, forever -- the exact outcome placement
+	// exists to make impossible. Boot and the heartbeat were fixed; this path was not, and it is the one an
+	// operator actually takes when they edit a trigger.
+	const authored = [{ schedulerId: "a", pattern: "0 3 * * *", run: { kind: "local", folder: "/a", flow: "f", task: "t" } }];
+	const theirs = cronFingerprint(authored, { tz: "UTC" });
+	const ref = { current: [] };
+	const queue = fakeQueue();
+	const logs = [];
+	const res = await reloadSchedules({ triggersFile: "/t.json" }, queue, {
+		// What THIS host can serve: the peer's trigger is stubbed out, because its folder is on the peer.
+		loadFn: () => [sched("a"), { schedulerId: "b", unserved: "folder-absent" }],
+		authoredFn: () => authored,
+		ref,
+		registry: fakeRegistry([{ name: "mini2", fpCron: theirs, cronCount: "1" }]),
+		log: (e, f) => logs.push({ e, f }),
+		tz: "UTC",
+	});
+	assert.equal(res.ok, true, "identical files agree, whatever each host can run from them");
+	assert.equal(logs.some((l) => l.e === "cron_divergence_refused"), false);
+	assert.ok(logs.some((l) => l.e === "cron_agreement"));
+});
+
+test("a host that cannot read its OWN file refuses rather than pruning on a comparison it never made", async () => {
+	// `authoredCron` returns null for an absent or unparseable file. Null is not an opinion, so it can
+	// neither agree nor disagree -- and proceeding would prune a peer's schedulers on the strength of a
+	// comparison that did not happen. Its own token, because "I could not read my file" and "we disagree"
+	// send an operator to two different places.
+	const queue = fakeQueue();
+	const logs = [];
+	const res = await reloadSchedules({ triggersFile: "/t.json" }, queue, {
+		loadFn: () => [sched("a")],
+		authoredFn: () => null,
+		ref: { current: [] },
+		registry: fakeRegistry([{ name: "mini2", fpCron: "deadbeefdeadbeef", cronCount: "1" }]),
+		log: (e, f) => logs.push({ e, f }),
+		tz: "UTC",
+	});
+	assert.equal(res.refused, "own-triggers-unreadable");
+	assert.deepEqual(queue.calls, [], "and nothing was installed or pruned");
+	assert.equal(logs.find((l) => l.e === "cron_divergence_refused")?.f?.reason, "own-triggers-unreadable");
+});
+
 test("an INVALID edit keeps the last-good ref as well as the running schedulers", async () => {
 	const ref = { current: [sched("a")] };
 	const logs = [];
