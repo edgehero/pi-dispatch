@@ -3200,6 +3200,8 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
     imageDigest     that image's `{{.Id}}`, or "" when docker could not answer
     piVersion       the image's own `dev.pi-dispatch.pi-version` label, or ""
     tz              the host's IANA zone, because a cron PATTERN carries none
+    fpCron          this host's schedule-set fingerprint, or "" when cron is disabled (= ABSTAIN)
+    cronCount       how many cron entries that fingerprint covers -- for the MESSAGE, never the rule
 ```
 
 **Every row is one host's SELF-DESCRIPTION.** No writer touches another host's row, and the keyspace
@@ -3237,6 +3239,19 @@ the panel reads every second.
 **`{ unreachable }` and `[]` are different answers** and no consumer may collapse them. "There are no
 other hosts" and "I could not find out" differ, and a panel that renders the second as the first tells an
 operator their fleet is gone when Valkey merely blinked.
+
+**A fact may be published as a VALUE or as a THUNK**, and the thunk is not a convenience. A fact that
+can change without a restart -- the cron fingerprint after a live triggers-file edit, the live
+concurrency after an overlay change -- must be re-read on every beat. Frozen at the call that started
+the heartbeat, a peer would compare against what this host believed at BOOT, and after any edit the
+two hosts' fingerprints would oscillate on the beat period: refusing or agreeing depending on which
+half of a beat a reload happened to land in. A thunk that throws yields an absent field and never
+skips the beat.
+
+**`fpCron: ""` means ABSTAIN, not "no schedules"**, and the distinction is load-bearing rather than
+pedantic. A worker with cron disabled has no view of what should be scheduled and must never be able
+to disagree with one that does; a worker whose triggers file declares zero cron entries HAS a view,
+and it is the sharpest form of the failure the gate exists to close.
 
 **The falsification test for anything added here later**: DELETE THE WHOLE `host:*` KEYSPACE WHILE THE
 FLEET RUNS, and every host must behave exactly as it did before this contract existed. That holds because

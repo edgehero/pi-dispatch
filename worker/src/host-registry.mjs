@@ -65,7 +65,20 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 	const write = async (fields) => {
 		const key = hostKey(name);
 		const flat = [];
-		for (const [k, v] of Object.entries(fields)) flat.push(k, String(v ?? ""));
+		// A fact may be a VALUE or a THUNK. A thunk is what lets a fact that changes without a restart --
+		// the cron fingerprint after a live triggers-file edit, the live concurrency after an overlay
+		// change -- be re-read on every beat rather than frozen at the call that started the heartbeat.
+		// Without it a peer would compare against what this host believed at boot, and two hosts would see
+		// each other's fingerprint oscillate on the beat period after any edit.
+		for (const [k, v] of Object.entries(fields)) {
+			let resolved;
+			try {
+				resolved = typeof v === "function" ? v() : v;
+			} catch {
+				resolved = ""; // a fact that cannot be computed is absent, never a reason to skip the beat
+			}
+			flat.push(k, String(resolved ?? ""));
+		}
 		await redis.hset(key, ...flat);
 		// PEXPIRE ON EVERY BEAT, which REVERSES this project's stated TTL rule ("set the TTL only when the
 		// key is first created, so a long window cannot push its expiry forward" -- budget.mjs). The
@@ -106,6 +119,18 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		/** Merge new facts and publish immediately. Awaited by callers that must be visible before they read. */
 		async publish(fields) {
 			await beat(fields);
+		},
+
+		/**
+		 * Every live host EXCEPT this one. Separate from `readLiveHosts` because "who else is there" is the
+		 * question every caller actually has, and excluding self at the one place stops each of them doing it
+		 * differently -- and stops a stale self-row, written by a previous process of this same host, being
+		 * read as a peer that disagrees with the process that is running now.
+		 */
+		async livePeers() {
+			const res = await readLiveHosts(redis, { now });
+			if (res.unreachable) return res;
+			return { hosts: res.hosts.filter((h) => h.name !== name) };
 		},
 
 		/**

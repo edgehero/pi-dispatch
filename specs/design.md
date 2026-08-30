@@ -324,6 +324,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     attempt. For an unattended recurring trigger the **cadence is the retry**, so a failing tick must not
     multiply spend within one tick — two distinct triggers with different retry semantics, not two
     implementations of one thing.
+  - **Reconcile is gated on fleet AGREEMENT since issue #57.** `reconcile` prunes every resident scheduler
+    not named in this worker's config, which is idempotent for one worker and mutual teardown for two: each
+    deletes the other's on every boot and every file-watch reload. A worker now publishes a fingerprint of
+    its NORMALIZED schedule set (plus its IANA zone, since a cron pattern carries none) and reconciles only
+    when no other live worker publishes a differing one. **Agreement rather than an elected owner**, and
+    the bad case is why: an elected owner reconciles from ITS file, so a stale one -- the operator edited on
+    the other host, or a compose `:ro` single-file mount pinned a dead inode -- silently converges the fleet
+    on the wrong set and reverts the edit with a log line that reads like success, which is `OQ-008`'s own
+    verdict through a new door. Agreement never picks a winner, so it cannot pick the wrong one, and it
+    needs no lease because it grants no authority: the rule only ever WITHHOLDS a permission, so absence of
+    knowledge proceeds and a Valkey blip cannot wedge a single host. The honest cost is that agreement can
+    stalemate and needs an operator, where election resolves automatically and possibly wrongly.
   **Legacy `repeat:` is deprecated and slated for removal in v6** — starting on it would be adopting a
   known-dead API.
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/classes/queue.ts:468-495 → upsertJobScheduler`

@@ -4,7 +4,7 @@ import { dirname, basename, join } from "node:path";
 import { promisify } from "node:util";
 import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
-import { reconcile, reloadSchedules } from "./cron.mjs";
+import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
@@ -14,6 +14,7 @@ import { makeForgejoHost } from "./forgejo-host.mjs";
 import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
+import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker } from "./index.mjs";
@@ -74,7 +75,7 @@ const WORKER_VERSION = (() => {
  * `reloadSchedules`. Best-effort and unref'd so it never blocks shutdown; a platform without `fs.watch`
  * logs and the worker keeps its boot-time schedulers.
  */
-function watchTriggersFile(config, queue, log) {
+function watchTriggersFile(config, queue, log, ref, registry, tz) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -83,7 +84,7 @@ function watchTriggersFile(config, queue, log) {
 		watch(dir, (_event, changed) => {
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
 			clearTimeout(timer);
-			timer = setTimeout(() => void reloadSchedules(config, queue, { log }), 150);
+			timer = setTimeout(() => void reloadSchedules(config, queue, { log, ref, registry, tz }), 150);
 		}).unref?.();
 		log("triggers_watching", { path });
 	} catch (err) {
@@ -242,7 +243,12 @@ export async function startWorker(
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: load and validate the triggers file with the operator present and
 	// before any Valkey contact, so a misconfigured schedule refuses startup loudly (configError) rather
 	// than upserting a broken scheduler. [] means cron disabled (no PI_TRIGGERS_FILE, or no cron triggers).
-	const schedules = loadSchedules(config);
+	// A mutable ref, like its `pauseWindows` and `scopedLimits` siblings and for a reason this one only
+	// acquired with issue #57: the heartbeat fingerprints what this host CURRENTLY believes should be
+	// scheduled, and a `const` frozen at boot would make it publish the pre-edit set forever -- so two
+	// hosts would see each other's fingerprint oscillate on the beat period, refusing or agreeing
+	// depending on which half of a beat a reload happened to land in.
+	const schedules = { current: loadSchedules(config) };
 
 	// REQ-SCOPED-PAUSE-WINDOWS: load + validate the pause-windows file with the operator present and before any
 	// Valkey contact, so a malformed file refuses startup (configError) rather than silently disabling scoped
@@ -493,6 +499,8 @@ export async function startWorker(
 	// handed, and two constructions are two chances for that to stop being true.
 	const imagePreflight = makeImagePreflightFn({ image: config.jobImage });
 	const bootImage = await imagePreflight({}).catch(() => ({}));
+	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
+	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
 	// NOT awaited, and that is load-bearing rather than an optimisation. `makeRedisClient` sets
 	// `maxRetriesPerRequest: null` -- required for BullMQ's blocking connections -- which means a command
@@ -511,7 +519,12 @@ export async function startWorker(
 		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
 		// On one host that is exactly what an operator means; on two in different zones the same pattern is
 		// two different instants, and nothing anywhere says so. Published now so a later slice can refuse.
-		tz: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
+		tz: hostTz,
+		// The cron fingerprint rides every beat from the LIVE ref, so a peer always compares against what
+		// this host believes now rather than what it believed at boot. `null` means abstain: cron disabled
+		// here is no opinion at all, and such a host must never be able to disagree with one that has one.
+		fpCron: () => cronFingerprint(config.triggersFile ? schedules.current : null, { tz: hostTz }) ?? "",
+		cronCount: () => schedules.current.length,
 	});
 
 	const worker = createWorkerFn({
@@ -722,10 +735,10 @@ export async function startWorker(
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
 	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
 	// queue entirely -- no getJobSchedulers Redis hit -- but still logs {0,0} so the operator sees cron is off.
-	if (schedules.length > 0) {
+	if (schedules.current.length > 0) {
 		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }));
 		try {
-			const r = await reconcile(rq, schedules, { log });
+			const r = await reconcileGated(rq, schedules.current, { registry, log, tz: hostTz });
 			log("schedules_installed", { installed: r.installed, removed: r.removed });
 		} finally {
 			await rq.close().catch(() => {});
@@ -738,7 +751,7 @@ export async function startWorker(
 	// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
 	// Only when a triggers file is configured; best-effort + unref'd; a bad edit keeps the running schedulers.
 	if (config.triggersFile) {
-		watchTriggersFile(config, runtimeQueue, log);
+		watchTriggersFile(config, runtimeQueue, log, schedules, registry, hostTz);
 	}
 
 	// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
