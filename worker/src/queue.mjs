@@ -317,10 +317,18 @@ export async function discoverHostQueues(redis, { timeoutMs = 2_000, count = 500
 			// an unreachable server therefore QUEUES FOREVER rather than rejecting -- so an unguarded await
 			// here would hang the kill switch instead of failing it open. The same trap the registry's
 			// `bounded` exists for.
+			//
+			// CLEARED on the way out, and NOT `unref`'d. Leaving it pending held the event loop open for the
+			// rest of the budget after the work was done, so `pi-dispatch pause` sat for two seconds having
+			// already paused everything; unref'ing instead would stop it firing when the hang is the last
+			// thing on the loop, which is the one case it exists for.
+			let timer;
 			const [next, keys] = await Promise.race([
 				redis.scan(cursor, "MATCH", `${prefix}*:meta`, "COUNT", count),
-				new Promise((_, reject) => setTimeout(() => reject(new Error("scan timed out")), Math.max(1, deadline - Date.now()))),
-			]);
+				new Promise((_, reject) => {
+					timer = setTimeout(() => reject(new Error("scan timed out")), Math.max(1, deadline - Date.now()));
+				}),
+			]).finally(() => clearTimeout(timer));
 			cursor = next;
 			for (const key of keys ?? []) {
 				const name = String(key).slice(prefix.length, -":meta".length);

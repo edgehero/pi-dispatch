@@ -149,6 +149,16 @@ test("an unreadable or HANGING keyspace fails open rather than wedging the kill 
 	assert.ok(Date.now() - started < 2_000, "bounded, not hung");
 });
 
+test("the bound leaves no timer behind once the scan has answered", async () => {
+	// The timer must not be `unref`'d -- it has to fire when a hang is the last thing on the loop, which is
+	// the only case it exists for -- so it has to be CLEARED instead. Left pending, it held the event loop
+	// open for the rest of the budget after the work was done, and `pi-dispatch pause` sat for two seconds
+	// having already paused everything.
+	const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+	await discoverHostQueues({ async scan(c) { return c === "0" ? ["0", ["bull:pi-jobs@a:meta"]] : ["0", []]; } }, { timeoutMs: 30_000 });
+	assert.equal(process.getActiveResourcesInfo().filter((r) => r === "Timeout").length, before, "no timer outlives the call");
+});
+
 test("the union covers a queue whose host is GONE, which is the direction with no recovery", () => {
 	// Pause with mini1 live durably pauses `pi-jobs@mini1`. Resume while mini1 is down, off the registry
 	// alone, enumerates nothing for it: the queue stays paused permanently and no surface names it.
