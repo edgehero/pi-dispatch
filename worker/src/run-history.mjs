@@ -114,7 +114,34 @@ export function parseExitTurns(text) {
  * Read-only telemetry, exactly like `parseExitTurns`: NEVER throws and MUST NOT feed exit-code or retry
  * classification (INT-RUNNER-EXIT-CODE-PROTOCOL). A malformed or non-object `tokens` (or one missing a
  * numeric `total`) is `null`, never a partial that could poison the daily token counter.
+ *
+ * The admitted object is REBUILT through `rebuildTokens` rather than returned as it arrived. See that
+ * function for why: the pass-through it replaces is what made this comment's "integer token counts and
+ * numeric cost only" false one level below `buildRecord`'s literal.
  */
+/**
+ * The CLOSED `session.reason` enum, verbatim from `INT-RUN-HISTORY-FILE-CONTRACT`. Three producers write
+ * this field (resolve, runner, promote) and the contract has always called the set closed; until this
+ * list existed, nothing enforced it and the runner's half was an unchecked string. Kept here rather than
+ * beside the store because this module is where the container's copy is admitted, and an enum that lives
+ * anywhere but the admission point is a comment, not a check.
+ */
+const SESSION_REASONS = new Set([
+	"resumed",
+	"absent",
+	"expired",
+	"conversation-too-old",
+	"resume-chain-too-long",
+	"context-too-full",
+	"too-large",
+	"unparseable",
+	"not-a-regular-file",
+	"pi-version-changed",
+	"locked",
+	"promote-failed",
+	"disabled",
+]);
+
 /**
  * The runner's `session` object off the exit line: `{ resumed: <bool>, reason: "<enum>" }` or null when
  * the container died before emitting one (REQ-RESUMABLE-SESSION).
@@ -125,7 +152,8 @@ export function parseExitTurns(text) {
  * without both numbers it is indistinguishable from an ordinary cold start. A feature that fails open
  * must still say that it did.
  *
- * PII-free by construction: a boolean and a fixed enum. No key, no branch name, no path.
+ * PII-free by construction: a boolean and a fixed enum. No key, no branch name, no path -- and since the
+ * `SESSION_REASONS` check below, that sentence is enforced rather than merely intended.
  */
 export function parseExitSession(text) {
 	if (typeof text !== "string") return null;
@@ -137,7 +165,14 @@ export function parseExitSession(text) {
 		if (parsed?.event !== "exit") continue;
 		const sess = parsed?.session;
 		if (sess && typeof sess === "object" && !Array.isArray(sess) && typeof sess.resumed === "boolean") {
-			return { resumed: sess.resumed, reason: typeof sess.reason === "string" ? sess.reason : null };
+			// The reason is checked against the CLOSED enum, not merely against `typeof === "string"`, which
+			// is what it used to be. The container owns this value, so an unchecked string put an
+			// attacker-shapeable one into a record whose PII-free property rests on holding none -- while
+			// the comment above claimed "a boolean and a fixed enum". An unrecognised token reads as `null`
+			// (the runner said nothing this contract can represent) rather than being carried through: the
+			// enum is documented CLOSED in INT-RUN-HISTORY-FILE-CONTRACT, so a value outside it was already
+			// contract-violating and every consumer already handles null.
+			return { resumed: sess.resumed, reason: SESSION_REASONS.has(sess.reason) ? sess.reason : null };
 		}
 		return null;
 	}
@@ -176,6 +211,43 @@ export function parseExitContext(text) {
 	return null;
 }
 
+/**
+ * The keys the runner actually emits, in its own emission order: the metered snapshot
+ * (`image/runner/src/usage-meter.mjs` -> `snapshot`) plus the token-budget fallback
+ * (`image/runner/run-job.mjs` -> `pickTotals`, which sends the first four and `metered: false`). Order
+ * matters because it is what makes a conformant runner's object round-trip byte-identically through the
+ * rebuild below, so the record's bytes do not move for anyone running a real image.
+ */
+const TOKEN_KEYS = ["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced"];
+
+/**
+ * Rebuild the billed totals from a closed key list rather than passing the container's object through.
+ *
+ * This function exists because the pass-through was a hole. `parseExitTokens` used to `return t`
+ * verbatim whenever `t.total` was a number, so any key the container invented -- a path, a branch name,
+ * a string it read out of the workspace -- rode into the durable record, and from there into anything
+ * that mirrors it. The record's PII-free-by-construction property held at `buildRecord`'s own level and
+ * NOT one level down, while this module's own comment claimed "integer token counts and numeric cost
+ * only". `parseExitUsage` already rebuilds for exactly this reason and says so; this is the sibling that
+ * did not, and the asymmetry was an oversight rather than a decision.
+ *
+ * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
+ * carries only five of the twelve, and a null there would read as "measured zero" for a number nobody
+ * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
+ * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
+ */
+function rebuildTokens(t) {
+	const out = {};
+	for (const key of TOKEN_KEYS) {
+		if (key === "metered") {
+			if (typeof t.metered === "boolean") out.metered = t.metered;
+		} else if (typeof t[key] === "number") {
+			out[key] = t[key];
+		}
+	}
+	return out;
+}
+
 export function parseExitTokens(text) {
 	if (typeof text !== "string") return null;
 	const lines = text.split("\n");
@@ -185,7 +257,7 @@ export function parseExitTokens(text) {
 		const parsed = parseTailLine(line);
 		if (parsed?.event !== "exit") continue;
 		const t = parsed?.tokens;
-		if (t && typeof t === "object" && !Array.isArray(t) && typeof t.total === "number") return t;
+		if (t && typeof t === "object" && !Array.isArray(t) && typeof t.total === "number") return rebuildTokens(t);
 		return null;
 	}
 	return null;

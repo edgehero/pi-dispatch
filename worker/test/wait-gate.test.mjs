@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { makeInFlight } from "../src/scoped-limits.mjs";
 import { makeCheckWaitSkew } from "../src/triggers-file.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS } from "../src/wait-for.mjs";
 import { makeWaitState } from "../src/wait-state.mjs";
@@ -70,7 +71,7 @@ function spyJob(data, { id = "gh-1", deduplicationId = "acme/web#7:deploy" } = {
 	return { job: { id, attemptsMade: 0, name: data.kind, data, deduplicationId, timestamp: NOW - 5 * 3600 * 1000, moveToDelayed: async (ts, tok) => moves.push({ ts, tok }) }, moves };
 }
 
-function harness({ redis = fakeRedis(), deps = {}, afterMaxMs, waitState } = {}) {
+function harness({ redis = fakeRedis(), deps = {}, afterMaxMs, waitState, checkSlots } = {}) {
 	const seen = { containerCalls: 0, records: [], logs: [], comments: [] };
 	const processor = mod.makeProcessor({
 		cancelJob: () => {},
@@ -82,6 +83,7 @@ function harness({ redis = fakeRedis(), deps = {}, afterMaxMs, waitState } = {})
 		timeoutMs: 100000,
 		...(afterMaxMs ? { afterMaxMs } : {}),
 		...(waitState ? { waitState } : {}),
+		...(checkSlots ? { checkSlots } : {}),
 		deps: {
 			mintToken: async () => "tok",
 			isDefaultBranchProtected: async () => true,
@@ -318,6 +320,53 @@ test("the wait state fails OPEN: a dead redis costs a panel row, never a refusal
 	await assert.rejects(() => processor(job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
 	assert.equal(moves.length, 1);
 	assert.equal(moves[0].ts, NOW + mod.SUPERSEDE_RECHECK_MS, "re-asks shortly, rather than holding to the instant on an unverified target");
+	assert.ok(seen.logs.some((l) => l.e === "wait_supersede_unverified"));
+});
+
+// --- the check lease is released on EVERY exit ---------------------------------------------------------
+//
+// The supersede claim sits between the lease acquire and the check loop, and both of its exits leave the
+// gate. Until this pair existed, both walked out holding the slot: at the shipped default of one, a single
+// `wait-superseded` wedged every wait check on the worker until it restarted, and the symptom was a later
+// job recording `wait-expired`/`max-wait-unchecked` -- capacity blamed for a leak.
+
+test("a wait-superseded refusal on the polled path RELEASES the check slot", { skip }, async () => {
+	const checkSlots = makeInFlight();
+	const state = { ...makeWaitState({ redis: fakeRedis(), now: () => NOW }), claim: async () => ({ heldBy: "gh-other" }) };
+	const { job } = spyJob(forge([{ profile: "jira" }]));
+	const { processor, seen } = harness({
+		waitState: state,
+		checkSlots,
+		deps: { waitProfileDeclared: () => true, checkWait: async () => ({ verdict: "go" }) },
+	});
+
+	const result = await processor(job, "tok", new AbortController().signal);
+	assert.equal(result.reason, "wait-superseded");
+	assert.equal(checkSlots.count("wait-check"), 0, "the slot the gate took before the claim is given back");
+	assert.equal(seen.containerCalls, 0);
+
+	// The proof that matters is the NEXT job: with one slot, a leak would throttle it forever.
+	const { job: second } = spyJob(forge([{ profile: "jira" }]), { id: "gh-2", deduplicationId: "acme/web#8:deploy" });
+	const clean = { ...makeWaitState({ redis: fakeRedis(), now: () => NOW }), claim: async () => ({ ok: true }) };
+	const run = harness({ waitState: clean, checkSlots, deps: { waitProfileDeclared: () => true, checkWait: async () => ({ verdict: "go" }) } });
+	await run.processor(second, "tok", new AbortController().signal);
+	assert.equal(run.seen.containerCalls, 1, "the next job wins the lease and runs, rather than throttling behind a leaked slot");
+	assert.ok(!run.seen.logs.some((l) => l.e === "wait_check_throttled"), "and is never throttled at all");
+});
+
+test("an unverifiable holder re-defers and RELEASES the check slot", { skip }, async () => {
+	const checkSlots = makeInFlight();
+	const state = { ...makeWaitState({ redis: fakeRedis(), now: () => NOW }), claim: async () => ({ retry: true, holder: null }) };
+	const { job, moves } = spyJob(forge([{ profile: "jira" }]));
+	const { processor, seen } = harness({
+		waitState: state,
+		checkSlots,
+		deps: { waitProfileDeclared: () => true, checkWait: async () => ({ verdict: "go" }) },
+	});
+
+	await assert.rejects(() => processor(job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(moves[0].ts, NOW + mod.SUPERSEDE_RECHECK_MS);
+	assert.equal(checkSlots.count("wait-check"), 0, "a throw out of the gate releases too -- the finally covers both exits");
 	assert.ok(seen.logs.some((l) => l.e === "wait_supersede_unverified"));
 });
 

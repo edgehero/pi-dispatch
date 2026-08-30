@@ -227,23 +227,32 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 					throw new DelayedError();
 				}
 
-				// Claimed BEFORE the check, not after: a second delivery for an already-held target is a free
-				// determinate refusal, and paying for a subprocess first inverts the free-before-costly rule
-				// this gate's own header invokes. Tier 1 already claims in this order.
-				const claim = await waitState.claim(job.id, { dedupId, untilMs: nowMs + waitBackoffMs(intervalMs(), held), isLive: deps?.isJobLive });
-				if (claim.heldBy) {
-					return await refuseWait("wait-superseded", "wait_superseded", { heldBy: claim.heldBy }, "Another delivery for this target is already waiting on the same conditions. Not run.");
-				}
-				if (claim.retry) {
-					deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
-					await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
-					throw new DelayedError();
-				}
-
-				await waitState.noteThrottle(job.id, { denied: false }); // granted: the run of denials ends here
+				// Declared outside the try below because the branches AFTER it read both.
 				let verdict = null;
 				let checked = null;
+				// THE LEASE IS HELD FROM THE `tryAcquire` ABOVE, so every exit from here down must release it.
+				// The try opens here and not at the check loop, which is where it used to open: the supersede
+				// claim sits between the two, and BOTH of its exits leave -- one returns `wait-superseded`,
+				// the other re-defers and throws -- so a claim that refused or could not be verified walked
+				// out holding the slot. At the shipped default of one slot that wedged every wait check on
+				// the worker until it restarted, and the symptom was silent in the worst way: held jobs kept
+				// throttling and eventually recorded `wait-expired` with `max-wait-unchecked`, which blames
+				// the deployment's capacity for a slot this gate leaked.
 				try {
+					// Claimed BEFORE the check, not after: a second delivery for an already-held target is a free
+					// determinate refusal, and paying for a subprocess first inverts the free-before-costly rule
+					// this gate's own header invokes. Tier 1 already claims in this order.
+					const claim = await waitState.claim(job.id, { dedupId, untilMs: nowMs + waitBackoffMs(intervalMs(), held), isLive: deps?.isJobLive });
+					if (claim.heldBy) {
+						return await refuseWait("wait-superseded", "wait_superseded", { heldBy: claim.heldBy }, "Another delivery for this target is already waiting on the same conditions. Not run.");
+					}
+					if (claim.retry) {
+						deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
+						await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
+						throw new DelayedError();
+					}
+
+					await waitState.noteThrottle(job.id, { denied: false }); // granted: the run of denials ends here
 					// Sequential, in the operator's writing order: the resolver's reason applies unchanged --
 					// naming the first condition that did not clear is what makes a held row readable, and a
 					// parallel fan-out would blame whichever lost the race on any given wake.

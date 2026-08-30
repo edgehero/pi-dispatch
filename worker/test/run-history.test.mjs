@@ -267,6 +267,45 @@ test("parseExitTokens returns the LAST exit line's tokens when two are present",
 	assert.deepEqual(parseExitTokens(text), { total: 9 });
 });
 
+test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
+	// The container owns this object. Passing it through put whatever it invented -- a path, a branch
+	// name, a credential it read -- into a record whose PII-free property rests on holding none, while
+	// this module's comment promised "integer token counts and numeric cost only".
+	const hostile = '{"event":"exit","tokens":{"total":5,"input":2,"leaked":"ghp_x /Users/rob/secret","nested":{"branch":"feature/customer"}}}';
+	const out = parseExitTokens(hostile);
+	assert.deepEqual(out, { input: 2, total: 5 }, "only the closed key list survives");
+	const json = JSON.stringify(out);
+	assert.ok(!json.includes("ghp_x"), "no attacker-chosen string");
+	assert.ok(!json.includes("/Users/rob/"), "and nothing path-shaped");
+	assert.ok(!json.includes("feature/customer"), "nesting is not a way around the list either");
+	// A string in a KNOWN slot is dropped too: the list closes which keys survive, the type check closes
+	// what may sit in them.
+	assert.deepEqual(parseExitTokens('{"event":"exit","tokens":{"total":5,"cost":"free"}}'), { total: 5 });
+});
+
+test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY", () => {
+	// The rebuild must cost a real image nothing, key order included -- the record's bytes are a contract.
+	// Both shapes the runner emits: usage-meter.mjs -> snapshot, and run-job.mjs -> pickTotals.
+	const metered = { input: 1, output: 2, total: 3, cost: 0.5, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0 };
+	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`)), JSON.stringify(metered));
+	const fallback = { input: 1, output: 2, total: 3, cost: 0.5, metered: false };
+	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)), JSON.stringify(fallback));
+	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the twelve, and
+	// a null would read as "measured zero" for a number nobody measured.
+	assert.ok(!("otherTotal" in parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)));
+});
+
+test("parseExitSession refuses a reason outside the CLOSED enum", () => {
+	// The enum is documented closed in INT-RUN-HISTORY-FILE-CONTRACT; until this check it was enforced by
+	// nothing, so the container could write any string into the record.
+	assert.deepEqual(parseExitSession('{"event":"exit","session":{"resumed":false,"reason":"attacker /path/ string"}}'), { resumed: false, reason: null });
+	assert.deepEqual(parseExitSession('{"event":"exit","session":{"resumed":true,"reason":"resumed"}}'), { resumed: true, reason: "resumed" });
+	// Every token the contract lists must survive, or this check would silently narrow the enum.
+	for (const reason of ["resumed", "absent", "expired", "conversation-too-old", "resume-chain-too-long", "context-too-full", "too-large", "unparseable", "not-a-regular-file", "pi-version-changed", "locked", "promote-failed", "disabled"]) {
+		assert.equal(parseExitSession(`{"event":"exit","session":{"resumed":false,"reason":${JSON.stringify(reason)}}}`).reason, reason, reason);
+	}
+});
+
 test("parseExitTokens rejects a malformed tokens value rather than storing a partial", () => {
 	// A non-object, an array, or an object missing a numeric total must not poison the daily counter.
 	assert.equal(parseExitTokens('{"event":"exit","tokens":42}'), null);
