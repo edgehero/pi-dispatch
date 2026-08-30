@@ -2,7 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { InfraRetry, runJob } from "./processor.mjs";
+import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
+import { WAIT_AFTER_MAX_DEFAULT_MS, afterMs, unreadableConditions, waitArmed, waitLabel, waitProfileNames } from "./wait-for.mjs";
+import { makeWaitState } from "./wait-state.mjs";
 
 const exec = promisify(execFile);
 
@@ -15,6 +18,12 @@ export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
 // folder -- pays exactly one re-check, not fifteen seconds of dead air. No jitter: one worker per
 // docker daemon bounds any herd by its own concurrency, and a contended wake just re-defers.
 export const SCOPE_BUSY_RECHECK_MS = 5_000;
+
+// How long a job waits before re-asking whether a target's holder is still alive (issue #230). Reached only
+// when the liveness probe could not answer, which is a redis or queue fault rather than a normal state, so
+// this is a short retry rather than a cadence: the job is deciding nothing and holding nothing while it
+// waits, and the fault it is waiting out is usually seconds long.
+export const SUPERSEDE_RECHECK_MS = 15_000;
 
 /**
  * Build the BullMQ processor.
@@ -35,7 +44,7 @@ export const SCOPE_BUSY_RECHECK_MS = 5_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now() }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -53,9 +62,115 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			throw new DelayedError();
 		}
 
+		// The wait gate (issue #230, REQ-WAIT-FOR). THIRD: after the pause gate, because a paused job must
+		// not burn a wait evaluation any more than it burns a scope re-check, and BEFORE the scope acquire,
+		// because a job that is going to sit until tomorrow morning must not hold the folder mutex while it
+		// does. Strictly above the `try` for the two reasons the gates below it document.
+		//
+		// The order WITHIN the gate is determinate-refusals-then-holds, which is CONST-BUDGET-BEFORE-TOKENS'
+		// shape applied to time rather than to money: a condition this deployment can never answer must be
+		// refused now, not after a day of waiting.
+		//
+		// On throwing above the `try`: an exception here escapes into BullMQ's normal failed-attempt handling,
+		// which is WANTED for `moveToDelayed` (the scope gate below gives the argument: a transient rejection
+		// must stay a transient failure rather than becoming a permanent one) and unwanted everywhere else. So
+		// the state and comment seams fail open by construction, and `recordRun` is relied on not to throw --
+		// its writer swallows fs errors by contract, which is the same reliance the settings-overlay refusal
+		// below already makes.
+		if (waitArmed(job.data)) {
+			// The supersede identity: the queue's semantic key PLUS the trigger that produced this job.
+			// The semantic key alone is `repo<sep>number:flow`, which two DIFFERENT triggers on one target and
+			// flow legitimately share -- a label rule that waits a day and a comment rule that waits a minute
+			// would coalesce, and the second would be refused with a message claiming they wait on "the same
+			// conditions" when they do not. Adding the raw trigger index makes the key mean one intent.
+			const matchedIndex = job.data?.trigger?.matched?.index;
+			const dedupId = job.deduplicationId ? `${job.deduplicationId}#${Number.isInteger(matchedIndex) ? matchedIndex : "?"}` : null;
+			const refuseWait = async (reason, logEvent, fields, sentence) => {
+				// The INJECTED clock, like both gates above: a record whose timestamps ignore the test clock
+				// is a record no test of this gate can assert about.
+				const at = new Date(now()).toISOString();
+				await waitState.release(job.id, { dedupId });
+				deps?.log?.(logEvent, { jobId: job.id, ...fields });
+				// The comment names the FIELD and the operator's own words for the condition, never a
+				// resolver path or a vault topology -- `secret-profile-unknown` sets that rule.
+				if (sentence && deps?.comment) await Promise.resolve(deps.comment(job.data, sentence)).catch(() => {});
+				const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false };
+				recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString() });
+				return result;
+			};
+
+			// EVERY condition must be one this worker understands, checked before anything else. The loader
+			// refuses an unknown condition, but the loader is a DIFFERENT PROCESS: `job.data.waitFor` arrives
+			// over Redis from the receiver, and this whole feature exists because receiver-worker version
+			// skew is real. `makeCheckWaitSkew` closes the backward direction (the file has conditions the
+			// job arrived without); this closes the forward one (a newer receiver enqueues a condition shape
+			// this worker cannot read). Without it the gate would fall through, log `wait_cleared`, and run
+			// the job -- asserting in the log that conditions cleared which it never evaluated, which is the
+			// same undetectable paid run the backward check exists to stop.
+			const unreadable = unreadableConditions(job.data);
+			if (unreadable.length > 0) {
+				// Its OWN token, not `wait-skew`. Both are version skew, and the REMEDIES are opposites --
+				// upgrade the receiver there, upgrade the worker here -- so one token in a durable record
+				// would tell an operator that something is out of step and not which way to move.
+				return await refuseWait("wait-unreadable", "refused_wait_unreadable", { conditions: unreadable.length }, `Refused: this job carries ${unreadable.length} wait condition${unreadable.length === 1 ? "" : "s"} this worker cannot read, so it cannot honour them. The worker is older than the service that enqueued this job. Not run.`);
+			}
+
+			// A `profile` condition needs a resolver, and until one is wired NOTHING can answer it. Refused
+			// rather than ignored: a wait the deployment cannot perform must not read as a wait that passed.
+			const profiles = waitProfileNames(job.data);
+			if (profiles.length > 0 && !deps?.checkWait) {
+				return await refuseWait("wait-profile-unknown", "wait_profile_unknown", { profile: profiles[0] }, `Waiting on \`${profiles[0]}\` is not something this deployment can answer. Not run.`);
+			}
+
+			const holdUntil = afterMs(job.data); // named apart from the pause gate's `until` above, which it would otherwise shadow
+			// An instant further out than the ceiling is refused at FIRST pickup rather than held toward:
+			// holding for a month to then refuse tells the operator nothing they could not have been told now.
+			if (holdUntil !== null && holdUntil - nowMs > afterMaxMs()) {
+				return await refuseWait("wait-after-beyond-max", "wait_after_beyond_max", { delayMs: holdUntil - nowMs }, `The \`after\` instant is further out than this deployment allows a job to wait. Not run.`);
+			}
+
+			// The pause gate's boundary guard, for its reason: a tick landing on the instant must run rather
+			// than busy-defer to a moment already past.
+			if (holdUntil !== null && holdUntil > nowMs + 1000) {
+				// `isJobLive` is what stops a vanished holder's lease becoming a tombstone that refuses this
+				// target for the rest of the hold. Optional: an unwired probe means the holder cannot be
+				// checked, which ADMITS and says so -- one duplicate run beats one dropped delivery, which is
+				// `OQ-027`'s call ("one wasted vault read beats one dropped job") on this feature's terms.
+				const claim = await waitState.claim(job.id, { dedupId, untilMs: holdUntil, isLive: deps?.isJobLive });
+				if (claim.heldBy) {
+					// Another delivery for this same target and flow is already holding. Both would clear
+					// together and both would be paid, which is the accumulation the acceptance forbids.
+					return await refuseWait("wait-superseded", "wait_superseded", { heldBy: claim.heldBy }, "Another delivery for this target is already waiting on the same conditions. Not run.");
+				}
+				if (claim.retry) {
+					// The holder could not be checked. Holding anyway would put two jobs on one target and pay
+					// for both; refusing would drop a delivery over a holder that may be gone. So decide
+					// nothing: re-defer briefly and ask again once the probe can answer.
+					deps?.log?.("wait_supersede_unverified", { jobId: job.id, heldBy: claim.holder ?? null, delayMs: SUPERSEDE_RECHECK_MS });
+					await job.moveToDelayed(nowMs + SUPERSEDE_RECHECK_MS, token);
+					throw new DelayedError();
+				}
+				if (claim.tookOverFrom) deps?.log?.("wait_lease_taken_over", { jobId: job.id, from: claim.tookOverFrom });
+				await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: holdUntil });
+				deps?.log?.("wait_deferred", { jobId: job.id, until: new Date(holdUntil).toISOString(), label: waitLabel(job.data) });
+				await job.moveToDelayed(holdUntil, token);
+				throw new DelayedError();
+			}
+
+			// Every condition this slice can evaluate has cleared. Drop the lease and the row before the job
+			// becomes an ordinary run: a held marker outliving its hold is a panel lying about live state.
+			// Only a job that actually HELD has cleared. Without the check this line fires on the first
+			// pickup of a job whose instant had already passed, and again on every scope-busy re-check
+			// afterwards -- asserting a wait ended that never began.
+			const heldForMs = await waitState.heldForMs(job.id);
+			await waitState.release(job.id, { dedupId });
+			if (heldForMs !== null) deps?.log?.("wait_cleared", { jobId: job.id, label: waitLabel(job.data), heldForMs });
+		}
+
 		// Per-scope concurrency and the one-job-per-folder mutex (issue #242,
-		// INT-SCOPED-LIMITS-FILE-CONTRACT). SECOND, after the pause gate (a paused job must not burn
-		// re-check wakes) and STRICTLY above the `try` below, like the pause gate and for the same two
+		// INT-SCOPED-LIMITS-FILE-CONTRACT). LAST of the three gates, after the pause gate (a paused job must
+		// not burn re-check wakes) and after the wait gate (a job holding until tomorrow must not sit on a
+		// folder while it does), and STRICTLY above the `try` below, like the pause gate and for the same two
 		// reasons: a DelayedError thrown inside the try would be converted to UnrecoverableError by the
 		// catch, and a moveToDelayed rejection here must escape RAW into BullMQ's normal failed-attempt
 		// handling exactly as the pause gate's does (inside the try it would become a permanent failure
@@ -123,7 +238,9 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// job completed and does not retry a file that can never parse (CONST-RETRY-INFRA-ONLY). Resolved
 				// before runJob, so no budget slot is reserved and no container starts (CONST-BUDGET-BEFORE-TOKENS).
 				// recordRun leaves the durable settings-overlay-invalid trace for the admin extension.
-				// No provider/model here, alone among the terminal results: the overlay is the thing that failed to parse, so no honest effective value exists -- buildRecord defaults both null.
+				// No provider/model here, as in every result this function returns from ABOVE the try (the wait gate's
+				// refusals are the others): each is decided before or during the settings read, so no honest effective
+				// value exists yet -- buildRecord defaults both null.
 				const result = { outcome: "policy", reason: "settings-overlay-invalid", exitCode: null, turns: null, tokens: null, budgetReserved: false };
 				recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
@@ -210,7 +327,7 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 	};
 }
 
-export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, extraClosers = [] }) {
+export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, extraClosers = [] }) {
 	let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 	const processor = makeProcessor({
 		cancelJob: (id, reason) => worker.cancelJob(id, reason),
@@ -228,6 +345,10 @@ export function createWorker({ connection, concurrency, getSettings, redis, deps
 		// shape means one per daemon).
 		scopedLimits,
 		inFlight,
+		// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
+		// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
+		waitState,
+		afterMaxMs,
 		deps,
 		recordRun,
 	});

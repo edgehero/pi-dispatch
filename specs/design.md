@@ -2310,6 +2310,95 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ---
 
+## DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES
+
+- **Status**: the gate, the `after` hold, the pre-spend refusals, the `wait:` keyspace and the skew
+  detector are LANDED. The `profile` spawner described under Decision is NOT — until it lands, a `profile`
+  condition is refused pre-spend rather than waited on, which is the fail-closed direction.
+- **Decision** (issue #230): `run.waitFor` holds a job at the PICKUP GATE, third in the stack — after the
+  pause gate, before the scope acquire — using `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`'s seam unchanged
+  (`moveToDelayed` + `DelayedError`, strictly above the processor's `try`). An `after` defers once to the
+  operator's own instant and polls nothing. A `profile` is answered by an operator-declared executable run
+  HOST-SIDE, pre-spend, on the secret resolver's model and with its shape reduced: argv array, `shell:
+  false`, stdin ignored, both streams byte-counted rather than read, SIGTERM then SIGKILL, its own timeout,
+  and the processor's own abort signal. Verdicts speak `INT-RUNNER-EXIT-CODE-PROTOCOL`'s wait-profile
+  table, which is where the fourth code lives.
+
+- **Why the gate and not `runJob`**: the issue proposed running the check where the secrets resolver sits
+  and threading a "hold me until T" answer back to the wrapper. That is strictly worse and unnecessary.
+  `runJob` is below the `try`, so nothing there can defer, and a hold threaded back would mint a `runJob`
+  outcome the enum does not have. Both of the stated blockers dissolve at the gate: the abort `signal` is
+  the processor's own THIRD PARAMETER, in scope on line one, and a check brings its own timeout, which is
+  tighter than the 30-minute kill timer it was said to need.
+
+- **Why the order within the gate is refusals-then-holds**: `CONST-BUDGET-BEFORE-TOKENS`' shape applied to
+  time. A condition this deployment cannot answer must be refused now, not after a day of waiting, so the
+  determinate refusals run before the free hold and the free hold runs before the expensive check.
+
+- **Why the position is between pause and scope**: a paused job must not burn a wait evaluation (the scope
+  gate's own argument for sitting second), and a job that will sit until tomorrow must not hold the folder
+  mutex while it does.
+
+- **Why wait profiles are env-only**: `getSettings` is read INSIDE the `try`, below this gate, so an
+  overlay-declared profile could not be seen by the gate that would run it. A key that cannot be honoured
+  must not be offerable, which is also why none joins `KNOWN_KEYS` and why there is no
+  `PI_WAIT_RESOLVER_ROOTS` twin: `PI_SECRET_RESOLVER_ROOTS` exists to bound paths arriving from the
+  overlay, and here there is no overlay half to bound.
+
+- **Why a small `wait:` keyspace and not `job.timestamp`**: `job.timestamp` is the ENQUEUE instant, so it
+  counts pause-window, scope-mutex and backoff time as "waited" — a job enqueued into a quiet window would
+  burn ten hours of its budget before the first check existed, and the panel would report the same wrong
+  number. The keyspace also carries the supersede lease, without which two deliveries for one target would
+  both hold and both be paid. This is NOT the Redis state `OQ-008` refused: that was a claim that would
+  survive a crash wrongly; this describes delayed jobs, which are Redis-persisted already, every key is
+  TTL'd to the hold it names, and the supersede path verifies before it refuses.
+
+- **Where the skew detector lives, and why not at the gate**: as a pre-spend check inside `runJob`, beside
+  the one-shot check rather than as a fourth gate arm. It never DEFERS, so it needs nothing the gate
+  provides, and there it joins the free-refusal ladder that already runs before the mint, the clone and the
+  reservation. The cost of the placement is stated rather than discovered: a skewed job takes and releases
+  the folder mutex and arms the kill timer before refusing, which is wasted but not incorrect. The relative
+  order of the two is unobservable, because a skewed job carries no `waitFor` and the gate is skipped for it.
+- **Why the version skew is detected rather than documented**: `DES-TRIGGERS-UNIFIED-FILE` records that a
+  widening drops silently on an old parser, which for every previous field was harmless. `waitFor` is the
+  first field whose ABSENCE is destructive — the resulting run is byte-identical to a correct one in the
+  record, the panel and the log, and success is the least detectable failure available. `docs/secrets.md`'s
+  answer (a documented version floor) is not enough here, and `doctor` cannot close it either: it cannot
+  see the receiver's installed version from the worker host, so its warning would fire on every deployment
+  using the feature forever, which is the always-on amber the panel's own design rejects. So the worker
+  compares the AUTHORED entry against the job it was handed, fail-open on anything it cannot answer.
+
+- **Rejected**:
+  - ***Widening the queue's dedup window for a held job*** — the obvious way to coalesce repeat deliveries,
+    and wrong three times over: the key carries no trigger identity (so it would suppress an unflagged
+    sibling on the same target and flow), it OUTLIVES completion when a ttl is set (so it would go on
+    suppressing for the rest of the window after the job finished), and there is no public API to reset it.
+  - ***`deduplication.replace`*** — it does key on the delayed state, and that is exactly why it is wrong:
+    the replacement is a new job with a new timestamp, so a repeatedly re-labelled issue would reset its
+    own wait clock and never reach the maximum.
+  - ***`keepLastIfActive`*** — coalesces against an ACTIVE job; a held job is delayed, so it would never
+    see one.
+  - ***Reinterpreting exit `2` as "not yet"*** — it would contradict the Queue-behaviour column's own words
+    in the one place a reader checks them, and `2` already means determinate-and-never-retried to two other
+    participants.
+  - ***A general unknown-key sweep on `run`*** — it would close the misspelling hole, and it would refuse
+    files that load today; tolerating unknown keys is this file's documented forward-compatibility posture.
+    A near-miss guard on this one field buys the safety without the breakage.
+  - ***A `blocked` run-record outcome*** — the outcome enum is closed and the admin surfaces drop unknowns.
+  - ***BullMQ Flows*** — `moveToWaitingChildren` requires the job to be ACTIVE, so it is a mid-processing
+    yield, not a pre-spend gate, and it models job-to-job rather than job-to-world dependencies.
+  - ***An index of blocker to held jobs*** — refused twice before: an index is a query surface, a query
+    surface is the database, and the delayed set is enumerable and already persisted.
+
+- **Named residuals**: a held job's WAKE has no authorizing actor (`OQ-029`), and a check's exit code is a
+  convention this project cannot enforce (`OQ-030`).
+
+- **Traces to**: `REQ-WAIT-FOR`, `INT-WAIT-PROFILES-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`, `DES-PER-TRIGGER-SECRET-PROFILE`,
+  `DES-TRIGGERS-UNIFIED-FILE`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-BUDGET-BEFORE-TOKENS`
+
+---
+
 ## DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED
 
 - **Decision**: Which transcript a job resumes is **computed from the job**, never looked up. A forge job
@@ -2606,6 +2695,7 @@ a tunnel.
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #230, enforcement slice for the free tier. **NEW `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`**: the gate position (third, after pause and before the scope acquire, with the reason each neighbour gives for its own place), the refusals-then-holds ordering, and a CORRECTION to the issue's own proposal — it wanted the check inside `runJob` with a hold threaded back to the wrapper, which is unnecessary and worse, since `runJob` sits below the `try` where nothing can defer, while the abort signal the check was said to need is the processor's own third parameter and its timeout is tighter than the kill timer. Records why wait profiles are env-only (the gate reads its config above the per-job settings read, so an overlay-declared profile could not be seen by the gate that would run it), why a small `wait:` keyspace exists rather than reusing `job.timestamp` (which is the ENQUEUE instant and counts pause and backoff time as waiting), and why the version skew is DETECTED rather than documented. Rejected, with the pinned reason for each: widening the queue's dedup window (the key carries no trigger identity and outlives completion), `deduplication.replace` (the replacement resets the wait clock, so a re-labelled issue could never reach its maximum), `keepLastIfActive` (it coalesces against an ACTIVE job and a held job is delayed), reinterpreting exit `2`, a general unknown-key sweep, a `blocked` outcome, BullMQ Flows, and an index of blocker to held jobs. **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` UNCHANGED, checked**: its seam is reused byte-for-byte and its own gate is untouched — the new gate sits after it and adds no case to it. **`DES-TRIGGERS-UNIFIED-FILE` UNCHANGED, checked**, and the check is the point: its widening-drops-silently rule is still exactly right, and this issue is the first field for which the resulting no-op is destructive rather than harmless, which is why the answer is a worker-side detector rather than an amendment here. **`DES-PER-TRIGGER-SECRET-PROFILE` UNCHANGED, checked**: the resolver's shape is borrowed, not shared. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**, and it is the entry a reviewer would expect to have moved: its Rejected list refuses *per-trigger `run.*` fields* for limits, on two grounds, and the FIRST is what keeps a wait outside it — "many triggers feed one repo, so the scope is the wrong shape" is exactly false of a wait, which is per-trigger by nature, since two triggers on one repo legitimately wait on different things. The second ground (limits are runtime controls, not reviewed trigger content) is what keeps `waitFor` file-only with no model-callable path, so this entry's reasoning is followed rather than excepted. **Code evidence**: worker/src/index.mjs -> makeProcessor; worker/src/wait-state.mjs -> makeWaitState; worker/src/triggers-file.mjs -> makeCheckWaitSkew. |
 | 2026-08-29 | Issue #242, admin slice. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: gains the admin-surface paragraph — the pause-windows stack copied (confirm-gated trio + the panel's `m` key), the divider-not-footer hint decision with the footer arithmetic as the reason, the neutral render-only-when-nonzero `delayed` count (the delayed set is dominated by cron next-occurrences, pinned upstream by the cron integration test), and config-only concurrency display on the no-invented-numbers doctrine. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the new tools ride the same registerTool/confirm plumbing every write tool uses; nothing new reaches the model without the operator confirm. |
 | 2026-08-29 | Issue #242, enforcement slice, one CORRECTION and one new entry. **`DES-CRON-VIA-BULLMQ-SCHEDULER` CORRECTED**: the "No overlap, structurally" bullet was FALSE at every version that carried it — the next occurrence is minted at pickup (`worker.js → nextJobFromJobData → upsertJobScheduler`, `override: false`) and promoted on time alone (`promoteDelayedJobs.lua`), so a slow run overlaps its own successor whenever a slot is free (measured: 301ms of live same-folder container overlap through the real processor). Rewritten to the true bound (at most one UNSTARTED occurrence) with the same-folder no-overlap now supplied, structurally, by the folder mutex landing in this slice — the correction and its mechanism arrive together. **NEW `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`**: the watched `scoped-limits.json`, scoped-reserves-first with the compensating release on a global refusal, deferral-never-refusal concurrency at a fixed 5s re-check, the unconditional folder mutex on canonical paths, process-memory in-flight counts, and the rejected alternatives (BullMQ Pro groups, the dead global `limiter`, `PI_CONCURRENCY=1`, per-trigger fields, an overlay map, Redis in-flight counters). **`DES-CONCURRENCY-3` AMENDED**: gains the per-scope deferral axis, the hand-run-worker qualifier on the daemon invariant, and the process-memory reasoning. **`DES-CLI-SURFACE` AMENDED**: the never-tier enumeration gains scoped-limits content. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` CORRECTED in passing**: its key enumeration had drifted from `KNOWN_KEYS` (missing `maxTokens`, `dailyTokenCap`; `secretProfiles` now named as the operator-only resident) — pre-existing drift, unrelated to this issue, fixed while touching the file. **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` UNCHANGED, checked**: the pause gate, its window-end semantics and its raw-scope matcher are byte-identical; the new gate sits AFTER it and reuses only the seam. |
 | 2026-08-29 | Issue #231, worker slice. **`DES-ONE-SHOT-DISARM-IN-THE-FILE` AMENDED**: the lifecycle paragraph is now landed code (recordRun wrap, all records disarm, the own-jobId pre-spend exception via the injected queue jobId); NEW compose-topology paragraph -- the single-file :ro bind mount pins a dead inode across the disarm's rename, so the worker's `once-already-spent` pre-spend gate is the once-enforcement layer there, stated beside the mount in BOTH compose copies; the disarm path resolves `PI_TRIGGERS_FILE ?? ./triggers.json` on doctor's precedent, never the cron-off `triggersFile` knob. **`DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked**: the hook no-ops on any job without `matched.once`, cron included. |

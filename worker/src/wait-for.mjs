@@ -71,6 +71,19 @@ export const WAIT_INTERVAL_FLOOR_MS = 30_000;
 export const WAIT_INTERVAL_MAX_MS = 900_000;
 
 /**
+ * The default ceiling on how far out an `after` instant may sit, and deliberately NOT the maximum hold.
+ *
+ * An `after` polls nothing: it is one exact `moveToDelayed` to an instant, self-terminating and costing
+ * nothing while it waits, so bounding it by the polling budget would refuse "hold this until the
+ * maintenance window next month" for a reason about subprocesses it never runs. Thirty days is a bound on
+ * how far ahead a REVIEWED FILE may schedule, not a bound on cost.
+ *
+ * A literal shared by `config.mjs` and the processor's own default, so a bare `makeProcessor` under test
+ * and a wired worker agree on what "too far" means.
+ */
+export const WAIT_AFTER_MAX_DEFAULT_MS = 30 * 24 * 3600 * 1000;
+
+/**
  * How long to wait before the next check, given the configured base and how long this job has been held.
  *
  * Doubles every ten base periods and settles at `WAIT_INTERVAL_MAX_MS` -- **or at `base`, whichever is
@@ -227,6 +240,35 @@ export function afterMs(job) {
 }
 
 /**
+ * The conditions on this job that this worker cannot read, as written.
+ *
+ * The loader refuses all of these, and the loader is a DIFFERENT PROCESS: `job.data.waitFor` reaches the
+ * gate over Redis from the receiver, so a receiver newer than the worker can enqueue a condition shape this
+ * build has no branch for. Returning them rather than ignoring them is what lets the gate refuse instead of
+ * silently treating an unreadable condition as a satisfied one -- the forward half of the same version skew
+ * `makeCheckWaitSkew` closes backward.
+ *
+ * Deliberately structural rather than a re-run of the loader's validator: this asks only "can I act on
+ * this?", so a future worker that learns a new condition answers differently here without the two
+ * validators having to agree on every message.
+ */
+export function unreadableConditions(job) {
+	if (!waitArmed(job)) return [];
+	return job.waitFor.filter((condition) => {
+		if (condition === null || typeof condition !== "object" || Array.isArray(condition)) return true;
+		const keys = Object.keys(condition);
+		if (keys.length !== 1 || !WAIT_CONDITION_KEYS.includes(keys[0])) return true;
+		if (keys[0] === "after") return afterInstantMs(condition.after) === null;
+		return !isDeclarableName(condition.profile);
+	});
+}
+
+/** A profile name this worker will put in a log line and a public comment. See `waitLabel`. */
+function isDeclarableName(value) {
+	return typeof value === "string" && PROFILE_NAME.test(value);
+}
+
+/**
  * The profile names this job waits on, in the operator's writing order. Order matters here even though the
  * conditions are a CONJUNCTION and the tiers are evaluated cheapest-first: within tier 2 the checks run
  * sequentially, and naming the first one that says "not yet" is what makes a held row readable.
@@ -235,7 +277,12 @@ export function waitProfileNames(job) {
 	if (!waitArmed(job)) return [];
 	const names = [];
 	for (const condition of job.waitFor) {
-		if (typeof condition?.profile === "string" && condition.profile !== "") names.push(condition.profile);
+		// Charset-checked HERE, not merely upstream. The loader enforces the same set, but that runs in a
+		// different process and this value ends up in a PUBLIC forge comment and a log line: a name carrying
+		// a backtick breaks the code span it is rendered in, and one carrying a newline is a log injection.
+		// The module that makes the no-attacker-bytes claim is the one that has to enforce it -- the same
+		// reasoning as this file's prototype-free profile table.
+		if (isDeclarableName(condition?.profile)) names.push(condition.profile);
 	}
 	return names;
 }
@@ -243,8 +290,8 @@ export function waitProfileNames(job) {
 /**
  * A short, PII-free label for what this job is waiting on, for the held row and the log line.
  *
- * Every byte of it is operator-authored, from the reviewed triggers file: a profile name is `PROFILE_NAME`
- * and an instant is an ISO string this module already validated. Nothing attacker-chosen can reach it,
+ * Every byte of it is checked HERE against `PROFILE_NAME` or the instant grammar, rather than trusted to
+ * have been checked by the loader in another process. Nothing attacker-chosen can reach it,
  * which is the property that lets it sit in a panel row and a log line at all (`INT-RUN-HISTORY-FILE-CONTRACT`'s
  * PII-free-by-construction rule, applied to a surface that is not the record).
  */
@@ -252,8 +299,10 @@ export function waitLabel(job) {
 	if (!waitArmed(job)) return null;
 	const parts = [];
 	for (const condition of job.waitFor) {
-		if (typeof condition?.after === "string") parts.push(`after ${condition.after}`);
-		else if (typeof condition?.profile === "string") parts.push(condition.profile);
+		// Both arms are re-validated for the reason waitProfileNames states: this string is rendered to
+		// operators, and "it was validated upstream" is a claim about another process.
+		if (afterInstantMs(condition?.after) !== null) parts.push(`after ${condition.after}`);
+		else if (isDeclarableName(condition?.profile)) parts.push(condition.profile);
 	}
 	return parts.length > 0 ? parts.join(" + ") : null;
 }

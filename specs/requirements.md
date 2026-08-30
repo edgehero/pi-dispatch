@@ -612,6 +612,72 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   nothing new, then it behaves byte-identically, key for key and record for record, except where the
   mutex serializes — which is the feature.
 
+## REQ-WAIT-FOR
+
+- **Statement**: A trigger MAY carry `run.waitFor`, a conjunction of one to four conditions that must all
+  clear before its job starts. `{ "after": "<ISO instant>" }` is answered from the clock; `{ "profile":
+  "<name>" }` is answered by an operator-declared executable (`INT-WAIT-PROFILES-CONTRACT`). A job whose
+  conditions have not cleared is **HELD**: deferred through the delayed set, reserving no budget slot,
+  arming no kill timer, consuming no retry attempt, surviving a worker restart, and keeping its
+  delivery-GUID identity. When every condition clears it runs exactly **once**. Absent, a job's data,
+  container environment and run record are byte-identical to one prepared before the field existed.
+
+- **Scope**: The webhook trigger kinds, on every forge, whether the delivery arrived by webhook or by the
+  poller. Operator-authored config from the reviewed `triggers.json` only — nothing reachable from a
+  payload, an issue body, `dispatch_run` or a chained job's `/outbox` can supply it, and no model-callable
+  tool can write it. Refused at load beside `on.once`, `run.replicas` and on `cron`
+  (`INT-TRIGGERS-FILE-CONTRACT` gives each refusal its mechanism).
+
+- **Why**: **A hold is a third thing, and the queue had only two.** `CONST-RETRY-INFRA-ONLY` splits every
+  outcome into "retry now" and "stop", and neither is "not yet". A `{ outcome: "policy" }` return would
+  DROP the job, which is right for over-budget and wrong for a dependency: a forge issue job has no
+  re-trigger, so dropping it loses the work. `REQ-SCOPED-PAUSE-WINDOWS` already established the shape —
+  defer, keep identity, auto-resume — and this widens what may be waited ON from a clock to anything an
+  operator can write a script about.
+
+  **The cheap tier exists because the expensive one cannot express it.** A one-shot "not before this
+  instant" is structurally inexpressible in pause windows: `windowEndAt` derives every answer from a daily
+  `to` time and `from == to` is refused at parse, precisely so a window cannot become an unbounded hold.
+  An `after` is that missing shape, and it is free — one exact `moveToDelayed`, no polling at all.
+
+  **Every bound exists because a wait is the one control that can cost nothing and still starve
+  everything.** A held job spends no money, so the spend caps cannot see it: `CONST-BUDGET-BEFORE-TOKENS`
+  counts container starts, and a check that starts no container is invisible to every ceiling this project
+  has. That is why the profile tier carries a per-check timeout, a clamped interval with backoff, a
+  concurrent-check lease kept below `PI_CONCURRENCY`, a maximum hold, a per-job check count and a
+  consecutive-fault bound — and why every one of them logs its overflow rather than absorbing it silently.
+
+  **The `after` ceiling is deliberately not the maximum hold.** An instant polls nothing and terminates
+  itself, so bounding it by a budget meant for subprocesses would refuse the most obvious use of the field
+  ("hold this until the maintenance window next month") for a reason that does not apply to it.
+
+  **A wait gates STARTING, never merging.** `CONST-MERGE-NEVER-AUTOMATIC` forbids completing a pull request
+  "on any condition", and "wait until CI is green" is one syntactic step from it. The distinction is that a
+  wait decides WHEN this harness begins work a human already authorized; it never decides that a human's
+  review is unnecessary.
+
+- **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `CONST-MERGE-NEVER-AUTOMATIC`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-SCOPED-LIMITS`, `REQ-TRIGGER-SECRETS`,
+  `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`, `INT-WAIT-PROFILES-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-029`, `OQ-030`
+
+- **Acceptance**: Given a trigger carrying `waitFor`, it loads in all three loaders and an unflagged
+  trigger's job data and run record are byte-identical to before the field existed. Given a future `after` more than a
+  second away, the job is deferred to that exact instant, writes no run record, consumes no attempt,
+  reserves no budget slot and starts no container, and runs when the instant passes; an instant already
+  within that second runs now rather than busy-deferring to a moment already past, which is the pause
+  gate's own boundary rule. Given an `after` already past, it runs.
+  Given an `after` beyond the configured ceiling, it is refused at FIRST pickup as
+  `wait-after-beyond-max` — never held toward a bound it cannot reach. Given a condition this deployment
+  cannot answer, the job is refused pre-spend rather than run unchecked. Given a second delivery for a
+  target already held, it is refused `wait-superseded` rather than held beside the first, so one intent
+  produces one paid run; given a delivery after that hold has cleared, it is admitted. Given the authored
+  trigger declares conditions the job arrived WITHOUT — a service below the version floor dropped the
+  field — the job is refused `wait-skew` pre-spend rather than run immediately, and the refusal names both
+  causes -- a service below the floor, or one still running against an older copy of the file. Given the
+  MIRROR case, a job carrying a condition this worker cannot read, it is refused `wait-unreadable`: the
+  same skew from the other side, given its own token because the remedy is the opposite one. Given a paused scope, the pause is honoured first and the wait burns nothing.
+
 ## REQ-TOKEN-ACCOUNTING-AND-CAPS
 
 - **Statement**: The harness shall (a) **account** every job's token usage **process-wide** — the runner
@@ -1678,6 +1744,7 @@ wait-list working as designed, not a failure — see `README.md`.
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | **NEW `REQ-WAIT-FOR`** (issue #230): a trigger may carry a conjunction of conditions that must clear before its job starts, and a job whose conditions have not cleared is HELD — deferred, spending nothing, consuming no attempt, surviving a restart, and running exactly once when they clear. The statement records why a hold had to be a third thing: `CONST-RETRY-INFRA-ONLY` splits outcomes into retry-now and stop, and a policy return would DROP a job that a forge will never re-trigger. It also records why the cheap tier exists at all — a one-shot instant is structurally inexpressible in pause windows, whose `from == to` refusal exists precisely so a window cannot become an unbounded hold — and why every bound in the expensive tier is mandatory rather than prudent: a held job spends no money, so `CONST-BUDGET-BEFORE-TOKENS` cannot see it, and no ceiling this project already has applies. **`REQ-SCOPED-PAUSE-WINDOWS` UNCHANGED, checked**: the pause gate keeps its position, its window-end semantics and its raw-scope matcher; the wait gate sits AFTER it and reuses only the seam, so a paused job burns no wait evaluation. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: the folder mutex and the scoped ledgers are untouched, and the wait gate sits BEFORE the scope acquire so a job waiting until tomorrow does not hold a folder while it waits. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: the resolver seam is the model this borrows from and neither its table nor its position moved; the two are separate variables on purpose, so a resolver cannot be reached as a gate. **Code evidence**: worker/src/index.mjs -> makeProcessor; worker/src/wait-for.mjs -> afterInstantMs, unreadableConditions. |
 | 2026-08-29 | Issue #242, enforcement slice, one CORRECTION and one new entry. **`REQ-CRON-SCHEDULED-JOBS` CORRECTED**: its Why and its restart acceptance claimed "structural no-overlap" — false since the entry was written (the scheduler mints the next occurrence at pickup and promotes on time alone); both now state the true at-most-one-unstarted bound, with same-folder serialization supplied by the mutex `REQ-SCOPED-LIMITS` specifies. **NEW `REQ-SCOPED-LIMITS`**: per-scope day/week/month run caps refused pre-spend as `scope-cap`, per-scope concurrency by deferral, and the always-on one-job-per-folder mutex on resolved paths — with the storm-drain acceptance (a global refusal releases the scoped reserve) and the byte-identity carve-out (identical except where the mutex serializes, which is the feature). **`REQ-REPLICA-RUNS` AMENDED**, two clauses: the local/cron hazard paragraph re-anchors to the corrected cron claim (the refusal of local replicas is the position the mutex generalizes), and the budget paragraph gains the scoped windows among the ceilings that divide by N (a scoped refusal truncates a replica set exactly as the global cap always could). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the never-tier enumeration gains scoped-limits content. **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: the global windows keep their exact semantics; the scoped windows are a sibling ledger under their own keys, reserving first, never altering when or how the global reserve runs. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: "however many windows exist" is scope-agnostic and the scoped reserve is still check-and-increment before the container. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a deferral is neither a policy return nor a retry-throw — `moveToDelayed` passes `skipAttempt: true`, so the attempt ledger is untouched, the pause gate's own posture. |
 | 2026-08-28 | Issue #231, receiver slice. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): close jobs' semantic key leads the flow slot with `closed:`, derived from the matched rule, so a same-target-same-flow label job inside the window can never swallow a close job -- a swallowed close writes no run record and its one-shot never disarms. Every non-close key byte-identical; the GUID layer UNCHANGED, checked. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the close arm lives in `CONST-TRIGGER-AUTHOR-GATE`, and the offline-testable split (lookup in the receiver, verdict into the pure gate) is exactly the shape this requirement already mandates. |
 | 2026-08-26 | **NEW `REQ-TRIGGER-SECRETS`** (issue #225): a trigger names secret REFERENCES and the worker resolves them host-side, pre-spend, through an operator-declared resolver. Legal on all four kinds INCLUDING cron, unlike `run.replicas`, whose local refusal turns on two agents sharing one bind-mounted working tree rather than on anything about a credential. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: `--env-setup` still gives the WORKER an environment, and this gives one TRIGGER a value; the two seams do not overlap. **`REQ-GLOBAL-PI-OVERLAY` UNCHANGED, checked**: its "the overlay must hold no secret" clause is untouched, because nothing here is staged into the overlay. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: the resolver runs on the HOST, outside the job's `--internal` network entirely, so no allowlist entry is needed and none was added. **`REQ-PER-TRIGGER-SKILLS`, `REQ-PER-TRIGGER-INSTRUCTION`, `REQ-REPLICA-RUNS`, `REQ-RESUMABLE-SESSION` UNCHANGED, checked** (`run.secrets` beside `run.resume` is refused at load, so the two features never co-exist on one trigger). |

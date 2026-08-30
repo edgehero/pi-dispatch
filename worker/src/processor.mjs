@@ -54,6 +54,9 @@ export async function runJob(job, deps) {
 		// exactly as before, and the gate below only calls it for a job whose matched rule was a
 		// one-shot, so the default is never a probe running on every delivery.
 		checkOnceSpent = async () => ({ ok: true }),
+		// Issue #230. Admit-everything by default, like checkOnceSpent above and for its reason: an
+		// unwired seam must not refuse, and the wiring is what turns the check on.
+		checkWaitSkew = async () => ({ ok: true }),
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
@@ -152,6 +155,28 @@ export async function runJob(job, deps) {
 				await comment(job, `Refused: this one-shot trigger was already spent${spent.at ? ` at ${spent.at}` : ""}${spent.jobId ? ` by job ${spent.jobId}` : ""}. The close that armed it has already produced a run; delete on.disarmed from the trigger entry to re-arm it. Not run.`);
 				log("refused_once_already_spent", { triggerIndex: job.trigger?.matched?.index ?? null });
 				return { outcome: "policy", reason: "once-already-spent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+		}
+
+		// The wait-skew check (issue #230), second on the ladder and for the first one's reasons: the same
+		// file read, free, determinate, credential-less, and pre-spend. It answers a question no other layer
+		// can: does the AUTHORED trigger carry wait conditions this job arrived without? That happens when a
+		// service below the version floor dropped the field as an unknown key, and the resulting run is
+		// byte-identical to a correct one everywhere it is recorded -- so this refusal is the only thing
+		// standing between a stale receiver and a paid job that ran when the operator wrote "wait".
+		{
+			const skew = await checkWaitSkew(job);
+			if (skew.skewed) {
+				// Named for the operator, not the payload: how many conditions were authored, never what
+				// they say. The fix is a version, so the comment says which one.
+				// The message names BOTH causes, because the more likely one is not a version at all. In the
+				// compose topology the receiver's single-file `:ro` mount pins a dead inode, so an operator
+				// who ADDS `waitFor` to an existing rule gets this refusal on every delivery from a service
+				// that is perfectly up to date and merely holding an older copy of the file. Naming only the
+				// version would send them looking for an upgrade they do not need.
+				await comment(job, `Refused: this trigger declares ${skew.conditions} wait condition${skew.conditions === 1 ? "" : "s"}, but the job reached the worker without them, which means it would have run immediately. Either a service in this deployment is below the version that carries the field, or one is still running against an older copy of the triggers file and needs restarting. Not run.`);
+				log("refused_wait_skew", { triggerIndex: job.trigger?.matched?.index ?? null, conditions: skew.conditions });
+				return { outcome: "policy", reason: "wait-skew", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
 		}
 

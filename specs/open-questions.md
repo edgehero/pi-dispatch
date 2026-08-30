@@ -1075,10 +1075,68 @@ adversarial passes did.
   container entirely and could take resolved secrets with it.
 - **Raised by**: issue #225.
 
+## OQ-029 — A held job's WAKE has no authorizing actor, and the moment picks the commit
+
+- **Status**: **ACCEPTED RISK** — opened by `REQ-WAIT-FOR`.
+- **Position**: `CONST-TRIGGER-AUTHOR-GATE` requires a job to start "only on the say-so of an actor with
+  write access or above". Until `run.waitFor`, the say-so and the start were the same moment, so gating the
+  first gated the second. A held job separates them: a maintainer's label authorizes the run, and whoever
+  clears the condition chooses when it begins. That person may hold no permission on the repository — the
+  obvious case is a Jira user moving a ticket to Done — and the moment is a capability rather than a
+  detail, because `prepare-github.mjs` resolves the default-branch SHA **fresh at run**. Choosing the
+  instant chooses the commit that gets cloned, which may include merges the approver never saw.
+- **Why it is a risk row and not a defect**: what a third party supplies is a MOMENT, not a job. Nothing
+  about a wait widens who may cause a job to exist; the author gate runs, unchanged, before the field is
+  ever read. The condition itself is operator-authored in the reviewed file, a payload cannot supply one,
+  no model-callable tool can write one, and a `profile` selects only among executables the operator
+  declared in their own environment. So the person who authored the waiting always had write access.
+- **What it costs when it bites**: a job that was approved against `main@abc` runs against `main@def`, up
+  to the maximum hold later. For the motivating uses (wait for a deploy, wait for a ticket) that is
+  usually the POINT — the operator wants the newer commit. It is wrong when the approval was of a specific
+  state rather than of the work.
+- **What bounds it meanwhile**: the ceiling on the condition -- `PI_WAIT_AFTER_MAX_MS` (30 days by default)
+  for an instant, `PI_WAIT_MAX_MS` (24 hours) for a polled hold. They are deliberately different numbers,
+  so the bound on this residual is whichever applies to the condition an operator actually wrote, and for
+  the free tier it is the LARGER of the two. Also: the poller and the webhook paths share this gate, so no
+  path is worse than the others.
+- **What would close it**: pinning the SHA at enqueue for a job that can be held. `queue.mjs` refuses a
+  `sha` field today because "baking a possibly-stale sha here would only race the branch head" — true for
+  a queue measured in seconds, and inverted for a hold measured in days. Closing it means making that
+  refusal conditional on the job being holdable, and deciding what a pinned SHA that has since been
+  force-pushed away should do.
+- **Raised by**: issue #230.
+
+## OQ-030 — A wait profile's exit code is a convention we cannot enforce, over four codes instead of three
+
+- **Status**: **ACCEPTED RISK** — opened by `REQ-WAIT-FOR`. `OQ-027`'s twin, one participant over.
+- **Position**: `INT-RUNNER-EXIT-CODE-PROTOCOL` asks an operator's wait check to distinguish four answers:
+  cleared (`0`), never (`2`), not yet (`3`) and could-not-tell (`1`). Nothing enforces that, and `OQ-027`
+  already records why the three-code version is unenforceable — most CLIs exit `1` for everything.
+  Four codes is a wider convention to get wrong, and `3` in particular is a code almost no tool emits, so
+  the honest expectation is that most checks will only ever produce `0` and `1`.
+- **Why it is a risk row and not a defect**: the default mapping is the safe one, and it is safe by
+  accident in the operator's favour. The naive one-liner (`... | grep -q ...`) exits `1` when its pattern
+  is absent, which this protocol reads as could-not-tell and therefore HOLDS — the same behaviour a correct
+  `3` would have produced. A check that never learns to emit `3` still works; it is merely counted as
+  faulting while it does.
+- **What it costs when it bites**: a check that is permanently broken rather than merely unanswerable looks
+  identical for `PI_WAIT_MAX_FAULTS` consecutive attempts. After that it terminates as `wait-unanswerable`
+  naming the profile, which is the difference from `OQ-027`: there, a wrong code costs one extra vault read;
+  here, without the fault bound, it would have cost a full maximum hold and a message blaming the condition
+  rather than the script. The bound is what keeps this a risk row.
+- **What bounds it meanwhile**: the fault count and its terminal reason; the per-job check count; and
+  `docs/wait-for.md` stating the four codes in the worked example's own comments, which is where an
+  operator writing their first check actually reads.
+- **What would close it**: nothing this project can do alone, for `OQ-027`'s stated reason — the
+  alternative is interpreting the check's stderr, which `image-preflight.mjs` refuses for its own reasons
+  and which this contract refuses more strongly still, since a check's output is a third party's text.
+- **Raised by**: issue #230.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #230. **NEW `OQ-029`**: a held job's WAKE has no authorizing actor. `CONST-TRIGGER-AUTHOR-GATE` gates the enqueue and nothing gates the moment, so a Jira user with no repository permission can choose when an authorized job begins — and because the default-branch SHA is resolved fresh at run, choosing the instant chooses the commit. Recorded as a risk rather than a defect because what a third party supplies is a moment and not a job, bounded by the maximum hold, and closed by pinning the SHA at enqueue, which `queue.mjs` refuses today for a reason that is true of a seconds-long queue and inverted for a day-long hold. **NEW `OQ-030`**: `OQ-027`'s twin one participant over, now across four codes rather than three. The mapping is safe by accident in the operator's favour — the naive one-liner exits `1`, which reads as could-not-tell and therefore holds, exactly as a correct `3` would — and the difference from `OQ-027` is the fault bound: without it a permanently broken check would cost a full maximum hold and a message blaming the condition rather than the script. **`OQ-027` UNCHANGED, checked**: the secret resolver's three codes and its unenforceable convention are untouched; the new row is a sibling, not a replacement. **`OQ-008` UNCHANGED, checked**: the `wait:` keyspace is not the two-sources-of-truth failure that row refuses — it describes DELAYED JOBS, which Redis already persists, rather than claiming a container the reaper may have killed, every key is TTL'd to the hold it names, and the supersede path verifies the holder is still queued before it refuses anyone -- a review found that claim ahead of the code and the liveness probe now backs it. There is deliberately no index SET: a set cannot expire its members, so it would be the one structure here that leaks permanently. **`OQ-017` UNCHANGED, checked**: `run.waitFor` is refused beside `run.replicas`, so the replica residual gains no case. **Code evidence**: worker/src/wait-state.mjs -> makeWaitState (claim, the supersede lease and its liveness check). |
 | 2026-08-29 | Issue #242, enforcement slice. **`OQ-017` AMENDED, narrowed not closed**: "replicas often serialise — which is luck, not a control" is no longer the whole truth — a `concurrent: 1` scoped-limit row on the repo now serialises a same-repo replica set as a control, by deferral (`REQ-SCOPED-LIMITS`); the row's residual stands (serialisation orders pushes, it does not make two replicas on one human head branch sound, and no forge scope is limited by default). **`OQ-008` UNCHANGED, checked**: the scoped-limits file has ONE author (the admin console) and the worker only reads it — no second write authority, no Redis state the boot would fight; the in-flight count is process memory precisely to honor this row's two-sources-of-truth refusal. **`OQ-002` UNCHANGED, checked**: `PI_CONCURRENCY`'s own value and its unmeasured RAM input are untouched; the new axis bounds WHERE jobs run, not how many. |
 | 2026-08-28 | Issue #231, second slice (writer). **`OQ-008` AMENDED, not reversed**: "the file is the single write target" holds and is strengthened (the one-shot disarm writes the same file, no second store); "no LLM tool reaches `writeTriggers`" was already superseded by the confirm-gated `dispatch_trigger_*` tools and is corrected in place; "writes stay operator-typed" is widened -- the worker is a second author whose authority is monotonically disarming (may only add `on.disarmed` to an operator-armed entry, verified against the matched item number), so no machine path can ARM anything. **`OQ-004`, `OQ-022` UNCHANGED, checked**: neither the egress posture nor chain refusal vocabulary is touched by a host-side file write. |
 | 2026-08-28 | Issue #224 (the exit line lost to one un-newlined write). **`OQ-003` AMENDED, status stays `OPEN`** -- the residual's accidental half is CLOSED on both edges: both runner writers newline-DELIMIT (a leading `\n` closes whatever un-newlined write another process left dangling), and every exit-line parser repairs a glued line by re-anchoring on the writers' own first-key bytes (`{"event":"`), collision-free because JSON.stringify escapes every quote inside a string value. The no-race forgery closes with it, since the glued genuine line now parses and the backward scan finds it before any earlier forged line. The adversarial half stays OPEN, and the entry now records why the cheap candidate is rejected rather than leaving it looking untried: a take-only-the-final-line reader closes nothing (the container runs under `--init`, so the runner is not PID 1 and an agent subprocess can forge a line then kill the runner before the genuine one exists, leaving the forged line final) and converts trailing teardown noise the backward scan deliberately tolerates into lost telemetry. On a shared channel no reader policy distinguishes the runner's bytes from an imitation; only an accounting channel the agent cannot write closes that half. **`OQ-014` UNCHANGED, checked**: its detection bullet leans on `session.{resumed, reason}` reaching the record, which the repair makes more reliable while moving nothing about what the row accepts or what would close it. **`OQ-028` UNCHANGED, checked**: the exit line travels stdout, not argv, and no env value moves. |

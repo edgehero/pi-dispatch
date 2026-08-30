@@ -376,6 +376,83 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
 	};
 }
 
+/**
+ * Detect the version skew `run.waitFor` opens (issue #230), pre-spend, from the worker's own file read.
+ *
+ * The hazard is `DES-TRIGGERS-UNIFIED-FILE`'s widening rule arriving somewhere it has never bitten. Unknown
+ * keys DROP, which for every previous field was a harmless no-op: an old parser meeting `run.image` gives
+ * you the default image and a job that ran. `waitFor` is the first field whose ABSENCE is destructive -- a
+ * receiver below the floor enqueues the job without it and the worker runs it UNHELD, producing a record, a
+ * panel row and a log line byte-identical to one that correctly waited. Success is the least detectable
+ * failure available, and the whole point of a wait is that running now is the destructive option.
+ *
+ * `docs/secrets.md`'s answer to the same skew is documentation plus a version floor, and it is not enough
+ * here for two reasons: a dropped secret surfaces as a 401 and an agent report that reads wrong, and
+ * `doctor` cannot see the receiver's installed version from the worker host, so its warning would fire on
+ * every deployment using the feature, forever -- the always-on amber the panel's own design rejects.
+ *
+ * So the worker checks the authored file itself. It already reads it per job for the one-shot gate, and in
+ * the compose topology this read is the authoritative one: the receiver's single-file `:ro` mount pins a
+ * dead inode until restart, which is precisely the deployment where the skew bites.
+ *
+ * FAIL-OPEN throughout, `readDisarmState`'s posture and for its reason: an unreadable or changed file means
+ * "run", because a broken read must never wedge every job. Only a positive, identity-confirmed mismatch --
+ * this entry authored conditions, this job carries none -- refuses.
+ */
+export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
+	// Cached by mtime, unlike `checkOnceSpent` which re-reads every time. The difference is which jobs each
+	// one runs for: the one-shot check is gated on `matched.once === true`, so it is rare by construction and
+	// its comment can call one read cheap. This one has to look at EVERY forge job, because the whole point
+	// is to catch a job that arrived WITHOUT the field, and there is nothing on such a job to narrow by. So a
+	// stat replaces a read-and-parse on the hot path. The residual is millisecond mtime granularity: two
+	// writes inside one millisecond would serve a stale parse for one job, which fails OPEN like every other
+	// uncertainty here.
+	let cache = null; // { mtimeMs, size, triggers }
+	const read = () => {
+		try {
+			const st = fs.statSync?.(triggersPath);
+			if (cache && st && cache.mtimeMs === st.mtimeMs && cache.size === st.size) return cache.triggers;
+			const raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+			const triggers = Array.isArray(raw?.triggers) ? raw.triggers : null;
+			if (st) cache = { mtimeMs: st.mtimeMs, size: st.size, triggers };
+			return triggers;
+		} catch {
+			cache = null;
+			return null;
+		}
+	};
+
+	return async function checkWaitSkew(job) {
+		if (typeof triggersPath !== "string" || triggersPath === "") return { ok: true };
+		// Cron and CLI jobs carry no matched index, and cannot carry `waitFor` at all.
+		const index = job?.trigger?.matched?.index;
+		if (!Number.isInteger(index)) return { ok: true };
+		// The field arrived. Whether its conditions are SATISFIED is the gate's business, not this check's.
+		if (Array.isArray(job?.waitFor) && job.waitFor.length > 0) return { ok: true };
+
+		const triggers = read();
+		if (triggers === null) return { ok: true };
+		const entry = triggers[index];
+		const authored = entry?.run?.waitFor;
+		if (!Array.isArray(authored) || authored.length === 0) return { ok: true };
+
+		// The identity guard readDisarmState keeps, and WIDER than flow alone. `triggerIndex` is a RAW array
+		// position, so an insertion, a reorder, or a stray `triggers.json` at the worker's cwd can all put a
+		// different trigger here -- and two rules sharing a flow are indistinguishable on flow alone, which
+		// made a false refusal reachable by ordinary editing. Kind and on-type are compared too, on
+		// `readDisarmState`'s precedent of checking the item number rather than trusting the index.
+		//
+		// Every mismatch folds to "run", never to a refusal: the true answer to "is this job missing
+		// conditions someone wrote for it?" is then unknown, and unknown must not refuse a paid delivery.
+		if (entry?.run?.flow !== job?.flow || entry?.run?.command !== job?.command) return { ok: true };
+		if (entry?.run?.kind !== job?.kind) return { ok: true };
+		const onType = job?.trigger?.matched?.type;
+		if (typeof onType === "string" && entry?.on?.type !== onType) return { ok: true };
+
+		return { skewed: true, conditions: authored.length };
+	};
+}
+
 export function readDisarmState({ triggersPath, index, number, flow, command, fs = nodeFs }) {
 	let raw;
 	try {

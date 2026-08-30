@@ -10,7 +10,7 @@ import { delimiter } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
-import { WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
+import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -318,7 +318,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// scheduled instant, not a poll -- one exact moveToDelayed, self-terminating, costing nothing while it
 		// waits -- so bounding it by the polling budget would refuse "hold this until the maintenance window
 		// next month" for a reason that is about subprocesses it never runs.
-		waitAfterMaxMs: positiveInt(env, "PI_WAIT_AFTER_MAX_MS", 30 * 24 * 3600 * 1000),
+		waitAfterMaxMs: positiveInt(env, "PI_WAIT_AFTER_MAX_MS", WAIT_AFTER_MAX_DEFAULT_MS),
 		// How many wait checks may run AT ONCE in this worker process. One by default, and the ceiling it
 		// really pins is duty cycle: slots x timeout is the most wall-clock a worker can spend answering
 		// questions instead of running paid jobs. Clamped below PI_CONCURRENCY at the gate so a check can

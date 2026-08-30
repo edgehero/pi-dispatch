@@ -387,7 +387,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt }) {
  * separator from the table, so the notation a forge uses is the notation its records carry -- and a forge
  * added later inherits a label rather than a null.
  */
-function targetFor(kind, data) {
+/*
+ * Exported since issue #230: a held job's panel row needs the same id-only label a run record carries, and
+ * the wait gate would otherwise re-derive it. Two spellings of "which issue is this" is how one of them
+ * starts carrying a title.
+ */
+export function targetFor(kind, data) {
 	if (kind === "local") return `local:${basename(data.folder ?? "")}`;
 	if (isForgeKind(kind)) return `${data.repo}${targetSeparator(kind, data.target?.type)}${data.target?.number}`;
 	return null;

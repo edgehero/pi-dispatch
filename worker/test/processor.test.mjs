@@ -1061,6 +1061,39 @@ test("a once job with a foreign-spent check refuses FIRST on the ladder -- nothi
 	assert.ok(events.includes("refused_once_already_spent"), "the refusal leaves its log line");
 });
 
+test("a wait-skew refusal is pre-spend, and its cost is one file read and one comment (#230)", async () => {
+	const redis = fakeRedis();
+	const posted = [];
+	const events = [];
+	const { deps: d, calls } = deps({
+		redis,
+		checkWaitSkew: async () => (calls.push("check-skew"), { skewed: true, conditions: 2 }),
+		imagePreflight: async () => (calls.push("image-preflight"), { ok: true }),
+		comment: async (_j, t) => (posted.push(t), calls.push("comment")),
+		log: (event) => events.push(event),
+	});
+	const r = await runJob(ghJob, d);
+
+	assert.equal(r.outcome, "policy", "a skewed job is determinate: no version of it can succeed until a service is upgraded");
+	assert.equal(r.reason, "wait-skew");
+	assert.equal(r.budgetReserved, false);
+	// The ladder position IS the assertion: this refusal exists to stop a paid run, so it must precede
+	// everything that costs, including the docker inspect.
+	assert.deepEqual(calls, ["check-skew", "comment"], "one file read and one comment are the whole cost");
+	assert.equal(redis.incrCalls, 0, "reserveBudget never reached");
+	assert.ok(posted[0].includes("2 wait conditions"), "the comment counts what was authored");
+	assert.ok(!posted[0].includes("jira"), "and never says WHAT they were -- the count is the actionable part");
+	assert.ok(posted[0].includes("below the version"), "it names the fix, which is an upgrade rather than an edit");
+	assert.ok(posted[0].includes("Not run."));
+	assert.ok(events.includes("refused_wait_skew"));
+});
+
+test("the default checkWaitSkew admits, so an unwired processor is unchanged (#230)", async () => {
+	const { deps: d } = deps({});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed", "the seam is off until the wiring turns it on");
+});
+
 test("a once job whose check answers ok runs exactly the happy path, with the check in front", async () => {
 	const { deps: d, calls } = deps({ checkOnceSpent: async () => (calls.push("check-once"), { ok: true }) });
 	const r = await runJob(onceJob, d);

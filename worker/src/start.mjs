@@ -22,9 +22,10 @@ import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare
 import { listRunningSandboxes } from "./sandbox.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
-import { makeCheckOnceSpent, makeDisarmOnce } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { loadScopedLimits } from "./scoped-limits.mjs";
+import { makeWaitState } from "./wait-state.mjs";
 import { makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
@@ -466,6 +467,11 @@ export async function startWorker(
 		// Issue #242: the scoped-limits snapshot the pickup gate and the scoped budget read, once per
 		// pickup, from the live-reloaded ref -- same next-job grain as pauseUntil above.
 		scopedLimits: () => scopedLimits.current,
+		// Issue #230. The `after` ceiling is read per pickup from config rather than frozen into the
+		// processor, so it is one value with one home; the wait state shares the budget's redis client
+		// because it describes the same delayed jobs that client already reasons about.
+		afterMaxMs: () => config.waitAfterMaxMs,
+		waitState: makeWaitState({ redis }),
 		deps: {
 			collectChain,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
@@ -473,6 +479,27 @@ export async function startWorker(
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
 			// layer, because the receiver's single-file :ro mount pins a dead inode until restart.
 			checkOnceSpent: makeCheckOnceSpent({ triggersPath: onceTriggersFile }),
+			// Issue #230. The same file and the same fail-open posture, but its own mtime-cached read: this one
+			// asks whether the AUTHORED entry declares wait conditions the job arrived without, which is how a
+			// service below the version floor turns a wait into a paid run nothing can tell from a correct
+			// one. In the compose topology the worker's read is the live inode while the receiver's is dead
+			// until restart, which is exactly the deployment where the skew happens.
+			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
+			// Issue #230. Whether a job the supersede lease names is still in the queue. Without it a holder
+			// that vanished by any route except the clean one leaves a key that refuses every later delivery
+			// for that target until it expires -- and a refused forge delivery is gone, since no webhook
+			// resends it. `getJob` answers from the queue rather than from our own bookkeeping, so the two
+			// cannot agree with each other while both being wrong.
+			isJobLive: async (id) => {
+				const held = await runtimeQueue.getJob(id);
+				if (!held) return false;
+				// EXISTENCE IS NOT LIVENESS, and the difference decides whether a target stays deafened:
+				// `removeOnComplete`/`removeOnFail` keep a finished job's hash for 31 days, so a holder that
+				// can never wake again would answer "still waiting" for a month. Only a state it can still be
+				// picked up from counts.
+				const state = await held.getState();
+				return state === "delayed" || state === "waiting" || state === "active" || state === "prioritized" || state === "waiting-children";
+			},
 			// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
 			// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
 			// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
