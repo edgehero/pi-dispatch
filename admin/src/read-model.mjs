@@ -195,8 +195,12 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
   try {
     // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
     // an unreachable Valkey took twice as long to say the same thing.
+    // The inner per-operation bound is HALVED, like `readHosts`: `readLiveHosts` walks `1 + N` operations
+    // sequentially, so an inner bound equal to the outer one lets a single hung operation consume the whole
+    // budget and the two timers fire together. Halved, one slow host costs half the budget rather than all
+    // of it, and the walk can still finish.
     const [fleet, existing] = await Promise.all([
-      withTimeout(readLiveHosts(redis, { timeoutMs }), timeoutMs, { unreachable: "timed out reaching the registry" }),
+      withTimeout(readLiveHosts(redis, { timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" }),
       discoverHostQueues(redis, { timeoutMs }),
     ]);
     return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing), blind: fleet?.unreachable ?? null, hosts: fleet?.hosts ?? [] };
