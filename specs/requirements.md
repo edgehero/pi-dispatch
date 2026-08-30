@@ -1740,10 +1740,47 @@ wait-list working as designed, not a failure — see `README.md`.
 
 ---
 
+## REQ-MULTI-HOST-COORDINATION
+
+**As** an operator running pi-dispatch on more than one machine, **I want** the workers to know about each
+other, **so that** the things that silently assume one host either work across the fleet or refuse loudly
+instead of drifting.
+
+- Every worker has an IDENTITY: `PI_WORKER_NAME`, defaulting to this machine's sanitized hostname. It is
+  always populated, so a fleet of two can be told apart before anyone has configured anything.
+- Every worker PUBLISHES a row about itself and can READ its peers' (`INT-HOST-REGISTRY-CONTRACT`).
+- The identity reaches the operator where they already look: on every worker log line, in every run
+  record, on the boot line, and as the BullMQ worker name.
+- **A single-host deployment is unchanged in every way that decides anything.** The registry runs, because
+  a fleet must be detectable before it is configured, but nothing reads it to make a decision a single
+  host makes differently, and no job path gains a Valkey round trip.
+- **Nothing here may be able to refuse a job or block a boot.** The registry is telemetry plus, later, a
+  source of refusals that are loud by design; a fault in it costs a panel row and never a run.
+
+**Acceptance**
+
+- Given no `PI_WORKER_NAME`, when the worker boots, then its name is this machine's hostname reduced to
+  the name charset, and two spellings of one machine (`Robs-Mac-Mini.local`, `mac-mini`) do not become two
+  identities.
+- Given a `PI_WORKER_NAME` that is not in the charset, does not begin with a letter or digit, exceeds 64
+  characters, or ends in `.json` or `.log`, when the worker boots, then it refuses with a message naming
+  the variable -- a declared name is never silently repaired.
+- Given a reachable Valkey, when the worker boots, then a row for this host exists and is refreshed; and
+  when the worker shuts down cleanly, then the row is DELETED rather than left to expire.
+- Given a Valkey that never answers, when the worker boots, then it still comes up and drains, because the
+  first beat is not awaited.
+- Given the whole `host:*` keyspace is deleted while the fleet runs, then every host behaves exactly as it
+  did before the keyspace existed.
+
+- **Traces to**: `INT-HOST-REGISTRY-CONTRACT`, `DES-HOST-REGISTRY`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `DES-CONCURRENCY-3`, `OQ-008`, `OQ-012`
+
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #57, the identity slice. **NEW `REQ-MULTI-HOST-COORDINATION`**: workers get an identity and a way to see each other, with the two properties that bound everything later in the issue stated as acceptance rather than left implied -- a single-host deployment is unchanged in every way that decides anything, and nothing in this layer may refuse a job or block a boot. The last acceptance line is the falsification test: delete the whole `host:*` keyspace while the fleet runs and every host must behave exactly as before. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**, and the check is the substantive one: its acceptance says the record contains no issue or comment body, title, or username, and the new `host` field satisfies it -- no path from any payload reaches the value, it is fixed at boot from one environment variable, and its charset cannot express a path. What it is not is anonymous, since the default is a hostname; that is argued as operator-disclosed in `INT-RUN-HISTORY-FILE-CONTRACT` rather than waved past here, and `PI_WORKER_NAME` is the documented answer. No new datastore: the sidecars remain the durable record. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: its no-pii-in-logs note now covers one more field per line, and a worker name is deployment configuration rather than payload text. **Code evidence**: worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName, defaultWorkerName; worker/src/host-registry.mjs -> makeHostRegistry. |
 | 2026-08-30 | **NEW `REQ-WAIT-FOR`** (issue #230): a trigger may carry a conjunction of conditions that must clear before its job starts, and a job whose conditions have not cleared is HELD — deferred, spending nothing, consuming no attempt, surviving a restart, and running exactly once when they clear. The statement records why a hold had to be a third thing: `CONST-RETRY-INFRA-ONLY` splits outcomes into retry-now and stop, and a policy return would DROP a job that a forge will never re-trigger. It also records why the cheap tier exists at all — a one-shot instant is structurally inexpressible in pause windows, whose `from == to` refusal exists precisely so a window cannot become an unbounded hold — and why every bound in the expensive tier is mandatory rather than prudent: a held job spends no money, so `CONST-BUDGET-BEFORE-TOKENS` cannot see it, and no ceiling this project already has applies. **`REQ-SCOPED-PAUSE-WINDOWS` UNCHANGED, checked**: the pause gate keeps its position, its window-end semantics and its raw-scope matcher; the wait gate sits AFTER it and reuses only the seam, so a paused job burns no wait evaluation. **`REQ-SCOPED-LIMITS` UNCHANGED, checked**: the folder mutex and the scoped ledgers are untouched, and the wait gate sits BEFORE the scope acquire so a job waiting until tomorrow does not hold a folder while it waits. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: the resolver seam is the model this borrows from and neither its table nor its position moved; the two are separate variables on purpose, so a resolver cannot be reached as a gate. **Code evidence**: worker/src/index.mjs -> makeProcessor; worker/src/wait-for.mjs -> afterInstantMs, unreadableConditions. |
 | 2026-08-29 | Issue #242, enforcement slice, one CORRECTION and one new entry. **`REQ-CRON-SCHEDULED-JOBS` CORRECTED**: its Why and its restart acceptance claimed "structural no-overlap" — false since the entry was written (the scheduler mints the next occurrence at pickup and promotes on time alone); both now state the true at-most-one-unstarted bound, with same-folder serialization supplied by the mutex `REQ-SCOPED-LIMITS` specifies. **NEW `REQ-SCOPED-LIMITS`**: per-scope day/week/month run caps refused pre-spend as `scope-cap`, per-scope concurrency by deferral, and the always-on one-job-per-folder mutex on resolved paths — with the storm-drain acceptance (a global refusal releases the scoped reserve) and the byte-identity carve-out (identical except where the mutex serializes, which is the feature). **`REQ-REPLICA-RUNS` AMENDED**, two clauses: the local/cron hazard paragraph re-anchors to the corrected cron claim (the refusal of local replicas is the position the mutex generalizes), and the budget paragraph gains the scoped windows among the ceilings that divide by N (a scoped refusal truncates a replica set exactly as the global cap always could). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the never-tier enumeration gains scoped-limits content. **`REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked**: the global windows keep their exact semantics; the scoped windows are a sibling ledger under their own keys, reserving first, never altering when or how the global reserve runs. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: "however many windows exist" is scope-agnostic and the scoped reserve is still check-and-increment before the container. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: a deferral is neither a policy return nor a retry-throw — `moveToDelayed` passes `skipAttempt: true`, so the attempt ledger is untouched, the pause gate's own posture. |
 | 2026-08-28 | Issue #231, receiver slice. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED** (semantic layer only): close jobs' semantic key leads the flow slot with `closed:`, derived from the matched rule, so a same-target-same-flow label job inside the window can never swallow a close job -- a swallowed close writes no run record and its one-shot never disarms. Every non-close key byte-identical; the GUID layer UNCHANGED, checked. **`REQ-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the close arm lives in `CONST-TRIGGER-AUTHOR-GATE`, and the offline-testable split (lookup in the receiver, verdict into the pure gate) is exactly the shape this requirement already mandates. |

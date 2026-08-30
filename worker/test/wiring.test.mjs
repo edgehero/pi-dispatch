@@ -144,6 +144,37 @@ test("shutdown closes each extraCloser after the worker drains", { skip }, async
 	}
 });
 
+test("createWorker NAMES the BullMQ Worker when given one, and omits the option when not", { skip }, async () => {
+	// Naming is what makes `getWorkers()` rows tell hosts apart -- bullmq appends `:w:<name>` to the client
+	// name and `moveToActive` stamps `processedBy` onto each active job's hash. Conditional, so a bare
+	// createWorker still builds a byte-identical options object.
+	const base = {
+		connection: { host: "127.0.0.1", port: 1 },
+		concurrency: 1,
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		redis: {},
+		deps: {},
+	};
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let named;
+	let unnamed;
+	try {
+		named = mod.createWorker({ ...base, name: "mac-mini-1" });
+		named.on("error", () => {});
+		assert.equal(named.opts.name, "mac-mini-1");
+
+		unnamed = mod.createWorker(base);
+		unnamed.on("error", () => {});
+		assert.ok(!("name" in unnamed.opts), "no name given, no name key -- a single-host deployment's options are unchanged");
+	} finally {
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(named?.close()).catch(() => {});
+		await Promise.resolve(unnamed?.close()).catch(() => {});
+	}
+});
+
 // The full BullMQ job object the processor hands to recordRun -- id/attemptsMade/name/data are the
 // fields buildRecord (start.mjs) reads, so recordRun must receive `job`, not `job.data`.
 const fakeJob = () => ({ id: "j1", attemptsMade: 0, name: "github", data: { kind: "github", repo: "o/r", flow: "fix", target: { type: "issue", number: 1 } } });

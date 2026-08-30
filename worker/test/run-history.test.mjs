@@ -267,6 +267,29 @@ test("parseExitTokens returns the LAST exit line's tokens when two are present",
 	assert.deepEqual(parseExitTokens(text), { total: 9 });
 });
 
+test("the record carries a host, in tail position, and null when nobody named one", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 }, flow: "deploy" } };
+	const args = { job, result: { outcome: "completed", exitCode: 0 }, startedAt: "2026-08-30T12:00:00.000Z", endedAt: "2026-08-30T12:00:01.000Z" };
+
+	const withHost = buildRecord({ ...args, host: "mac-mini-1" });
+	const keys = Object.keys(withHost);
+	assert.equal(keys.at(-1), "host", "tail position: every prior addition took the tail, and field order is the contract");
+	assert.equal(keys.length, 25);
+	assert.equal(withHost.host, "mac-mini-1");
+
+	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
+	// record's normal case, and "field order is the serialisation order" is what makes a sometimes-absent
+	// key a shape change rather than a value change.
+	const without = buildRecord(args);
+	assert.ok("host" in without, "the key is always present");
+	assert.equal(without.host, null);
+	assert.deepEqual(Object.keys(without), keys, "and the key SET does not depend on whether a host was passed");
+
+	// The admissibility argument in one assertion: this value cannot be path-shaped, so it cannot carry
+	// the OS account name that `targetFor` drops a local folder to a basename to avoid.
+	assert.ok(!/[\\/]/.test(String(withHost.host)));
+});
+
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
 	// The container owns this object. Passing it through put whatever it invented -- a path, a branch
 	// name, a credential it read -- into a record whose PII-free property rests on holding none, while

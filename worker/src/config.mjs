@@ -6,6 +6,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { hostname } from "node:os";
 import { delimiter } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
@@ -212,6 +213,14 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 	const model = env.PI_MODEL ?? "claude-sonnet-4-5-20250929"; // dated snapshot; deterministic per CONST-PI-VERSION-PINNED
 	return {
 		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379",
+		// Issue #57. What this machine calls itself: the key of its registry row, the `host` on every log
+		// line and run record, and the BullMQ worker name. Always populated -- a deployment that declares
+		// nothing still has an identity, which is what lets a fleet of two be TOLD APART before anyone has
+		// configured anything. `workerNameDeclared` is kept separately because "the operator named this
+		// machine" and "we read the hostname" are different facts, and a later slice gates a host-visible
+		// side effect on the first rather than the second.
+		workerName: workerName(env),
+		workerNameDeclared: Boolean(env.PI_WORKER_NAME),
 		concurrency: positiveInt(env, "PI_CONCURRENCY", 3), // DES-CONCURRENCY-3
 		dailyCap: positiveInt(env, "PI_DAILY_CAP", 25), // bounds container STARTS per day (money)
 		weeklyCap: optionalBoundedInt(env, "PI_WEEKLY_CAP", 1), // REQ-SPEND-CAPS-MULTI-WINDOW; null = weekly window disabled
@@ -446,6 +455,80 @@ export function defaultLogsDir() {
 	// Under the OS temp dir by default. Holds durable per-run history/log artifacts written host-side;
 	// a worker-owned path that never enters the container env allowlist (no-broad-env-into-container).
 	return `${process.env.TMPDIR ?? process.env.TEMP ?? "/tmp"}/pi-dispatch/logs`.replace(/\\/g, "/");
+}
+
+/**
+ * What a worker may call itself (issue #57). The CHARACTER CLASS is `sanitizeJobId`'s
+ * (`[A-Za-z0-9._-]`), reused rather than invented so this project has one name-safe alphabet -- but that
+ * function is a REPLACER, not a validator, so the three rules around the class are NEW and are claimed
+ * as new here rather than borrowed:
+ *
+ *   - a leading alphanumeric, which is what refuses `..` and a leading `-` that reads as a flag;
+ *   - a 64-character ceiling, because the name is a Valkey key segment and a log field on every line;
+ *   - no `.json`/`.log` tail, which is not decoration. The class contains the dot, so `prod.json` is
+ *     otherwise a legal name -- and a later slice writes a per-host marker file into `PI_LOGS_DIR`,
+ *     where `<something>.json` is parsed as a run record by the admin and DELETED by the log reaper.
+ *     A name is refused here rather than escaped there, because the escape would have to be remembered
+ *     at every site that ever composes a filename from this value.
+ *
+ * The class is `:`-free, `,`-free and `#`-free, which is what lets the name be a Valkey key segment
+ * UNHASHED. That is the point of validating instead of hashing (`scopeKeyPrefix` does the opposite for
+ * a folder path, which was never chosen for key-safety and cannot be refused): the whole value of a host
+ * registry is that `HGETALL host:h:mac-mini-1` is readable by a human.
+ */
+export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** True when the name would collide with the run-history filename namespace. See WORKER_NAME_RE. */
+const RESERVED_NAME_TAIL = /\.(json|log)$/i;
+
+/**
+ * A hostname reduced to something `WORKER_NAME_RE` accepts, for use as a DEFAULT only.
+ *
+ * Lowercased because macOS reports `Robs-Mac-Mini.local` where Linux reports `mac-mini`: two spellings
+ * of one machine would be two rows in the registry and two values in the run records. The `.local`
+ * suffix is deliberately NOT stripped -- an OS-specific suffix rule is a rule someone has to remember,
+ * and it costs nothing to keep.
+ */
+export function sanitizeWorkerName(raw) {
+	const cleaned = String(raw ?? "")
+		.toLowerCase()
+		.replace(/[^a-z0-9._-]/g, "-")
+		.replace(/-{2,}/g, "-")
+		.replace(/^[-.]+|[-.]+$/g, "")
+		.slice(0, 64)
+		.replace(/[-.]+$/, ""); // the slice can leave a trailing separator behind
+	if (cleaned === "" || !WORKER_NAME_RE.test(cleaned)) return "worker";
+	// The reserved tail is repaired by REPLACING the dot, never by appending: a suffix on a name already at
+	// the 64-character ceiling would push it past, and a default that the validator would reject is a
+	// second, weaker alphabet arriving by the back door. `host.json` becomes `host-json`, which is the same
+	// length, still readable, and cannot match the tail again.
+	return cleaned.replace(RESERVED_NAME_TAIL, (m) => `-${m.slice(1)}`);
+}
+
+/** This machine's name, sanitized. Exported so doctor and the admin resolve it without `loadConfig`. */
+export function defaultWorkerName() {
+	try {
+		return sanitizeWorkerName(hostname());
+	} catch {
+		return "worker"; // hostname() can throw on a locked-down host; a name is never worth refusing boot for
+	}
+}
+
+/**
+ * THE ASYMMETRY IS THE DESIGN. A value the operator did not choose is repaired silently; a value they
+ * typed is refused loudly and never quietly altered. Defaulting is a convenience, so it must not be able
+ * to fail; declaring is a statement, so a typo in it must not become a different machine's name.
+ */
+function workerName(env) {
+	const declared = env.PI_WORKER_NAME;
+	if (declared === undefined || declared === "") return defaultWorkerName();
+	if (!WORKER_NAME_RE.test(declared)) {
+		throw configError(`PI_WORKER_NAME must match ${WORKER_NAME_RE.source} (letters, digits, dot, underscore, hyphen; first character alphanumeric; at most 64): ${JSON.stringify(declared)}`);
+	}
+	if (RESERVED_NAME_TAIL.test(declared)) {
+		throw configError(`PI_WORKER_NAME must not end in .json or .log: ${JSON.stringify(declared)} would collide with the run-history filenames in PI_LOGS_DIR`);
+	}
+	return declared;
 }
 
 export function defaultGraphDir(env = process.env) {

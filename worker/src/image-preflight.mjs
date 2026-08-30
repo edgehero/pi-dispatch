@@ -70,7 +70,7 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 		// become the push race it exists to avoid, with nothing in the run record saying so.
 		const probe = await runDocker(spawnFn, ["image", "inspect", `--format={{.Id}}${FIELD_SEP}${PI_VERSION_TEMPLATE}${FIELD_SEP}${FORGES_TEMPLATE}${FIELD_SEP}${CAPABILITIES_TEMPLATE}`, wanted], true);
 		if (probe.code === 0) {
-			const [piVersion, forges, capabilities] = parseLabels(probe.stdout);
+			const [piVersion, forges, capabilities, imageDigest] = parseLabels(probe.stdout);
 			const kind = job?.kind;
 			// Absent label => ALLOW. The polarity matters and is the opposite of what "declare your
 			// capabilities" suggests: every operator-built image predating this label (OQ-012) declares
@@ -96,7 +96,7 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			if (job?.command !== undefined && !(capabilities ?? []).includes("commands")) {
 				return { commandUnsupported: wanted, declared: capabilities ?? [] };
 			}
-			return { ok: true, image: wanted, piVersion };
+			return { ok: true, image: wanted, piVersion, imageDigest };
 		}
 		if ((await runDocker(spawnFn, ["info"])).code === 0) return { missing: wanted };
 		return { unavailable: wanted };
@@ -135,10 +135,15 @@ function parseLabels(stdout) {
 	// the safe answer on every field. On `capabilities` "safe" means the caller refuses a replica job,
 	// which is the same direction a genuinely unlabelled image goes.
 	const parts = String(stdout ?? "").trim().split(FIELD_SEP);
+	// Field 0 is `{{.Id}}`, the image's own digest. It has been fetched on every job since this format
+	// string had four fields and was thrown away until issue #57, which needs it to answer "are these two
+	// hosts running the same image?" -- a question `OQ-012` records as unanswerable and which turns out to
+	// cost nothing to answer, because the inspect that would have asked it already runs.
+	const imageDigest = label(parts[0]);
 	const piVersion = label(parts[1]);
 	// A label that is present but parses to nothing usable is treated as ABSENT rather than as an empty
 	// list -- on `forges` the latter would refuse every job on an image whose label was merely malformed.
-	return [piVersion, list(parts[2]), list(parts[3])];
+	return [piVersion, list(parts[2]), list(parts[3]), imageDigest];
 }
 
 /** One comma-separated label value as a non-empty array, or `null` when it declares nothing usable. */

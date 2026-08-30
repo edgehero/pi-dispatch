@@ -378,7 +378,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -441,6 +441,28 @@ export function buildRecord({ job, result, error, startedAt, endedAt }) {
 		// BRANCH NAME ARE DELIBERATELY ABSENT: this record's PII-free-by-construction property rests on it
 		// holding no attacker-chosen string, and a branch name is exactly that.
 		session: source.session ?? null,
+		// Which machine ran this (issue #57). Additive, nullable, an explicit literal, TAIL position: every
+		// prior addition took the tail, and "field order is the serialisation order" is this record's
+		// contract, so the tail is the only placement that leaves twenty-four existing positions untouched.
+		// Unconditional rather than a conditional spread, on the same contract sentence and on the
+		// `tokens`/`usage`/`session` precedent that null-with-the-key-present is this record's normal case.
+		//
+		// ADMISSIBILITY, which has to engage this record's own sentences rather than sidestep them. The
+		// PII-free-by-construction property rests on holding NO ATTACKER-CHOSEN STRING, and `host`
+		// satisfies that absolutely: there is no path from a webhook payload, an issue body, a branch name
+		// or a folder to this value. It is fixed once at boot from one environment variable against a
+		// charset that excludes `/` and `\`, so it cannot even be path-shaped -- which is the property
+		// `targetFor` drops a local folder to its basename to get.
+		//
+		// What it is NOT is anonymous, and that is worth writing down rather than glossing. The default is
+		// `os.hostname()`, and on a personal machine a hostname is often a person's name. The honest word
+		// is OPERATOR-DISCLOSED: the operator names their own machines, this record is written to their own
+		// disk, that name is already on every packet the machine sends, and `PI_WORKER_NAME` is the
+		// documented answer for anyone who wants something else here.
+		//
+		// Passed in rather than read from a module-level value, so `buildRecord` stays pure and every
+		// existing caller keeps getting `null` without knowing this field exists.
+		host,
 	};
 }
 

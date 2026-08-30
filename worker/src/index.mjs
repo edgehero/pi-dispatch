@@ -523,7 +523,7 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 	};
 }
 
-export function createWorker({ connection, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, checkSlots, checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, extraClosers = [] }) {
+export function createWorker({ connection, name, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, checkSlots, checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, extraClosers = [] }) {
 	let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 	const processor = makeProcessor({
 		cancelJob: (id, reason) => worker.cancelJob(id, reason),
@@ -565,6 +565,9 @@ export function createWorker({ connection, concurrency, getSettings, redis, deps
 		connection: { ...connection, maxRetriesPerRequest: null },
 		concurrency,
 		maxStalledCount: 0, // a stalled paid job FAILS, never silently re-runs (verified live)
+		// Issue #57. Conditional, so a bare createWorker builds a byte-identical options object -- and because
+		// bullmq's own matcher accepts both the named and unnamed client-name spellings, naming costs nothing.
+		...(name ? { name } : {}),
 		...(limiter ? { limiter } : {}),
 	});
 

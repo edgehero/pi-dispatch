@@ -31,7 +31,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, order } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, order } = {}) {
 	const calls = [];
 	const registered = {};
 	const createWorkerFn = (arg) => {
@@ -118,6 +118,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeSandboxReaper: sandboxReaper,
 			makeRunContainer: runContainerFactory,
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
+			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 		});
@@ -808,4 +809,76 @@ test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good o
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+// --- host identity (issue #57) --------------------------------------------------------------------------
+
+test("every log line carries the host", { skip }, async () => {
+	const { logs } = await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+	});
+	const emitted = logs.filter((l) => l.event);
+	assert.ok(emitted.length > 0);
+	for (const line of emitted) assert.equal(line.host, "mac-mini-1", `every line, including ${line.event}`);
+});
+
+test("a call site that passes its own host is OVERRIDDEN, never trusted", { skip }, async () => {
+	const { deps } = await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+	});
+	// The stamp sits AFTER the spread, so the closure's value wins: no call site knows better than this
+	// one which process wrote a line, and one that passed `host` would be lying by construction.
+	const { logs } = whileCapturingLogs(() => deps.log("forged", { host: "somewhere-else", jobId: "j1" }));
+	const forged = logs.find((l) => l.event === "forged");
+	assert.equal(forged.host, "mac-mini-1");
+	assert.equal(forged.jobId, "j1", "and every other field the caller passed survives");
+});
+
+test("the worker is NAMED, the registry is closed on shutdown, and the boot line announces both host and digest", { skip }, async () => {
+	const { captured, logs } = await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+	});
+
+	// Naming the BullMQ Worker is what makes getWorkers() rows tell hosts apart, and it stamps
+	// `processedBy` on every active job's hash for free.
+	assert.equal(captured.name, "mac-mini-1");
+
+	// The registry joins the runtime queue as an extraCloser, so a clean shutdown DELETES the row rather
+	// than leaving a ghost peer for the TTL.
+	assert.equal(captured.extraClosers.length, 2);
+	assert.equal(typeof captured.extraClosers[1].close, "function");
+	await captured.extraClosers[1].close();
+
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.host, "mac-mini-1");
+	assert.ok("imageDigest" in started, "two hosts on two builds of one tag must not emit identical boot lines");
+});
+
+test("boot does NOT wait on the registry: a Valkey that never answers must not hang the worker", { skip }, async () => {
+	// `makeRedisClient` sets `maxRetriesPerRequest: null`, which BullMQ's blocking connections require and
+	// which means a command against an unreachable server QUEUES FOREVER rather than rejecting. Awaiting the
+	// first beat therefore turns a telemetry keyspace into a boot dependency that can never time out.
+	let started = false;
+	const hung = () => ({
+		self: () => "mac-mini-1",
+		publish: () => new Promise(() => {}),
+		start: () => ((started = true), new Promise(() => {})), // never resolves, exactly as a queued command would not
+		close: async () => {},
+	});
+
+	const { captured, logs } = await Promise.race([
+		runStart({
+			env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHostRegistry: hung,
+		}),
+		new Promise((_r, reject) => setTimeout(() => reject(new Error("startWorker awaited the registry")), 8000).unref?.()),
+	]);
+
+	assert.equal(started, true, "the heartbeat is still started");
+	assert.ok(captured, "and the worker is constructed regardless");
+	assert.ok(logs.some((l) => l.event === "worker_started"), "a worker whose row never appears still comes up");
 });

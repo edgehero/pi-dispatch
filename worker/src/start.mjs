@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { watch } from "node:fs";
+import { readFileSync, watch } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { promisify } from "node:util";
 import { configError, loadConfig } from "./config.mjs";
@@ -14,6 +14,7 @@ import { makeForgejoHost } from "./forgejo-host.mjs";
 import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
+import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker } from "./index.mjs";
 import { makeCollectChain } from "./outbox.mjs";
@@ -36,6 +37,20 @@ import { loadSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 const exec = promisify(execFile);
+
+/**
+ * This worker's own package version, for the registry row (issue #57): a rolling upgrade should be
+ * visible as a fact about the fleet rather than as a diff someone has to run. Read once, and never
+ * fatal -- an unreadable manifest costs a blank field, not a boot. npm always ships `package.json`
+ * whatever `files` says, so this resolves from an installed package as well as from a checkout.
+ */
+const WORKER_VERSION = (() => {
+	try {
+		return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? "";
+	} catch {
+		return "";
+	}
+})();
 
 /**
  * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind, before
@@ -205,6 +220,7 @@ export async function startWorker(
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
+		makeHostRegistry: makeHostRegistryFn = makeHostRegistry,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
@@ -215,7 +231,13 @@ export async function startWorker(
 	} = {},
 ) {
 	const config = loadConfig(env);
-	const log = (event, fields = {}) => process.stdout.write(`${JSON.stringify({ event, ...fields })}\n`);
+	// `host` sits AFTER the spread, so it is authoritative rather than overridable (issue #57). No call
+	// site can know better than this closure which process wrote a line, and one that passed `host` would
+	// be lying by construction -- verified: none does. This is also why the stamp lives ONLY here. Every
+	// other module takes `log` injected, and two tests pin the KEY SET of the fields object handed to an
+	// injected log (`run_record_failed`, `wait_check`); a `host` added at any call site would break them,
+	// while one added inside this closure cannot reach them.
+	const log = (event, fields = {}) => process.stdout.write(`${JSON.stringify({ event, ...fields, host: config.workerName })}\n`);
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: load and validate the triggers file with the operator present and
 	// before any Valkey contact, so a misconfigured schedule refuses startup loudly (configError) rather
@@ -365,7 +387,9 @@ export async function startWorker(
 	const onceTriggersFile = env.PI_TRIGGERS_FILE ?? join(process.cwd(), "triggers.json");
 	const disarmOnce = makeDisarmOnce({ triggersPath: onceTriggersFile, log });
 	const recordRun = ({ job, result, error, startedAt, endedAt }) => {
-		writeRecord(buildRecord({ job, result, error, startedAt, endedAt }));
+		// The `host` is stamped HERE rather than inside the processor, which is what keeps every one of its
+		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
+		writeRecord(buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName }));
 		// Strictly AFTER the durable record: "fired" means "produced a run record", and the crash
 		// direction this ordering buys is the chosen one -- an armed one-shot with a record, never a
 		// disarm before writeRecord RETURNED. Returned, not succeeded: the record writer swallows fs
@@ -455,13 +479,54 @@ export async function startWorker(
 	if (config.globalPiDir && !readStageManifest({ globalPiDir: config.globalPiDir })) log("packages_manifest_absent", { overlay: config.globalPiDir });
 	getPackagePaths();
 
+	// Issue #57. Published before the worker starts draining, so a peer that boots a moment later sees this
+	// host rather than an empty fleet. The image identity rides the SAME preflight the job path uses -- one
+	// inspect implementation, one format string -- called once here with an empty job, which resolves the
+	// deployment default and trips none of the per-job label gates.
+	//
+	// The boot line and the registry may cache this where the GATE may not, and the distinction is the whole
+	// argument: a gate that caches gives a WRONG DECISION when an operator builds or removes an image
+	// mid-day, which is why `imagePreflight` is deliberately not memoised below. A heartbeat that caches
+	// gives a STALE ROW, and nothing reads a row to decide anything.
+	// ONE preflight instance, constructed once and shared: `start-wiring.test.mjs` pins that, and the
+	// reason is the module's own -- the tag the preflight checked has to be the tag `docker run` is
+	// handed, and two constructions are two chances for that to stop being true.
+	const imagePreflight = makeImagePreflightFn({ image: config.jobImage });
+	const bootImage = await imagePreflight({}).catch(() => ({}));
+	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
+	// NOT awaited, and that is load-bearing rather than an optimisation. `makeRedisClient` sets
+	// `maxRetriesPerRequest: null` -- required for BullMQ's blocking connections -- which means a command
+	// issued against an unreachable server QUEUES FOREVER instead of rejecting. Awaiting the first beat
+	// would therefore hang boot indefinitely on a deployment whose Valkey is down, turning a telemetry
+	// keyspace into a boot dependency. The registry is never on a decision path, so a worker that comes
+	// up before its own row does is correct: the row appears when Valkey does.
+	void registry.start({
+		version: WORKER_VERSION,
+		image: config.jobImage,
+		imageDigest: bootImage.imageDigest ?? "",
+		piVersion: bootImage.piVersion ?? "",
+		concurrency: bootConcurrency,
+		pid: process.pid,
+		// The host's IANA zone, because a cron PATTERN carries none: `triggers.json` has no `tz` field and
+		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
+		// On one host that is exactly what an operator means; on two in different zones the same pattern is
+		// two different instants, and nothing anywhere says so. Published now so a later slice can refuse.
+		tz: Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
+	});
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
+		// Names the BullMQ Worker, which makes `getWorkers()` rows tell hosts apart -- bullmq appends
+		// `:w:<name>` to the client name and `moveToActive` stamps `processedBy` onto each active job's
+		// hash, so per-job host attribution arrives for free. A NICETY on top of the registry and never the
+		// source of truth: that call rests on CLIENT SETNAME, which bullmq's own doc-comment says some
+		// providers do not support, and a host list that silently empties cannot be what a decision reads.
+		name: config.workerName,
 		concurrency: bootConcurrency,
 		getSettings,
 		redis,
 		recordRun,
-		extraClosers: [runtimeQueue],
+		extraClosers: [runtimeQueue, registry],
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
@@ -523,7 +588,7 @@ export async function startWorker(
 			// cache would be wrong in both directions -- an operator who builds the image mid-day would stay refused,
 			// one who removes it would stay admitted. Contrast the staged-package manifest, correctly read once at
 			// boot because it is deploy-time state under a :ro mount; the host's image set is not.
-			imagePreflight: makeImagePreflightFn({ image: config.jobImage }),
+			imagePreflight,
 			// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
 			// value, one place, so the gate that checks the proxy and the runner that attaches to its network
 			// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
@@ -689,6 +754,8 @@ export async function startWorker(
 
 	log("worker_started", {
 		queue: "pi-jobs",
+		host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
+		imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 		concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
 		dailyCap: config.dailyCap,
 		weeklyCap: config.weeklyCap, // null when the weekly window is disabled
