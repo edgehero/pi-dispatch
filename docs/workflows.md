@@ -36,7 +36,7 @@ run.flow | run.command            the skill the trigger names, read from the def
 the skills it calls, or a staged workflow extension
 ```
 
-Four properties of that chain decide what is possible inside it.
+Five properties of that chain decide what is possible inside it.
 
 **`run.flow` and `run.command` are the two entry points.** There is still no `run.workflow`: which stages
 run is a property of what the entry point does, which the repo changes by merging a skill or you change by
@@ -86,6 +86,16 @@ says as much about its own run-name claim, which is atomic per write but holds n
 the mutex is what closes that gap. To bound a scope further (jobs per day/week/month, or a concurrency
 ceiling on a repo), see [`docs/scoped-limits.md`](scoped-limits.md). Forge jobs are immune to the
 working-tree race by construction, since each one gets its own clone.
+
+**The delivery decides when the job is enqueued; `run.waitFor` decides when it starts.** The one thing the
+chain above cannot express is a *dependency*: stage 1 needs the Jira parent accepted, or the deploy window
+open, or last night's pipeline green, and none of those is an event a forge will send you.
+[`run.waitFor`](wait-for.md) holds the whole job in the delayed set, unstarted and unbilled, until an
+instant passes or a check script you wrote exits 0. It is deliberately not a stage inside the container:
+a stage that waits burns the turn budget, holds a concurrency slot, and pays for a container to sleep,
+while a job held at the gate costs nothing and survives a restart. So the ordering to reach for is a wait
+in front of the job, not a sleep inside it — and if the thing you are waiting for is another pi-dispatch
+job, prefer a check that reads that job's own output over one that guesses from elapsed time.
 
 ## The simple case: a flow that calls skills
 

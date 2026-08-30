@@ -44,13 +44,14 @@
  * about severity: a --fix run still exits by the same failed/ok logic, warns stay warns, and the fix pass
  * happens at most once (check, fix, re-check -- never a loop).
  */
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { defaultSandboxDir, globalExtensionsEnabled } from "./config.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
+import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
@@ -265,7 +266,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -1099,14 +1100,84 @@ export async function collectChecks(env, seams) {
 		});
 	}
 
+	// Issue #230, `run.waitFor`. The PARSE is asked unconditionally, and the rest only when something waits.
+	// That split is not the usual "only report what this deployment uses": `loadConfig` calls
+	// `parseWaitProfiles` on every boot whether or not a trigger holds anything, so a garbled variable is a
+	// worker that will not START, and gating that behind `waiting > 0` would have hidden it from precisely
+	// the operator this check exists for. The ordinary sequence produces that state: declare the variable,
+	// restart, then write the trigger -- doctor is run in the middle, and would have said nothing at all.
+	const { profiles: declaredWaits, error: waitParseFailure } = parseWaitProfilesSafe(env.PI_WAIT_PROFILES);
+	if (waitParseFailure) {
+		checks.push({ ok: false, label: "PI_WAIT_PROFILES does not parse", fix: `${waitParseFailure} -- the worker refuses to BOOT until this is fixed, rather than dropping the entry and leaving you a check you believe is wired` });
+	}
+	// Everything below is about triggers, so it is asked only when a trigger holds something: a deployment
+	// that waits on nothing must not carry a line about a feature it does not use, which is the always-on
+	// advisory this file avoids everywhere else.
+	if (waiting > 0 && !waitParseFailure) {
+		// A HARD FAIL, `secretProfiles`' twin and for its reason: these jobs refuse pre-spend until the
+		// profile is declared, deliberately, rather than starting without ever asking the question.
+		const missing = waitProfiles.filter((name) => !(name in declaredWaits));
+		checks.push({
+			ok: missing.length === 0,
+			label: missing.length === 0 ? `${waiting} trigger(s) hold their jobs, and every wait profile they name is declared` : `${waiting} trigger(s) hold their jobs, but ${missing.length} named wait profile(s) are not declared: ${missing.join(", ")}`,
+			fix: `declare them in PI_WAIT_PROFILES as name:/absolute/path pairs (a check is one line, and its exit code is the answer: 0 go, 3 not yet, 2 never, 1 could not tell) -- these jobs refuse pre-spend until you do`,
+		});
+		// Each declared check is stat'd, exactly as a resolver is: absent, a directory, or not executable is a
+		// check that can never answer. NAMED profiles fail; declared-but-unnamed ones only warn, because no
+		// job looks them up -- a retired entry left in `.env` is untidy, not a deployment that refuses
+		// deliveries, and failing the whole command on it is the same over-reporting the `waiting > 0` gate
+		// exists to prevent. The probe is `wait-check.mjs`'s own, symlinks and all, so doctor and the gate
+		// cannot disagree about what will run.
+		const named = new Set(waitProfiles);
+		for (const name of Object.keys(declaredWaits).sort()) {
+			const path = declaredWaits[name];
+			const st = statPath(path);
+			const used = named.has(name);
+			checks.push({
+				ok: st.ok || !used,
+				...(st.ok ? { label: `Wait profile ${name} -> ${path}${used ? "" : " (declared, named by no trigger)"}` } : {}),
+				...(st.ok
+					? {}
+					: used
+						? { label: `Wait profile ${name} -> ${path} ${st.why}`, fix: "every job naming this profile refuses pre-spend as wait-profile-unknown until the path resolves to an executable file" }
+						: { warn: true, label: `Wait profile ${name} -> ${path} ${st.why}, and no trigger names it`, fix: "no job looks this up, so nothing refuses today -- fix the path or drop the entry before a trigger starts naming it" }),
+			});
+		}
+		// An `after` further out than the ceiling refuses EVERY delivery at first pickup, and doctor holds
+		// both halves of that arithmetic, so it is the same class of finding as an undeclared profile: a
+		// trigger that cannot deliver, knowable before anything is enqueued. Measured from now, exactly as
+		// the gate measures it.
+		const afterMax = Number(env.PI_WAIT_AFTER_MAX_MS ?? "") > 0 ? Number(env.PI_WAIT_AFTER_MAX_MS) : WAIT_AFTER_MAX_DEFAULT_MS;
+		const beyond = waitAfters.filter((iso) => {
+			const ms = afterInstantMs(iso);
+			return ms !== null && ms - Date.now() > afterMax;
+		});
+		if (beyond.length > 0) {
+			checks.push({
+				ok: false,
+				label: `${beyond.length} wait condition(s) name an instant beyond PI_WAIT_AFTER_MAX_MS: ${beyond.join(", ")}`,
+				fix: "every delivery refuses pre-spend as wait-after-beyond-max at first pickup -- bring the instant inside the ceiling or raise PI_WAIT_AFTER_MAX_MS",
+			});
+		}
+		// The version-floor disclosure. Stated ONCE, as a fact rather than a warning, because it is not a
+		// defect: it is the one thing about this feature an operator cannot check from here. `doctor` runs
+		// on the worker host and cannot see the receiver's installed version, so an unconditional warning
+		// would be the always-on amber the panel's own design rejects -- and the worker's own skew check
+		// already refuses a job that arrives without conditions it should have had.
+		checks.push({
+			ok: true,
+			label: `run.waitFor needs worker >= 1.6.0, receiver >= 1.4.0 and admin >= 1.6.0 (a service below the floor drops the field silently; the worker refuses such a job as wait-skew rather than running it unheld)`,
+		});
+	}
+
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
 	// reason to set.
 	if (secreting > 0) {
-		const declared = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
+		const { profiles: declared, error: parseFailure } = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
 		const names = Object.keys(declared).sort();
-		if (declared.error) {
-			checks.push({ ok: false, label: "PI_SECRET_PROFILES does not parse", fix: `${declared.error} -- the worker refuses to boot until this is fixed, rather than dropping the entry and leaving you a profile you believe is wired` });
+		if (parseFailure) {
+			checks.push({ ok: false, label: "PI_SECRET_PROFILES does not parse", fix: `${parseFailure} -- the worker refuses to boot until this is fixed, rather than dropping the entry and leaving you a profile you believe is wired` });
 		} else {
 			// A HARD FAIL, not a warning, and worded like the run.resume/PI_SESSIONS_DIR check below for the
 			// same reason: these jobs refuse pre-spend until it is set, deliberately, rather than running
@@ -1537,16 +1608,46 @@ async function repoFlowAtHead(spawn, folder, flow) {
 }
 
 /**
- * `parseSecretProfiles`, but doctor never throws. A malformed PI_SECRET_PROFILES is a finding to REPORT,
- * not a reason for the diagnostic tool to die: the operator running doctor is very likely running it
- * BECAUSE the worker refused to boot on that exact line, and a stack trace instead of a check is the least
- * useful possible answer. Returns the table, or `{ error }` carrying the parser's own message.
+ * `parseWaitProfiles`, but doctor never throws: a malformed variable is a finding to REPORT, not a reason
+ * for the diagnostic tool to die, since the operator running doctor is very likely running it BECAUSE the
+ * worker refused to boot on that exact line.
+ *
+ * Returns an ENVELOPE, `{ profiles, error }`, rather than the table with an `error` key beside the profiles.
+ * The flat shape reads better and is wrong: `error` is a legal profile name, so `PI_WAIT_PROFILES=error:/x.sh`
+ * declares a profile whose PATH then reads as a parse failure -- doctor reports the variable as unparseable,
+ * quoting the path as the message, and skips every check below it on a deployment that is perfectly fine.
+ */
+function parseWaitProfilesSafe(raw) {
+	try {
+		return { profiles: parseWaitProfiles(raw), error: null };
+	} catch (err) {
+		return { profiles: Object.create(null), error: err?.message ?? String(err) };
+	}
+}
+
+/** Is this path something the worker could actually execute? The resolver's probe, reused verbatim. */
+function statPath(path) {
+	try {
+		const real = realpathSync(path);
+		const st = statSync(real);
+		if (!st.isFile()) return { ok: false, why: "(not a regular file)" };
+		if ((st.mode & 0o111) === 0) return { ok: false, why: "(not executable)" };
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, why: `(${err?.code ?? "unreadable"})` };
+	}
+}
+
+/**
+ * `parseSecretProfiles`, but doctor never throws, for `parseWaitProfilesSafe`'s reason and returning the
+ * same envelope. The `error`-is-a-legal-profile-name defect was found in the wait copy and fixed in both:
+ * the flat shape let one declared profile's PATH read as a parse failure and hide every check below it.
  */
 function parseSecretProfilesSafe(raw) {
 	try {
-		return parseSecretProfiles(raw);
+		return { profiles: parseSecretProfiles(raw), error: null };
 	} catch (err) {
-		return { error: err?.message ?? "unparseable" };
+		return { profiles: Object.create(null), error: err?.message ?? "unparseable" };
 	}
 }
 
@@ -1573,7 +1674,7 @@ function readScopedLimitFacts(env, fileExists) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -1619,6 +1720,21 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so
 			// the unreferenced-scope advisory compares like with like across spelling variants.
 			folders: [...new Set(triggers.filter((t) => t.run.kind === "local" && typeof t.run.folder === "string").map((t) => canonicalScope({ kind: "local", folder: t.run.folder })))].sort(),
+			// Issue #230. How many triggers hold their jobs, and the distinct profile NAMES they select --
+			// deduped like `secretProfiles` and for its reason: each name costs a lookup, and two triggers
+			// waiting on one profile are one question.
+			waiting: triggers.filter((t) => Array.isArray(t.run.waitFor) && t.run.waitFor.length > 0).length,
+			// The `after` instants as WRITTEN, deduped. Not parsed here: `readTriggerFacts` is a fact reader and
+			// the ceiling it is measured against is env, which belongs at the check. Two triggers naming one
+			// instant are one finding, and the raw string is what the operator has to go and edit.
+			waitAfters: [...new Set(triggers.flatMap((t) => (Array.isArray(t.run.waitFor) ? t.run.waitFor : [])).map((c) => c?.after).filter((v) => typeof v === "string"))].sort(),
+			waitProfiles: [
+				...new Set(
+					triggers
+						.filter((t) => Array.isArray(t.run.waitFor))
+						.flatMap((t) => t.run.waitFor.map((c) => c?.profile).filter((n) => typeof n === "string")),
+				),
+			].sort(),
 			optingOut: triggers.filter((t) => t.run.packages === false).length,
 			images: [...new Set(triggers.map((t) => t.run.image).filter((i) => typeof i === "string"))].sort(),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,

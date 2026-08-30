@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2282,4 +2283,197 @@ test("doctor: the dead-scope advisory stays SILENT when the triggers facts are u
 	writeFileSync(limits2, JSON.stringify({ version: 1, limits: [{ scope: "/srv/never", day: 1 }] }));
 	const absent = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: limits2 }), collectSeams(green, { cwd: bare, nodeVersion: "22.19.0", probeValkey: async () => true }));
 	assert.ok(!absent.find((x) => /name a folder no trigger runs in/.test(x.label)), "no triggers file: no advisory");
+});
+
+// --- run.waitFor (issue #230) --------------------------------------------------------------------------
+
+function waitTriggersFile({ profiles = ["jira"], after } = {}) {
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-wait-")), "triggers.json");
+	const waitFor = [...(after ? [{ after }] : []), ...profiles.map((profile) => ({ profile }))];
+	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:deploy"] }, run: { kind: "github", flow: "deploy", waitFor } }] }));
+	return path;
+}
+
+test("doctor: a waiting trigger whose profile is NOT declared FAILS, naming the profile", async () => {
+	// A hard fail, `secretProfiles`' twin and for its reason: these jobs refuse pre-spend until it is set,
+	// deliberately, rather than starting without ever asking the question they were written to ask.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /hold their jobs/.test(c.label));
+	assert.ok(hit, "the finding must exist at all");
+	assert.equal(hit.ok, false);
+	assert.match(hit.label, /not declared: jira/);
+	assert.match(hit.fix, /refuse pre-spend/);
+	assert.match(hit.fix, /0 go, 3 not yet, 2 never, 1 could not tell/, "and it states the protocol, where an operator writing their first check reads");
+});
+
+test("doctor: a declared profile is STAT'd -- a path that cannot run is a check that can never answer", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-wait-checks-"));
+	const good = join(dir, "wait.sh");
+	writeFileSync(good, "#!/bin/sh\nexit 0\n");
+	chmodSync(good, 0o755);
+	const notExec = join(dir, "plain.sh");
+	writeFileSync(notExec, "x");
+	chmodSync(notExec, 0o644);
+
+	const env = {
+		PI_PROVIDER: "anthropic",
+		ANTHROPIC_API_KEY: "sk-x",
+		PI_TRIGGERS_FILE: waitTriggersFile({ profiles: ["ok", "dull", "gone", "dir"] }),
+		PI_WAIT_PROFILES: `ok:${good},dull:${notExec},gone:${join(dir, "missing.sh")},dir:${dir}`,
+	};
+	const checks = await collectChecks(env, secretsSeams());
+	const byName = (n) => checks.find((c) => c.label.startsWith(`Wait profile ${n} `));
+	assert.equal(byName("ok").ok, true);
+	assert.equal(byName("dull").ok, false);
+	assert.match(byName("dull").label, /not executable/);
+	assert.equal(byName("gone").ok, false);
+	assert.match(byName("gone").label, /ENOENT/);
+	assert.equal(byName("dir").ok, false);
+	assert.match(byName("dir").label, /not a regular file/);
+	assert.match(byName("gone").fix, /wait-profile-unknown/, "and it names the reason the job will actually record");
+});
+
+test("doctor: a garbled PI_WAIT_PROFILES is REPORTED, never thrown", async () => {
+	// The operator running doctor is very likely running it because the worker refused to boot on that line.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile(), PI_WAIT_PROFILES: "jira" };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /PI_WAIT_PROFILES does not parse/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+});
+
+test("doctor: the version floor is stated ONCE as a fact, and only when something waits", async () => {
+	// doctor runs on the worker host and cannot see the receiver's installed version, so an unconditional
+	// warning would be the always-on amber the panel's own design rejects -- and the worker's skew check
+	// already refuses a job that arrives without conditions it should have had.
+	const waiting = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile() }, secretsSeams());
+	const floor = waiting.filter((c) => /receiver >= 1\.4\.0/.test(c.label));
+	assert.equal(floor.length, 1, "once, not once per profile");
+	assert.equal(floor[0].ok, true, "a fact, not a defect");
+	assert.match(floor[0].label, /wait-skew/, "and it names what the worker does instead of running unheld");
+
+	const quiet = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/r.sh" }, secretsSeams());
+	assert.equal(quiet.some((c) => /receiver >= 1\.4\.0/.test(c.label)), false, "a deployment that holds no jobs hears nothing about it");
+	assert.equal(quiet.some((c) => /hold their jobs/.test(c.label)), false);
+});
+
+test("doctor: an `after`-only wait needs no profile table at all", async () => {
+	// The free tier declares nothing, so a deployment using only instants must not be told to declare a
+	// profile it has no use for.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: [], after: "2026-09-01T09:00:00Z" }) };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /hold their jobs/.test(c.label));
+	assert.equal(hit.ok, true, "nothing named, nothing missing");
+});
+
+test("doctor: a profile literally NAMED `error` does not forge a parse failure", async () => {
+	// `error` passes the profile charset, so a flat `{ ...profiles, error }` return let one declared profile's
+	// PATH read as an error message: doctor reported the variable as unparseable, quoted the path as the
+	// reason, and skipped every check below it on a deployment that was entirely fine. Both wrappers return an
+	// envelope now, and both are pinned, because the second one was the first one's copy.
+	const wait = await collectChecks(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: ["error"] }), PI_WAIT_PROFILES: "error:/opt/pi/wait.sh" },
+		secretsSeams(),
+	);
+	assert.equal(wait.some((c) => /PI_WAIT_PROFILES does not parse/.test(c.label)), false);
+	assert.equal(wait.find((c) => /hold their jobs/.test(c.label)).ok, true, "the profile IS declared");
+	assert.ok(wait.some((c) => /^Wait profile error -> \/opt\/pi\/wait\.sh/.test(c.label)), "and it is stat'd like any other");
+
+	const secret = await collectChecks(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "error" }), PI_SECRET_PROFILES: "error:/opt/pi/resolve.sh" },
+		secretsSeams(),
+	);
+	assert.equal(secret.some((c) => /PI_SECRET_PROFILES does not parse/.test(c.label)), false);
+	assert.equal(secret.find((c) => /bind secrets/.test(c.label)).ok, true);
+	assert.ok(secret.some((c) => /Secret resolver profiles declared: error -> \/opt\/pi\/resolve\.sh/.test(c.label)));
+});
+
+test("doctor: a garbled PI_WAIT_PROFILES is reported even when NOTHING waits", async () => {
+	// `loadConfig` parses this variable on every boot, waiting triggers or not, so a garbled value is a worker
+	// that will not START. Gating the parse behind `waiting > 0` hid it from exactly the operator the check
+	// exists for, and the ordinary sequence produces that state: declare the variable, restart, THEN write the
+	// trigger. Doctor is run in the middle.
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod" }), PI_SECRET_PROFILES: "prod:/opt/pi/r.sh", PI_WAIT_PROFILES: "totally-garbled" };
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /PI_WAIT_PROFILES does not parse/.test(c.label));
+	assert.ok(hit && hit.ok === false, "the finding must exist on a deployment that holds nothing");
+	assert.match(hit.fix, /refuses to BOOT/, "and it says which failure this is: a boot refusal, not a delivery that refuses");
+	// The trigger-driven half stays silent, because there is still no trigger.
+	assert.equal(checks.some((c) => /hold their jobs/.test(c.label)), false);
+	assert.equal(checks.some((c) => /receiver >= 1\.4\.0/.test(c.label)), false);
+});
+
+test("doctor: an `after` beyond PI_WAIT_AFTER_MAX_MS FAILS -- every delivery refuses at first pickup", async () => {
+	const far = new Date(Date.now() + 400 * 24 * 3600 * 1000).toISOString();
+	const near = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString();
+	const beyond = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: [], after: far }) }, secretsSeams());
+	const hit = beyond.find((c) => /beyond PI_WAIT_AFTER_MAX_MS/.test(c.label));
+	assert.ok(hit && hit.ok === false);
+	assert.match(hit.label, new RegExp(far.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "it names the instant to go and edit");
+	assert.match(hit.fix, /wait-after-beyond-max/, "and the reason the record will actually carry");
+
+	// Inside the ceiling: silent. And the ceiling is the env var, not the 24h maximum wait -- a 2-day `after`
+	// is the field's most obvious use and must not be reported as a defect.
+	const ok = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: [], after: near }) }, secretsSeams());
+	assert.equal(ok.some((c) => /beyond PI_WAIT_AFTER_MAX_MS/.test(c.label)), false);
+	// And it reads the operator's own ceiling, not just the default.
+	const lowered = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: [], after: near }), PI_WAIT_AFTER_MAX_MS: String(3600 * 1000) }, secretsSeams());
+	assert.equal(lowered.find((c) => /beyond PI_WAIT_AFTER_MAX_MS/.test(c.label))?.ok, false);
+});
+
+test("doctor: a broken profile NO trigger names only warns -- nothing refuses today", async () => {
+	// The missing-profile check is trigger-driven; the stat loop is declaration-driven. Failing the whole
+	// command on a retired entry no job looks up is the same over-reporting the `waiting > 0` gate prevents.
+	const dir = mkdtempSync(join(tmpdir(), "pi-wait-unused-"));
+	const good = join(dir, "wait.sh");
+	writeFileSync(good, "#!/bin/sh\nexit 0\n");
+	chmodSync(good, 0o755);
+	const env = {
+		PI_PROVIDER: "anthropic",
+		ANTHROPIC_API_KEY: "sk-x",
+		PI_TRIGGERS_FILE: waitTriggersFile({ profiles: ["jira"] }),
+		PI_WAIT_PROFILES: `jira:${good},retired:${join(dir, "gone.sh")}`,
+	};
+	const checks = await collectChecks(env, secretsSeams());
+	const retired = checks.find((c) => c.label.startsWith("Wait profile retired "));
+	assert.equal(retired.ok, true, "it does not fail the command");
+	assert.equal(retired.warn, true, "but it is not silent either");
+	assert.match(retired.label, /no trigger names it/);
+	assert.equal(checks.find((c) => c.label.startsWith("Wait profile jira ")).ok, true);
+	assert.ok(checks.find((c) => c.label.startsWith("Wait profile jira ")).label.includes("named by no trigger") === false);
+});
+
+test("doctor's stat probe follows SYMLINKS, exactly as the gate's does", async () => {
+	// The one property this block rests on is that `statPath` asks the question `makeWaitChecker` will ask at
+	// spawn. `realpathSync` is the half with no other pin: drop it and every test above stays green while a
+	// release-directory layout (`current -> releases/<date>/wait.sh`), which the gate runs happily, reads here
+	// as a check that can never answer. Asserted against the REAL checker, not against a restatement of it.
+	const dir = mkdtempSync(join(tmpdir(), "pi-wait-symlink-"));
+	const real = join(dir, "wait-2026-08-30.sh");
+	writeFileSync(real, "#!/bin/sh\nexit 0\n");
+	chmodSync(real, 0o755);
+	const link = join(dir, "current.sh");
+	symlinkSync(real, link);
+
+	const checks = await collectChecks(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: waitTriggersFile({ profiles: ["jira"] }), PI_WAIT_PROFILES: `jira:${link}` },
+		secretsSeams(),
+	);
+	assert.equal(checks.find((c) => c.label.startsWith("Wait profile jira ")).ok, true, "doctor follows the link");
+
+	// And the gate agrees: it spawns rather than answering profileUnknown.
+	let spawned = 0;
+	const check = makeWaitChecker({
+		profiles: { jira: link },
+		spawnFn: () => {
+			spawned += 1;
+			const handlers = new Map();
+			const child = { stdout: { on: (e, f) => handlers.set(`o${e}`, f) }, stderr: { on: (e, f) => handlers.set(`e${e}`, f) }, on: (e, f) => handlers.set(e, f), kill: () => {} };
+			queueMicrotask(() => handlers.get("exit")?.(0, null));
+			return child;
+		},
+		log: () => {},
+	});
+	assert.deepEqual(await check("jira", "acme/web#7"), { verdict: "go", fault: false });
+	assert.equal(spawned, 1, "the gate resolved the same link doctor resolved");
 });

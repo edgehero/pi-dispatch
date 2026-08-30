@@ -274,6 +274,10 @@ or what it costs):
   them. The worker runs your one line script (`exec op read --no-newline "$1"`) on the host before the
   container starts, so the job gets values and never your manager's credential
   ([`docs/secrets.md`](docs/secrets.md))
+- `"waitFor": [{ "after": "2026-09-01T09:00:00Z" }, { "profile": "jira" }]` holds this trigger's job in the
+  queue, unstarted and unbilled, until every condition clears. An instant costs nothing; a profile names one
+  of your own check scripts, which the worker runs on the host and reads the exit code of
+  ([`docs/wait-for.md`](docs/wait-for.md)).
 - `"resume": true` continues the session that opened the PR ([`docs/sessions.md`](docs/sessions.md)).
 - `"github": true` on a cron trigger mints the same per-job GitHub token the webhook path gets, so a
   scheduled flow can use `gh`.
@@ -315,6 +319,24 @@ because two agents editing one working tree race each other with no gate and no 
 
 Manage them with `m` in the panel or `PI_SCOPED_LIMITS_FILE` by hand
 ([`docs/scoped-limits.md`](docs/scoped-limits.md)).
+
+### Waiting on a condition
+
+A trigger fires the moment its event arrives, which is sometimes exactly wrong: the label goes on at 16:40
+but the deploy window opens at 09:00, or the ticket is labelled while its parent is still in review.
+`run.waitFor` holds the job in the queue, unstarted and unbilled, until every condition clears:
+
+```json
+{ "on": { "type": "label", "any": ["pi:deploy"] },
+  "run": { "kind": "github", "flow": "deploy",
+           "waitFor": [{ "after": "2026-09-01T09:00:00Z" }, { "profile": "jira" }] } }
+```
+
+An `after` is answered from the clock and costs nothing. A `profile` names one of your own scripts, which
+the worker runs on the host with the job's target id (`acme/web#7`, never a title or a body) and reads the
+exit code: 0 to go, 3 for not yet, 2 if it will never clear, 1 if you could not tell. Held jobs get their
+own panel section showing what each is waiting on and for how long, plus `dispatch_waits` and a
+`dispatch_wait_cancel` behind the operator confirm ([`docs/wait-for.md`](docs/wait-for.md)).
 
 ## Flows: the custom prompt a trigger runs
 

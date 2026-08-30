@@ -104,9 +104,12 @@ Three doors, same as quiet hours:
 
 - A `scope-cap` refusal is final for that window. No tool resets a counter; the window rolls over on its
   own (UTC), and the counters expire from redis like the global ones.
-- Deferrals are visible only as the queue's delayed count (the panel's status line shows it when
-  nonzero). That count also includes cron next-occurrences and retry backoff, so a nonzero value is
-  normal on any deployment with schedules.
+- A scope deferral is visible only as the queue's delayed count (the panel's status line shows it when
+  nonzero). That count also includes cron next-occurrences, retry backoff, quiet-hours deferrals and jobs
+  held on [`run.waitFor`](wait-for.md), so a nonzero value is normal on any deployment with schedules.
+  Only the last of those has a section of its own, because a wait is a per-trigger condition an operator
+  wrote and a scope deferral is a ceiling that clears in seconds without anyone acting; a row per scope
+  deferral would be a panel that redraws itself every few seconds saying nothing has gone wrong.
 - The counters live under hashed keys (`budget:s:<16 hex>`) so scopes containing `:` or `/` cannot
   collide with the global key namespace; the panel and `dispatch_limits` recompute the hash from the
   configured scope to display used counts.
