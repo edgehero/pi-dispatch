@@ -29,7 +29,7 @@ import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { loadScopedLimits } from "./scoped-limits.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
-import { makeQueue } from "./queue.mjs";
+import { hostQueueName, makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter } from "./run-history.mjs";
@@ -38,6 +38,9 @@ import { loadSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 const exec = promisify(execFile);
+
+/** How long boot will wait for `docker image inspect` before shipping without a digest. */
+const BOOT_IMAGE_TIMEOUT_MS = 5_000;
 
 /**
  * This worker's own package version, for the registry row (issue #57): a rolling upgrade should be
@@ -498,7 +501,15 @@ export async function startWorker(
 	// reason is the module's own -- the tag the preflight checked has to be the tag `docker run` is
 	// handed, and two constructions are two chances for that to stop being true.
 	const imagePreflight = makeImagePreflightFn({ image: config.jobImage });
-	const bootImage = await imagePreflight({}).catch(() => ({}));
+	// BOUNDED, because `.catch()` cannot rescue a promise that never settles: `runDocker` resolves only on
+	// the child's `close` or `error` and has no timeout of its own, so a wedged daemon would hang boot
+	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may
+	// never be able to stop a worker starting. The per-JOB preflight keeps its unbounded wait, where a
+	// wedged daemon is the job's problem and the 30-minute job timeout already covers it.
+	const bootImage = await Promise.race([
+		imagePreflight({}).catch(() => ({})),
+		new Promise((resolve) => setTimeout(() => resolve({}), BOOT_IMAGE_TIMEOUT_MS).unref?.()),
+	]);
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
@@ -513,7 +524,9 @@ export async function startWorker(
 		image: config.jobImage,
 		imageDigest: bootImage.imageDigest ?? "",
 		piVersion: bootImage.piVersion ?? "",
-		concurrency: bootConcurrency,
+		// A thunk, because the spec says this row carries the LIVE slot count and the overlay can lower it
+		// mid-run through `dispatch_set`. A literal here would publish the boot value forever.
+		concurrency: () => worker?.concurrency ?? bootConcurrency,
 		pid: process.pid,
 		// The host's IANA zone, because a cron PATTERN carries none: `triggers.json` has no `tz` field and
 		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
@@ -527,8 +540,25 @@ export async function startWorker(
 		cronCount: () => schedules.current.length,
 	});
 
+	// THE HOST QUEUE (issue #57): work only this machine can do, because the folder lives here.
+	//
+	// Armed by the operator DECLARING a name, not by a peer appearing. Two reasons, and the first is
+	// decisive: which queue a job is enqueued to is a routing decision made by whoever enqueues it, so it
+	// cannot be allowed to flip underneath a running deployment when a second host happens to register --
+	// a cron scheduler upserted on one queue and pruned from another is exactly the mutual teardown this
+	// issue exists to stop. And a second BullMQ Worker is a second blocking connection, which a single-host
+	// deployment should not pay for silently. Declaring a name IS the multi-host declaration; `doctor`
+	// warns when peers exist and nobody has made it.
+	const hostQueue = config.workerNameDeclared ? hostQueueName(config.workerName) : null;
+	// The long-lived handle the cron watcher reloads through. Its own when a host queue is armed, so a
+	// live triggers-file edit lands on the same queue the boot reconcile used; otherwise the shared
+	// runtime queue, exactly as before. Registered as an extraCloser only when it is a NEW handle --
+	// closing `runtimeQueue` twice would be closing another owner's connection.
+	const cronQueue = hostQueue ? makeQueue(parseConnection(config.valkeyUrl), { name: hostQueue }) : runtimeQueue;
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
+		hostQueue,
 		// Names the BullMQ Worker, which makes `getWorkers()` rows tell hosts apart -- bullmq appends
 		// `:w:<name>` to the client name and `moveToActive` stamps `processedBy` onto each active job's
 		// hash, so per-job host attribution arrives for free. A NICETY on top of the registry and never the
@@ -539,7 +569,7 @@ export async function startWorker(
 		getSettings,
 		redis,
 		recordRun,
-		extraClosers: [runtimeQueue, registry],
+		extraClosers: [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])],
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
@@ -736,7 +766,12 @@ export async function startWorker(
 	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
 	// queue entirely -- no getJobSchedulers Redis hit -- but still logs {0,0} so the operator sees cron is off.
 	if (schedules.current.length > 0) {
-		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }));
+		// Onto the HOST queue when one is armed. That makes Gap 1 structural rather than merely gated: a
+		// host queue's resident schedulers are only ever that host's, so `reconcile`'s "resident minus my
+		// config" is correct again by construction and two hosts can no longer prune each other at all. The
+		// fingerprint gate stays, because it still catches the divergence itself -- including a timezone
+		// disagreement, which no queue split can detect.
+		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
 		try {
 			const r = await reconcileGated(rq, schedules.current, { registry, log, tz: hostTz });
 			log("schedules_installed", { installed: r.installed, removed: r.removed });
@@ -751,7 +786,7 @@ export async function startWorker(
 	// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
 	// Only when a triggers file is configured; best-effort + unref'd; a bad edit keeps the running schedulers.
 	if (config.triggersFile) {
-		watchTriggersFile(config, runtimeQueue, log, schedules, registry, hostTz);
+		watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz);
 	}
 
 	// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so

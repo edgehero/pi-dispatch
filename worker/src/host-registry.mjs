@@ -55,9 +55,39 @@ export const HOST_TTL_MS = 90_000;
  * panel row and must never be able to invent a refusal. Nothing here is on the paid path, so there is no
  * case where throwing would be more correct than continuing.
  */
-export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = HOST_TTL_MS, log = () => {} }) {
+/**
+ * How long any single registry command may take before it is treated as a failure.
+ *
+ * THIS BOUND IS THE WHOLE FAIL-OPEN MECHANISM, and getting it wrong is subtle enough to be worth the
+ * paragraph. `makeRedisClient` sets `maxRetriesPerRequest: null`, which BullMQ's blocking connections
+ * require and which means a command issued against an unreachable server does NOT reject -- it QUEUES,
+ * forever. So a `try/catch` around it catches nothing: the failure mode of this client is a HANG, and a
+ * hang is not an exception. Every `await` in this module therefore goes through `bounded`, which converts
+ * "never answers" into "answered no" so the catch below can do its job.
+ */
+const REGISTRY_OP_TIMEOUT_MS = 2_000;
+
+/** Reject rather than wait forever. See REGISTRY_OP_TIMEOUT_MS for why this is not optional here. */
+function bounded(promise, ms = REGISTRY_OP_TIMEOUT_MS) {
+	return new Promise((resolve, reject) => {
+		// NOT unref'd, deliberately. An unref'd timer does not fire when nothing else is holding the event
+		// loop, so the bound would silently stop existing in exactly the situation it is for -- a shutdown
+		// where the hung command is the last thing running. The cost is that a pending call can delay exit
+		// by at most this timeout, which is the point: bounded, and short.
+		const t = setTimeout(() => reject(new Error("registry timeout")), ms);
+		Promise.resolve(promise).then(
+			(v) => (clearTimeout(t), resolve(v)),
+			(e) => (clearTimeout(t), reject(e)),
+		);
+	});
+}
+
+export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = HOST_TTL_MS, log = () => {}, timeoutMs = REGISTRY_OP_TIMEOUT_MS }) {
 	let timer = null;
 	let facts = {};
+	// Set the moment `close` is entered, so a beat already in flight cannot re-HSET the row AFTER the DEL
+	// and recreate the very ghost `close` exists to remove.
+	let closed = false;
 	// Logged once per TRANSITION rather than once per beat: at four beats a minute, a Valkey outage would
 	// otherwise drown the log it is meant to serve. `notePackageKey` sets this precedent and states it.
 	let reachable = true;
@@ -77,9 +107,21 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 			} catch {
 				resolved = ""; // a fact that cannot be computed is absent, never a reason to skip the beat
 			}
-			flat.push(k, String(resolved ?? ""));
+			const value = String(resolved ?? "");
+			// THE CONTENT RULE, ENFORCED HERE rather than asserted in a test. A test can only check the fields
+			// it happens to publish itself, so it could never catch the day someone adds `logsDir` at a call
+			// site. This can: a value that is path-shaped is DROPPED and named, loudly, once.
+			//
+			// The rule is mechanical rather than a blanket ban on `/`, because one legitimate value contains
+			// one: an IANA zone is `Europe/Amsterdam`. What no admissible value has is a filesystem ROOT -- a
+			// leading separator, a backslash, or a drive letter.
+			if (/^[/\\]|\\|^[A-Za-z]:[/\\]/.test(value)) {
+				log("host_registry_field_refused", { host: name, field: k, reason: "path-shaped" });
+				continue;
+			}
+			flat.push(k, value);
 		}
-		await redis.hset(key, ...flat);
+		await bounded(redis.hset(key, ...flat), timeoutMs);
 		// PEXPIRE ON EVERY BEAT, which REVERSES this project's stated TTL rule ("set the TTL only when the
 		// key is first created, so a long window cannot push its expiry forward" -- budget.mjs). The
 		// reversal is correct because the OBJECT is different, and the distinction is worth keeping:
@@ -92,14 +134,21 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		// The in-repo precedent is lease-shaped and two files away: `wait-state.hold` re-PEXPIREs the
 		// supersede lease `wait:key:<dedupId>` -- and only after checking the lease is still ours, which is
 		// the same ownership check this key gets for free by being named after its only writer.
-		await redis.pexpire(key, ttlMs);
-		await redis.sadd(HOST_SET, name);
+		await bounded(redis.pexpire(key, ttlMs), timeoutMs);
+		await bounded(redis.sadd(HOST_SET, name), timeoutMs);
 	};
 
+	// The beat currently in flight, so `close` can DRAIN before it deletes. A `closed` flag checked at the
+	// top of `beat` is not enough on its own: a beat that had already passed that check would land its
+	// HSET after the DEL and recreate the very ghost `close` exists to remove.
+	let inFlight = null;
+
 	const beat = async (fields = facts) => {
+		if (closed) return;
 		facts = { ...facts, ...fields };
 		try {
-			await write({ ...facts, name, beatAt: now() });
+			inFlight = write({ ...facts, name, beatAt: now() });
+			await inFlight;
 			if (!reachable) {
 				reachable = true;
 				log("host_registry_restored", { host: name });
@@ -109,6 +158,8 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 				reachable = false;
 				log("host_registry_unreachable", { host: name, reason: err?.message });
 			}
+		} finally {
+			inFlight = null;
 		}
 	};
 
@@ -116,9 +167,17 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		/** This worker's own name, so a caller never re-derives it from config and gets a different answer. */
 		self: () => name,
 
-		/** Merge new facts and publish immediately. Awaited by callers that must be visible before they read. */
-		async publish(fields) {
-			await beat(fields);
+		/**
+		 * Flush this host's current facts NOW, for a caller that must be visible before it reads peers.
+		 *
+		 * Takes NO fields, deliberately. It used to merge them, and that quietly destroyed the thunk
+		 * mechanism it depends on: a caller passing `fpCron` as a computed STRING replaced the closure the
+		 * heartbeat installed, so every later beat published a frozen value and two hosts' fingerprints
+		 * could drift apart again. A caller that wants a fact re-read on every beat installs a thunk once,
+		 * at `start`; a caller that wants it published NOW calls this.
+		 */
+		async publish() {
+			await beat();
 		},
 
 		/**
@@ -128,7 +187,7 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		 * read as a peer that disagrees with the process that is running now.
 		 */
 		async livePeers() {
-			const res = await readLiveHosts(redis, { now });
+			const res = await readLiveHosts(redis, { now, timeoutMs });
 			if (res.unreachable) return res;
 			return { hosts: res.hosts.filter((h) => h.name !== name) };
 		},
@@ -140,7 +199,9 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		 * queue, so a clean shutdown clears it before `process.exit`.
 		 */
 		async start(fields = {}, { intervalMs = HOST_BEAT_MS } = {}) {
+			if (closed || timer) return; // a second start would leak the first interval
 			await beat({ ...fields, startedAt: now() });
+			if (closed) return; // close() landed while the first beat was in flight
 			timer = setInterval(() => void beat(), intervalMs);
 			timer.unref?.();
 		},
@@ -151,11 +212,16 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		 * `wait-state.release` takes the same posture for the same reason.
 		 */
 		async close() {
+			if (closed) return; // idempotent, and the flag is also what stops an in-flight beat resurrecting the row
+			closed = true;
 			if (timer) clearInterval(timer);
 			timer = null;
+			// Drain before deleting, bounded like everything else here: an unbounded wait on a beat that is
+			// itself hung would be the shutdown hang this module's timeout exists to prevent.
+			await bounded(inFlight ?? Promise.resolve(), timeoutMs).catch(() => {});
 			try {
-				await redis.del(hostKey(name));
-				await redis.srem(HOST_SET, name);
+				await bounded(redis.del(hostKey(name)), timeoutMs);
+				await bounded(redis.srem(HOST_SET, name), timeoutMs);
 			} catch {
 				// Fail open: the TTL is the backstop, and a ghost row costs a panel line, never a decision.
 			}
@@ -177,22 +243,25 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  * one treats them alike: "there are no other hosts" and "I could not find out" differ, and a panel that
  * renders the second as the first tells an operator their fleet is gone when Valkey merely blinked.
  */
-export async function readLiveHosts(redis, { now = () => Date.now() } = {}) {
+export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS } = {}) {
 	let names;
 	try {
-		names = await redis.smembers(HOST_SET);
+		names = await bounded(redis.smembers(HOST_SET), timeoutMs);
+		// Inside the try, not after it: a client that answers with something non-iterable would otherwise
+		// throw straight out of a function whose contract is that every method fails open.
+		if (names !== null && names !== undefined && !Array.isArray(names)) throw new Error("smembers did not return a list");
 	} catch (err) {
 		return { unreachable: err?.message ?? "registry unreadable" };
 	}
 	const hosts = [];
 	for (const member of names ?? []) {
 		try {
-			const row = await redis.hgetall(hostKey(member));
+			const row = await bounded(redis.hgetall(hostKey(member)), timeoutMs);
 			if (!row || Object.keys(row).length === 0) {
-				await redis.srem(HOST_SET, member).catch(() => {});
+				await bounded(redis.srem(HOST_SET, member), timeoutMs).catch(() => {});
 				continue;
 			}
-			const beatAt = Number(row.beatAt);
+			const beatAt = typeof row.beatAt === "string" && row.beatAt.trim() !== "" ? Number(row.beatAt) : NaN;
 			hosts.push({
 				...row,
 				name: row.name || member,

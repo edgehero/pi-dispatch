@@ -10,6 +10,9 @@ import { makeWaitState } from "./wait-state.mjs";
 const exec = promisify(execFile);
 
 export const QUEUE = "pi-jobs";
+
+/** The key the host-wide in-flight count lives under. One machine, one counter, whatever the queue. */
+export const HOST_SLOT_KEY = "host";
 export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
 // The scope-busy re-check (issue #242): a held scope has no natural "until" (the holder may run to
 // JOB_TIMEOUT_MS), so a deferred job re-tests on a fixed cadence. 5s keeps the worst case trivial
@@ -60,7 +63,7 @@ const THROTTLE_FLOOR_MS = 11_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -378,6 +381,26 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 		// occurrence at pickup and promotes it on time alone, so a slow run overlaps its own successor
 		// (measured: 301ms of live container overlap through this very processor) unless this gate holds.
 		// Infinity-limited scopes still acquire, so release stays uniform for every scoped job.
+		// THE HOST-WIDE SLOT (issue #57), taken before the scope slot and released in the same finally.
+		//
+		// It exists only when this worker drains a second, host-affine queue. BullMQ's concurrency is per
+		// Worker, so two queues at `PI_CONCURRENCY` would run twice the containers -- and that knob bounds a
+		// MACHINE (its RAM, its share of the provider's concurrent-stream budget), not a queue. Deferral
+		// rather than refusal, at the scope gate's own cadence and for its reason: a full host is transient
+		// state, never a verdict about the job (CONST-RETRY-INFRA-ONLY).
+		//
+		// Before the scope acquire, so a job that cannot run on this machine at all never takes a folder
+		// mutex it would immediately have to give back, and so the two releases nest rather than interleave.
+		let hostHeld = false;
+		if (hostBound) {
+			if (!hostBound.slots.tryAcquire(HOST_SLOT_KEY, hostBound.limit())) {
+				deps?.log?.("host_busy_deferred", { jobId: job.id, delayMs: SCOPE_BUSY_RECHECK_MS });
+				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
+				throw new DelayedError();
+			}
+			hostHeld = true;
+		}
+
 		const limits = scopedLimits();
 		const scope = canonicalScope(job.data);
 		let held = false;
@@ -387,6 +410,12 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
 				// host path); the delayed count and the job id are what an operator needs to see it.
 				deps?.log?.("scope_busy_deferred", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS });
+				// The host slot goes back before we defer: `makeInFlight().release` is not idempotent, so a slot
+				// held across a deferral would be a slot this machine never gets back.
+				if (hostHeld) {
+					hostBound.slots.release(HOST_SLOT_KEY);
+					hostHeld = false;
+				}
 				await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
 				throw new DelayedError();
 			}
@@ -422,6 +451,10 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			if (held) {
 				inFlight.release(scope);
 				held = false;
+			}
+			if (hostHeld) {
+				hostBound.slots.release(HOST_SLOT_KEY);
+				hostHeld = false;
 			}
 			clearTimeout(timer);
 			throw error;
@@ -517,65 +550,98 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// Release FIRST and never throw (release clamps at zero by construction): a throw here would
 			// mask the job's real error, and a missed release wedges the scope until a worker restart.
 			if (held) inFlight.release(scope);
+			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
 			clearTimeout(timer);
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
 }
 
-export function createWorker({ connection, name, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight, waitState, afterMaxMs, checkSlots, checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, extraClosers = [] }) {
-	let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
-	const processor = makeProcessor({
-		cancelJob: (id, reason) => worker.cancelJob(id, reason),
-		stopContainer: (name) => exec("docker", ["stop", "-t", "5", name]),
-		redis,
-		getSettings,
-		// Late-bound over `worker`: an overlay concurrency change re-binds the live slot count at the next
-		// job start. Guarded so only an integer that actually differs touches the property.
-		applyConcurrency: (n) => {
-			if (Number.isInteger(n) && worker.concurrency !== n) worker.concurrency = n;
-		},
-		pauseUntil,
-		// Undefined pass-throughs take makeProcessor's own defaults (no limits; a fresh per-processor
-		// in-flight map -- one per worker process, which under DES-CONCURRENCY-3's one-worker-per-daemon
-		// shape means one per daemon).
-		scopedLimits,
-		inFlight,
-		// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
-		// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
-		waitState,
-		afterMaxMs,
-		// Issue #230, the polled tier. `concurrencyNow` reads the LIVE slot count rather than the boot value,
-		// because the overlay can lower it through `dispatch_set` and a check must never take the last free
-		// slot from a paid job. Late-bound over `worker` exactly as `applyConcurrency` is, and for the same
-		// reason: the value it needs does not exist until the Worker is constructed.
-		checkSlots,
-		checkSlotCount,
-		concurrencyNow: concurrencyNow ?? (() => worker?.concurrency ?? concurrency),
-		intervalMs,
-		maxWaitMs,
-		maxChecks,
-		maxFaults,
-		deps,
-		recordRun,
-	});
+export function createWorker({ connection, name, hostQueue = null, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
+	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
+	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
+	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
+	// the delayed set is gated on each worker's own `Date.now()`, so the fastest clock wins every hop and a
+	// job that had to reach another host might never get there.
+	const names = hostQueue ? [QUEUE, hostQueue] : [QUEUE];
+	const workers = [];
 
-	worker = new Worker(QUEUE, processor, {
-		// maxRetriesPerRequest: null is REQUIRED for BullMQ's blocking connections, or it throws.
-		connection: { ...connection, maxRetriesPerRequest: null },
-		concurrency,
-		maxStalledCount: 0, // a stalled paid job FAILS, never silently re-runs (verified live)
-		// Issue #57. Conditional, so a bare createWorker builds a byte-identical options object -- and because
-		// bullmq's own matcher accepts both the named and unnamed client-name spellings, naming costs nothing.
-		...(name ? { name } : {}),
-		...(limiter ? { limiter } : {}),
-	});
+	// THE HOST-WIDE BOUND, and the reason it has to exist at all. `PI_CONCURRENCY` bounds a HOST -- its RAM
+	// and its share of the provider's concurrent-stream budget (DES-CONCURRENCY-3) -- but BullMQ's own
+	// concurrency is per Worker, so two Workers at 3 would run six containers. This semaphore restores the
+	// bound as a property of the machine. Process memory is still the correct store, for this entry's own
+	// unchanged reason: it counts THIS host's containers, and the boot reaper clears survivors before
+	// draining. Armed only when a host queue exists, so a single-host deployment builds one Worker and
+	// never reaches the acquire.
+	const hostBound = hostQueue ? { slots: hostSlots, limit: () => liveConcurrency() } : null;
+	const liveConcurrency = () => workers[0]?.concurrency ?? concurrency;
+
+	for (const queueName of names) {
+		let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
+		const processor = makeProcessor({
+			// Bound to THIS worker: a job on the host queue is cancelled by the worker draining that queue,
+			// and the shared handle could not reach it.
+			cancelJob: (id, reason) => worker.cancelJob(id, reason),
+			stopContainer: (name) => exec("docker", ["stop", "-t", "5", name]),
+			redis,
+			getSettings,
+			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the
+			// next job start, and with two queues both have to move or the host bound and the queue bounds
+			// stop agreeing. Guarded so only an integer that actually differs touches the property.
+			applyConcurrency: (n) => {
+				if (!Number.isInteger(n)) return;
+				for (const w of workers) if (w.concurrency !== n) w.concurrency = n;
+			},
+			pauseUntil,
+			// SHARED across both workers, and that sharing is the point rather than an optimisation: the
+			// folder mutex, the per-scope ceiling and the wait-check lease all bound the HOST, so two
+			// independent maps would double every one of them exactly as two Workers double concurrency.
+			scopedLimits,
+			inFlight,
+			hostBound,
+			// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
+			// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
+			waitState,
+			afterMaxMs,
+			// Issue #230, the polled tier. `concurrencyNow` reads the LIVE slot count rather than the boot value,
+			// because the overlay can lower it through `dispatch_set` and a check must never take the last free
+			// slot from a paid job.
+			checkSlots,
+			checkSlotCount,
+			concurrencyNow: concurrencyNow ?? liveConcurrency,
+			intervalMs,
+			maxWaitMs,
+			maxChecks,
+			maxFaults,
+			deps,
+			recordRun,
+		});
+
+		worker = new Worker(queueName, processor, {
+			// maxRetriesPerRequest: null is REQUIRED for BullMQ's blocking connections, or it throws.
+			connection: { ...connection, maxRetriesPerRequest: null },
+			concurrency,
+			maxStalledCount: 0, // a stalled paid job FAILS, never silently re-runs (verified live)
+			// Issue #57. Conditional, so a bare createWorker builds a byte-identical options object -- and because
+			// bullmq's own matcher accepts both the named and unnamed client-name spellings, naming costs nothing.
+			...(name ? { name } : {}),
+			...(limiter ? { limiter } : {}),
+		});
+		workers.push(worker);
+	}
+
+	const primary = workers[0];
+	// The host-queue worker, for the caller that must register listeners on both. Attached rather than
+	// returned as a pair so every existing caller keeps receiving exactly what it received before.
+	primary.hostWorker = workers[1] ?? null;
 
 	const shutdown = async () => {
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,
-		// worker.close() would wait up to 30 minutes for the container.
-		await Promise.resolve(worker.cancelAllJobs?.("shutdown")).catch(() => {});
-		await worker.close();
+		// worker.close() would wait up to 30 minutes for the container. ONE shutdown for every queue: two
+		// registrations would mean two `process.exit(0)` racing, and the second worker's containers would
+		// outlive the handler that was meant to stop them.
+		for (const w of workers) await Promise.resolve(w.cancelAllJobs?.("shutdown")).catch(() => {});
+		for (const w of workers) await w.close().catch(() => {});
 		// Close auxiliary resources (e.g. a cron scheduler) after the worker drains. Per-item catch
 		// so one failing or absent closer never strands the others or blocks exit -- matches the
 		// swallow posture on cancelAllJobs above.
@@ -589,5 +655,5 @@ export function createWorker({ connection, name, concurrency, getSettings, redis
 	// worker still aborts in-flight jobs and docker-stops their containers rather than orphaning them.
 	if (process.platform === "win32") process.once("SIGBREAK", shutdown);
 
-	return worker;
+	return primary;
 }

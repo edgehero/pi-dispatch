@@ -33,8 +33,8 @@ function fakeRegistry(peers, { unreachable = false } = {}) {
 	const published = [];
 	return {
 		published,
-		async publish(fields) {
-			published.push(fields);
+		async publish() {
+			published.push(true);
 		},
 		async livePeers() {
 			return unreachable ? { unreachable: "ECONNREFUSED" } : { hosts: peers };
@@ -149,8 +149,10 @@ test("ABSENCE never refuses: an unreadable registry, or none at all, proceeds", 
 test("PUBLISH happens before READ, which is what makes the legitimate-edit sequence race-free", async () => {
 	const order = [];
 	const registry = {
-		async publish(f) {
-			order.push(["publish", f.fpCron, f.cronCount]);
+		// `publish` takes no fields since the thunk fix: passing a computed fingerprint in would REPLACE the
+		// closure the heartbeat installed, so every later beat would republish a frozen value.
+		async publish(...args) {
+			order.push(["publish", args.length]);
 		},
 		async livePeers() {
 			order.push(["read"]);
@@ -160,8 +162,7 @@ test("PUBLISH happens before READ, which is what makes the legitimate-edit seque
 	await reconcileGated(fakeQueue(), [sched("a")], { registry, tz: "UTC" });
 	assert.equal(order[0][0], "publish");
 	assert.equal(order[1][0], "read");
-	assert.equal(order[0][1], cronFingerprint([sched("a")], { tz: "UTC" }));
-	assert.equal(order[0][2], 1);
+	assert.equal(order[0][1], 0, "and it passes NO fields, so the heartbeat's thunks survive it");
 });
 
 test("the WATCH path is gated too, and it updates the live ref it fingerprints from", async () => {

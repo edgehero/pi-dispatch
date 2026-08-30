@@ -300,7 +300,7 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_runs",
     label: "pi-dispatch runs",
     description:
-      "Read-only. Returns structured, PII-free run records from the durable run history. Raw job logs are not available to tools — ask the user to run /dispatch logs.",
+      "Read-only. Returns structured run records (PII-free by construction, plus the worker name when the operator declared one) from the durable run history. Raw job logs are not available to tools — ask the user to run /dispatch logs.",
     parameters: Type.Object({
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
       jobId: Type.Optional(Type.String()),

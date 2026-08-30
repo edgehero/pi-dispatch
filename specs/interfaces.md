@@ -3185,7 +3185,10 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 ## INT-HOST-REGISTRY-CONTRACT
 
-**Producer**: every worker, about itself. **Consumers**: every other worker, the admin extension, `doctor`.
+**Producer**: every worker, about itself. **Consumer today**: the cron gate (`cron.mjs -> reconcileGated`),
+and nothing else. The admin extension and `doctor` are the intended consumers and read none of this yet;
+stated that way deliberately, because a contract that lists readers it does not have is one a later
+reader will assume has already been thought through.
 
 ```
   host:live         SET of worker names -- an index the READER prunes, never a source of truth
@@ -3195,7 +3198,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
     startedAt       epoch ms, first beat of this process
     beatAt          epoch ms, this beat. Readers derive AGE from it rather than trusting expiry
     pid             the worker process id on its own host
-    concurrency     the LIVE slot count, not the boot value
+    concurrency     the LIVE slot count, not the boot value (published as a thunk, so the overlay moves it)
     image           the deployment's default job image TAG
     imageDigest     that image's `{{.Id}}`, or "" when docker could not answer
     piVersion       the image's own `dev.pi-dispatch.pi-version` label, or ""
@@ -3252,6 +3255,26 @@ skips the beat.
 pedantic. A worker with cron disabled has no view of what should be scheduled and must never be able
 to disagree with one that does; a worker whose triggers file declares zero cron entries HAS a view,
 and it is the sharpest form of the failure the gate exists to close.
+
+**Every value is written through a bound, because the failure mode of this client is a HANG.**
+`makeRedisClient` sets `maxRetriesPerRequest: null`, which BullMQ's blocking connections require and
+which means a command issued against an unreachable server QUEUES rather than rejects. A `try/catch`
+around it therefore catches nothing: an outage is not an exception. Every await here is bounded, which
+is what converts "never answers" into "answered no" so the fail-open path can run at all -- and it is
+why the unreachable transition is reportable rather than invisible. The bound's timer is deliberately
+NOT unref'd: an unref'd timer does not fire when the hung command is the last thing holding the loop,
+which is exactly the shutdown case the bound exists for.
+
+**The content rule is enforced by the WRITER**, not by a test. A test can only check the fields it
+publishes itself, so it could never catch the day a path is added at a real call site. A value with a
+leading separator, a backslash, or a drive letter is DROPPED and named (`host_registry_field_refused`).
+The rule is mechanical rather than a ban on `/`, because one admissible value contains one: an IANA
+zone is `Europe/Amsterdam`. What no admissible value has is a filesystem ROOT.
+
+**Residual, recorded rather than fixed**: a hostname whose characters are all outside the name charset
+sanitizes to the same fallback on every such machine, so two hosts could share one row, one BullMQ
+name and one record value -- the precise failure identity exists to prevent. An operator on such a
+host declares `PI_WORKER_NAME`; nothing detects the collision yet.
 
 **The falsification test for anything added here later**: DELETE THE WHOLE `host:*` KEYSPACE WHILE THE
 FLEET RUNS, and every host must behave exactly as it did before this contract existed. That holds because

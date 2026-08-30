@@ -8,10 +8,31 @@ import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 const PR_CLOSE_WORDS = new Set(Object.values(PR_CLOSE_ACTIONS));
 
 export const QUEUE = "pi-jobs";
+
+/**
+ * The queue a HOST-AFFINE job goes to (issue #57): work only one machine can do, because the folder, the
+ * secret resolver or the wait-check script lives there.
+ *
+ * `@` is the separator because it is outside the worker-name charset (`[A-Za-z0-9._-]`), so
+ * `pi-jobs@<name>` decomposes unambiguously and a name can never contain one. A SUFFIX rather than a
+ * prefix so `KEYS bull:pi-jobs*` still shows an operator the whole deployment.
+ *
+ * Deliberately a separate queue rather than a field the pickup gate filters on. BullMQ has no selective
+ * pop, so filtering would mean taking a job and putting it back -- and promotion out of the delayed set is
+ * gated on each worker's OWN `Date.now()` in two places, so the host whose clock runs fastest wins every
+ * hop deterministically. A job that had to reach a different host might never get there, and jitter cannot
+ * fix it: it randomises WHEN the wake is, not WHO wins it.
+ */
+export const hostQueueName = (worker) => `${QUEUE}@${worker}`;
+
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId };
 
-export function makeQueue(connection) {
-	return new Queue(QUEUE, { connection });
+/**
+ * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
+ * single-host deployment never names anything else.
+ */
+export function makeQueue(connection, { name = QUEUE } = {}) {
+	return new Queue(name, { connection });
 }
 
 /**

@@ -112,7 +112,12 @@ export async function reconcileGated(queue, schedules, { registry, log = () => {
 	// the gate be the DEFAULT on every path without a caller having to remember to arm it.
 	if (!registry) return await reconcileFn(queue, schedules, { log });
 	const mine = cronFingerprint(schedules, { tz });
-	await registry.publish({ fpCron: mine ?? "", cronCount: schedules.length });
+	// Publishes this host's CURRENT facts rather than passing the fingerprint in. Passing it in was the
+	// first shape and it quietly destroyed the mechanism it depends on: the heartbeat installs `fpCron` as
+	// a THUNK over the live schedule ref, and a caller merging a computed string replaced that closure, so
+	// every later beat republished a frozen value and two hosts could drift apart again with nothing saying
+	// so. The thunk is installed once, at boot; this only forces it to be read NOW.
+	await registry.publish();
 	const peers = await registry.livePeers();
 
 	// `{ unreachable }` and "no peers" are different facts and the panel must keep them apart -- but for

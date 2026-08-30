@@ -128,8 +128,10 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 
 	const captured = calls[0];
 	captured?.redis?.disconnect?.(); // release the background reconnect handle
-	// The persistent runtimeQueue opens its own ioredis connection; close it so the suite leaks no handle.
-	await captured?.extraClosers?.[0]?.close?.().catch(() => {});
+	// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name also
+	// opens a host-queue handle, and one unclosed ioredis connection holds the event loop open forever --
+	// which shows up as the whole test FILE hanging rather than as a failure anyone can read.
+	for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
 
 	const logs = lines.map((l) => {
 		try {
@@ -848,37 +850,55 @@ test("the worker is NAMED, the registry is closed on shutdown, and the boot line
 
 	// The registry joins the runtime queue as an extraCloser, so a clean shutdown DELETES the row rather
 	// than leaving a ghost peer for the TTL.
-	assert.equal(captured.extraClosers.length, 2);
-	assert.equal(typeof captured.extraClosers[1].close, "function");
-	await captured.extraClosers[1].close();
+	// The runtime queue, the registry, and -- because this deployment DECLARES a name -- the host queue the
+	// cron watcher reloads through. The registry is the one that must leave rather than expire.
+	assert.ok(captured.extraClosers.length >= 2);
+	const registryCloser = captured.extraClosers[1];
+	assert.equal(typeof registryCloser.close, "function");
+	await registryCloser.close();
 
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.host, "mac-mini-1");
 	assert.ok("imageDigest" in started, "two hosts on two builds of one tag must not emit identical boot lines");
 });
 
-test("boot does NOT wait on the registry: a Valkey that never answers must not hang the worker", { skip }, async () => {
+test("an unreachable Valkey cannot hang boot, and a HANG is what unreachable means here", { skip }, async () => {
 	// `makeRedisClient` sets `maxRetriesPerRequest: null`, which BullMQ's blocking connections require and
-	// which means a command against an unreachable server QUEUES FOREVER rather than rejecting. Awaiting the
-	// first beat therefore turns a telemetry keyspace into a boot dependency that can never time out.
-	let started = false;
-	const hung = () => ({
-		self: () => "mac-mini-1",
-		publish: () => new Promise(() => {}),
-		start: () => ((started = true), new Promise(() => {})), // never resolves, exactly as a queued command would not
-		close: async () => {},
-	});
+	// which means a command against an unreachable server QUEUES rather than rejects. So the failure mode is
+	// a hang, a try/catch around it catches nothing, and every registry await has to be BOUNDED instead.
+	//
+	// This drives the REAL registry over a redis whose every command never settles, rather than a fake whose
+	// methods resolve instantly -- a fake would pass against the unbounded code this test exists to keep out.
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const hanging = new Proxy({}, { get: () => () => new Promise(() => {}) });
 
-	const { captured, logs } = await Promise.race([
-		runStart({
-			env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
-			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
-			makeHostRegistry: hung,
-		}),
-		new Promise((_r, reject) => setTimeout(() => reject(new Error("startWorker awaited the registry")), 8000).unref?.()),
-	]);
+	// A triggers file with a cron entry, so the boot RECONCILE runs too: `reconcileGated` awaits publish and
+	// livePeers two hops below the deliberately un-awaited `start()`, and those were the second hang.
+	const dir = mkdtempSync(join(tmpdir(), "pi-boot-hang-"));
+	const folder = mkdtempSync(join(tmpdir(), "pi-boot-folder-"));
+	const triggersFile = join(dir, "triggers.json");
+	writeFileSync(triggersFile, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder, flow: "tidy", task: "tidy up" } }] }));
 
-	assert.equal(started, true, "the heartbeat is still started");
-	assert.ok(captured, "and the worker is constructed regardless");
-	assert.ok(logs.some((l) => l.event === "worker_started"), "a worker whose row never appears still comes up");
+	try {
+		const { captured, logs } = await Promise.race([
+			runStart({
+				env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399", PI_TRIGGERS_FILE: triggersFile },
+				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+				makeHostRegistry: (args) => makeHostRegistry({ ...args, redis: hanging, timeoutMs: 50 }),
+			}),
+			// NOT unref'd: an unref'd rejection timer does not fire when the hang is the only thing left, so
+			// the test would hang rather than fail -- which is the failure it is meant to report.
+			new Promise((_r, reject) => setTimeout(() => reject(new Error("boot waited on the registry")), 15000)),
+		]);
+
+		assert.ok(captured, "the worker is constructed regardless");
+		assert.ok(logs.some((l) => l.event === "worker_started"), "a worker whose row never appears still comes up");
+		assert.ok(logs.some((l) => l.event === "host_registry_unreachable"), "and the outage is REPORTED -- a bound is what turns a hang into something the catch can see");
+		// The gate proceeded rather than refusing: not knowing whether anyone disagrees is not knowing that
+		// someone does, so absence never refuses.
+		assert.ok(logs.some((l) => l.event === "schedules_installed"), "and cron still reconciled");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(folder, { recursive: true, force: true });
+	}
 });

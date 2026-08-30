@@ -166,7 +166,7 @@ test("createWorker NAMES the BullMQ Worker when given one, and omits the option 
 
 		unnamed = mod.createWorker(base);
 		unnamed.on("error", () => {});
-		assert.ok(!("name" in unnamed.opts), "no name given, no name key -- a single-host deployment's options are unchanged");
+		assert.ok(!("name" in unnamed.opts), "no name given, no name key -- the seam stays optional for a bare wiring, though start.mjs always supplies one");
 	} finally {
 		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
 		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
