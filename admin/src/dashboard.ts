@@ -24,8 +24,9 @@ import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connecti
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readStagedPackages } from "./read-model.mjs";
-import { renderStatus, renderBudget, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
+import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
+import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { renderStatus, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 import { box, meter, clip, makeLineInput } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -84,7 +85,28 @@ export function createDashboardDeps(paths: any) {
         redis.hgetall(STALL_KEY).catch(() => ({})),
       ]);
       const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
+      // The scoped limits + their live counters (issue #242): GET only the windows a row caps, each cell
+      // caught individually so one bad read degrades one cell, never the snapshot. Keys recomputed from
+      // the shared scopeKeyPrefix, so this reader and the worker's writer cannot drift.
+      const scopedLimits: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const limitRows: any[] = Array.isArray(scopedLimits?.limits) ? scopedLimits.limits : [];
+      const scopedNow = new Date();
+      const scopedBudget = {
+        rows: await Promise.all(
+          limitRows.map(async (l: any) => {
+            const prefix = scopeKeyPrefix(l.scope);
+            const cell = (key: string) => redis.get(key).then((v: any) => Number(v ?? 0), () => null);
+            const row: any = {};
+            if (Number.isInteger(l.day)) row.day = await cell(dayKey(scopedNow, prefix));
+            if (Number.isInteger(l.week)) row.week = await cell(weekKey(scopedNow, prefix));
+            if (Number.isInteger(l.month)) row.month = await cell(monthKey(scopedNow, prefix));
+            return row;
+          }),
+        ),
+      };
       return {
+        scopedLimits,
+        scopedBudget,
         queue: { pausedState, counts, workers },
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
@@ -552,6 +574,10 @@ export function makeDashboard({
         void dispose().finally(() => done({ action: "managePauses" }));
         return;
       }
+      if (data === "m" || data === "M") {
+        void dispose().finally(() => done({ action: "manageLimits" }));
+        return;
+      }
       if (matchesKey(data, "up")) {
         selected = Math.max(0, selected - 1);
         tui?.requestRender?.();
@@ -684,6 +710,10 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     { title: "RUNS", lines: renderRunList(buildRows(snapshot, runSort), selected, 24) },
     { title: "SETTINGS", lines: toLines(renderSettingsView(snapshot.settings)) },
   ];
+  // Scoped limits appear only when configured (the mutex needs no line) -- renderScopedLimits returns
+  // null for the nothing-configured case, and a section with no lines would render an empty box.
+  const scopedText = renderScopedLimits({ limits: snapshot.scopedLimits, scopedBudget: snapshot.scopedBudget });
+  if (scopedText) sections.splice(2, 0, { title: "SCOPED LIMITS", lines: toLines(scopedText) });
   const plain = [title];
   for (const section of sections) plain.push(section.title, ...section.lines);
   plain.push(KEY_HINTS);
@@ -744,6 +774,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // Triggers are selectable and come FIRST in buildRows, so a trigger's file index == its selection index.
   const trg = triggerLines(snapshot, selected, inner, styler);
   const pw = pauseLines(snapshot.pauseWindows, inner, styler);
+  const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler);
   // Active + run rows follow the triggers in buildRows, so offset the selection index by the trigger count.
   const runRows = buildRows(snapshot, runSort).slice(trg.count);
   const runCount = Array.isArray(snapshot.runs) ? snapshot.runs.length : 0;
@@ -757,6 +788,10 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler), priority: 4, viewKey: "s" },
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
+    // Priority 0: the section an operator acts on least often from the panel folds FIRST under the
+    // collapse budget. The key hint lives in this divider, not the footer -- the footer's width
+    // arithmetic has no headroom for another hint (its own comment), the s/o/Tab precedent.
+    { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
     { key: "runs", head: ["runs", `last ${runCount} · o ${runSort}`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
   ];
@@ -795,8 +830,14 @@ function statusHeader(queue: any, inner: number, styler: any): string {
   const dot = styler.fg(stateColor, "●");
   const word = styler.bold(styler.fg(stateColor, running ? "RUNNING" : "PAUSED"));
   const sep = styler.fg("dim", " · ");
+  // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
+  // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,
+  // quiet-hours and scope deferrals -- an always-on amber would teach operators to ignore it. Absent at
+  // zero, the header is byte-identical to before the count existed.
+  const delayed = Number(c.delayed ?? 0);
   const vitals =
     `${c.waiting ?? 0} waiting` + sep + `${c.active ?? 0} active` + sep +
+    (delayed > 0 ? `${delayed} delayed` + sep : "") +
     (failed > 0 ? styler.fg("error", `${failed} failed`) : `${failed} failed`) + sep +
     `${queue.workers ?? "?"} workers`;
   const clock = new Date().toISOString().slice(11, 19); // HH:MM:SS UTC
@@ -994,6 +1035,36 @@ function pauseRow(w: any, now: number, inner: number, styler: any): string {
   if (w.days) bits.push(styler.fg("muted", `[${w.days.join(",")}]`));
   if (w.dateFrom || w.dateTo) bits.push(styler.fg("dim", `${w.dateFrom ?? "…"}→${w.dateTo ?? "…"}`));
   if (until) bits.push(styler.fg("warning", `resumes in ${humanizeMs(until - now) || "<1m"}`));
+  return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
+}
+
+/** The scoped limits (issue #242) as colored rows: used/cap per capped window, config-only concurrency. */
+function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any): { count: number; lines: string[] } {
+  const lines: string[] = [];
+  if (scopedLimits && scopedLimits.missing) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
+  if (scopedLimits && scopedLimits.invalid) { lines.push(styler.cell(`(scoped-limits file invalid: ${scopedLimits.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
+  const list = (scopedLimits && scopedLimits.limits) ?? [];
+  if (list.length === 0) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
+  list.forEach((l: any, i: number) => lines.push(limitRow(l, scopedBudget?.rows?.[i] ?? null, inner, styler)));
+  return { count: list.length, lines };
+}
+
+function limitRow(l: any, used: any, inner: number, styler: any): string {
+  // The dot goes amber when any capped window's used count has reached its cap (the next job refuses
+  // scope-cap). Concurrency never drives the dot: per-scope in-flight is worker-process state this
+  // panel cannot see, and the panel never invents a number -- `≤K at once` is config, stated as such.
+  let atCap = false;
+  const windows: string[] = [];
+  for (const key of ["day", "week", "month"]) {
+    if (!Number.isInteger(l[key])) continue;
+    const u = used && Number.isFinite(used[key]) ? used[key] : null;
+    const over = u !== null && u >= l[key];
+    if (over) atCap = true;
+    windows.push(styler.fg(over ? "warning" : "text", `${key} ${u ?? "-"}/${l[key]}`));
+  }
+  const dot = atCap ? styler.fg("warning", "●") : styler.fg("dim", "○");
+  const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
+  if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));
   return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
 }
 

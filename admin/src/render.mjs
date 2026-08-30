@@ -107,6 +107,31 @@ export function renderBudget({ budget, settings } = {}) {
   return lines.join("\n");
 }
 
+/**
+ * Render the scoped limits (issue #242) as plain text: one line per configured row with used/cap per
+ * capped window (`-` when the counter read failed) and the config-only concurrency ceiling -- per-scope
+ * in-flight is worker-process state, so no live count is ever invented here. Degrades in place on a
+ * missing (no lines) or invalid (one error line) file, like renderTriggers.
+ */
+export function renderScopedLimits({ limits, scopedBudget } = {}) {
+  if (limits?.invalid) return `Scoped limits: file invalid (${limits.invalid})`;
+  const list = Array.isArray(limits?.limits) ? limits.limits : [];
+  if (list.length === 0) return null; // nothing configured: say nothing (the mutex needs no line)
+  const lines = ["Scoped limits:"];
+  list.forEach((l, i) => {
+    const used = scopedBudget?.rows?.[i] ?? null;
+    const bits = [];
+    for (const key of ["day", "week", "month"]) {
+      if (!Number.isInteger(l[key])) continue;
+      const u = used && Number.isFinite(used[key]) ? used[key] : "-";
+      bits.push(`${key} ${u}/${l[key]}`);
+    }
+    if (Number.isInteger(l.concurrent)) bits.push(`<=${l.concurrent} at once`);
+    lines.push(`  ${l.scope}: ${bits.join(" · ")}`);
+  });
+  return lines.join("\n");
+}
+
 /** One window's cap + state suffix: the overlay cap and its classified state, or the unknown-cap notice. */
 function capLabel(cap, reserved, pct) {
   if (!Number.isInteger(cap)) return "unknown (worker env/default)";

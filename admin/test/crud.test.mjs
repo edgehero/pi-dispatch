@@ -497,3 +497,105 @@ test("a profile name carrying a list separator is refused -- it could not round-
   await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, (m) => notes.push(m), ["add"]);
   assert.ok(notes.some((n) => /letters, digits/.test(n)));
 });
+
+// ── scoped limits (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT): the pause trio's twin ───────────────────
+function tmpLimits(initial) {
+  const path = join(mkdtempSync(join(tmpdir(), "pi-sl-")), "scoped-limits.json");
+  writeFileSync(path, JSON.stringify(initial));
+  process.env.PI_SCOPED_LIMITS_FILE = path;
+  return path;
+}
+
+test("dispatch_limit_add: an approved confirm writes a validated limit", async () => {
+  const path = tmpLimits({ version: 1, limits: [] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_limit_add").execute("id", { scope: "acme/web", day: 10, concurrent: 1 }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  const l = read(path).limits[0];
+  assert.deepEqual(l, { scope: "acme/web", day: 10, concurrent: 1 });
+  assert.equal(read(path).version, 1);
+  assert.match(shown[0].message, /scoped-limits\.json/, "the confirm names the file being changed");
+});
+
+test("dispatch_limit_add: a row that limits nothing is rejected by the shared parser, nothing written", async () => {
+  const path = tmpLimits({ version: 1, limits: [] });
+  const { ctx } = toolCtx({ answer: true });
+  await assert.rejects(
+    () => toolByName("dispatch_limit_add").execute("id", { scope: "acme/web" }, undefined, undefined, ctx),
+    /at least one of day, week, month, concurrent/,
+  );
+  assert.deepEqual(read(path).limits, [], "the file is unchanged");
+});
+
+test("dispatch_limit_add: refused with no interactive operator (headless)", async () => {
+  const path = tmpLimits({ version: 1, limits: [] });
+  const { ctx } = toolCtx({ hasUI: false });
+  await assert.rejects(() => toolByName("dispatch_limit_add").execute("id", { scope: "a/b", day: 1 }, undefined, undefined, ctx), /interactive operator/);
+  assert.deepEqual(read(path).limits, []);
+});
+
+test("dispatch_limit_add: a declined confirm changes nothing", async () => {
+  const path = tmpLimits({ version: 1, limits: [] });
+  const { ctx } = toolCtx({ answer: false });
+  const out = textOf(await toolByName("dispatch_limit_add").execute("id", { scope: "a/b", day: 1 }, undefined, undefined, ctx));
+  assert.equal(out.applied, false);
+  assert.deepEqual(read(path).limits, []);
+});
+
+test("dispatch_limit_edit: an approved partial edit changes one field and keeps the rest", async () => {
+  const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 10, week: 40 }] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_limit_edit").execute("id", { index: 0, day: 5 }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  const l = read(path).limits[0];
+  assert.deepEqual(l, { scope: "acme/web", day: 5, week: 40 });
+  assert.match(shown[0].message, /→/, "the confirm shows before→after");
+});
+
+test("dispatch_limit_edit / _delete: out-of-range index throws and writes nothing", async () => {
+  const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 1 }] });
+  const { ctx } = toolCtx({ answer: true });
+  await assert.rejects(() => toolByName("dispatch_limit_edit").execute("id", { index: 3, day: 2 }, undefined, undefined, ctx), /no scoped limit at index 3 \(have 1\)/);
+  await assert.rejects(() => toolByName("dispatch_limit_delete").execute("id", { index: 3 }, undefined, undefined, ctx), /no scoped limit at index 3/);
+  assert.equal(read(path).limits[0].day, 1);
+});
+
+test("dispatch_limit_delete: an approved confirm removes the picked limit", async () => {
+  const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 1 }, { scope: "/srv/site", month: 6 }] });
+  const { ctx, shown } = toolCtx({ answer: true });
+  const out = textOf(await toolByName("dispatch_limit_delete").execute("id", { index: 0 }, undefined, undefined, ctx));
+  assert.equal(out.applied, true);
+  assert.deepEqual(read(path).limits.map((l) => l.scope), ["/srv/site"]);
+  assert.match(shown[0].message, /day 1/, "the confirm shows the human summary");
+});
+
+test("dispatch_limits lists rows with their index and null used counts on an unreachable queue", async () => {
+  tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 10, concurrent: 1 }] });
+  process.env.VALKEY_URL = "not-a-url"; // degrade synchronously, never a timeout burn
+  const rows = textOf(await toolByName("dispatch_limits").execute("id", {}, undefined, undefined, undefined));
+  assert.equal(rows[0].index, 0);
+  assert.equal(rows[0].scope, "acme/web");
+  assert.equal(rows[0].used, null, "used stays null on unreachable -- never an invented zero");
+  delete process.env.VALKEY_URL;
+});
+
+test("manageLimits: Add writes a validated limit (live); blanks drop out", async () => {
+  const path = tmpLimits({ version: 1, limits: [] });
+  const ui = mockUi({ select: ["Add a scoped limit"], input: ["acme/web", "10", "", "", "1"] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui });
+  assert.deepEqual(read(path).limits, [{ scope: "acme/web", day: 10, concurrent: 1 }]);
+  assert.ok(ui.notes.some((n) => /added \(live\)/.test(n.m)));
+});
+
+test("manageLimits: Edit blank-keeps-current; Delete removes on confirm; a decline writes nothing", async () => {
+  const path = tmpLimits({ version: 1, limits: [{ scope: "acme/web", day: 10, week: 40 }] });
+  const editUi = mockUi({ select: ["Edit a scoped limit", "#1  acme/web  day 10 · week 40"], input: ["", "5", "", "", ""] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: editUi });
+  assert.deepEqual(read(path).limits[0], { scope: "acme/web", day: 5, week: 40 }, "blank keeps, typed replaces");
+  const declineUi = mockUi({ select: ["Delete a scoped limit", "#1  acme/web  day 5 · week 40"], confirm: [false] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: declineUi });
+  assert.equal(read(path).limits.length, 1, "a declined confirm deletes nothing");
+  const deleteUi = mockUi({ select: ["Delete a scoped limit", "#1  acme/web  day 5 · week 40"], confirm: [true] });
+  await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: deleteUi });
+  assert.deepEqual(read(path).limits, []);
+});

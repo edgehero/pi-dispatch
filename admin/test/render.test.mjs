@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel } from "../src/render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel } from "../src/render.mjs";
 
 test("render.mjs has no path to raw .log content", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/render.mjs", import.meta.url)), "utf8");
@@ -395,4 +395,15 @@ test("renderTriggers marks a replicating trigger, and an unflagged line is byte-
     },
   });
   assert.equal(all.split("[x").length - 1, 3, "label, comment and pull_request each show their count");
+});
+
+test("renderScopedLimits: rows with used/cap and config-only concurrency; null when nothing configured; invalid degrades", () => {
+  const limits = { limits: [{ scope: "acme/web", day: 10, week: 40, month: null, concurrent: 1 }, { scope: "/srv/site", day: null, week: null, month: 60, concurrent: null }] };
+  const out = renderScopedLimits({ limits, scopedBudget: { rows: [{ day: 3, week: null }, { month: 12 }] } });
+  assert.match(out, /Scoped limits:/);
+  assert.match(out, /acme\/web: day 3\/10 · week -\/40 · <=1 at once/, "used/cap, a dash for a failed cell, config-only concurrency");
+  assert.match(out, /\/srv\/site: month 12\/60/);
+  assert.equal(renderScopedLimits({ limits: { limits: [] } }), null, "nothing configured says nothing (the mutex needs no line)");
+  assert.equal(renderScopedLimits({ limits: { missing: true } }), null);
+  assert.match(renderScopedLimits({ limits: { invalid: "boom" } }), /file invalid \(boom\)/);
 });

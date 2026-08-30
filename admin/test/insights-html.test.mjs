@@ -648,3 +648,34 @@ test("a hostile flow name in the series stays entity-escaped in panel titles and
   assert.equal((out.match(/<script/g) ?? []).length, 1, "still exactly one script element");
   assert.ok(out.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "the hostile name renders as entities");
 });
+
+// ---- scoped limits in the budget panel (issue #242) ----
+
+test("scoped rows render facts with the assembler's state words; config-only concurrency; junk state falls to ok", () => {
+  const p = CANNED_PAYLOAD();
+  p.budget = {
+    ...CANNED_BUDGET(),
+    scoped: [
+      { scope: "acme/web", day: { used: 3, cap: 10, state: "ok" }, week: { used: 12, cap: 40, state: "over" }, month: null, concurrent: 1 },
+      { scope: "/srv/site", day: { used: null, cap: 4, state: "junk-word" }, week: null, month: null, concurrent: null },
+    ],
+    scopedInvalid: null,
+  };
+  const page = buildInsightsHtml(p, { now: NOW });
+  assert.ok(page.includes("scoped limits (scoped-limits.json)"), "the scoped block is labeled");
+  assert.ok(page.includes("day used 3 / cap 10"), "used/cap as words");
+  assert.ok(page.includes("week used 12 / cap 40"), "every capped window rides");
+  assert.ok(page.includes("concurrent ≤1 (config; in-flight not shown)"), "concurrency is config-only, said so");
+  assert.ok(page.includes("day used ? / cap 4"), "an unreadable counter cell renders as ?, never an invented zero");
+  assert.ok(!page.includes("junk-word"), "a junk state falls to ok and never reaches the page");
+  assert.ok(page.includes("dispatch_limit_add/edit/delete"), "the scoped lever is named");
+});
+
+test("a pre-#242 payload (no scoped key) and an invalid limits file both state their absence honestly", () => {
+  const base = cannedHtml(); // CANNED_BUDGET carries no `scoped` -- the pre-#242 payload shape
+  assert.ok(!base.includes("scoped limits (scoped-limits.json)"), "no scoped block invented for an old payload");
+  const p = CANNED_PAYLOAD();
+  p.budget = { ...CANNED_BUDGET(), scoped: [], scopedInvalid: "scoped-limits file is not valid JSON: x" };
+  const page = buildInsightsHtml(p, { now: NOW });
+  assert.ok(page.includes("scoped limits: file invalid"), "an invalid file is a stated absence, not a silent gap");
+});

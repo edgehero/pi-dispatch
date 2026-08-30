@@ -255,13 +255,17 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
  * writes cannot interleave. This test is the deliberate record that model-callable writes were added on
  * purpose -- gated by an operator confirm (behaviour proven in crud.test.mjs), not tool absence.
  */
-const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete"];
+const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete"];
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 15, "exactly fifteen tools");
+  assert.equal(calls.registerTool.length, 19, "exactly nineteen tools");
   assert.deepEqual(names, [
     "dispatch_costs",
+    "dispatch_limit_add",
+    "dispatch_limit_delete",
+    "dispatch_limit_edit",
+    "dispatch_limits",
     "dispatch_pause",
     "dispatch_pause_add",
     "dispatch_pause_delete",
@@ -522,6 +526,15 @@ test("dispatch_costs.execute returns the typed fold as JSON, class on every doll
 
     const filtered = await costs.execute("call-2", { window: "7d", flow: "other" });
     assert.equal(JSON.parse(filtered.content[0].text).fold.provenance.runsTotal, 0, "flow filters the fold's input records");
+
+    // The repo filter (issue #242) applies at the same records level, so EVERY fold arm scopes. The
+    // fixture's target is "local:repo", whose byRepo key is the repoOfTarget grammar's "local:repo".
+    const repoHit = await costs.execute("call-3", { window: "7d", repo: "local:repo" });
+    assert.equal(JSON.parse(repoHit.content[0].text).fold.provenance.runsTotal, 1, "the matching repo keeps its run");
+    const repoMiss = await costs.execute("call-4", { window: "7d", repo: "acme/other" });
+    const missFold = JSON.parse(repoMiss.content[0].text).fold;
+    assert.equal(missFold.provenance.runsTotal, 0, "an unknown repo folds to empty");
+    assert.deepEqual(missFold.byFlow, [], "every arm scopes -- no unfiltered sibling table");
   } finally {
     process.env.PI_LOGS_DIR = prevLogsDir;
     if (prevSubs === undefined) delete process.env.PI_SUBSCRIPTIONS_FILE;

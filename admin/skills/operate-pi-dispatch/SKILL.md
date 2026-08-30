@@ -41,6 +41,12 @@ dialog before it takes effect**:
   (per folder/repo "quiet hours": runs for a scope are deferred between certain times and auto-resume after;
   `dispatch_pauses` lists them with their index). `dispatch_pause_edit` is a partial change — pass the index
   plus only the fields to alter. Deferring never drops a job and costs no budget.
+- `dispatch_limit_add` / `dispatch_limit_edit` / `dispatch_limit_delete` — manage scoped limits (per
+  repo/folder budget caps and concurrency: `day`/`week`/`month` job-count caps refuse a job pre-spend with
+  reason `scope-cap`, never retried; `concurrent` defers the excess, never drops it; `dispatch_limits`
+  lists them with their index and used counts). `dispatch_limit_edit` is a partial change — pass the index
+  plus only the fields to alter. Scopes match exactly (a repo `owner/name` or an ABSOLUTE folder path, no
+  globs).
 
 Use them like this:
 
@@ -235,3 +241,28 @@ If you are asked why a GitLab trigger did not fire, the usual answers in order:
 2. **No label was added by that event.** GitLab has no `labeled` action; the trigger fires on the labels
    an event *added*, so editing an already-labelled issue does nothing. This is deliberate.
 3. **The action word belongs to the other forge.** See above.
+
+## Scoped limits — and the folder mutex you cannot turn off
+
+`scoped-limits.json` holds per-scope bounds beside the deployment-global ones: `day`/`week`/`month` cap
+how many jobs a repo or folder may run per window (refused pre-spend, reason `scope-cap`, never retried,
+the scope's own counter still counts the refusal), and `concurrent` caps how many run at once (the excess
+is deferred to the delayed set and runs when a slot frees — never dropped, no budget spent while waiting).
+Edits apply live: the worker hot-reloads the file and keeps the last good version on a bad edit.
+
+Separate from all of that, **local jobs carry a built-in one-job-per-folder mutex: at most one job per
+folder at a time, always on, with NO configuration, NO tool, and NO panel key.** If an operator asks to
+disable it, say plainly that there is no switch, deliberately: two agents editing one working tree race
+each other with no gate and no undo, and an off switch's only use is re-opening that race. A `concurrent`
+value on a folder scope can never raise the mutex's one-at-a-time (the lower bound always wins).
+
+Three more things to say when asked:
+
+- **A `scope-cap` refusal is final for that window.** The counter is not resettable from any tool; the
+  window rolls over on its own (day/week/month, UTC). Raising the cap via `dispatch_limit_edit` takes
+  effect at the next job.
+- **Deferrals are visible only as the queue's delayed count** (the panel's status line shows it when it
+  is nonzero). That count also includes cron next-occurrences and retry backoff — a nonzero number is
+  normal on any deployment with schedules.
+- **Per-scope in-flight is not displayed anywhere.** The panel and `dispatch_limits` show `concurrent` as
+  configuration only; the live count lives inside the worker process and no reader can see it.

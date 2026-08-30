@@ -1476,14 +1476,17 @@ test("with terminalRows the LIST collapses by priority, never the cursor's secti
     done() {},
     tui: fakeTui(),
     intervalMs: 100000,
-    deps: cannedDeps({ fetchSnapshot: async () => tallSnap(), terminalRows: () => 18 }),
+    deps: cannedDeps({ fetchSnapshot: async () => tallSnap(), terminalRows: () => 20 }),
   });
   await flush();
 
   // Cursor opens on the triggers: they stay expanded while everything foldable around them gives way.
+  // 20 rows, not 18: the scoped-limits section (issue #242) costs a RULE + divider even fully folded,
+  // and the collapse is best-effort by doctrine -- the floor moved with the section count.
   let text = stripAnsi(comp.render(80).join("\n"));
   assert.match(text, /t0/, "the cursor's section (triggers) is never collapsed");
-  assert.match(text, /6 hidden — w to view/, "pause windows fold first, to their divider alone");
+  assert.match(text, /1 hidden — m to view/, "scoped limits (priority 0) fold FIRST, to their divider alone");
+  assert.match(text, /6 hidden — w to view/, "pause windows fold next");
   assert.match(text, /2 hidden — s to view/, "settings fold too, naming their key");
   assert.doesNotMatch(text, /hidden — tab to view/, "triggers hold while the cursor is in them");
 
@@ -1492,7 +1495,7 @@ test("with terminalRows the LIST collapses by priority, never the cursor's secti
   const lines = comp.render(80);
   text = stripAnsi(lines.join("\n"));
   await comp.dispose();
-  assert.ok(lines.length <= 18, `the composed frame fits the 18-row budget (got ${lines.length})`);
+  assert.ok(lines.length <= 20, `the composed frame fits the 20-row budget (got ${lines.length})`);
   assert.match(text, /4 hidden — tab to view/, "triggers fold once the cursor leaves them");
   assert.match(text, /› .*r0/, "the runs viewport (which bounds itself) still shows the cursor row");
 });
@@ -1571,4 +1574,61 @@ test("the sibling scan does not cross forges -- a stranger's run is never named 
   assert.match(detail, /replica\s+r1\/2/, "it is still a replica run");
   assert.doesNotMatch(detail, /sibling r2 fj-x9-r2/, "a different forge's run is not this job's sibling");
   assert.match(detail, /no sibling in this window/, "and saying so is better than naming a stranger");
+});
+
+// ── scoped limits (issue #242): the m key, the section rows, the delayed count ───────────────────────────
+
+test("the m key resolves the overlay with { action: 'manageLimits' }", async () => {
+  let result = null;
+  const comp = makeDashboard({ paths: {}, done: (r) => (result = r), tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  comp.handleInput("m");
+  await flush();
+  await comp.dispose();
+  assert.deepEqual(result, { action: "manageLimits" });
+});
+
+test("scoped limit rows: used/cap per capped window, '-' on a failed cell, config-only concurrency, amber at cap", async () => {
+  const snap = {
+    ...SNAPSHOT,
+    scopedLimits: { limits: [
+      { scope: "acme/web", day: 10, week: 40, month: null, concurrent: 1 },
+      { scope: "/srv/site", day: 3, week: null, month: null, concurrent: null },
+    ] },
+    scopedBudget: { rows: [{ day: 2, week: null }, { day: 3 }] },
+  };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  const out = comp.render(80).join("\n");
+  await comp.dispose();
+  assert.match(out, /SCOPED LIMITS/, "the section divider");
+  assert.match(out, /m manage/, "the key hint lives in the divider, not the footer");
+  assert.doesNotMatch(out, /m limits/, "and the footer itself is untouched (no headroom -- its own comment)");
+  assert.match(out, /acme\/web\s+day 2\/10\s+week -\/40\s+≤1 at once/, "used/cap, a dash for the failed cell, config-only concurrency");
+  assert.match(out, /● \/srv\/site\s+day 3\/3/, "at cap: the row's dot goes amber (● not ○)");
+});
+
+test("scoped limit section degrades on missing/invalid and never shows an in-flight count", async () => {
+  const missing = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, scopedLimits: { missing: true } }) }) });
+  const invalid = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, scopedLimits: { invalid: "boom" } }) }) });
+  await flush();
+  const a = missing.render(80).join("\n");
+  const b = invalid.render(80).join("\n");
+  await missing.dispose();
+  await invalid.dispose();
+  assert.match(a, /no scoped limits · m to manage/);
+  assert.match(b, /scoped-limits file invalid: boom/);
+});
+
+test("the status header shows the delayed count ONLY when nonzero, neutral, and is byte-identical at zero", async () => {
+  const withDelayed = { ...SNAPSHOT, queue: { ...SNAPSHOT.queue, counts: { ...SNAPSHOT.queue.counts, delayed: 4 } } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => withDelayed }) });
+  const zero = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  const shown = comp.render(80).join("\n");
+  const plain = zero.render(80).join("\n");
+  await comp.dispose();
+  await zero.dispose();
+  assert.match(shown, /1 active · 4 delayed · 3 failed/, "delayed sits between active and failed");
+  assert.doesNotMatch(plain, /delayed/, "absent at zero -- the header is byte-identical to before the count existed");
 });

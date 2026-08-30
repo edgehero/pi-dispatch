@@ -563,7 +563,7 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
   }
 
   // ── (6) the deployment pointer ─────────────────────────────────────────────────────────────────
-  // Only the three cwd-default files need pointing: resolvePaths defaults them to "./" (right only
+  // Only the four cwd-default files need pointing: resolvePaths defaults them to "./" (right only
   // when pi runs FROM the deployment dir), while logsDir/settingsFile default to absolute OS-temp
   // locations and VALKEY_URL's default already matches the container up starts. Absolute paths by
   // pointer contract (a relative value is dropped by the normalizer).
@@ -573,6 +573,7 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
     env: {
       PI_TRIGGERS_FILE: join(dir, "triggers.json"),
       PI_PAUSE_WINDOWS_FILE: join(dir, "pause-windows.json"),
+      PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"),
       PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
     },
   };

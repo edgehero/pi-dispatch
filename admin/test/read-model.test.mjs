@@ -23,6 +23,9 @@ import {
   writeTriggers,
   readPauseWindows,
   writePauseWindows,
+  readScopedLimits,
+  writeScopedLimits,
+  readScopedBudget,
   readSubscriptions,
   writeSubscriptions,
   enqueueDispatchRun,
@@ -211,6 +214,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     chainMaxPerJob: 2,
     graphDir: "/g",
     pauseWindowsPath: "./pause-windows.json",
+    scopedLimitsPath: "./scoped-limits.json",
     subscriptionsPath: "/subs.json",
   });
 });
@@ -1901,4 +1905,75 @@ test("readFolderSkills attaches the prose-loop hints from the SKILL.md body", ()
   ]);
   const out = readFolderSkills({ folder: "/proj", exec });
   assert.deepEqual(out.skills[0].loops, [{ hint: "iterate until the report renders right" }], "the body's loop phrase, not the frontmatter's 'repeat daily'");
+});
+
+// ── scoped limits (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT) ──────────────────────────────────────
+
+import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+
+test("readScopedLimits: valid file, missing file, invalid file (incl. a NEWER version, fail-loud)", () => {
+  const fs = memFs({ "sl.json": JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] }) });
+  const ok = readScopedLimits({ scopedLimitsPath: "sl.json", fs });
+  assert.equal(ok.limits[0].day, 3);
+  assert.deepEqual(readScopedLimits({ scopedLimitsPath: "absent.json", fs }), { missing: true });
+  const newer = readScopedLimits({ scopedLimitsPath: "v2.json", fs: memFs({ "v2.json": JSON.stringify({ version: 2, limits: [] }) }) });
+  assert.match(newer.invalid, /newer pi-dispatch \(version 2; this build understands 1\)/);
+});
+
+test("writeScopedLimits: a MISSING file starts from the empty v1 shape and the write creates it", () => {
+  const fs = memFs({});
+  const res = writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (list) => [...list, { scope: "acme/web", day: 3 }] });
+  assert.equal(res.ok, true);
+  const written = JSON.parse(fs.files.get("sl.json"));
+  assert.equal(written.version, 1);
+  assert.deepEqual(written.limits, [{ scope: "acme/web", day: 3 }]);
+  assert.ok(!fs.files.get("sl.json").includes("null"), "absent windows are omitted, never null-padded");
+});
+
+test("writeScopedLimits REFUSES a version-less or newer existing file -- read and write both refuse, no repair", () => {
+  // The pause writer scavenges the raw array and would silently re-stamp a v2 file as v1 with its
+  // unknown fields dropped -- the exact cap-widening the version field exists to prevent. This writer
+  // reads through the parser instead: the downgrade pin.
+  const versionless = memFs({ "sl.json": JSON.stringify({ limits: [{ scope: "a/b", day: 1 }] }) });
+  const r1 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: versionless, mutate: (l) => l });
+  assert.match(r1.invalid, /must have "version": 1/);
+  assert.equal(JSON.parse(versionless.files.get("sl.json")).version, undefined, "the file bytes were not touched");
+  const v2text = JSON.stringify({ version: 2, limits: [{ scope: "a/b", day: 1, hour: 2 }] });
+  const v2 = memFs({ "sl.json": v2text });
+  const r2 = writeScopedLimits({ scopedLimitsPath: "sl.json", fs: v2, mutate: (l) => l });
+  assert.match(r2.invalid, /newer pi-dispatch/);
+  assert.equal(v2.files.get("sl.json"), v2text, "never re-stamped v1");
+});
+
+test("writeScopedLimits validates the RESULT through the shared parser and leaves bytes untouched on reject", () => {
+  const before = JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] });
+  const fs = memFs({ "sl.json": before });
+  const res = writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (list) => [...list, { scope: "acme/web", week: 9 }] });
+  assert.match(res.invalid, /duplicate scope/);
+  assert.equal(fs.files.get("sl.json"), before);
+  const glob = writeScopedLimits({ scopedLimitsPath: "sl.json", fs, mutate: (list) => [...list, { scope: "acme/*", day: 1 }] });
+  assert.match(glob.invalid, /scopes match exactly/);
+});
+
+test("readScopedBudget GETs only the windows a row caps; absent keys are honest zeros; dead queue degrades", async () => {
+  const limits = [
+    { scope: "acme/web", day: 3, week: 40, month: null, concurrent: 1 },
+    { scope: "/srv/site", day: null, week: null, month: null, concurrent: 2 }, // concurrent-only: zero GETs
+  ];
+  const commands = [];
+  const prefix = scopeKeyPrefix("acme/web");
+  const redis = {
+    async get(key) {
+      commands.push(key);
+      return key === dayKey(new Date(), prefix) ? "2" : null;
+    },
+    disconnect() {},
+  };
+  const res = await readScopedBudget({ url: "redis://x", limits, redisFn: () => redis });
+  assert.deepEqual(res.rows, [{ day: 2, week: 0 }, {}]);
+  assert.equal(commands.length, 2, "one GET per capped window, none for the concurrent-only row");
+  assert.ok(commands.every((k) => k.startsWith(`${prefix}:`)), "keys recomputed through the shared scopeKeyPrefix");
+  const dead = await readScopedBudget({ url: "not-a-url", limits });
+  assert.ok(dead.unreachable, "junk URL degrades synchronously, never a timeout burn");
+  assert.deepEqual(await readScopedBudget({ url: "redis://x", limits: [] }), { rows: [] });
 });

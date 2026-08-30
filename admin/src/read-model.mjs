@@ -23,6 +23,9 @@ import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS } from "@edgehe
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
+// The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
+// write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
+import { parseScopedLimits, SCOPED_LIMITS_VERSION, scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
@@ -63,6 +66,7 @@ export function resolvePaths(env = process.env) {
     // root, and silently wrong (demo triggers) everywhere else.
     triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json",
     pauseWindowsPath: env.PI_PAUSE_WINDOWS_FILE ?? "./pause-windows.json",
+    scopedLimitsPath: env.PI_SCOPED_LIMITS_FILE ?? "./scoped-limits.json",
     subscriptionsPath: env.PI_SUBSCRIPTIONS_FILE ?? "./subscriptions.json",
     // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY), where the staged third-party pi
     // packages live under `packages/`. `|| null` so unset AND empty both read as "no overlay" -- the
@@ -392,6 +396,108 @@ export function writePauseWindows({ pauseWindowsPath, mutate, fs = nodeFs }) {
   fs.writeFileSync(tmp, text, { mode: 0o644 });
   fs.renameSync(tmp, pauseWindowsPath);
   return { ok: true };
+}
+
+/**
+ * Read + validate the scoped-limits file for display (INT-SCOPED-LIMITS-FILE-CONTRACT). Returns
+ * `{ limits }` of normalized rows, or `{ missing }` / `{ invalid }` so the viewer degrades — the
+ * `{ invalid }` case includes a file written by a newer pi-dispatch (fail-loud, naming both versions).
+ * Uses the SHARED `parseScopedLimits`, so the admin and the worker cannot drift on the schema.
+ */
+export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
+  let text;
+  try {
+    text = fs.readFileSync(scopedLimitsPath, "utf8");
+  } catch {
+    return { missing: true };
+  }
+  try {
+    return { limits: parseScopedLimits(text, scopedLimitsPath) };
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * Read-modify-write the scoped-limits file. DELIBERATELY NOT `writePauseWindows`' raw-array scavenge:
+ * the read goes THROUGH the shared parser, so an existing file with a missing or NEWER `version`
+ * refuses the write (`{ invalid }`) instead of being silently re-stamped v1 with its unknown fields
+ * dropped — that re-stamp is exactly the cap-widening the version field exists to prevent, and it is
+ * why this money file refuses where the analytics twin (`writeSubscriptions`) repairs. Only a MISSING
+ * file starts from the empty v1 shape. The result is re-serialized (absent windows omitted, not
+ * null-padded — the committed example's shape), re-validated fail-closed, and written tmp + rename.
+ * Returns `{ ok }` or `{ invalid }`.
+ */
+export function writeScopedLimits({ scopedLimitsPath, mutate, fs = nodeFs }) {
+  let current = [];
+  let existing = null;
+  try {
+    existing = fs.readFileSync(scopedLimitsPath, "utf8");
+  } catch {
+    // Missing file: start from the empty v1 shape -- the one repair this writer performs.
+  }
+  if (existing !== null) {
+    try {
+      current = parseScopedLimits(existing, scopedLimitsPath);
+    } catch (e) {
+      return { invalid: e?.message ?? String(e) };
+    }
+  }
+  const next = mutate(current.map((l) => ({ ...l })));
+  const rows = next.map((l) => Object.fromEntries(Object.entries(l).filter(([, v]) => v !== null && v !== undefined)));
+  const text = `${JSON.stringify({ version: SCOPED_LIMITS_VERSION, limits: rows }, null, 2)}\n`;
+  try {
+    parseScopedLimits(text, scopedLimitsPath); // the loader's own validator -- never write a file it would reject
+  } catch (e) {
+    return { invalid: e?.message ?? String(e) };
+  }
+  const tmp = `${scopedLimitsPath}.tmp`;
+  fs.writeFileSync(tmp, text, { mode: 0o644 });
+  fs.renameSync(tmp, scopedLimitsPath);
+  return { ok: true };
+}
+
+/**
+ * The used counts behind each scoped limit row (issue #242): GET only the windows a row actually caps
+ * (a concurrent-only row touches redis zero times -- in-flight is worker-process state this reader
+ * cannot see), under the keys the worker's own builders compose from the shared `scopeKeyPrefix`, so
+ * the two sides cannot drift on the key shape. `rows[i]` matches `limits[i]`; an absent key reads as an
+ * honest 0 (a scope that never ran). One client, one timeout, `{ unreachable }` on a dead queue --
+ * `readBudget`'s posture exactly.
+ */
+export async function readScopedBudget({ url, limits, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  if (!Array.isArray(limits) || limits.length === 0) return { rows: [] };
+  let redis;
+  try {
+    parseConnection(url, { failFast: true }); // throws on junk before any client exists
+    redis = redisFn(url);
+    const now = new Date();
+    const settled = Promise.all(
+      limits.map(async (l) => {
+        const prefix = scopeKeyPrefix(l.scope);
+        const cell = async (key) => Number((await redis.get(key)) ?? 0);
+        const row = {};
+        if (l.day !== null && l.day !== undefined) row.day = await cell(dayKey(now, prefix));
+        if (l.week !== null && l.week !== undefined) row.week = await cell(weekKey(now, prefix));
+        if (l.month !== null && l.month !== undefined) row.month = await cell(monthKey(now, prefix));
+        return row;
+      }),
+    ).then(
+      (rows) => ({ rows }),
+      (err) => ({ unreachable: err?.message ?? String(err) }),
+    );
+    return await withTimeout(settled, timeoutMs, { unreachable: "timed out reaching the queue" });
+  } catch (err) {
+    return { unreachable: err?.message ?? String(err) };
+  } finally {
+    if (redis) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+    }
+  }
 }
 
 /**

@@ -338,6 +338,32 @@ function normBudget(v) {
       state: BUDGET_STATES.includes(t.state) ? t.state : "ok",
       maxTokens: Number.isInteger(t.maxTokens) && t.maxTokens > 0 ? t.maxTokens : null,
     },
+    // The scoped rows (issue #242): a pre-1.5 payload simply lacks the key and renders nothing.
+    scoped: Array.isArray(v.scoped) ? v.scoped.map(normScopedRow).filter((r) => r !== null) : [],
+    scopedInvalid: typeof v.scopedInvalid === "string" && v.scopedInvalid !== "" ? clip(v.scopedInvalid, 160) : null,
+  };
+}
+
+/** One scoped-limit row's allowlist: scope a non-empty string (clipped), each window `{ used, cap,
+ * state }` with used a non-negative integer or null (an unreadable counter cell, never an invented
+ * zero), concurrent a positive integer or null. Config-only concurrency: no in-flight count exists
+ * here to display, and the page never invents one. */
+function normScopedRow(v) {
+  if (v === null || typeof v !== "object" || typeof v.scope !== "string" || v.scope === "") return null;
+  const win = (w) => {
+    if (w === null || w === undefined || typeof w !== "object") return null;
+    return {
+      used: Number.isInteger(w.used) && w.used >= 0 ? w.used : null,
+      cap: Number.isInteger(w.cap) && w.cap > 0 ? w.cap : null,
+      state: BUDGET_STATES.includes(w.state) ? w.state : "ok",
+    };
+  };
+  return {
+    scope: clip(v.scope, 60),
+    day: win(v.day),
+    week: win(v.week),
+    month: win(v.month),
+    concurrent: Number.isInteger(v.concurrent) && v.concurrent > 0 ? v.concurrent : null,
   };
 }
 
@@ -784,6 +810,26 @@ function budgetSectionHtml(nb) {
 
   if (nb.softHoldPct !== null) {
     rows.push(`<div class="dim small">soft-hold band: ${fmt(nb.softHoldPct)}% of each cap (the amber tick)</div>`);
+  }
+  // The scoped rows (issue #242): configured limits with their used counts, states as the assembler's
+  // words. Concurrency renders as config only -- in-flight is worker state no payload carries.
+  if (nb.scopedInvalid !== null) {
+    rows.push(`<div class="dim small">scoped limits: file invalid (${escapeHtml(nb.scopedInvalid)})</div>`);
+  } else if (nb.scoped.length > 0) {
+    rows.push('<div class="dim small">scoped limits (scoped-limits.json)</div>');
+    for (const s of nb.scoped) {
+      const bits = [];
+      let worst = "ok";
+      for (const key of ["day", "week", "month"]) {
+        const w = s[key];
+        if (w === null || w.cap === null) continue;
+        bits.push(`${key} used ${w.used !== null ? fmt(w.used) : "?"} / cap ${fmt(w.cap)}`);
+        if (w.state !== "ok") worst = w.state;
+      }
+      if (s.concurrent !== null) bits.push(`concurrent ≤${fmt(s.concurrent)} (config; in-flight not shown)`);
+      rows.push(`<div class="row"><span class="wl">${escapeHtml(s.scope)}</span><span>${escapeHtml(bits.join(" · "))}</span>${worst !== "ok" ? stateWord(worst) : ""}</div>`);
+    }
+    rows.push('<div class="lever">scoped: dispatch_limit_add/edit/delete · or press m in the /dispatch panel</div>');
   }
   // The lever, named: what the whole panel exists to point at.
   rows.push('<div class="lever">adjust: /dispatch set dailyCap|weeklyCap|monthlyCap|dailyTokenCap|softHoldPct &lt;n&gt; · or press s in the /dispatch panel</div>');

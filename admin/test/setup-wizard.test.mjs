@@ -733,6 +733,7 @@ test("wizard: the pointer is written only after a confirm showing the JSON verba
   assert.deepEqual(pointer.env, {
     PI_TRIGGERS_FILE: join(dir, "triggers.json"),
     PI_PAUSE_WINDOWS_FILE: join(dir, "pause-windows.json"),
+    PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"),
     PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
   });
   const pointerConfirm = seen.confirm.find((c) => /pointer/.test(c.title));

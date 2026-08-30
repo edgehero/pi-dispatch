@@ -217,3 +217,22 @@ test("the page carries the budget panel: unreachable canned queue stated as a ba
   assert.ok(page.includes("budget unreachable:"), "the absence is a banner, not a silent gap");
   assert.ok(page.includes("adjust: /dispatch set dailyCap"), "the lever is named -- the panel exists to point at it");
 });
+
+test("the budget slice carries the scoped rows from the limits file; a dead queue leaves used as ? not 0", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "admin-insights-sl-"));
+  const slPath = join(dir, "scoped-limits.json");
+  writeFileSync(slPath, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 10, concurrent: 2 }] }));
+  const sink = [];
+  const deps = {
+    fs: { mkdirSync: () => {}, writeFileSync: (_p, data) => sink.push(String(data)), renameSync: () => {} },
+    openBrowser: () => {},
+    env: {},
+    platform: "darwin",
+    now: () => 1770000000000,
+  };
+  await mod.insightsCommand({ ...cannedPaths(), scopedLimitsPath: slPath }, ["insights", "--no-open"], () => {}, deps);
+  const page = sink[0];
+  assert.ok(page.includes("scoped limits (scoped-limits.json)"), "the configured limits reach the page");
+  assert.ok(page.includes("day used ? / cap 10"), "the dead queue leaves used unknown, never an invented zero");
+  assert.ok(page.includes("concurrent ≤2 (config; in-flight not shown)"), "concurrency stays config-only");
+});

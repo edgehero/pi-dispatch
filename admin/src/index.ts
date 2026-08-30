@@ -66,11 +66,14 @@ import {
   readSettingsView,
   readTriggers,
   readPauseWindows,
+  readScopedLimits,
+  readScopedBudget,
   listRunIds,
   setQueuePaused,
   writeSettings,
   writeTriggers,
   writePauseWindows,
+  writeScopedLimits,
   enqueueDispatchRun,
   scanRunRecords,
   readSubscriptions,
@@ -101,7 +104,7 @@ import { applyDeploymentPointer, pointerPath, readPointer, takePointerNotice } f
 // The only fs use in this module: the skew notice reads one package.json through the wizard's own reader.
 // Everything else fs-shaped goes through read-model.mjs by design.
 import * as nodeFs from "node:fs";
-import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, whatIfFlow } from "./costs.mjs";
+import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget, whatIfFlow } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
@@ -109,7 +112,7 @@ import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } f
 import { setGlyphs } from "./panel.mjs";
 import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
-import { renderStatus, renderRuns, renderBudget, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
+import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
 // wizard itself stays behind the dispatch handler's lazy import. The setup-wizard module imports
@@ -315,15 +318,16 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Read-only. Folds the PII-free run history against the operator's declared subscriptions and pi-ai's " +
       "rate tables into the costs read-model: window totals, daily buckets, per-flow and per-model rollups, " +
-      "per-plan verdicts, and provenance. window = 7d | 30d | mtd (default mtd); flow filters to one flow's runs.",
-    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()) }),
+      "per-plan verdicts, and provenance. window = 7d | 30d | mtd (default mtd); flow filters to one flow's " +
+      "runs; repo filters to one repo's runs by the by-repo rollup's key (e.g. \"acme/web\" or \"local:site\").",
+    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const window = params.window ?? "mtd";
       if (!COSTS_WINDOWS.includes(window)) {
         throw new Error(`unknown window '${window}' (7d|30d|mtd)`);
       }
       const paths = resolvePaths(process.env);
-      const res = assembleCosts(paths, window, params.flow);
+      const res = assembleCosts(paths, window, params.flow, params.repo);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
       // The fold's dollars are TYPED `{ usd, class, floor, ... }` on purpose: the class rides beside every
       // number in this JSON, so a model consuming it cannot launder an estimate into a fact by dropping
@@ -671,6 +675,132 @@ function registerTools(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "dispatch_limits",
+    label: "pi-dispatch scoped limits",
+    description:
+      "Read-only. Lists the scoped limits (per repo/folder budget caps and concurrency, scoped-limits.json) " +
+      "with their array index and, when the queue is reachable, each scope's used day/week/month run counts. " +
+      "Use the index for dispatch_limit_edit / dispatch_limit_delete. The always-on one-job-per-folder mutex " +
+      "for local jobs is separate: it has no entry here and no switch anywhere.",
+    parameters: Type.Object({}),
+    async execute() {
+      const paths = resolvePaths(process.env);
+      const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      if (!Array.isArray((p as any)?.limits)) return toolText(JSON.stringify(p));
+      const counters = await readScopedBudget({ url: paths.valkeyUrl, limits: (p as any).limits });
+      const rows = (p as any).limits.map((l: any, index: number) => ({ index, ...l, used: (counters as any).rows?.[index] ?? null }));
+      return toolText(JSON.stringify(rows));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_limit_add",
+    label: "pi-dispatch add scoped limit",
+    description:
+      "Adds a scoped limit and applies it live: jobs whose scope (a repo \"owner/name\" or a local folder " +
+      "path, ABSOLUTE, matched exactly like pause windows — no globs) exceed the `day`/`week`/`month` " +
+      "job-count caps are REFUSED before any spend (reason scope-cap, never retried); jobs over `concurrent` " +
+      "are DEFERRED, never dropped, and run when a slot frees. At least one of day/week/month/concurrent is " +
+      "required, each an integer >= 1. The operator MUST approve a confirm dialog showing the entry; refused " +
+      "with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      scope: Type.String(),
+      day: Type.Optional(Type.Integer({ minimum: 1 })),
+      week: Type.Optional(Type.Integer({ minimum: 1 })),
+      month: Type.Optional(Type.Integer({ minimum: 1 })),
+      concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(process.env);
+      const l = buildScopedLimit(params);
+      const result = await confirmedWrite(
+        ctx,
+        { title: "Add scoped limit", message: `Add to scoped-limits.json:\n${JSON.stringify(l)}` },
+        () => {
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (list: any[]) => [...list, l] });
+          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+          return { applied: true, added: l };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_limit_delete",
+    label: "pi-dispatch delete scoped limit",
+    description:
+      "Removes a scoped limit (by array index from dispatch_limits) and applies it live. The operator MUST " +
+      "approve a confirm dialog showing the limit; refused with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(process.env);
+      const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
+      const cur = list[params.index];
+      if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
+      const result = await confirmedWrite(
+        ctx,
+        { title: `Delete scoped limit #${params.index + 1}`, message: `Remove scoped limit #${params.index + 1}: ${cur.scope} ${limitSummary(cur)}` },
+        () => {
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.filter((_, i) => i !== params.index) });
+          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+          return { applied: true, deletedIndex: params.index };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  pi.registerTool({
+    name: "dispatch_limit_edit",
+    label: "pi-dispatch edit scoped limit",
+    description:
+      "Changes fields of an existing scoped limit (by array index from dispatch_limits) and applies it live. " +
+      "Provide only the fields to change (scope/day/week/month/concurrent); the rest keep their current value " +
+      "(to drop one cap from an entry, delete it and re-add without that field). The operator MUST approve a " +
+      "confirm dialog showing the before->after; refused with no interactive operator.",
+    executionMode: "sequential",
+    parameters: Type.Object({
+      index: Type.Integer({ minimum: 0 }),
+      scope: Type.Optional(Type.String()),
+      day: Type.Optional(Type.Integer({ minimum: 1 })),
+      week: Type.Optional(Type.Integer({ minimum: 1 })),
+      month: Type.Optional(Type.Integer({ minimum: 1 })),
+      concurrent: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const paths = resolvePaths(process.env);
+      const p = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const list = Array.isArray((p as any)?.limits) ? (p as any).limits : [];
+      const cur = list[params.index];
+      if (!cur) throw new Error(`no scoped limit at index ${params.index} (have ${list.length})`);
+      // A provided field replaces; an omitted one keeps the current value (?? treats undefined as "keep").
+      // Rebuild through the shared builder so the result is validated the same way as an add.
+      const before = buildScopedLimit(cur);
+      const merged = buildScopedLimit({
+        scope: params.scope ?? cur.scope,
+        day: params.day ?? cur.day,
+        week: params.week ?? cur.week,
+        month: params.month ?? cur.month,
+        concurrent: params.concurrent ?? cur.concurrent,
+      });
+      const result = await confirmedWrite(
+        ctx,
+        { title: `Edit scoped limit #${params.index + 1}`, message: `scoped limit #${params.index + 1}:\n${JSON.stringify(before)}\n→ ${JSON.stringify(merged)}` },
+        () => {
+          const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === params.index ? merged : w)) });
+          if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
+          return { applied: true, index: params.index, limit: merged };
+        },
+      );
+      return toolText(JSON.stringify(result));
+    },
+  });
+
+  pi.registerTool({
     name: "dispatch_trigger_delete",
     label: "pi-dispatch delete trigger",
     description:
@@ -852,6 +982,32 @@ function buildPauseWindow(f: any): any {
   return w;
 }
 
+/**
+ * Build one scoped-limit entry from a field bag (shared by dispatch_limit_add/_edit and the operator
+ * dialogs). Required scope; day/week/month/concurrent ride only when an integer-shaped value parses, so a
+ * blank dialog answer or omitted tool param drops out of the JSON. All value validation (positive safe
+ * integers, at-least-one-limit, non-empty scope, no globs) lives in the shared parseScopedLimits, which
+ * the write goes through — a bad value is rejected there, never written.
+ */
+function buildScopedLimit(f: any): any {
+  const l: any = { scope: String(f.scope ?? "").trim() };
+  for (const k of ["day", "week", "month", "concurrent"]) {
+    const v = optInt(f[k]);
+    if (v !== undefined) l[k] = v;
+  }
+  return l;
+}
+
+/** One scoped limit as a display summary: `day 10 · week 40 · ≤1 at once` (set fields only). */
+function limitSummary(l: any): string {
+  const bits: string[] = [];
+  if (Number.isInteger(l?.day)) bits.push(`day ${l.day}`);
+  if (Number.isInteger(l?.week)) bits.push(`week ${l.week}`);
+  if (Number.isInteger(l?.month)) bits.push(`month ${l.month}`);
+  if (Number.isInteger(l?.concurrent)) bits.push(`≤${l.concurrent} at once`);
+  return bits.join(" · ");
+}
+
 /** Normalise a labels/action field to a trimmed non-empty string list, accepting an array or a string. */
 function asWords(x: any): string[] {
   if (Array.isArray(x)) return x.map((s) => String(s).trim()).filter(Boolean);
@@ -966,7 +1122,10 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
     case "budget": {
       const budget = await readBudget({ url: paths.valkeyUrl });
       const settings = readSettingsView({ settingsFile: paths.settingsFile });
-      send(pi, renderBudget({ budget, settings }));
+      const limits: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+      const scopedBudget: any = Array.isArray(limits?.limits) && limits.limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits: limits.limits }) : { rows: [] };
+      const scopedText = renderScopedLimits({ limits, scopedBudget });
+      send(pi, `${renderBudget({ budget, settings })}${scopedText ? `\n${scopedText}` : ""}`);
       return;
     }
     case "triggers": {
@@ -1086,13 +1245,17 @@ const PRICING = { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVe
  * records, so every aggregate -- daily, plans, provenance -- is scoped, not just one table. Returns
  * `{ fold }`, or scanRunRecords' `{ unreachable }` passed through for the caller to surface.
  */
-function assembleCosts(paths: any, window: string, flow?: string): any {
+function assembleCosts(paths: any, window: string, flow?: string, repo?: string): any {
   const nowMs = Date.now();
   const sinceMs = costsSinceMs(window, nowMs);
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
   if (!Array.isArray(records)) return records; // { unreachable }
   const subs: any = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
-  const scoped = typeof flow === "string" && flow !== "" ? records.filter((r: any) => (r?.flow ?? null) === flow) : records;
+  const flowScoped = typeof flow === "string" && flow !== "" ? records.filter((r: any) => (r?.flow ?? null) === flow) : records;
+  // The repo filter applies at the same records level as the flow one, so EVERY fold arm scopes --
+  // one table filtered against unscoped siblings would misread as attribution. Keyed by repoOfTarget,
+  // the exact grammar the byRepo rollup labels rows with.
+  const scoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r: any) => repoOfTarget(r?.target) === repo) : flowScoped;
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
@@ -1206,6 +1369,22 @@ async function assembleBudgetView(paths: any): Promise<any> {
           ? "soft-hold"
           : "ok"
       : "ok";
+  // The scoped rows (issue #242): the configured limits joined to their live counters, states computed
+  // ASSEMBLER-side with the worker's own windowState so they ride the payload as words (the insights
+  // page's import allowlist forbids the worker import). Concurrency is CONFIG-only here -- per-scope
+  // in-flight is worker-process state no redis read can see, and the panel never invents a number.
+  const limitsView: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+  const limits: any[] = Array.isArray(limitsView?.limits) ? limitsView.limits : [];
+  const scopedCounters: any = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits }) : { rows: [] };
+  const scoped = limits.map((l: any, i: number) => {
+    const used = scopedCounters?.rows?.[i] ?? null;
+    const win = (cap: number | null, key: string) => {
+      if (cap === null) return null;
+      const u = used && Number.isFinite(used[key]) ? used[key] : null;
+      return { used: u, cap, state: u !== null ? windowState(u, cap, null) : "ok" };
+    };
+    return { scope: l.scope, day: win(l.day, "day"), week: win(l.week, "week"), month: win(l.month, "month"), concurrent: l.concurrent };
+  });
   return {
     unreachable,
     softHoldPct: pct,
@@ -1213,6 +1392,8 @@ async function assembleBudgetView(paths: any): Promise<any> {
     week: slotWindow("week", "weeklyCap"),
     month: slotWindow("month", "monthlyCap"),
     tokens: { spent: tokensSpent, cap: tokenCap, state: tokenState, maxTokens: posIntOrNull(overlay.maxTokens) },
+    scoped,
+    scopedInvalid: limitsView?.invalid ? String(limitsView.invalid) : null,
   };
 }
 
@@ -1495,7 +1676,84 @@ export async function handleDashboardAction(result: any, paths: any, ctx: any): 
       return editSettingsViaDialogs(paths, ui, notify);
     case "managePauses":
       return managePausesViaDialogs(paths, ui, notify);
+    case "manageLimits":
+      return manageLimitsViaDialogs(paths, ui, notify);
   }
+}
+
+async function manageLimitsViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const action = await ui.select("Scoped limits", ["Add a scoped limit", "Edit a scoped limit", "Delete a scoped limit"]);
+  if (!action) return;
+  if (action.startsWith("Add")) return addScopedLimitViaDialogs(paths, ui, notify);
+  if (action.startsWith("Edit")) return editScopedLimitViaDialogs(paths, ui, notify);
+  return deleteScopedLimitViaDialogs(paths, ui, notify);
+}
+
+/** Add a scoped limit: scope, then the four optional bounds (blank = omit). Validated + live. */
+async function addScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const scope = await ui.input("scope — a repo \"owner/name\" or an ABSOLUTE local folder path (exact match, no globs)", "");
+  if (scope === undefined || scope.trim() === "") return;
+  const day = await ui.input("day — max jobs per UTC day for this scope (blank = no day cap)", "");
+  if (day === undefined) return;
+  const week = await ui.input("week — max jobs per Mon-Sun UTC week (blank = no week cap)", "");
+  if (week === undefined) return;
+  const month = await ui.input("month — max jobs per calendar month (blank = no month cap)", "");
+  if (month === undefined) return;
+  const concurrent = await ui.input("concurrent — max jobs in flight for this scope, extras deferred (blank = no limit)", "");
+  if (concurrent === undefined) return;
+  const l = buildScopedLimit({ scope, day, week, month, concurrent });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (list: any[]) => [...list, l] });
+  notify?.(res.ok ? `scoped limit added (live) — ${l.scope} ${limitSummary(l)}` : `add rejected: ${res.invalid}`, res.ok ? "info" : "error");
+}
+
+/** Edit a scoped limit: select which, re-prompt each field with its current value — blank keeps it. */
+async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+  const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
+  if (list.length === 0) { notify?.("no scoped limits to edit", "info"); return; }
+  const labels = list.map((l, i) => `#${i + 1}  ${l.scope}  ${limitSummary(l)}`);
+  const picked = await ui.select("Edit which scoped limit", labels);
+  if (!picked) return;
+  const index = labels.indexOf(picked);
+  if (index < 0) return;
+  const cur = list[index];
+  const ask = async (label: string, current: string) => ui.input(`${label} — blank keeps "${current}"`, current);
+  const keep = (v: string | undefined, current: any) => (v === undefined || v.trim() === "" ? current : v);
+  const scope = await ask("scope", cur.scope ?? "");
+  if (scope === undefined) return;
+  const day = await ask("day cap", String(cur.day ?? ""));
+  if (day === undefined) return;
+  const week = await ask("week cap", String(cur.week ?? ""));
+  if (week === undefined) return;
+  const month = await ask("month cap", String(cur.month ?? ""));
+  if (month === undefined) return;
+  const concurrent = await ask("concurrent (max in flight)", String(cur.concurrent ?? ""));
+  if (concurrent === undefined) return;
+  const merged = buildScopedLimit({
+    scope: keep(scope, cur.scope),
+    day: keep(day, cur.day),
+    week: keep(week, cur.week),
+    month: keep(month, cur.month),
+    concurrent: keep(concurrent, cur.concurrent),
+  });
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.map((w, i) => (i === index ? merged : w)) });
+  notify?.(res.ok ? `scoped limit #${index + 1} updated (live) — ${merged.scope} ${limitSummary(merged)}` : `edit rejected: ${res.invalid}`, res.ok ? "info" : "error");
+}
+
+/** Delete a scoped limit: select which, confirm, remove. */
+async function deleteScopedLimitViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const p: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+  const list: any[] = Array.isArray(p?.limits) ? p.limits : [];
+  if (list.length === 0) { notify?.("no scoped limits to delete", "info"); return; }
+  const labels = list.map((l, i) => `#${i + 1}  ${l.scope}  ${limitSummary(l)}`);
+  const picked = await ui.select("Delete which scoped limit", labels);
+  if (!picked) return;
+  const index = labels.indexOf(picked);
+  if (index < 0) return;
+  const ok = await ui.confirm("Delete scoped limit", `Remove ${labels[index]}?`);
+  if (!ok) return;
+  const res = writeScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath, mutate: (l: any[]) => l.filter((_, i) => i !== index) });
+  notify?.(res.ok ? `scoped limit #${index + 1} deleted (live)` : `delete rejected: ${res.invalid}`, res.ok ? "info" : "error");
 }
 
 /** Pause-window management: pick add / edit / delete, then run the matching dialog. One overlay key (`w`). */
