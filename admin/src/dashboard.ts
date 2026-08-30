@@ -21,7 +21,7 @@
  */
 import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/pi-dispatch/budget";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { makeQueue, fleetQueueNames } from "@edgehero/pi-dispatch/queue";
+import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
@@ -143,6 +143,20 @@ export function createDashboardDeps(paths: any) {
     return lastNames.map((n) => pool.get(n));
   };
 
+  // The KILL SWITCH's set, which is not the per-tick set. A registry row is a lease that expires ninety
+  // seconds after a host stops writing, while that host's queue and its paused flag are permanent -- so
+  // pausing off the registry alone misses a host that has gone quiet but is still draining, and resuming
+  // off it leaves that host's queue paused forever with nothing able to name it. The union adds a SCAN of
+  // BullMQ's own meta keys, which is far too expensive for a reader that runs every second and entirely
+  // affordable for a keypress.
+  const killSwitchQueues = async () => {
+    const existing = await discoverHostQueues(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
+    for (const name of unionQueueNames(lastNames, existing)) {
+      if (!pool.has(name)) pool.set(name, makeQueue(parseConnection(paths.valkeyUrl, { failFast: true }), { name }));
+    }
+    return unionQueueNames(lastNames, existing).map((n) => pool.get(n));
+  };
+
   return {
     async fetchSnapshot() {
       const queues = await fleetQueues();
@@ -221,12 +235,14 @@ export function createDashboardDeps(paths: any) {
       };
     },
     async pause() {
-      for (const q of await fleetQueues()) await q.pause();
+      await fleetQueues(); // refresh `lastNames` from the registry before unioning the keyspace onto it
+      for (const q of await killSwitchQueues()) await q.pause();
     },
     async resume() {
       // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while
       // its host was live, then resumed while that host is down, stays paused with nothing naming it.
-      for (const q of await fleetQueues()) await q.resume();
+      await fleetQueues();
+      for (const q of await killSwitchQueues()) await q.resume();
     },
     async dispose() {
       for (const q of pool.values()) {
