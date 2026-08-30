@@ -14,6 +14,7 @@ import { makeForgejoHost } from "./forgejo-host.mjs";
 import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
+import { checkSlotKey, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -26,7 +27,7 @@ import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { loadScopedLimits } from "./scoped-limits.mjs";
+import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
@@ -41,6 +42,13 @@ const exec = promisify(execFile);
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
 const BOOT_IMAGE_TIMEOUT_MS = 5_000;
+
+/**
+ * How long a fleet-wide scope claim outlives its last refresh. The 30-minute job timeout plus slack, so a
+ * claim can never expire underneath a container that is still legitimately running -- which would let
+ * another host start a second job on a scope the operator limited to one, quietly.
+ */
+const SCOPE_CLAIM_TTL_MS = 35 * 60 * 1000;
 
 /**
  * This worker's own package version, for the registry row (issue #57): a rolling upgrade should be
@@ -224,6 +232,7 @@ export async function startWorker(
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
+		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
 		makeHostRegistry: makeHostRegistryFn = makeHostRegistry,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
@@ -321,8 +330,10 @@ export async function startWorker(
 
 	// Clear strays left by a previous crash before the worker starts draining. Best-effort: the reaper
 	// swallows its own docker errors; this guard keeps any reaper failure from blocking boot.
+	// Whether the container reaper actually ENUMERATED, which the scope-claim sweep below depends on.
+	let reaped = false;
 	try {
-		await makeReaperFn({ log })();
+		reaped = (await makeReaperFn({ log })())?.reaped === true;
 	} catch (err) {
 		log("reaper_skipped", { reason: err?.message });
 	}
@@ -355,6 +366,19 @@ export async function startWorker(
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
 	const redis = makeRedisClient(config.valkeyUrl);
+
+	// This host's own stale scope claims, gated on the reaper having having enumerated: the
+	// reaper is what establishes that this machine holds no `pi-job-*` containers, so a claim naming this
+	// host is a claim for a container that no longer exists. Deleting it is not a second source of truth --
+	// it is the SAME source writing down what it just established, which is what answers `OQ-008` here.
+	// Best-effort and double-wrapped like every other boot sweep: an OPTIMISATION over the TTL, never the
+	// mechanism, so a fault costs one TTL of a stale claim and never a boot.
+	try {
+		await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: scopeKeyPrefix(r.scope).slice("budget:s:".length) })), log })({ reaped });
+	} catch (err) {
+		log("scope_claims_sweep_skipped", { reason: err?.message });
+	}
+
 	// The persistent runtime queue: the stall guard tears schedulers down through it, AND the outbox
 	// collector enqueues chained children onto it -- the same pi-jobs queue, so one handle serves both.
 	// Non-failFast: a long-lived handle rides out a Valkey blip. Registered as an extraCloser so shutdown
@@ -587,6 +611,24 @@ export async function startWorker(
 		waitState: makeWaitState({ redis }),
 		// The polled tier's bounds, read per pickup from config so they are one value with one home. The
 		// slot count is a CEILING the gate clamps against the live concurrency, never the final number.
+		// The fleet-wide half of the wait-check bound (issue #57), armed on the same predicate as the host
+		// queue: declaring a name is declaring a fleet. Its TTL is DERIVED rather than guessed -- the gate
+		// holds the lease across every profile in turn, each bounded by the check timeout, so one timeout
+		// per profile plus one for the overhead between them.
+		// The fleet-wide half of a scoped `concurrent` ceiling. Its TTL is the job timeout plus slack rather
+		// than a guess: a container may legitimately run that long, and a claim that expired underneath a
+		// live job would let another host start a second one on a scope the operator limited to one. The
+		// job path refreshes it while the container runs.
+		scopeLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: scopeSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
+		checkLease: hostQueue
+			? makeFleetLease({
+					redis,
+					holderPrefix: config.workerName,
+					keyFor: checkSlotKey,
+					ttlMs: (Math.max(1, config.waitCheckSlots) + 1) * config.waitCheckTimeoutMs,
+					log,
+				})
+			: null,
 		checkSlotCount: () => config.waitCheckSlots,
 		intervalMs: () => config.waitIntervalMs,
 		maxWaitMs: () => config.waitMaxMs,

@@ -2953,7 +2953,9 @@ validator rather than a second copy of it.
   at boot), backing off with elapsed time toward a 15-minute ceiling — or toward the configured base if the
   operator set one LARGER, since clamping an explicit hourly cadence down to fifteen minutes would be a 4x
   cost overrun in the direction the operator was trying to avoid, from a knob documented as clamped-upward;
-  `PI_WAIT_CHECK_SLOTS` concurrent checks per worker process, held to `PI_CONCURRENCY - 1` so a check does
+  `PI_WAIT_CHECK_SLOTS` concurrent checks -- per worker process on a single-host deployment, and FLEET-WIDE
+  when `PI_WORKER_NAME` is declared (`DES-FLEET-LEASES-FOR-SHARED-BOUNDS`), because a held job's wakes land
+  on any host and a bound that multiplies by host count is not a bound -- held to `PI_CONCURRENCY - 1` so a check does
   not take the last free slot from a paid job -- **except at a concurrency of one, where the floor is one
   and a check does take the only slot**, because a ceiling of zero would mean no wait could ever be
   answered on that deployment. Stated rather than implied: it is the configuration where this bound
@@ -3242,6 +3244,14 @@ the panel reads every second.
 **`{ unreachable }` and `[]` are different answers** and no consumer may collapse them. "There are no
 other hosts" and "I could not find out" differ, and a panel that renders the second as the first tells an
 operator their fleet is gone when Valkey merely blinked.
+
+**The two shared bounds keep their keys under the prefixes they belong to**, not under `host:`:
+`wait:check:<i>` sits with the rest of the wait feature so one `KEYS wait:*` still shows all of it, and
+`slot:s:<16hex>:<i>` deliberately mirrors `budget:s:<16hex>` -- the same `scopeKeyPrefix` hash, so an
+operator reading both keys for one scope sees the same sixteen characters. A row's money windows and its
+concurrency are now both fleet-wide, by different mechanisms, and the difference is worth stating: a run
+CAP counts events that already happened and must never be forgotten, while a concurrency SLOT describes
+something happening now and must be forgotten when it stops. One is a ledger, the other a lease.
 
 **A fact may be published as a VALUE or as a THUNK**, and the thunk is not a convenience. A fact that
 can change without a restart -- the cron fingerprint after a live triggers-file edit, the live

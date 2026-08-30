@@ -2338,7 +2338,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - *Per-trigger `run.*` fields* — many triggers feed one repo, so the scope is the wrong shape; and
     limits are runtime controls, not reviewed trigger content.
   - *An overlay map key* — see "why a file" above.
-  - *Redis in-flight counters* — see "why process memory" above.
+  - *Redis in-flight counters* — see "why process memory" above, and see
+    `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` for the two cases issue #57 carved out of it. That refusal is
+    narrowed rather than reversed: it holds for the LOCAL folder mutex, where routing makes the
+    in-process count complete anyway, and it is answered for the two bounds that describe a
+    deployment rather than a process.
 - **Traces to**: `REQ-SCOPED-LIMITS`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `DES-CONCURRENCY-3`,
   `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` (the seam), `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
 
@@ -2773,10 +2777,65 @@ a tunnel.
   `OQ-008`, `OQ-012`
 
 
+## DES-FLEET-LEASES-FOR-SHARED-BOUNDS
+
+- **Decision** (issue #57): the two bounds enforced by an in-process `makeInFlight()` that describe a
+  DEPLOYMENT rather than a process -- `PI_WAIT_CHECK_SLOTS` and a `scoped-limits.json` row's `concurrent`
+  for a FORGE scope -- gain a fleet-wide layer of N independent `SET NX PX` keys beneath the unchanged
+  in-process one. The local map stays and stays correct as the per-host duty-cycle bound; the lease is
+  what stops the ceiling multiplying by host count.
+- **Why they had to move**: one worker per docker daemon made a per-process count correct, and two hosts
+  make it *a bound that multiplies by the operator's deployment shape*, which is not a bound. Four hosts
+  with `PI_WAIT_CHECK_SLOTS=1` run four concurrent checks against one third party; four hosts with
+  `concurrent: 1` run four paid containers on one repository. The second is worse in kind: a
+  `scoped-limits.json` row's day/week/month caps are already shared INCRs, so ONE ROW had one bound that
+  was fleet-correct and one that was silently widened -- which is the class of failure that file's own
+  version rule exists to prevent.
+- **What this owes `OQ-008` and `DES-CONCURRENCY-3`**, whose refusal of a Redis-held in-flight count is
+  about a claim whose truth-maker lives on the host while the claim lives in Redis. The two leases answer
+  it differently, and the difference is the whole entry:
+  - The CHECK lease **claims no container**. It claims a subprocess this same process spawned, bounded by
+    `PI_WAIT_CHECK_TIMEOUT_MS`, holding no folder and spending nothing. Three properties invert. What a
+    stale claim costs: a folder mutex nobody holds and a job that never runs, versus one check deferred by
+    at most a TTL. What contradicts it: the reaper is a second source of truth about containers and runs
+    at boot with authority, while nothing enumerates, inspects or reaps a check. And how long it can be
+    wrong: a container has no natural expiry, while a check has a hard configured timeout, so the TTL is
+    DERIVED rather than guessed.
+  - The SCOPE claim **really is for a container**, so the refusal lands squarely, and the answer is the
+    boot reaper. It establishes at boot that this host holds no `pi-job-*` containers, so a claim naming
+    this host is a claim for one that no longer exists, and deleting it is not a second source of truth:
+    it is the same source writing down what it just established. **The precondition is load-bearing and
+    is checked**: `makeReaper` catches its own `docker ps` failure, and on that path nothing was
+    enumerated -- so the sweep is skipped, because freeing those slots would let ANOTHER host start
+    containers alongside ones that may still be running. `makeInFlight`'s own escape ("a state where no
+    NEW container can start either") does not transfer, precisely because the sweep frees slots for a
+    different machine.
+- **LOCAL scopes never take a fleet claim, and the reason is not economy.** The key would be a hash of a
+  PATH STRING, which carries no identity: `/srv/site` on two machines is, in the common case, two
+  different repositories sharing a layout convention. A shared claim keyed on that would serialise two
+  independent working trees and break exactly the deployments this feature enables. Local folders are
+  answered by ROUTING instead -- a folder exists on one host, so its in-process mutex already spans
+  everything it needs to.
+- **N independent keys, never one counter**: a counter with one TTL loses every claim when it expires and
+  leaks a permanent `+1` on a crash, while N keys mean a lost release costs one slot for one TTL and never
+  the whole semaphore. Probing rotates from `hash(id) mod slots`, or every host tries index 0 first and
+  starves behind a busy slot while a free one sits two along -- a starvation indistinguishable from the
+  capacity shortage the bound exists to report.
+- **Release is idempotent here, which the in-process map is not.** It deletes only a key whose value is
+  still ours; `makeInFlight().release` clamps at zero but a double release on a `concurrent: 2` scope
+  frees the other holder's slot.
+- **A fault GRANTS.** The in-process bound is still underneath, so failing open degrades the fleet ceiling
+  to the per-host one -- the behaviour before this existed. Failing closed would turn a Valkey blip into
+  "no wait in this deployment can be answered", which is the wedge every other gate here refuses.
+- **Traces to**: `DES-CONCURRENCY-3`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `INT-SCOPED-LIMITS-FILE-CONTRACT`,
+  `INT-WAIT-PROFILES-CONTRACT`, `OQ-008`, `OQ-030`
+
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #57, the shared-bounds slice. **NEW `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`**: the two ceilings that describe a DEPLOYMENT rather than a process gain a fleet-wide layer beneath the unchanged in-process one. The entry's substance is what it owes `OQ-008` and this file's own refusal of Redis-held in-flight counts, and the two halves answer it differently. The check lease claims no container at all -- a subprocess this process spawned, bounded by a configured timeout, holding no folder and spending nothing -- so all three properties that made the container count wrong invert, and its TTL is derived rather than guessed. The scope claim really is for a container, so the refusal lands, and the answer is the boot reaper: it establishes that this host holds no containers, so deleting a claim that names this host is the same source of truth writing down what it just established. That argument has a PRECONDITION and the precondition is checked -- `makeReaper` catches its own `docker ps` failure, and on that path nothing was enumerated, so the sweep is skipped rather than freeing slots for containers that may still be running on a machine that would then be joined by another. Local scopes deliberately never claim, because the key would be a hash of a path string and `/srv/site` on two machines is usually two different repositories. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its rejection of Redis in-flight counters is NARROWED rather than reversed, and the narrowing is stated in the Rejected list itself so a reader meets it where the refusal is. **`DES-CONCURRENCY-3` UNCHANGED, checked**: the one-worker-per-daemon invariant and the process-memory argument for the folder mutex are untouched. **Code evidence**: worker/src/fleet-lease.mjs -> makeFleetLease, makeScopeClaimSweeper; worker/src/index.mjs -> makeProcessor (the check and scope arms); worker/src/start.mjs -> startWorker, makeReaper. |
 | 2026-08-30 | Issue #57, the placement slice. **`DES-CONCURRENCY-3` AMENDED**: `PI_CONCURRENCY` is restored as a bound on the MACHINE. A worker that drains a host-affine queue as well as the shared one runs two BullMQ Workers, and BullMQ's concurrency is per Worker, so two at 3 would run six containers and break the RAM and provider-throttle reasoning this entry rests on. An in-process semaphore at the pickup gate caps the sum, deferring the excess at the scope gate's cadence -- and process memory is still the CORRECT store for this entry's own unchanged reason, since it counts this host's containers and the boot reaper clears survivors before draining. The one-worker-per-docker-daemon invariant is untouched; multi-host means one worker per host, never two per daemon. **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**: a host's schedulers live on its own queue, which makes the orphan prune correct by construction rather than by agreement. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked, and the check is the interesting one**: the folder mutex stays an in-process count, and ROUTING is what keeps it complete across hosts -- a local folder exists on exactly one machine, so only that machine's worker ever runs jobs for it. Affinity preserves the mutex rather than being bolted beside it. The residual is a folder present on two hosts through a shared mount, which the registry can detect and nothing yet does. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the worker is still a host process shelling out to a local docker, and every bind mount is still a path on its own filesystem -- which is precisely why placement is a routing problem rather than a scheduling one. **Code evidence**: worker/src/index.mjs -> createWorker, makeProcessor; worker/src/queue.mjs -> hostQueueName; worker/src/schedules.mjs -> loadSchedules, servedSchedules. |
 | 2026-08-30 | Issue #57, the identity slice. **NEW `DES-HOST-REGISTRY`**: one TTL'd heartbeated row per worker, about itself, because six gaps wanting the same missing fact would otherwise grow six disagreeing answers. Three decisions carry their reasons. A registry rather than `CLIENT LIST`, because BullMQ's own doc-comment says `getWorkers()` does not work where CLIENT SETNAME is unsupported, and a host list that silently empties cannot be what a decision reads -- the Worker is named anyway, for the `processedBy` stamp it buys free. Boot never AWAITS the registry, which is correctness rather than speed: `maxRetriesPerRequest: null` (required by BullMQ's blocking connections) means a command against an unreachable server queues forever instead of rejecting, so awaiting the first beat would hang boot with no timeout on a deployment whose Valkey is down. And the name is validated rather than hashed, inverting `scopeKeyPrefix`'s call for a reason that is stated: a folder path was never chosen for key-safety and cannot be refused, while a declared name can -- and hashing would destroy the readability the structure exists for. **`DES-CONCURRENCY-3` UNCHANGED, checked**, plus one sentence saying why: the refused object is a claim whose truth-maker lives on the host while the claim lives in Redis, and a registry row's truth-maker is the process whose refresh IS the claim. The sentence also names where the argument does NOT transfer, because the naive reading is that #57 has retired this entry -- the wait-check lease and the per-scope in-flight count are claims of exactly this kind, and nothing here closes either. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: the sidecars remain the durable record and nothing about where they live has moved; the record gained one nullable field and no new store. **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` UNCHANGED, checked**: the in-flight map is untouched and still process memory. **Code evidence**: worker/src/host-registry.mjs -> makeHostRegistry, readLiveHosts; worker/src/start.mjs -> startWorker; worker/src/config.mjs -> WORKER_NAME_RE, sanitizeWorkerName. |
 | 2026-08-30 | Issue #230, the doctor and docs slice. **`DES-CLI-SURFACE` UNCHANGED, checked**: `doctor` stays read-only and always-safe, and the four new wait checks carry no `fixAction` -- they report and never repair, which is the property that keeps the command in its tier. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked**: no gate moved, no bound changed and no rejected alternative was revisited; this slice adds the load-time reporting of decisions that entry already made, plus the operator reference for them. Two of the checks did come from testing the entry's claims rather than from the plan, and both are recorded here because each is a state the entry implies is impossible to reach quietly: a garbled `PI_WAIT_PROFILES` is parsed by `loadConfig` on EVERY boot, holding triggers or not, so the parse check had to come out from behind the `waiting > 0` gate -- otherwise the one operator it exists for, the one whose worker refused to boot on that line before any trigger was written, was told nothing at all; and an `after` beyond `PI_WAIT_AFTER_MAX_MS` refuses every delivery at first pickup, which doctor can see before anything is enqueued because it holds both the instant and the ceiling. A third is a deliberate NARROWING: a declared profile no trigger names now warns instead of failing, because nothing looks it up and failing the command on a retired `.env` entry is the always-on advisory the `waiting > 0` gate exists to prevent. **`DES-PER-TRIGGER-SECRET-PROFILE` UNCHANGED, checked**, and re-checked deliberately: the doctor half of that entry gains no term, but the shared defect its parser copy carried is fixed on both sides (see `INT-WAIT-PROFILES-CONTRACT`'s row in interfaces.md) -- doctor was failing to ask its question, not answering it differently. **Code evidence**: worker/src/doctor.mjs -> collectChecks (the wait block), readTriggerFacts (waiting, waitProfiles, waitAfters), statPath, parseWaitProfilesSafe, parseSecretProfilesSafe. |

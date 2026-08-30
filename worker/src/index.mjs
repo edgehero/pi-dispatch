@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { InfraRetry, runJob } from "./processor.mjs";
 import { targetFor } from "./run-history.mjs";
-import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight } from "./scoped-limits.mjs";
+import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
@@ -63,7 +63,7 @@ const THROTTLE_FLOOR_MS = 11_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -233,6 +233,32 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// Declared outside the try below because the branches AFTER it read both.
 				let verdict = null;
 				let checked = null;
+				// A SECOND LAYER BENEATH THE FIRST, never a replacement (issue #57). The in-process map above
+				// stays exactly as it was and remains the correct per-host duty-cycle bound -- slots x timeout
+				// is the most wall-clock THIS worker spends answering questions instead of running jobs. What it
+				// cannot bound is the fleet: a held job's wakes land on any host, so `PI_WAIT_CHECK_SLOTS`
+				// silently multiplied by host count, and the one symptom the bound has gets QUIETER as you
+				// scale out, because multiplication produces fewer denials per host.
+				//
+				// Null when no peer could exist, so a single-host deployment issues no command at all.
+				let fleetSlot = null;
+				if (checkLease) {
+					fleetSlot = await checkLease.acquire(job.id, { slots: checkSlotCount() });
+					if (!fleetSlot) {
+						// The same outcome as a local denial and the same remedy, so the same cadence and the same
+						// event -- with one conditional field, which is what keeps an unarmed deployment's log line
+						// byte-identical.
+						checkSlots.release(WAIT_CHECK_KEY);
+						const denials = await waitState.noteThrottle(job.id, { denied: true });
+						if (denials === THROTTLE_ALARM) deps?.log?.("wait_capacity_exceeded", { jobId: job.id, denials, slots: checkSlotCount(), where: "fleet", hint: "raise PI_WAIT_CHECK_SLOTS or PI_CONCURRENCY, lengthen PI_WAIT_INTERVAL_MS, or hold fewer jobs" });
+						await waitState.hold(job.id, { dedupId, target: targetFor(job.data?.kind, job.data), label: waitLabel(job.data), untilMs: nowMs + maxWaitMs() });
+						const wait = Math.max(THROTTLE_FLOOR_MS, Math.floor(waitBackoffMs(intervalMs(), held) / 4));
+						const delay = wait + Math.floor(wait * 0.1 * random());
+						deps?.log?.("wait_check_throttled", { jobId: job.id, delayMs: delay, slots: checkSlotCount(), where: "fleet" });
+						await job.moveToDelayed(nowMs + delay, token);
+						throw new DelayedError();
+					}
+				}
 				// THE LEASE IS HELD FROM THE `tryAcquire` ABOVE, so every exit from here down must release it.
 				// The try opens here and not at the check loop, which is where it used to open: the supersede
 				// claim sits between the two, and BOTH of its exits leave -- one returns `wait-superseded`,
@@ -265,6 +291,7 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 						if (verdict?.profileUnknown || verdict?.verdict !== "go") break;
 					}
 				} finally {
+					await fleetSlot?.release?.();
 					checkSlots.release(WAIT_CHECK_KEY);
 				}
 
@@ -404,8 +431,10 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 		const limits = scopedLimits();
 		const scope = canonicalScope(job.data);
 		let held = false;
+		let scopeSlot = null;
 		if (scope) {
-			if (!inFlight.tryAcquire(scope, concurrencyFor(job.data, limits))) {
+			const ceiling = concurrencyFor(job.data, limits);
+			if (!inFlight.tryAcquire(scope, ceiling)) {
 				// Optional-chained: makeProcessor gives `deps` no default and bare wirings pass deps: {}.
 				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
 				// host path); the delayed count and the job id are what an operator needs to see it.
@@ -420,6 +449,37 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				throw new DelayedError();
 			}
 			held = true;
+
+			// THE FLEET-WIDE HALF of a scoped ceiling (issue #57). A `scoped-limits.json` row's day/week/month
+			// caps are already atomic INCRs on shared keys; its `concurrent` was a per-process Map, so it
+			// multiplied by host count -- a MONEY bound silently widened by the operator's deployment shape,
+			// which `INT-SCOPED-LIMITS-FILE-CONTRACT` calls out as the failure its version rule exists for.
+			//
+			// LOCAL scopes deliberately never claim, and the reason is not economy. The key is a hash of a
+			// PATH STRING, which carries no identity: `/srv/site` on two machines is, in the common case, two
+			// different repositories that share a layout convention. A shared claim keyed on that would
+			// serialise two genuinely independent working trees and break exactly the deployments this feature
+			// exists to enable. Local folders are answered by ROUTING instead -- a folder exists on one host,
+			// so its in-process mutex already spans everything it needs to.
+			//
+			// And an unlimited forge scope never claims either: `concurrencyFor` returns Infinity with no
+			// matching row, so a deployment with no scoped-limits file issues no command at all.
+			if (scopeLease && job.data?.kind !== "local" && Number.isFinite(ceiling)) {
+				scopeSlot = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [scopeKeyPrefix(scope).slice("budget:s:".length)] });
+				if (!scopeSlot) {
+					// The local slot goes back BEFORE we defer: `makeInFlight().release` is not idempotent, so a
+					// slot held across a deferral is a slot this host never gets back.
+					inFlight.release(scope);
+					held = false;
+					if (hostHeld) {
+						hostBound.slots.release(HOST_SLOT_KEY);
+						hostHeld = false;
+					}
+					deps?.log?.("scope_busy_deferred", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, where: "fleet" });
+					await job.moveToDelayed(nowMs + SCOPE_BUSY_RECHECK_MS, token);
+					throw new DelayedError();
+				}
+			}
 		}
 
 		let startedAt;
@@ -456,6 +516,8 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				hostBound.slots.release(HOST_SLOT_KEY);
 				hostHeld = false;
 			}
+			void scopeSlot?.release?.();
+			scopeSlot = null;
 			clearTimeout(timer);
 			throw error;
 		}
@@ -551,13 +613,15 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// mask the job's real error, and a missed release wedges the scope until a worker restart.
 			if (held) inFlight.release(scope);
 			if (hostHeld) hostBound.slots.release(HOST_SLOT_KEY);
+			// Fire-and-forget: the finally must not become async, and the TTL is the backstop for a lost release.
+			void scopeSlot?.release?.();
 			clearTimeout(timer);
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
 }
 
-export function createWorker({ connection, name, hostQueue = null, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
+export function createWorker({ connection, name, hostQueue = null, checkLease = null, scopeLease = null, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -599,6 +663,7 @@ export function createWorker({ connection, name, hostQueue = null, concurrency, 
 			scopedLimits,
 			inFlight,
 			hostBound,
+			scopeLease,
 			// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
 			// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
 			waitState,
@@ -607,6 +672,7 @@ export function createWorker({ connection, name, hostQueue = null, concurrency, 
 			// because the overlay can lower it through `dispatch_set` and a check must never take the last free
 			// slot from a paid job.
 			checkSlots,
+			checkLease,
 			checkSlotCount,
 			concurrencyNow: concurrencyNow ?? liveConcurrency,
 			intervalMs,
