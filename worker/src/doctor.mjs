@@ -838,10 +838,15 @@ export async function collectChecks(env, seams) {
 	// This host's own image id, read through the same seam every other docker probe here uses. Only when
 	// the image is actually present -- an absent one is already reported above, and a second line saying
 	// its digest is unknown would be noise on a fault the operator has been told about.
-	const imageDigest =
-		imageCode === 0 ? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage])).output.trim() || null : null;
 	const fleet = await readHosts(valkeyUrl);
 	const peers = (fleet.hosts ?? []).filter((h) => h.name !== workerNameOf(env));
+	// Read only when there is a peer to compare against. Every line below is gated on a peer existing, and
+	// the SUBPROCESS has to be too: otherwise every `doctor` run on every single-host deployment spawns an
+	// extra docker call whose answer nothing reads.
+	const imageDigest =
+		peers.length > 0 && imageCode === 0
+			? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage])).output.trim() || null
+			: null;
 	if (peers.length > 0) {
 		const mine = workerNameOf(env);
 		checks.push({ ok: true, label: `Fleet: ${peers.length + 1} worker${peers.length === 0 ? "" : "s"} (${[mine, ...peers.map((h) => h.name)].sort().join(", ")})` });

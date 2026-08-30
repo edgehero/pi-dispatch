@@ -202,9 +202,11 @@ export function makeReaper({ log }) {
 			// claim naming this host once this host has actually established that it holds no containers.
 			return { reaped: true };
 		} catch (err) {
-			// The `docker ps` itself is inside this try, so on this path nothing was listed and nothing
-			// reaped. Sweeping then would free slots for containers that may STILL BE RUNNING, and another
-			// host would start more alongside them -- a money overrun rather than a tidy-up.
+			// The `docker ps` is inside this try, so this path CANNOT establish that this host holds no
+			// containers -- whether it failed before listing anything or after reaping some and then losing
+			// the daemon. Either way the claim "I hold nothing" is unproven, and sweeping on it would free
+			// slots for containers that may STILL BE RUNNING, letting another host start more alongside
+			// them: a money overrun rather than a tidy-up. Conservative in the only safe direction.
 			log("reaper_skipped", { reason: err?.message });
 			return { reaped: false };
 		}

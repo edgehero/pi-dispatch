@@ -31,7 +31,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, order } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, order } = {}) {
 	const calls = [];
 	const registered = {};
 	const createWorkerFn = (arg) => {
@@ -119,6 +119,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeRunContainer: runContainerFactory,
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
+			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 		});
@@ -901,4 +902,53 @@ test("an unreachable Valkey cannot hang boot, and a HANG is what unreachable mea
 		rmSync(dir, { recursive: true, force: true });
 		rmSync(folder, { recursive: true, force: true });
 	}
+});
+
+test("the boot scope-claim sweep actually RUNS, and is told whether the reaper enumerated", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+
+	// The headline defect this pins: `makeReaper` returned nothing at all, so `?.reaped === true` was
+	// always false and the whole sweep was dead code that nobody noticed. Every reaper fake in this file
+	// also returns undefined, so no wiring test exercised the sweep running -- which is exactly how a
+	// silent no-op survives. This one drives it end to end.
+	const swept = [];
+	await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth,
+		makeHost: () => fakeHost(),
+		makeReaper: () => async () => ({ reaped: true }),
+		makeScopeClaimSweeper: (args) => async (opts) => (swept.push({ workerName: args.workerName, ...opts }), { swept: 0, skipped: false }),
+	});
+	assert.deepEqual(swept, [{ workerName: "mac-mini-1", reaped: true }]);
+});
+
+test("a reaper that could not enumerate passes reaped:false, and the sweep declines", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+
+	// The money finding: freeing a slot for a container that may still be running lets ANOTHER host start
+	// one alongside it. The reaper's `docker ps` is inside its own try, so a daemon blip means this host
+	// never established that it holds nothing -- and the sweep must be told that, not guess.
+	const swept = [];
+	await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth,
+		makeHost: () => fakeHost(),
+		makeReaper: () => async () => ({ reaped: false }),
+		makeScopeClaimSweeper: () => async (opts) => (swept.push(opts), { swept: 0, skipped: true }),
+	});
+	assert.deepEqual(swept, [{ reaped: false }]);
+});
+
+test("an UNDECLARED worker name never sweeps a shared keyspace it does not participate in", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+
+	const swept = [];
+	await runStart({
+		env: { VALKEY_URL: "redis://127.0.0.1:6399" },
+		makeAuth,
+		makeHost: () => fakeHost(),
+		makeReaper: () => async () => ({ reaped: true }),
+		makeScopeClaimSweeper: () => async (opts) => (swept.push(opts), { swept: 0, skipped: false }),
+	});
+	assert.deepEqual(swept, [], "no name declared means no fleet claims to own");
 });

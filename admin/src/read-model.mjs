@@ -641,7 +641,12 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
-    const res = await withTimeout(readLiveHosts(redis, { now }), timeoutMs, { unreachable: "timed out reaching the registry" });
+    // `timeoutMs` goes INWARD as well as around. Without it the inner per-operation bound stayed at its
+    // 2000ms default while the outer 2500ms had to cover a sequential `1 + N` round-trip walk, so past a
+    // handful of hosts on a slow Valkey the outer timer always won -- and the caller degraded to the
+    // shared queue alone for no reason but fleet size. Halved inward so N operations fit inside one outer
+    // budget rather than one operation consuming it.
+    const res = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" });
     if (res.unreachable) return { unreachable: res.unreachable };
     return { hosts: res.hosts };
   } catch (err) {
