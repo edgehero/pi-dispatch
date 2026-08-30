@@ -19,6 +19,14 @@ if (!mod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 }
 const skip = mod ? false : `worker deps not installed (node ${process.version} < 22.19.0); CI runs these`;
 
+// The Valkey these tests actually reach. `startWorker` connects for real here -- the fakes stop at docker,
+// not at the queue -- so a URL pointing at nothing does not fail, it HANGS: BullMQ's connections carry
+// `maxRetriesPerRequest: null`, which makes a command against an unreachable server queue forever rather
+// than reject. A hardcoded local port therefore passes on a laptop that happens to run one there and wedges
+// CI, where the service is published on a different port, with no error and no output. `VALKEY_TEST_URL` is
+// what the rest of the suite reads and what CI sets; the literal is only the local fallback.
+const VALKEY_URL = process.env.VALKEY_TEST_URL ?? "redis://127.0.0.1:6399";
+
 function fakeHost(overrides = {}) {
 	return {
 		resolveDefaultBranchSha: async () => ({ branch: "main", sha: "abc" }),
@@ -818,7 +826,7 @@ test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good o
 
 test("every log line carries the host", { skip }, async () => {
 	const { logs } = await runStart({
-		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 	});
 	const emitted = logs.filter((l) => l.event);
@@ -828,7 +836,7 @@ test("every log line carries the host", { skip }, async () => {
 
 test("a call site that passes its own host is OVERRIDDEN, never trusted", { skip }, async () => {
 	const { deps } = await runStart({
-		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 	});
 	// The stamp sits AFTER the spread, so the closure's value wins: no call site knows better than this
@@ -841,7 +849,7 @@ test("a call site that passes its own host is OVERRIDDEN, never trusted", { skip
 
 test("the worker is NAMED, the registry is closed on shutdown, and the boot line announces both host and digest", { skip }, async () => {
 	const { captured, logs } = await runStart({
-		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 	});
 
@@ -883,7 +891,7 @@ test("an unreachable Valkey cannot hang boot, and a HANG is what unreachable mea
 	try {
 		const { captured, logs } = await Promise.race([
 			runStart({
-				env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399", PI_TRIGGERS_FILE: triggersFile },
+				env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL, PI_TRIGGERS_FILE: triggersFile },
 				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 				makeHostRegistry: (args) => makeHostRegistry({ ...args, redis: hanging, timeoutMs: 50 }),
 			}),
@@ -913,7 +921,7 @@ test("the boot scope-claim sweep actually RUNS, and is told whether the reaper e
 	// silent no-op survives. This one drives it end to end.
 	const swept = [];
 	await runStart({
-		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
 		makeAuth,
 		makeHost: () => fakeHost(),
 		makeReaper: () => async () => ({ reaped: true }),
@@ -930,7 +938,7 @@ test("a reaper that could not enumerate passes reaped:false, and the sweep decli
 	// never established that it holds nothing -- and the sweep must be told that, not guess.
 	const swept = [];
 	await runStart({
-		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
 		makeAuth,
 		makeHost: () => fakeHost(),
 		makeReaper: () => async () => ({ reaped: false }),
@@ -944,7 +952,7 @@ test("an UNDECLARED worker name never sweeps a shared keyspace it does not parti
 
 	const swept = [];
 	await runStart({
-		env: { VALKEY_URL: "redis://127.0.0.1:6399" },
+		env: { VALKEY_URL },
 		makeAuth,
 		makeHost: () => fakeHost(),
 		makeReaper: () => async () => ({ reaped: true }),
