@@ -582,6 +582,21 @@ test("an unrecognised container exit still falls to the unknown-exit InfraRetry 
 	assert.equal(redis.decrCalls, 0, "an unknown exit is not assumed to have spent nothing");
 });
 
+test("a CONTAINER exiting 3 is still unrecognised -- the wait participant's hold code is not shared", async () => {
+	// Issue #230 gave exit 3 a meaning ("not yet, ask again later") for the WAIT PARTICIPANT only. That
+	// widening is per-participant by construction, and this is the pin that keeps it so: a container has no
+	// way to say "hold me", so a 3 from one is still a code we cannot reason about, still infra-retryable,
+	// and still holding its budget slot. If this test ever goes green on a `policy` or a deferral, the
+	// protocol amendment leaked into the classifier it promised not to touch.
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, runContainer: async () => ({ code: 3, aborted: false }) });
+	await assert.rejects(
+		() => runJob(ghJob, d),
+		(e) => e instanceof InfraRetry && /unknown container exit 3/.test(e.message) && e.budgetReserved === true,
+	);
+	assert.equal(redis.decrCalls, 0, "and no refund, exactly as for any other unrecognised code");
+});
+
 test("a completed run promotes its transcript; a policy or infra exit does NOT", async () => {
 	// Completed-only promotion is what keeps CONST-RETRY-INFRA-ONLY true: promote on every exit and a
 	// retry inherits the failed attempt's residue, so attempt 2 stops being the same run as attempt 1.

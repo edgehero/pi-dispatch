@@ -134,7 +134,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -179,6 +179,16 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		// is copied verbatim into /job/event.json, which an agent reads.
 		...(secrets !== undefined && { secrets }),
 		...(secretsProfile !== undefined && { secretsProfile }),
+		// Issue #230. The conditions the worker holds this job on, carried so the PICKUP gate can read them:
+		// that gate runs above the per-job settings read and never re-parses the triggers file for its terms.
+		// At JOB level, and here that placement is a correctness requirement rather than a convention --
+		// `trigger` is copied VERBATIM into /job/event.json (prepare-local.mjs), so a `trigger.waitFor` would
+		// hand the agent the operator's own gate. Conditional like every field above, so an unflagged job's
+		// data keeps exactly the keys it has today. The dedup options below are deliberately NOT widened for
+		// a waiting job: that key carries no trigger identity and outlives the job it was set for, so a
+		// longer window would suppress an unflagged sibling's deliveries and go on suppressing them after
+		// this job finished. Coalescing a held target is the worker's `wait:` keyspace's job instead.
+		...(waitFor !== undefined && { waitFor }),
 		// Conditional for the same reason packages/image/resume are: an unflagged job's data must keep
 		// exactly the keys it has today. `replica` is this job's 1-based index and `replicas` the set size;
 		// both are integers, so the run record they land in stays PII-free by construction.

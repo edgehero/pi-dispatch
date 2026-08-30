@@ -612,6 +612,42 @@ test("secrets and secretsProfile ride a forge job's data, and an unflagged job's
 	assert.equal("secretsProfile" in plain.got.data, false);
 });
 
+test("waitFor rides a forge job's data at JOB level, and never inside `trigger` (#230)", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const cap = (q) => ({ add: (name, data, opts) => ((q.got = { name, data, opts }), { id: opts.jobId }) });
+	const trigger = { event: "issues", action: "labeled", deliveryId: "guid-wait", sender: { id: 42 } };
+	const target = { type: "issue", number: 7, title: "T", body: "B" };
+	const waitFor = [{ after: "2026-09-01T09:00:00Z" }, { profile: "jira" }];
+
+	const armed = {};
+	await enqueueGitHubJob(cap(armed), { repo: "owner/repo", target, flow: "deploy", trigger, waitFor });
+	assert.deepEqual(armed.got.data.waitFor, waitFor);
+	// The placement is a correctness requirement, not a convention: `trigger` is copied VERBATIM into the
+	// container's /job/event.json, so a `trigger.waitFor` would hand the agent the operator's own gate.
+	assert.equal("waitFor" in armed.got.data.trigger, false);
+
+	// The dedup options are DELIBERATELY untouched by a wait. Widening that window was the obvious move and
+	// it is wrong twice: the key carries no trigger identity (so it would suppress an unflagged sibling on
+	// the same target and flow) and it outlives completion (so it would go on suppressing after this job
+	// finished). Coalescing a held target belongs to the worker's own keyspace instead.
+	const plainOpts = {};
+	await enqueueGitHubJob(cap(plainOpts), { repo: "owner/repo", target, flow: "deploy", trigger });
+	assert.deepEqual(armed.got.opts.deduplication, plainOpts.got.opts.deduplication, "a waiting job's dedup id and ttl are the same ones an unflagged job gets");
+	assert.equal(armed.got.opts.attempts, plainOpts.got.opts.attempts);
+
+	assert.equal("waitFor" in plainOpts.got.data, false, "and an unflagged job grows no key");
+});
+
+test("queue.mjs stays a pure function of its arguments -- no env read, no config import (#230)", async () => {
+	// The wait bounds are config, and the temptation was to reach for one here (a dedup ttl derived from
+	// PI_WAIT_MAX_MS). This module has never read `process.env` or imported `config.mjs`, and a NaN arriving
+	// from such a read would silently change the dedup branch bullmq takes for EVERY job, flagged or not.
+	const { readFileSync } = await import("node:fs");
+	const src = readFileSync(new URL("../src/queue.mjs", import.meta.url), "utf8");
+	assert.equal(/process\.env/.test(src), false, "queue.mjs must not read the environment");
+	assert.equal(/from "\.\/config\.mjs"/.test(src), false, "queue.mjs must not import config.mjs");
+});
+
 test("a local (cron) job may carry secrets too -- unlike replicas, which a local job is refused (#225)", async () => {
 	const { enqueueLocalJob } = await import("../src/queue.mjs");
 	let captured;

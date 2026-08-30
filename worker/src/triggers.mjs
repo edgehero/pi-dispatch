@@ -30,6 +30,11 @@ import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
+// The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
+// the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
+// how a file that loads clean starts holding for an instant nobody wrote. wait-for.mjs is pure and
+// fs-free, so importing it keeps parseTriggers pure.
+import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-for.mjs";
 
 const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
 
@@ -345,6 +350,9 @@ function normalizeCron(on, run, index, path, state) {
 	validateDisarmed(on, `cron trigger "${id}"`, path, { onType: "cron" });
 	const secrets = validateSecrets(run, `cron trigger "${id}"`, path);
 	const secretsProfile = validateSecretsProfile(run, `cron trigger "${id}"`, path);
+	// Called for its refusal only: the returned `run` below deliberately grows no `waitFor` key, exactly as
+	// it grows no `replicas` one, because a cron entry can never carry either (issue #230).
+	validateWaitFor(on, run, `cron trigger "${id}"`, path, { onType: "cron" });
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -984,6 +992,140 @@ function validateSecretsProfile(run, at, path) {
 	return profile;
 }
 
+/**
+ * `run.waitFor` -- the conditions that must all clear before this trigger's job starts (issue #230).
+ *
+ * A CONJUNCTION of one-key objects: `{ "after": "<ISO instant>" }` is answered from the clock, and
+ * `{ "profile": "<name>" }` is answered by an operator-declared executable. The tiers are evaluated
+ * cheapest-first at the gate rather than in the operator's writing order, which is a deliberate divergence
+ * from the sequential rule `run.secrets` keeps: that rule exists so a broken reference always blames the
+ * same variable, and a conjunction has no such ambiguity to protect.
+ *
+ * Like `run.secretsProfile`, a `profile` names a NAME and never a path, and WHETHER the deployment declares
+ * it cannot be answered here (this validator is pure and fs-free). That refuses pre-spend, per delivery, as
+ * `wait-profile-unknown`.
+ *
+ * UNKNOWN KEYS INSIDE A CONDITION ARE REFUSED, not dropped, which inverts this file's own posture for a
+ * reason `validateDisarmed` already established: everywhere else an unknown key is a field that does
+ * nothing, while here it is a CONDITION that does nothing, and a gate silently missing one of its terms
+ * runs a paid job the operator believed was held.
+ *
+ * Three combination refusals, checked BEFORE any shape check so the message names the combination rather
+ * than the array (`validateReplicas`' ordering lesson, where moving the local gate below the range check
+ * would have answered a cron entry with the wrong complaint):
+ *
+ *   - ON CRON. Two mechanisms, either of which is enough. The scheduler advances at PICKUP, so a held
+ *     occurrence carries an older `repeat:<id>:<millis>` than the one the scheduler stores; teardown
+ *     (`removeJobScheduler`, and therefore both a trigger delete and the stall guard's money backstop)
+ *     deletes only the STORED one, so the held job survives its own scheduler and still pays. And a held
+ *     occurrence's hash outliving the next `upsertJobScheduler` is a `SchedulerJobIdCollision`, which
+ *     `cron.mjs` turns into a config error that FAILS WORKER BOOT. Closing it needs teardown that
+ *     enumerates the delayed set, which is a gap to close, not a limit.
+ *   - BESIDE `on.once`. The one-shot disarm fires for EVERY run record, outcome-blind ("fired" means
+ *     "produced a run record"), so a wait that timed out would permanently spend a one-shot whose
+ *     container never started, and `checkOnceSpent` would then refuse every retry until the operator
+ *     hand-edited this file. Exempting the wait reasons instead would redefine "fired" for every other
+ *     refusal too, which is a gap to close, not a limit.
+ *   - BESIDE `run.replicas`. Fanout happens at enqueue, so N replicas are N independent holds: N times the
+ *     subprocesses and N times the check contention for ONE external condition. `REPLICAS_MAX` was chosen
+ *     against `PI_CONCURRENCY` on the premise that replicas RACE, and a hold inverts it.
+ *
+ * Returns a freshly built array, so nothing unvalidated rides through, and `undefined` when absent so an
+ * unflagged trigger normalizes byte-identically.
+ */
+function validateWaitFor(on, run, at, path, { onType }) {
+	// A NEAR-MISS SPELLING IS REFUSED, and this is the one place in this file that looks at a key nobody
+	// wrote. Unknown keys drop here by design, which is harmless for every other field: a misspelled
+	// `run.imgae` gives you the default image and a job that ran. `waitFor` is the first field whose
+	// ABSENCE is destructive -- `waitfor` loads clean, normalizes clean, enqueues clean, and produces a
+	// paid run that is byte-identical in the record, the panel and the log to one that correctly waited.
+	// That is precisely the argument this validator already makes one level down about an unknown key
+	// INSIDE a condition ("a term of the gate that would silently do nothing"), and the gate as a whole is
+	// the bigger casualty. Bounded deliberately to near-misses rather than a general unknown-key sweep:
+	// tolerating unknown `run` keys is this file's documented forward-compatibility posture, and a sweep
+	// would refuse files that load today.
+	// On `run` only a NEAR-MISS is wrong (the exact spelling is the field itself); on `on` every spelling is,
+	// including the correct one, since a wait is a property of the run and `on.waitFor` would be dropped just
+	// as silently as a typo.
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && key === "waitFor") continue;
+			if (key.replace(/[^a-z0-9]/gi, "").toLowerCase() !== "waitfor") continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.waitFor? A wait condition the loader drops holds nothing while the file reads as though it does, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+
+	const waitFor = run.waitFor;
+	if (waitFor === undefined) return undefined;
+
+	if (onType === "cron") {
+		throw configError(`${at}: run.waitFor is not yet covered on a cron trigger -- the scheduler advances at pickup, so a held occurrence outlives the teardown that would delete it and still pays, and its surviving job hash can fail worker boot with a scheduler id collision; bounding that needs delayed-set-aware teardown, which is a gap to close, not a limit: ${path}`);
+	}
+	if (on?.once === true) {
+		throw configError(`${at}: run.waitFor and on.once cannot be combined -- the one-shot disarms on every run record, so a wait that never cleared would spend the one-shot with no container ever started and no way to re-arm it but editing this file: ${path}`);
+	}
+	if (run.replicas !== undefined) {
+		throw configError(`${at}: run.waitFor and run.replicas cannot be combined -- replicas fan out at enqueue, so each one would hold and poll the same external condition independently, multiplying the checks by ${run.replicas} for one answer: ${path}`);
+	}
+
+	if (!Array.isArray(waitFor) || waitFor.length === 0) {
+		throw configError(`${at}: run.waitFor must be a non-empty array of conditions when present (got ${JSON.stringify(waitFor)}): ${path}`);
+	}
+	if (waitFor.length > WAIT_CONDITION_MAX) {
+		throw configError(`${at}: run.waitFor names ${waitFor.length} conditions, over the ${WAIT_CONDITION_MAX} cap -- each profile condition is a subprocess run before the container, holding a concurrency slot while it runs: ${path}`);
+	}
+
+	const expected = WAIT_CONDITION_KEYS.join("|");
+	const normalized = [];
+	const profiles = new Set();
+	let seenAfter = false;
+	for (let i = 0; i < waitFor.length; i += 1) {
+		const condition = waitFor[i];
+		const where = `${at}: run.waitFor[${i}]`;
+		if (condition === null || typeof condition !== "object" || Array.isArray(condition)) {
+			throw configError(`${where} must be an object naming exactly one condition (got ${JSON.stringify(condition)}): ${path}`);
+		}
+		const keys = Object.keys(condition);
+		if (keys.length !== 1) {
+			throw configError(`${where} must name exactly one condition (expected ${expected}), got ${keys.length === 0 ? "an empty object" : JSON.stringify(keys)}: ${path}`);
+		}
+		const key = keys[0];
+		if (key === "exclusive") {
+			throw configError(`${where}: exclusive is no longer a condition you write -- the worker already holds at most one local job per folder, always on, with no configuration and no off switch, and scoped-limits.json bounds any scope further: ${path}`);
+		}
+		if (!WAIT_CONDITION_KEYS.includes(key)) {
+			throw configError(`${where} has an unsupported condition ${JSON.stringify(key)} (expected ${expected}) -- an unknown condition here is a term of the gate that would silently do nothing, so it is refused rather than dropped: ${path}`);
+		}
+		if (key === "after") {
+			if (seenAfter) {
+				throw configError(`${where}: run.waitFor names a second "after" -- the conditions are a conjunction, so two instants mean the later one and the file would read as though both mattered: ${path}`);
+			}
+			if (afterInstantMs(condition.after) === null) {
+				throw configError(`${where}: after must be an ISO-8601 instant carrying its own zone, like "2026-09-01T09:00:00Z" or "2026-09-01T11:00:00+02:00" (got ${JSON.stringify(condition.after)}) -- without a zone the same file would hold for a different instant on a worker in a different timezone: ${path}`);
+			}
+			seenAfter = true;
+			normalized.push({ after: condition.after });
+			continue;
+		}
+		const profile = condition.profile;
+		if (!isNonEmptyString(profile)) {
+			throw configError(`${where}: profile must be a non-empty string naming one of the wait profiles this deployment declares (got ${JSON.stringify(profile)}): ${path}`);
+		}
+		if (!ID_CHARSET.test(profile)) {
+			throw configError(`${where}: profile ${JSON.stringify(profile)} may use letters, digits, dot, dash and underscore only -- PI_WAIT_PROFILES is a comma-separated list of name:path pairs, so a name carrying either separator cannot be declared: ${path}`);
+		}
+		if (profiles.has(profile)) {
+			throw configError(`${where}: run.waitFor names the profile ${JSON.stringify(profile)} twice -- the conditions are a conjunction, so the second one can never change the answer while it doubles the subprocesses: ${path}`);
+		}
+		profiles.add(profile);
+		normalized.push({ profile });
+	}
+	return normalized;
+}
+
 function normalizeLabel(on, run, index, path) {
 	const at = `trigger at index ${index}`;
 	const predicate = validatePredicate(on, index, path, true);
@@ -1005,9 +1147,10 @@ function normalizeLabel(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
 	};
 }
 
@@ -1043,9 +1186,10 @@ function normalizeComment(on, run, index, path, state) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
 	};
 }
 
@@ -1108,6 +1252,7 @@ function normalizeIssue(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: {
 			type: "issue",
@@ -1117,7 +1262,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
 	};
 }
 
@@ -1191,6 +1336,7 @@ function normalizePullRequest(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: {
 			type: "pull_request",
@@ -1205,7 +1351,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
 	};
 }
 

@@ -432,16 +432,38 @@ Evidence convention as in `constitution.md`.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
-**container → worker, and secret resolver → worker.**
+**container → worker, secret resolver → worker, and wait profile → worker.**
 
-The table below is written for the container, and a trigger's secret resolver (`REQ-TRIGGER-SECRETS`) speaks
-the same three codes for the same reason: `0` carries the value on stdout, `1` says the manager could not be
-reached and is RETRIED, `2` says the reference is wrong and is not. An unrecognised code is treated as `1`.
-Reusing this vocabulary rather than minting a second one is deliberate: an operator writing a resolver is
-already told to ask what their manager does to their exit code (`docs/secrets.md`), and folding every nonzero
-exit into a refusal would permanently burn a delivery over a transient vault outage.
+**Three participants, and one table each.** The vocabulary was one table with footnotes while every
+participant spoke the same three codes; it is stated per participant since the third one arrived needing a
+fourth. What has not changed is which codes each speaks, so a reader of either existing participant loses
+nothing by the restructure.
 
-- **Contract**:
+**The container and the secret resolver (`REQ-TRIGGER-SECRETS`) speak the same three codes for the same
+reason**: `0` carries the value on stdout, `1` says the manager could not be reached and is RETRIED, `2` says
+the reference is wrong and is not. For both of them an unrecognised code is treated as `1`. Reusing this
+vocabulary rather than minting a second one was deliberate: an operator writing a resolver is already told to
+ask what their manager does to their exit code (`docs/secrets.md`), and folding every nonzero exit into a
+refusal would permanently burn a delivery over a transient vault outage. The resolver has no table of its own
+below because it needs none — read the container's and substitute "the value" for "the agent's work".
+
+**The wait profile (`REQ-WAIT-FOR`, issue #230) is the first participant to need a code the other two do not
+have.** It answers *whether to start*, and the honest set of answers to that question is four, not three: go,
+never, could-not-tell, and **not yet** — which is neither a retry nor a refusal but a HOLD, a queue behaviour
+this protocol did not have. That is what the fourth code buys, and it is the whole of what it buys: the three
+shared codes keep their meanings everywhere, including in the wait profile's own table.
+
+**Why a code here and not a `reason`, when the rule below is that new vocabulary rides `reason`.** That rule
+was written for command jobs, whose new words describe a run that HAPPENED: there is an exit log line to carry
+them and a run record they end up in. A wait profile has neither — while a job is held there is no container,
+no `exit` line, and by `INT-RUN-HISTORY-FILE-CONTRACT` no record at all — so `reason` is not a channel it has,
+and the rule's own mechanism is what is missing rather than its intent being overridden. The widening is
+bounded by being per-participant: **no container and no resolver may emit `3`**, a container exiting `3` is
+still an unrecognised code that infra-retries, and a resolver exiting `3` is still `unreachable`. Both are
+test-pinned, because "we widened one participant's vocabulary" and "we changed what a `3` means" are one
+refactor apart.
+
+- **Contract, container → worker**:
   | Code | Meaning | Queue behaviour |
   |---|---|---|
   | `0` | Agent completed — **including** concluding "I cannot fix this" | Success. Never retried |
@@ -525,6 +547,29 @@ exit into a refusal would permanently burn a delivery over a transient vault out
   INCLUSION list for what the host DEMANDS of an image, and there is nothing here for `verify-image.sh` to
   grep that would mean anything. The cost of that is stated rather than discovered: the bound this feeds
   is inert on an old image and stays inert forever on one that is never rebuilt.
+
+- **Contract, wait profile → worker** (`run.waitFor`'s `profile` conditions):
+  | Code | Meaning | Queue behaviour |
+  |---|---|---|
+  | `0` | The condition has cleared | The job starts |
+  | `1` | I could not tell | **Held** — asked again later, and COUNTED as a fault |
+  | `2` | This will never clear | Not retried. Terminal, `wait-refused` |
+  | `3` | Not yet | **Held** — asked again later |
+  | any other | treated as `1` | **Held**, counted |
+
+  `1` holds rather than refusing because a check that could not answer has not answered *no*: reading an
+  unreachable Jira as "this will never clear" drops a paid delivery over a transient outage, which is
+  `CONST-RETRY-INFRA-ONLY` in the expensive direction and the same call the secret resolver makes.
+
+  **The fault count is what keeps `1` and `3` from being one code wearing two hats**, and it exists because
+  of `OQ-027`: most CLIs exit `1` for everything, so a permanently broken check — a typo'd `curl` exits `6`,
+  a false `jq -e` exits `1` — would otherwise hold for the entire maximum wait, spawn a process every
+  interval, and terminate with a reason blaming the CONDITION rather than the script. `PI_WAIT_MAX_FAULTS`
+  consecutive faults terminate as `wait-unanswerable`, naming the profile. A `3` resets the count: a check
+  that answered is a check that works. The happy side effect is that the naive one-liner an operator writes
+  first (`... | grep -q ...`, which exits `1` when the pattern is absent) behaves correctly by accident — it
+  holds, and the fault bound keeps that from being forever.
+
 - **Why**: This exit code **is** the mechanism `CONST-RETRY-INFRA-ONLY` is implemented by. The worker
   has no other channel to distinguish "the agent ran and said no" from "the container died" — collapse
   them and you either burn money blind-retrying determinate outcomes, or you silently swallow real infra
@@ -1991,6 +2036,56 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   never produce a valid trigger. The panel declares RESOLVERS, through the operator-typed `/dispatch
   secrets` command; binding one to a job stays an edit to this file.
 
+- **`run.waitFor` (webhook kinds only, optional array of 1..4 one-key condition objects)**: the conditions
+  that must ALL clear before this trigger's job starts (`REQ-WAIT-FOR`, issue #230). `{ "after": "<ISO
+  instant>" }` is answered from the clock; `{ "profile": "<name>" }` is answered by an operator-declared
+  executable (`INT-WAIT-PROFILES-CONTRACT`). Absent, the job data, container env and run record are
+  byte-identical to one prepared before the field existed.
+
+  **What is landed as of the grammar slice**: everything under "Refused at load" below, and the carry into
+  job data. **The hold itself is not** — the pre-spend `wait-profile-unknown` refusal and the `doctor` half
+  named below arrive with the enforcement slice of issue #230, and until then a trigger carrying this field
+  loads, enqueues and RUNS. Said here rather than only in the revision row because this bullet, not the
+  profiles entry, is what an operator authoring `triggers.json` is pointed at.
+
+  **Refused at load** for: a non-array or empty array; more than four conditions (each `profile` is a
+  subprocess run before the container, holding a concurrency slot, which is `run.secrets`' own bound in
+  time rather than in count); a condition that is not an object naming EXACTLY ONE key; an `after` that
+  does not carry its own zone, or names a date the calendar does not have; a second `after` in one array;
+  a `profile` that is not a non-empty string, or is outside `ID_CHARSET`, or is named twice; and
+  `exclusive`, by name, pointing at the mutex that replaced it.
+
+  **An unknown key inside a condition is REFUSED, not dropped**, which inverts this file's posture for
+  every other field and is the one place that inversion is right: elsewhere a dropped key is a field that
+  does nothing, while here it is a TERM OF A GATE that does nothing, and the job runs. `on.disarmed`'s
+  key sweep is the precedent; the difference is that this one guards a paid run rather than a sentinel.
+
+  **Three combinations are refused at load**, each in `run.resume`'s *not yet covered* vocabulary because
+  each is a gap with a known closure rather than a decision:
+  - **`cron`**. The scheduler advances at PICKUP, so a held occurrence carries an older
+    `repeat:<id>:<millis>` than the one the scheduler stores. Teardown deletes only the stored one, so a
+    held job outlives both a trigger delete and the stall guard's money backstop and still pays; and a
+    held occurrence's surviving job hash makes the next upsert a scheduler-id collision, which fails
+    worker boot. Closing it needs delayed-set-aware teardown.
+  - **`on.once`**. The one-shot disarm fires on EVERY run record, outcome-blind, so a wait that timed out
+    would permanently spend a one-shot whose container never started, and `once-already-spent` would then
+    refuse every retry until the operator hand-edited this file. Exempting the wait reasons instead would
+    redefine "fired" for every other refusal too.
+  - **`run.replicas`**. Fanout is at enqueue, so N replicas are N independent holds: N times the
+    subprocesses and N times the contention for ONE external answer. `REPLICAS_MAX` was chosen against
+    `PI_CONCURRENCY` on the premise that replicas RACE, and a hold inverts it.
+
+  **A second refusal is pre-spend, not at load**, for `run.secretsProfile`'s reason: which profiles a
+  deployment declares is env state and this loader is pure and fs-free. That refuses per delivery as
+  `wait-profile-unknown`, and `doctor` carries the load-time half.
+
+  **The field rides at JOB level and never inside `trigger`**, which here is a correctness requirement
+  rather than the convention it is for `image`/`skillsDir`: `trigger` is copied VERBATIM into
+  `/job/event.json`, so a `trigger.waitFor` would hand the agent the operator's own gate.
+
+  **No model-callable path**, on `run.secrets`' reasoning: `dispatch_trigger_add`/`_edit` carry no
+  `waitFor` parameter. A wait is reviewed trigger content, not a runtime control.
+
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
   owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
@@ -2768,6 +2863,77 @@ validator rather than a second copy of it.
 
 ---
 
+## INT-WAIT-PROFILES-CONTRACT
+
+- **Status**: the grammar, the profile table and the config keys are LANDED; **every OTHER statement in this
+  entry describes enforcement that lands in a later slice of issue #230** — including `Location`'s
+  fail-closed parenthetical, which is the one an operator would most reasonably assume is already true —
+  and until that slice a declared profile is read at boot and executed by nothing. Deliberately not an
+  enumeration of section names: naming five and omitting a sixth implies the sixth is present, which is a
+  stronger lie than saying nothing. `REQ-WAIT-FOR`, cited here and from `INT-TRIGGERS-FILE-CONTRACT`, lands in that same slice; the
+  forward reference is deliberate, so the address is written once rather than moved. Stated here rather than
+  only in the revision row because this file is the artifact an operator is pointed at, and a contract that
+  reads as present-tense while its enforcement is unbuilt is the same lie as a cap that does not cap.
+- **Producer/Consumer**: operator → worker, through the environment. The receiver carries `run.waitFor`
+  into job data and evaluates nothing; the admin extension reads held state and declares no profile.
+- **Location**: `PI_WAIT_PROFILES` (unset = the feature is off; every trigger naming a profile refuses
+  pre-spend). `name:/absolute/path` pairs, comma separated, each entry split on its FIRST colon so a
+  Windows `C:\...` path survives. Set-but-garbled is a BOOT refusal, `parseSecretProfiles`' posture: a
+  silently dropped entry is a profile the operator believes is wired, while every trigger naming it
+  refuses at delivery with the operator looking at the line that appears to declare it.
+- **Why a separate variable from `PI_SECRET_PROFILES`**, which has the identical grammar: the two answer
+  different questions (one fetches a value, one says whether to go), they grow different bounds, and one
+  merged list would make a resolver reachable as a gate and a gate reachable as a resolver. The duplication
+  is the cheaper of the two mistakes.
+- **Why there is no `PI_WAIT_RESOLVER_ROOTS` twin.** `PI_SECRET_RESOLVER_ROOTS` exists to bound paths
+  arriving from the settings OVERLAY, which is not a reviewed artifact. A wait profile has no overlay half
+  to bound, and cannot: the pickup gate runs ABOVE the per-job settings read, so a profile can only ever be
+  declared in the environment, beside the forge tokens. A bound with nothing to bound would be theatre.
+  Declaring profiles from the panel is deferred, and the roots variable arrives with it if it ever does.
+- **Invocation**: the worker spawns the named path with the job's **id-only target** as `argv[1]`
+  (`run-history.mjs`'s `targetFor` shape — `owner/repo#12`, or `local:<basename>`), never a title, a body,
+  or any payload text. `shell: false`, an argv array, stdin `ignore` so a check that prompts dies at once
+  rather than blocking to timeout. It runs on the HOST as the worker, with the worker's environment, before
+  the mint, the clone and the budget reservation — the secret resolver's position, and it inherits that
+  entry's disclosure: this is not a weaker blast radius than `--env-setup`, it is the same one at a
+  different time, and what bounds it is that the operator named the script in a file only they can write.
+- **Verdicts**: `INT-RUNNER-EXIT-CODE-PROTOCOL`'s wait-profile table (`0` go, `1` cannot tell → held and
+  counted, `2` never → terminal, `3` not yet → held, anything else → `1`). **stdout and stderr are BYTE
+  COUNTERS, never strings**: a check's output can echo the ticket, the query or a vendor's error text, and
+  a count still tells an operator to go run it by hand. Whether a check may return a reason string worth
+  showing on a held row is deferred, because that string is a third party's text arriving through an
+  operator's script and would need its own cap, its own escaping and a rule against ever posting it.
+- **Bounds, all seven, every overflow LOGGED rather than silent**: `PI_WAIT_CHECK_TIMEOUT_MS` per check
+  (SIGTERM, then SIGKILL after a grace); `PI_WAIT_INTERVAL_MS` as the base cadence, **clamped up** to a
+  30s floor rather than refused (the poller's "a typo'd `1` must not turn the harness into a hammer" —
+  note the clamp covers only a positive integer below the floor, since `0` and a non-integer still refuse
+  at boot), backing off with elapsed time toward a 15-minute ceiling — or toward the configured base if the
+  operator set one LARGER, since clamping an explicit hourly cadence down to fifteen minutes would be a 4x
+  cost overrun in the direction the operator was trying to avoid, from a knob documented as clamped-upward;
+  `PI_WAIT_CHECK_SLOTS` concurrent checks per worker process, clamped below `PI_CONCURRENCY` so a check can
+  never take the last free slot from a paid job; `PI_WAIT_MAX_MS` total hold for a profile;
+  `PI_WAIT_MAX_CHECKS` per job; and `PI_WAIT_MAX_FAULTS` consecutive cannot-tell answers.
+
+  **`PI_WAIT_AFTER_MAX_MS` is the seventh and is deliberately NOT `PI_WAIT_MAX_MS`.** An `after` condition
+  polls nothing: it is one exact `moveToDelayed` to an instant, self-terminating and costing nothing while
+  it waits, so bounding it by the polling budget would refuse "hold this until the maintenance window next
+  month" for a reason about subprocesses it never runs. It gets its own far larger ceiling and its own
+  refusal token, and an instant beyond it is refused at FIRST pickup rather than held uselessly toward it.
+- **The 30s floor is load-bearing twice**, and lowering it would break the second silently: it is also what
+  distinguishes a wait deferral from a scope deferral by wake instant, since `SCOPE_BUSY_RECHECK_MS` is 5s
+  and nothing else records WHY a job sits in the delayed set.
+- **Acceptance**: Given `PI_WAIT_PROFILES` unset and a trigger naming a profile, the job refuses pre-spend
+  as `wait-profile-unknown` with no token minted, no clone and no budget slot. Given a garbled entry, the
+  worker refuses to boot naming the variable. Given a check that exits `3`, the job is deferred, writes no
+  run record, consumes no attempt and spends nothing, and runs exactly once when the check later exits `0`.
+  Given a check that exits `2`, the job refuses `wait-refused` and never retries. Given a check that always
+  exits `1`, the job terminates as `wait-unanswerable` after `PI_WAIT_MAX_FAULTS` consecutive faults,
+  naming the profile rather than the condition. Given a check that hangs, it is killed at
+  `PI_WAIT_CHECK_TIMEOUT_MS` and the job is held, not failed. Given a deployment that declares no profile,
+  every byte of every job is what it was before this contract existed.
+
+---
+
 ## INT-SUBSCRIPTIONS-FILE-CONTRACT
 
 - **Producer/Consumer**: operator → admin extension; the worker exports the validator and reads nothing.
@@ -2909,6 +3075,7 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 | Date | Change |
 |---|---|
+| 2026-08-30 | Issue #230, grammar slice (inert: nothing evaluates a wait yet, and the entries say where enforcement lands). **NEW `INT-WAIT-PROFILES-CONTRACT`**: `PI_WAIT_PROFILES`, the id-only-target invocation, byte-counted streams, the six bounds and the acceptance. It records two absences with their reasons, because both look like oversights: there is no `PI_WAIT_RESOLVER_ROOTS` twin (the pickup gate runs above the per-job settings read, so a wait profile has no overlay half to bound, and a bound with nothing to bound would be theatre), and the grammar is duplicated from `PI_SECRET_PROFILES` rather than shared (one merged list would make a resolver reachable as a gate). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**, and this is the change a reviewer should read first: it gains a THIRD participant and the first code no other participant speaks, `3` = *not yet*, whose queue behaviour is **Held** — neither a retry nor a refusal, which is a behaviour this protocol did not have. The table is now stated PER PARTICIPANT rather than as one table with footnotes, and the "the same three codes" sentence is scoped to the resolver, which still speaks three. The entry argues past its own extension rule rather than citing it: new vocabulary rides `reason` on the exit log line, and a wait profile has no exit log line and (while held) no run record, so the rule's mechanism is what is missing, not its intent. The widening is bounded by being per-participant and BOTH directions are test-pinned — a container exiting `3` is still `unknown container exit 3` and infra-retries, a resolver exiting `3` is still `unreachable`. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the `run.waitFor` bullet, its load refusals, the three combination refusals (`cron`, `on.once`, `run.replicas`) each with the mechanism that forces it, the pre-spend `wait-profile-unknown` split, and the JOB-level placement, which here is a CORRECTNESS requirement rather than the convention it is for `image`/`skillsDir` because `trigger` is copied verbatim into `/job/event.json`. One inversion is called out as deliberate: an unknown key inside a condition is REFUSED, not dropped, because elsewhere a dropped key is a field that does nothing while here it is a term of a gate that does nothing. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no wait reason token lands until the enforcement slice, and the record shape gains no field in this issue at all — `waitedMs` was considered and rejected, since a new nullable key breaks every byte-identity `deepEqual` and the panel reads the hold clock from the worker's own keyspace instead. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**, and the check is the point: both event writers build explicit literals rather than spreading `job.data`, so a JOB-level `waitFor` cannot reach the container and no amendment is owed. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: the slice adds eight env keys and not one of them joins `KNOWN_KEYS`, deliberately and for the reason the new contract states at length — the pickup gate reads its config ABOVE the per-job settings read, so an overlay-declared wait profile could not be seen by the gate that would run it, and a key that cannot be honoured must not be offerable. The restructure of the protocol entry moved no container text: its table and every normative paragraph under it (the worker-abort override, the `try`/`catch`-plus-`stopReason` requirement, the failure table, `StopReason`, the command-job reasons and the read-only telemetry fields) stay in one bullet, with the wait profile's table appended after them rather than spliced between. |
 | 2026-08-30 | Issue #242, docs and doctor slice. **`INT-SCOPED-LIMITS-FILE-CONTRACT` clauses now fully landed, checked**: the "doctor advisory flags" sentence is implemented — a scaffolded-but-unpointed file warns (the pause trap's twin, with the mutex parenthetical so the check never implies local folders run ungated), a configured file that will not load is a FAILURE naming the boot refusal, and unreferenced scopes are advised by MEMBERSHIP against the triggers' canonicalized folder facts (a path-shape heuristic would be blind to the legal relative `run.folder` rows that are exactly the dead config this catches), with repo scopes advised under the webhook caveat rather than exempted. `pi-dispatch init` scaffolds the empty v1 file; `docs/scoped-limits.md` is the operator reference and `docs/workflows.md` retires the "one trigger per folder" workaround the mutex closed. No contract terms changed — this row records that every promised surface now exists. |
 | 2026-08-29 | Issue #242, admin slice. **`INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED** (acceptance): the confirm-gated tool trio + `dispatch_limits` and the panel's `m` key are landed; approve-applies-live / decline-changes-nothing / headless-refuses acceptance added, with the refuse-never-repair write rule now exercised by the admin writer (read THROUGH the shared parser — deliberately not the pause writer's raw-array scavenge, which would re-stamp a newer file's version) and the config-only concurrency display stated as contract. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: `dispatch_set`/KNOWN_KEYS untouched; the limits ride their own file and tools. **`INT-DEPLOYMENT-POINTER-CONTRACT` terms carried**: the pointer env allowlist gains `PI_SCOPED_LIMITS_FILE` (the fourth cwd-default file), or a wizard-pointed deployment's panel would edit a file the worker never reads — the exact drift the pointer exists to prevent. |
 | 2026-08-29 | Issue #242, enforcement slice. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `scope-cap` — the pre-spend policy refusal for a job over its scope's day/week/month window; a fixed token like every sibling, with the scope named only in the forge comment and, as its 16-hex key, in the worker log (no-PII-in-logs); `budgetReserved` keeps its global-only meaning, false on a scope-cap even though the scoped counter kept its refused reservation. **`INT-SCOPED-LIMITS-FILE-CONTRACT`'s Enforcement section is now landed code, checked against it**: scoped-reserves-first between the token-cap read and the global reserve, the compensating release on a global refusal, both-or-neither refund on `container-never-started`, the 5s re-check deferral above the processor's try, the setup guard, and the release-first finally. **The `REPLICAS_MAX` rationale AMENDED**, one sentence: a repo's `concurrent` limit can bound a replica set below the ceiling too, by deferral — a second bounding axis, not an exception. **`INT-CONFIG-OVERLAY-CONTRACT` UNCHANGED, checked**: scoped limits deliberately do NOT ride the overlay (the gate reads a watched ref above the per-job settings read); the design entry's stale key list was corrected in the same PR. |

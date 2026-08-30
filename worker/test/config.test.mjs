@@ -3,6 +3,7 @@ import { delimiter } from "node:path";
 import { test } from "node:test";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, globalExtensionsEnabled, loadConfig, loadGitLabAuth, normalizeAppPrivateKey } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
+import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
 	const c = loadConfig({});
@@ -580,4 +581,44 @@ test("the per-reference timeout defaults to 10s -- tighter than doctor's, becaus
 	assert.equal(loadConfig({}).secretResolveTimeoutMs, 10000);
 	assert.equal(loadConfig({ PI_SECRET_RESOLVE_TIMEOUT_MS: "2500" }).secretResolveTimeoutMs, 2500);
 	assert.throws(() => loadConfig({ PI_SECRET_RESOLVE_TIMEOUT_MS: "0" }), (e) => e.piDispatchConfig === true);
+});
+
+test("the wait bounds default conservatively, and the feature is OFF until a profile is declared (#230)", () => {
+	const c = loadConfig({});
+	// Spread first: the table is deliberately prototype-free so an inherited name (`toString`) cannot pass
+	// for a declared one, and deepEqual under node:assert/strict compares prototypes too.
+	assert.deepEqual({ ...c.waitProfiles }, {}, "unset = the feature is off; a trigger naming a profile refuses pre-spend");
+	assert.equal(c.waitCheckTimeoutMs, 10000, "the secret resolver's twin, for its reason: this holds a slot before a paid container");
+	assert.equal(c.waitIntervalMs, 60000);
+	assert.equal(c.waitMaxMs, 24 * 3600 * 1000);
+	assert.equal(c.waitAfterMaxMs, 30 * 24 * 3600 * 1000, "an `after` polls nothing, so its ceiling is not the polling budget");
+	assert.equal(c.waitCheckSlots, 1);
+	assert.equal(c.waitMaxChecks, 96);
+	assert.equal(c.waitMaxFaults, 5);
+});
+
+test("PI_WAIT_INTERVAL_MS clamps UP to the floor, and never down -- both directions pinned (#230)", () => {
+	// The poller's posture and its reason verbatim: "a typo'd `1` must not turn the harness into a hammer".
+	assert.equal(loadConfig({ PI_WAIT_INTERVAL_MS: "1" }).waitIntervalMs, WAIT_INTERVAL_FLOOR_MS);
+	assert.equal(loadConfig({ PI_WAIT_INTERVAL_MS: "29999" }).waitIntervalMs, WAIT_INTERVAL_FLOOR_MS);
+	assert.equal(loadConfig({ PI_WAIT_INTERVAL_MS: "30000" }).waitIntervalMs, 30000, "the floor itself is not raised");
+	// The other direction is the one an operator loses money on if it is ever "fixed" into a two-sided
+	// clamp: someone who deliberately asks for an hourly cadence to save money must KEEP it.
+	assert.equal(loadConfig({ PI_WAIT_INTERVAL_MS: "3600000" }).waitIntervalMs, 3600000);
+
+	// "Clamped, not refused" is true only for a positive integer below the floor. Everything else still
+	// refuses at boot through positiveInt, and the comment in config.mjs says so rather than overclaiming.
+	for (const bad of ["0", "-5", "1.5", "abc", "30000ms"]) {
+		assert.throws(() => loadConfig({ PI_WAIT_INTERVAL_MS: bad }), (e) => e.piDispatchConfig === true, `PI_WAIT_INTERVAL_MS=${bad} must refuse, not clamp`);
+	}
+	assert.equal(loadConfig({ PI_WAIT_INTERVAL_MS: "" }).waitIntervalMs, 60000, "empty is unset, which takes the default");
+});
+
+test("a garbled PI_WAIT_PROFILES refuses to BOOT, on its sibling's reasoning (#230)", () => {
+	assert.deepEqual({ ...loadConfig({ PI_WAIT_PROFILES: "jira:/opt/pi/wait.sh" }).waitProfiles }, { jira: "/opt/pi/wait.sh" });
+	// A silently dropped entry is a profile the operator believes is wired, while every trigger naming it
+	// refuses at delivery with the operator looking at the line that appears to declare it.
+	for (const bad of ["jira", "jira:relative/path", "has space:/opt/a.sh", "a:/opt/x.sh,a:/opt/y.sh"]) {
+		assert.throws(() => loadConfig({ PI_WAIT_PROFILES: bad }), (e) => e.piDispatchConfig === true, bad);
+	}
 });

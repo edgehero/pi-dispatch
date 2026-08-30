@@ -136,6 +136,7 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
 		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
 		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
+		...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
@@ -178,6 +179,7 @@ function routeLabel(subset, triggers, targetType) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -241,6 +243,7 @@ function mrResult(subset, rule, matched) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -286,6 +289,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -319,6 +323,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -370,6 +375,7 @@ function routeNote(subset, triggers, knownFlows) {
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
+		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,

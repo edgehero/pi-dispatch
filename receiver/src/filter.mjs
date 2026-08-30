@@ -155,6 +155,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
 		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
 		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
+		...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		// Conditional like packages/image, and for the same reason: an unflagged job's data must stay
 		// byte-identical to today's, so the key is absent rather than present-and-undefined.
@@ -202,6 +203,7 @@ function routeIssueLabel(subset, triggers) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -261,6 +263,7 @@ function routeComment(subset, triggers, knownFlows) {
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
+		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,
@@ -358,6 +361,7 @@ function routePullRequest(subset, triggers, action) {
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
+			waitFor: rule.waitFor,
 			instructions: rule.instructions,
 			resume: rule.resume,
 			replicas: rule.replicas,
@@ -473,6 +477,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,

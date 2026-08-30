@@ -10,6 +10,7 @@ import { delimiter } from "node:path";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
+import { WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 
 export function configError(message) {
 	const error = new Error(message);
@@ -296,6 +297,39 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// Per-reference ceiling. Tighter than doctor's 30s on purpose: this runs before a paid container, is
 		// multiplied by the reference count, and holds a PI_CONCURRENCY slot while it waits.
 		secretResolveTimeoutMs: positiveInt(env, "PI_SECRET_RESOLVE_TIMEOUT_MS", 10000),
+		// Issue #230, `run.waitFor`. The operator's declared wait checks, same `name:absolute-path` grammar as
+		// the resolvers above and deliberately a SEPARATE variable: the two answer different questions (one
+		// fetches a value, one says whether to go), they will grow different bounds, and one list would make a
+		// resolver reachable as a gate and a gate reachable as a resolver. Unset = the feature is off and any
+		// trigger naming a profile refuses pre-spend. There is no `PI_WAIT_RESOLVER_ROOTS` twin because there
+		// is no overlay half to bound: the wait gate runs ABOVE the per-job settings read, so a wait profile
+		// can only ever be declared here, beside the forge tokens.
+		waitProfiles: parseWaitProfiles(env.PI_WAIT_PROFILES),
+		// Per-check ceiling, `secretResolveTimeoutMs`' twin and for its reason: this runs before a paid
+		// container and holds a PI_CONCURRENCY slot while it waits.
+		waitCheckTimeoutMs: positiveInt(env, "PI_WAIT_CHECK_TIMEOUT_MS", 10000),
+		// The base re-check cadence, clamped UP to the floor rather than refused (wait-for.mjs states why, and
+		// what the clamp does not cover). The backoff derives from elapsed time, so this is a base, not a period.
+		waitIntervalMs: Math.max(WAIT_INTERVAL_FLOOR_MS, positiveInt(env, "PI_WAIT_INTERVAL_MS", 60_000)),
+		// How long a PROFILE hold may last before it terminates with a named reason. A dependency, unlike a
+		// pause window, is not self-terminating by construction, so this is the bound that makes it one.
+		waitMaxMs: positiveInt(env, "PI_WAIT_MAX_MS", 24 * 3600 * 1000),
+		// The separate, far larger ceiling on an `after` instant. Deliberately NOT waitMaxMs: an `after` is a
+		// scheduled instant, not a poll -- one exact moveToDelayed, self-terminating, costing nothing while it
+		// waits -- so bounding it by the polling budget would refuse "hold this until the maintenance window
+		// next month" for a reason that is about subprocesses it never runs.
+		waitAfterMaxMs: positiveInt(env, "PI_WAIT_AFTER_MAX_MS", 30 * 24 * 3600 * 1000),
+		// How many wait checks may run AT ONCE in this worker process. One by default, and the ceiling it
+		// really pins is duty cycle: slots x timeout is the most wall-clock a worker can spend answering
+		// questions instead of running paid jobs. Clamped below PI_CONCURRENCY at the gate so a check can
+		// never take the last free slot.
+		waitCheckSlots: positiveInt(env, "PI_WAIT_CHECK_SLOTS", 1),
+		// Two bounds on ONE job's checks, both logged on overflow. The count bound is SECRETS_MAX's argument
+		// applied over time rather than over a map, and it matters because nothing in the money system sees a
+		// check at all: CONST-BUDGET-BEFORE-TOKENS counts container starts. The fault bound is what makes a
+		// broken check loud in minutes instead of silent for a day (OQ-027: most CLIs exit 1 for everything).
+		waitMaxChecks: positiveInt(env, "PI_WAIT_MAX_CHECKS", 96),
+		waitMaxFaults: positiveInt(env, "PI_WAIT_MAX_FAULTS", 5),
 		github: { ...loadGitHubAuth(env, fileExists), allowGhResume: env.PI_SESSIONS_ALLOW_GH_SOURCE === "1" },
 		gitlab: loadGitLabAuth(env),
 		forgejo: loadForgejoAuth(env),

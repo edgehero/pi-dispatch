@@ -119,6 +119,7 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
 		...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
 		...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
+		...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
 		...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
 		...(resolved.resume !== undefined ? { resume: resolved.resume } : {}),
 		// How many independent sandboxes race this flow (REQ-REPLICA-RUNS). At JOB level and conditional for the
@@ -188,6 +189,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
+		waitFor: rule.waitFor,
 		instructions: rule.instructions,
 		resume: rule.resume,
 		replicas: rule.replicas,
@@ -231,6 +233,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
+		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
 		resume: triggers.comment.resume,
 		replicas: triggers.comment.replicas,
@@ -263,6 +266,7 @@ function routePullRequest(subset, triggers, action) {
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
+			waitFor: rule.waitFor,
 			instructions: rule.instructions,
 			resume: rule.resume,
 			replicas: rule.replicas,
