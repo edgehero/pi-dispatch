@@ -44,6 +44,7 @@ import { makeResolveForgejoAuthority } from "./forgejo-members.mjs";
 import { makeResolveAzureAuthority } from "./azure-members.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
+import { makeForgeRouter } from "./route.mjs";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
 
 /**
@@ -55,6 +56,7 @@ export async function startReceiver(
 	{
 		makeAuth = makeGitHubAuth,
 		makeQueueFn = makeQueue,
+		makeForgeRouterFn = makeForgeRouter,
 		createServer = http.createServer,
 		resolveGitLabSelfId: resolveSelfIdFn = resolveGitLabSelfId,
 		makeResolveAuthority: makeResolveAuthorityFn = makeResolveAuthority,
@@ -111,6 +113,15 @@ export async function startReceiver(
 	// restart, not give up on a transient disconnect.
 	const queue = makeQueueFn(parseConnection(cfg.valkeyUrl));
 
+	// Multi-host routing for deliveries that bind a host-local resource (issue #57, `OQ-032`). A trigger
+	// naming `run.secretsProfile` or a `run.waitFor` profile can only run where that profile is declared, and
+	// which worker pops a shared-queue job is a coin flip -- so the same trigger succeeded or failed by
+	// chance, permanently, and read like a configuration error rather than a placement one.
+	//
+	// Every failure path inside the router returns the shared queue, so a receiver whose Valkey read fails,
+	// or whose deployment has no named hosts, behaves exactly as it did before this existed.
+	const router = makeForgeRouterFn({ valkeyUrl: cfg.valkeyUrl, shared: queue, log });
+
 	// The GitLab arm, when configured. Its identity resolution is HARD-FAIL for the same reason github's
 	// is: without a selfId the bot-loop guard cannot run, and a receiver that listens without it turns the
 	// harness's own status comment into another paid job.
@@ -158,7 +169,7 @@ export async function startReceiver(
 		};
 	}
 
-	const handler = makeReceiver({ queue, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
+	const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
 	const server = createServer(handler);
 	server.listen(cfg.port, cfg.bind, () =>
 		log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),
@@ -173,6 +184,7 @@ export async function startReceiver(
 			log({ event: "receiver_stopping", signal });
 			await new Promise((resolve) => server.close(resolve));
 			await queue.close();
+			await router.close();
 			process.exit(0);
 		};
 		process.once("SIGTERM", () => void shutdown("SIGTERM"));

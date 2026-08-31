@@ -134,7 +134,11 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null }) {
+	// Which queue a delivery is enqueued onto (issue #57, `OQ-032`). The default is the shared queue for
+	// EVERY job, which is what this receiver did before multi-host existed -- so a deployment that wires no
+	// router, and every test that constructs one without it, is byte-identical.
+	const routeTo = router ? (kind, job) => router.queueFor(kind, job) : () => queue;
 	// Built only when the deployment serves GitHub. Construction is not free of the secret either: the
 	// `new Webhooks({ secret })` inside makeVerifiedHandler throws "options.secret required" on an absent
 	// one, so not building the arm is what lets a github-free deployment legitimately have no secret --
@@ -143,7 +147,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// `resolveAuthority` is the GITHUB closer resolver (issue #231), riding top-level beside `selfId`
 	// because github's dependencies always have -- the other forges bundle theirs in per-forge objects.
 	// Optional, because only a close delivery an armed close rule matches ever consults it.
-	const github = cfg.servesGithub ? makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) : null;
+	const github = cfg.servesGithub ? makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority }) : null;
 
 	// A TABLE, built once, rather than one `if` per forge. Two forges made that a single branch; four make
 	// it a chain, and a chain is where one arm quietly ends up checked after the fallthrough. A path present
@@ -151,9 +155,9 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// falls through to GitHub, which is what keeps `/` working -- and a configured-off GitHub answers the
 	// same 404 from the fallthrough itself, below.
 	const routes = {
-		"/gitlab": gitlab ? makeGitLabHandler({ queue, cfg, log, ...gitlab }) : null,
-		"/forgejo": forgejo ? makeForgejoHandler({ queue, cfg, log, ...forgejo }) : null,
-		"/azure": azure ? makeAzureHandler({ queue, cfg, log, ...azure }) : null,
+		"/gitlab": gitlab ? makeGitLabHandler({ queue, routeTo, cfg, log, ...gitlab }) : null,
+		"/forgejo": forgejo ? makeForgejoHandler({ queue, routeTo, cfg, log, ...forgejo }) : null,
+		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure }) : null,
 	};
 
 	return async function receiverHandler(req, res) {
@@ -223,7 +227,7 @@ async function fanout(job, enqueue) {
  * uses, so a lookup is never spent on a delivery the gate then ignores -- every label, comment, PR and
  * review delivery, and every close nothing wants, stays payload-only and byte-identical to before.
  */
-function makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) {
+function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority }) {
 	return makeVerifiedHandler({ secret: cfg.webhookSecret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -264,7 +268,7 @@ function makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) {
 		// Fanout (REQ-REPLICA-RUNS) lives in `fanout` above; the 202/503 decision stays here, where it always was.
 		let replicas;
 		try {
-			replicas = await fanout(result.job, (j) => enqueueGitHubJob(queue, j));
+			replicas = await fanout(result.job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
 		} catch (err) {
 			// Own try/catch so a Valkey-down enqueue is a 503 (retryable), not verify's outer 500.
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
@@ -289,7 +293,7 @@ function makeGitHubHandler({ queue, selfId, cfg, log, resolveAuthority }) {
  * The lookup runs only for events that could still fire -- after verification, and after the payload has
  * been projected -- so an unauthenticated flood cannot make this project call GitLab at all.
  */
-function makeGitLabHandler({ queue, cfg, log, mode, secret, selfId, resolveAuthority, now }) {
+function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, resolveAuthority, now }) {
 	return makeGitLabVerifiedHandler({ mode, secret, ...(now ? { now } : {}) }, async ({ rawBody, delivery }, res) => {
 		let subset;
 		try {
@@ -314,7 +318,7 @@ function makeGitLabHandler({ queue, cfg, log, mode, secret, selfId, resolveAutho
 
 		let replicas;
 		try {
-			replicas = await fanout(result.job, (j) => enqueueGitLabJob(queue, j));
+			replicas = await fanout(result.job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitLab redelivers; dedup by webhook-id coalesces
@@ -341,7 +345,7 @@ function makeGitLabHandler({ queue, cfg, log, mode, secret, selfId, resolveAutho
  * per construction, and serving two sources from one would mean either sharing a secret between forges or
  * letting the request choose which one it was checked against.
  */
-function makeForgejoHandler({ queue, cfg, log, secret, selfId, resolveAuthority }) {
+function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveAuthority }) {
 	return makeVerifiedHandler({ secret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -366,7 +370,7 @@ function makeForgejoHandler({ queue, cfg, log, secret, selfId, resolveAuthority 
 
 		let replicas;
 		try {
-			replicas = await fanout(result.job, (j) => enqueueForgeJob(queue, "forgejo", j));
+			replicas = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // Forgejo redelivers; dedup by GUID coalesces
@@ -391,7 +395,7 @@ function makeForgejoHandler({ queue, cfg, log, secret, selfId, resolveAuthority 
  * `"Display Name <email>"`. Both the resolver and the bot-loop guard handle both forms -- see
  * filter-azure.mjs, where the ordering constraint is stated in full.
  */
-function makeAzureHandler({ queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority }) {
+function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority }) {
 	return makeAzureVerifiedHandler({ mode, secret, headerName }, async ({ rawBody }, res) => {
 		let subset;
 		try {
@@ -424,7 +428,7 @@ function makeAzureHandler({ queue, cfg, log, mode, secret, headerName, selfId, r
 
 		let replicas;
 		try {
-			replicas = await fanout(result.job, (j) => enqueueForgeJob(queue, "azure", j));
+			replicas = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" });

@@ -48,6 +48,7 @@
     "./open-browser": "./src/open-browser.mjs",
     "./git-dirty": "./src/git-dirty.mjs",
     "./queue": "./src/queue.mjs",
+    "./capabilities": "./src/capabilities.mjs",
     "./connection": "./src/connection.mjs",
     "./job-id": "./src/job-id.mjs",
     "./forges": "./src/forges.mjs",

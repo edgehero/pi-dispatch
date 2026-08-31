@@ -7,10 +7,14 @@ from it.
 
 
 **On more than one machine** ([`multi-host.md`](multi-host.md)): a resolver is an absolute path on one
-host's disk, so a trigger binding `run.secrets` needs its profile declared on **every** host that might
-pop the delivery. A host without it refuses the job `secret-profile-unknown`, which is returned and never
-retried, so the same trigger succeeds or fails depending on where it landed. Declare the same profiles
-and roots on every host.
+host's disk, so a trigger binding `run.secrets` can only run where its profile is declared. **The receiver
+now routes such a delivery to a host that has the profile**, so it no longer succeeds or fails depending on
+which worker happened to pop it.
+
+Routing is a repair, not a licence to diverge. It can only send work to a host that is beating and has
+declared a queue of its own, and when nobody declares the profile the job still refuses
+`secret-profile-unknown`, which is returned and never retried. Declaring the same profiles and roots on
+every host remains the right shape: it needs no routing at all, and it lets any host take the work.
 
 ## The one fact everything follows from
 

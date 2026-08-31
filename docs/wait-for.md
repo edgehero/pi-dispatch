@@ -27,8 +27,9 @@ writing order, so an unreached instant never costs you a subprocess.
 a worker name is declared, so the capacity arithmetic below is for the whole deployment rather than per
 host. It used to be per process, which meant N hosts ran N times the checks against the same external
 system while the only symptom, a denial, got *rarer* per host as you scaled out. A wait profile is also a
-script on one machine's disk: a host that does not have it refuses the job, so declare the same profiles
-everywhere, or accept that a delivery's fate depends on which host popped it.
+script on one machine's disk, and the receiver **routes a delivery that names one to a host that has it**,
+so a delivery's fate no longer depends on which host popped it. Declaring the same profiles everywhere is
+still the better shape, because then any host can take the work and nothing needs routing.
 
 ## Enable it
 

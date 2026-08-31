@@ -15,6 +15,7 @@ import { makeAzureAuth } from "./azure-auth.mjs";
 import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
+import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
@@ -585,6 +586,13 @@ export async function startWorker(
 		// Whether this host DRAINS a queue of its own. Every worker publishes a row; only a host that declared
 		// a name has somewhere for routed work to go, and a reader must not invent a queue for one that has not.
 		routes: config.workerNameDeclared,
+		// What this host can serve that another might not (issue #57, `OQ-032`): the secret and wait profiles
+		// it has declared. NAMES only, never the resolver paths behind them -- a path is PII on Windows and
+		// operator topology everywhere, and the receiver only needs to know WHICH host, not what it runs.
+		//
+		// Recomputed per beat rather than frozen at boot, for the reason the digest is: a host that gains a
+		// profile on restart must start attracting that work within one beat, and one that loses it must stop.
+		caps: () => serializeCaps(capabilityTokens(config)),
 		// The host's IANA zone, because a cron PATTERN carries none: `triggers.json` has no `tz` field and
 		// BullMQ hands the pattern to cron-parser with no zone, so it resolves in each worker's LOCAL time.
 		// On one host that is exactly what an operator means; on two in different zones the same pattern is

@@ -43,11 +43,16 @@ Pause windows are shared correctly too, and for a reason worth knowing: every wi
 
 Each worker publishes one small row about itself, refreshed every fifteen seconds and expiring after
 ninety: its name, version, the image it runs, that image's digest, its timezone, its live concurrency,
-and a fingerprint of the cron triggers it can see. Nothing in that row is an instruction to anybody. It
-is how a host is *seen*.
+a fingerprint of the cron triggers it can see, and the names of the secret and wait profiles it declares.
+Nothing in that row is an instruction to anybody. It is how a host is *seen*.
 
-Three things read it. `doctor` and the panel, to tell you what your fleet looks like. The cron reconcile,
-to refuse to act while hosts disagree. And the pause switch and the panel, to find every queue.
+Profile **names** only, never the resolver paths or check scripts behind them. A path is operator topology
+everywhere and carries the account name on Windows, and a reader only ever needs to know which host, not
+what it runs to get there.
+
+Four things read it. `doctor` and the panel, to tell you what your fleet looks like. The cron reconcile,
+to refuse to act while hosts disagree. The pause switch and the panel, to find every queue. And the
+receiver, to decide which queue a forge delivery belongs on.
 
 The pause switch does not trust it alone. A registry row is a lease that expires ninety seconds after a
 host stops writing, while that host's queue, and its paused flag, are permanent. So `pause`, `resume` and
@@ -86,6 +91,28 @@ whoever enqueues it. Everything else stays on the shared queue and any host can 
 | `pi-dispatch run <folder>` | the host you ran the command on | it checked that folder against its own disk |
 | `/dispatch run` from the panel | the host the panel is running beside | its `PI_DISPATCH_RUN_ROOTS` resolved the folder |
 | A forge delivery | the shared queue | its workspace is a fresh clone, so any host can build it |
+| A forge delivery binding a secret or wait profile | a host that declares that profile | the resolver or check script is on one machine's disk |
+
+### A forge delivery that needs one particular machine
+
+Most forge deliveries can run anywhere: the workspace is a fresh clone. Two trigger fields break that.
+`run.secretsProfile` names a resolver on one host's disk, and a `run.waitFor` condition names a check
+script on one host's disk. Before, whichever worker happened to pop the delivery decided whether it ran,
+permanently and invisibly, and the refusal read like a configuration error rather than a placement one.
+
+The receiver now reads the registry and enqueues such a delivery onto a host that declares the profile.
+It **abstains** in four cases, and every one of them lands on exactly what happened before:
+
+- the delivery binds neither field, which is nearly all of them
+- **every** live host declares it, so the shared queue is better: it load-balances, and this is the shape
+  the docs recommend
+- **no** host declares it, so routing cannot help and the existing pre-spend refusal is the honest answer
+- no capable host has a queue of its own, or the registry could not be read
+
+A host has to be *beating* to attract routed work, not merely unexpired. The ninety second TTL answers
+"has this host definitely gone" and is deliberately six missed beats so a blip cannot evict a working host
+from the panel. Routing needs the opposite: a job sent to a stopped host's queue waits there for it to come
+back, so a host stops attracting work after three missed beats, long before its row expires.
 
 **Why routing at enqueue rather than a check at pickup.** The obvious alternative is to let any host take
 the job and put it back if it cannot serve it. That does not work here. BullMQ promotes a delayed job on
@@ -179,12 +206,10 @@ strays and kill a running job.
 image whose digest differs from the others, explains a timezone disagreement, and flags a host row that
 has gone stale. Every one of those lines is absent on a single-host deployment.
 
-What it does **not** check yet: whether two hosts are sharing a directory they should not be, and whether
-every host declares the secret and wait profiles your triggers name. Both are on you for now.
+What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
+on you.
 
-And what the panel does not do yet: merge the run history across hosts, or route a forge delivery that
-binds a secret or wait profile to a host that has it. Both are tracked; the second is why declaring the
-same profiles everywhere matters today.
+And what the panel does not do yet: merge the run history across hosts. That is tracked.
 
 The panel's status line names the workers when it can. `RUN_DETAIL` names the host that ran a job.
 
@@ -208,6 +233,7 @@ produce different digests legitimately. It means "check", not "broken".
 |---|---|
 | `host:live` | the set of live worker names |
 | `host:h:<name>` | one host's own description, refreshed every 15s, expiring after 90s |
+| `host:h:<name>` field `caps` | the secret and wait profile NAMES this host declares, comma separated |
 | `wait:check:<i>` | the fleet-wide wait-check slots |
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
 
