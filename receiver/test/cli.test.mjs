@@ -9,18 +9,14 @@ import { entryExitCode, main } from "../src/cli.mjs";
 // live server.
 
 /** Capture everything main writes to stdout, restoring the real writer even on a failing assertion. */
+// The collector is INJECTED into the code under test, never installed over `process.stdout.write`.
+// `node --test` runs each file in a child process that serialises its own results over that same stdout,
+// so a helper holding a replacement across an `await` swallows the runner's result frames -- three tests
+// in `worker/test/start-wiring.test.mjs` were reported as never existing at all, exit code 0 (issue #266).
 async function withStdout(fn) {
 	const written = [];
-	const real = process.stdout.write;
-	process.stdout.write = (chunk) => {
-		written.push(String(chunk));
-		return true;
-	};
-	try {
-		return { result: await fn(), out: written.join("") };
-	} finally {
-		process.stdout.write = real;
-	}
+	const write = (chunk) => (written.push(String(chunk)), true);
+	return { result: await fn(write), out: written.join("") };
 }
 
 test("no args means serve: startReceiver gets the bin's env and the bin returns 0", async () => {
@@ -44,7 +40,7 @@ test("`serve` is the same path as no args, spelled out", async () => {
 
 test("--help and -h print usage and exit 0 without booting the receiver", async () => {
 	for (const flag of ["--help", "-h"]) {
-		const { result, out } = await withStdout(() => main([flag], {}, { start: async () => assert.fail("help must not boot the receiver") }));
+		const { result, out } = await withStdout((write) => main([flag], {}, { write, start: async () => assert.fail("help must not boot the receiver") }));
 		assert.equal(result, 0, `${flag}: asked-for help is success`);
 		assert.match(out, /pi-dispatch-receiver/);
 		assert.match(out, /WEBHOOK_SECRET/, "usage names where config comes from, so help is actionable");
@@ -52,7 +48,7 @@ test("--help and -h print usage and exit 0 without booting the receiver", async 
 });
 
 test("an unknown command prints usage and exits 1 (a typo is not success)", async () => {
-	const { result, out } = await withStdout(() => main(["frobnicate"], {}, { start: async () => assert.fail("an unknown command must not boot the receiver") }));
+	const { result, out } = await withStdout((write) => main(["frobnicate"], {}, { write, start: async () => assert.fail("an unknown command must not boot the receiver") }));
 	assert.equal(result, 1);
 	assert.match(out, /pi-dispatch-receiver serve/);
 });

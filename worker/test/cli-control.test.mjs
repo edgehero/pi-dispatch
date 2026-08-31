@@ -12,26 +12,25 @@ try {
 } catch {}
 const needsDeps = depsOk ? false : `queue deps not installed (node ${process.version} < 22.19.0); CI runs these`;
 
-/** Run `fn` with process.stdout.write captured; returns the concatenated output. */
+/**
+ * Run `fn` with a collector it must pass into the code under test; returns the concatenated output.
+ *
+ * The collector is INJECTED into the code under test, never installed over `process.stdout.write`.
+ * `node --test` runs each file in a child process that serialises its own results over that same stdout,
+ * so a helper holding a replacement across an `await` swallows the runner's result frames -- three tests
+ * in `worker/test/start-wiring.test.mjs` were reported as never existing at all, exit code 0 (issue #266).
+ */
 async function captureStdout(fn) {
-	const original = process.stdout.write.bind(process.stdout);
 	let out = "";
-	process.stdout.write = (chunk) => {
-		out += chunk;
-		return true;
-	};
-	try {
-		await fn();
-	} finally {
-		process.stdout.write = original;
-	}
+	const write = (chunk) => ((out += chunk), true);
+	await fn(write);
 	return out;
 }
 
 test("usage lists the pause/resume/status control commands", async () => {
 	let code;
-	const out = await captureStdout(async () => {
-		code = await main([], {});
+	const out = await captureStdout(async (write) => {
+		code = await main([], {}, { write });
 	});
 	assert.equal(code, 0);
 	assert.match(out, /\bpause\b/);

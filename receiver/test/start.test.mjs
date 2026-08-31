@@ -61,18 +61,14 @@ const gitlabFakes = {
  * back. `startReceiver` writes them itself (the sink is deliberately not injectable -- one line, one
  * object, one place), so capturing the stream is how a boot decision gets asserted.
  */
+// The collector is INJECTED into the code under test, never installed over `process.stdout.write`.
+// `node --test` runs each file in a child process that serialises its own results over that same stdout,
+// so a helper holding a replacement across an `await` swallows the runner's result frames -- three tests
+// in `worker/test/start-wiring.test.mjs` were reported as never existing at all, exit code 0 (issue #266).
 async function bootLogLines(fn) {
 	const chunks = [];
-	const real = process.stdout.write.bind(process.stdout);
-	process.stdout.write = (chunk) => {
-		chunks.push(String(chunk));
-		return true;
-	};
-	try {
-		await fn();
-	} finally {
-		process.stdout.write = real;
-	}
+	const write = (chunk) => (chunks.push(String(chunk)), true);
+	await fn(write);
 	return chunks
 		.join("")
 		.split("\n")
@@ -225,8 +221,8 @@ test("a gitlab-only deployment boots without ever calling makeAuth, and says so 
 	// "never called", and a stub would let a silent regression (github arm still resolving identity) pass.
 	const forbiddenAuth = async () => assert.fail("makeAuth must not be called on a deployment that serves no github");
 
-	const lines = await bootLogLines(async () => {
-		const server = await startReceiver(gitlabOnlyEnv(), { makeAuth: forbiddenAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes });
+	const lines = await bootLogLines(async (write) => {
+		const server = await startReceiver(gitlabOnlyEnv(), { write, makeAuth: forbiddenAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes });
 		assert.ok(server, "the receiver boots and returns its server -- this deployment could not start at all before");
 	});
 
@@ -274,8 +270,8 @@ test("a github-free deployment 404s `/` -- the skipped identity resolution and t
 	// run the bot-loop guard comparing every sender against undefined. The route must therefore be gone, and
 	// this asserts it through the handler startReceiver actually built rather than through makeReceiver alone.
 	const { captured, createServer } = capturingServer();
-	await bootLogLines(() =>
-		startReceiver(gitlabOnlyEnv(), { makeAuth: async () => assert.fail("no github arm here"), makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
+	await bootLogLines((write) =>
+		startReceiver(gitlabOnlyEnv(), { write, makeAuth: async () => assert.fail("no github arm here"), makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
 	);
 
 	const payload = JSON.stringify({ action: "labeled", sender: { id: 1 }, repository: { full_name: "octo/repo" }, issue: { number: 42, labels: [{ name: "pi:frontend" }] } });
@@ -312,8 +308,8 @@ test("the github closer resolver is built over the boot auth object's OWN mintTo
 			return { authorized: true };
 		};
 
-	await bootLogLines(() =>
-		startReceiver({ WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath }, { makeAuth: async () => auth, makeQueueFn: () => queue, createServer, makeResolveGitHubAuthority }),
+	await bootLogLines((write) =>
+		startReceiver({ WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath }, { write, makeAuth: async () => auth, makeQueueFn: () => queue, createServer, makeResolveGitHubAuthority }),
 	);
 
 	const payload = JSON.stringify({

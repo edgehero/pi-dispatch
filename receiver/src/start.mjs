@@ -54,6 +54,10 @@ import { parseConnection } from "@edgehero/pi-dispatch/connection";
 export async function startReceiver(
 	env = process.env,
 	{
+		// Where the receiver's JSON log lines go. Defaults to the real stdout; a test injects a collector
+		// rather than reassigning `process.stdout.write`, which under `node --test` is the same channel the
+		// child process reports its own results on (issue #266).
+		write = (chunk) => process.stdout.write(chunk),
 		makeAuth = makeGitHubAuth,
 		makeQueueFn = makeQueue,
 		makeForgeRouterFn = makeForgeRouter,
@@ -68,7 +72,7 @@ export async function startReceiver(
 	} = {},
 ) {
 	// Single-object log line: `makeReceiver` calls `log?.({ event, ... })`, so the sink takes ONE object.
-	const log = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+	const log = (obj) => write(`${JSON.stringify(obj)}\n`);
 
 	const cfg = loadReceiverConfig(env);
 

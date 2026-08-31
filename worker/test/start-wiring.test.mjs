@@ -36,6 +36,31 @@ const skip = !mod
 // what the rest of the suite reads and what CI sets; the literal is only the local fallback.
 const VALKEY_URL = process.env.VALKEY_TEST_URL ?? "redis://127.0.0.1:6399";
 
+// EVERY byte `startWorker`'s `write` seam emits, in order, for the life of the file.
+//
+// Nothing here reassigns `process.stdout.write`, and that is the whole point (issue #266). `node --test`
+// runs each file in a child process that serialises its own results over that same stdout, so a helper
+// holding a replacement across an `await` swallows the runner's result frames: three tests in this file
+// were reported as never existing at all -- no name, no count, exit code 0. Reading the product's own
+// injected writer cannot lose anything, because it never touches the channel the runner needs.
+const bootLines = [];
+
+/** Parse the raw chunks a slice of `bootLines` holds; a non-JSON chunk survives as `{ raw }`. */
+function parseLines(chunks) {
+	return chunks.flatMap((l) =>
+		String(l)
+			.split("\n")
+			.filter(Boolean)
+			.map((one) => {
+				try {
+					return JSON.parse(one);
+				} catch {
+					return { raw: one };
+				}
+			}),
+	);
+}
+
 function fakeHost(overrides = {}) {
 	return {
 		resolveDefaultBranchSha: async () => ({ branch: "main", sha: "abc" }),
@@ -117,14 +142,17 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			return async () => ({ code: 0, aborted: false, turns: null, tokens: null });
 		});
 
-	const lines = [];
-	const origWrite = process.stdout.write;
-	process.stdout.write = (chunk) => {
-		lines.push(String(chunk));
-		return true;
-	};
-	try {
+	// The boot log is collected through `startWorker`'s OWN `write` seam, never by reassigning
+	// `process.stdout.write`. Under `node --test` the child process serialises its results over that same
+	// stdout, so holding a replacement across this `await` swallowed the runner's result frames: three tests
+	// in this file were reported as never existing -- no name, no count, exit 0 (issue #266).
+	const from = bootLines.length;
+	{
 		await mod.startWorker(env, {
+			write: (chunk) => {
+				bootLines.push(String(chunk));
+				return true;
+			},
 			makeAuth,
 			makeHost,
 			createWorkerFn,
@@ -140,8 +168,6 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 		});
-	} finally {
-		process.stdout.write = origWrite;
 	}
 
 	const captured = calls[0];
@@ -184,38 +210,18 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 		}
 	}
 
-	const logs = lines.map((l) => {
-		try {
-			return JSON.parse(l);
-		} catch {
-			return { raw: l };
-		}
-	});
+	const logs = parseLines(bootLines.slice(from));
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
 	return { captured, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls };
 }
 
-// Capture the JSON log lines a synchronous fn emits via process.stdout.write, then restore it.
+// Capture the JSON log lines a synchronous fn emits through the injected writer.
 function captureLogs(fn) {
-	const lines = [];
-	const origWrite = process.stdout.write;
-	process.stdout.write = (chunk) => {
-		lines.push(String(chunk));
-		return true;
-	};
-	try {
-		fn();
-	} finally {
-		process.stdout.write = origWrite;
-	}
-	return lines.map((l) => {
-		try {
-			return JSON.parse(l);
-		} catch {
-			return { raw: l };
-		}
-	});
+	// Reads the slice of `bootLines` that `fn` produced, rather than stealing `process.stdout.write`.
+	const from = bootLines.length;
+	fn();
+	return parseLines(bootLines.slice(from));
 }
 
 test("github configured: real mintToken and the host's isDefaultBranchProtected are wired", { skip }, async () => {
@@ -532,28 +538,10 @@ test("staged packages: no overlay configured means no manifest read and no packa
  * when it returns, and the per-job resolver is called AFTER that, so its lines need their own window.
  */
 function whileCapturingLogs(fn) {
-	const origWrite = process.stdout.write;
-	const lines = [];
-	process.stdout.write = (chunk) => (lines.push(String(chunk)), true);
-	let value;
-	try {
-		value = fn();
-	} finally {
-		process.stdout.write = origWrite;
-	}
-	const logs = lines.flatMap((l) =>
-		l
-			.split("\n")
-			.filter(Boolean)
-			.map((one) => {
-				try {
-					return JSON.parse(one);
-				} catch {
-					return { raw: one };
-				}
-			}),
-	);
-	return { value, logs };
+	// Same as `captureLogs`, but hands back the wrapped call's return value alongside its log lines.
+	const from = bootLines.length;
+	const value = fn();
+	return { value, logs: parseLines(bootLines.slice(from)) };
 }
 
 // The reason the boot-time read became a per-job one (issue #102): `pi install` then `import-pi` is now a

@@ -233,6 +233,15 @@ export function makeReaper({ log }) {
 export async function startWorker(
 	env = process.env,
 	{
+		// WHERE THE BOOT LOG BYTES GO. Defaults to the real stdout, so production is byte-identical; a test
+		// passes a collector instead of reassigning `process.stdout.write`.
+		//
+		// That distinction is not stylistic. `node --test` runs each file in a CHILD PROCESS that serialises
+		// its own results over `process.stdout`, so a test that replaces the global and holds the replacement
+		// across an `await` swallows the runner's result frames for whatever completes in that window. Three
+		// tests in `start-wiring.test.mjs` were reported as not existing at all -- no name, no count, exit 0 --
+		// because this function's log line went through the same channel the runner needed (issue #266).
+		write = (chunk) => process.stdout.write(chunk),
 		makeAuth = makeGitHubAuth,
 		makeHost = makeGitHubHost,
 		createWorkerFn = createWorker,
@@ -263,7 +272,7 @@ export async function startWorker(
 	// other module takes `log` injected, and two tests pin the KEY SET of the fields object handed to an
 	// injected log (`run_record_failed`, `wait_check`); a `host` added at any call site would break them,
 	// while one added inside this closure cannot reach them.
-	const log = (event, fields = {}) => process.stdout.write(`${JSON.stringify({ event, ...fields, host: config.workerName })}\n`);
+	const log = (event, fields = {}) => write(`${JSON.stringify({ event, ...fields, host: config.workerName })}\n`);
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: load and validate the triggers file with the operator present and
 	// before any Valkey contact, so a misconfigured schedule refuses startup loudly (configError) rather

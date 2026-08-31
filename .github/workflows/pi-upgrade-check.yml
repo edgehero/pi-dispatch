@@ -229,6 +229,26 @@ jobs:
           fi
           echo "OK: no merge symbols (both forges)"
 
+      - name: No test may steal the runner's stdout
+        run: |
+          # Issue #266, and "grep is the test" again. `node --test` runs each file in a CHILD PROCESS that
+          # serialises its own results over `process.stdout`. A test helper that replaces
+          # `process.stdout.write` and holds the replacement across an `await` destroys whatever result
+          # frames flush in that window: three tests in worker/test/start-wiring.test.mjs were reported as
+          # never existing at all -- no name, no count, `fail 0`, exit code 0.
+          #
+          # The tests still RAN, and a failure in one still turned the build red -- as `not ok <file>` with
+          # no test name, which is the part that makes a red build unreadable.
+          #
+          # Every entry point takes an injected `write`, so there is no legitimate reason left to reassign
+          # the global and this grep carries no allowlist. stderr is deliberately not matched: it is not the
+          # channel the runner reports on.
+          if grep -rnE '^[^/]*process\.stdout\.write *=' worker/test receiver/test admin/test image/runner/test; then
+            echo "::error::A test reassigns process.stdout.write. Inject the code under test's own `write` seam instead (issue #266)."
+            exit 1
+          fi
+          echo "OK: no test steals the runner's results channel"
+
   contract-tests:
     name: pinned assumptions still hold (offline, no API key)
     runs-on: ubuntu-latest
@@ -270,6 +290,18 @@ jobs:
           PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
           VALKEY_TEST_URL: "redis://127.0.0.1:6379"
         run: npm test
+
+      # The suite above can report success while silently losing tests, which is the failure issue #266
+      # was: `fail 0`, exit 0, and three tests missing from the output entirely. This compares what
+      # `node --test` reports against what the in-process runner actually runs, per file. It runs the suite
+      # a second time (~2 min) and that is the price of the count meaning something.
+      - name: Every declared test is actually reported (issue #266)
+        env:
+          PI_DISPATCH_REQUIRE_LOADER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_WORKER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
+          VALKEY_TEST_URL: "redis://127.0.0.1:6379"
+        run: node .github/scripts/test-count-check.mjs
 
   image:
     name: the job image holds its contract

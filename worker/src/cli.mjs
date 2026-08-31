@@ -43,7 +43,11 @@ Config comes from the environment (see .env.example); flags override it per run.
 Prefer being walked through all of this? The operator panel's /dispatch setup does every step
 with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 
-export async function main(argv = process.argv.slice(2), env = process.env) {
+	// Where this command's output goes. Defaults to the real stdout, so the CLI is byte-identical; a test
+	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
+	// runs each file in a child process that serialises its own results over that same stdout, so a test
+	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk) } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === "init") {
@@ -69,7 +73,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 			const { runGithubAppSetup } = await import("./github-app-setup.mjs");
 			return runGithubAppSetup(argv.slice(2), { env });
 		}
-		process.stdout.write(`pi-dispatch setup <target> — guided credential setup\n\n  targets: github\n\n  pi-dispatch setup github (--webhook-url <URL> | --no-webhook) [--org <org>] [--name <appName>]\n      mint GitHub App credentials via the App Manifest flow — one browser click returns the app id,\n      private key, and webhook secret; every write is shown first and individually consented\n`);
+		write(`pi-dispatch setup <target> — guided credential setup\n\n  targets: github\n\n  pi-dispatch setup github (--webhook-url <URL> | --no-webhook) [--org <org>] [--name <appName>]\n      mint GitHub App credentials via the App Manifest flow — one browser click returns the app id,\n      private key, and webhook secret; every write is shown first and individually consented\n`);
 		return argv[1] ? 1 : 0;
 	}
 
@@ -144,7 +148,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 				// throws inside buildDockerRunArgs after a budget slot is reserved.
 				image: values.image || undefined,
 			});
-			process.stdout.write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
+			write(`queued ${jobId} — folder ${folder}\nrun \`pi-dispatch worker\` to process it.\n`);
 		} catch (error) {
 			return fail(`could not reach Valkey at ${config.valkeyUrl} — is it running? (docker compose up)\n  ${error.message}`);
 		} finally {
@@ -208,7 +212,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 					// as "nothing happened" and walks away from a fleet with one host still spending.
 					return fail(`could not ${cmd} the whole deployment at ${url}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}`);
 				}
-				process.stdout.write(cmd === "pause" ? `paused — worker will stop taking new jobs (jobs still enqueue)${span}\n` : `resumed${span}\n`);
+				write(cmd === "pause" ? `paused — worker will stop taking new jobs (jobs still enqueue)${span}\n` : `resumed${span}\n`);
 			} else {
 				// "paused" is included in the counts because jobs enqueued while paused land in the
 				// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state
@@ -226,7 +230,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 				const pausedState = states.every(Boolean);
 				const pausedPartial = !pausedState && states.some(Boolean);
 				const out = { pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}) };
-				process.stdout.write(`${JSON.stringify(out)}\n`);
+				write(`${JSON.stringify(out)}\n`);
 			}
 		} catch (error) {
 			return fail(`could not reach Valkey at ${url} — is it running? (docker compose up)\n  ${error.message}`);
@@ -236,7 +240,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		return 0;
 	}
 
-	process.stdout.write(`${USAGE}\n`);
+	write(`${USAGE}\n`);
 	return cmd ? 1 : 0;
 }
 

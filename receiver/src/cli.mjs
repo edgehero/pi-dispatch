@@ -33,7 +33,11 @@ serve listens, and POLL_REPOS / POLL_INTERVAL_SECONDS shape what poll watches an
  * or touching Valkey -- and the help/unknown paths stay runnable even where the queue deps are not
  * installed.
  */
-export async function main(argv = process.argv.slice(2), env = process.env, { start, startPoll } = {}) {
+	// Where this command's output goes. Defaults to the real stdout, so the CLI is byte-identical; a test
+	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
+	// runs each file in a child process that serialises its own results over that same stdout, so a test
+	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
+export async function main(argv = process.argv.slice(2), env = process.env, { start, startPoll, write = (chunk) => process.stdout.write(chunk) } = {}) {
 	const cmd = argv[0];
 
 	if (cmd === undefined || cmd === "serve") {
@@ -53,7 +57,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { st
 		return 0;
 	}
 
-	process.stdout.write(`${USAGE}\n`);
+	write(`${USAGE}\n`);
 	return cmd === "--help" || cmd === "-h" ? 0 : 1; // asked-for help is success; a typo is not
 }
 

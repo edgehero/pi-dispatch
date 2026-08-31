@@ -217,18 +217,14 @@ function assertNoRepoFailure(out) {
 	assert.deepEqual(failed, [], `the cycle swallowed a failure: ${JSON.stringify(failed)}`);
 }
 
+// The collector is INJECTED into the code under test, never installed over `process.stdout.write`.
+// `node --test` runs each file in a child process that serialises its own results over that same stdout,
+// so a helper holding a replacement across an `await` swallows the runner's result frames -- three tests
+// in `worker/test/start-wiring.test.mjs` were reported as never existing at all, exit code 0 (issue #266).
 async function withStdout(fn) {
 	const written = [];
-	const real = process.stdout.write;
-	process.stdout.write = (chunk) => {
-		written.push(String(chunk));
-		return true;
-	};
-	try {
-		return { result: await fn(), out: written.join("") };
-	} finally {
-		process.stdout.write = real;
-	}
+	const write = (chunk) => (written.push(String(chunk)), true);
+	return { result: await fn(write), out: written.join("") };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -934,8 +930,9 @@ test("cli: `poll` dispatches to startPoller with the bin's env, and --help names
 	assert.equal(await main(["poll"], env, { startPoll: fake }), 0);
 	assert.equal(calls[0], env, "the poller boots from the env main was handed, never an ambient process.env");
 
-	const { result, out } = await withStdout(() =>
+	const { result, out } = await withStdout((write) =>
 		main(["--help"], {}, {
+			write,
 			start: async () => assert.fail("help must not boot the receiver"),
 			startPoll: async () => assert.fail("help must not boot the poller"),
 		}),
