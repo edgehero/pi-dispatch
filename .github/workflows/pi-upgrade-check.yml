@@ -15,7 +15,15 @@
 name: pi upgrade check
 
 on:
+  # MAIN ONLY. Without a `branches:` key this fired on every branch, so a commit on a PR branch ran the
+  # whole suite TWICE -- once here, once as `pull_request` -- and both runs emitted the same five required
+  # context names for the same sha. That is exactly the failure the comment below rejects a companion
+  # workflow for ("two check runs then share one context name -- a green stand-in that can mask a red real
+  # run"), reached through a different door. A PR branch now gets one run, from `pull_request`; main gets
+  # one, from here. The cost is that pushing a branch with no PR open runs nothing, which is the intended
+  # trade: checks report when there is something for them to gate.
   push:
+    branches: [main]
     paths:
       - "image/**"
       - "worker/**"
@@ -44,6 +52,19 @@ on:
     # project's design being written. A pin that is never exercised rots silently.
     - cron: "0 6 * * 1"
   workflow_dispatch:
+
+# A BARE LITERAL GROUP WOULD BE WRONG HERE, which is why this departs from the four publisher workflows
+# (image, receiver-image, release, repo-release). Those are `push: branches: [main]` only, so `group: image`
+# names one queue that genuinely should be serial. This workflow runs on `pull_request`, and a literal
+# would put EVERY open PR in one group -- each new PR cancelling the last one's checks.
+#
+# `cancel-in-progress` is safe here and is not safe there: a superseded run of this workflow is one whose
+# commit nobody is merging any more, while a superseded run of `release` is a publish halfway through.
+# Ten pushes to a branch used to leave ten sets of runs queued against each other, and the newest commit --
+# the only one that matters -- waited behind its own predecessors.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   version-pin:

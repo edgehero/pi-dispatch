@@ -18,7 +18,12 @@
 name: deploy lint
 
 on:
+  # MAIN ONLY, for the reason `pi-upgrade-check.yml` records at greater length: without a `branches:` key
+  # this fired on every branch, so a PR branch touching `deploy/` ran twice and produced two check runs
+  # under one context name. This check is deliberately NOT required, so the duplicate could not deadlock a
+  # merge -- but it could still show green twice while one of them was red.
   push:
+    branches: [main]
     paths:
       - "deploy/**"
       - ".github/workflows/deploy-lint.yml"
@@ -27,6 +32,12 @@ on:
       - "deploy/**"
       - ".github/workflows/deploy-lint.yml"
   workflow_dispatch:
+
+# Superseded runs are cancelled rather than queued. Same reasoning as `pi-upgrade-check.yml`: a literal
+# group would serialise every PR against every other, and nothing here is a publish that must finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
