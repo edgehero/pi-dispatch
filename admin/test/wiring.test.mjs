@@ -366,7 +366,14 @@ test("dispatch_runs.execute returns run records as JSON and never any .log conte
     const list = await runs.execute("call-1", {});
     const listText = list.content[0].text;
     const parsed = JSON.parse(listText);
-    assert.ok(Array.isArray(parsed) && parsed.some((r) => r.jobId === "j-log"), "returns the record");
+    // `{runs, hosts, mirror}` since issue #57, deliberately, not a bare array. This surface's own doctrine
+    // is the reason: typed dollars carry their `class` so a model cannot launder an estimate into a fact by
+    // dropping the label, and a bare array holding an unstated fraction of a fleet's runs is that same
+    // laundering. `mirror` is how a consumer knows whether the list is the whole deployment.
+    assert.ok(Array.isArray(parsed.runs) && parsed.runs.some((r) => r.jobId === "j-log"), "returns the record");
+    assert.deepEqual(parsed.hosts, [], "a pre-#57 record names no host and none is invented");
+    assert.equal(typeof parsed.mirror, "string", "and the completeness of the list is always stated");
+    // THE LOAD-BEARING ASSERTION, unchanged: not one byte of the raw .log reaches a tool result.
     assert.ok(!listText.includes("SECRET_LOG_MARKER"), "list path never carries raw .log bytes");
 
     const one = await runs.execute("call-2", { jobId: "j-log" });

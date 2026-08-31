@@ -25,7 +25,7 @@ import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from 
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { listRuns, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
+import { listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -175,6 +175,9 @@ export function createDashboardDeps(
   return {
     async fetchSnapshot() {
       const queues = await fleetQueues();
+      // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the
+      // panel already pays for several, so it costs no extra tick.
+      const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
       const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallHash] = await Promise.all([
         Promise.all(queues.map((q: any) => q.isPaused())),
         Promise.all(queues.map((q: any) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
@@ -235,7 +238,12 @@ export function createDashboardDeps(
         schedulers: mapSchedulers(schedulerList, Date.now()),
         schedulerStalls: stallHash ?? {},
         schedulerStallMax: paths.schedulerStallMax,
-        runs: listRuns({ logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD }),
+        // Merged across the fleet (issue #57, Gap 3). This host's files stay the truth and the single-host
+        // path; the mirror adds the other hosts' records. On a shared `PI_LOGS_DIR` the local read is
+        // already the merged read and the mirror adds nothing, which is why there is no second code path.
+        runs: merged.runs,
+        runHosts: merged.hosts,
+        runMirror: merged.mirror,
         settings: readSettingsView({ settingsFile: paths.settingsFile }),
         triggers: readTriggers({ triggersPath: paths.triggersPath }),
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
@@ -836,7 +844,11 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
       ],
     },
     { title: "TRIGGERS", lines: toLines(renderTriggers({ schedulers: snapshot.schedulers, triggers: snapshot.triggers })) },
-    { title: "RUNS", lines: renderRunList(buildRows(snapshot, runSort), selected, 24) },
+    // The section TITLE carries the fleet fact, not a seventh cell in each row (issue #57, Gap 3). A cell
+    // would compete with jobId and target inside one `fitLine(..., inner)` and clip silently at width 80;
+    // the title answers the completeness question once rather than fifty times. Absent on a single host,
+    // so that output is byte-identical.
+    { title: runsTitle(snapshot), lines: renderRunList(buildRows(snapshot, runSort), selected, 24) },
     { title: "SETTINGS", lines: toLines(renderSettingsView(snapshot.settings)) },
   ];
   // Scoped limits appear only when configured (the mutex needs no line) -- renderScopedLimits returns
@@ -1265,6 +1277,22 @@ function limitRow(l: any, used: any, inner: number, styler: any): string {
   const bits = [`${dot} ${styler.fg("accent", l.scope ?? "-")}`, ...windows];
   if (Number.isInteger(l.concurrent)) bits.push(styler.fg("muted", `≤${l.concurrent} at once`));
   return fitLine(bits.join(styler.fg("dim", "  ")), inner, styler);
+}
+
+
+/**
+ * `RUNS`, or `RUNS · 2 hosts`, or `RUNS · this host only`.
+ *
+ * The mirror's degradation channel is what distinguishes the last one from a single-host deployment, and
+ * the two must not read alike: "off" on a fleet means the other hosts are below the version floor or their
+ * Valkey writes are failing, and an operator reading a short list needs to know it is short.
+ */
+function runsTitle(snapshot: any): string {
+  const hosts: string[] = Array.isArray(snapshot?.runHosts) ? snapshot.runHosts : [];
+  if (hosts.length > 1) return `RUNS · ${hosts.length} hosts`;
+  const mirror = snapshot?.runMirror;
+  if (typeof mirror === "string" && mirror.startsWith("unreachable")) return "RUNS · this host only";
+  return "RUNS";
 }
 
 /** The interactive RUNS list, colored: cursor, id, target, flow, outcome (✔/⚠/✘), turns, tokens.

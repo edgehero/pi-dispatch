@@ -61,6 +61,7 @@ import {
   readSchedulers,
   readBudget,
   listRuns,
+  listRunsMerged,
   readRun,
   readLogTail,
   readSettingsView,
@@ -307,10 +308,15 @@ function registerTools(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params) {
       const paths = resolvePaths(process.env);
-      const data = params.jobId
-        ? readRun({ logsDir: paths.logsDir, jobId: params.jobId })
-        : listRuns({ logsDir: paths.logsDir, limit: params.limit ?? 10 });
-      return toolText(JSON.stringify(data));
+      if (params.jobId) return toolText(JSON.stringify(readRun({ logsDir: paths.logsDir, jobId: params.jobId })));
+      // `{runs, hosts, mirror}` rather than a bare array (issue #57, Gap 3). The one deliberate tool-shape
+      // change here, and this surface's own doctrine is the justification: typed dollars carry their
+      // `class` so a model consuming them cannot launder an estimate into a fact by dropping the label, and
+      // a bare array holding some unstated fraction of a fleet's runs is exactly that laundering. `mirror`
+      // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
+      // ("truncated"), or unknown ("unreachable ...").
+      const merged = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
+      return toolText(JSON.stringify(merged));
     },
   });
 
@@ -2107,7 +2113,11 @@ async function showLogs(logsDir: string, tokens: string[], ctx: any): Promise<vo
     return;
   }
   const lines = tokens[2] ? Number(tokens[2]) : undefined;
-  const tail = readLogTail({ logsDir, jobId, lines });
+  // The record already says which machine ran this job, so a foreign run can be named rather than reported
+  // as "no captured log" (issue #57, Gap 3). One file read that the viewer would not otherwise do, on a
+  // command an operator types by hand -- and only its `host` field is used.
+  const record: any = readRun({ logsDir, jobId });
+  const tail = readLogTail({ logsDir, jobId, lines, host: record?.host ?? null, self: process.env.PI_WORKER_NAME ?? null });
 
   const custom = ctx?.ui?.custom;
   if (typeof custom !== "function") {
@@ -2128,7 +2138,7 @@ const VIEWPORT_LINES = 20;
  * renders a capture-off note rather than an empty view. The lines live only in this closure -- there is no
  * path from here to `sendMessage`.
  */
-function makeLogViewer(jobId: string, tail: { lines?: string[]; missing?: boolean }) {
+function makeLogViewer(jobId: string, tail: { lines?: string[]; missing?: boolean; elsewhere?: string }) {
   const missing = tail.missing === true;
   const lines = missing ? [] : tail.lines ?? [];
   const maxTop = () => Math.max(0, lines.length - VIEWPORT_LINES);
@@ -2138,7 +2148,12 @@ function makeLogViewer(jobId: string, tail: { lines?: string[]; missing?: boolea
     const component = {
       render(_width: number): string[] {
         if (missing) {
-          return [`logs ${jobId} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found). Esc to close.`, ""];
+          // A run that happened on another machine is NOT "no captured log". The bytes exist, on a host this
+          // panel deliberately cannot reach, and saying so is the difference between an operator who knows
+          // where to look and one who concludes capture is off.
+          return tail.elsewhere
+            ? [`logs ${jobId} -- this run happened on ${tail.elsewhere}; its raw log stays on that host. Esc to close.`, ""]
+            : [`logs ${jobId} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found). Esc to close.`, ""];
         }
         const out = [`logs ${jobId} -- ${lines.length} line(s). Up/Down scroll, PgUp/PgDn page, Esc close.`, ""];
         for (const line of lines.slice(top, top + VIEWPORT_LINES)) out.push(line);

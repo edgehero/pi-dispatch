@@ -34,7 +34,8 @@ import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
-import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter } from "./run-history.mjs";
+import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, sanitizeJobId } from "./run-history.mjs";
+import { makeRunMirror } from "./run-mirror.mjs";
 import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
@@ -238,6 +239,7 @@ export async function startWorker(
 		makeReaper: makeReaperFn = makeReaper,
 		makeLogSink: makeLogSinkFn = makeLogSink,
 		makeRecordWriter: makeRecordWriterFn = makeRecordWriter,
+		makeRunMirror: makeRunMirrorFn = makeRunMirror,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
@@ -447,10 +449,22 @@ export async function startWorker(
 	// that can neither disarm nor pre-spend-check.
 	const onceTriggersFile = env.PI_TRIGGERS_FILE ?? join(process.cwd(), "triggers.json");
 	const disarmOnce = makeDisarmOnce({ triggersPath: onceTriggersFile, log });
+	// The fleet-visible copy of the run history (issue #57, Gap 3). Armed only on a deployment that declared
+	// a worker name: an unnamed one is a single host, its own files ARE the whole history, and a mirror
+	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
+	// no job then issues a single extra Valkey command.
+	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
 	const recordRun = ({ job, result, error, startedAt, endedAt }) => {
 		// The `host` is stamped HERE rather than inside the processor, which is what keeps every one of its
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
-		writeRecord(buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName }));
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName });
+		writeRecord(record);
+		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
+		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
+		// and a view that can outlive its source is a second source of truth. Not awaited, because this is
+		// the job's own completion path: a slow Valkey may cost a row in a panel and must never hold up a
+		// job that has already finished and already been written to disk. `mirror` never rejects.
+		void runMirror?.mirror(record, sanitizeJobId(record.jobId));
 		// Strictly AFTER the durable record: "fired" means "produced a run record", and the crash
 		// direction this ordering buys is the chosen one -- an armed one-shot with a record, never a
 		// disarm before writeRecord RETURNED. Returned, not succeeded: the record writer swallows fs

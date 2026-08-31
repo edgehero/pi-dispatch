@@ -33,6 +33,7 @@ import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { QUEUE, makeQueue, enqueueLocalJob, fleetQueueNames, hostQueueName, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
+import { hostsIn, mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty } from "@edgehero/pi-dispatch/git-dirty";
 import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
@@ -978,6 +979,69 @@ function withTimeout(promise, ms, fallback) {
  * cap the count to 1..50. A missing logs dir is a normal empty history `[]`; any other readdir error is
  * `{ unreachable }`.
  */
+/**
+ * `listRuns` for a fleet, ON A CLIENT THE CALLER OWNS: this host's files, merged with every other host's
+ * mirrored records (issue #57, Gap 3). Never disconnects what it was handed.
+ *
+ * A SIBLING rather than a replacement, and `listRuns` stays byte-identical, because the local read is the
+ * truth and the single-host path. On a shared `PI_LOGS_DIR` the local read is ALSO already the merged read,
+ * and `mergeRuns(local, [])` is the identity function -- one reader, two sources, one of them empty. That
+ * is why no second code path is needed for the shared-storage shape.
+ *
+ * `hosts` is computed from the RECORDS' own `host` field rather than from where each row came from, so the
+ * host count is right on both shapes with no extra work.
+ *
+ * Degradation is a discriminated channel and never a silence: `"off"` (no index, which is what both a
+ * single-host deployment and a fleet still below the version floor look like), `"ok"`, `"truncated"`, or
+ * `"unreachable (...)"`. `"off"` and `"unreachable"` must not collapse -- a new panel meeting old workers
+ * has to read "off", not "error".
+ */
+export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, timeoutMs = 2500 } = {}) {
+  const local = listRuns({ logsDir, limit, fs });
+  // A local read that FAILED is passed straight through. The mirror is a view of OTHER hosts' work; it
+  // cannot stand in for this host's own history, and reporting a partial list as if it were whole is the
+  // silent no-op this project refuses.
+  if (!Array.isArray(local)) return { runs: [], hosts: [], mirror: "off", ...local };
+  try {
+    // Asked for MORE than the display cap, because the merge dedups and the two sources overlap on every
+    // run this host both wrote and mirrored: cutting each source at the cap first would let a duplicate
+    // pair squeeze a real run off the end.
+    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: Math.max(limit * 2, 50), timeoutMs });
+    const runs = mergeRuns(local, mirrored, { limit });
+    return { runs, hosts: hostsIn(runs), mirror: degraded };
+  } catch (err) {
+    return { runs: local, hosts: hostsIn(local), mirror: `unreachable (${err?.message ?? "?"})` };
+  }
+}
+
+/**
+ * The one-shot wrapper: opens a client, reads, closes it.
+ *
+ * Split from the core deliberately, and it is not stylistic. The panel holds its clients for the life of
+ * the overlay, so a reader that disconnected the client it was handed would tear down the whole dashboard's
+ * Valkey connection on its first tick. `readBudget` makes the same split for the same reason; this one
+ * improves on the `readHeldJobs` precedent, whose connection-first shape forced `dashboard.ts` to keep an
+ * inline copy that a source-text parity test then had to police.
+ */
+export async function listRunsMerged({ logsDir, limit = 10, url, fs = nodeFs, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+  let redis;
+  try {
+    redis = redisFn(url);
+    redis.on?.("error", () => {}); // one clean line on a down Valkey, never ioredis stack traces
+    return await mergedRunsOn(redis, { logsDir, limit, fs, timeoutMs });
+  } catch (err) {
+    const local = listRuns({ logsDir, limit, fs });
+    const runs = Array.isArray(local) ? local : [];
+    return { runs, hosts: hostsIn(runs), mirror: `unreachable (${err?.message ?? "?"})` };
+  } finally {
+    try {
+      redis?.disconnect?.();
+    } catch {
+      // best-effort teardown
+    }
+  }
+}
+
 export function listRuns({ logsDir, limit = 10, fs = nodeFs }) {
   const cap = clampLimit(limit);
   let names;
@@ -1045,16 +1109,24 @@ export function readRun({ logsDir, jobId, fs = nodeFs }) {
 }
 
 /**
- * Read the tail of a job's raw `.log`. Returns `{ lines }` or `{ missing: true }` when capture is off or
- * the file is absent -- an ENOENT is the normal "no captured log" case and never throws. The caller shows
- * these lines ONLY in the overlay viewer; they are never rendered into or sent to model context.
+ * Read the tail of a job's raw `.log`. Returns `{ lines }`, `{ missing: true }` when capture is off or the
+ * file is absent, or `{ missing: true, elsewhere: <host> }` when the run happened on another machine.
+ * An ENOENT is the normal "no captured log" case and never throws. The caller shows these lines ONLY in the
+ * overlay viewer; they are never rendered into or sent to model context.
+ *
+ * THE RAW LOG DOES NOT TRAVEL; THE POINTER DOES (issue #57, Gap 3). It is the one artifact here holding
+ * issue text, comment text and tool output, so it stays on the machine that wrote it. But a foreign run
+ * falling into a bare `{missing: true}` is a lie by omission -- it renders as "no captured log" while the
+ * bytes sit on the other host. The fix needs no new I/O and no change to this read: the answer is on the
+ * RECORD, which the caller already holds, so `host` is passed in rather than looked up.
  */
-export function readLogTail({ logsDir, jobId, lines = 200, fs = nodeFs }) {
+export function readLogTail({ logsDir, jobId, lines = 200, fs = nodeFs, host = null, self = null }) {
   let text;
   try {
     text = fs.readFileSync(join(logsDir, `${sanitizeJobId(jobId)}.log`), "utf8");
   } catch {
-    return { missing: true };
+    const foreign = typeof host === "string" && host !== "" && typeof self === "string" && self !== "" && host !== self;
+    return foreign ? { missing: true, elsewhere: host } : { missing: true };
   }
   // The runner newline-DELIMITS its events (issue #224): each line is written `\n{...}\n`, so the raw
   // .log carries a blank line before every runner event plus the trailing-newline segment. Drop every

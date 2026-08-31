@@ -804,7 +804,7 @@ test("wizard: the edge's service answer installs the PINNED receiver, then the -
   assert.equal(attached.length, 2, "the npm install and the unit install — nothing else");
   assert.equal(attached[0].argv0, "npm", "posix npm, per npmSpawnOptions");
   assert.deepEqual(attached[0].args, mod.npmInstallArgsFor(RECEIVER_PKG, mod.RECEIVER_VERSION));
-  assert.ok(attached[0].args.includes(`${RECEIVER_PKG}@1.4.0`), "the pinned name@version token, spelled out");
+  assert.ok(attached[0].args.includes(`${RECEIVER_PKG}@1.5.0`), "the pinned name@version token, spelled out");
   assert.equal(attached[0].cwd, dir, "installed into the deployment dir, by cwd");
   assert.deepEqual(
     JSON.parse(readFileSync(join(dir, "package.json"), "utf8")),
@@ -818,7 +818,7 @@ test("wizard: the edge's service answer installs the PINNED receiver, then the -
   assert.equal(attached[1].cwd, dir);
 
   const c = seen.confirm.find((x) => /receiver/i.test(x.title));
-  assert.match(c.message, new RegExp(`${RECEIVER_PKG.replace("/", "\\/")}@1\\.4\\.0`), "the confirm shows the exact pin");
+  assert.match(c.message, new RegExp(`${RECEIVER_PKG.replace("/", "\\/")}@1\\.5\\.0`), "the confirm shows the exact pin");
   assert.match(c.message, /service install --receiver/, "and the unit command it will run after");
   assert.ok(c.message.includes(dir), "and names the cwd");
   assert.ok(reachedFirstTrigger(seen), "the wizard continued to step 11");

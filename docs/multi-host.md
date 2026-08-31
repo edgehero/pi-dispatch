@@ -66,12 +66,19 @@ A job's raw log (`PI_CAPTURE_JOB_LOGS`) stays on the host that wrote it. It is t
 holds issue text, comment text and tool output, and mirroring it would move that off the machine the
 operator chose to keep it on.
 
-The consequence is worth knowing before you go looking: `/dispatch logs <id>` for a job that ran on
-another host reports no captured log, the same as it would for a job whose logs were never captured. The
-run's own record names the host, so `RUN_DETAIL` tells you where to look; the bytes are on that machine.
+`/dispatch logs <id>` for a job that ran elsewhere now says so by name, rather than reporting no captured
+log as though none had been taken. The bytes are on that machine and this panel deliberately cannot reach
+them.
 
-**The run history is also still per host** unless you share the directory (trap 4). Each host's panel
-lists the runs on its own disk. Merging it is not done yet.
+**The run history is merged.** Each worker writes its record to its own disk as it always has, and also
+mirrors it into Valkey, so every panel lists the whole deployment's runs and labels each one with the host
+that produced it. The files stay the record; the mirror is a view of them, and it is never allowed to
+outlive them: its retention is the shorter of your `PI_LOG_RETENTION_DAYS` and ninety-two days, so it can
+never show a run whose file has already been reaped.
+
+If Valkey is unreachable the panel shows this host's runs and says `RUNS · this host only` rather than
+quietly presenting a third of your deployment as all of it. A worker below the version floor mirrors
+nothing, so its runs are visible only on its own panel.
 
 Local folders. That is the whole point of routing.
 
@@ -174,8 +181,10 @@ something rather than merely confusing something, which is why it gets a trap of
 
 ### 4. Sharing the logs directory is a real option, with a real cost
 
-If `PI_LOGS_DIR` is a shared mount, the run history is merged with no further machinery, and a cron job's
-`previousRunAt` is correct across hosts for free.
+If `PI_LOGS_DIR` is a shared mount, the run history is merged with no further machinery, and it is merged
+more deeply than the Valkey mirror manages: the mirror holds at most ninety-two days and five thousand
+runs, while a shared directory holds whatever your retention keeps. You also get every host's raw logs
+readable from every panel, which the mirror deliberately never does.
 
 What it costs: the raw job logs, which hold issue and comment text, then live on that mount too, and a
 mount outage becomes a *lost record* rather than a missing panel row. Retention also becomes fleet-wide by
@@ -209,7 +218,8 @@ has gone stale. Every one of those lines is absent on a single-host deployment.
 What it does **not** check yet: whether two hosts are sharing a directory they should not be. That one is
 on you.
 
-And what the panel does not do yet: merge the run history across hosts. That is tracked.
+A cron trigger's `previousRunAt` needs no merging: cron jobs are routed to the host holding their folder,
+so a scheduler's fires all land on one machine and its own files are the complete answer.
 
 The panel's status line names the workers when it can. `RUN_DETAIL` names the host that ran a job.
 
@@ -236,9 +246,13 @@ produce different digests legitimately. It means "check", not "broken".
 | `host:h:<name>` field `caps` | the secret and wait profile NAMES this host declares, comma separated |
 | `wait:check:<i>` | the fleet-wide wait-check slots |
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
+| `runs:index` | the merged run history's index, newest first |
+| `runs:rec:<jobId>` | one run's record, a copy of the sidecar on its host's disk |
 
 Deleting the whole `host:*` keyspace while the fleet is running is safe: every host falls back to
-behaving as a single host, which is the behaviour before any of this existed.
+behaving as a single host, which is the behaviour before any of this existed. The same is true of
+`runs:*`: you lose the merged view until the next runs repopulate it, and never a record, because the
+record is the file on disk.
 
 **Version floor**: worker 1.7.0, admin 1.7.0. Every host must be on it. A worker below the floor does not
 publish itself, so the others cannot see it, and it will not route its own work.

@@ -43,6 +43,8 @@ import {
   forgeRepoTargets,
   readHosts,
   resolveWorkerCount,
+  mergedRunsOn,
+  listRunsMerged,
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 
@@ -2151,4 +2153,70 @@ test("a HALF paused deployment reads as neither running nor paused", async () =>
   const res = await readQueueState({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]) });
   assert.equal(res.pausedState, false, "not fully paused");
   assert.equal(res.pausedPartial, true, "and the renderer must not call that 'running'");
+});
+
+// --- the merged run history (issue #57, Gap 3) ------------------------------------------------------------
+
+const mirrorRedis = (records) => ({
+  async zrevrangebyscore() {
+    return records.map((r) => r.jobId);
+  },
+  async mget(...keys) {
+    return keys.map((k) => {
+      const r = records.find((x) => `runs:rec:${x.jobId}` === k);
+      return r ? JSON.stringify(r) : null;
+    });
+  },
+  async zrem() {},
+  on() {},
+  disconnect() {},
+});
+
+test("the merged list shows other hosts' runs alongside this host's files", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  writeFileSync(join(dir, "local-1.json"), JSON.stringify({ jobId: "local-1", host: "mini1", endedAt: "2026-08-30T10:00:00.000Z" }));
+  const res = await mergedRunsOn(mirrorRedis([{ jobId: "far-1", host: "mini2", endedAt: "2026-08-30T11:00:00.000Z" }]), { logsDir: dir, limit: 10 });
+  assert.deepEqual(res.runs.map((r) => r.jobId), ["far-1", "local-1"], "newest first, across both sources");
+  assert.deepEqual(res.hosts, ["mini1", "mini2"]);
+  assert.equal(res.mirror, "ok");
+});
+
+test("a mirror this panel cannot read degrades the VIEW, never this host's own history", async () => {
+  // The local files are the truth. A Valkey outage must cost the fleet view and nothing else, and it has to
+  // SAY so rather than silently presenting one host's runs as the deployment's.
+  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  writeFileSync(join(dir, "local-1.json"), JSON.stringify({ jobId: "local-1", host: "mini1", endedAt: "2026-08-30T10:00:00.000Z" }));
+  const dead = { async zrevrangebyscore() { throw new Error("ECONNREFUSED"); }, on() {}, disconnect() {} };
+  const res = await mergedRunsOn(dead, { logsDir: dir, limit: 10 });
+  assert.deepEqual(res.runs.map((r) => r.jobId), ["local-1"], "this host's own runs still show");
+  assert.match(res.mirror, /^unreachable/);
+});
+
+test("a local read that FAILED is never papered over by the mirror", async () => {
+  // The mirror is a view of OTHER hosts' work; it cannot stand in for this host's history. Returning a
+  // partial list as if it were whole is the silent no-op this project refuses.
+  const res = await mergedRunsOn(mirrorRedis([{ jobId: "far-1", host: "mini2", endedAt: "2026-08-30T11:00:00.000Z" }]), { logsDir: "/nope", limit: 10, fs: { readdirSync() { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } });
+  assert.match(res.unreachable, /logs dir unreadable/);
+  assert.deepEqual(res.runs, []);
+});
+
+test("the one-shot wrapper closes its own client; the core never closes a borrowed one", async () => {
+  // The panel holds its clients for the life of the overlay, so a reader that disconnected the client it
+  // was handed would tear down the whole dashboard's Valkey connection on its first tick.
+  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  let disconnects = 0;
+  const client = { ...mirrorRedis([]), disconnect() { disconnects++; } };
+  await mergedRunsOn(client, { logsDir: dir, limit: 5 });
+  assert.equal(disconnects, 0, "the core must not close what it was handed");
+  await listRunsMerged({ logsDir: dir, limit: 5, url: "redis://x", redisFn: () => client });
+  assert.equal(disconnects, 1, "the wrapper closes what it opened");
+});
+
+test("a foreign run's log is NAMED rather than reported as absent", async () => {
+  // A bare "no captured log" is a lie by omission when the bytes are sitting on another machine. The
+  // answer is on the record, which the caller already holds, so this costs no new I/O.
+  const dir = mkdtempSync(join(tmpdir(), "foreign-log-"));
+  assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini2", self: "mini1" }), { missing: true, elsewhere: "mini2" });
+  assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini1", self: "mini1" }), { missing: true }, "our own missing log is still just missing");
+  assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1" }), { missing: true }, "and a single-host deployment is unchanged");
 });

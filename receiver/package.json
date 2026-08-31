@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-receiver",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "Webhook receiver for pi-dispatch: the always-on edge that verifies GitHub, GitLab, Forgejo and Azure DevOps deliveries and enqueues (at most) one job per event for the worker.",
   "keywords": [
