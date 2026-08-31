@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDockerRunArgs, ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { buildDockerRunArgs, containerSpec, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -188,4 +188,78 @@ test("run.skillsDir adds NO mount -- injected skills ride the /job bind that alr
 	const mounts = base.filter((a, i) => base[i - 1] === "-v");
 	assert.deepEqual(mounts, ["/j:/job:ro", "/w:/workspace"]);
 	assert.ok(!base.some((a) => String(a).includes("trigger-skills")), "a trigger-skills mount was emitted");
+});
+
+// --- the spec, and the argv builder that consumes it (issue #261) -----------------------------------------
+//
+// `buildDockerRunArgs` is now `dockerArgsFromSpec(containerSpec(opts))`. Every test above still calls it
+// directly and is untouched, which is the point: the extraction changed the middle of that sentence and
+// neither end. These pin the middle.
+
+test("the spec describes the box in its own vocabulary, not docker's", () => {
+	const spec = containerSpec({ ...base, sessionDir: "/s", globalPiDir: "/g", network: "pi-job-1-net" });
+	// Mounts are STRUCTURED, because the flattening is the docker part: a runtime that does not bind-mount
+	// still has to see which host path becomes which container path, and what may be written.
+	assert.deepEqual(spec.mounts, [
+		{ host: "/srv/jobs/abc/job", container: "/job", readOnly: true },
+		{ host: "/srv/jobs/abc/workspace", container: "/workspace", readOnly: false },
+		{ host: "/srv/jobs/abc/outbox", container: "/outbox", readOnly: false },
+		{ host: "/s", container: "/session", readOnly: false },
+		{ host: "/g", container: "/opt/pi-global", readOnly: true },
+	]);
+	assert.equal(spec.image, base.image);
+	assert.equal(spec.network, "pi-job-1-net");
+	// Named for what it is. A non-docker consumer must REFUSE this field rather than translate it.
+	assert.deepEqual(spec.dockerExtra, []);
+	assert.equal("extraFlags" in spec, false, "the docker-only escape hatch is not disguised as portable");
+});
+
+test("an absent optional mount is absent from the spec, not a null entry", () => {
+	const spec = containerSpec({ image: "i", name: "n", workspace: "/w" });
+	assert.deepEqual(spec.mounts, [{ host: "/w", container: "/workspace", readOnly: false }]);
+});
+
+test("the spec CANNOT describe an unisolated container", () => {
+	// The boundary is not something a caller opts into: CONST-ISOLATION-CONTAINER-PER-JOB is why every
+	// other flag exists. So there is no parameter that unsets it, and passing one changes nothing.
+	assert.equal(containerSpec(base).isolated, true);
+	assert.equal(containerSpec({ ...base, isolated: false }).isolated, true, "a hostile or mistaken caller cannot ask for less");
+});
+
+test("the argv builder REFUSES a spec that is not isolated", () => {
+	// Only reachable for a hand-built spec, and that is exactly the case that must fail loudly: a spec
+	// that forgot the field would otherwise emit a container with no isolation flags at all.
+	const good = containerSpec(base);
+	assert.ok(dockerArgsFromSpec(good).includes("--cap-drop=ALL"));
+	for (const bad of [{ ...good, isolated: false }, { ...good, isolated: undefined }, { ...good, isolated: "true" }, {}, null]) {
+		assert.throws(() => dockerArgsFromSpec(bad), /not isolated/, `must refuse ${JSON.stringify(bad)}`);
+	}
+});
+
+test("composing the two halves is exactly what the public builder does", () => {
+	// The regression pin for the extraction itself: if these ever diverge, one of the two paths has grown
+	// behaviour the other has not.
+	const shapes = [
+		base,
+		{ ...base, sessionDir: "/s", globalPiDir: "/g", network: "n", env: { A: "1", B: undefined } },
+		{ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j", extraFlags: ["-i", "-t", "--entrypoint", "bash"] },
+		{ image: "i", name: "n", workspace: "/w", memory: "8g", cpus: "4" },
+	];
+	for (const s of shapes) assert.deepEqual(dockerArgsFromSpec(containerSpec({ ...s })), buildDockerRunArgs({ ...s }));
+});
+
+test("mounts flatten in spec order, and -v stays two argv elements", () => {
+	// The pairing is load-bearing beyond style: the mount assertions in this suite extract by adjacency
+	// (`args[i - 1] === "-v"`), so a single `--volume=` token would make those filters return nothing and
+	// turn several exact-array checks vacuously green.
+	const args = dockerArgsFromSpec(containerSpec({ ...base, sessionDir: "/s", globalPiDir: "/g" }));
+	const flat = args.filter((_a, i) => args[i - 1] === "-v");
+	assert.deepEqual(flat, [
+		"/srv/jobs/abc/job:/job:ro",
+		"/srv/jobs/abc/workspace:/workspace",
+		"/srv/jobs/abc/outbox:/outbox",
+		"/s:/session",
+		"/g:/opt/pi-global:ro",
+	]);
+	assert.equal(args.filter((a) => a === "-v").length, flat.length, "one -v per mount, never a fused token");
 });

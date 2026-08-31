@@ -50,7 +50,20 @@ export const ISOLATION_FLAGS = [
 ];
 
 /**
- * Build the full `docker run` argv (excluding the leading "docker").
+ * WHAT the box is, with no Docker vocabulary in it.
+ *
+ * Split from the argv builder below so the description of a container exists as a VALUE before it becomes
+ * one runtime's flags. `buildDockerRunArgs` is unchanged in name, signature and output -- it is now
+ * `dockerArgsFromSpec(containerSpec(opts))` -- so every caller and every assertion is untouched, and the
+ * only thing that is new is that the middle of that sentence can be read on its own.
+ *
+ * Mounts are structured (`{host, container, readOnly}`) rather than pre-flattened `host:container:ro`
+ * strings, because the flattening IS the Docker part: a runtime that does not bind-mount has to be able to
+ * see which host path becomes which container path, and what may be written.
+ *
+ * `dockerExtra` is named for what it is. It carries raw Docker flags (`-i -t --entrypoint bash`, a
+ * Linux-only `--user`), so it is the one field a non-Docker consumer must refuse rather than translate.
+ * Calling it `extraFlags` at the boundary would have hidden that.
  *
  * @param image      pinned job image tag/digest
  * @param env        the closed env map from buildContainerEnv -- passed as explicit -e NAME=VALUE
@@ -66,7 +79,7 @@ export const ISOLATION_FLAGS = [
  *                   docker default bridge, which is what every job did before that requirement existed
  * @param extraFlags escape hatch for a Linux-only --user uid:gid on a bind-mounted local folder
  */
-export function buildDockerRunArgs({
+export function containerSpec({
 	image,
 	env,
 	jobDir,
@@ -84,6 +97,56 @@ export function buildDockerRunArgs({
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 
+	const mounts = [];
+	// The WHOLE /job dir is read-only (INT-CONTAINER-JOB-INPUTS): it holds prompt.md and pi/, and
+	// the agent cannot rewrite any of it. /workspace is the only writable mount.
+	if (jobDir) mounts.push({ host: jobDir, container: "/job", readOnly: true });
+	mounts.push({ host: workspace, container: "/workspace", readOnly: false });
+	// Local jobs get a writable /outbox host bind, the same host-bind mechanism as /workspace
+	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
+	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
+	if (outboxDir) mounts.push({ host: outboxDir, container: "/outbox", readOnly: false });
+
+	// This job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION, INT-SESSION-STORE-CONTRACT).
+	// Writable, because pi appends to it as the agent works -- and per-job, exactly like jobDir, which is
+	// the whole reason CONST-ISOLATION-CONTAINER-PER-JOB's "none host-wide" clause still reads true. The
+	// shared store under PI_SESSIONS_DIR is NEVER bind-mounted: one job here would otherwise be able to
+	// read and rewrite every other branch's and every other repository's transcripts, which is not a
+	// weakening of that constraint but its inversion. Absent unless the trigger armed run.resume AND a key
+	// resolved, so an unarmed job's argv is byte-identical to one built before this feature existed.
+	if (sessionDir) mounts.push({ host: sessionDir, container: CONTAINER_SESSION_DIR, readOnly: false });
+
+	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
+	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,
+	// the same trust class as the baked floor, but the agent still must not rewrite it. Both job kinds.
+	if (globalPiDir) mounts.push({ host: globalPiDir, container: CONTAINER_GLOBAL_PI_DIR, readOnly: true });
+
+	return {
+		image,
+		name,
+		memory,
+		cpus,
+		network,
+		// UNCONDITIONALLY true, and there is deliberately no parameter that can unset it. The boundary is
+		// not a thing a caller opts into -- CONST-ISOLATION-CONTAINER-PER-JOB is why every other flag here
+		// exists -- so the spec is simply unable to describe an unisolated container, and the builder below
+		// refuses one it is handed. A field that could be false would be a way to ask for less.
+		isolated: true,
+		mounts,
+		env,
+		dockerExtra: extraFlags,
+	};
+}
+
+/**
+ * HOW Docker spells it. The only consumer of a spec today.
+ */
+export function dockerArgsFromSpec(spec) {
+	// The builder CANNOT DECLINE the boundary. `containerSpec` cannot produce anything but `true`, so this
+	// only ever fires on a hand-built spec -- and a hand-built spec that forgot the field is exactly the
+	// case that must fail loudly rather than quietly emit a container with no isolation flags at all.
+	if (spec?.isolated !== true) throw new Error("docker run: refusing to build an argv for a spec that is not isolated");
+
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
 	// of it reaches the sandbox argv *against the imported array, not a copy* (CONST-ISOLATION-CONTAINER-PER-JOB
@@ -94,41 +157,34 @@ export function buildDockerRunArgs({
 	//
 	// null => the flag is ABSENT, so a job argv without an egress policy is byte-identical to one built
 	// before this feature existed. Same shape as the sessionDir/outboxDir/globalPiDir mounts below.
-	const args = ["run", `--name=${name}`, ...ISOLATION_FLAGS, `--memory=${memory}`, `--cpus=${cpus}`];
-	if (network) args.push(`--network=${network}`);
-	args.push(...extraFlags);
+	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--cpus=${spec.cpus}`];
+	if (spec.network) args.push(`--network=${spec.network}`);
+	args.push(...(spec.dockerExtra ?? []));
 
 	// Explicit env allowlist. Each entry is `-e NAME=VALUE`, built from the closed map -- so a
 	// stray host variable cannot ride along (no bare `-e NAME` inheriting from the host, no
 	// --env-file). Undefined values are skipped, never passed as an empty string.
-	for (const [k, v] of Object.entries(env ?? {})) {
+	for (const [k, v] of Object.entries(spec.env ?? {})) {
 		if (v === undefined || v === null) continue;
 		args.push("-e", `${k}=${v}`);
 	}
 
-	// The WHOLE /job dir is read-only (INT-CONTAINER-JOB-INPUTS): it holds prompt.md and pi/, and
-	// the agent cannot rewrite any of it. /workspace is the only writable mount.
-	if (jobDir) args.push("-v", `${jobDir}:/job:ro`);
-	args.push("-v", `${workspace}:/workspace`);
-	// Local jobs get a writable /outbox host bind, the same host-bind mechanism as /workspace
-	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
-	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
-	if (outboxDir) args.push("-v", `${outboxDir}:/outbox`);
+	// `-v` and its value stay TWO argv elements rather than one `--volume=` token. Not cosmetic: the mount
+	// assertions across this suite extract mounts by adjacency (`args[i - 1] === "-v"`), so collapsing the
+	// pair would make those filters return nothing and turn several exact-array checks vacuously green.
+	for (const m of spec.mounts ?? []) args.push("-v", `${m.host}:${m.container}${m.readOnly ? ":ro" : ""}`);
 
-	// This job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION, INT-SESSION-STORE-CONTRACT).
-	// Writable, because pi appends to it as the agent works -- and per-job, exactly like jobDir, which is
-	// the whole reason CONST-ISOLATION-CONTAINER-PER-JOB's "none host-wide" clause still reads true. The
-	// shared store under PI_SESSIONS_DIR is NEVER bind-mounted: one job here would otherwise be able to
-	// read and rewrite every other branch's and every other repository's transcripts, which is not a
-	// weakening of that constraint but its inversion. Absent unless the trigger armed run.resume AND a key
-	// resolved, so an unarmed job's argv is byte-identical to one built before this feature existed.
-	if (sessionDir) args.push("-v", `${sessionDir}:${CONTAINER_SESSION_DIR}`);
-
-	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
-	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,
-	// the same trust class as the baked floor, but the agent still must not rewrite it. Both job kinds.
-	if (globalPiDir) args.push("-v", `${globalPiDir}:${CONTAINER_GLOBAL_PI_DIR}:ro`);
-
-	args.push(image);
+	args.push(spec.image);
 	return args;
+}
+
+/**
+ * Build the full `docker run` argv (excluding the leading "docker").
+ *
+ * The public entry point, unchanged: same name, same parameters, same argv byte for byte. Kept as the
+ * name rather than replaced by `dockerArgsFromSpec` because `CONST-EGRESS-POLICY-IN-THE-ARGV` cites this
+ * symbol in its Code evidence, and because a rename would churn every call site and assertion for nothing.
+ */
+export function buildDockerRunArgs(opts) {
+	return dockerArgsFromSpec(containerSpec(opts));
 }
