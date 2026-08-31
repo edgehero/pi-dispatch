@@ -145,11 +145,44 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	}
 
 	const captured = calls[0];
+
 	captured?.redis?.disconnect?.(); // release the background reconnect handle
 	// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name also
 	// opens a host-queue handle, and one unclosed ioredis connection holds the event loop open forever --
 	// which shows up as the whole test FILE hanging rather than as a failure anyone can read.
 	for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
+
+	// DELETE THE HOST QUEUE THIS RUN CREATED (issue #262). A declared `PI_WORKER_NAME` makes `startWorker`
+	// open `pi-jobs@<name>`, and BullMQ's meta key for it outlives the process: they accumulate across runs
+	// and are exactly what `discoverHostQueues` reads to find host queues. Nothing in the suite reads the
+	// live keyspace for them today, but the read they would pollute was added by the same slice that created
+	// the residue, and it has already produced one false result: a live check of "a deployment that never had
+	// a named worker opens exactly one queue" reported the claim FALSE against leftover keys. The claim was
+	// true; the fixture was dirty.
+	//
+	// AFTER the closers and on its OWN client, both deliberately. Deleting before `queue.close()` does not
+	// work -- BullMQ writes `:meta` back on the way out, so the keys reappear -- and the worker's own client
+	// is disconnected by then. The MATCH is narrowed to this run's declared name, so it can only ever remove
+	// what this file made.
+	if (env.PI_WORKER_NAME) {
+		const { makeRedisClient } = await import("../src/connection.mjs");
+		const sweeper = makeRedisClient(env.VALKEY_URL ?? VALKEY_URL);
+		sweeper.on("error", () => {});
+		try {
+			let cursor = "0";
+			const keys = [];
+			do {
+				const [next, batch] = await sweeper.scan(cursor, "MATCH", `bull:pi-jobs@${env.PI_WORKER_NAME}:*`, "COUNT", 200);
+				cursor = next;
+				keys.push(...batch);
+			} while (cursor !== "0");
+			if (keys.length > 0) await sweeper.del(...keys);
+		} catch {
+			// Best effort: a surviving key costs a FUTURE test a confusing fixture, never this one a failure.
+		} finally {
+			sweeper.disconnect();
+		}
+	}
 
 	const logs = lines.map((l) => {
 		try {
@@ -968,4 +1001,35 @@ test("an UNDECLARED worker name never sweeps a shared keyspace it does not parti
 		makeScopeClaimSweeper: () => async (opts) => (swept.push(opts), { swept: 0, skipped: false }),
 	});
 	assert.deepEqual(swept, [], "no name declared means no fleet claims to own");
+});
+
+test("a named run leaves NO host-queue keys behind in the test Valkey", { skip }, async () => {
+	// The harness cleans up after itself (issue #262). This pins that, because the residue is invisible
+	// until something reads the live keyspace for host queues -- and `discoverHostQueues`, which the kill
+	// switch depends on, does exactly that. A future integration test for it would otherwise see queues no
+	// test created and pass, or fail, for reasons unrelated to what it was checking.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const probe = makeRedisClient(VALKEY_URL);
+	probe.on("error", () => {});
+	const leftover = async () => {
+		let cursor = "0";
+		const keys = [];
+		do {
+			const [next, batch] = await probe.scan(cursor, "MATCH", "bull:pi-jobs@mac-mini-1:*", "COUNT", 200);
+			cursor = next;
+			keys.push(...batch);
+		} while (cursor !== "0");
+		return keys;
+	};
+
+	// try/finally, because a FAILING assertion here would otherwise leak this client -- and an open ioredis
+	// handle does not fail the file, it HANGS it, which is the trap this whole file exists downstream of.
+	try {
+		await probe.del(...(await leftover()).concat("__never__")); // start from a known-clean slate
+		await runStart({ env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL }, makeAuth, makeHost: () => fakeHost() });
+		assert.deepEqual(await leftover(), [], "the run's own host queue is gone when it ends");
+	} finally {
+		probe.disconnect();
+	}
 });
