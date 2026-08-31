@@ -851,7 +851,7 @@ export async function startWorker(
 	// CONST-RETRY-INFRA-ONLY money backstop: BullMQ's maxStalledCount does not bound scheduler jobs, so a
 	// wedged scheduled run is re-paid on every stall. The guard counts stalls per scheduler and tears the
 	// scheduler down past the threshold. Keyed on "stalled", not "failed" -- only a stall is the unbounded re-run.
-	const guard = makeStallGuard({
+	const onStalled = makeStallGuard({
 		redis,
 		threshold: config.schedulerStallMax,
 		// The queue the schedulers were actually INSTALLED on. Torn down from `runtimeQueue` on a named
@@ -859,7 +859,10 @@ export async function startWorker(
 		removeJobScheduler: (id) => cronQueue.removeJobScheduler(id),
 		log,
 	});
-	for (const w of allWorkers) w.on("stalled", (jobId) => void guard.onStalled(jobId));
+	// `makeStallGuard` returns the LISTENER, not an object holding one -- hence the name of the local. It was
+	// called as `guard.onStalled(jobId)` here for the whole life of the feature, which is `undefined(jobId)`,
+	// so every stall threw a TypeError and the money backstop never counted one (issue #267).
+	for (const w of allWorkers) w.on("stalled", (jobId) => void onStalled(jobId));
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
 	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile

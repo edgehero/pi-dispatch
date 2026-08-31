@@ -336,8 +336,20 @@ test("cron wiring: a stalled listener is registered and schedules_installed prec
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 9, source: "gh" });
 	const { captured, logs, registered } = await runStart({ makeAuth, makeHost: () => fakeHost() });
 
-	// (a) the money backstop is keyed on "stalled" -- the guard's onStalled is registered there.
+	// (a) the money backstop is keyed on "stalled", and it is INVOKED here rather than merely counted.
+	//
+	// `typeof registered.stalled === "function"` was the whole assertion for the life of this feature, and it
+	// could not fail: the registered arrow is a function whatever its body does. The body called
+	// `guard.onStalled(jobId)` while `makeStallGuard` returns the listener ITSELF, so every stall threw
+	// `TypeError: guard.onStalled is not a function` and the guard never counted one (issue #267). BullMQ
+	// exempts scheduler jobs from `maxStalledCount`, so this listener is the only thing standing between a
+	// wedged cron run and being re-paid forever -- CONST-RETRY-INFRA-ONLY's "BullMQ will never do this for
+	// us". A backstop that is never called is worth nothing, and only calling it can tell you.
 	assert.equal(typeof registered.stalled, "function", "a stalled listener (the scheduler stall guard) must be registered");
+	await assert.doesNotReject(async () => {
+		const out = registered.stalled("repeat:not-a-real-scheduler:1");
+		await Promise.resolve(out);
+	}, "the registered listener must actually RUN -- a listener that throws is a backstop that does not exist");
 
 	// (c) the persistent runtimeQueue is handed to createWorker as an extraCloser so shutdown drains it.
 	assert.equal(
