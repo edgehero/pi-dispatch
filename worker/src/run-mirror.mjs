@@ -110,7 +110,7 @@ export function makeRunMirror({ redis, retentionDays, now = () => Date.now(), lo
 				await bounded(redis.zremrangebyscore(RUNS_INDEX, "-inf", `(${now() - windowMs}`), timeoutMs);
 				await bounded(redis.zremrangebyrank(RUNS_INDEX, 0, -indexMax - 1), timeoutMs);
 				// ROLLING expiry, deliberately unlike `budget.mjs`'s set-once rule and deliberately like
-				// `pi-dispatch:sched-stalls`. A budget window must not be pushed forward by traffic or a busy
+				// `pi-dispatch:sched-stalls:<schedulerId>`. A budget window must not be pushed forward by traffic or a busy
 				// day never resets; an ACTIVITY index should roll with traffic, because that is what it
 				// describes. A fleet that stops running jobs loses its index one window later, which is
 				// correct: there is nothing left to show.

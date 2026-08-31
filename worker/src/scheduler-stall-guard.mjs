@@ -1,5 +1,5 @@
 /**
- * Per-scheduler stall accounting -- the money backstop for cron (constitution.md:203-216).
+ * Per-scheduler stall accounting -- the money backstop for cron (CONST-RETRY-INFRA-ONLY).
  *
  * BullMQ's `maxStalledCount` does not cover scheduler jobs: `moveStalledJobsToWait` derives
  * `isRepeatableJob` from the job's `rjk` field and skips the stall-fail for a live scheduler, so a
@@ -10,16 +10,41 @@
  * Injected `redis` (ioredis-compatible), `removeJobScheduler`, and `log` keep the logic testable with
  * no queue, no bullmq import, and no real Valkey.
  *
- * Custom: per-scheduler stall accounting; BullMQ's maxStalledCount does not cover scheduler jobs -- constitution.md:203-216 carve-out ("BullMQ will never do this for us")
+ * Custom: per-scheduler stall accounting; BullMQ's maxStalledCount does not cover scheduler jobs -- CONST-RETRY-INFRA-ONLY carve-out ("BullMQ will never do this for us")
  */
 
-// The Redis hash of per-scheduler stall counts (field = schedulerId, value = count). Exported so the admin
-// panel can read it (HGETALL) for the cron drill-in without re-deriving the key string.
+// The prefix every stall counter lives under, so `KEYS pi-dispatch:sched-stalls*` still shows an operator
+// the whole feature -- the affordance `wait:`, `slot:` and `budget:` all assume. Exported alongside the
+// builder so the admin panel and the integration teardown compose keys through one definition and cannot
+// drift from the writer.
 export const STALL_KEY = "pi-dispatch:sched-stalls";
 
-// A rolling window: the EXPIRE is re-set on every stall, so a scheduler that stops stalling for a full
-// day drops back to zero. This prevents unrelated transient stalls weeks apart from accumulating into a
-// false teardown -- only sustained stalling inside one window trips the threshold.
+/**
+ * One scheduler's counter. The id is VALIDATED upstream rather than hashed here: it is operator-declared in
+ * `triggers.json`, `triggers.mjs` already refuses a `:` in it precisely to protect this parse, and the value
+ * of a readable keyspace is that `GET pi-dispatch:sched-stalls:nightly` answers the question directly.
+ */
+export const stallKey = (schedulerId) => `${STALL_KEY}:${schedulerId}`;
+
+// ONE KEY PER SCHEDULER, so the window is per scheduler.
+//
+// This was one HASH with a field per scheduler and a single `EXPIRE` on the whole key, which meant any
+// scheduler's stall pushed the TTL forward for EVERY scheduler's count. The window never reset on a
+// deployment where anything stalled regularly, so the guard silently degraded from "sustained stalling
+// inside one window" to "cumulative stalling ever": three stalls ninety days apart tore a scheduler down
+// if a neighbour was stalling twice a day, and did not if the deployment was quiet. Same scheduler, same
+// stalls, opposite outcome, decided by an unrelated trigger (issue #267).
+//
+// Per-field TTLs would have fixed it in place and are not available: `HEXPIRE` does not exist on the pinned
+// `valkey/valkey:8` (verified, `ERR unknown command`, recorded under DES-HOST-REGISTRY). A key per entity is
+// the only shape that gets per-entity expiry.
+//
+// The EXPIRE still ROLLS on every stall, deliberately, and that is not `budget.mjs`'s set-once rule being
+// broken. A budget window is a CALENDAR window and must not be pushed forward by traffic or a busy day
+// never resets. This is a STREAK detector -- "is this scheduler wedged right now" -- and quiet for a day
+// genuinely should forget. `poll:<repo>:close-gate:<deliveryId>` is the in-repo precedent, a bounded
+// consecutive-failure counter given its own key and TTL for exactly this reason: it must decay with the
+// thing it measures rather than with a larger family.
 const STALL_WINDOW_SECONDS = 24 * 60 * 60;
 
 /**
@@ -45,8 +70,9 @@ export function makeStallGuard({ redis, threshold, removeJobScheduler, log }) {
 				return;
 			}
 
-			const count = Number(await redis.hincrby(STALL_KEY, schedulerId, 1));
-			await redis.expire(STALL_KEY, STALL_WINDOW_SECONDS);
+			const key = stallKey(schedulerId);
+			const count = Number(await redis.incr(key));
+			await redis.expire(key, STALL_WINDOW_SECONDS);
 
 			if (count > threshold) {
 				try {
@@ -56,7 +82,7 @@ export function makeStallGuard({ redis, threshold, removeJobScheduler, log }) {
 					// state, not an error -- swallow it so hdel and the teardown alert still run.
 					log("scheduler_teardown_remove_failed", { schedulerId, error: error?.message });
 				}
-				await redis.hdel(STALL_KEY, schedulerId);
+				await redis.del(key);
 				// The loud log is the "alert" half of the constitution's "removeJobScheduler -- or alert".
 				log("scheduler_torn_down", { schedulerId, stalls: count });
 			}

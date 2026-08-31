@@ -29,7 +29,14 @@ if (!url && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 }
 const skip = url ? false : "VALKEY_TEST_URL not set; cron integration skipped locally";
 
-const STALL_KEY = "pi-dispatch:sched-stalls";
+// The PREFIX, not a key: since issue #267 each scheduler counts under `<prefix>:<schedulerId>`, so a
+// teardown that deletes the bare prefix clears nothing. Deleting by pattern is right here and only here --
+// this is a test teardown against a shared live Valkey, not a reader on the panel's per-tick path.
+const STALL_PREFIX = "pi-dispatch:sched-stalls";
+const delStallKeys = async (redis) => {
+	const keys = await redis.keys(`${STALL_PREFIX}*`);
+	if (keys.length > 0) await redis.del(...keys);
+};
 // A far-future pattern: its single upcoming slot stays DELAYED and is never promoted, so a scheduler
 // installed with it holds one stable resident that a no-worker test can inspect without racing a tick.
 const FAR_FUTURE = "0 0 1 1 *"; // 00:00 on Jan 1, yearly
@@ -79,7 +86,7 @@ async function teardown({ queue, worker, redis, budgetKeys = [] }) {
 		}
 	}
 	if (redis) {
-		await redis.del(STALL_KEY).catch(() => {});
+		await delStallKeys(redis).catch(() => {});
 		for (const key of budgetKeys) await redis.del(key).catch(() => {});
 	}
 	await queue?.obliterate({ force: true }).catch(() => {});
@@ -226,7 +233,7 @@ test("getJobSchedulers descriptor carries the schedulerId on `.key`; reconcile p
 
 // 4. STALL -> REMOVE. The money backstop BullMQ does not provide for scheduler jobs: past the
 //    threshold, makeStallGuard tears the scheduler down through the REAL removeJobScheduler and logs
-//    the alert (constitution.md:203-216).
+//    the alert (CONST-RETRY-INFRA-ONLY).
 test("stall guard tears a scheduler down past the threshold (real removeJobScheduler + alert)", { skip }, async () => {
 	const { Queue, parseConnection, makeRedisClient, makeStallGuard } = await load();
 	const name = uniqueQueueName();
@@ -234,7 +241,7 @@ test("stall guard tears a scheduler down past the threshold (real removeJobSched
 	const redis = makeRedisClient(url);
 	const queue = new Queue(name, { connection: conn });
 	try {
-		await redis.del(STALL_KEY).catch(() => {});
+		await delStallKeys(redis).catch(() => {});
 		await queue.obliterate({ force: true }).catch(() => {});
 		await queue.upsertJobScheduler("s", { pattern: FAR_FUTURE }, { name: "local", data: localTemplate("t"), opts: RETENTION });
 		assert.deepEqual((await queue.getJobSchedulers(0, -1, true)).map((d) => d.key), ["s"]);

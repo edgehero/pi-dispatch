@@ -32,7 +32,7 @@ Point every host at the same Valkey, and give each one its own `PI_LOGS_DIR`, `P
 ### Shared because it always was
 
 The queue itself. The day, week and month spend windows and the daily token counter, which are atomic
-increments on one key. The pause kill switch. The scheduler stall counters. Job deduplication and the
+increments on one key. The pause kill switch. The scheduler stall counters, one key per scheduler. Job deduplication and the
 semantic window. Everything the `wait:` keyspace holds for `run.waitFor`: the hold clock, the per-job
 check and fault counts, the supersede lease, and the panel's held-jobs list.
 

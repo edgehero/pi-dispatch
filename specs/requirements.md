@@ -378,7 +378,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
     no-op.
   - Given a scheduler whose per-scheduler stall counter exceeds `PI_SCHEDULER_STALL_MAX`, when the next
     stall is observed, then the scheduler is torn down via `removeJobScheduler` — the explicit backstop for
-    the `maxStalledCount` carve-out.
+    the `maxStalledCount` carve-out. The counter is **per scheduler and windowed**: it lives under its own
+    key with its own expiry, so one scheduler's stalls never extend another's window, and a scheduler that
+    stops stalling for a full window drops back to zero. Stated here because it was previously claimed only
+    in a source comment, and the comment was false while the counter shared one key (issue #267).
   - Given a worker that was down across one or more due ticks, when it restarts, then exactly one job is
     emitted (no backfill), and at most one UNSTARTED next occurrence exists for a schedule at any time.
     Two occurrences of one schedule CAN be in flight together when a slot is free — the false "no

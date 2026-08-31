@@ -23,7 +23,7 @@ import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/p
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
-import { STALL_KEY } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
@@ -178,7 +178,17 @@ export function createDashboardDeps(
       // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the
       // panel already pays for several, so it costs no extra tick.
       const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
-      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallHash] = await Promise.all([
+      // The cron ids this deployment declares, read from the triggers file the same tick already reads
+      // SYNCHRONOUSLY. Since issue #267 each scheduler's stall count is its own key, so the reader has to
+      // name them -- and naming them from config is the repo's own doctrine for exactly this shape
+      // (`scoped-limits.json` enumerates every scope that can carry a claim; `no KEYS, no SCAN, and no index
+      // set to leak`). A keyspace scan was measured and refused for `wait:held` and `host:h:*` because the
+      // panel reads every second and a scan walks hardest when nothing is registered.
+      const triggersView: any = readTriggers({ triggersPath: paths.triggersPath });
+      const cronIds: string[] = Array.isArray(triggersView?.triggers)
+        ? triggersView.triggers.filter((t: any) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t: any) => t.id)
+        : [];
+      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
         Promise.all(queues.map((q: any) => q.isPaused())),
         Promise.all(queues.map((q: any) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
         queue.getWorkers().catch(() => []),
@@ -191,8 +201,10 @@ export function createDashboardDeps(
         Promise.all(queues.map((q: any, i: number) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
         Promise.all(queues.map((q: any) => q.getActive(0, 0).catch(() => []))),
         // Per-scheduler stall counts (money backstop) for the cron drill-in; reuses the held client like the
-        // budget GETs. HGETALL of an absent key is `{}`, so a never-stalled deployment shows 0 stalls.
-        redis.hgetall(STALL_KEY).catch(() => ({})),
+        // budget GETs. ONE MGET for every declared cron id, so this stays one round trip however many
+        // schedulers exist. An absent key reads as an honest 0 -- a scheduler that has never stalled -- which
+        // is the same posture `readScopedBudget` takes for a scope that has never run.
+        cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => []) : Promise.resolve([]),
       ]);
       const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
       // Summed across the fleet, because a count of one queue is not a count of the deployment.
@@ -236,7 +248,9 @@ export function createDashboardDeps(
         queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
         budget: { day: Number(dayRaw ?? 0), week: Number(weekRaw ?? 0), month: Number(monthRaw ?? 0), tokensToday: Number(tokenRaw ?? 0) },
         schedulers: mapSchedulers(schedulerList, Date.now()),
-        schedulerStalls: stallHash ?? {},
+        // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so
+        // neither reader changes.
+        schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, Number((stallCounts as any[])?.[i] ?? 0) || 0])),
         schedulerStallMax: paths.schedulerStallMax,
         // Merged across the fleet (issue #57, Gap 3). This host's files stay the truth and the single-host
         // path; the mirror adds the other hosts' records. On a shared `PI_LOGS_DIR` the local read is
@@ -245,7 +259,7 @@ export function createDashboardDeps(
         runHosts: merged.hosts,
         runMirror: merged.mirror,
         settings: readSettingsView({ settingsFile: paths.settingsFile }),
-        triggers: readTriggers({ triggersPath: paths.triggersPath }),
+        triggers: triggersView,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         // The operator's staged third-party pi packages (REQ-GLOBAL-PI-OVERLAY), for the armed triggers'
         // trust model. Like the four reads above it is a plain file read whose fs access lives entirely in

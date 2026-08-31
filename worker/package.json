@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "type": "module",
   "description": "Self-hosted job harness for the pi coding agent: a BullMQ worker that drains the queue, mints scoped forge tokens, and runs one container per job — plus the pi-dispatch CLI (init, up, doctor, service).",
   "keywords": [
