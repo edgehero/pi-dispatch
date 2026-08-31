@@ -17,7 +17,16 @@ try {
 if (!mod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 	throw new Error(`start wiring tests are REQUIRED here but a dependency could not import.\n${importError}`);
 }
-const skip = mod ? false : `worker deps not installed (node ${process.version} < 22.19.0); CI runs these`;
+// These tests need a REAL queue: `startWorker` connects for real (the fakes here stop at docker, not at
+// the queue), and BullMQ's connections carry `maxRetriesPerRequest: null`, so a URL pointing at nothing does
+// not fail, it HANGS forever. That makes "no Valkey" a state this file must DECLINE rather than attempt --
+// a hang has no error, no output and no end, and it wedged both the required contract job and the release
+// workflow, the latter of which has no Valkey service at all and would never have published.
+const skip = !mod
+	? `worker deps not installed (node ${process.version} < 22.19.0); CI runs these`
+	: process.env.VALKEY_TEST_URL
+		? false
+		: "needs VALKEY_TEST_URL (startWorker connects for real; a dead URL hangs rather than fails)";
 
 // The Valkey these tests actually reach. `startWorker` connects for real here -- the fakes stop at docker,
 // not at the queue -- so a URL pointing at nothing does not fail, it HANGS: BullMQ's connections carry
