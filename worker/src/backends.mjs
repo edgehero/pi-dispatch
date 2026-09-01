@@ -26,10 +26,10 @@
  * this deployment currently getting it?". Those are two axes and this table is one of them. A property a
  * deployment switch gates carries `armedBy`, naming the switch, so a reader is never handed the capability
  * word alone where it could be mistaken for the posture. Whether that switch is on is the deployment's own
- * answer, which `egressArmed` already owns; a later slice teaches `doctor` to print the two beside each
- * other. NOTHING READS `armedBy` IN PRODUCTION TODAY -- doctor does not reference this table at all -- so
- * this is a contract the first consumer must honour, and `declarationOf` below exists so that consumer has
- * one definition of the join rather than reinventing it.
+ * answer, which `egressArmed` owns; `doctor` joins the two and prints them together, and `unarmedFloor`
+ * below makes the boot refusal read the switch as well -- a floor asking for a gated property is not met by
+ * capability alone. `declarationOf` is the one definition of that join, so a consumer never has to
+ * reconstruct it and never prints a capability word bare.
  *
  * The capability axis is the one a floor compares against, which is what makes the axis the right choice
  * rather than a convenient one: the refusal it has to produce is "this deployment ARMED egress and the
@@ -239,7 +239,16 @@ export const PROPERTY_NAMES = Object.freeze(Object.keys(PROPERTIES));
 export function declarationOf(name, property) {
 	const entry = backendFor(name);
 	if (!entry || !isProperty(property)) return undefined;
-	return { property, word: entry.declares[property], armedBy: PROPERTIES[property].armedBy, question: PROPERTIES[property].question };
+	const word = entry.declares[property];
+	return {
+		property,
+		word,
+		armedBy: PROPERTIES[property].armedBy,
+		question: PROPERTIES[property].question,
+		// Only meaningful for an asserted word, and null otherwise rather than absent, so a consumer that
+		// prints it unconditionally renders nothing rather than "undefined".
+		assertedBy: word === ASSERTED ? (entry.asserts?.[property] ?? null) : null,
+	};
 }
 
 /** Is `name` one of the closed list? `Object.hasOwn`, so `"toString"` is not a property. */
@@ -311,6 +320,19 @@ const BACKENDS_TABLE = {
 			// The whole reason `DES-WORKER-ON-HOST` reversed the containerised worker.
 			localFolders: ENFORCED,
 		},
+		/**
+		 * WHO is asserting each `asserted` property. Required for every property this backend declares
+		 * ASSERTED and meaningless for the others, which a test pins both ways.
+		 *
+		 * Exists because "asserted" alone is not actionable: it tells an operator the worker is not the one
+		 * providing the property without telling them who is, so they cannot go and check. `doctor` prints
+		 * this beside the word, which is what lets the claim "asserted names who is asserting it" be true
+		 * rather than aspirational. For a vendor adapter this is where "the vendor's documentation" goes.
+		 */
+		asserts: {
+			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not)",
+			credentialTransit: "the docker endpoint DOCKER_HOST resolves to, which is this host unless something redirects it",
+		},
 	},
 };
 
@@ -373,5 +395,182 @@ export function shortfall(name, want = {}) {
 		const have = entry?.declares?.[property] ?? ABSENT;
 		if (!meets(have, need)) out.push({ property, have, want: need });
 	}
+	return out;
+}
+
+/**
+ * `PI_BACKENDS` -- which backends this deployment blesses, comma separated. Unset means `[local]`, which is
+ * what every deployment that has never heard of this table is already running.
+ *
+ * ENV-ONLY, never the settings overlay and never the deployment pointer, on `config.mjs`'s rule for
+ * `PI_SECRET_RESOLVER_ROOTS`: "a bound that can be widened from the surface it bounds is not a bound". The
+ * pointer needs no change to enforce that -- `POINTER_ENV_ALLOWLIST` is an ALLOWLIST (of the path and URL
+ * variables `resolvePaths` reads), so a name absent from it is refused by omission.
+ *
+ * An unknown name is REFUSED rather than dropped. Dropping it would leave an operator who misspelled their
+ * one entry with a silently empty set, and a deployment that blesses nothing is a deployment where every
+ * trigger naming a backend is refused for a reason that names the trigger rather than the typo.
+ *
+ * Throws a plain Error; `config.mjs` re-tags it as a config error, which is `egressArmed`'s arrangement and
+ * for its reason: this module imports nothing, so it cannot reach for that tagger itself.
+ */
+export function parseBackendList(raw) {
+	const names = (raw ?? "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0);
+	if (names.length === 0) return [DEFAULT_BACKEND];
+	for (const name of names) {
+		if (!Object.hasOwn(BACKENDS, name)) {
+			throw new Error(`PI_BACKENDS names an unknown backend ${JSON.stringify(name)} (known: ${BACKEND_NAMES.join(", ")})`);
+		}
+	}
+	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one".
+	const unique = [...new Set(names)];
+	// NOTHING SELECTS A BACKEND YET. `start.mjs` builds `local` unconditionally, so every job runs there
+	// whatever this list says. A set excluding it would therefore make two statements false at once: the
+	// deployment would be told its jobs run somewhere they do not, and the floor -- which is checked against
+	// this list -- would skip the backend that is actually running them. Refusing is the only honest option
+	// while that is true, and this guard is unreachable today because `local` is the only entry. It is
+	// written now because the slice that adds a second one is the slice where it starts mattering, and it
+	// comes out again in the slice that wires selection.
+	if (!unique.includes(DEFAULT_BACKEND)) {
+		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)} until a backend can be selected per job; every job runs there today regardless of this list`);
+	}
+	return unique;
+}
+
+/**
+ * `PI_BACKEND_FLOOR` -- the minimum every blessed backend must declare, as `property=word` pairs, comma
+ * separated. Example: `egress=enforced,nonRoot=asserted`. Unset means no floor.
+ *
+ * PARSED HERE, IN THE LEAF, which is `egressArmed`'s pattern and its reason: `doctor`, `up` and the worker
+ * must not be able to disagree about what the floor says. One parse, one answer, and a typo throws at the
+ * one place that reads the string rather than defaulting three consumers to three different open postures.
+ *
+ * Every part is validated and NOTHING is skipped. A pair with no `=`, an unknown property name, an unknown
+ * word: each throws. That strictness is the whole point of the variable existing -- `shortfall` returning
+ * `[]` is indistinguishable from a satisfied floor, so a floor this module cannot read must never be
+ * allowed to become one it reads as empty. `PI_EGRESS` refuses a third value for the same reason.
+ */
+export function parseBackendFloor(raw) {
+	const floor = {};
+	for (const pair of (raw ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0)) {
+		const at = pair.indexOf("=");
+		if (at <= 0) {
+			throw new Error(`PI_BACKEND_FLOOR entry ${JSON.stringify(pair)} must be property=word (e.g. egress=enforced)`);
+		}
+		const property = pair.slice(0, at).trim();
+		const word = pair.slice(at + 1).trim();
+		if (!isProperty(property)) {
+			throw new Error(`PI_BACKEND_FLOOR names an unknown property ${JSON.stringify(property)} (known: ${PROPERTY_NAMES.join(", ")})`);
+		}
+		if (!isDeclaration(word)) {
+			throw new Error(`PI_BACKEND_FLOOR: ${property} must be one of ${ENFORCED}, ${ASSERTED}, ${ABSENT}; got ${JSON.stringify(word)}`);
+		}
+		if (Object.hasOwn(floor, property)) {
+			// Last-wins would be a silent choice between two things an operator wrote down deliberately.
+			throw new Error(`PI_BACKEND_FLOOR names ${property} twice`);
+		}
+		floor[property] = word;
+	}
+	return floor;
+}
+
+/**
+ * Which floored properties this deployment is NOT getting because their switch is off, as
+ * `[{ property, want, armedBy }]`.
+ *
+ * THE FLOOR IS NOT MET BY CAPABILITY ALONE, and reading it that way was the defect this function exists to
+ * close. `shortfall` compares a floor against what a backend CAN do, which is right for the question "could
+ * this deployment's jobs ever get this here". It is not the question an operator asks by writing a floor.
+ * `local` declares `egress: enforced` whether or not `PI_EGRESS` is armed, so `PI_BACKEND_FLOOR=egress=enforced`
+ * on a `PI_EGRESS=0` deployment passed `shortfall` and booted -- and `doctor` then printed "this deployment
+ * is not getting it" two lines above "PI_BACKEND_FLOOR holds". Every job ran on docker's default bridge
+ * while the operator had asked, in writing, for the opposite.
+ *
+ * That is the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` describes, arriving through the very
+ * mechanism added to discharge it, so the floor reads the switch too. Anything above `absent` on a gated
+ * property requires the switch to be ON: a floor asking for `absent` is asking for nothing and is met.
+ *
+ * `switches` maps an `armedBy` name to whether it is armed. `undefined` means "not known" and is treated as
+ * NOT armed, on this file's standing polarity: a thing that cannot be shown to be on gets no credit.
+ */
+export function unarmedFloor(floor, switches = {}) {
+	const out = [];
+	for (const [property, want] of Object.entries(floor ?? {})) {
+		if (!isProperty(property) || want === ABSENT) continue;
+		const armedBy = PROPERTIES[property].armedBy;
+		if (armedBy && switches[armedBy] !== true) out.push({ property, want, armedBy });
+	}
+	return out;
+}
+
+/**
+ * Every reason the blessed set fails the floor, as `[{ backend, property, have, want }]`. Empty means the
+ * deployment is admissible.
+ *
+ * WHY EVERY BACKEND RATHER THAN THE SELECTED ONE: a floor is a statement about where this deployment's jobs
+ * may run, and any blessed backend is somewhere they may run. Checking only the default would let an
+ * operator bless a backend that fails the floor and reach it from a trigger, which is the floor widened
+ * from the surface it bounds.
+ */
+export function floorShortfall(names, floor) {
+	const out = [];
+	for (const backend of names ?? []) {
+		for (const miss of shortfall(backend, floor)) out.push({ backend, ...miss });
+	}
+	return out;
+}
+
+/**
+ * Every reason this deployment's configuration is inadmissible, as a list of operator-facing messages.
+ * Empty means it may boot.
+ *
+ * THE LADDERS LIVE HERE, IN THE LEAF, rather than in `config.mjs`, for the reason the parsers do: a rule
+ * reachable only through `loadConfig` can only be tested through whatever backend names `parseBackendList`
+ * currently accepts -- which today is exactly one. Three separate mutations of these rules survived a
+ * mutation pass for precisely that reason: the tests could not construct a deployment that violated them.
+ * As a pure function over an explicit backend list, each rule can be driven against a backend that fails
+ * it, so the rule is pinned rather than merely present. `config.mjs` re-tags these as config errors.
+ *
+ * Three questions, in the order an operator can act on them:
+ *
+ *   1. Does every blessed backend clear the floor the operator wrote? Checked against EVERY member rather
+ *      than the default alone, because any blessed backend is somewhere this deployment's jobs may run.
+ *   2. Is the operator's floor asking for something they have themselves switched off? Capability is not
+ *      posture, and a floor met only in principle is the belief this whole vocabulary exists to prevent.
+ *   3. Has the deployment armed a control its backend cannot provide at all? Implied rather than written:
+ *      arming egress IS asking for egress, whatever the floor says.
+ */
+export function backendRefusals({ backends = [], backendFloor = {}, egress = false } = {}) {
+	const out = [];
+
+	const misses = floorShortfall(backends, backendFloor);
+	if (misses.length > 0) {
+		const lines = misses.map((m) => `  ${m.backend}: ${m.property} is ${m.have}, PI_BACKEND_FLOOR wants ${m.want}`);
+		out.push(`PI_BACKEND_FLOOR is not met by every backend in PI_BACKENDS:\n${lines.join("\n")}`);
+	}
+
+	const unarmed = unarmedFloor(backendFloor, { PI_EGRESS: egress });
+	if (unarmed.length > 0) {
+		const lines = unarmed.map((u) => `  ${u.property}=${u.want} requires ${u.armedBy}, which is off`);
+		out.push(
+			`PI_BACKEND_FLOOR asks for something this deployment has switched off:\n${lines.join("\n")}\n` +
+				"Arm the switch, or lower that entry to `absent` if you did not mean to require it.",
+		);
+	}
+
+	if (egress) {
+		const unarmable = floorShortfall(backends, { egress: ASSERTED });
+		if (unarmable.length > 0) {
+			const names = unarmable.map((m) => m.backend);
+			out.push(
+				`PI_EGRESS is armed but ${names.join(", ")} ${names.length === 1 ? "declares" : "declare"} egress absent, so no allowlist policy can exist there. ` +
+					"Set PI_EGRESS=0 to run without a policy, or remove that backend from PI_BACKENDS.",
+			);
+		}
+	}
+
 	return out;
 }

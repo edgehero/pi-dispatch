@@ -58,6 +58,21 @@ test("a deployment-armed property says so, because a capability is not a posture
 	}
 });
 
+test("every ASSERTED property names who asserts it, and no other property claims an asserter", () => {
+	// The closed-list rule applied one level down: an asserted word with no source is not actionable, and a
+	// source on an enforced word would be a claim about something this worker builds itself.
+	for (const name of BACKEND_NAMES) {
+		for (const property of PROPERTY_NAMES) {
+			const d = declarationOf(name, property);
+			if (BACKENDS[name].declares[property] === ASSERTED) {
+				assert.ok(typeof d.assertedBy === "string" && d.assertedBy.length > 20, `${name}.${property} must name its asserter`);
+			} else {
+				assert.equal(d.assertedBy, null, `${name}.${property} is not asserted, so it names no asserter`);
+			}
+		}
+	}
+});
+
 test("credentialTransit is ASSERTED, because DOCKER_HOST can redirect every spawn", () => {
 	// The second honest one. Every spawn is `docker` with the worker's environment inherited, so
 	// DOCKER_HOST=tcp://... or a docker context sends the connection to another machine with the provider
@@ -79,8 +94,14 @@ test("declarationOf joins a word to what qualifies it, so a consumer cannot prin
 		word: ENFORCED,
 		armedBy: "PI_EGRESS",
 		question: PROPERTIES.egress.question,
+		assertedBy: null,
 	});
 	assert.equal(declarationOf("local", "isolation").armedBy, null);
+	// An asserted word carries WHO asserts it. "not us" without "them" leaves an operator nothing to check,
+	// which is why doctor can honestly say it names the asserter.
+	assert.match(declarationOf("local", "nonRoot").assertedBy, /USER directive/);
+	assert.match(declarationOf("local", "credentialTransit").assertedBy, /DOCKER_HOST/);
+	assert.equal(declarationOf("local", "isolation").assertedBy, null, "meaningless for an enforced word");
 	assert.equal(declarationOf("nope", "egress"), undefined);
 	assert.equal(declarationOf("local", "egres"), undefined);
 	assert.equal(declarationOf("local", "toString"), undefined);

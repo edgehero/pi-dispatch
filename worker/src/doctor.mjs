@@ -58,6 +58,7 @@ import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
+import { ABSENT, ASSERTED, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -469,6 +470,7 @@ export async function collectChecks(env, seams) {
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
 	checks.push(...(await egressChecks(env, seams, { dockerCode, imageCode, jobImage })));
+	checks.push(...backendChecks(env));
 
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
 	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
@@ -2336,4 +2338,117 @@ async function defaultProbeValkey(url) {
 	} finally {
 		client.disconnect();
 	}
+}
+
+/**
+ * WHERE this deployment's jobs run, and what that place actually guarantees (issue #227).
+ *
+ * THIS IS THE CHECK THAT MAKES THE DECLARATION ADMISSIBLE AT ALL. `CONST-EGRESS-POLICY-IN-THE-ARGV` says a
+ * control an operator BELIEVES in is worse than one they know is missing, because the belief displaces the
+ * credential bound that is really holding. A table of guarantees nothing ever prints is exactly such a
+ * belief. So the three words must stay TOLD APART on the way out, and told apart ON THE SCREEN rather than
+ * in a field nobody renders:
+ *
+ *   enforced -- ours, in this worker's own code, readable back from what it produced. Quiet.
+ *   asserted -- someone else's. Rendered as a WARNING, and it NAMES who is asserting it, because "not us"
+ *               without "them" leaves an operator nothing to go and check.
+ *   absent   -- not provided at all. A failure, since a deployment reaching it must know before a job does.
+ *
+ * `ok: false, warn: true` IS THE WARNING SHAPE, and it is the one thing to get right when editing here.
+ * `render` reads `c.ok` FIRST, so `ok: true, warn: true` renders as a plain pass and drops the `fix` line
+ * with it. An earlier draft used that shape and every asserted property printed as a green tick, which made
+ * this section say the opposite of what it exists to say. `warn` keeps the RUN green -- `render` only fails
+ * on `!ok && !warn` -- so an operator's CI is unaffected while the operator is actually told.
+ *
+ * A property a deployment switch gates is printed with the switch AND its position, never the bare
+ * capability word: `local` can enforce egress, and a `PI_EGRESS=0` deployment is not getting it. Those are
+ * two different sentences. `absent` OUTRANKS the gate, because a control that does not exist is a different
+ * fact from one that is merely unarmed, and "CAN be absent but the switch is off" would be both meaningless
+ * and green.
+ *
+ * Reads the environment directly, like every other check here, and parses through `backends.mjs` so doctor
+ * and the worker cannot disagree about what a floor says.
+ */
+export function backendChecks(env) {
+	const checks = [];
+	let backends;
+	let floor;
+	try {
+		backends = parseBackendList(env.PI_BACKENDS);
+		floor = parseBackendFloor(env.PI_BACKEND_FLOOR);
+	} catch (error) {
+		// The worker refuses to boot on this, so doctor must not soften it to a warning.
+		return [{ ok: false, label: `backend configuration does not parse: ${error.message}`, fix: "fix PI_BACKENDS / PI_BACKEND_FLOOR, then re-run doctor" }];
+	}
+
+	// The switch positions every `armedBy` in the table can name. A MAP rather than one boolean, because
+	// `armedBy` is a general field: hardcoding one variable name here would silently hide a second switch's
+	// off-position the day one is added, which is the defect `armedBy` exists to prevent.
+	const switches = {};
+	try {
+		switches.PI_EGRESS = egressArmed(env);
+	} catch (error) {
+		// NOT an abstention that falls through to the good case. A value doctor cannot parse is a value the
+		// worker refuses to boot on, and an earlier draft claimed in a comment that "its own check reports
+		// that" -- nothing did, so doctor printed every gated property as quietly enforced on a deployment
+		// that could not start.
+		checks.push({ ok: false, label: `PI_EGRESS does not parse, so what this deployment actually gets cannot be determined: ${error.message}`, fix: 'set PI_EGRESS to exactly "0" (off) or "1"/unset (on)' });
+	}
+
+	checks.push({ ok: true, label: `Jobs run on: ${backends.join(", ")} (nothing selects between backends yet; every job runs on ${backends[0]})` });
+
+	for (const name of backends) {
+		for (const property of PROPERTY_NAMES) {
+			const d = declarationOf(name, property);
+			if (!d) continue;
+			// FIRST, ahead of the gate: a control that does not exist is not a control that is unarmed.
+			if (d.word === ABSENT) {
+				checks.push({ ok: false, label: `${name}: ${property} is ABSENT -- ${d.question}`, fix: `this backend does not provide ${property}; a deployment that needs it must not run jobs on ${name}` });
+				continue;
+			}
+			if (d.armedBy && switches[d.armedBy] === undefined) {
+				// The switch did not parse. Say so rather than pick a side; the failure is already reported.
+				checks.push({ ok: false, warn: true, label: `${name}: ${property} depends on ${d.armedBy}, which does not parse -- cannot say whether this deployment gets it`, fix: `fix ${d.armedBy}, then re-run doctor` });
+				continue;
+			}
+			if (d.armedBy && switches[d.armedBy] === false) {
+				checks.push({ ok: false, warn: true, label: `${name}: ${property} CAN be ${d.word} here, but ${d.armedBy} is off, so this deployment is not getting it`, fix: `arm ${d.armedBy} to get it (${d.question})` });
+				continue;
+			}
+			if (d.word === ASSERTED) {
+				checks.push({ ok: false, warn: true, label: `${name}: ${property} is ASSERTED by ${d.assertedBy ?? "something outside this worker"}, not enforced by it`, fix: `not verifiable from here, so treat it as a claim rather than a control: ${d.question}` });
+				continue;
+			}
+			// enforced, and armed if it is gated at all. The good case, and it stays quiet.
+		}
+	}
+
+	// ALWAYS a line, including when no floor is set. `PI_BACKENDS_FLOOR` is a plausible one-character-off
+	// spelling of the real name, and nothing in this project warns on an unknown PI_* variable, so silence
+	// here would make a typo'd VARIABLE NAME look exactly like a floor that holds -- the same belief the
+	// strict parsing inside the string exists to prevent, arriving from outside the string.
+	const floorNames = Object.keys(floor);
+	if (floorNames.length === 0) {
+		checks.push({ ok: true, label: "PI_BACKEND_FLOOR is not set, so no minimum is required of any backend" });
+		return checks;
+	}
+
+	const misses = floorShortfall(backends, floor);
+	const unarmed = unarmedFloor(floor, switches);
+	// A floor whose every entry is `absent` parses, reads, and bounds NOTHING: `meets(have, absent)` is true
+	// for every value. It is the one READABLE word that reproduces the outcome `isDeclaration` refuses a
+	// typo for, so it is named rather than affirmed.
+	const bounding = floorNames.filter((p) => floor[p] !== ABSENT);
+	const spelled = floorNames.map((p) => `${p}=${floor[p]}`).join(", ");
+	if (misses.length > 0) {
+		checks.push({ ok: false, label: `PI_BACKEND_FLOOR is not met: ${misses.map((m) => `${m.backend}.${m.property} is ${m.have}`).join(", ")}`, fix: "raise the backend, lower PI_BACKEND_FLOOR, or drop the backend from PI_BACKENDS" });
+	} else if (unarmed.length > 0) {
+		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${unarmed.map((u) => `${u.property}=${u.want}`).join(", ")}, which ${[...new Set(unarmed.map((u) => u.armedBy))].join(", ")} has switched off`, fix: "arm the switch, or lower that entry to `absent` if you did not mean to require it" });
+	} else if (bounding.length === 0) {
+		checks.push({ ok: false, warn: true, label: `PI_BACKEND_FLOOR (${spelled}) requires nothing: every entry asks for "absent", which every backend meets`, fix: "raise an entry to `asserted` or `enforced` for it to bound anything" });
+	} else {
+		checks.push({ ok: true, label: `PI_BACKEND_FLOOR holds (${spelled})` });
+	}
+
+	return checks;
 }

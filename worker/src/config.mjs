@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { delimiter } from "node:path";
+import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -158,6 +159,47 @@ function egressEnabled(env) {
 	}
 }
 
+/**
+ * PI_BACKENDS and PI_BACKEND_FLOOR (issue #227). Both parse in `backends.mjs` for `egressEnabled`'s reason
+ * directly above: `doctor` reads the environment itself, and three copies of one grammar is two chances to
+ * disagree about what an operator's floor says. Here they gain the `piDispatchConfig` tag only.
+ *
+ * ENV-ONLY, never the overlay and never the deployment pointer, on `secretResolverRoots`' rule: a bound
+ * that can be widened from the surface it bounds is not a bound. The pointer needs no edit to enforce it --
+ * `POINTER_ENV_ALLOWLIST` is an ALLOWLIST (of the path and URL variables `resolvePaths` reads), so a
+ * name absent from it is refused by omission, and a capability grant is never added to it.
+ */
+function backendSet(env) {
+	try {
+		return parseBackendList(env.PI_BACKENDS);
+	} catch (error) {
+		throw configError(error.message);
+	}
+}
+
+function backendFloorOf(env) {
+	try {
+		return parseBackendFloor(env.PI_BACKEND_FLOOR);
+	} catch (error) {
+		throw configError(error.message);
+	}
+}
+
+/**
+ * THE BOOT REFUSAL. A deployment whose configuration needs something its backends cannot provide is refused
+ * here, named backend by named property, rather than discovering it per job.
+ *
+ * The RULES live in `backends.mjs` as a pure function over an explicit backend list; this only re-tags them
+ * so the CLI prints them cleanly, which is `egressEnabled`'s arrangement. That split is not tidiness: a
+ * rule reachable only through `loadConfig` can only be exercised with backend names `parseBackendList`
+ * accepts, and there is exactly one today, so three of these rules survived a mutation pass unprotected
+ * while living here.
+ */
+function refuseBackendShortfall(config) {
+	const [first] = backendRefusals(config);
+	if (first) throw configError(first);
+}
+
 // The operator's global pi overlay dir (REQ-GLOBAL-PI-OVERLAY). Unset/empty = feature off. When set it
 // must EXIST at boot -- a typo pointing at nothing would silently drop the operator's whole setup on
 // every job, so fail loud like every other config error rather than degrade to nothing.
@@ -211,7 +253,12 @@ export function globalExtensionsEnabled(env) {
  */
 export function loadConfig(env = process.env, { fileExists = existsSync } = {}) {
 	const model = env.PI_MODEL ?? "claude-sonnet-4-5-20250929"; // dated snapshot; deterministic per CONST-PI-VERSION-PINNED
-	return {
+	// #227. Hoisted above the object because `defaultBackend` INDEXES `backends`, and a property cannot read
+	// a sibling of the literal it is in. (Calling the parser twice would be harmless -- `egressEnabled` is
+	// called twice a few properties down for the same reason -- so this is about the index, not the throw.)
+	const backends = backendSet(env);
+	const backendFloor = backendFloorOf(env);
+	const config = {
 		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379",
 		// Issue #57. What this machine calls itself: the key of its registry row, the `host` on every log
 		// line and run record, and the BullMQ worker name. Always populated -- a deployment that declares
@@ -238,6 +285,15 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// per-job network is built around. Read BEFORE forwardEnv below, because the forward list's refusal
 		// of the proxy variables is conditional on it.
 		egress: egressEnabled(env),
+		// #227. The blessed set and the minimum every member of it must declare. The default set is the one
+		// name every existing deployment is already running, so an operator who has never heard of either
+		// variable gets exactly what they had.
+		backends,
+		backendFloor,
+		// The FIRST blessed name, which is what a deployment means by "the one my jobs run on unless a
+		// trigger says otherwise". `parseBackendList` never returns empty, so the fallback is belt-and-braces
+		// against a future edit rather than a reachable branch today.
+		defaultBackend: backends[0] ?? DEFAULT_BACKEND,
 		egressProxy: env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY, // || (not ??) so an empty string falls back
 		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV, egressEnabled(env)), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
@@ -344,6 +400,12 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		forgejo: loadForgejoAuth(env),
 		azure: loadAzureAuth(env),
 	};
+
+	// #227, and it runs AFTER the object is built rather than inside it: the refusal reads `egress` as well
+	// as the two backend fields, and a check woven between properties would depend on key order.
+	refuseBackendShortfall(config);
+
+	return config;
 }
 
 /**
