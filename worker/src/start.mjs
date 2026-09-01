@@ -782,6 +782,10 @@ export async function startWorker(
 			// the panel should not have to restart the worker to use it. A deployment that declares nothing
 			// spawns nothing at all: the gate only calls this when a trigger is armed.
 			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, log }),
+			// #227. What PI_BACKENDS blessed, so a trigger naming an unblessed venue refuses pre-spend. The
+			// panel's picker is bounded by the same list, and this is the half that binds: the overlay is
+			// not the reviewed artifact (DES-PER-TRIGGER-SECRET-PROFILE).
+			blessedBackends: config.backends,
 			runContainer: localBackend.runContainer,
 			prepareWorkspace: makePrepareWorkspace({
 				jobsDir: config.jobsDir,

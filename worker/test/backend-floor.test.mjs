@@ -98,8 +98,12 @@ test("PI_EGRESS armed against a backend that cannot do egress is refused", () =>
 	// whatever the floor says, so a backend declaring it absent would arm a control that cannot exist there
 	// and report nothing. Deleting this entire ladder used to leave the suite green.
 	const armed = backendRefusals({ backends: ["local", NOTHING], backendFloor: {}, egress: true });
-	assert.equal(armed.length, 1);
+	// TWO reasons, not one: `jobToJobIsolation` carries the same switch, and the ladder used to name only
+	// `egress`. Hardcoding one variable where `armedBy` is a general field is the defect `armedBy` exists to
+	// prevent, and it had crept back in one function over from where it was fixed.
+	assert.equal(armed.length, 2);
 	assert.match(armed[0], new RegExp(`PI_EGRESS is armed but ${NOTHING} declares egress absent`));
+	assert.match(armed[1], new RegExp(`PI_EGRESS is armed but ${NOTHING} declares jobToJobIsolation absent`));
 	// Unarmed, the same deployment has asked for nothing and is admissible on this axis.
 	assert.deepEqual(backendRefusals({ backends: ["local", NOTHING], backendFloor: {}, egress: false }), []);
 	// And the real deployment is not refused, which is the case that must never regress.
@@ -110,9 +114,9 @@ test("every refusal reason is reported, not only the first one found", () => {
 	// `loadConfig` throws on the first, but the rules compute independently so a later slice can print all
 	// of them. A ladder that silently stopped contributing would otherwise be invisible here.
 	const both = backendRefusals({ backends: ["local", NOTHING], backendFloor: { isolation: ENFORCED }, egress: true });
-	assert.equal(both.length, 2);
+	assert.equal(both.length, 3, "the floor, plus one per armed property the backend cannot provide");
 	assert.match(both[0], /PI_BACKEND_FLOOR is not met/);
-	assert.match(both[1], /PI_EGRESS is armed/);
+	assert.ok(both.slice(1).every((m) => /PI_EGRESS is armed/.test(m)));
 });
 
 // Drive the REAL doctor and read its REAL output. An earlier version of this file asserted `c.warn === true`
@@ -184,10 +188,10 @@ test("doctor refuses to call an all-absent floor 'holding', because it bounds no
 	assert.doesNotMatch(text, /PI_BACKEND_FLOOR holds/);
 });
 
-test("doctor does not claim jobs run somewhere selection cannot send them", async () => {
-	// Nothing selects a backend yet: start.mjs builds `local` unconditionally. "Jobs run on: local" would be
-	// true only by the coincidence that local is the sole entry, so the line says so outright.
-	assert.match(await doctorText(base()), /Jobs run on: local \(nothing selects between backends yet; every job runs on local\)/);
+test("doctor names where jobs run", async () => {
+	// With one blessed backend there is nothing to choose between, so the line stays plain. The qualifier
+	// arrives with a second name, which is when "which one" becomes a question an operator can have.
+	assert.match(await doctorText(base()), /Jobs run on: local \(run\.backend is validated and gated, but nothing dispatches on it yet/);
 });
 
 test("doctor FAILS on a backend configuration the worker would refuse to boot on", async () => {
@@ -221,19 +225,18 @@ test("a floor naming a switched-off control REFUSES BOOT, and doctor says which 
 	assert.match(await doctorText({ PI_EGRESS: "0", PI_BACKEND_FLOOR: "egress=enforced" }), /✗ PI_BACKEND_FLOOR asks for egress=enforced, which PI_EGRESS has switched off/);
 });
 
-test("PI_BACKENDS always includes the backend that actually runs jobs", () => {
-	// `start.mjs` builds `local` unconditionally, so every job runs there whatever this list says. A set
-	// excluding it would make two statements false at once: the deployment would be told its jobs run
-	// somewhere they do not, and the floor -- checked against this list -- would skip the backend actually
-	// running them. The refusal cannot be reached through the parser while `local` is the only name (an
-	// unknown name is rejected first), so what is pinned here is the INVARIANT it protects, which stays
-	// meaningful when a second backend arrives.
+test("PI_BACKENDS always includes the backend an unflagged trigger runs on", () => {
+	// A trigger that names no venue runs on `backends[0]`, and the processor refuses a job whose named
+	// backend is not in this list -- so a set that dropped the default would refuse every unflagged trigger
+	// on a deployment that never asked for that. The refusal cannot be reached through the parser while
+	// `local` is the only name (an unknown name is rejected first), so what is pinned here is the INVARIANT
+	// it protects, which stays meaningful when a second backend arrives.
 	for (const raw of [undefined, "", "   ", "local", " local , local "]) {
 		assert.ok(parseBackendList(raw).includes(DEFAULT_BACKEND), `${JSON.stringify(raw)} must still include ${DEFAULT_BACKEND}`);
 	}
 	// And the guard is present rather than merely intended, so removing it fails here rather than silently.
 	const src = readFileSync(new URL("../src/backends.mjs", import.meta.url), "utf8");
-	assert.match(src, /PI_BACKENDS must include .* until a backend can be selected per job/);
+	assert.match(src, /PI_BACKENDS must include .*: every job runs there today regardless of this list/);
 });
 
 test("arming egress on the real deployment still boots", () => {

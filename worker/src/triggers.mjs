@@ -23,6 +23,7 @@
  * Custom: triggers validated inline per config.mjs/schedules.mjs precedent; zod not in deps
  */
 
+import { BACKEND_NAMES, backendFor } from "./backends.mjs";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
 // SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
 // materialize.mjs and the admin already import it, and a keep-in-sync copy would drift where a
@@ -350,6 +351,7 @@ function normalizeCron(on, run, index, path, state) {
 	validateDisarmed(on, `cron trigger "${id}"`, path, { onType: "cron" });
 	const secrets = validateSecrets(run, `cron trigger "${id}"`, path);
 	const secretsProfile = validateSecretsProfile(run, `cron trigger "${id}"`, path);
+	const backend = validateBackend(on, run, `cron trigger "${id}"`, path, { localWorkspace: true });
 	// Called for its refusal only: the returned `run` below deliberately grows no `waitFor` key, exactly as
 	// it grows no `replicas` one, because a cron entry can never carry either (issue #230).
 	validateWaitFor(on, run, `cron trigger "${id}"`, path, { onType: "cron" });
@@ -361,7 +363,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }) },
 	};
 }
 
@@ -993,6 +995,115 @@ function validateSecretsProfile(run, at, path) {
 }
 
 /**
+ * Would running a folder-bound job in this venue be impossible? Exported ONLY so it can be driven.
+ *
+ * The refusal it answers cannot be reached through `parseTriggers` today: the table holds one entry and it
+ * is local, so no trigger can name a remote venue and the branch below is unreachable. A mutation pass duly
+ * deleted that branch and the whole suite stayed green. A rule nothing can exercise is a rule that will be
+ * wrong on the day it finally matters, which is the day a second backend lands -- so the decision lives
+ * here, as one line over an explicit entry, and a test drives it against a synthetic remote one.
+ *
+ * `!== false` and not `=== true`: `remote` is a plain field on the table entry rather than a member of the
+ * closed PROPERTIES list, so an entry that simply omits it would otherwise read as local and be admitted
+ * onto a folder-bound trigger. That is the fail-open direction `backends.mjs`'s own rule forbids ("a backend
+ * that omits one is not admitted for it"), and it would defeat with an absent key a refusal this file calls
+ * physics. A test pins that every entry declares it, so both halves have to fail together.
+ */
+export function refusesLocalWorkspace(entry, localWorkspace) {
+	return Boolean(localWorkspace) && entry?.remote !== false;
+}
+
+/**
+ * `run.backend` -- WHICH venue this trigger's container is built in (issue #227).
+ *
+ * A NAME, never a configuration. `validateSecretsProfile` above is the template end to end, and the reason
+ * is the same: a trigger SELECTS among what the deployment already blessed, and never configures a posture.
+ * `run.network` was rejected outright for that reason, and this field must not become a way back to it --
+ * naming `remote-vendor` cannot turn egress off, because what egress a venue can provide is the backend
+ * table's answer and the deployment's floor bounds which venues are reachable at all.
+ *
+ * WHAT IS CHECKED HERE AND WHAT IS NOT. This file answers what the FILE knows: that the name is a name, and
+ * that the venue could ever run this kind of job. Whether the DEPLOYMENT blessed it is `PI_BACKENDS`, which
+ * lives in the environment, and a loader that read it would refuse a reviewed file on a per-host setting --
+ * so the processor refuses that pre-spend instead. Same split `secretsProfile` already draws between the
+ * charset check here and `secret-profile-unknown` there.
+ *
+ * A NEAR-MISS SPELLING IS REFUSED, which puts this in `waitFor`'s class rather than `run.imgae`'s. A
+ * misspelled image gives you the default image and a job that ran; a misspelled `backend` gives you the
+ * DEFAULT VENUE and a job that ran -- byte-identical in the record, the panel and the log to one that
+ * correctly named a venue, while the operator reads the file as though it chose. That is the destructive
+ * absence `validateWaitFor` refuses near-misses for, one field over.
+ */
+function validateBackend(on, run, at, path, { localWorkspace }) {
+	// The near-miss sweep, exactly `validateWaitFor`'s: on `run` the exact spelling is the field, on `on`
+	// every spelling is wrong including the correct one, because a venue is a property of the run.
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && key === "backend") continue;
+			// The PLURAL is included, and it is the likeliest miss of all: the deployment-side variable is
+			// `PI_BACKENDS`, so `run.backends` is what an operator writes from memory. Nothing else in this
+			// file needs that, which is why the comparison is against a small set rather than `waitFor`'s
+			// single normalized string.
+			// A HOMOGLYPH is caught too. `replace(/[^a-z0-9]/gi, "")` DELETES a non-ASCII character rather
+			// than failing on it, so a Cyrillic "a" in `b<U+0430>ckend` normalizes to `bckend` and an
+			// Armenian "n" in `backe<U+0578>d` to `backed` -- both miss an equality test and are dropped in
+			// exactly the silence this sweep exists to prevent. Such a key arrives by paste from a rendered
+			// doc or a chat client, the same route homoglyphs take into package names.
+			//
+			// So a key carrying non-ASCII is compared as a SUBSEQUENCE: whatever ASCII letters survive must
+			// still be obtainable from `backend`/`backends` in order. That catches any number of substituted
+			// glyphs without guessing which ones, and a genuinely unrelated non-ASCII key (`fl<U+00F6>w`)
+			// keeps falling through to this file's documented tolerance of unknown `run` keys.
+			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+			const targets = ["backend", "backends"];
+			const isSubsequence = (needle, hay) => {
+				let i = 0;
+				for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+				return i === needle.length;
+			};
+			// The floor is 4 rather than 5 so a key with three substituted glyphs is still caught. Only a
+			// non-ASCII key reaches this branch, so the false-positive surface is a non-ASCII key whose
+			// surviving letters happen to be an in-order subset of "backend", which no field here is.
+			const suspicious = /^[\x20-\x7E]*$/.test(key)
+				? targets.includes(normalized)
+				: normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+			if (!suspicious) continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.backend? A venue the loader drops runs the job somewhere else while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+
+	const backend = run.backend;
+	if (backend === undefined) return undefined;
+
+	if (!isNonEmptyString(backend)) {
+		throw configError(`${at}: run.backend must be a non-empty string naming one of the backends this deployment can run jobs in (got ${JSON.stringify(backend)}): ${path}`);
+	}
+	if (!ID_CHARSET.test(backend)) {
+		throw configError(`${at}: run.backend ${JSON.stringify(backend)} may use letters, digits, dot, dash and underscore only -- PI_BACKENDS is a comma-separated list, so a name carrying that separator could not be blessed: ${path}`);
+	}
+	const entry = backendFor(backend);
+	if (!entry) {
+		throw configError(`${at}: run.backend ${JSON.stringify(backend)} is not a backend this build knows (known: ${BACKEND_NAMES.join(", ")}) -- whether your deployment BLESSES it is PI_BACKENDS, checked before the job spends: ${path}`);
+	}
+
+	// A LOCAL job cannot run in a remote venue, and this is physics rather than policy. `DES-WORKER-ON-HOST`
+	// finding (2): "the operator's own folder must be bind-mounted as /workspace, edited in place. There is
+	// no volume to hide behind." A cron trigger normalizes to a local run for the same reason. Refused at
+	// LOAD and permanently, because no amount of deployment configuration can make a folder on this machine
+	// appear inside someone else's daemon -- so this is not a bound an operator could widen, it is one the
+	// world imposes, and discovering it per job would burn a pickup for an answer the file already had.
+	// The decision itself is `refusesLocalWorkspace` above, so it can be driven; see its comment.
+	if (refusesLocalWorkspace(entry, localWorkspace)) {
+		throw configError(`${at}: run.backend ${JSON.stringify(backend)} is remote, and this trigger runs against a folder on THIS machine that has to be bind-mounted and edited in place -- there is no volume to hide behind (DES-WORKER-ON-HOST): ${path}`);
+	}
+
+	return backend;
+}
+
+/**
  * `run.waitFor` -- the conditions that must all clear before this trigger's job starts (issue #230).
  *
  * A CONJUNCTION of one-key objects: `{ "after": "<ISO instant>" }` is answered from the clock, and
@@ -1147,10 +1258,11 @@ function normalizeLabel(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
 	};
 }
 
@@ -1186,10 +1298,11 @@ function normalizeComment(on, run, index, path, state) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
 	};
 }
 
@@ -1252,6 +1365,7 @@ function normalizeIssue(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: {
@@ -1262,7 +1376,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
 	};
 }
 
@@ -1336,6 +1450,7 @@ function normalizePullRequest(on, run, index, path) {
 	const replicas = validateReplicas(run, at, path);
 	const secrets = validateSecrets(run, at, path);
 	const secretsProfile = validateSecretsProfile(run, at, path);
+	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	return {
 		on: {
@@ -1351,7 +1466,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
 	};
 }
 

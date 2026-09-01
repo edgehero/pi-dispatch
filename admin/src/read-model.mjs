@@ -1228,6 +1228,9 @@ export function normalizeTriggerForDisplay(entry) {
   const command = typeof run.command === "string" ? run.command : null;
   const packages = run.packages !== false;
   const image = typeof run.image === "string" && run.image.trim() !== "" ? run.image : null;
+  // #227. Null when the trigger names no venue, so the panel can print "deployment default" as a checked
+  // fact rather than leaving where the box was built implicit -- the argument the image row already makes.
+  const backend = typeof run.backend === "string" && run.backend.trim() !== "" ? run.backend : null;
   // The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS, issue #60). Carried on every kind like
   // `image`, and shown for the same reason: which skills a job loads IS what the agent can do. `null` is
   // the none sentinel, matching this function's own convention.
@@ -1272,6 +1275,7 @@ export function normalizeTriggerForDisplay(entry) {
         model: typeof run.model === "string" ? run.model : null,
         packages,
         image,
+        backend,
         skillsDir,
         instructions,
         resume,
@@ -1279,9 +1283,9 @@ export function normalizeTriggerForDisplay(entry) {
         secretsProfile,
       };
     case "label":
-      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
+      return { type: "label", any: normalizeSelector(on.any), all: normalizeSelector(on.all), none: normalizeSelector(on.none), flow, command, packages, image, backend, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "comment":
-      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
+      return { type: "comment", phrase: typeof on.phrase === "string" ? on.phrase : null, flow, command, packages, image, backend, skillsDir, instructions, resume, secrets, secretsProfile, replicas, forge };
     case "pull_request": {
       // A close-only PR rule carries the same #231 trio the issue arm does, on the issue arm's terms
       // (see its comments): without them here, a spent PR one-shot renders byte-identical to an armed
@@ -1302,6 +1306,7 @@ export function normalizeTriggerForDisplay(entry) {
         command,
         packages,
         image,
+        backend,
         skillsDir,
         instructions,
         resume,
@@ -1335,6 +1340,7 @@ export function normalizeTriggerForDisplay(entry) {
         command,
         packages,
         image,
+        backend,
         skillsDir,
         instructions,
         resume,

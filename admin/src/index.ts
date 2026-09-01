@@ -91,6 +91,7 @@ import {
 } from "./read-model.mjs";
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
+import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -490,7 +491,10 @@ function registerTools(pi: ExtensionAPI): void {
       "pull_request trigger may not carry labels[] at all. A github review_submitted trigger may also set " +
       "reviewState[] (approved|changes_requested|commented) to narrow which verdicts fire; omitted, all " +
       "three do. For webhook triggers the repo and the task come from the triggering " +
-      "issue/PR event — set only the match + flow — and they run under the deployment default model.",
+      "issue/PR event — set only the match + flow — and they run under the deployment default model. " +
+      "`backend` (optional, any kind) names WHERE the job's container is built, chosen from the names this " +
+      "deployment blesses in PI_BACKENDS; omitted, the job runs on the deployment default. A name this " +
+      "deployment does not bless is refused here, and refused again before the job spends.",
     executionMode: "sequential",
     parameters: Type.Object({
       kind: Type.String(),
@@ -515,8 +519,22 @@ function registerTools(pi: ExtensionAPI): void {
       model: Type.Optional(Type.String()),
       provider: Type.Optional(Type.String()),
       maxTurns: Type.Optional(Type.Integer({ minimum: 1 })),
+      // #227. WHICH venue this trigger's container is built in. A NAME chosen from what PI_BACKENDS
+      // blessed, never a configuration -- `DES-PER-TRIGGER-JOB-IMAGE` predicted this exact arrival: "If a
+      // future tool ever takes an image parameter, the allowlist arrives with that tool, and this row is
+      // the reason it must." The allowlist is checked in execute, below, because a schema enum would be
+      // frozen at registration while PI_BACKENDS is read per call.
+      backend: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const blessed = blessedBackends(process.env);
+      if (params.backend !== undefined) {
+        // REFUSED UNDER AN EMPTY SET rather than passed through. A deployment that blesses nothing has no
+        // venue to name, so a picker that accepted a name here would author a trigger the worker refuses
+        // pre-spend on every delivery -- a file that reads as chosen and never runs.
+        if (blessed.length === 0) throw new Error("this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)");
+        if (!blessed.includes(params.backend)) throw new Error(`backend '${params.backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
+      }
       const entry = buildTriggerEntry(params.kind, params);
       if (!entry) throw new Error(`unknown trigger kind '${params.kind}' (cron|label|comment|pull_request|issue)`);
       const result = await confirmedWrite(
@@ -536,10 +554,12 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_trigger_edit",
     label: "pi-dispatch edit trigger",
     description:
-      "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live. The " +
-      "operator MUST approve a confirm dialog showing flow before->after; with no interactive operator it is refused.",
+      "Changes which flow a trigger runs (by array index from dispatch_triggers) and applies it live, and " +
+      "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
+      "blesses. The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
+      "operator it is refused.",
     executionMode: "sequential",
-    parameters: Type.Object({ index: Type.Integer({ minimum: 0 }), flow: Type.String() }),
+    parameters: Type.Object({ index: Type.Integer({ minimum: 0 }), flow: Type.String(), backend: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const paths = resolvePaths(process.env);
       const list = triggerList(paths);
@@ -547,16 +567,29 @@ function registerTools(pi: ExtensionAPI): void {
       if (!cur) throw new Error(`no trigger at index ${params.index} (have ${list.length})`);
       const flow = params.flow.trim();
       if (!flow) throw new Error("flow must be non-empty");
+      // #227, the same allowlist `_add` applies and for the same reason: the picker bounds what an operator
+      // can choose, and the worker bounds what actually runs (DES-PER-TRIGGER-SECRET-PROFILE -- the overlay
+      // is not the reviewed artifact). Checked here rather than as a schema enum because a schema is frozen
+      // at registration while PI_BACKENDS is read per call.
+      const backend = optStr(params.backend);
+      if (backend !== undefined) {
+        const blessed = blessedBackends(process.env);
+        if (blessed.length === 0) throw new Error("this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)");
+        if (!blessed.includes(backend)) throw new Error(`backend '${backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`);
+      }
+      const venue = backend === undefined ? "" : `, backend: ${(cur as any).backend ?? "-"} -> ${backend}`;
       const result = await confirmedWrite(
         ctx,
-        { title: `Edit trigger #${params.index + 1}`, message: `trigger #${params.index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}` },
+        { title: `Edit trigger #${params.index + 1}`, message: `trigger #${params.index + 1} (${cur.type}) flow: ${cur.flow ?? "-"} -> ${flow}${venue}` },
         () => {
           const res = writeTriggers({
             triggersPath: paths.triggersPath,
-            mutate: (raw: any[]) => raw.map((tr, i) => (i === params.index ? { ...tr, run: { ...tr.run, flow } } : tr)),
+            // `backend` is merged only when the caller sent one, so an edit that changes just the flow
+            // leaves the entry byte-identical in every other key -- including a venue it already had.
+            mutate: (raw: any[]) => raw.map((tr, i) => (i === params.index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }) } } : tr)),
           });
           if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-          return { applied: true, index: params.index, flow };
+          return { applied: true, index: params.index, flow, ...(backend !== undefined && { backend }) };
         },
       );
       return toolText(JSON.stringify(result));
@@ -971,6 +1004,29 @@ const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
   azure: { hint: "created updated", dflt: "updated" },
 };
 
+/**
+ * Which backends this deployment blessed, answered by the WORKER'S OWN parser.
+ *
+ * An earlier version reimplemented the comma split here and justified it by saying `backends.mjs` was not
+ * in this bundle. It already is: `index.ts` imports `read-model.mjs`, which reaches `triggers.mjs`, which
+ * imports `backends.mjs` -- and the built `dist/index.mjs` contains `BACKENDS_TABLE`. So the duplicate
+ * bought nothing and cost the two things a duplicate always costs. It did not dedupe, and it returned `[]`
+ * for an unset variable while the worker returns `["local"]`, so on the DEFAULT deployment the picker told
+ * an operator "this deployment blesses no backends" about a deployment that blesses one and would have run
+ * the trigger fine.
+ *
+ * Falls back to `[]` only when the value cannot be parsed at all. `parseBackendList` throws on an unknown
+ * name, which is the worker refusing to boot -- the panel is not the place to relitigate that, and an empty
+ * list makes the picker refuse every name, which is the safe direction while the deployment is broken.
+ */
+export function blessedBackends(env: NodeJS.ProcessEnv): string[] {
+  try {
+    return parseBackendList(env.PI_BACKENDS);
+  } catch {
+    return [];
+  }
+}
+
 export function buildTriggerEntry(kind: string, f: any): any {
   if (kind === "cron") {
     // Optional per-entry provider/model/maxTurns pass through to job.data (highest precedence); omitted when
@@ -984,6 +1040,9 @@ export function buildTriggerEntry(kind: string, f: any): any {
     if (model) run.model = model;
     if (provider) run.provider = provider;
     if (maxTurns !== undefined) run.maxTurns = maxTurns;
+    // #227, carried only when set so every pre-#227 call site writes a byte-identical entry.
+    const backend = optStr(f.backend);
+    if (backend) run.backend = backend;
     return { on: { type: "cron", id: f.id, pattern: f.pattern }, run };
   }
   const forge = optStr(f.forge) ?? "github";
@@ -992,7 +1051,8 @@ export function buildTriggerEntry(kind: string, f: any): any {
   // than validating here keeps one validator, exactly as an unrecognised forge is passed through to be
   // refused fail-loud at the write instead of silently rewritten to github.
   const repository = optStr(f.repository);
-  const forgeRun = (rest: any) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}) });
+  const backend = optStr(f.backend);
+  const forgeRun = (rest: any) => ({ kind: forge, ...rest, ...(repository ? { repository } : {}), ...(backend ? { backend } : {}) });
   if (kind === "label") return { on: { type: "label", any: asWords(f.labels ?? f.any) }, run: forgeRun({ flow: f.flow }) };
   if (kind === "comment") return { on: { type: "comment", phrase: f.phrase }, run: forgeRun({ flow: f.flow }) };
   if (kind === "pull_request") {
@@ -1006,7 +1066,10 @@ export function buildTriggerEntry(kind: string, f: any): any {
     const prNumber = optInt(f.number);
     if (prNumber !== undefined) on.number = prNumber;
     if (typeof f.once === "boolean") on.once = f.once;
-    return { on, run: { kind: forge, flow: f.flow } };
+    // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
+    // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
+    // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
+    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}) } };
   }
   if (kind === "issue") {
     // The close-trigger kind (issue #231). `action` DEFAULTS to this forge's close word -- the only
@@ -1020,7 +1083,10 @@ export function buildTriggerEntry(kind: string, f: any): any {
     const number = optInt(f.number);
     if (number !== undefined) on.number = number;
     if (typeof f.once === "boolean") on.once = f.once;
-    return { on, run: { kind: forge, flow: f.flow } };
+    // `forgeRun` is not used on this arm (it builds `on` itself), so the venue is carried explicitly.
+    // Without this the picker VALIDATED a name and then discarded it, and the confirm dialog rendered
+    // an entry with no `backend` for the operator to approve -- a pick accepted and dropped in silence.
+    return { on, run: { kind: forge, flow: f.flow, ...(backend ? { backend } : {}) } };
   }
   return null;
 }

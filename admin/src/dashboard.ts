@@ -1479,6 +1479,11 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // deliberate rather than an omitted row: a missing row would read as "I don't know", this reads as
   // "I checked". Which image runs is which code runs, so it is not a fact to leave implicit.
   out.push(kv("image", t.image ?? "deployment default", t.image ? "accent" : "dim"));
+  // #227, and it earns its row by the same argument the image row states: the dim "deployment default" is
+  // "I checked". Where the box was BUILT bounds what the box can be, so it is not a fact to leave implicit
+  // -- and without this row an operator has no surface anywhere (panel, run record, success log) on which
+  // to confirm a venue their trigger named.
+  out.push(kv("backend", t.backend ?? "deployment default", t.backend ? "accent" : "dim"));
   // Rendered on BOTH branches and on every kind, with the same "I checked" dim default the image row uses.
   // `warning` when armed, because this is the one row on this pane that describes something LEAVING the
   // job: everything above says what the job runs, this says what it writes down and hands to the next one.

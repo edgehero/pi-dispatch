@@ -24,6 +24,17 @@ test("every backend declares EVERY property -- omission is not a pass", () => {
 	}
 });
 
+test("every backend declares whether it is REMOTE, because a missing key would read as local", () => {
+	// `remote` is not a member of the closed PROPERTIES list, so nothing else forces it to exist -- and
+	// `validateBackend` refuses a remote venue on a folder-bound trigger, a refusal that file calls physics.
+	// An entry omitting the key would defeat that refusal with an absent field, which is the fail-open
+	// direction this module's own rule forbids. The check there is `!== false`, so both halves fail together.
+	for (const name of BACKEND_NAMES) {
+		assert.equal(typeof BACKENDS[name].remote, "boolean", `${name} must declare remote as a boolean`);
+	}
+	assert.equal(BACKENDS.local.remote, false);
+});
+
 test("the closed list covers the guarantees a backend could otherwise silently drop", () => {
 	// The closed-list rule ("a backend that omits one is not admitted for it") is only sound if the list is
 	// COMPLETE. These five were missing from the first draft, and each is a way to declare everything else

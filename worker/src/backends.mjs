@@ -427,15 +427,17 @@ export function parseBackendList(raw) {
 	}
 	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one".
 	const unique = [...new Set(names)];
-	// NOTHING SELECTS A BACKEND YET. `start.mjs` builds `local` unconditionally, so every job runs there
-	// whatever this list says. A set excluding it would therefore make two statements false at once: the
-	// deployment would be told its jobs run somewhere they do not, and the floor -- which is checked against
-	// this list -- would skip the backend that is actually running them. Refusing is the only honest option
-	// while that is true, and this guard is unreachable today because `local` is the only entry. It is
-	// written now because the slice that adds a second one is the slice where it starts mattering, and it
-	// comes out again in the slice that wires selection.
+	// NOTHING DISPATCHES ON `run.backend` YET. `start.mjs` builds `local` unconditionally and no code reads a
+	// job's backend to choose an adapter, so every job runs there whatever this list says. `run.backend` is
+	// today a VALIDATED, GATED LABEL: refused at load if unknown, refused pre-spend if unblessed, and then
+	// not routed on. The dispatch arrives with `stopContainer` and `reap`, which need the same per-backend
+	// lookup and should grow it once rather than twice.
+	//
+	// So a set excluding the default would make two statements false at once: the deployment would be told
+	// its jobs run somewhere they do not, and the floor -- checked against this list -- would skip the
+	// backend actually running them. Refusing is the only honest option while that holds.
 	if (!unique.includes(DEFAULT_BACKEND)) {
-		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)} until a backend can be selected per job; every job runs there today regardless of this list`);
+		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)}: every job runs there today regardless of this list, so a set without it would describe a deployment that does not exist`);
 	}
 	return unique;
 }
@@ -561,15 +563,22 @@ export function backendRefusals({ backends = [], backendFloor = {}, egress = fal
 		);
 	}
 
-	if (egress) {
-		const unarmable = floorShortfall(backends, { egress: ASSERTED });
-		if (unarmable.length > 0) {
-			const names = unarmable.map((m) => m.backend);
-			out.push(
-				`PI_EGRESS is armed but ${names.join(", ")} ${names.length === 1 ? "declares" : "declare"} egress absent, so no allowlist policy can exist there. ` +
-					"Set PI_EGRESS=0 to run without a policy, or remove that backend from PI_BACKENDS.",
-			);
-		}
+	// EVERY property the armed switch gates, not just `egress`. `armedBy` is a general field and
+	// `jobToJobIsolation` carries the same switch -- the table calls it "the measured half of
+	// REQ-EGRESS-ALLOWLIST" -- so naming one property here would have let a backend that cannot keep two
+	// jobs apart be blessed under an armed policy with nothing said. Hardcoding one variable is the defect
+	// `armedBy` was added to prevent, and it had crept back in one function over.
+	const switches = { PI_EGRESS: egress };
+	for (const property of PROPERTY_NAMES) {
+		const armedBy = PROPERTIES[property].armedBy;
+		if (!armedBy || switches[armedBy] !== true) continue;
+		const unarmable = floorShortfall(backends, { [property]: ASSERTED });
+		if (unarmable.length === 0) continue;
+		const names = unarmable.map((m) => m.backend);
+		out.push(
+			`${armedBy} is armed but ${names.join(", ")} ${names.length === 1 ? "declares" : "declare"} ${property} absent, so that control cannot exist there. ` +
+				`Set ${armedBy}=0 to run without it, or remove that backend from PI_BACKENDS.`,
+		);
 	}
 
 	return out;

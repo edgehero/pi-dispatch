@@ -1,3 +1,4 @@
+import { DEFAULT_BACKEND } from "./backends.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
@@ -100,6 +101,13 @@ export async function runJob(job, deps) {
 		// would leave an INJECTED resolver running on every job, which is how a probe nobody wanted starts
 		// spawning a subprocess per delivery to learn nothing.
 		resolveSecrets = async (job) => ({ profileUnknown: job.secretsProfile ?? DEFAULT_SECRETS_PROFILE }),
+		// #227. Which backends this deployment BLESSED (PI_BACKENDS). Defaults to the one name every
+		// deployment already runs rather than to admit-everything: a wiring that says nothing blesses
+		// `local` only, so a job naming anything else is refused instead of running somewhere the operator
+		// never approved. That is the same fail-closed direction `resolveSecrets` above defaults in, and it
+		// is safe to default at all only because the gate below fires ONLY when a job names a backend --
+		// an unflagged job never consults this list.
+		blessedBackends = [DEFAULT_BACKEND],
 		// (job) => scoped short-lived token. Takes the JOB, not the repo: which forge mints -- and therefore
 		// which credential the container gets -- is a property of `job.kind`, and only the wiring knows the
 		// map. Called for forge-backed jobs and for local jobs opted in via `github: true`; unflagged local
@@ -178,6 +186,25 @@ export async function runJob(job, deps) {
 				log("refused_wait_skew", { triggerIndex: job.trigger?.matched?.index ?? null, conditions: skew.conditions });
 				return { outcome: "policy", reason: "wait-skew", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
+		}
+
+		// #227. WHERE this job wants to run, against what this deployment blessed. FREE, determinate and
+		// credential-less, so it precedes the image inspect below for that gate's own stated reason: a job
+		// that names a venue this host will not use must refuse before anything spawns, mints or clones.
+		//
+		// The LOADER already refused a name this build does not know; what it could not check is PI_BACKENDS,
+		// which is a per-host setting a reviewed file must not be refused over -- the same split
+		// `run.secretsProfile` draws between its charset check at load and `secret-profile-unknown` here.
+		//
+		// Enforced HERE and not only in the panel's picker, because `DES-PER-TRIGGER-SECRET-PROFILE` says the
+		// overlay is not the reviewed artifact: a tool-side allowlist bounds what an operator can pick, and
+		// this bounds what actually runs.
+		if (job.backend !== undefined && !blessedBackends.includes(job.backend)) {
+			await comment(job, `Refused: this trigger asks to run on the "${job.backend}" backend, which this deployment does not bless. Not run.`);
+			// The backend NAME is operator-authored config, never payload, so naming it is PII-safe -- the
+			// same class as the image ref below.
+			log("refused_backend_unblessed", { backend: job.backend, blessed: blessedBackends });
+			return { outcome: "policy", reason: "backend-unblessed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and

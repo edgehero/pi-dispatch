@@ -78,7 +78,7 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, now = new Date() }) {
+export async function enqueueLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, image, backend, skillsDir, secrets, secretsProfile, chainDepth, parentJobId, jobId, now = new Date() }) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -104,6 +104,12 @@ export async function enqueueLocalJob(queue, { folder, flow, task, command, prov
 		model,
 		maxTurns,
 		...(image !== undefined && { image }),
+		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
+		// venue produces byte-identical job data -- and at JOB level, never inside `trigger`, for the reason
+		// `image` and `skillsDir` are: `trigger` is copied VERBATIM into `/job/event.json`, so a key added
+		// there becomes agent-visible input, and where the box was built is the worker's business rather
+		// than the agent's.
+		...(backend !== undefined && { backend }),
 		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
 		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
 		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the
@@ -191,7 +197,7 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
+export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, packages, image, backend, skillsDir, instructions, resume, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	// `packages` (whether to load the operator-staged pi packages) and `image` (which container image to run)
 	// come off the MATCHED trigger (INT-TRIGGERS-FILE-CONTRACT / REQ-GLOBAL-PI-OVERLAY) and land on `data`
@@ -219,6 +225,12 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		maxTurns,
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
+		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
+		// venue produces byte-identical job data -- and at JOB level, never inside `trigger`, for the reason
+		// `image` and `skillsDir` are: `trigger` is copied VERBATIM into `/job/event.json`, so a key added
+		// there becomes agent-visible input, and where the box was built is the worker's business rather
+		// than the agent's.
+		...(backend !== undefined && { backend }),
 		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
 		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
 		// than inside `trigger` because a worker-host path is an execution knob, not a fact about the

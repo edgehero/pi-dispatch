@@ -137,7 +137,7 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// key. A command trigger carries no flow/task at all (the validator enforces the XOR), so those two
 	// keys hold undefined here and drop at JSON serialization -- the command schedule's data is exactly
 	// kind/folder/command plus the shared fields.
-	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
+	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, trigger: { id: on.id, pattern: on.pattern } };
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.
 	const opts = { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } };

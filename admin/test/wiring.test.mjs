@@ -839,3 +839,53 @@ test("NO tool exposes a secrets parameter, and none can reach the overlay key ei
   const set = toolByName(calls, "dispatch_set");
   assert.equal(/secretProfiles/.test(set.description ?? ""), false);
 });
+
+test("buildTriggerEntry carries run.backend on EVERY kind it is offered for (#227)", async () => {
+  // The bug this pins: `forgeRun` was extended with `backend`, but the `pull_request` and `issue` arms do
+  // not use `forgeRun` -- they build `run` inline. So the tool VALIDATED the name against PI_BACKENDS,
+  // accepted it, and then discarded it, writing an entry the operator approved without the venue they
+  // picked. A validated choice dropped in silence is the shape this whole issue exists to prevent.
+  const { mod } = await loadRegistered();
+  const { buildTriggerEntry } = mod;
+  const cases = [
+    ["cron", { id: "n", pattern: "0 3 * * *", folder: "/p", flow: "f", task: "t", backend: "local" }],
+    ["label", { labels: ["pi"], flow: "f", backend: "local" }],
+    ["comment", { phrase: "@pi", flow: "f", backend: "local" }],
+    ["pull_request", { action: ["opened"], flow: "f", backend: "local" }],
+    ["issue", { action: ["closed"], flow: "f", backend: "local" }],
+  ];
+  for (const [kind, params] of cases) {
+    assert.equal(buildTriggerEntry(kind, params).run.backend, "local", `${kind} must carry the venue`);
+  }
+  // And omitted, no key at all, so every pre-#227 call site writes a byte-identical entry.
+  for (const [kind, params] of cases) {
+    const { backend, ...without } = params;
+    assert.equal("backend" in buildTriggerEntry(kind, without).run, false, `${kind} must add no key when unset`);
+  }
+});
+
+test("both trigger writers expose a backend picker, and it is not a schema enum (#227)", async () => {
+  // A schema enum would be frozen at registration while PI_BACKENDS is read per call, so the allowlist is
+  // checked in `execute`. What the schema must do is let the model SEND the field at all -- the exact
+  // defect the `repository` test above records.
+  const { calls } = await loadRegistered();
+  for (const name of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    const keys = Object.keys(toolByName(calls, name).parameters.properties ?? {});
+    assert.ok(keys.includes("backend"), `${name} must be able to send run.backend`);
+  }
+  // And the model is told the parameter exists: a schema-visible, undescribed field is one it never sends.
+  assert.match(toolByName(calls, "dispatch_trigger_add").description, /backend/);
+  assert.match(toolByName(calls, "dispatch_trigger_edit").description, /backend/);
+});
+
+test("the panel reads PI_BACKENDS through the WORKER's parser, not a private copy (#227)", async () => {
+  // A hand-rolled comma split here did not dedupe, did not refuse an unknown name, and returned [] for an
+  // unset value while the worker returns ["local"] -- so on the DEFAULT deployment the picker told an
+  // operator "this deployment blesses no backends" about one that blesses exactly one.
+  const { mod } = await loadRegistered();
+  const { blessedBackends } = mod;
+  assert.deepEqual(blessedBackends({}), ["local"], "unset must agree with the worker, not contradict it");
+  assert.deepEqual(blessedBackends({ PI_BACKENDS: "local" }), ["local"]);
+  assert.deepEqual(blessedBackends({ PI_BACKENDS: " local , local " }), ["local"], "deduped, like the worker");
+  assert.deepEqual(blessedBackends({ PI_BACKENDS: "vapour" }), [], "a value the worker refuses to boot on offers nothing");
+});

@@ -109,6 +109,12 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 		...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
+		// #227. A SEPARATE spread, and this is the whole of the bug it replaces: folded into the `image`
+		// conditional above, a trigger that named a venue but no image had its venue silently dropped here --
+		// it loaded, validated, reached this function on the rule, and then ran on the default. That is
+		// exactly the destructive absence `validateBackend`'s near-miss sweep refuses a misspelling for,
+		// arriving through the plumbing instead of the spelling, one file downstream of the guard.
+		...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -185,7 +191,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		repository: rule.repository,
 		packages: rule.packages,
-		image: rule.image,
+		image: rule.image, backend: rule.backend,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -229,7 +235,7 @@ function routeComment(subset, triggers, knownFlows, targetType) {
 		...(command !== undefined ? { command } : { flow }),
 		repository: triggers.comment.repository,
 		packages: triggers.comment.packages,
-		image: triggers.comment.image,
+		image: triggers.comment.image, backend: triggers.comment.backend,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -262,7 +268,7 @@ function routePullRequest(subset, triggers, action) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			repository: rule.repository,
 			packages: rule.packages,
-			image: rule.image,
+			image: rule.image, backend: rule.backend,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,

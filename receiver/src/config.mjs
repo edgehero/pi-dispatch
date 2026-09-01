@@ -293,9 +293,9 @@ function loadTriggers(env, readFile, fileExists) {
 		}
 		const group = groups[run.kind];
 		if (on.type === "label") {
-			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas, repository: run.repository });
+			group.label.push({ index, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, backend: run.backend, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas, repository: run.repository });
 		} else if (on.type === "comment") {
-			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
+			group.comment = { index, phrase: on.phrase, defaultFlow: run.flow, command: run.command, packages: run.packages, image: run.image, backend: run.backend, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas, repository: run.repository }; // parseTriggers guarantees at most one per forge
 		} else if (on.type === "pull_request") {
 			// The close-only split (issue #231): a close rule routes through the close gate (the CLOSER's
 			// resolved authority) and every other PR rule through the author gate, so they live in separate
@@ -304,17 +304,17 @@ function loadTriggers(env, readFile, fileExists) {
 			// split reads the SHARED close-word table, never a re-typed word.
 			const closeWord = PR_CLOSE_ACTIONS[run.kind];
 			if (closeWord !== undefined && on.action.includes(closeWord)) {
-				group.prClose.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
+				group.prClose.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, backend: run.backend, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
 			} else {
 				// `reviewStates` is null rather than an empty Set when unnarrowed: the filter tests it for
 				// presence, and an empty Set would read as "no verdict matches" and silently refuse everything.
-				group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
+				group.pullRequest.push({ index, actions: new Set(on.action), reviewStates: on.reviewState ? new Set(on.reviewState) : null, predicate: { any: on.any, all: on.all, none: on.none }, flow: run.flow, command: run.command, packages: run.packages, image: run.image, backend: run.backend, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
 			}
 		} else if (on.type === "issue") {
 			// The close-trigger kind (issue #231). No predicate and no reviewStates by construction (the
 			// loader refused both), and `number`/`once` ride conditionally-present exactly as the loader
 			// normalized them -- the filter's close route reads them, nothing else does.
-			group.issue.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
+			group.issue.push({ index, actions: new Set(on.action), number: on.number, once: on.once, flow: run.flow, command: run.command, packages: run.packages, image: run.image, backend: run.backend, skillsDir: run.skillsDir, instructions: run.instructions, resume: run.resume, secrets: run.secrets, secretsProfile: run.secretsProfile, waitFor: run.waitFor, replicas: run.replicas });
 		}
 	}
 

@@ -126,6 +126,12 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 		...(resolved.command !== undefined ? { command: resolved.command } : { flow: resolved.flow }),
 		...(resolved.packages !== undefined ? { packages: resolved.packages } : {}),
 		...(resolved.image !== undefined ? { image: resolved.image } : {}),
+		// #227. A SEPARATE spread, and this is the whole of the bug it replaces: folded into the `image`
+		// conditional above, a trigger that named a venue but no image had its venue silently dropped here --
+		// it loaded, validated, reached this function on the rule, and then ran on the default. That is
+		// exactly the destructive absence `validateBackend`'s near-miss sweep refuses a misspelling for,
+		// arriving through the plumbing instead of the spelling, one file downstream of the guard.
+		...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -175,7 +181,7 @@ function routeLabel(subset, triggers, targetType) {
 		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
-		image: rule.image,
+		image: rule.image, backend: rule.backend,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -239,7 +245,7 @@ function mrResult(subset, rule, matched) {
 		// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
-		image: rule.image,
+		image: rule.image, backend: rule.backend,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -285,7 +291,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image,
+		image: rule.image, backend: rule.backend,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -319,7 +325,7 @@ function routeMergeRequestClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
-		image: rule.image,
+		image: rule.image, backend: rule.backend,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -371,7 +377,7 @@ function routeNote(subset, triggers, knownFlows) {
 		enqueue: true,
 		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
-		image: triggers.comment.image,
+		image: triggers.comment.image, backend: triggers.comment.backend,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,

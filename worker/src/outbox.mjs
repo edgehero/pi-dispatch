@@ -171,6 +171,14 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// (INT-OUTBOX-CONTRACT's explicit-property-reads rule). Undefined stays undefined, so a parent with
 					// no image chains a child whose data is byte-identical to today's.
 					image: job.data?.image,
+					// #227, and INHERITED for the reason `image` directly above is: a chained child continues its
+					// parent's work, so it belongs in the venue the parent's trigger chose, not silently back on
+					// the deployment default. Written down rather than left to inference because this file's
+					// convention is that every inherit/don't-inherit decision here carries its reason -- and the
+					// distinction it turns on is the same one `secrets` is excluded by: a venue is toolchain, a
+					// resolved credential is a capability. The agent cannot choose it any more than it can choose
+					// its child's image: the value comes off `job.data`, never off the request file.
+					backend: job.data?.backend,
 					// The parent's injected skills follow the child, off validated JOB DATA and never off the
 					// request file (REQ-PER-TRIGGER-SKILLS). Same reason `image` does: a chained child runs the
 					// same operator's flows and, without them, would look up a skill that is not there, write a

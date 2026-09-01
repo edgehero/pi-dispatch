@@ -1156,3 +1156,38 @@ test("hasCloseTriggers answers per group: empty false, issue-only true, prClose-
 	assert.equal(hasCloseTriggers(undefined), false, "an unconfigured forge group arms nothing");
 	assert.equal(hasCloseTriggers(cfg.triggers.github), false, "a pre-#231 group without the close keys arms nothing");
 });
+
+test("a rule naming a VENUE and no image still carries the venue to the job (#227)", () => {
+	// The bug this pins was a regex sweep landing inside an existing conditional: `backend` was folded into
+	// `...(resolved.image !== undefined ? { image, backend } : {})`, so a trigger that named a venue and no
+	// image had its venue silently dropped HERE -- after the loader validated it and after the route put the
+	// right value on the rule. The job then ran on the default, byte-identical in the record to one that
+	// never chose. That is exactly the destructive absence `validateBackend`'s near-miss sweep refuses a
+	// misspelling for, arriving one file downstream through the plumbing instead of the spelling.
+	const withBackend = forgeCfg({
+		triggers: { label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", backend: "local" }], comment: undefined, pullRequest: [], knownFlows: new Set(["frontend-fix"]) },
+	});
+	const r = filter("issues", issuesSubset(), withBackend, SELF_ID, "d-backend");
+	assert.equal(r.enqueue, true);
+	assert.equal(r.job.backend, "local", "the venue must survive with no run.image set");
+	assert.equal("image" in r.job, false, "and no image key is invented alongside it");
+});
+
+test("a rule naming NEITHER a venue nor an image adds no key for either (#227)", () => {
+	// The other half of byte-identity: neither may appear present-and-undefined, or an unflagged trigger's
+	// job literal stops matching the one this receiver emitted before the field existed. `JSON.stringify`
+	// would hide an undefined value, so the assertion is on key presence.
+	const r = filter("issues", issuesSubset(), cfg, SELF_ID, "d-plain");
+	assert.equal(r.enqueue, true);
+	assert.equal("backend" in r.job, false);
+	assert.equal("image" in r.job, false);
+});
+
+test("a rule naming BOTH carries both (#227)", () => {
+	const both = forgeCfg({
+		triggers: { label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", image: "pi-job:2", backend: "local" }], comment: undefined, pullRequest: [], knownFlows: new Set(["frontend-fix"]) },
+	});
+	const r = filter("issues", issuesSubset(), both, SELF_ID, "d-both");
+	assert.equal(r.job.image, "pi-job:2");
+	assert.equal(r.job.backend, "local");
+});

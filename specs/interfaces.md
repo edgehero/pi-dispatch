@@ -2006,6 +2006,48 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `dispatch_trigger_add`/`_edit` carry no `replicas` parameter, for a sharper version of the reason they
   carry no `image` one: a spend multiplier is plainly a capability the model would *gain*. It is a file
   edit, and the panel displays it without offering a key that sets it.
+- **`run.backend` (ALL trigger kinds, optional name)**: WHICH venue this trigger's container is built in
+  (`DES-CONTAINER-BACKEND-REGISTRY`, issue #227). A **NAME, never a configuration**, on
+  `run.secretsProfile`'s template: a trigger SELECTS among what the deployment already blessed and never
+  configures a posture. This is deliberately not a way back to `run.network`, which was rejected outright --
+  naming a venue cannot turn egress off, because what a venue can provide is the backend table's answer.
+  `PI_BACKENDS` membership is the bound that always holds; `PI_BACKEND_FLOOR`, which is unset by default,
+  additionally bounds what a blessed venue must declare. The armed-control ladder holds regardless of either:
+  a backend declaring a switched-on control `absent` cannot be blessed at all.
+
+  **Refused at load** for a non-string, an empty string, a name outside `[A-Za-z0-9._-]` (`PI_BACKENDS` is
+  comma separated, so a name carrying that separator could not be blessed), and a name this BUILD does not
+  know. Also refused at load, permanently, is a **remote venue on a trigger that runs against a folder on
+  this machine**: `DES-WORKER-ON-HOST` finding (2) is physics rather than policy, since the operator's own
+  folder must be bind-mounted as `/workspace` and edited in place, and there is no volume to hide behind.
+
+  **A NEAR-MISS SPELLING IS REFUSED**, which puts this field in `run.waitFor`'s class rather than
+  `run.image`'s. A misspelled image gives you the default image and a job that ran; a misspelled `backend`
+  gives you the DEFAULT VENUE and a job that ran, byte-identical in the record, the panel and the log to one
+  that correctly chose, while the file reads as though it chose. The **plural** `run.backends` is included
+  in that sweep and is the likeliest miss of all, because the deployment-side variable is `PI_BACKENDS`. On
+  `on` every spelling is refused including the correct one, since a venue is a property of the run.
+
+  **A second refusal is pre-spend, not at load**, for `run.secretsProfile`'s reason: which backends a
+  deployment BLESSES is `PI_BACKENDS`, a per-host setting, and a reviewed file must not be refused over one
+  host's environment. The processor returns `backend-unblessed` before the image inspect, the mint, the
+  clone and the reservation -- free, determinate and credential-less, so `CONST-BUDGET-BEFORE-TOKENS`
+  holds. **Enforced in the worker and not only in the panel's picker**: `dispatch_trigger_add`/`_edit` do
+  carry a `backend` parameter validated against `PI_BACKENDS` and refusing outright under an empty set,
+  which is `DES-PER-TRIGGER-JOB-IMAGE`'s own prediction arriving ("If a future tool ever takes an image
+  parameter, the allowlist arrives with that tool"), but the overlay is not the reviewed artifact
+  (`DES-PER-TRIGGER-SECRET-PROFILE`), so the tool bounds what an operator can pick and the worker bounds
+  what actually runs.
+
+  **Absent carries no `backend` key at all**, so a trigger that names nothing normalizes and enqueues job
+  data byte-identical to one written before this field existed.
+
+  **NOTHING DISPATCHES ON THE FIELD YET**, and the honest statement of what this buys is worth making
+  plainly: `start.mjs` builds the local backend unconditionally and no code reads a job's backend to choose
+  an adapter, so `run.backend` is today a VALIDATED, GATED LABEL -- refused at load if unknown, refused
+  pre-spend if unblessed, and not routed on. The dispatch arrives with `stopContainer` and `reap`, which
+  need the same per-backend lookup and should grow it once rather than twice.
+
 - **`run.secrets` (ALL FOUR trigger kinds, optional map of env-var name to opaque reference) and
   `run.secretsProfile` (optional name)**: the environment variables this trigger's jobs receive, and which
   operator-declared resolver reads them. **The reference grammar is the resolver's, never this project's**
