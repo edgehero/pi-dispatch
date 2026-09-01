@@ -10,6 +10,9 @@ const bundle = (name, calls = []) => ({
 	egressPreflight: async (job) => (calls.push([name, "egressPreflight", job?.id]), {}),
 	stopContainer: async (n, job) => calls.push([name, "stopContainer", n, job?.id]),
 	reap: async () => ({ reaped: true }),
+	// Required by the registry's shape check: a bundle it will DISPATCH to has to be complete at boot, or
+	// the failure lands after the budget reserve as a plain TypeError that refunds nothing.
+	neverStartedExits: [125, 126, 127],
 });
 
 test("every per-job function resolves the SAME way, so none can be forgotten", () => {
@@ -64,6 +67,13 @@ test("the registry refuses a broken construction at BOOT rather than at the firs
 	assert.throws(() => makeBackendRegistry({ bundles: [bundle("local")], defaultName: "far" }), /default "far" is not among/);
 	assert.throws(() => makeBackendRegistry({ bundles: [bundle("a"), bundle("a")], defaultName: "a" }), /registered twice/);
 	assert.throws(() => makeBackendRegistry({ bundles: [{ runContainer() {} }], defaultName: "x" }), /must carry its own name/);
+	// SHAPE too, and at boot. `makeLocalBackend` enforces this for its own bundle and the registry never
+	// calls it, so a hollow bundle used to build fine and fail at the first PICKUP -- after the budget
+	// reserve, as a plain TypeError, which is not an InfraRetry and so refunded nothing.
+	assert.throws(() => makeBackendRegistry({ bundles: [{ name: "hollow" }], defaultName: "hollow" }), /has no runContainer\(\)/);
+	const noExits = { ...bundle("x") };
+	delete noExits.neverStartedExits;
+	assert.throws(() => makeBackendRegistry({ bundles: [noExits], defaultName: "x" }), /must declare neverStartedExits as an array/);
 });
 
 test("reapAll is CONSERVATIVE: one venue that could not enumerate makes the whole answer unproven", async () => {

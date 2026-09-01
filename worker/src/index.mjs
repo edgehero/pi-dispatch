@@ -534,6 +534,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let name;
 		let timer;
 		let onAbort;
+		let venue;
 		try {
 			// Nothing between the acquire above and the main `try` below may throw unguarded: the releasing
 			// finally belongs to THAT try, so an unguarded throw here would leak the hold and wedge the
@@ -546,7 +547,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// From the VENUE that will build the container, not from the local adapter reached for directly:
 			// the abort stops this name, so the name and the stop have to come from the same backend. The
 			// default keeps every wiring that predates the seam building it exactly as before.
-			name = containerName(job);
+			//
+			// `job.data`, NOT `job`. This function's `job` is the BullMQ WRAPPER -- its own keys are `id` and
+			// `data` -- so `job.backend` is always undefined and the registry's resolution would fall to
+			// `?? defaultName` for every job, silently, on the one path where the fail-closed throw can never
+			// fire because "names nothing" is exactly the case it permits. `runJob` is handed `effectiveJob`,
+			// a spread of `job.data`, which is why `runContainer` and the two preflights dispatch correctly
+			// while these two did not.
+			// One object carrying BOTH halves: the id is the BullMQ wrapper's (it always was) and the venue is
+			// the trigger's, which lives in `data`. Built once so the name and the stop cannot resolve
+			// different backends -- the whole reason the name moved onto the registry in the first place.
+			venue = { ...job.data, id: job.id };
+			name = containerName(venue);
 			timer = setTimeout(() => {
 				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
 				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
@@ -555,9 +567,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// Abort (timeout OR shutdown) => stop the container. docker stop sends SIGTERM then SIGKILL
 			// after the grace period; the runner exits and runContainer returns/throws.
 			onAbort = () => {
-				// The JOB goes with the name: a container name alone cannot say which runtime holds it once
-				// there is more than one venue, and this call is the only thing standing between a runaway
-				// job and the 30-minute bound (REQ-JOB-TIMEOUT-30M).
+				// The JOB'S DATA goes with the name -- `job.data`, not `job`. A container name alone cannot say
+				// which runtime holds it once there is more than one venue, and this call is the only thing
+				// standing between a runaway job and the 30-minute bound (REQ-JOB-TIMEOUT-30M). Passing the
+				// BullMQ wrapper sent every abort to the DEFAULT venue: `docker stop` on a host that never
+				// held the container, rejecting into a log line while the real one kept running and kept
+				// spending, with the local reaper unable to see it either.
 				// The whole call is inside the try, not just its promise. `Promise.resolve(f())` evaluates `f()`
 				// FIRST, so a missing or throwing `stopContainer` raises synchronously, inside an
 				// AbortSignal listener, where it surfaces as an uncaughtException and takes the worker
@@ -565,7 +580,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// host. Losing the kill for one job is bad; losing the process is worse.
 				const note = deps.log ?? (() => {});
 				try {
-					Promise.resolve(stopContainer(name, job)).catch((err) => note("stop_container_failed", { job: job.id, reason: err?.message }));
+					Promise.resolve(stopContainer(name, venue)).catch((err) => note("stop_container_failed", { job: job.id, reason: err?.message }));
 				} catch (err) {
 					note("stop_container_failed", { job: job.id, reason: err?.message });
 				}

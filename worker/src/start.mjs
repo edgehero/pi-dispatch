@@ -30,8 +30,9 @@ import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { JOB_NAME_PREFIX, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll } from "./backend-registry.mjs";
+import { DEFAULT_BACKEND } from "./backends.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
@@ -321,7 +322,7 @@ export async function startWorker(
 		// CONSTRUCTED INSIDE THE GUARD, not above it. The comment on this try says it "keeps any reaper
 		// failure from blocking boot", and a factory that throws is a reaper failure -- an earlier draft
 		// hoisted the construction out and quietly made that sentence false.
-		backendReaps = { local: makeReaperFn({ log }) };
+		backendReaps = { [DEFAULT_BACKEND]: makeReaperFn({ log }) };
 		reaped = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
 	} catch (err) {
 		log("reaper_skipped", { reason: err?.message });
@@ -610,7 +611,7 @@ export async function startWorker(
 		// sweep below only sweeps this host's scope claims once the reaper has PROVEN this host holds no
 		// job containers, and an unproven answer must never free a slot.
 		stopContainer: makeStopContainer(),
-		reap: backendReaps.local,
+		reap: backendReaps[DEFAULT_BACKEND],
 		// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
 		// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
 		// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.

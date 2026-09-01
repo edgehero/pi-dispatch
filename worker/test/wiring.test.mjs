@@ -88,7 +88,7 @@ test("an abort stops the container", { skip }, async () => {
 	let stopped = null;
 	const processor = mod.makeProcessor({
 		cancelJob: () => {},
-		stopContainer: (name) => (stopped = name),
+		stopContainer: (name, forJob) => (stopped = { name, forJob }),
 		redis: { async incr() { return 1; }, async expire() {} },
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 		timeoutMs: 100000,
@@ -109,7 +109,7 @@ test("an abort stops the container", { skip }, async () => {
 	await new Promise((r) => setTimeout(r, 10));
 	ac.abort();
 	await new Promise((r) => setTimeout(r, 10));
-	assert.equal(stopped, "pi-job-j2");
+	assert.equal(stopped?.name, "pi-job-j2");
 	await running;
 });
 
@@ -609,4 +609,49 @@ test("a stop that DOES take settles normally and logs nothing about the grace (#
 	controller.abort();
 	assert.deepEqual(await bounded, { code: 137, aborted: true });
 	assert.deepEqual(logs, [], "the bound is a backstop, not a second code path");
+});
+
+test("the abort resolves the venue from job.DATA, not the BullMQ wrapper (#227)", async () => {
+	// The bug this pins shipped: `onAbort` passed the BullMQ `Job` -- whose own keys are `id` and `data` --
+	// to a registry that reads `job.backend`. So the venue was ALWAYS undefined, resolution fell to
+	// `?? defaultName`, and every abort went to the default backend. The fail-closed throw could never fire,
+	// because "names nothing" is exactly the case it permits, so there was no signal at all: `docker stop`
+	// on a host that never held the container, rejecting into a log line while the real one kept running and
+	// kept spending -- and the local reaper cannot see a remote venue's containers either.
+	//
+	// `runContainer` and the two preflights dispatched correctly the whole time, because `runJob` is handed
+	// `effectiveJob`, a spread of `job.data`. That asymmetry is what hid it.
+	const mod = await import("../src/index.mjs");
+	let seen = null;
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: (name, forJob) => (seen = { name, backend: forJob?.backend }),
+		containerName: (forJob) => `pi-job-${forJob?.id}-${forJob?.backend ?? "default"}`,
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs: 100000,
+		deps: {
+			log: () => {},
+			// `far` has to be blessed, or the pre-spend gate refuses it before the abort is ever armed --
+			// which is itself the right behaviour, and is why this test has to opt in.
+			blessedBackends: ["local", "far"],
+			imagePreflight: async () => ({}),
+			runContainer: async ({ signal }) =>
+				new Promise((resolve) => {
+					signal.addEventListener("abort", () => resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }), { once: true });
+				}),
+			prepareWorkspace: async () => ({ jobDir: "/j", workspace: "/w" }),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+		recordRun: () => {},
+	});
+	const controller = new AbortController();
+	const job = { id: "j9", data: { id: "j9", kind: "local", folder: "/p", flow: "f", task: "t", backend: "far" } };
+	const run = processor(job, "tok", controller.signal);
+	await new Promise((r) => setImmediate(r));
+	controller.abort();
+	await run.catch(() => {});
+	assert.equal(seen?.backend, "far", "the abort must reach the venue the trigger named, not the default");
+	assert.match(seen?.name ?? "", /-far$/, "and the NAME must be built by that same venue");
 });

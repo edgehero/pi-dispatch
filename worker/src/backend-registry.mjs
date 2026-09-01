@@ -66,6 +66,17 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 	for (const bundle of bundles) {
 		if (!bundle?.name) throw new Error("backend registry: every bundle must carry its own name");
 		if (byName.has(bundle.name)) throw new Error(`backend registry: ${JSON.stringify(bundle.name)} is registered twice`);
+		// SHAPE, at boot. `makeLocalBackend` enforces this for its own bundle and the registry never calls
+		// it, so a hollow bundle used to build fine and fail at the first PICKUP -- as a plain TypeError
+		// after the budget reserve, which is not an InfraRetry, so the slot was never refunded. The
+		// "refuse at boot rather than at first pickup" property this constructor already claims for names
+		// and duplicates has to hold for the functions it is going to call.
+		for (const fn of ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap"]) {
+			if (typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has no ${fn}()`);
+		}
+		if (!Array.isArray(bundle.neverStartedExits)) {
+			throw new Error(`backend registry: ${JSON.stringify(bundle.name)} must declare neverStartedExits as an array ([] if it normalises to container-never-started itself)`);
+		}
 		byName.set(bundle.name, bundle);
 	}
 	if (byName.size === 0) throw new Error("backend registry: at least one backend must be registered");
