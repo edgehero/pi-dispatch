@@ -614,6 +614,21 @@ build does not.
   refuse/report by name; doctor additionally **warns** when a named image's entrypoint does not look like
   the runner. Neither inspects the image's contents. Naming a conformance verdict that had not been computed
   would be worse than reporting none — the same honesty as `OQ-011`'s child-process sampler.
+- **AMENDED (issue #227, the container-backend registry): a remote backend takes BOTH load-bearing
+  mitigations away, and the row survives only because none is blessed yet.** The first is
+  *"the isolation surface is the worker's argv, not the image's"* -- true exactly while the worker builds
+  the argv. A backend that is not the local daemon builds the box itself, so a non-conformant image on a
+  remote venue is no longer merely a worse agent: nothing in this repo's argv reaches it, and the blast
+  radius is whatever that venue provides. The second is the stated path to closure:
+  `image/verify-image.sh` *"runs ON THE HOST THAT HOLDS THE IMAGE, which is the only place it can"* -- and
+  on a remote venue this host does not hold the image, so the one runnable definition of conformance cannot
+  be run from here at all. What replaces neither but bounds the gap is the backend TABLE: a venue declares
+  `isolation`, `imagePinning` and `nonRoot` in words an operator reads, `PI_BACKEND_FLOOR` can require a
+  minimum of every blessed venue, and a deployment whose configuration needs what a venue declares `absent`
+  is refused at boot rather than downgraded. That converts a silent loss into a stated one, which is this
+  row's own standard and not a closure of it. **The status stays ACCEPTED RISK**, and the ratification it
+  wants is now sharper: it is no longer only "an operator's image is outside our gates" but "a venue's
+  runtime may be too".
 - **What would close it**: a worker-side gate at job start. Half the ingredients exist — `image/verify-image.sh`
   is the CORE checklist as one runnable definition, shared by CI and by the operator, and it runs **on the
   host that holds the image**, which is the only place it can (`--pull=never` means the runnable images are

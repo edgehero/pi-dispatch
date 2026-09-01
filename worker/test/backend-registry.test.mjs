@@ -13,6 +13,9 @@ const bundle = (name, calls = []) => ({
 	// Required by the registry's shape check: a bundle it will DISPATCH to has to be complete at boot, or
 	// the failure lands after the budget reserve as a plain TypeError that refunds nothing.
 	neverStartedExits: [125, 126, 127],
+	// The registry CALLS this to build the name the abort then stops, so a bundle without it is refused at
+	// boot rather than at the first pickup.
+	containerName: (id) => `${name}-${id}`,
 });
 
 test("every per-job function resolves the SAME way, so none can be forgotten", () => {
@@ -71,6 +74,12 @@ test("the registry refuses a broken construction at BOOT rather than at the firs
 	// calls it, so a hollow bundle used to build fine and fail at the first PICKUP -- after the budget
 	// reserve, as a plain TypeError, which is not an InfraRetry and so refunded nothing.
 	assert.throws(() => makeBackendRegistry({ bundles: [{ name: "hollow" }], defaultName: "hollow" }), /has no runContainer\(\)/);
+	const noName = { ...bundle("x") };
+	delete noName.containerName;
+	assert.throws(() => makeBackendRegistry({ bundles: [noName], defaultName: "x" }), /has no containerName\(\)/);
+	// And a non-integer exit set: the processor compares against a numeric code, so ["125"] would pass a
+	// bare Array.isArray and then never match, silently keeping the slot on the case it exists to refund.
+	assert.throws(() => makeBackendRegistry({ bundles: [{ ...bundle("x"), neverStartedExits: ["125"] }], defaultName: "x" }), /array of integers/);
 	const noExits = { ...bundle("x") };
 	delete noExits.neverStartedExits;
 	assert.throws(() => makeBackendRegistry({ bundles: [noExits], defaultName: "x" }), /must declare neverStartedExits as an array/);

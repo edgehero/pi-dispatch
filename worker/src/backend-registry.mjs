@@ -71,11 +71,17 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		// after the budget reserve, which is not an InfraRetry, so the slot was never refunded. The
 		// "refuse at boot rather than at first pickup" property this constructor already claims for names
 		// and duplicates has to hold for the functions it is going to call.
-		for (const fn of ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap"]) {
+		// `containerName` is in this list because THIS MODULE calls it: `registry.containerName(job)` builds
+		// the name the abort then stops. Omitting it built fine and threw at the first pickup, which is the
+		// property this constructor claims to have and did not.
+		for (const fn of ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap", "containerName"]) {
 			if (typeof bundle[fn] !== "function") throw new Error(`backend registry: ${JSON.stringify(bundle.name)} has no ${fn}()`);
 		}
-		if (!Array.isArray(bundle.neverStartedExits)) {
-			throw new Error(`backend registry: ${JSON.stringify(bundle.name)} must declare neverStartedExits as an array ([] if it normalises to container-never-started itself)`);
+		if (!Array.isArray(bundle.neverStartedExits) || !bundle.neverStartedExits.every(Number.isInteger)) {
+			// INTEGERS, checked: the processor compares against the container's numeric exit code, so `["125"]`
+			// would pass a bare Array.isArray and then never match -- silently keeping the budget slot on
+			// exactly the case the list exists to refund.
+			throw new Error(`backend registry: ${JSON.stringify(bundle.name)} must declare neverStartedExits as an array of integers ([] if it normalises to container-never-started itself)`);
 		}
 		byName.set(bundle.name, bundle);
 	}

@@ -60,10 +60,12 @@
  *
  * `OQ-012` already draws this line for images -- "a required OCI label proves INTENT, not conformance" --
  * and the same is true one level out. The value of the table is not that a vendor is verified; it is that a
- * MISMATCH becomes a refusal instead of a silent downgrade. NOTHING HERE IS VERIFIED AGAINST BEHAVIOUR YET:
- * a backend can declare all of this and do none of it, and only a conformance suite that drives its own
- * `runContainer` and reads each property back off what it produced can close that. That suite is this
- * issue's last slice, and until it exists these words are a contract, not a finding.
+ * MISMATCH becomes a refusal instead of a silent downgrade. `backend-conformance.mjs` verifies THREE of the
+ * thirteen -- exit-code fidelity, the abort flag's independence from the code, and the read-only downgrade a
+ * copying runtime takes -- plus the shape of a bundle and the internal consistency of its declaration. The
+ * other ten need a live container on the target runtime, and the harness names each one and what it would
+ * take rather than passing them in silence. So a backend can still declare all of this and do most of it:
+ * these words are a contract with three of them checked, which is more than none and less than proof.
  *
  * THE PROPERTIES ARE NOT A RENDERING OF `ISOLATION_FLAGS`, and must not become one. That array is the
  * literal, value-free, unconditional set the local argv splices in, and two tests assert every member of it

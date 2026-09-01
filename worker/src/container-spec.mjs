@@ -212,9 +212,10 @@ function isInside(outer, inner) {
  * adapter that returns entries here and still declares `readOnlyJobInputs: enforced` is making exactly the
  * claim `CONST-EGRESS-POLICY-IN-THE-ARGV` calls worse than no claim.
  *
- * NOTHING READS THIS YET, and that is worth saying rather than leaving to be discovered: it is an
- * adapter-facing contract whose consumer is the conformance suite, and until that exists it is a contract
- * and not a control -- the same thing the backend table's own header says about its words.
+ * `backend-conformance.mjs` is the consumer, and it is what makes this a control rather than a contract: a
+ * backend declaring `binds: false` and `readOnlyJobInputs: enforced` FAILS on the strength of this list.
+ * A backend that declares no `binds` at all makes the harness abstain rather than pass, because a bundle
+ * that has not said how it moves files has not earned the word.
  */
 export function copyDowngrades(spec) {
 	const bound = transfersFromSpec(spec, { binds: true });

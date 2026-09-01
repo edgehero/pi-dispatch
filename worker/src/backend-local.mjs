@@ -65,11 +65,18 @@ export function jobContainerName(jobId) {
  * not callable, which is a wiring mistake that would otherwise surface as an unhelpful `undefined is not a
  * function` deep inside a paid job. It proves ARITY AND NOTHING ELSE: `makeEgressPreflight({ armed: false })`
  * returns a function that answers `{ ok: true }` and spawns nothing, so a bundle can pass this check with a
- * gate that does no gating. Distinguishing a gate from a stub needs a conformance suite that drives the
- * backend and reads the property back, which is this issue's last slice.
+ * gate that does no gating. `backend-conformance.mjs` does not close that either: it never invokes
+ * `imagePreflight` or `egressPreflight`, so a stubbed gate remains exactly what neither check can see. What
+ * the harness does verify is listed in its own header, and what it cannot is listed beside it.
  */
 /** The functions a bundle carries today. Deferred members are refused BY NAME below, never ignored. */
 export const BACKEND_FUNCTIONS = ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap"];
+
+/**
+ * Members `makeLocalBackend` SETS rather than takes. An adapter written elsewhere supplies them itself; the
+ * local bundle knows its own, so passing them here is refused as an unknown member like any other.
+ */
+export const BACKEND_PROVIDED = ["name", "declares", "namePrefix", "containerName", "neverStartedExits", "binds"];
 
 /**
  * Non-function members every bundle must also carry. Separate from the list above because the completeness
@@ -96,7 +103,7 @@ export function makeLocalBackend(parts = {}) {
 	// control again, arriving through a dropped argument.
 	for (const key of Object.keys(parts ?? {})) {
 		if (BACKEND_FUNCTIONS.includes(key) || BACKEND_VALUES.includes(key)) continue;
-		throw new Error(`backend "${DEFAULT_BACKEND}": unknown bundle member ${JSON.stringify(key)} (known: ${BACKEND_FUNCTIONS.join(", ")})`);
+		throw new Error(`backend "${DEFAULT_BACKEND}": unknown bundle member ${JSON.stringify(key)} (this factory takes ${BACKEND_FUNCTIONS.join(", ")} and sets ${BACKEND_PROVIDED.join(", ")} itself)`);
 	}
 
 	return {
@@ -119,6 +126,9 @@ export function makeLocalBackend(parts = {}) {
 		// The integers this runtime uses for "the runner never ran". The processor asks the BACKEND rather
 		// than assuming docker's triple, because those numbers collide with the runner's own exit channel.
 		neverStartedExits: LOCAL_NEVER_STARTED_EXITS,
+		// This runtime BIND-MOUNTS, so `/job`'s read-only is the kernel's. The conformance harness abstains
+		// rather than passing when a bundle does not say, because a copy downgrades that to a convention.
+		binds: true,
 	};
 }
 
