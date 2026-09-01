@@ -34,10 +34,13 @@ import { configError } from "./config.mjs";
 // and the admin block cannot drift between the stager and this validator (doctor.mjs sets the precedent
 // of importing from import-pi.mjs).
 import { ADMIN_RE, ENTRY_NAME_RE } from "./import-pi.mjs";
-// The container-side mount point is docker-run.mjs's fact -- IMPORTED, never re-typed, so the mount and the
-// packages root below cannot drift apart while both test suites stay green. docker-run.mjs is dependency-free
-// (it builds an argv array and nothing else), so this costs no cycle and no weight in the admin's bundle.
-import { CONTAINER_GLOBAL_PI_DIR } from "./docker-run.mjs";
+// The container-side mount point is container-spec.mjs's fact -- IMPORTED, never re-typed, so the mount and
+// the packages root below cannot drift apart while both test suites stay green. That module is a LEAF and
+// imports nothing, so this costs no cycle and no weight in the admin's bundle. It used to be imported from
+// docker-run.mjs, which held the same constant and made the same claim; issue #227 moved the container-side
+// half out, and this points at the half it actually wants -- a container path is not a Docker fact, and
+// docker-run.mjs now has an import edge of its own.
+import { CONTAINER_GLOBAL_PI_DIR } from "./container-spec.mjs";
 
 /** Staged packages live under `<globalPiDir>/packages/` -- a subdir of the overlay, not a new mount. */
 export const PACKAGES_SUBDIR = "packages";

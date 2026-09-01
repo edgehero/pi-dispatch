@@ -32,6 +32,7 @@ import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
+import { JOB_NAME_PREFIX, makeLocalBackend } from "./backend-local.mjs";
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, sanitizeJobId } from "./run-history.mjs";
@@ -175,7 +176,7 @@ function watchScopedLimitsFile(config, ref, log) {
 export function makeReaper({ log }) {
 	return async function reap() {
 		try {
-			const { stdout } = await exec("docker", ["ps", "--filter", "name=pi-job-", "--format", "{{.Names}}"]);
+			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
 			const names = stdout
 				.split("\n")
 				.map((n) => n.trim())
@@ -193,7 +194,7 @@ export function makeReaper({ log }) {
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
 			// A network still in use by something else fails to remove and is skipped, which is correct: this
 			// is a best-effort sweep and never a reason not to boot.
-			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", "name=pi-job-", "--format", "{{.Name}}"]);
+			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
 			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) {
 				try {
 					await exec("docker", ["network", "rm", net]);
@@ -629,6 +630,51 @@ export async function startWorker(
 	});
 
 
+	// #227: WHERE this job's container runs. The three functions that decide whether a container may start and
+	// then start it -- two pre-spend gates and the launcher -- bundled into one value with a completeness
+	// check, so the set has a name instead of being three unrelated `deps` keys. Byte-identical to passing them individually -- the same three functions reach the same three keys,
+	// built from the same config, behind the same injectable factories -- and this is the seam a second
+	// backend is selected at once there is one to select.
+	//
+	// Assigned key by key below rather than spread, because the bundle also carries `name` and `declares`,
+	// and `deps` is the processor's namespace: a spread would put a backend's name into it under a key the
+	// processor is free to mean something else by.
+	const localBackend = makeLocalBackend({
+		// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
+		// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
+		// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
+		// Nothing is memoised (see its construction above): `docker image inspect` costs ~tens of ms against a
+		// container run of minutes, and a cache would be wrong in both directions -- an operator who builds the
+		// image mid-day would stay refused, one who removes it would stay admitted. Contrast the staged-package
+		// manifest, correctly read once at boot because it is deploy-time state under a :ro mount.
+		imagePreflight,
+		// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
+		// value, one place, so the gate that checks the proxy and the runner that attaches to its network
+		// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
+		// starts the proxy mid-day must not stay refused, and one who stops it must not stay admitted.
+		// Unarmed it spawns nothing at all, so a deployment without a policy pays for none of this.
+		egressPreflight: makeEgressPreflightFn({ proxy: config.egressProxy, armed: config.egress }),
+		runContainer: makeRunContainerFn({
+			image: config.jobImage,
+			hostEnv: env,
+			egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
+			egressProxy: config.egressProxy,
+			openJobLog,
+			globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
+			allowGlobalExtensions: config.allowGlobalExtensions,
+			// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
+			// packages:false. A RESOLVER, not the array: the factory is still constructed exactly once, only
+			// the value it reads became a call, so a re-stage takes effect on the next job without a restart.
+			packagePaths: getPackagePaths,
+			forwardEnv: config.forwardEnv,
+			authFromPi: config.authFromPi, // source the provider key from ~/.pi/agent/auth.json when env has none
+			// Self-hosted instance URLs, keyed by forge. A MAP rather than one scalar per forge: the table says
+			// which variable each lands in, so a forge with no self-hosted concept simply has no entry, and
+			// adding one does not widen this signature again.
+			forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+		}),
+	});
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
 		hostQueue,
@@ -718,20 +764,8 @@ export async function startWorker(
 				const state = await held.getState();
 				return state === "delayed" || state === "waiting" || state === "active" || state === "prioritized" || state === "waiting-children";
 			},
-			// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
-			// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
-			// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
-			// Nothing is memoised: `docker image inspect` costs ~tens of ms against a container run of minutes, and a
-			// cache would be wrong in both directions -- an operator who builds the image mid-day would stay refused,
-			// one who removes it would stay admitted. Contrast the staged-package manifest, correctly read once at
-			// boot because it is deploy-time state under a :ro mount; the host's image set is not.
-			imagePreflight,
-			// REQ-EGRESS-ALLOWLIST, and built here for the same reason the image preflight is: one deployment
-			// value, one place, so the gate that checks the proxy and the runner that attaches to its network
-			// cannot disagree about which proxy is meant. Nothing is memoised here either -- an operator who
-			// starts the proxy mid-day must not stay refused, and one who stops it must not stay admitted.
-			// Unarmed it spawns nothing at all, so a deployment without a policy pays for none of this.
-			egressPreflight: makeEgressPreflightFn({ proxy: config.egressProxy, armed: config.egress }),
+			imagePreflight: localBackend.imagePreflight,
+			egressPreflight: localBackend.egressPreflight,
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
@@ -748,25 +782,7 @@ export async function startWorker(
 			// the panel should not have to restart the worker to use it. A deployment that declares nothing
 			// spawns nothing at all: the gate only calls this when a trigger is armed.
 			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, log }),
-			runContainer: makeRunContainerFn({
-				image: config.jobImage,
-				hostEnv: env,
-				egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
-				egressProxy: config.egressProxy,
-				openJobLog,
-				globalPiDir: config.globalPiDir, // REQ-GLOBAL-PI-OVERLAY: :ro overlay mount when configured
-				allowGlobalExtensions: config.allowGlobalExtensions,
-				// REQ-GLOBAL-PI-OVERLAY: staged package paths; every job receives them unless its trigger set
-				// packages:false. A RESOLVER, not the array: the factory is still constructed exactly once, only
-				// the value it reads became a call, so a re-stage takes effect on the next job without a restart.
-				packagePaths: getPackagePaths,
-				forwardEnv: config.forwardEnv,
-				authFromPi: config.authFromPi, // source the provider key from ~/.pi/agent/auth.json when env has none
-				// Self-hosted instance URLs, keyed by forge. A MAP rather than one scalar per forge: the table says
-				// which variable each lands in, so a forge with no self-hosted concept simply has no entry, and
-				// adding one does not widen this signature again.
-				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
-			}),
+			runContainer: localBackend.runContainer,
 			prepareWorkspace: makePrepareWorkspace({
 				jobsDir: config.jobsDir,
 				forgeFor,

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
+import { jobContainerName } from "./backend-local.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
@@ -498,7 +499,9 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// addEventListener on the bullmq-allocated controller are total at processor arity 3); the
 			// guard is structural, not observational.
 			startedAt = new Date().toISOString();
-			name = `pi-job-${job.id}`;
+			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
+			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
+			name = jobContainerName(job.id);
 			timer = setTimeout(() => {
 				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
 				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});

@@ -6,28 +6,21 @@
  * array (never a shell string): no interpolation, no injection, and the env allowlist is passed
  * with explicit `-e NAME` where the value is read from the argv env map, never `--env-file` and
  * never a host pass-through.
- */
-
-/**
- * Where the operator's global pi overlay lands INSIDE the container (REQ-GLOBAL-PI-OVERLAY). Exported
- * because packages.mjs derives the staged-packages root from it: the mount and that root are ONE fact on
- * one side of the boundary, and two literals in two modules could drift apart with both test suites still
- * green. A Linux container path, so it is always built with "/" -- never `path.join`, which yields
- * backslashes when the worker itself runs on Windows.
- */
-export const CONTAINER_GLOBAL_PI_DIR = "/opt/pi-global";
-
-/**
- * The session mount and the file inside it, exported together and used by both the argv builder here and
- * the env builder in env-allowlist.mjs. Two literals in two modules is how a mount and the variable
- * naming a path inside it drift apart with both suites green -- the runner would then look for a
- * transcript at a path nothing mounted, find none, and cold-start every job without saying so.
  *
- * Nothing key-derived crosses the boundary: the container always sees the same constant path, so no
- * repository name, no branch name and no host layout is legible from inside a job.
+ * HOW Docker spells a container. WHAT a container IS moved to `container-spec.mjs` (issue #227), which is
+ * the move #261 deferred to "the PR that adds a second consumer" -- the backend seam is that consumer, since
+ * a backend that is not the local Docker daemon consumes a spec and never produces an argv. The constants
+ * and `containerSpec` are RE-EXPORTED below, so every existing import of this module still resolves and
+ * every assertion in the suite is untouched. This file is now the LOCAL backend's half of that contract.
  */
-export const CONTAINER_SESSION_DIR = "/session";
-export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
+
+// The portable half. Re-exported rather than moved out of reach: `run-container.mjs` reads
+// CONTAINER_SESSION_FILE beside `buildDockerRunArgs` and is Docker-bound anyway, and `containerSpec` is
+// imported from this module by the suite. `CONST-EGRESS-POLICY-IN-THE-ARGV`'s Code evidence names
+// `buildDockerRunArgs`, which never moved; the entry that names `containerSpec` is design.md's 2026-08-31
+// row, and this move is recorded in its own row rather than by leaving that pointer to rot.
+export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
+import { containerSpec } from "./container-spec.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -50,102 +43,103 @@ export const ISOLATION_FLAGS = [
 ];
 
 /**
- * WHAT the box is, with no Docker vocabulary in it.
- *
- * Split from the argv builder below so the description of a container exists as a VALUE before it becomes
- * one runtime's flags. `buildDockerRunArgs` is unchanged in name, signature and output -- it is now
- * `dockerArgsFromSpec(containerSpec(opts))` -- so every caller and every assertion is untouched, and the
- * only thing that is new is that the middle of that sentence can be read on its own.
- *
- * Mounts are structured (`{host, container, readOnly}`) rather than pre-flattened `host:container:ro`
- * strings, because the flattening IS the Docker part: a runtime that does not bind-mount has to be able to
- * see which host path becomes which container path, and what may be written.
- *
- * `dockerExtra` is named for what it is. It carries raw Docker flags (`-i -t --entrypoint bash`, a
- * Linux-only `--user`), so it is the one field a non-Docker consumer must refuse rather than translate.
- * Calling it `extraFlags` at the boundary would have hidden that.
- *
- * @param image      pinned job image tag/digest
- * @param env        the closed env map from buildContainerEnv -- passed as explicit -e NAME=VALUE
- * @param jobDir     host path to the /job inputs dir (contains prompt.md and pi/); mounted /job:ro
- * @param workspace  host path to the fresh clone / local folder (mounted /workspace:rw)
- * @param outboxDir  host path to the /outbox chain-request dir (local jobs only); mounted /outbox:rw
- * @param sessionDir host path to this job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION);
- *                   mounted /session:rw. Per-job, like jobDir -- never the shared store.
- * @param globalPiDir host path to the operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY); mounted /opt/pi-global:ro
- * @param name       container name (for `docker stop` at the timeout)
- * @param memory     e.g. "4g"; cpus e.g. "2"
- * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
- *                   docker default bridge, which is what every job did before that requirement existed
- * @param extraFlags escape hatch for a Linux-only --user uid:gid on a bind-mounted local folder
+ * HOW Docker spells it. The only consumer of a spec today, and the local backend's translation step:
+ * a second backend implements this function's job against its own runtime and shares everything above it.
  */
-export function containerSpec({
-	image,
-	env,
-	jobDir,
-	workspace,
-	outboxDir,
-	sessionDir,
-	globalPiDir,
-	name,
-	memory = "4g",
-	cpus = "2",
-	network = null,
-	extraFlags = [],
-}) {
-	if (!image) throw new Error("docker run: image is required");
-	if (!name) throw new Error("docker run: container name is required");
-	if (!workspace) throw new Error("docker run: workspace mount is required");
-
-	const mounts = [];
-	// The WHOLE /job dir is read-only (INT-CONTAINER-JOB-INPUTS): it holds prompt.md and pi/, and
-	// the agent cannot rewrite any of it. /workspace is the only writable mount.
-	if (jobDir) mounts.push({ host: jobDir, container: "/job", readOnly: true });
-	mounts.push({ host: workspace, container: "/workspace", readOnly: false });
-	// Local jobs get a writable /outbox host bind, the same host-bind mechanism as /workspace
-	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
-	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
-	if (outboxDir) mounts.push({ host: outboxDir, container: "/outbox", readOnly: false });
-
-	// This job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION, INT-SESSION-STORE-CONTRACT).
-	// Writable, because pi appends to it as the agent works -- and per-job, exactly like jobDir, which is
-	// the whole reason CONST-ISOLATION-CONTAINER-PER-JOB's "none host-wide" clause still reads true. The
-	// shared store under PI_SESSIONS_DIR is NEVER bind-mounted: one job here would otherwise be able to
-	// read and rewrite every other branch's and every other repository's transcripts, which is not a
-	// weakening of that constraint but its inversion. Absent unless the trigger armed run.resume AND a key
-	// resolved, so an unarmed job's argv is byte-identical to one built before this feature existed.
-	if (sessionDir) mounts.push({ host: sessionDir, container: CONTAINER_SESSION_DIR, readOnly: false });
-
-	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
-	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,
-	// the same trust class as the baked floor, but the agent still must not rewrite it. Both job kinds.
-	if (globalPiDir) mounts.push({ host: globalPiDir, container: CONTAINER_GLOBAL_PI_DIR, readOnly: true });
-
-	return {
-		image,
-		name,
-		memory,
-		cpus,
-		network,
-		// UNCONDITIONALLY true, and there is deliberately no parameter that can unset it. The boundary is
-		// not a thing a caller opts into -- CONST-ISOLATION-CONTAINER-PER-JOB is why every other flag here
-		// exists -- so the spec is simply unable to describe an unisolated container, and the builder below
-		// refuses one it is handed. A field that could be false would be a way to ask for less.
-		isolated: true,
-		mounts,
-		env,
-		dockerExtra: extraFlags,
-	};
-}
-
 /**
- * HOW Docker spells it. The only consumer of a spec today.
+ * Flags a `dockerExtra` may not carry, because docker resolves a repeated option LAST-WINS and this array
+ * is appended AFTER `ISOLATION_FLAGS`. `--privileged` supersedes `--cap-drop=ALL`; `--network` supersedes
+ * the per-job one; `--pull` supersedes `--pull=never`; `--rm=false` supersedes `--rm` (verified against
+ * docker 27.4.0, not assumed); a second `-v` adds a mount the spec never declared; a second `--name` wins
+ * and leaves a container outside both reapers' filter and beyond `docker stop`.
+ *
+ * The list covers every member of `ISOLATION_FLAGS`, the container name, and the near-synonyms that reach
+ * the same effect without repeating a listed flag (`--volumes-from` for a mount, `--memory-swap` for the
+ * memory bound). It is a DENY-list and therefore only as good as its coverage: docker's surface is large
+ * and a release can add another way in. So it NARROWS the gap rather than closing it, and the backend
+ * table's `isolation` and `ephemeral` words rest on this plus the single production caller passing fixed
+ * literals, never on this alone.
+ *
+ * Without this the two standing assertions that "every member of ISOLATION_FLAGS reaches the argv" would
+ * still pass on an argv with no boundary left, because membership is not effectiveness. Nothing passes any
+ * of these today -- `sandbox.mjs` sends `-i -t --entrypoint bash` plus loopback-bound `-p` flags, all of
+ * which stay allowed -- so this closes a hole rather than changing a behaviour, and it makes "the builder
+ * CANNOT DECLINE the boundary" true of the whole argv instead of of one boolean field.
+ *
+ * `--user` is DELIBERATELY NOT HERE, and it is the one that looks like it belongs. It is a documented,
+ * tested feature -- the Linux-only `uid:gid` on a bind-mounted local folder, so files the agent writes into
+ * an operator's own directory come back owned by the operator rather than by root. It also does not touch
+ * this boundary: it changes which uid runs, not what that uid may do, and `--cap-drop=ALL` plus
+ * `no-new-privileges` hold either way. What it does bear on is `nonRoot`, which the backend table already
+ * declares `asserted` for the separate reason that the image's `USER pi` is what provides it. Denying it
+ * here would break local-folder jobs to make a word honest that is already honest.
  */
+export const DOCKER_EXTRA_FORBIDDEN = [
+	// Each of the seven logical flags in ISOLATION_FLAGS, and the argv member beside them that the worker's
+	// own machinery reads back. A flag missing from here is a flag the array cannot defend.
+	"--rm", // `--rm=false` leaves the container behind; verified against docker 27.4.0. `ephemeral` rests on it.
+	"--init",
+	"--shm-size",
+	// The container NAME is not an isolation flag and is the sharpest entry on this list: both boot reapers
+	// match `pi-job-` as a substring and the abort path is `docker stop <name>`, so a second `--name` wins
+	// last and leaves a container no sweep finds and no timeout can stop. `ephemeral` and `abortable` both
+	// rest on it.
+	"--name",
+	"--privileged",
+	"--cap-add",
+	"--security-opt",
+	"--pids-limit",
+	"--memory",
+	"-m",
+	"--cpus",
+	"--network",
+	"--net",
+	"--pull",
+	// Add a mount, which is what `-v`/`--volume`/`--mount` are blocked for; `mountSet` rests on all five.
+	"--volumes-from",
+	"--tmpfs",
+	// Relax the memory bound without repeating `--memory`.
+	"--memory-swap",
+	"--oom-kill-disable",
+	// Widen what the process may do without repeating a flag already listed.
+	"--ulimit",
+	"--sysctl",
+	"--group-add",
+	"--cgroup-parent",
+	"--device-cgroup-rule",
+	"--gpus",
+	"--runtime",
+	"-v",
+	"--volume",
+	"--mount",
+	"--device",
+	"--pid",
+	"--ipc",
+	"--uts",
+	"--userns",
+	"--cgroupns",
+];
+
 export function dockerArgsFromSpec(spec) {
 	// The builder CANNOT DECLINE the boundary. `containerSpec` cannot produce anything but `true`, so this
 	// only ever fires on a hand-built spec -- and a hand-built spec that forgot the field is exactly the
 	// case that must fail loudly rather than quietly emit a container with no isolation flags at all.
 	if (spec?.isolated !== true) throw new Error("docker run: refusing to build an argv for a spec that is not isolated");
+
+	// Same refusal, one level down. `dockerExtra` is raw Docker flags by design, and it lands after the
+	// boundary where a repeat supersedes it -- so the escape hatch is bounded by what it may not say.
+	// Split on `=` so `--network=foo` is caught alongside `--network foo`.
+	for (const flag of spec.dockerExtra ?? []) {
+		// REFUSED, not skipped. Skipping a non-string still PUSHED it into the argv below, so
+		// `new String("--privileged")` and `{ toString: () => "--privileged" }` walked past the check and
+		// then reached docker as the flag they stringify to.
+		if (typeof flag !== "string") {
+			throw new Error(`docker run: dockerExtra must contain only strings; got ${typeof flag}`);
+		}
+		if (DOCKER_EXTRA_FORBIDDEN.includes(flag.split("=", 1)[0])) {
+			throw new Error(`docker run: refusing a dockerExtra flag that would supersede the isolation boundary: ${flag}`);
+		}
+	}
 
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
