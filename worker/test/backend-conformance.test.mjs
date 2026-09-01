@@ -95,18 +95,46 @@ test("a COPYING backend that declares readOnlyJobInputs enforced is caught", asy
 	assert.match(findings(r, "readOnlyJobInputs")[0].detail, /read-only by convention rather than by the kernel/);
 });
 
-test("a copying backend that declares the truth PASSES", async () => {
-	// The point is not that copying is forbidden. It is that a copy has to SAY it is a copy.
-	const honest = referenceBackend({
+test("a copying backend cannot borrow a BINDING backend's declaration, and the two checks say so together", async () => {
+	// The point is not that copying is forbidden; it is that a copy has to SAY it is a copy, and that its
+	// declaration has to be ITS OWN. These two checks look like they conflict and do not: `checkTransfers`
+	// refuses a copying backend that declares `readOnlyJobInputs: enforced`, while `checkShape` refuses a
+	// declaration that differs from the table's. For a venue with its own BACKENDS_TABLE entry -- which
+	// `docs/backends.md` makes step 1 for exactly this reason -- both are satisfied at once: the entry says
+	// `asserted` and the bundle reads it. For a bundle borrowing `local`'s name they cannot both be, and
+	// that is correct rather than a contradiction: this backend is not local.
+	//
+	// An earlier version of this test was named "...declares the truth PASSES" and asserted only that
+	// `readOnlyJobInputs` had no failures. It went GREEN while the run it described was RED on two other
+	// checks -- a false green of exactly the kind this whole feature is about.
+	const borrowed = referenceBackend({
 		binds: false,
 		declares: { ...BACKENDS.local.declares, readOnlyJobInputs: "asserted" },
 		name: "local",
 	});
-	const r = await runBackendConformance(honest, { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) });
-	assert.deepEqual(
-		findings(r, "readOnlyJobInputs").filter((f) => !f.ok),
-		[],
-	);
+	const r = await runBackendConformance(borrowed, { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) });
+	assert.equal(r.ok, false, "borrowing local's name while declaring something else is refused");
+	assert.ok(findings(r, "shape").some((f) => !f.ok && f.detail.includes("readOnlyJobInputs")), "the drift is named");
+	// And the transfer check is SATISFIED, which is the half that shows the two rules are compatible: a
+	// copy declaring `asserted` is exactly what the downgrade requires.
+	assert.deepEqual(findings(r, "readOnlyJobInputs").filter((f) => !f.ok), [], "declaring asserted is what a copy must do");
+});
+
+test("a neverStartedExits that claims a code the protocol already means is caught", async () => {
+	// Declaring 137 would make every kernel OOM a refunded "never started": the container DID run, spent
+	// its slot, and the refund hands it back. 0/1/2 are the runner's own completed/infra/policy codes, so
+	// claiming one of those turns a real outcome into an infra retry that never resolves.
+	for (const code of [0, 1, 2, 137]) {
+		const b = referenceBackend({ neverStartedExits: [code] });
+		const r = await runBackendConformance(b, { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) });
+		assert.equal(r.ok, false, `${code} must not be claimable as never-started`);
+		assert.ok(findings(r, "shape").some((f) => !f.ok && f.detail.includes("neverStartedExits")), String(code));
+	}
+	// Docker's own triple is fine, and so is an empty set (an adapter that normalises itself).
+	for (const set of [[125, 126, 127], []]) {
+		const r = await runBackendConformance(referenceBackend({ neverStartedExits: set }), { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) });
+		assert.deepEqual(failed(r), [], JSON.stringify(set));
+	}
 });
 
 test("a bundle whose NAME has no table entry is caught", async () => {

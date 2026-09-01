@@ -470,7 +470,9 @@ network behind an allowlist proxy, and a job the policy cannot serve is refused 
 are yours to list and nothing here can know what your own flows reach, so read
 [`docs/egress.md`](docs/egress.md) before you rely on it. Recorded tokens and cost are process-wide
 (subagent sessions included),
-and the per-job token budget is enforced against that same total.
+and the per-job token budget is enforced against that same total. Where that container gets built is a
+named backend, and what each one guarantees is declared rather than assumed:
+[`docs/backends.md`](docs/backends.md) is the contract, and `pi-dispatch doctor` prints the declaration.
 
 ### What is inside the container while a job runs
 

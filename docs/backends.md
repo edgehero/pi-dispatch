@@ -183,17 +183,28 @@ The harness cannot detect that. A green run is not a conformant backend.
 
 ## Registering it
 
-```js
-import { makeBackendRegistry } from "@edgehero/pi-dispatch/backend-registry";
-import { BACKENDS } from "@edgehero/pi-dispatch/backends";
+Pass your bundle to `startWorker` as an extra backend. It is registered after `local`, and its own `reap`
+joins the boot sweep automatically:
 
-const backends = makeBackendRegistry({
-  bundles: [localBackend, myBackend],
+```js
+import { startWorker } from "@edgehero/pi-dispatch";
+
+await startWorker({ extraBackends: [myBackend] });
+```
+
+`startWorker` builds the registry itself:
+
+```js
+makeBackendRegistry({
+  bundles: [localBackend, ...extraBackends],
   defaultName: config.defaultBackend,
   blessed: config.backends,   // refuses a name PI_BACKENDS blesses but nothing builds
   reaps: backendReaps,        // refuses a venue with no boot reaper
 });
 ```
+
+Both cross-checks fire at boot rather than at the first pickup, so a venue you blessed but did not register,
+or registered without a reaper, is a startup error rather than a job that fails hours later.
 
 Then an operator blesses it with `PI_BACKENDS=local,mine` (which requires the table entry from step 1) and
 a trigger selects it with `run.backend`.

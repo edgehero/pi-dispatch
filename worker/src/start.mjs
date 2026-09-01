@@ -204,6 +204,10 @@ export async function startWorker(
 		makeHost = makeGitHubHost,
 		createWorkerFn = createWorker,
 		makeReaper: makeReaperFn = makeReaper,
+		makeBackendRegistry: makeBackendRegistryFn = makeBackendRegistry,
+		// Additional backend bundles, in registration order after `local`. The deployment still decides which
+		// are BLESSED (PI_BACKENDS) and which is default; this only says which exist.
+		extraBackends = [],
 		makeLogSink: makeLogSinkFn = makeLogSink,
 		makeRecordWriter: makeRecordWriterFn = makeRecordWriter,
 		makeRunMirror: makeRunMirrorFn = makeRunMirror,
@@ -322,7 +326,12 @@ export async function startWorker(
 		// CONSTRUCTED INSIDE THE GUARD, not above it. The comment on this try says it "keeps any reaper
 		// failure from blocking boot", and a factory that throws is a reaper failure -- an earlier draft
 		// hoisted the construction out and quietly made that sentence false.
-		backendReaps = { [DEFAULT_BACKEND]: makeReaperFn({ log }) };
+		// DERIVED from the bundles, not a hand-kept parallel map. An earlier draft had a literal here and the
+		// registry cross-checking it, which made adding a venue three edits that nothing forced to agree --
+		// and a forgotten one is INVISIBLE, because `reapAll` is conservative over the reapers it is handed
+		// rather than over the venues that exist. A bundle already carries its own `reap`, so taking it from
+		// there is one place. `local`'s is built here because its bundle cannot exist yet.
+		backendReaps = { [DEFAULT_BACKEND]: makeReaperFn({ log }), ...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])) };
 		reaped = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
 	} catch (err) {
 		log("reaper_skipped", { reason: err?.message });
@@ -651,8 +660,15 @@ export async function startWorker(
 	// resolution returns it -- but the mechanism is real, so `run.backend` stops being a validated label and
 	// the abort path can reach a venue it did not build. `config.backends[0]` is the deployment's default,
 	// and the registry refuses a default it does not hold rather than discovering it at the first pickup.
-	const backends = makeBackendRegistry({
-		bundles: [localBackend],
+	const backends = makeBackendRegistryFn({
+		// #227. A SEAM, not a literal. `docs/backends.md` tells an adapter author to register their bundle
+		// here, and until this was injectable that instruction described code nobody could run: the array
+		// was hard-coded, so a venue could pass the conformance suite, get a table entry and be blessed in
+		// PI_BACKENDS, and then be refused at boot as blessed-but-unbuilt with nowhere to put it. It is also
+		// what lets a wiring test prove `startWorker` actually CONNECTS the registry to the processor --
+		// six mutations reverting that connection survived the whole suite, which is the same shape as the
+		// bug that shipped: invisible while there is one venue.
+		bundles: [localBackend, ...extraBackends],
 		defaultName: config.defaultBackend,
 		// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
 		// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is

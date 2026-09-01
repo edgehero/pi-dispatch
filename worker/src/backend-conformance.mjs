@@ -112,6 +112,15 @@ function checkShape(backend) {
 	}
 	if (!Array.isArray(backend?.neverStartedExits)) {
 		out.push(fail("shape", "neverStartedExits must be an array -- [] if this runtime normalises to container-never-started itself"));
+	} else {
+		// The set must not CLAIM a code the protocol already means. 137 is the OOM/SIGKILL code, so claiming
+		// it turns every kernel OOM into a refunded "never started" -- the container ran, spent its slot, and
+		// the refund hands the slot back. 0/1/2 are the runner's own completed/infra/policy codes, so claiming
+		// one of those converts a real outcome into an infra retry that can never resolve. Both are money.
+		const reserved = backend.neverStartedExits.filter((c) => [0, 1, 2, 137].includes(c));
+		if (reserved.length > 0) {
+			out.push(fail("shape", `neverStartedExits claims ${reserved.join(", ")}, which INT-RUNNER-EXIT-CODE-PROTOCOL already means (0 completed, 1 infra, 2 policy, 137 OOM/SIGKILL); claiming one refunds a slot the container actually spent`));
+		}
 	}
 	const entry = BACKENDS[backend?.name];
 	if (!entry) out.push(fail("shape", `the bundle's name ${JSON.stringify(backend?.name)} has no entry in the backend table, so nothing declares what it guarantees`));

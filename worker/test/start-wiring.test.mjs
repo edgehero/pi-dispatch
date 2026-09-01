@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -73,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, order } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order } = {}) {
 	const calls = [];
 	const registered = {};
 	const createWorkerFn = (arg) => {
@@ -163,6 +164,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeSandboxReaper: sandboxReaper,
 			makeRunContainer: runContainerFactory,
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
+			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
+			...(extraBackends ? { extraBackends } : {}),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
@@ -1032,4 +1035,54 @@ test("a named run leaves NO host-queue keys behind in the test Valkey", { skip }
 	} finally {
 		probe.disconnect();
 	}
+});
+
+test("startWorker CONNECTS the registry to the processor, and to the abort (#227)", { skip }, async () => {
+	// Six mutations reverting exactly this connection survived the whole suite: `wiring.test.mjs` pins that
+	// the processor uses an INJECTED stop, `backend-registry.test.mjs` pins that the registry dispatches --
+	// and nothing pinned that `startWorker` joins the two. Reverting one line put the abort path back on
+	// hard-wired local docker, which is the condition the venue-resolution fix exists to prevent, and every
+	// one of them is behaviourally neutral while a single venue is registered. That is the same shape as the
+	// bug that shipped: invisible on a single-venue deployment, wrong the moment there are two.
+	//
+	// The proof is a SECOND registered venue. Each dep is then asked for a job naming it, and must answer
+	// from that venue rather than from `local`.
+	const seen = [];
+	const far = {
+		name: "far",
+		declares: (await import("../src/backends.mjs")).BACKENDS.local.declares,
+		neverStartedExits: [7],
+		containerName: (id) => `far-${id}`,
+		runContainer: async () => (seen.push("far:runContainer"), { code: 0 }),
+		imagePreflight: async () => (seen.push("far:imagePreflight"), {}),
+		egressPreflight: async () => (seen.push("far:egressPreflight"), { ok: true }),
+		stopContainer: async () => seen.push("far:stopContainer"),
+		reap: async () => ({ reaped: true }),
+	};
+	let registryArgs = null;
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		extraBackends: [far],
+		makeBackendRegistry: (args) => {
+			registryArgs = args;
+			return realRegistry(args);
+		},
+	});
+
+	// The registry is built from the deployment's own facts, not from literals: reverting either of these
+	// disarms a boot cross-check silently.
+	assert.deepEqual(registryArgs.blessed, ["local"], "PI_BACKENDS is what the registry cross-checks against");
+	assert.ok(typeof registryArgs.reaps?.local === "function", "and the boot reaper map, or an unswept venue reads as proven");
+	assert.deepEqual(registryArgs.bundles.map((b) => b.name), ["local", "far"], "the seam an adapter registers through");
+
+	// Every per-job dep must route through the registry, or a job naming `far` would run on `local`.
+	const job = { id: "j", backend: "far" };
+	await captured.deps.imagePreflight(job);
+	await captured.deps.egressPreflight(job);
+	await captured.deps.runContainer({ job });
+	await captured.stopContainer("far-j", job);
+	assert.deepEqual(seen.sort(), ["far:egressPreflight", "far:imagePreflight", "far:runContainer", "far:stopContainer"].sort());
+	assert.deepEqual(captured.deps.neverStartedExits(job), [7], "the exit set is the venue's too");
+	assert.equal(captured.containerName(job), "far-j", "and the NAME the abort stops is built by that venue");
 });
