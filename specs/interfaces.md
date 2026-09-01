@@ -1239,6 +1239,13 @@ contract governs the argv of one container, this governs the estate that argv jo
 
 ## INT-SANDBOX-CONTRACT
 
+**LOCAL-ONLY (issue #227).** This command opens a shell on THIS host's docker daemon against the job's
+retained directory, so it cannot reach a job that ran in another venue: `manifest.workspace` is a path on
+this machine, which for such a job either does not exist or exists and reproduces a run from the wrong
+host, silently. `buildSandboxRunArgs` is a second container producer outside the `runContainer` seam and is
+hard-wired to the local CLI. A deployment blessing any remote backend is REFUSED here in words rather than
+left to fail on a missing directory.
+
 **operator → docker daemon.** A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, never an amendment to it.
 That contract governs the container the harness launches against untrusted input and says **"No TTY
 (`-it` absent)"**; this one governs a container an operator launches with no agent in it. IDs are

@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { jobContainerName } from "./backend-local.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
@@ -8,7 +6,6 @@ import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPr
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 
-const exec = promisify(execFile);
 
 export const QUEUE = "pi-jobs";
 
@@ -46,6 +43,50 @@ const THROTTLE_ALARM = 5;
 const THROTTLE_FLOOR_MS = 11_000;
 
 /**
+ * How long a container gets to actually die after the abort's `docker stop` before the worker stops waiting.
+ *
+ * `docker stop -t 5` is SIGTERM then an unignorable SIGKILL five seconds later, so a reachable daemon ends
+ * the container well inside this. The margin is for the daemon being slow, not for the container being
+ * stubborn -- a container cannot outlive SIGKILL.
+ */
+const ABORT_GRACE_MS = 30_000;
+
+/**
+ * Resolve `run` normally, but stop waiting once the abort has fired and the grace has passed.
+ *
+ * See the call site for why this exists. Returns the same `{ code: 137, aborted: true }` shape a killed
+ * container produces, so nothing downstream needs to know the difference -- the processor's abort
+ * classification, the run record and the refund all behave exactly as they do for a stop that worked.
+ */
+function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
+	if (!signal) return run;
+	return new Promise((resolve, reject) => {
+		let timer = null;
+		let settled = false;
+		const done = (fn) => (v) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			fn(v);
+		};
+		const onAbort = () => {
+			timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				log("stop_did_not_take", { job: job.id, graceMs });
+				resolve({ code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null });
+			}, graceMs);
+			// A boot-blocking handle is not wanted here: the worker should be able to exit if everything else
+			// has finished, and this timer only matters while a job is still in flight.
+			timer.unref?.();
+		};
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		run.then(done(resolve), done(reject));
+	});
+}
+
+/**
  * Build the BullMQ processor.
  *
  * It MUST declare exactly three parameters (job, token, signal). BullMQ only allocates an
@@ -54,7 +95,8 @@ const THROTTLE_FLOOR_MS = 11_000;
  * abort -- with no error. A test asserts the arity precisely because the failure is silent.
  *
  * Dependencies are injected so this is testable without a live queue: `cancelJob` (fired by the
- * timeout), `stopContainer` (fired by the abort), and the orchestration deps.
+ * timeout), `stopContainer` (fired by the abort, and INJECTED so the venue that built the container is
+ * the one that stops it), and the orchestration deps.
  *
  * Once per job, before runJob, it resolves the runtime-settings overlay via `getSettings`
  * (INT-CONFIG-OVERLAY-CONTRACT). A present-but-invalid overlay resolves to a POLICY refusal RETURNED
@@ -64,7 +106,7 @@ const THROTTLE_FLOOR_MS = 11_000;
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -501,7 +543,10 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			startedAt = new Date().toISOString();
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
-			name = jobContainerName(job.id);
+			// From the VENUE that will build the container, not from the local adapter reached for directly:
+			// the abort stops this name, so the name and the stop have to come from the same backend. The
+			// default keeps every wiring that predates the seam building it exactly as before.
+			name = containerName(job);
 			timer = setTimeout(() => {
 				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
 				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
@@ -510,7 +555,20 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 			// Abort (timeout OR shutdown) => stop the container. docker stop sends SIGTERM then SIGKILL
 			// after the grace period; the runner exits and runContainer returns/throws.
 			onAbort = () => {
-				Promise.resolve(stopContainer(name)).catch(() => {});
+				// The JOB goes with the name: a container name alone cannot say which runtime holds it once
+				// there is more than one venue, and this call is the only thing standing between a runaway
+				// job and the 30-minute bound (REQ-JOB-TIMEOUT-30M).
+				// The whole call is inside the try, not just its promise. `Promise.resolve(f())` evaluates `f()`
+				// FIRST, so a missing or throwing `stopContainer` raises synchronously, inside an
+				// AbortSignal listener, where it surfaces as an uncaughtException and takes the worker
+				// process down 30 minutes into a runaway job -- killing every other in-flight job on the
+				// host. Losing the kill for one job is bad; losing the process is worse.
+				const note = deps.log ?? (() => {});
+				try {
+					Promise.resolve(stopContainer(name, job)).catch((err) => note("stop_container_failed", { job: job.id, reason: err?.message }));
+				} catch (err) {
+					note("stop_container_failed", { job: job.id, reason: err?.message });
+				}
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
 		} catch (error) {
@@ -577,7 +635,26 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 				// life. Null when no row carries a money window for this scope.
 				scopedCaps: budgetCapsFor(job.data, limits),
 				...deps,
-				runContainer: (ctx) => deps.runContainer({ ...ctx, name, signal }),
+				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
+				//
+				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing
+				// else ends that await -- the signal is read at entry and captured at close, never passed to
+				// the spawn. So `stopContainer` is the sole kill channel, and if it does not take (an
+				// unreachable daemon, a wiring whose stop is a no-op) the container keeps running, `docker
+				// run` never exits, and the processor awaits FOREVER: an active job renewing its lock and
+				// holding its in-flight slot, its host slot, its scope lease and its budget reservation, with
+				// nothing in the log and nothing in the record. REQ-JOB-TIMEOUT-30M's Acceptance says "the
+				// slot is freed", and it was not.
+				//
+				// So once the abort has fired, the wait is bounded. On expiry this resolves the SAME shape a
+				// killed container returns -- `{ code: 137, aborted: true }`, which `run-container.mjs`
+				// already uses for "aborted before it could start" -- so the processor classifies it as
+				// POLICY and does not retry. That is deliberate: the container may still be running, and a
+				// retry would pay for a second one alongside it. What is leaked is the container, which the
+				// next boot reaper sweeps; what is NOT leaked is the slot, the lease and the reservation.
+				// The `stop_did_not_take` line is the loud half, because a host whose daemon ignores a stop
+				// is a fact an operator has to learn from somewhere.
+				runContainer: (ctx) => boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})),
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
 				// to be abortable for the same reason runContainer does: a resolver blocking on an unreachable
 				// vault would otherwise hold its slot until its own timeout, and an abort landing mid-resolution
@@ -633,12 +710,19 @@ export function makeProcessor({ cancelJob, stopContainer, redis, getSettings, ap
 	};
 }
 
-export function createWorker({ connection, name, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, redis, deps, recordRun, limiter, pauseUntil, scopedLimits, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), extraClosers = [] }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
 	// the delayed set is gated on each worker's own `Date.now()`, so the fastest clock wins every hop and a
 	// job that had to reach another host might never get there.
+	// #227. REFUSED AT CONSTRUCTION, because the alternative is discovering it 30 minutes into a runaway
+	// job. `stopContainer` is the only thing that enforces REQ-JOB-TIMEOUT-30M, and it is what the backend
+	// table declares as `abortable: enforced` -- a wiring that omits it would make that declaration false
+	// while every test that never aborts stayed green.
+	if (typeof stopContainer !== "function") {
+		throw new Error("createWorker: stopContainer is required -- it is the only thing that enforces the 30-minute job timeout");
+	}
 	const names = hostQueue ? [QUEUE, hostQueue] : [QUEUE];
 	const workers = [];
 
@@ -658,7 +742,12 @@ export function createWorker({ connection, name, hostQueue = null, checkLease = 
 			// Bound to THIS worker: a job on the host queue is cancelled by the worker draining that queue,
 			// and the shared handle could not reach it.
 			cancelJob: (id, reason) => worker.cancelJob(id, reason),
-			stopContainer: (name) => exec("docker", ["stop", "-t", "5", name]),
+			// #227. INJECTED, not built here. This was a one-line `docker stop` literal, which meant the abort
+			// path -- the only thing that can end a runaway job -- was the one backend function unreachable
+			// from `startWorker`. The wiring now passes the registry's per-job stop, so the container is
+			// stopped by whatever venue built it.
+			stopContainer,
+			containerName,
 			redis,
 			getSettings,
 			// Late-bound over EVERY worker: an overlay concurrency change re-binds the live slot count at the
@@ -736,3 +825,9 @@ export function createWorker({ connection, name, hostQueue = null, checkLease = 
 
 	return primary;
 }
+
+/**
+ * `boundAfterAbort` with a zero grace, for tests only. The real bound is 30 seconds, which no test can wait
+ * for, and the behaviour under test is what happens WHEN the grace expires -- not how long it is.
+ */
+export const __boundAfterAbortForTests = (run, signal, job, log) => boundAfterAbort(run, signal, job, log, 0);

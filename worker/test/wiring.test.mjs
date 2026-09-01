@@ -129,6 +129,11 @@ test("shutdown closes each extraCloser after the worker drains", { skip }, async
 			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 			redis: {},
 			deps: {},
+			// #227. `createWorker` REFUSES a wiring without it: `stopContainer` is the only thing that
+			// enforces REQ-JOB-TIMEOUT-30M, and a partial wiring used to be accepted silently -- so the
+			// 30-minute kill was a control the backend table declared `enforced` while a caller could omit
+			// it and every test that never aborts stayed green.
+			stopContainer: async () => {},
 			extraClosers: [{ close: async () => { closed = true; } }],
 		});
 		worker.on("error", () => {}); // swallow the connection-refused error against the dead port
@@ -154,6 +159,7 @@ test("createWorker NAMES the BullMQ Worker when given one, and omits the option 
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 		redis: {},
 		deps: {},
+		stopContainer: async () => {}, // required: see the note at the first createWorker above
 	};
 	const beforeTerm = new Set(process.listeners("SIGTERM"));
 	const beforeInt = new Set(process.listeners("SIGINT"));
@@ -558,4 +564,49 @@ test("(e) a burst of distinct ids writes one distinct file each through the same
 	assert.ok(paths.includes(join("/logs", "j1.json")));
 	assert.ok(paths.includes(join("/logs", "j2.json")));
 	assert.ok(paths.includes(join("/logs", "j3.json")));
+});
+
+test("createWorker REFUSES a wiring with no stopContainer, rather than failing 30 minutes in (#227)", async () => {
+	// `stopContainer` is the only thing that enforces REQ-JOB-TIMEOUT-30M, and it is what the backend table
+	// declares as `abortable: enforced`. A wiring that omitted it used to be accepted silently: the throw
+	// then landed inside an AbortSignal listener, where it surfaces as an uncaughtException and takes the
+	// whole worker process down mid-job, killing every other in-flight job on the host. Losing the kill for
+	// one job is bad; losing the process is worse. Two call sites in THIS file omitted it and stayed green,
+	// because neither ever aborts.
+	const mod = await import("../src/index.mjs");
+	assert.throws(
+		() => mod.createWorker({ connection: { host: "127.0.0.1", port: 1 }, concurrency: 1, getSettings: () => ({}), redis: {}, deps: {} }),
+		/stopContainer is required -- it is the only thing that enforces the 30-minute job timeout/,
+	);
+});
+
+test("an abort whose stop does NOT take still frees the slot, and says so (#227)", async () => {
+	// The hole this closes: `makeRunContainer`'s promise settles only on the docker child's close or error,
+	// and nothing else ends that await -- so a stop that does not take (an unreachable daemon, a bundle
+	// whose stop is a no-op) left the container running, `docker run` never exiting, and the processor
+	// awaiting FOREVER. An active job renewing its lock, holding its in-flight slot, its host slot, its
+	// scope lease and its budget reservation, with nothing in the log and nothing in the record.
+	// REQ-JOB-TIMEOUT-30M's Acceptance says "the slot is freed", and it was not.
+	const mod = await import("../src/index.mjs");
+	const logs = [];
+	const controller = new AbortController();
+	// A runContainer that never settles, which is exactly what a live container looks like to the worker.
+	const never = new Promise(() => {});
+	const bounded = mod.__boundAfterAbortForTests(never, controller.signal, { id: "j1" }, (event, fields) => logs.push([event, fields]));
+	controller.abort();
+	const out = await bounded;
+	assert.equal(out.aborted, true, "classified as an abort, so the processor treats it as POLICY and does not retry");
+	assert.equal(out.code, 137, "the same shape a killed container returns, so nothing downstream needs to know the difference");
+	assert.equal(logs[0][0], "stop_did_not_take", "a host whose daemon ignores a stop is a fact an operator must learn somewhere");
+	assert.equal(logs[0][1].job, "j1");
+});
+
+test("a stop that DOES take settles normally and logs nothing about the grace (#227)", async () => {
+	const mod = await import("../src/index.mjs");
+	const logs = [];
+	const controller = new AbortController();
+	const bounded = mod.__boundAfterAbortForTests(Promise.resolve({ code: 137, aborted: true }), controller.signal, { id: "j2" }, (e) => logs.push(e));
+	controller.abort();
+	assert.deepEqual(await bounded, { code: 137, aborted: true });
+	assert.deepEqual(logs, [], "the bound is a backstop, not a second code path");
 });

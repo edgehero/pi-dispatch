@@ -73,6 +73,19 @@
  * that deliver it stay where they are.
  */
 
+/**
+ * The exit codes a DOCKER-shaped runtime uses for "the runner never ran": 125 is `docker run` itself
+ * failing, 126 an entrypoint that is not executable, 127 an entrypoint that was not found. In all three the
+ * daemon never handed control to the runner, so nothing was spent -- which is what `container-never-started`
+ * means, and why they refund the budget slot instead of keeping it.
+ *
+ * HERE, in the leaf, rather than in `backend-local.mjs`, so `processor.mjs` can default to them without
+ * importing the local adapter and dragging `node:child_process` and the docker CLI machinery into its
+ * module graph. The local bundle declares the same constant; a second backend declares its own, or declares
+ * `[]` and normalises to the outcome itself.
+ */
+export const DOCKER_NEVER_STARTED_EXITS = Object.freeze([125, 126, 127]);
+
 /** The three words. Ordered weakest-last so a floor can be expressed as "at least this". */
 export const ENFORCED = "enforced";
 export const ASSERTED = "asserted";
@@ -176,10 +189,10 @@ const PROPERTIES_TABLE = {
 		armedBy: null,
 	},
 	abortable: {
-		// REQ-JOB-TIMEOUT-30M. Named here even though the seam it needs does not exist yet: `stopContainer`
-		// is hard-wired in index.mjs's abort path, so a second backend could pass every other check with no
-		// way to stop a runaway container and nothing in this table would move. The word arrives before the
-		// seam on purpose -- a gap that is declared is a refusal, and a gap that is unnamed is a surprise.
+		// REQ-JOB-TIMEOUT-30M. Declared two slices before the seam existed, on purpose: `stopContainer` was
+		// hard-wired in index.mjs's abort path, so a second backend could have passed every other check with
+		// no way to stop a runaway container and nothing in this table would have moved. A gap that is
+		// declared is a refusal; a gap that is unnamed is a surprise. The seam landed in slice 4.
 		question: "a running job can be stopped on the 30-minute timeout or a shutdown, and the abort is distinguishable from a crash",
 		armedBy: null,
 	},
@@ -293,8 +306,9 @@ const BACKENDS_TABLE = {
 			// `spawn` on the CLI: the integer comes from the `close` event and is passed to `decideRetry`
 			// unmodified.
 			exitCodes: ENFORCED,
-			// `docker stop` on the name, driven from index.mjs's abort path, and the abort FLAG rather than
-			// the code is the discriminator -- a worker SIGKILL and a kernel OOM both surface as 137.
+			// `docker stop` on the name, and the abort FLAG rather than the code is the discriminator -- a
+			// worker SIGKILL and a kernel OOM both surface as 137. The worker also BOUNDS the wait after the
+			// abort, so a stop that does not take frees the slot instead of holding it forever.
 			abortable: ENFORCED,
 			// `-v <host>:/job:ro` -- the kernel enforces it. `verify-image.sh` proves it with a live write
 			// attempt rather than trusting the flag.
@@ -427,17 +441,11 @@ export function parseBackendList(raw) {
 	}
 	// Deduplicated, order preserved: the first entry is what a deployment means by "the default one".
 	const unique = [...new Set(names)];
-	// NOTHING DISPATCHES ON `run.backend` YET. `start.mjs` builds `local` unconditionally and no code reads a
-	// job's backend to choose an adapter, so every job runs there whatever this list says. `run.backend` is
-	// today a VALIDATED, GATED LABEL: refused at load if unknown, refused pre-spend if unblessed, and then
-	// not routed on. The dispatch arrives with `stopContainer` and `reap`, which need the same per-backend
-	// lookup and should grow it once rather than twice.
-	//
-	// So a set excluding the default would make two statements false at once: the deployment would be told
-	// its jobs run somewhere they do not, and the floor -- checked against this list -- would skip the
-	// backend actually running them. Refusing is the only honest option while that holds.
+	// The DEFAULT backend must stay in the set. A trigger that names no venue is dispatched to
+	// `backends[0]`, and the boot registry refuses a default it does not hold -- so a set excluding it would
+	// describe a deployment whose unflagged triggers, which is nearly all of them, have nowhere to run.
 	if (!unique.includes(DEFAULT_BACKEND)) {
-		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)}: every job runs there today regardless of this list, so a set without it would describe a deployment that does not exist`);
+		throw new Error(`PI_BACKENDS must include ${JSON.stringify(DEFAULT_BACKEND)}: a trigger that names no backend is dispatched there, so a set without it leaves every unflagged trigger nowhere to run`);
 	}
 	return unique;
 }

@@ -1,4 +1,4 @@
-import { DEFAULT_BACKEND } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
@@ -108,6 +108,12 @@ export async function runJob(job, deps) {
 		// is safe to default at all only because the gate below fires ONLY when a job names a backend --
 		// an unflagged job never consults this list.
 		blessedBackends = [DEFAULT_BACKEND],
+		// #227. The exit codes THIS JOB'S venue uses for "the runner never ran" -- a function of the job,
+		// not of the wiring, because which venue ran it is a per-job fact and the registry resolves it per
+		// job for every other backend function too. Docker's triple is the default because it is the only
+		// runtime this repo ships, so a wiring that omits this keeps today's behaviour exactly; an adapter
+		// that normalises to `container-never-started` itself returns an empty list.
+		neverStartedExits = () => DOCKER_NEVER_STARTED_EXITS,
 		// (job) => scoped short-lived token. Takes the JOB, not the repo: which forge mints -- and therefore
 		// which credential the container gets -- is a property of `job.kind`, and only the wiring knows the
 		// map. Called for forge-backed jobs and for local jobs opted in via `github: true`; unflagged local
@@ -638,18 +644,22 @@ export async function runJob(job, deps) {
 				return { outcome: "policy", reason: "runner-policy", exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
 			case EXIT_INFRA:
 				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
-			case 125: // `docker run` itself failed (unusable image reference, bad flag)
-			case 126: // the entrypoint exists but is not executable
-			case 127: // the entrypoint was not found
-				// In all three docker never handed control to the runner, so NOTHING was spent -- which is
-				// exactly what `container-never-started` means, and it reuses the refund below rather than
-				// keeping a slot the agent never used. These used to fall to `default:`, which kept the slot
-				// AND retried, burning a second one. The preflight above converts the KNOWABLE case (an absent
-				// image) into a pre-spend policy refusal; a 125 that survives it is a race (the image was
-				// removed between the inspect and the run) or a docker-side fault we did not foresee --
-				// genuinely infra, and now with a retry that costs nothing.
-				throw new InfraRetry(`docker could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 			default:
+				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that
+				// (issue #227). For docker it is 125 (`docker run` itself failed), 126 (the entrypoint exists
+				// but is not executable) and 127 (the entrypoint was not found). Nothing was spent -- which is
+				// exactly what `container-never-started` means -- so this reuses the refund below rather than
+				// keeping a slot the agent never used. They used to fall to the unknown-exit branch, which
+				// kept the slot AND retried, burning a second one.
+				//
+				// ASKED OF THE BACKEND rather than hardcoded, because those integers are Docker's and they
+				// COLLIDE with the runner's own channel (`INT-RUNNER-EXIT-CODE-PROTOCOL`). Assuming them is
+				// silently wrong for any venue where 125 is a real runner exit, and the assumption was
+				// invisible while there was one runtime. An adapter declares its own set, or declares none
+				// and normalises to this outcome itself.
+				if ((neverStartedExits(job) ?? []).includes(code)) {
+					throw new InfraRetry(`the runtime could not start the container, exit ${code}`, { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
+				}
 				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 		}
 	} catch (e) {

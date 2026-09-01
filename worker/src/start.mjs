@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { readFileSync, watch } from "node:fs";
 import { dirname, basename, join } from "node:path";
-import { promisify } from "node:util";
 import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
@@ -32,7 +30,9 @@ import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { JOB_NAME_PREFIX, makeLocalBackend } from "./backend-local.mjs";
+import { JOB_NAME_PREFIX, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { makeBackendRegistry, reapAll } from "./backend-registry.mjs";
+
 import { makeRunContainer } from "./run-container.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, sanitizeJobId } from "./run-history.mjs";
@@ -41,7 +41,6 @@ import { effectiveSettings, readOverlay } from "./runtime-settings.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
-const exec = promisify(execFile);
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
 const BOOT_IMAGE_TIMEOUT_MS = 5_000;
@@ -171,49 +170,6 @@ function watchScopedLimitsFile(config, ref, log) {
 	} catch (err) {
 		log("scoped_limits_watch_unavailable", { reason: err?.message });
 	}
-}
-
-export function makeReaper({ log }) {
-	return async function reap() {
-		try {
-			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
-			const names = stdout
-				.split("\n")
-				.map((n) => n.trim())
-				.filter(Boolean);
-			for (const name of names) {
-				await exec("docker", ["rm", "-f", name]);
-				log("reaped_container", { name });
-			}
-			// REQ-EGRESS-ALLOWLIST: the per-job networks those containers were on. Swept AFTER the containers,
-			// because a network with a member still attached cannot be removed -- and swept by the SAME
-			// `pi-job-` filter, so the namespace rule that keeps an operator's live sandbox safe from the
-			// container reaper keeps their sandbox NETWORK safe too, with no second rule to remember.
-			//
-			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
-			// on every ordinary path, so anything still here outlived a process that did not get to run it.
-			// A network still in use by something else fails to remove and is skipped, which is correct: this
-			// is a best-effort sweep and never a reason not to boot.
-			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
-			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) {
-				try {
-					await exec("docker", ["network", "rm", net]);
-					log("reaped_network", { network: net });
-				} catch {} // still in use, or already gone -- either way not this boot's problem
-			}
-			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
-			// claim naming this host once this host has actually established that it holds no containers.
-			return { reaped: true };
-		} catch (err) {
-			// The `docker ps` is inside this try, so this path CANNOT establish that this host holds no
-			// containers -- whether it failed before listing anything or after reaping some and then losing
-			// the daemon. Either way the claim "I hold nothing" is unproven, and sweeping on it would free
-			// slots for containers that may STILL BE RUNNING, letting another host start more alongside
-			// them: a money overrun rather than a tidy-up. Conservative in the only safe direction.
-			log("reaper_skipped", { reason: err?.message });
-			return { reaped: false };
-		}
-	};
 }
 
 /**
@@ -354,9 +310,19 @@ export async function startWorker(
 	// Clear strays left by a previous crash before the worker starts draining. Best-effort: the reaper
 	// swallows its own docker errors; this guard keeps any reaper failure from blocking boot.
 	// Whether the container reaper actually ENUMERATED, which the scope-claim sweep below depends on.
+	// #227. ONE map, read twice: the boot sweep below combines every entry, and each backend's bundle takes
+	// its own reaper from it by name. Held here rather than derived from the bundles because the bundles
+	// cannot exist yet -- they need the log sink, the package resolver and the image preflight, all built
+	// further down -- and reaching for one here is a temporal dead zone the boot try/catch would swallow.
+	let backendReaps = {};
+
 	let reaped = false;
 	try {
-		reaped = (await makeReaperFn({ log })())?.reaped === true;
+		// CONSTRUCTED INSIDE THE GUARD, not above it. The comment on this try says it "keeps any reaper
+		// failure from blocking boot", and a factory that throws is a reaper failure -- an earlier draft
+		// hoisted the construction out and quietly made that sentence false.
+		backendReaps = { local: makeReaperFn({ log }) };
+		reaped = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
 	} catch (err) {
 		log("reaper_skipped", { reason: err?.message });
 	}
@@ -640,6 +606,11 @@ export async function startWorker(
 	// and `deps` is the processor's namespace: a spread would put a backend's name into it under a key the
 	// processor is free to mean something else by.
 	const localBackend = makeLocalBackend({
+		// #227. The two the earlier slices deferred, now real seams. `reap` keeps its tri-state: the boot
+		// sweep below only sweeps this host's scope claims once the reaper has PROVEN this host holds no
+		// job containers, and an unproven answer must never free a slot.
+		stopContainer: makeStopContainer(),
+		reap: backendReaps.local,
 		// One deployment default, two consumers, adjacent by construction: the preflight that refuses a missing
 		// image BEFORE the budget slot, and the factory that puts it in the argv. Both resolve a trigger's own
 		// `run.image` through the same resolveJobImage, so the image that was checked is the image that runs.
@@ -675,8 +646,28 @@ export async function startWorker(
 		}),
 	});
 
+	// #227. WHICH backend runs which job, and the one place that decides. One bundle today, so every
+	// resolution returns it -- but the mechanism is real, so `run.backend` stops being a validated label and
+	// the abort path can reach a venue it did not build. `config.backends[0]` is the deployment's default,
+	// and the registry refuses a default it does not hold rather than discovering it at the first pickup.
+	const backends = makeBackendRegistry({
+		bundles: [localBackend],
+		defaultName: config.defaultBackend,
+		// Cross-checked at boot rather than discovered at the first pickup: a name PI_BACKENDS blesses but
+		// nothing builds passes both the loader and the pre-spend gate, and a venue with no boot reaper is
+		// swept by nothing while still reporting the host as proven clean.
+		blessed: config.backends,
+		reaps: backendReaps,
+	});
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
+		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
+		// not enough to find the runtime holding it once there is more than one venue.
+		stopContainer: backends.stopContainer,
+		// The NAME the abort stops, built by the venue that will build the container rather than by the local
+		// adapter reached for directly -- the name and the stop have to come from the same venue.
+		containerName: backends.containerName,
 		hostQueue,
 		// Names the BullMQ Worker, which makes `getWorkers()` rows tell hosts apart -- bullmq appends
 		// `:w:<name>` to the client name and `moveToActive` stamps `processedBy` onto each active job's
@@ -764,8 +755,8 @@ export async function startWorker(
 				const state = await held.getState();
 				return state === "delayed" || state === "waiting" || state === "active" || state === "prioritized" || state === "waiting-children";
 			},
-			imagePreflight: localBackend.imagePreflight,
-			egressPreflight: localBackend.egressPreflight,
+			imagePreflight: backends.imagePreflight,
+			egressPreflight: backends.egressPreflight,
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
@@ -786,7 +777,17 @@ export async function startWorker(
 			// panel's picker is bounded by the same list, and this is the half that binds: the overlay is
 			// not the reviewed artifact (DES-PER-TRIGGER-SECRET-PROFILE).
 			blessedBackends: config.backends,
-			runContainer: localBackend.runContainer,
+			runContainer: backends.runContainer,
+			// #227. Resolved through the registry like every other per-job backend fact, so the integers the
+			// processor treats as "never started" are the ones the venue that ran the job actually uses.
+			// NOT `?? []`. An empty list means "this venue never reports a never-started exit", which sends a
+			// 125 to the unknown-exit branch -- no `reason`, so the budget slot is KEPT and BullMQ retries,
+			// burning a second one per never-started job. That is the bug the explicit case group was added
+			// to fix. A bundle that omits the field is a wiring defect, so it fails loudly here rather than
+			// silently in the money direction; `backends.mjs` requires it of every bundle.
+			// Off the REGISTRY's surface, like every other per-job backend fact. Rebuilding it at the call site
+			// is how a fact ends up dispatched on one path and hardcoded on another.
+			neverStartedExits: backends.neverStartedExits,
 			prepareWorkspace: makePrepareWorkspace({
 				jobsDir: config.jobsDir,
 				forgeFor,

@@ -191,7 +191,7 @@ test("doctor refuses to call an all-absent floor 'holding', because it bounds no
 test("doctor names where jobs run", async () => {
 	// With one blessed backend there is nothing to choose between, so the line stays plain. The qualifier
 	// arrives with a second name, which is when "which one" becomes a question an operator can have.
-	assert.match(await doctorText(base()), /Jobs run on: local \(run\.backend is validated and gated, but nothing dispatches on it yet/);
+	assert.match(await doctorText(base()), /Jobs run on: local$/m, "one venue, nothing to choose between, so no qualifier");
 });
 
 test("doctor FAILS on a backend configuration the worker would refuse to boot on", async () => {
@@ -236,7 +236,7 @@ test("PI_BACKENDS always includes the backend an unflagged trigger runs on", () 
 	}
 	// And the guard is present rather than merely intended, so removing it fails here rather than silently.
 	const src = readFileSync(new URL("../src/backends.mjs", import.meta.url), "utf8");
-	assert.match(src, /PI_BACKENDS must include .*: every job runs there today regardless of this list/);
+	assert.match(src, /PI_BACKENDS must include .*: a trigger that names no backend is dispatched there/);
 });
 
 test("arming egress on the real deployment still boots", () => {

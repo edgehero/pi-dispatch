@@ -12,19 +12,20 @@
  * property gone. So the table declares and this module implements, and the two are joined by NAME -- the
  * same split `forges.mjs` uses against the forge hosts.
  *
- * WHAT IS AND IS NOT HERE YET. Three of the functions a backend owns are already injectable and are bundled
- * below. Two are not, and pretending otherwise would be the believed-in control this whole issue is trying
- * to avoid:
- *
- *   `stopContainer` is HARD-WIRED in index.mjs's abort path and cannot be reached from `startWorker`.
- *   `reap()` returns a TRI-STATE that `makeScopeClaimSweeper` gates a money decision on, so it is not a
- *   function that can be moved without moving that reasoning with it.
- *
- * Both are the next slice's work, not this one's, and the bundle's own completeness check names exactly the
- * set it currently claims rather than a set it wishes it had.
+ * FIVE FUNCTIONS, and the last two arrived late on purpose. `stopContainer` was a one-line literal inside
+ * `index.mjs`'s `createWorker` and unreachable from `startWorker`; `reap` lived in `start.mjs` and returns a
+ * TRI-STATE that `makeScopeClaimSweeper` gates a money decision on. Neither could move without its reasoning
+ * moving too, so an earlier slice declared `abortable` in the table, named both as deferred, and REFUSED a
+ * bundle that tried to supply them -- because an adapter author who passes `stopContainer` and has it
+ * silently dropped believes a runaway job can be stopped through their backend when the abort path still
+ * calls docker directly. That refusal is now gone because the seam is real.
  */
 
-import { BACKENDS, DEFAULT_BACKEND } from "./backends.mjs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
+
+const execDocker = promisify(execFile);
 
 /**
  * `pi-job-` -- the container-name namespace, and a LOAD-BEARING string rather than a prefix chosen for
@@ -68,14 +69,20 @@ export function jobContainerName(jobId) {
  * backend and reads the property back, which is this issue's last slice.
  */
 /** The functions a bundle carries today. Deferred members are refused BY NAME below, never ignored. */
-export const BACKEND_FUNCTIONS = ["runContainer", "imagePreflight", "egressPreflight"];
+export const BACKEND_FUNCTIONS = ["runContainer", "imagePreflight", "egressPreflight", "stopContainer", "reap"];
 
-/** Named so the refusal can say "not yet" rather than "unknown", which is a different instruction. */
-const DEFERRED_FUNCTIONS = ["stopContainer", "reap"];
+/**
+ * Non-function members every bundle must also carry. Separate from the list above because the completeness
+ * check tests callability, and these are values -- but they are just as required: `neverStartedExits` gates
+ * a budget REFUND, so a bundle that omitted it would keep the slot and let BullMQ retry, burning a second
+ * one per never-started job. That is the exact bug the explicit `case 125/126/127` was added to fix,
+ * reachable again by an adapter simply not setting a property.
+ */
+export const BACKEND_VALUES = ["neverStartedExits"];
 
 export function makeLocalBackend(parts = {}) {
-	const { runContainer, imagePreflight, egressPreflight } = parts ?? {};
-	const missing = Object.entries({ runContainer, imagePreflight, egressPreflight })
+	const { runContainer, imagePreflight, egressPreflight, stopContainer, reap } = parts ?? {};
+	const missing = Object.entries({ runContainer, imagePreflight, egressPreflight, stopContainer, reap })
 		.filter(([, fn]) => typeof fn !== "function")
 		.map(([k]) => k);
 	if (missing.length > 0) {
@@ -88,10 +95,7 @@ export function makeLocalBackend(parts = {}) {
 	// backend while the abort path still goes straight to the local docker CLI. That is the believed-in
 	// control again, arriving through a dropped argument.
 	for (const key of Object.keys(parts ?? {})) {
-		if (BACKEND_FUNCTIONS.includes(key)) continue;
-		if (DEFERRED_FUNCTIONS.includes(key)) {
-			throw new Error(`backend "${DEFAULT_BACKEND}": ${key} is not part of the bundle yet (issue #227 defers it); the abort and reap paths still call docker directly`);
-		}
+		if (BACKEND_FUNCTIONS.includes(key) || BACKEND_VALUES.includes(key)) continue;
 		throw new Error(`backend "${DEFAULT_BACKEND}": unknown bundle member ${JSON.stringify(key)} (known: ${BACKEND_FUNCTIONS.join(", ")})`);
 	}
 
@@ -110,5 +114,99 @@ export function makeLocalBackend(parts = {}) {
 		runContainer,
 		imagePreflight,
 		egressPreflight,
+		stopContainer,
+		reap,
+		// The integers this runtime uses for "the runner never ran". The processor asks the BACKEND rather
+		// than assuming docker's triple, because those numbers collide with the runner's own exit channel.
+		neverStartedExits: LOCAL_NEVER_STARTED_EXITS,
 	};
 }
+
+/**
+ * The exit codes that mean THE RUNNER NEVER RAN, as this runtime spells them.
+ *
+ * Docker's own convention, and defined in `backends.mjs` rather than here so the processor can default to
+ * it without importing this module. Re-exported under the local backend's name because that is what the
+ * bundle carries and what an adapter author reads.
+ */
+export const LOCAL_NEVER_STARTED_EXITS = DOCKER_NEVER_STARTED_EXITS;
+
+/**
+ * `docker stop` on the job's container name, fired by the abort (the 30-minute timeout or a shutdown).
+ *
+ * MOVED HERE from `index.mjs`'s `createWorker`, where it was a one-line literal inside the processor's
+ * construction and could not be reached from `startWorker` at all. That is why `abortable` was declared in
+ * the table two slices before this function existed: a second backend could have passed every other check
+ * with no way to stop a runaway container, and nothing in the table would have moved.
+ *
+ * `-t 5` is SIGTERM then SIGKILL after five seconds. The runner exits, `docker run` returns, and
+ * `runContainer`'s promise resolves -- so the abort's effect reaches the processor through the container's
+ * own exit rather than through this call's return value, which is why nothing awaits it.
+ *
+ * `INT-RUNNER-EXIT-CODE-PROTOCOL` is what makes this transferable: the discriminator is the abort FLAG the
+ * processor already holds, not the exit code, because a worker SIGKILL and a kernel OOM both surface as
+ * 137. An adapter implements "stop this job" however its runtime spells it and the classification is
+ * unchanged.
+ */
+export function makeStopContainer({ exec = execDocker } = {}) {
+	return async function stopContainer(name) {
+		return exec("docker", ["stop", "-t", "5", name]);
+	};
+}
+
+/**
+ * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind.
+ *
+ * MOVED HERE from `start.mjs` (issue #227). It belongs to the backend because the containers it sweeps are
+ * that backend's, and a second backend's crashed containers are unreachable by this one's `docker ps`.
+ *
+ * THE TRI-STATE IS THE POINT and moved with it: `{ reaped: true }` means this host has ESTABLISHED that it
+ * holds no job containers, `{ reaped: false }` means it could not establish that. `makeScopeClaimSweeper`
+ * gates a money decision on the difference -- it may only delete a scope claim naming this host once the
+ * host has proven it holds nothing -- so returning `[]` or `true` on a failed enumeration would free slots
+ * for containers that may still be running and let another host start more alongside them. That is a spend
+ * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
+ */
+export function makeReaper({ log, exec = execDocker }) {
+	return async function reap() {
+		try {
+			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
+			const names = stdout
+				.split("\n")
+				.map((n) => n.trim())
+				.filter(Boolean);
+			for (const name of names) {
+				await exec("docker", ["rm", "-f", name]);
+				log("reaped_container", { name });
+			}
+			// REQ-EGRESS-ALLOWLIST: the per-job networks those containers were on. Swept AFTER the containers,
+			// because a network with a member still attached cannot be removed -- and swept by the SAME
+			// `pi-job-` filter, so the namespace rule that keeps an operator's live sandbox safe from the
+			// container reaper keeps their sandbox NETWORK safe too, with no second rule to remember.
+			//
+			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
+			// on every ordinary path, so anything still here outlived a process that did not get to run it.
+			// A network still in use by something else fails to remove and is skipped, which is correct: this
+			// is a best-effort sweep and never a reason not to boot.
+			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
+			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) {
+				try {
+					await exec("docker", ["network", "rm", net]);
+					log("reaped_network", { network: net });
+				} catch {} // still in use, or already gone -- either way not this boot's problem
+			}
+			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
+			// claim naming this host once this host has actually established that it holds no containers.
+			return { reaped: true };
+		} catch (err) {
+			// The `docker ps` is inside this try, so this path CANNOT establish that this host holds no
+			// containers -- whether it failed before listing anything or after reaping some and then losing
+			// the daemon. Either way the claim "I hold nothing" is unproven, and sweeping on it would free
+			// slots for containers that may STILL BE RUNNING, letting another host start more alongside
+			// them: a money overrun rather than a tidy-up. Conservative in the only safe direction.
+			log("reaper_skipped", { reason: err?.message });
+			return { reaped: false };
+		}
+	};
+}
+

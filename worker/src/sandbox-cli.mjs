@@ -1,10 +1,29 @@
 import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
+import { DEFAULT_BACKEND, backendFor } from "./backends.mjs";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildSandboxRunArgs, launchSandbox, listRunningSandboxes, parsePublish, resolveSandbox, sandboxContainerName } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
+
+/**
+ * Would this deployment's venues put a job's retained directory out of this command's reach? Exported ONLY
+ * so it can be driven.
+ *
+ * The refusal it answers is unreachable today: the table holds one backend and it is local, so
+ * `PI_BACKENDS` cannot name a remote venue. An unreachable rule with no test is a rule a mutation pass
+ * deletes in silence -- which is precisely what happened to the trigger-side remote refusal one slice ago,
+ * so this one is a pure predicate over an explicit config from the start.
+ *
+ * TRUE when any blessed venue is remote, not merely when the DEFAULT is: a job that ran there has a
+ * retained directory this host never had, and `pi-dispatch sandbox <jobId>` takes a job id rather than a
+ * venue, so it cannot know which one it is being asked about until the directory is already missing.
+ */
+export function sandboxUnreachableFrom(config) {
+	const names = config?.backends ?? [config?.defaultBackend ?? DEFAULT_BACKEND];
+	return names.some((n) => backendFor(n)?.remote !== false);
+}
 
 /**
  * `pi-dispatch sandbox` -- re-open a finished run's sandbox as an interactive shell
@@ -76,6 +95,23 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		publish = parsePublish(values.publish ?? []);
 	} catch (error) {
 		return fail(err, error.message);
+	}
+
+	// #227. THE SANDBOX IS LOCAL-ONLY, and this refusal is what keeps that true rather than accidental.
+	//
+	// `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer` seam and hard-wired to
+	// this host's docker CLI. It reopens a retained job directory: `manifest.workspace` is a path on THIS
+	// machine, which for a job that ran in another venue either does not exist or exists and reproduces a
+	// run from the wrong host, silently. `INT-SANDBOX-CONTRACT` is already "a SIBLING ... never an
+	// amendment" of the container contract, and this is the clause that says which sibling.
+	//
+	// Refused BEFORE `resolveSandbox` reads anything, so a deployment that blesses a remote venue is told
+	// what is wrong rather than handed a confusing missing-directory message.
+	if (sandboxUnreachableFrom(config)) {
+		return fail(
+			err,
+			`pi-dispatch sandbox opens a shell on THIS host's docker daemon against the job's retained directory, so it cannot reach a job that ran in a remote venue (PI_BACKENDS: ${config.backends.join(", ")}). Run it on the host that ran the job.`,
+		);
 	}
 
 	const resolved = resolveSandbox({

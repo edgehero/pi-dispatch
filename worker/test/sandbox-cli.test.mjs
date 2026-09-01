@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { runSandbox } from "../src/sandbox-cli.mjs";
+import { runSandbox, sandboxUnreachableFrom } from "../src/sandbox-cli.mjs";
 
 /**
  * `pi-dispatch sandbox`, driven through its injected seams. Nothing here reaches docker or a terminal:
@@ -180,4 +180,31 @@ test("a pinned row reads as pinned, and a plain one counts down the window", asy
 	const c2 = capture();
 	await runSandbox(["--list"], { env: envWith(root2), deps: c2.deps });
 	assert.match(c2.text(), /24h left/);
+});
+
+test("the sandbox is LOCAL-ONLY, and says so rather than failing on a missing directory (#227)", async () => {
+	// `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer` seam and hard-wired to
+	// this host's docker CLI. It reopens a retained job directory, and `manifest.workspace` is a path on THIS
+	// machine -- for a job that ran in another venue that path either does not exist, or exists and
+	// reproduces a run from the wrong host, silently. INT-SANDBOX-CONTRACT is already "a SIBLING ... never an
+	// amendment"; this is the clause that says which sibling.
+	// A deployment that blesses only local must NOT be refused: that is every deployment today, and a
+	// refusal here would break the command outright.
+	const c = capture({ running: async () => [] });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith("/nope", { PI_BACKENDS: "local" }), deps: c.deps }), 1);
+	assert.doesNotMatch(c.errText(), /remote venue/, "the local-only deployment reaches the ordinary not-found path");
+
+	// The refusal itself is driven as a predicate, because it is unreachable through the CLI while `local`
+	// is the only backend -- and an unreachable rule with no test is one a mutation pass deletes in silence,
+	// which is exactly what happened to the trigger-side remote refusal one slice ago.
+	assert.equal(sandboxUnreachableFrom({ backends: ["local"] }), false);
+	assert.equal(sandboxUnreachableFrom({ backends: ["local", "far"] }), true, "ANY remote venue puts a retained dir out of reach");
+	assert.equal(sandboxUnreachableFrom({ backends: ["far"] }), true);
+	// An UNCONFIGURED deployment is a local one -- `parseBackendList` returns ["local"] for an unset
+	// PI_BACKENDS -- so it must stay reachable. This is the case that would break every existing operator
+	// if the predicate were fail-closed on absence, and it is the one place in this feature where "declares
+	// nothing" does not mean "gets no benefit of the doubt": the deployment did declare, by default.
+	assert.equal(sandboxUnreachableFrom({}), false);
+	// A name nothing implements is unreachable, though: that is a venue this host cannot have run.
+	assert.equal(sandboxUnreachableFrom({ backends: ["not-a-backend"] }), true);
 });

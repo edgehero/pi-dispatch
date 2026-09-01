@@ -2395,10 +2395,10 @@ export function backendChecks(env) {
 		checks.push({ ok: false, label: `PI_EGRESS does not parse, so what this deployment actually gets cannot be determined: ${error.message}`, fix: 'set PI_EGRESS to exactly "0" (off) or "1"/unset (on)' });
 	}
 
-	// The qualifier is not decoration: nothing dispatches on `run.backend` yet, so a bare "Jobs run on"
-	// would be true today only by the coincidence that `local` is the sole entry, and would become a lie the
-	// day a second name is blessed. It comes off when the dispatch lands.
-	checks.push({ ok: true, label: `Jobs run on: ${backends.join(", ")} (run.backend is validated and gated, but nothing dispatches on it yet; every job runs on ${backends[0]})` });
+	// The dispatch landed in slice 4, so the "nothing selects yet" qualifier came off -- and it came off HERE
+	// as well as in the code, because a stale caveat on the one surface that makes the table admissible is
+	// its own kind of false statement.
+	checks.push({ ok: true, label: `Jobs run on: ${backends.join(", ")}${backends.length > 1 ? ` (a trigger that names none runs on ${backends[0]}; run.backend selects)` : ""}` });
 
 	for (const name of backends) {
 		for (const property of PROPERTY_NAMES) {

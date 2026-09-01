@@ -133,3 +133,93 @@ export function containerSpec({
 		dockerExtra: extraFlags,
 	};
 }
+
+/**
+ * The mounts of a spec, rendered as TRANSFERS for a runtime that cannot bind-mount (issue #227).
+ *
+ * A bind mount is not a file copy, and the whole value of this function is that it refuses to pretend
+ * otherwise. `DES-JOB-FILES-VIA-VOLUME-SUBPATH` already recorded the specific loss: `docker cp` "cannot
+ * give `/job` a kernel-enforced read-only mount, which `INT-CONTAINER-JOB-INPUTS` depends on" -- and every
+ * vendor upload API is `docker cp`-shaped. So `binds` says which kind of runtime is asking: a binding one
+ * gets `readOnlyEnforcedBy: "kernel"`, a copying one gets `"convention"`, and the second is a DECLARED
+ * DOWNGRADE rather than a neutral translation. That word is what a conformance suite reads, and what stops
+ * "we upload the files" being mistaken for "the agent cannot rewrite its own instructions".
+ *
+ * `0444` file modes are the second and weaker line, named here so nobody mistakes them for the first: they
+ * bind an agent that respects them and nothing else, whereas the kernel binds one that does not.
+ *
+ * DIRECTION FOLLOWS WRITABILITY, not a list of paths. An earlier draft hardcoded `/workspace` as the only
+ * mount coming back, and that was wrong in a way that would have been silent: `/outbox` and `/session` are
+ * writable too, and the HOST reads both after the container exits -- `collectChain` reads `jobDir/outbox`
+ * for the chain requests the agent wrote (`INT-OUTBOX-CONTRACT`), and `promoteSession` reads
+ * `jobDir/session` for the transcript pi appended to (`REQ-RESUMABLE-SESSION`). An adapter that brought
+ * back only `/workspace` would never enqueue a chained child and would cold-start every resume, both
+ * reporting success. So a mount the container may write is a mount the host may need back, and the rule is
+ * exactly that.
+ *
+ * THE NESTING IS MODELLED, because it is the trap. `session/` nests inside `jobDir` for every job kind, and
+ * `workspace/` and `outbox/` nest for their own kinds, so an adapter that uploads each mount independently
+ * produces a container where `/job/workspace` also exists with a stale copy of the tree -- path-equivalent
+ * to nothing the local backend ever produces, and silently divergent rather than broken. `contains` names,
+ * for each entry, the other container paths whose host path lies inside this one, so an adapter can exclude
+ * them from the upload instead of discovering the overlap in review.
+ *
+ * @param binds  true when the runtime bind-mounts (the local backend); false when it copies.
+ */
+export function transfersFromSpec(spec, { binds = true } = {}) {
+	const mounts = spec?.mounts ?? [];
+	return mounts.map((m) => ({
+		host: m.host,
+		container: m.container,
+		readOnly: m.readOnly === true,
+		// The distinction this function exists for. A bind is enforced by the kernel; a copy is enforced by
+		// whatever the agent chooses to respect, which is not enforcement. `null` where nothing is claimed.
+		readOnlyEnforcedBy: m.readOnly === true ? (binds ? "kernel" : "convention") : null,
+		// Writable means the container may change it, which means the host may need it back. See the header:
+		// `/outbox` and `/session` are both read after the run, and hardcoding `/workspace` missed them.
+		direction: m.readOnly === true ? "in" : "in-out",
+		// Other mounts whose HOST path is nested inside this one, by container path. Uploading this entry
+		// without excluding these duplicates their trees under it.
+		contains: mounts.filter((o) => isInside(m.host, o.host)).map((o) => o.container),
+	}));
+}
+
+/**
+ * Is `inner` a host path strictly beneath `outer`?
+ *
+ * SEPARATOR-AGNOSTIC, because host paths are built with `path.join` (`join(jobDir, "workspace")`) and this
+ * worker runs on Windows -- where those are backslash-separated while an earlier draft compared against a
+ * hardcoded `/`. That draft reported NO nesting at all on Windows, which is precisely the platform where a
+ * silently divergent upload would be hardest to spot. The container paths above are always `/`-built and
+ * are not the ones compared here.
+ *
+ * A trailing separator on either side is ignored, and equality is not containment.
+ */
+function isInside(outer, inner) {
+	const strip = (v) => String(v ?? "").replace(/[\\/]+$/, "");
+	const a = strip(outer);
+	const b = strip(inner);
+	if (a === "" || a === b) return false;
+	const next = b.charAt(a.length);
+	return b.startsWith(a) && (next === "/" || next === "\\");
+}
+
+/**
+ * What an adapter LOSES by copying instead of bind-mounting, as `[{ container, was, becomes }]`.
+ *
+ * Empty for a runtime that binds. Non-empty is not a failure: it is the list an adapter must declare, and
+ * the reason `readOnlyJobInputs` is a property in the backend table at all rather than an assumption. An
+ * adapter that returns entries here and still declares `readOnlyJobInputs: enforced` is making exactly the
+ * claim `CONST-EGRESS-POLICY-IN-THE-ARGV` calls worse than no claim.
+ *
+ * NOTHING READS THIS YET, and that is worth saying rather than leaving to be discovered: it is an
+ * adapter-facing contract whose consumer is the conformance suite, and until that exists it is a contract
+ * and not a control -- the same thing the backend table's own header says about its words.
+ */
+export function copyDowngrades(spec) {
+	const bound = transfersFromSpec(spec, { binds: true });
+	const copied = transfersFromSpec(spec, { binds: false });
+	return bound
+		.map((b, i) => ({ container: b.container, was: b.readOnlyEnforcedBy, becomes: copied[i].readOnlyEnforcedBy }))
+		.filter((d) => d.was !== null && d.was !== d.becomes);
+}

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, JOB_NAME_PREFIX, jobContainerName, makeLocalBackend } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, JOB_NAME_PREFIX, jobContainerName, makeLocalBackend, makeReaper, makeStopContainer } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 
-const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}) });
+const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) });
 
 test("container-spec.mjs is a LEAF -- it imports nothing", () => {
 	// Not in backends.test.mjs because it is a different module's property, and it is load-bearing from the
@@ -53,7 +53,7 @@ test("an incomplete bundle is REFUSED, and the refusal names what is missing", (
 		delete parts[key];
 		assert.throws(() => makeLocalBackend(parts), new RegExp(`missing ${key}`), key);
 	}
-	assert.throws(() => makeLocalBackend({}), /missing runContainer, imagePreflight, egressPreflight/);
+	assert.throws(() => makeLocalBackend({}), /missing runContainer, imagePreflight, egressPreflight, stopContainer, reap/);
 	assert.throws(() => makeLocalBackend(), /missing runContainer/, "no argument at all is the same refusal, not a TypeError");
 	assert.throws(() => makeLocalBackend(null), /missing runContainer/);
 });
@@ -65,14 +65,23 @@ test("a non-callable member is refused even though the key is present", () => {
 	}
 });
 
-test("a DEFERRED member is refused by name, never silently dropped", () => {
-	// An adapter author who supplies `stopContainer` has read the issue and expects it wired. Dropping it
-	// would leave them believing a runaway job can be stopped through their backend while the abort path
-	// still goes straight to the local docker CLI -- the believed-in control, arriving through an ignored
-	// argument. The message says "not yet", which is a different instruction from "unknown".
-	assert.throws(() => makeLocalBackend({ ...fns(), stopContainer: () => {} }), /stopContainer is not part of the bundle yet/);
-	assert.throws(() => makeLocalBackend({ ...fns(), reap: () => {} }), /reap is not part of the bundle yet/);
+test("the two once-deferred members are now REQUIRED, and an unknown one is still refused", () => {
+	// An earlier slice refused `stopContainer` and `reap` BY NAME, because accepting and dropping them
+	// would leave an adapter author believing a runaway job could be stopped through their backend while
+	// the abort path still called docker directly. The seam is real now, so they are required rather than
+	// refused -- and a bundle missing either is refused for the reason every member is.
+	assert.ok(BACKEND_FUNCTIONS.includes("stopContainer") && BACKEND_FUNCTIONS.includes("reap"));
+	assert.doesNotThrow(() => makeLocalBackend(fns()));
 	assert.throws(() => makeLocalBackend({ ...fns(), nonsense: 1 }), /unknown bundle member "nonsense"/);
+});
+
+test("the bundle carries the abort path and the boot sweep, which used to be unreachable from it", () => {
+	// `stopContainer` was a literal inside index.mjs's createWorker and `reap` lived in start.mjs, so the
+	// only two functions that can end a runaway job or clear a crashed worker's strays were the two a
+	// second backend could never provide. That is why `abortable` was declared in the table before this.
+	const b = makeLocalBackend(fns());
+	assert.equal(typeof b.stopContainer, "function");
+	assert.equal(typeof b.reap, "function");
 });
 
 test("the completeness check proves ARITY and is not credited with more", () => {
