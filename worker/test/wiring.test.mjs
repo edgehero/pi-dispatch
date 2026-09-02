@@ -353,7 +353,13 @@ test("prepareWorkspace receives (effectiveJob, token, { queueJobId: <real BullMQ
 	const result = await processor(job, "tok", new AbortController().signal);
 
 	assert.equal(result.outcome, "completed");
-	assert.deepEqual(received.opts, { queueJobId: "repeat:t:1758868620000" }, "the real wrapper's id reaches prepare as queueJobId");
+	// BOTH keys, not an exact-shape deepEqual on `{ queueJobId }` alone. That assertion is what let a real
+	// defect live: the wrapper REPLACED runJob's third argument instead of extending it, so `piVersion`
+	// never arrived, `readCanonical`'s `if (piVersion === null) return COLD("pi-version-changed")` fired on
+	// every job, and every `run.resume` cold-started while reporting success -- with this test green,
+	// because it pinned the replaced shape as correct.
+	assert.equal(received.opts.queueJobId, "repeat:t:1758868620000", "the real wrapper's id reaches prepare as queueJobId");
+	assert.ok("piVersion" in received.opts, "and runJob's own options survive the wrapper (REQ-RESUMABLE-SESSION)");
 	assert.notEqual(received.job, job, "prepare receives the effectiveJob (a spread of job.data), not the raw wrapper");
 	assert.equal(received.job.kind, "local");
 	assert.deepEqual(received.job.trigger, { id: "t", pattern: "0 3 * * *" }, "the cron-only trigger data field rides the effectiveJob");
@@ -654,4 +660,39 @@ test("the abort resolves the venue from job.DATA, not the BullMQ wrapper (#227)"
 	await run.catch(() => {});
 	assert.equal(seen?.backend, "far", "the abort must reach the venue the trigger named, not the default");
 	assert.match(seen?.name ?? "", /-far$/, "and the NAME must be built by that same venue");
+});
+
+test("the prepareWorkspace wrapper EXTENDS runJob's options instead of replacing them (#227)", async () => {
+	// The bug this pins made every `run.resume` cold-start on every wired worker, silently. `runJob` calls
+	// `prepareWorkspace(job, token, { piVersion })`, and the wrapper passed only `{ queueJobId }` -- so
+	// `piVersion` arrived undefined, defaulted to null, and `readCanonical`'s first gate is
+	// `if (piVersion === null) return COLD("pi-version-changed")`. The stamp `promoteSession` wrote was
+	// correct the whole time; the comparison never happened. REQ-RESUMABLE-SESSION was inert.
+	//
+	// It survived because the processor tests inject `prepareWorkspace` directly and never reach this
+	// wrapper -- so the assertion has to be on what the WRAPPER forwards, not on what runJob passes.
+	const mod = await import("../src/index.mjs");
+	let opts = null;
+	const processor = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: async () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs: 100000,
+		deps: {
+			log: () => {},
+			// The image declares a version; the processor threads it into prepareWorkspace's options.
+			imagePreflight: async () => ({ piVersion: "1.2.3" }),
+			prepareWorkspace: async (_j, _t, o) => {
+				opts = o;
+				throw new Error("stop here");
+			},
+			comment: async () => {},
+			cleanup: async () => {},
+		},
+		recordRun: () => {},
+	});
+	await processor({ id: "j1", data: { id: "j1", kind: "local", folder: "/p", flow: "f", task: "t" } }, "tok", new AbortController().signal).catch(() => {});
+	assert.equal(opts?.piVersion, "1.2.3", "the image's pi version must survive the wrapper, or no session ever resumes");
+	assert.equal(opts?.queueJobId, "j1", "and the wrapper's own injection is still there");
 });

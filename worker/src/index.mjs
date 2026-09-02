@@ -693,12 +693,23 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// job.data with no `.id` -- and the real wrapper is only in scope here, so inject it as
 				// `queueJobId`, mirroring the collectChain injection above. Omitted when unwired so a bare
 				// processor keeps runJob's plain (job, token) call.
-				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t) => deps.prepareWorkspace(j, t, { queueJobId: job.id }) } : {}),
+				// The third argument is EXTENDED, never replaced. `runJob` calls this as
+				// `prepareWorkspace(job, token, { piVersion })`, so a wrapper passing only `{ queueJobId }`
+				// dropped it -- and `piVersion` defaults to `null`, which `readCanonical` treats as
+				// "never resume": `if (piVersion === null) return COLD("pi-version-changed")`. So EVERY
+				// `run.resume` cold-started, on every wired worker, while reporting success. The stamp
+				// `promoteSession` writes was correct the whole time; the comparison simply never happened.
+				// The processor tests inject `prepareWorkspace` directly and never see this wrapper, which is
+				// why nothing caught it (REQ-RESUMABLE-SESSION).
+				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t, opts) => deps.prepareWorkspace(j, t, { ...opts, queueJobId: job.id }) } : {}),
 				// The one-shot pre-spend check (issue #231) needs the REAL BullMQ job's `.id` to excuse this
 				// delivery's own earlier attempt -- runJob's effectiveJob has no `.id`, prepareWorkspace's
 				// own injection above states why, and this one mirrors it. Omitted when unwired so a bare
 				// processor keeps runJob's admit-everything default.
-				...(deps.checkOnceSpent ? { checkOnceSpent: (j) => deps.checkOnceSpent(j, { queueJobId: job.id }) } : {}),
+				// Same extend-don't-replace shape as `prepareWorkspace` above, for its reason: `runJob` passes
+				// this one no options today, so there is nothing to lose yet -- and the day it does, a
+				// replacing wrapper would lose it in the same silence.
+				...(deps.checkOnceSpent ? { checkOnceSpent: (j, opts) => deps.checkOnceSpent(j, { ...opts, queueJobId: job.id }) } : {}),
 			});
 			recordRun({ job, result, startedAt, endedAt: new Date().toISOString() });
 			return result;
