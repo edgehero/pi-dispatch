@@ -354,9 +354,9 @@ Stated openly rather than discovered later:
   its own children, but it does **not** stop a later AI-initiated run of the planted flow. Both halves
   hold; neither is undo.
 - **A prompt injection in the operator's session can invoke `dispatch_run` — a paid run with no undo, and
-  it is NOT money-safe.** `dispatch_run` is a **third** model-callable tool alongside reads and
-  `pause`/`resume`, and unlike them it spends money editing a folder in place with no undo — an explicit
-  break from the pause/resume "money-safe" framing that governs the other tools. It is bounded in
+  it is NOT money-safe.** `dispatch_run` is an *enqueue*, a third kind of model-callable tool beside the
+  reads and the queue controls, and unlike either it spends money editing a folder in place with no undo —
+  an explicit break from the "money-safe" framing that governs `pause`/`resume`. It is bounded in
   blast-radius, not prevented, by **six** independent limits: the folder allowlist `PI_DISPATCH_RUN_ROOTS`
   (realpath + containment); the committed per-flow opt-in (default deny, read at a pre-agent SHA); the
   dirty-tree refusal (no force option); no spend-knob parameters on the tool; a per-hour rate limit; and
@@ -368,6 +368,21 @@ Stated openly rather than discovered later:
   capability this bullet is bounding. Anything else in the file is dropped silently, and the pointer never
   overwrites a variable you exported yourself.
   Do not read `dispatch_run` as money-safe or reversible — it is neither.
+
+- **The model can also reach a set of confirm-gated WRITE tools, and some of them move spend limits.**
+  Named here because this page previously described the model-callable surface as reads plus
+  `pause`/`resume` plus `dispatch_run`, which stopped being true when the trigger, pause-window and
+  scoped-limit CRUD shipped (issue #280). The full inventory lives in `REQ-ADMIN-VIA-PI-EXTENSION` and is
+  scanned against the code by `admin/test/wiring.test.mjs`, so it is not re-listed here: a second copy on
+  this page is exactly how the first claim went stale. What matters for a threat model is the shape. These
+  tools can raise a spend cap, add a paid trigger, open or move a pause window, set a per-scope limit, or
+  cancel a held job, so **"money-safe" does not describe them either** — only `pause`/`resume` earns that
+  word. What bounds them is not reversibility and not structure but a **human keypress**: each routes
+  through one `confirmedWrite` funnel that refuses unless an interactive operator is present (`ctx.hasUI`)
+  **and** approves a dialog showing the concrete before/after. A prompt-injected session emits the *call*;
+  it cannot forge the *approval*, and in a print or headless session the write is refused rather than
+  silently applied. The residual is therefore an operator who approves a dialog without reading it, which
+  is a real residual and is named rather than argued away.
 
 - **A resumed session hands one job's transcript to the next job on the same key.** With
   `"resume": true` on a trigger, the agent's full working history — tool output, file contents, its own

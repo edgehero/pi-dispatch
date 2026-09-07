@@ -257,10 +257,13 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
 });
 
 /**
- * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): seven reads
+ * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): the reads
  * (`dispatch_status`/`_runs`/`_costs`/`_triggers`/`_pauses`/`_limits`/`_waits`), the on/off controls
- * (`_pause`/`_resume`), the gated PAID enqueue (`_run`), and eleven confirm-gated writes (`_set`, the
- * trigger, pause-window and scoped-limit CRUD, and `_wait_cancel`). Two invariants are locked here: there
+ * (`_pause`/`_resume`), the gated PAID enqueue (`_run`), and the confirm-gated writes (`_set`, the
+ * trigger, pause-window and scoped-limit CRUD, and `_wait_cancel`). No count words: the arrays below are
+ * the inventory, and a number beside them would be the second unchecked claim that caused issue #280 --
+ * in this very comment, which said "eleven" while the array three lines down said twenty-one. Two
+ * invariants are locked here: there
  * is still NO raw-log tool (no name contains "log"), and every WRITE tool is `sequential` so two writes
  * cannot interleave. This test is the deliberate record that model-callable writes were added on purpose
  * -- gated by an operator confirm (behaviour proven in crud.test.mjs), not tool absence.
@@ -937,10 +940,16 @@ function specEnumerationRegion({ file, heading, field }) {
   const lines = readFileSync(path, "utf8").split("\n");
   const start = lines.indexOf(heading);
   assert.notEqual(start, -1, `${file}: the heading ${heading} is gone -- this scan cannot find its subject`);
-  const fieldAt = lines.findIndex((l, i) => i > start && l.startsWith(field));
-  assert.notEqual(fieldAt, -1, `${file}: ${heading} no longer has a ${field} line`);
-  let end = lines.findIndex((l, i) => i > fieldAt && l.startsWith("- **"));
-  if (end === -1) end = lines.length;
+  // Bounded by the NEXT `## ` heading, not just by "after this one". An unbounded search walks into the
+  // following entry when this one's field is renamed away, and then reports a content failure -- telling a
+  // maintainer to add twenty-one names to an entry that already has them. Structural breakage has to be
+  // diagnosed as structural.
+  let entryEnd = lines.findIndex((l, i) => i > start && l.startsWith("## "));
+  if (entryEnd === -1) entryEnd = lines.length;
+  const fieldAt = lines.findIndex((l, i) => i > start && i < entryEnd && l.startsWith(field));
+  assert.notEqual(fieldAt, -1, `${file}: ${heading} no longer has a ${field} line -- this scan reads that field and cannot find it`);
+  let end = lines.findIndex((l, i) => i > fieldAt && i < entryEnd && l.startsWith("- **"));
+  if (end === -1) end = entryEnd;
   const region = lines.slice(fieldAt, end).join("\n");
   assert.ok(region.trim().length > 0, `${file}: the ${field} region under ${heading} is empty`);
   return region;

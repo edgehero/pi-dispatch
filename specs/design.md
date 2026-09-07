@@ -1355,7 +1355,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Decision**: The admin surface is a **pi extension** shipped in an `admin/` workspace, loaded into the
   operator's own interactive pi session (via `-e`, `~/.pi/agent/extensions`, or a trust-gated
   `.pi/extensions`). It provides operator-only slash commands
-  (`/dispatch status|pause|resume|runs|logs|budget|triggers|insights|settings|set|unset`) and one
+  (`/dispatch status|pause|resume|run|runs|logs|budget|insights|triggers|settings|set|unset|setup|secrets`,
+  the order `KNOWN_SUBCOMMANDS` declares them in) and one
   self-refreshing TUI overlay component with **four in-component views**: **LIST** — a framed,
   **theme-colored** panel (color via pi's injected `Theme`, applied post-layout so pi's ANSI-aware
   `visibleWidth` still frames it) carrying a status header, day/week/month **SPEND meters** (colored by the
@@ -1467,9 +1468,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     A **second residual is named but is NOT money-safe**, and is bounded by structure rather than by
     reversibility: a prompt injection in the operator's session can invoke **`dispatch_run`**, which
     enqueues a **paid** run that edits a folder in place with no undo. This **supersedes the Decision's
-    "reads plus `pause`/`resume` only" categorical** — `dispatch_run` is a **third** model-callable tool,
-    an enqueue, admitted under `DES-AI-TRIGGER-FLOW-GATE` and its companion requirement (the
-    `requirements.md` amendment lands in a sibling task). `dispatch_run` still takes no spend knobs. The
+    "reads plus `pause`/`resume` only" categorical** — `dispatch_run` is an *enqueue*, a third KIND of
+    model-callable tool beside the reads and the queue controls, admitted under `DES-AI-TRIGGER-FLOW-GATE`
+    and its companion requirement. "Third" is the kind, never a running count of tools: the Decision's list
+    is the inventory, and it is scanned rather than counted. `dispatch_run` still takes no spend knobs. The
     injected call is bounded by six independent limits, not by
     undo: (1) the operator-preconfigured **folder allowlist** (`PI_DISPATCH_RUN_ROOTS`, realpath +
     containment) — the tool can fire only inside folders the operator chose; (2) the **per-flow committed
@@ -1480,9 +1482,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     widen per-job spend; (5) a **per-hour rate limit** on `dispatch_run`; and (6) the **daily cap**
     (`CONST-BUDGET-BEFORE-TOKENS`), the ultimate money bound, resolved consumer-side in the processor. The
     money-safe framing therefore applies only to `dispatch_pause`/`dispatch_resume`, not to `dispatch_run`.
-    A **third residual is named and bounded by a human confirm, not by structure**: the model-callable write
-    tools `dispatch_set` and `dispatch_trigger_add`/`_edit`/`_delete` can change a limit (the daily cap
-    included) or add a paid trigger. Each routes through `confirmedWrite`, which **refuses unless the operator
+    A **third residual is named and bounded by a human confirm, not by structure**: **every** confirm-gated
+    write tool the Decision lists -- deliberately not re-enumerated here, because this paragraph carried its
+    own copy of that list and the copy went stale at four names while eleven shipped (issue #280), and the
+    scan that now pins the Decision's list does not read this field -- can change a limit (the daily cap
+    included), add a paid trigger, open or move a pause window, set a per-scope spend cap, or cancel a held
+    job. Each routes through `confirmedWrite`, which **refuses unless the operator
     is present** (`ctx.hasUI`) **and approves a `ctx.ui.confirm` dialog showing the concrete before/after** —
     so a prompt-injected session emits only the *call*; the *approval* is a human keypress it cannot forge,
     and with no interactive UI (print/headless) the write is refused, not silently applied. This is the same
