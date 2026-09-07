@@ -444,3 +444,53 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 	assert.ok(template.includes("still inside the template"), "a multiline template was cut at its first newline");
 	assert.ok(!template.includes("PI_TAIL"), "the comment after the template survived");
 });
+
+/**
+ * The parser above is hand written, and four rounds of fixes on it shared one property: every defect was
+ * LATENT. The suite was green before and after each one, because nothing in this tree happened to use the
+ * literal forms that broke it, so a green run was never evidence the parsing was right.
+ *
+ * This asks a real parser instead of arguing. Be precise about what it buys, because it does NOT close
+ * that gap: a defect no file triggers is invisible here too. What it does is remove the need for anyone
+ * to THINK of the case. The day a file arrives using a form the hand parser gets wrong, this fails on
+ * that commit rather than years later, and it was measured: with template expressions broken, this test
+ * passes on today's tree and fails the moment a file using `` /`/ `` inside a `${}` is added.
+ *
+ * esbuild is already installed for the admin bundle. When it cannot be resolved the check skips rather
+ * than failing, on the same principle as the other conditional tests here.
+ */
+let esbuild = null;
+try {
+	esbuild = (await import("esbuild")).default;
+} catch {
+	// no esbuild in this install: the cross-check skips, the rest of the file still runs
+}
+
+test("the hand written stripper agrees with a real parser on every file in the tree", { skip: esbuild ? false : "esbuild is not installed" }, () => {
+	const namesIn = (code) => {
+		const found = new Set();
+		for (const re of READ_PATTERNS) {
+			re.lastIndex = 0;
+			for (let m; (m = re.exec(code)) !== null; ) found.add(m[1]);
+		}
+		return found;
+	};
+	const invented = [];
+	const missed = [];
+	for (const f of allSources()) {
+		const src = readFileSync(f, "utf8");
+		let real;
+		try {
+			real = namesIn(esbuild.transformSync(src, { loader: f.endsWith(".ts") ? "ts" : "js", legalComments: "none" }).code);
+		} catch {
+			continue; // a file esbuild will not parse is not this test's business
+		}
+		const mine = namesIn(stripComments(src));
+		for (const n of mine) if (!real.has(n)) invented.push(`${rel(f)}: ${n}`);
+		for (const n of real) if (!mine.has(n)) missed.push(`${rel(f)}: ${n}`);
+	}
+	// Invented is the failure that matters: a name the stripper sees and a real parser does not is a
+	// comment leaking into the scan, which fails this file's first test on a tree that is correct.
+	assert.deepEqual(invented.sort(), [], "the stripper found reads a real parser does not: a comment is leaking");
+	assert.deepEqual(missed.sort(), [], "a real parser found reads the stripper missed");
+});
