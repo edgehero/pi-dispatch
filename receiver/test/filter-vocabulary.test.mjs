@@ -5,6 +5,7 @@ import { PR_ACTIONS as GITHUB_ROUTED } from "../src/filter.mjs";
 import { MR_ACTIONS as GITLAB_ROUTED } from "../src/filter-gitlab.mjs";
 import { PR_ACTIONS as FORGEJO_ROUTED } from "../src/filter-forgejo.mjs";
 import { PR_ACTION_FOR } from "../src/filter-azure.mjs";
+import { PR_EVENTS } from "../src/azure-subset.mjs";
 import { mapAction } from "../src/forgejo-subset.mjs";
 
 /**
@@ -32,8 +33,9 @@ test("github's routed PR actions are the loader's github set minus the close wor
 	// Both exclusions are ROUTES, not gaps: `closed` reaches findCloseRule and `review_submitted` its own
 	// arm on the pull_request_review event, so neither belongs in the action gate.
 	assert.deepEqual(GITHUB_ROUTED, minus(LOADER_PR_ACTIONS.github, PR_CLOSE_ACTIONS.github, "review_submitted"));
-	// Asserted as absences too, so a future "fix" that closes the apparent gap by adding them -- and
-	// thereby double-routes a close or a review -- fails here rather than in production.
+	// Restated as absences for the reader, because "minus two things" is the whole content of this pin and
+	// a diff that adds one should be met by a line naming it. The deepEqual above is what actually fails;
+	// these say WHICH exclusion was lost, and that a close double-routed through this gate is the harm.
 	assert.equal(GITHUB_ROUTED.has(PR_CLOSE_ACTIONS.github), false, "the close word is routed by findCloseRule, never by this gate");
 	assert.equal(GITHUB_ROUTED.has("review_submitted"), false, "a submitted review has its own arm");
 });
@@ -63,4 +65,9 @@ test("azure's event-to-action map has the loader's azure vocabulary as its value
 	// apart, so there is no close word to subtract. If one is ever added, this line is the reminder that
 	// this test must gain a subtraction like its three siblings.
 	assert.equal(PR_CLOSE_ACTIONS.azure, undefined, "azure has no close word -- INT-AZURE-PAYLOAD-SUBSET is the gap");
+	// The KEYS are a second table, restating azure-subset's PR_EVENTS -- and this file already imports
+	// that set, so the copy bought nothing. routePullRequest gates on PR_EVENTS.has(event) and then
+	// indexes PR_ACTION_FOR[event], so an event added to one and not the other arrives with an undefined
+	// action: fail-closed, but silent, which is the same "loads clean, never fires" class as the values.
+	assert.deepEqual(new Set(Object.keys(PR_ACTION_FOR)), PR_EVENTS, "the routed events must be exactly the recognized ones");
 });

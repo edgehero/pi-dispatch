@@ -1039,5 +1039,11 @@ test("the dispatch_trigger_add description states each forge's vocabulary exactl
     );
   }
   assert.ok(description.includes([...REVIEW_STATES].join("|")), "reviewState's vocabulary is stated too");
-  for (const kind of ON_TYPES) assert.match(description, new RegExp(`\\b${kind}\\b`), `the model must know the kind ${kind} exists`);
+  // Against the `kind` = ... clause specifically, NOT the whole description. A bare word search here is
+  // vacuous: all five kinds occur incidentally in the surrounding prose ("issue fires when an ISSUE
+  // closes", "label needs labels[]+flow"), so deleting the entire enumeration left a `\bkind\b` scan
+  // green. Verified by deleting it.
+  const kindClause = description.match(/`kind` = ([a-z|_]+)/);
+  assert.ok(kindClause, "the description must state the kinds as a `kind` = a|b|c clause for this pin to read");
+  assert.deepEqual(kindClause[1].split("|").sort(), [...ON_TYPES].sort(), "the model is told exactly the kinds the loader accepts");
 });

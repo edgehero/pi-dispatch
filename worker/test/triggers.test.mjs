@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { FORGE_HOST_VARS, MINTED_TOKEN_VARS } from "../src/forges.mjs";
 import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
-import { parseTriggers } from "../src/triggers.mjs";
+import { PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
 
 // parseTriggers is pure over the file TEXT -- no fs, no bullmq. `parse` serializes triggers and feeds
 // them through with a stable path for the "names the path" assertions.
@@ -1373,5 +1375,33 @@ test("an issue one-shot is orthogonal to the run vocabulary -- each field surviv
 		const [t] = parse([withRun(ISSUE_ONCE, over)]);
 		check(t.run);
 		assert.deepEqual(t.on, { type: "issue", action: ["closed"], number: 40, once: true }, `${Object.keys(over).join("+")} must not disturb the on`);
+	}
+});
+
+/**
+ * `INT-TRIGGERS-FILE-CONTRACT`'s per-forge action vocabulary, against the table that enforces it.
+ *
+ * This entry is the contract an operator or an agent reads to learn what a trigger may SAY, and it had
+ * drifted in the most consequential direction available to it: it named `github` and `gitlab` and stopped,
+ * while four forges shipped -- so a reader would conclude that two of the four accept no pull-request
+ * actions at all. Worse, this file's own revision history recorded the two missing vocabularies as having
+ * been added, so the history asserted content the body did not contain.
+ *
+ * Scanned rather than re-read by a human, on `admin/test/wiring.test.mjs`'s precedent (issue #280): the
+ * bullet names the forge and its words, and this reproduces that string from `PR_ACTIONS` and requires it
+ * to be present. It is the vocabulary's fifth copy in the tree and the last one that was unguarded.
+ */
+test("INT-TRIGGERS-FILE-CONTRACT states every forge's action vocabulary, in the loader's own words", () => {
+	const spec = readFileSync(fileURLToPath(new URL("../../specs/interfaces.md", import.meta.url)), "utf8");
+	const marker = "- **`run.kind` selects the forge; `on.type` is shared.**";
+	const start = spec.indexOf(marker);
+	assert.notEqual(start, -1, "the bullet this scan reads is gone from INT-TRIGGERS-FILE-CONTRACT");
+	const end = spec.indexOf("\n- **", start + marker.length);
+	const region = spec.slice(start, end === -1 ? undefined : end);
+	for (const [forge, actions] of Object.entries(PR_ACTIONS)) {
+		assert.ok(
+			region.includes(`\`${[...actions].join("|")}\``),
+			`${forge}: the contract must spell its vocabulary as the loader validates it -- a forge the entry does not name reads as a forge that takes no actions, which is how two of four went missing`,
+		);
 	}
 });

@@ -51,9 +51,11 @@ test("the runner's retyped EXIT_POLICY is the same integer -- the container cann
 
 test("every service unit refuses to restart EXIT_POLICY, by its own spelling of the number", () => {
 	for (const unit of ["deploy/worker.service", "deploy/receiver.service"]) {
-		assert.match(repoFile(unit), new RegExp(`RestartPreventExitStatus=${EXIT_POLICY}\\b`), `${unit} must not restart a determinate refusal`);
+		// Anchored to the start of a line: unanchored, a COMMENTED-OUT directive satisfies the match, and
+		// both of these files carry prose mentioning the setting a few lines above the setting itself.
+		assert.match(repoFile(unit), new RegExp(`^RestartPreventExitStatus=${EXIT_POLICY}$`, "m"), `${unit} must not restart a determinate refusal`);
 	}
-	assert.match(repoFile("deploy/nssm-install.cmd"), new RegExp(`AppExit ${EXIT_POLICY} Exit`), "nssm must not restart a determinate refusal");
+	assert.match(repoFile("deploy/nssm-install.cmd"), new RegExp(`^nssm set %SERVICE% AppExit ${EXIT_POLICY} Exit$`, "m"), "nssm must not restart a determinate refusal");
 });
 
 test("both wrappers convert EXIT_POLICY to a clean exit, keyed on the constant's value", () => {

@@ -9,9 +9,12 @@ test("render.mjs has no path to raw .log content", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/render.mjs", import.meta.url)), "utf8");
   // A renderer has no I/O: no fs read and no call into the log tail. (A doc comment may name `.log`;
   // what matters is that no code path reads one.) The ban is on THIS module's own reads, not on its
-  // import graph: it imports the worker's KNOWN_KEYS and budget helpers, which reach node:fs
-  // transitively, and that has always been true of the budget import. What must stay absent is a read
-  // written here.
+  // import graph -- and that distinction became load-bearing rather than academic when render.mjs began
+  // importing the worker's KNOWN_KEYS. Before that its whole graph was render -> panel -> budget, which
+  // reaches NO node builtin; runtime-settings pulls in config.mjs and with it node:fs, node:os, node:path
+  // and node:child_process. Admissible, and checked rather than assumed: none of those modules executes a
+  // top-level statement, so importing render.mjs performs no read and touches no env. What must stay
+  // absent is a read written HERE, which is what this regex sees.
   assert.ok(
     !/readLogTail|readFileSync|\breadFile\b|require\(|import\s+.*node:fs/.test(src),
     "renderers must never read raw log content -- that surface belongs to the overlay viewer only",
@@ -292,7 +295,7 @@ test("renderTriggers reports an unreachable scheduler read", () => {
   assert.match(renderTriggers({ schedulers: { unreachable: "down" }, triggers: { triggers: [] } }), /unreachable \(down\)/);
 });
 
-test("renderSettingsView lists all ten keys, unset ones marked", () => {
+test("renderSettingsView lists every overlay key, unset ones marked", () => {
   const out = renderSettingsView({ path: "/s", overlay: { model: "claude", dailyCap: 5, weeklyCap: 100, softHoldPct: 80, maxTokens: 500000 } });
   assert.match(out, /Settings \(\/s\)/);
   assert.match(out, /model: claude/);
