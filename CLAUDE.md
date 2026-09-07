@@ -32,6 +32,7 @@ Two consequences worth internalising before you design anything:
 | `deploy/` | service units, wrappers and the compose file; `worker/deploy/` is the published mirror |
 | `specs/` | constitution, requirements, design, interfaces, open questions. The source of truth |
 | `docs/` | operator-facing reference, one file per feature or forge |
+| `launch/` | launch copy and the demo recording recipe. Maintainer material, deliberately not in `docs/` |
 
 ## Read these before changing behaviour
 

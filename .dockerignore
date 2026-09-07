@@ -23,6 +23,7 @@
 
 # Docs, specs, planning, editor/agent tooling -- prose and provenance, not runtime.
 docs
+launch
 specs
 examples
 .plan-artifacts

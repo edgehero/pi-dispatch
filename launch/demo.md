@@ -32,10 +32,10 @@ finish, then record.
 
 ## Option A — vhs (recommended for a crisp GIF)
 
-`brew install vhs` (or see its README). Save as `docs/demo.tape`:
+`brew install vhs` (or see its README). Save as `launch/demo.tape`:
 
 ```tape
-# docs/demo.tape
+# launch/demo.tape
 Output docs/images/dispatch-demo.gif
 Set FontSize 15
 Set Width 1200
@@ -59,7 +59,7 @@ Type "q"
 Sleep 1s
 ```
 
-Then: `vhs docs/demo.tape` → produces `docs/images/dispatch-demo.gif`.
+Then: `vhs launch/demo.tape` → produces `docs/images/dispatch-demo.gif`.
 
 **Why `Tab` and not a row of `Down`s.** Selection is one flat list, triggers first and then runs, so a blind
 `Down` count only lands where you meant it against the exact fixture you recorded on. `Tab` jumps between the
@@ -72,9 +72,9 @@ below them. Record at the `Set Height` above, on a fixture you control.
 ## Option B — asciinema + agg (records a real session)
 
 ```bash
-asciinema rec docs/dispatch-demo.cast --cols 120 --rows 40
+asciinema rec launch/dispatch-demo.cast --cols 120 --rows 40
 #   ... do the walkthrough above, then exit the shell (Ctrl-D) ...
-agg --font-size 15 --theme dracula docs/dispatch-demo.cast docs/images/dispatch-demo.gif
+agg --font-size 15 --theme dracula launch/dispatch-demo.cast docs/images/dispatch-demo.gif
 ```
 
 An `.cast` file can also be uploaded to asciinema.org and embedded (autoplaying) in the README.
