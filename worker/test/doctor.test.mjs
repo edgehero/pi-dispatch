@@ -2540,3 +2540,155 @@ test("an unreadable registry is SAID, never silently absent", async () => {
 	assert.ok(c);
 	assert.equal(c.ok, true, "not knowing is not a fault of this host");
 });
+
+// ── issue #290: the durable-state block ──────────────────────────────────────────────────────────────
+
+const stateSeams = (extra = {}) =>
+	collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true, ...extra });
+const durable = (checks) => checks.filter((c) => /^Durable state:/.test(c.label));
+const tempWarn = (checks) => checks.filter((c) => /points? into the OS temp dir/.test(c.label));
+
+test("a default deployment reports its durable state on ONE green line", async () => {
+	// A home OUTSIDE the OS temp dir, and stated rather than mkdtemp'd: a home under <tmp> really is a
+	// swept location, so a temp-rooted fixture would exercise the warn branch while claiming to test the
+	// green one. No disk is needed -- the check reads paths and one fileExists.
+	const home = "/home/u";
+	const checks = await collectChecks({}, stateSeams({ home, fileExists: () => true }));
+	const lines = durable(checks);
+	assert.equal(lines.length, 1, "one line, not one per variable");
+	assert.equal(lines[0].ok, true);
+	assert.ok(!lines[0].warn, "a durable default is not a warning");
+	assert.equal(tempWarn(checks).length, 0);
+	assert.equal(durable(checks)[0].fixAction, undefined, "the never tier: doctor does not move records");
+});
+
+test("a run history under the OS temp dir warns, prints a fix, and does NOT fail doctor", async () => {
+	const swept = join(tmpdir(), "pi-swept-logs");
+	const checks = await collectChecks({ PI_LOGS_DIR: swept }, stateSeams());
+	const warns = tempWarn(checks);
+	assert.equal(warns.length, 1);
+	assert.equal(warns[0].ok, false, "ok:false is what renders the ⚠ AND its fix line");
+	assert.equal(warns[0].warn, true, "warn:true is what keeps it out of doctor's failure set");
+	assert.match(warns[0].label, /PI_LOGS_DIR/);
+	assert.ok(!warns[0].label.includes("PI_SETTINGS_FILE"), "only the variable that actually hit is named");
+	assert.equal(typeof warns[0].fix, "string");
+	assert.ok(warns[0].fix.length > 0, "an ok:false check DOES print its fix, so it must have one");
+	assert.equal(warns[0].fixAction, undefined);
+});
+
+test("the temp warning is a WARNING: doctor still exits 0 (the tier pinned by consequence)", async () => {
+	// Field inspection cannot make this claim -- render()'s failed rule is what turns (ok,warn) into an
+	// exit code, and that is the thing an operator actually experiences. Drive the whole command.
+	const { out, text } = capture();
+	const code = await runDoctor(
+		{ PI_LOGS_DIR: join(tmpdir(), "pi-swept-exit"), PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-fake" },
+		{ ...stateSeams(), out },
+	);
+	assert.match(text(), /points into the OS temp dir/);
+	assert.equal(code, 0, "a swept state dir is worth a warning, never a refusal to run");
+});
+
+test("both variables under temp produce ONE line naming both, pluralised", async () => {
+	const checks = await collectChecks(
+		{ PI_LOGS_DIR: join(tmpdir(), "pi-a"), PI_SETTINGS_FILE: join(tmpdir(), "pi-b.json") },
+		stateSeams(),
+	);
+	const warns = tempWarn(checks);
+	assert.equal(warns.length, 1, "one line, not two");
+	assert.match(warns[0].label, /PI_LOGS_DIR/);
+	assert.match(warns[0].label, /PI_SETTINGS_FILE/);
+	assert.match(warns[0].label, / point into /, "two variables read as plural");
+});
+
+test("no home directory on disk warns about the SILENT record loss the move introduces", async () => {
+	// makeRecordWriter swallows its mkdir failure into a logs_dir_error line and keeps running, so
+	// without this check the worker drains jobs perfectly and records nothing.
+	const checks = await collectChecks({}, stateSeams({ home: "/nonexistent", fileExists: (p) => p !== "/nonexistent" }));
+	const homeless = checks.filter((c) => /no home directory on disk/.test(c.label));
+	assert.equal(homeless.length, 1);
+	assert.equal(homeless[0].ok, false);
+	assert.equal(homeless[0].warn, true);
+	assert.match(homeless[0].fix, /logs_dir_error/, "name the log line an operator would otherwise have to guess");
+
+	// An explicit PI_LOGS_DIR means the home dir is irrelevant, so the line must not fire.
+	const explicit = await collectChecks({ PI_LOGS_DIR: "/srv/logs" }, stateSeams({ home: "/nonexistent", fileExists: (p) => p !== "/nonexistent" }));
+	assert.equal(explicit.filter((c) => /no home directory on disk/.test(c.label)).length, 0);
+});
+
+test("the migration hint fires ONLY while the old path holds records and the new one does not", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-"));
+	const home = mkdtempSync(join(tmpdir(), "pi-migrate-home-"));
+	const env = { TMPDIR: tmp };
+	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
+	writeFileSync(join(tmp, "pi-dispatch", "logs", "gh-1.json"), "{}");
+	const hint = (checks) => checks.filter((c) => /still holds \d+ run record/.test(c.label));
+
+	// (a) old populated, new absent -> the hint, on the advisory tier.
+	const a = await collectChecks(env, stateSeams({ home }));
+	assert.equal(hint(a).length, 1);
+	assert.equal(hint(a)[0].ok, true, "advisory: it must not read as something being wrong");
+	assert.equal(hint(a)[0].warn, true);
+
+	// (b) the new store has anything at all -> the hint retires itself forever.
+	mkdirSync(join(home, ".pi-dispatch", "logs"), { recursive: true });
+	writeFileSync(join(home, ".pi-dispatch", "logs", "gh-2.json"), "{}");
+	assert.equal(hint(await collectChecks(env, stateSeams({ home }))).length, 0, "a populated new store retires the hint");
+
+	// (c) an explicit PI_LOGS_DIR -> nothing to migrate, so nothing is claimed.
+	rmSync(join(home, ".pi-dispatch", "logs", "gh-2.json"));
+	assert.equal(hint(await collectChecks({ ...env, PI_LOGS_DIR: join(home, "elsewhere") }, stateSeams({ home }))).length, 0);
+
+	// (d) a RECORD is a .json or a .log, the log reaper's own rule. Anything else in the new store is
+	// not a record and must not retire the hint, or a stray file silently strands the operator's history
+	// at the old path with nothing left to tell them.
+	writeFileSync(join(home, ".pi-dispatch", "logs", "notes.txt"), "x");
+	assert.equal(hint(await collectChecks(env, stateSeams({ home }))).length, 1, "a non-record does not count as a record");
+});
+
+test("a legacy directory holding only non-records has nothing to migrate", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-junk-"));
+	const home = mkdtempSync(join(tmpdir(), "pi-migrate-junk-home-"));
+	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
+	writeFileSync(join(tmp, "pi-dispatch", "logs", "README.txt"), "x");
+	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
+	assert.equal(checks.filter((c) => /still holds \d+ run record/.test(c.label)).length, 0);
+});
+
+test("the migration hint's remedy is in the LABEL, because an ok:true check never prints its fix", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-label-"));
+	const home = mkdtempSync(join(tmpdir(), "pi-migrate-label-home-"));
+	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
+	writeFileSync(join(tmp, "pi-dispatch", "logs", "gh-1.log"), "x"); // the reaper's OTHER extension
+	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
+	const hint = checks.find((c) => /still holds \d+ run record/.test(c.label));
+	assert.ok(hint, "a .log counts as a record, exactly as the log reaper counts it");
+	assert.match(hint.label, /mv /, "the command is in the label");
+	assert.equal(hint.fix, undefined, "a fix key here would never render, and a key that never renders rots");
+});
+
+test("the settings hint names the CONSEQUENCE, not just the path", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-settings-"));
+	const home = mkdtempSync(join(tmpdir(), "pi-migrate-settings-home-"));
+	mkdirSync(join(tmp, "pi-dispatch"), { recursive: true });
+	writeFileSync(join(tmp, "pi-dispatch", "settings.json"), "{}");
+	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
+	const hint = checks.find((c) => /caps and settings are still at/.test(c.label));
+	assert.ok(hint);
+	assert.equal(hint.ok, true);
+	assert.equal(hint.warn, true);
+	assert.match(hint.label, /WIDER/, "a lost overlay silently RESTORES the env cap; say so, do not imply it");
+	assert.match(hint.label, /mv /);
+});
+
+test("a home UNDER the OS temp dir is still a swept location, and says so", async () => {
+	// Not a contrived case: a service account whose home is provisioned under /tmp gets a durable-looking
+	// ~/.pi-dispatch that the OS still sweeps. The predicate reads the resolved path, not the variable,
+	// which is exactly why it catches this.
+	const home = mkdtempSync(join(tmpdir(), "pi-home-in-temp-"));
+	const checks = await collectChecks({}, stateSeams({ home }));
+	assert.equal(checks.filter((c) => /^Durable state:/.test(c.label)).length, 0);
+	const warns = checks.filter((c) => /points? into the OS temp dir/.test(c.label));
+	assert.equal(warns.length, 1);
+	assert.match(warns[0].label, /PI_LOGS_DIR/);
+	assert.match(warns[0].label, /PI_SETTINGS_FILE/, "both defaults live under the one swept root");
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { delimiter } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, globalExtensionsEnabled, loadConfig, loadGitLabAuth, normalizeAppPrivateKey } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, defaultLogsDir, defaultSettingsFile, globalExtensionsEnabled, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
 
@@ -22,7 +22,7 @@ test("loads conservative defaults with an empty-ish env", () => {
 	assert.ok(c.jobsDir.length > 0);
 	assert.equal(c.triggersFile, null);
 	assert.equal(c.schedulerStallMax, 2);
-	assert.ok(c.logsDir.endsWith("/pi-dispatch/logs"), c.logsDir);
+	assert.ok(c.logsDir.endsWith("/.pi-dispatch/logs"), c.logsDir); // the DURABLE root (issue #290), not the OS temp dir
 	assert.equal(c.captureJobLogs, false);
 	assert.equal(c.logRetentionDays, 30);
 });
@@ -35,7 +35,9 @@ test("AI-trigger / chaining knobs default conservatively", () => {
 	assert.deepEqual(c.dispatchRunRoots, []);
 });
 
-test("defaultGraphDir is the worker-owned temp path, beside logs/ and jobs/, never inside logsDir", () => {
+test("defaultGraphDir is the worker-owned temp path, beside jobs/, never inside logsDir", () => {
+	// Still under temp, and no longer beside logs/: issue #290 moved the two DURABLE stores to
+	// ~/.pi-dispatch and left the regenerable artifact here, because the next `insights` rebuilds it.
 	// NOT logsDir on purpose: INT-RUN-HISTORY-FILE-CONTRACT names that directory's filename shape,
 	// and a stray .html beside the sidecars would widen a contract for a file that is not a record.
 	assert.equal(defaultGraphDir({ TMPDIR: "/t" }), "/t/pi-dispatch/graph");
@@ -170,7 +172,7 @@ test("run-history env overrides logsDir, captureJobLogs, and logRetentionDays", 
 
 test("logsDir uses || so an empty PI_LOGS_DIR falls back to the default", () => {
 	const c = loadConfig({ PI_LOGS_DIR: "" });
-	assert.ok(c.logsDir.endsWith("/pi-dispatch/logs"), c.logsDir);
+	assert.ok(c.logsDir.endsWith("/.pi-dispatch/logs"), c.logsDir); // the DURABLE root (issue #290), not the OS temp dir
 });
 
 test("captureJobLogs is strict: only \"1\" enables it, everything else stays off", () => {
@@ -621,4 +623,87 @@ test("a garbled PI_WAIT_PROFILES refuses to BOOT, on its sibling's reasoning (#2
 	for (const bad of ["jira", "jira:relative/path", "has space:/opt/a.sh", "a:/opt/x.sh,a:/opt/y.sh"]) {
 		assert.throws(() => loadConfig({ PI_WAIT_PROFILES: bad }), (e) => e.piDispatchConfig === true, bad);
 	}
+});
+
+// ── issue #290: the two DURABLE defaults, and the predicate that says when they are not ──────────────
+
+test("the durable defaults compose one state root under the home dir, in the slash alphabet", () => {
+	// The SHAPE pin, on defaultGraphDir's precedent above. `.pi-dispatch` is the whole point: these two
+	// are the run history and the operator's caps, and the OS is entitled to sweep what they used to
+	// default into. See docs/backup.md.
+	assert.equal(defaultLogsDir({}, "/home/u"), "/home/u/.pi-dispatch/logs");
+	assert.equal(defaultSettingsFile({}, "/home/u"), "/home/u/.pi-dispatch/settings.json");
+	assert.equal(defaultLogsDir({}, "C:\\Users\\u"), "C:/Users/u/.pi-dispatch/logs", "backslashes normalise like the sibling defaults");
+	assert.equal(defaultLogsDir({}, "/home/u/"), "/home/u/.pi-dispatch/logs", "a trailing separator on the home dir is stripped");
+
+	// ONE root, which is the claim docs/backup.md makes to an operator: back up one directory.
+	const dir = (p) => p.slice(0, p.lastIndexOf("/"));
+	assert.equal(dir(defaultSettingsFile({}, "/home/u")), dir(defaultLogsDir({}, "/home/u")));
+
+	// A home that cannot be named falls back to the OLD address, byte for byte -- including the `//`
+	// that a macOS TMPDIR's trailing slash composes. That is deliberate, not a leak: the fallback is
+	// exactly what underOsTempDir detects, so doctor prints one line instead of failing silently.
+	assert.equal(defaultLogsDir({ TMPDIR: "/var/T/" }, ""), "/var/T//pi-dispatch/logs");
+	assert.equal(defaultLogsDir({ TEMP: "C:\\Temp" }, ""), "C:/Temp/pi-dispatch/logs");
+	assert.equal(defaultLogsDir({}, ""), "/tmp/pi-dispatch/logs", "the Linux shape, where TMPDIR is unset");
+	assert.equal(legacyTempStateDir({ TMPDIR: "/var/T/" }), "/var/T//pi-dispatch", "the migration hint and the fallback share one derivation");
+
+	assert.ok(!defaultLogsDir({ TMPDIR: "/t" }, "/home/u").startsWith("/t"), "a home that exists beats TMPDIR");
+});
+
+test("loadConfig and logsDirPath resolve the SAME durable defaults, so nothing re-derives them", () => {
+	// The WIRING pin. The shape pin above cannot make this claim: it would still pass if loadConfig
+	// were wired to a different helper entirely, which is how a panel and a worker come to read two
+	// different directories and neither says why.
+	const c = loadConfig({});
+	assert.equal(c.logsDir, defaultLogsDir());
+	assert.equal(c.settingsFile, defaultSettingsFile());
+	assert.equal(logsDirPath({}), defaultLogsDir());
+	assert.equal(logsDirPath({ PI_LOGS_DIR: "/x" }), "/x", "an explicit value still wins");
+	assert.equal(logsDirPath({ PI_LOGS_DIR: "" }), defaultLogsDir(), "|| not ??, so empty falls back");
+	assert.ok(!underOsTempDir(c.logsDir), "a default deployment's run history is durable");
+	assert.ok(!underOsTempDir(c.settingsFile), "a default deployment's caps are durable");
+});
+
+test("underOsTempDir answers the four cases a naive prefix test gets wrong", () => {
+	// Every row here was MEASURED on a real host before it was written down. The realpath seam throws
+	// on purpose, isolating the lexical half: doctor asks this question before these dirs exist.
+	const noRealpath = { realpath: () => { throw new Error("ENOENT"); }, osTmpDir: () => "/var/folders/ab/T" };
+	const env = { TMPDIR: "/var/folders/ab/T/" }; // macOS hands back a TRAILING SLASH
+
+	assert.equal(underOsTempDir("/var/folders/ab/T//pi-dispatch/logs", env, noRealpath), true, "the `//` the old default actually composed");
+	assert.equal(underOsTempDir("/var/folders/ab/T/pi-dispatch/logs", env, noRealpath), true);
+	assert.equal(underOsTempDir("/var/folders/ab/T", env, noRealpath), true, "the root itself is under itself");
+	assert.equal(underOsTempDir("/var/folders/ab/T-notmine/logs", env, noRealpath), false, "a SIBLING must not match a bare prefix");
+	assert.equal(underOsTempDir("/home/u/.pi-dispatch/logs", env, noRealpath), false, "the new default is not under temp");
+
+	// The literal /tmp is checked because it is what the pre-#290 default resolved to on Linux.
+	assert.equal(underOsTempDir("/tmp/x", {}, noRealpath), true);
+	assert.equal(underOsTempDir("/tmpfoo/x", {}, noRealpath), false);
+
+	// Windows, in both alphabets, which is why this compares in slashes rather than calling withinRoots.
+	const win = { TEMP: "C:\\Temp" };
+	assert.equal(underOsTempDir("C:/Temp/pi-dispatch/logs", win, noRealpath), true);
+	assert.equal(underOsTempDir("C:\\Temp\\pi-dispatch\\logs", win, noRealpath), true);
+
+	// Advisory means it FAILS OPEN and never throws: junk is "not under temp", not an exception.
+	for (const junk of ["", "   ", undefined, null, 42, {}]) {
+		assert.equal(underOsTempDir(junk, env, noRealpath), false, `junk: ${JSON.stringify(junk)}`);
+	}
+	assert.equal(underOsTempDir("/x", { TMPDIR: "/t" }, { realpath: () => { throw new Error("boom"); }, osTmpDir: () => { throw new Error("boom"); } }), false, "an unanswerable temp dir is not worth throwing over");
+});
+
+test("underOsTempDir expands BOTH sides through realpath, which is the /private/var case", () => {
+	// macOS: /var/folders/... realpaths to /private/var/folders/..., so an operator who writes the
+	// resolved spelling is a FALSE NEGATIVE unless the ROOT is expanded too. The candidate here does
+	// not exist -- doctor's ordinary situation -- so only the root-side expansion can catch it.
+	const realpath = (p) => {
+		if (p === "/var/x") return "/private/var/x";
+		throw new Error("ENOENT");
+	};
+	assert.equal(underOsTempDir("/private/var/x/logs", { TMPDIR: "/var/x" }, { realpath, osTmpDir: () => "/var/x" }), true);
+
+	// And with NEITHER side resolving, the lexical answer still stands.
+	const never = { realpath: () => { throw new Error("ENOENT"); }, osTmpDir: () => "/var/x" };
+	assert.equal(underOsTempDir("/var/x/logs", { TMPDIR: "/var/x" }, never), true);
 });

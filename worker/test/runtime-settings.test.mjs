@@ -281,8 +281,11 @@ test("settingsFilePath: PI_SETTINGS_FILE wins when set", () => {
 	assert.equal(settingsFilePath({ PI_SETTINGS_FILE: "/abs/custom.json" }), "/abs/custom.json");
 });
 
-test("settingsFilePath: unset or empty falls back to the shared default under the temp dir", () => {
+test("settingsFilePath: unset or empty falls back to the shared DURABLE default", () => {
 	assert.equal(settingsFilePath({}), defaultSettingsFile());
 	assert.equal(settingsFilePath({ PI_SETTINGS_FILE: "" }), defaultSettingsFile());
-	assert.ok(settingsFilePath({}).endsWith("pi-dispatch/settings.json"), "default sits under pi-dispatch/");
+	assert.ok(settingsFilePath({}).endsWith(".pi-dispatch/settings.json"), "default sits under the durable state root (issue #290)");
+	// The seam the worker never uses and doctor depends on: an injected home must reach the default.
+	assert.equal(settingsFilePath({}, "/home/u"), "/home/u/.pi-dispatch/settings.json");
+	assert.equal(settingsFilePath({ PI_SETTINGS_FILE: "/abs/x.json" }, "/home/u"), "/abs/x.json", "an explicit path still wins over any home");
 });

@@ -144,6 +144,13 @@ test("bare /dispatch with nothing configured lands in the wizard select; Cancel 
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   for (const k of keys) delete process.env[k];
   process.env.VALKEY_URL = "redis://127.0.0.1:1";
+  // The two path keys MUST stay deleted: ENV_PATH_KEYS (from POINTER_ENV_ALLOWLIST) includes both, so
+  // setting them makes detectDeployment report state "env" and this test loses the very branch it exists
+  // for. But since issue #290 their defaults are durable (~/.pi-dispatch), so an unset pair now resolves
+  // into the DEVELOPER'S OWN run history rather than the empty temp path it used to. Redirect HOME
+  // instead, which os.homedir() honours: unset stays unset, and the default resolves inside scratch.
+  const savedHome = process.env.HOME;
+  process.env.HOME = mkdtempSync(join(tmpdir(), "pi-wiring-home-"));
   const agentDirBefore = readdirSync(process.env.PI_CODING_AGENT_DIR);
   try {
     const { calls, def } = await loadRegistered();
@@ -187,6 +194,8 @@ test("bare /dispatch with nothing configured lands in the wizard select; Cancel 
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
   }
 });
 

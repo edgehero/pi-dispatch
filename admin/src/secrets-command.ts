@@ -14,8 +14,9 @@
  * diff someone can read.
  *
  * The worker does not trust any of it. Every overlay-declared path is re-checked against
- * PI_SECRET_RESOLVER_ROOTS at resolution time, on the realpath, because this file's default location is
- * the OS temp directory. A check that lived only here would be cosmetic on a multi-user host.
+ * PI_SECRET_RESOLVER_ROOTS at resolution time, on the realpath, because PI_SETTINGS_FILE can put this
+ * file anywhere (its default was the OS temp directory until issue #290). A check that lived only here
+ * would be cosmetic.
  */
 
 import { readSettingsView, writeSettings } from "./read-model.mjs";

@@ -801,13 +801,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the allowlist arrives with that tool, and this row is the reason it must."
 
   **The bound is enforced in the WORKER, not only where a profile is written.** The settings overlay
-  defaults into the OS temp directory, so on a multi-user host a check that lived in the panel alone would
-  be cosmetic. Re-checking at resolution time caps a tampered overlay at "choose among scripts the operator
-  allowlisted" rather than "name any executable on the host".
+  may be pointed anywhere by `PI_SETTINGS_FILE`, and its default was a world-writable OS temp path until
+  issue #290 moved it under the home directory, so a check that lived in the panel alone would be cosmetic.
+  Re-checking at resolution time caps a tampered overlay at "choose among scripts the operator allowlisted"
+  rather than "name any executable on the host", whatever the overlay's address is.
 
   **Neither source wins a name collision.** `DES-RUNTIME-SETTINGS-FILE-OVERLAY` gives the overlay
   precedence over env, and inverting that for one key would leave two rules disagreeing about what an
-  overlay is; honouring it would let a file in a world-writable default directory redirect a profile the
+  overlay is; honouring it would let a file at an address `PI_SETTINGS_FILE` controls redirect a profile the
   operator wrote in `.env`. So a name declared in both refuses per delivery, which is the posture `PI_EGRESS`
   already takes toward an ambiguous value.
 

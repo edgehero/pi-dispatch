@@ -261,8 +261,8 @@ export function makeSecretsResolver({
 		}
 		if (!path) return { profileUnknown: wanted };
 		// The bound is checked on the REALPATH, and in the WORKER rather than only where a profile is
-		// written. A panel-side check alone would be cosmetic: the settings overlay defaults into the OS
-		// temp directory, so on a multi-user host the directory can be pre-created by anyone. Checking here
+		// written. A panel-side check alone would be cosmetic: PI_SETTINGS_FILE can point the overlay
+		// anywhere, and its default was a world-writable OS temp path until issue #290. Checking here
 		// caps a tampered overlay at "choose among scripts the operator allowlisted" instead of "name any
 		// executable on the host". An env-declared profile is exempt: PI_SECRET_PROFILES already lives
 		// beside the forge tokens and the App key, so requiring roots for it would bound nothing and would

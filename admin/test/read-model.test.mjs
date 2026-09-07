@@ -223,6 +223,21 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
   });
 });
 
+test("the admin and the worker resolve the SAME durable defaults from an empty env (issue #290)", async () => {
+  // The assertion that would have caught "point the panel at the durable dir and leave the worker in
+  // temp" as a bug. A panel reading a different directory than the worker writes shows an empty run
+  // list and says nothing about why, which is the worst shape this disagreement can take.
+  const { defaultLogsDir, defaultSettingsFile, logsDirPath, underOsTempDir } = await import("@edgehero/pi-dispatch/config");
+  const { settingsFilePath } = await import("@edgehero/pi-dispatch/runtime-settings");
+  const p = resolvePaths({});
+  assert.equal(p.logsDir, defaultLogsDir(), "the panel's run history is the worker's run history");
+  assert.equal(p.logsDir, logsDirPath({}), "and it is the ONE derivation, not a re-derived twin");
+  assert.equal(p.settingsFile, settingsFilePath({}));
+  assert.equal(p.settingsFile, defaultSettingsFile());
+  assert.ok(!underOsTempDir(p.logsDir), "the panel's default is durable too");
+  assert.ok(!underOsTempDir(p.settingsFile));
+});
+
 test("resolvePaths resolves the graph dir from PI_GRAPH_DIR with the worker's temp default", () => {
   assert.equal(resolvePaths({ PI_GRAPH_DIR: "/x/graphs" }).graphDir, "/x/graphs");
   assert.ok(resolvePaths({}).graphDir.endsWith("/pi-dispatch/graph"), "the default is the worker-owned temp path, never cwd");

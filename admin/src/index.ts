@@ -1348,8 +1348,9 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
       // operator-typed only, and it is why this is a subcommand rather than a fifteenth tool.
       //
       // The worker still does not trust what lands here. Every overlay-declared path is re-checked against
-      // PI_SECRET_RESOLVER_ROOTS at resolution time, because this file is written to a settings.json whose
-      // default location is the OS temp directory. A panel-side check alone would be cosmetic.
+      // PI_SECRET_RESOLVER_ROOTS at resolution time, because PI_SETTINGS_FILE can put this settings.json
+      // anywhere (its default was the OS temp directory until issue #290). A panel-side check alone would
+      // be cosmetic.
       const { runSecretsCommand } = await import("./secrets-command.ts");
       await runSecretsCommand(paths, ctx, notify, tokens.slice(1));
       return;

@@ -421,8 +421,8 @@ export async function runJob(job, deps) {
 		if (resolved.ambiguous) {
 			// Two sources declared one profile name. Neither wins, deliberately: runtime-settings documents the
 			// overlay's precedence as overlay > env, so inverting it here would leave two rules disagreeing about
-			// what an overlay is, while honouring it would let a settings file in a world-writable default
-			// directory redirect a profile the operator wrote in .env. This project already refuses ambiguity
+			// what an overlay is, while honouring it would let a settings file -- which PI_SETTINGS_FILE can put
+			// anywhere -- redirect a profile the operator wrote in .env. This project already refuses ambiguity
 			// rather than resolving it (PI_EGRESS: "a typo must never leave you believing you have a policy you
 			// do not"), and an operator who sees this fixes it in seconds.
 			await comment(job, "Refused: this trigger set `run.secrets`, and the resolver profile it names is declared twice on this worker host, once in the environment and once in the settings overlay. Neither wins, on purpose: the job would otherwise run against whichever one happened to be picked. Remove one of the two. Not run.");

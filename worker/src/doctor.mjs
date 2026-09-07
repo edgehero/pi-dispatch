@@ -49,7 +49,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
-import { defaultSandboxDir, defaultWorkerName, globalExtensionsEnabled } from "./config.mjs";
+import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, legacyTempStateDir, logsDirPath, underOsTempDir } from "./config.mjs";
+import { settingsFilePath } from "./runtime-settings.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -215,7 +216,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env) } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = homedir() } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -1535,6 +1536,83 @@ export async function collectChecks(env, seams) {
 		}
 	}
 
+	// issue #290. The two DURABLE stores -- the run history everything folds over, and the overlay holding
+	// every cap the operator tuned from the panel -- used to default under the OS temp dir, which macOS
+	// sweeps on its own schedule and which is tmpfs (RAM) on several Linux distros. They now default under
+	// ~/.pi-dispatch, so this block is normally one green line; it warns only when a path RESOLVES under a
+	// temp dir, which after the move means an operator put it there.
+	//
+	// Deliberately NOT checked: PI_JOBS_DIR, PI_SANDBOX_DIR and PI_GRAPH_DIR. Those are per-run,
+	// retention-bounded and regenerable respectively, and they stay under temp on purpose. Warning about a
+	// directory that is SUPPOSED to be swept is how an operator learns to skim this section, which costs
+	// more than it buys.
+	{
+		// The home SEAM, not the real homedir: this block must answer for the deployment doctor is
+		// describing, and the no-home case has to be exercisable on a host that has one.
+		const logsDir = logsDirPath(env, home);
+		const settingsFile = settingsFilePath(env, home);
+		const swept = [
+			["PI_LOGS_DIR", logsDir],
+			["PI_SETTINGS_FILE", settingsFile],
+		].filter(([, p]) => underOsTempDir(p, env));
+
+		if (swept.length === 0) {
+			checks.push({ ok: true, label: `Durable state: run history ${logsDir}, settings ${settingsFile} — both survive a reboot (docs/backup.md)` });
+		} else {
+			// ok:false + warn:true is the tier that renders a warning WITHOUT failing doctor and still
+			// prints its fix line; an ok:true check's fix is never rendered (see render() above). One check
+			// for both variables, because the acceptance asks for one line and they are nearly always both
+			// set or both unset.
+			//
+			// No fixAction, and that is the never tier working as designed: choosing a durable path is a
+			// semantic env value, and doctor does not move an operator's records for them.
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${swept.map(([k, p]) => `${k} (${p})`).join(" and ")} ${swept.length > 1 ? "point" : "points"} into the OS temp dir, which the OS may sweep — a reboot can take your run history and your caps with it`,
+				fix: `point ${swept.length > 1 ? "them" : "it"} at a durable path and move the existing files there; unset falls back to ${defaultLogsDir(env, home)} and ${defaultSettingsFile(env, home)}`,
+			});
+		}
+
+		// The failure mode the MOVE introduces, which the temp default did not have: under <OS temp> the
+		// mkdir always succeeded, under <home> it can fail. makeRecordWriter and makeLogSink both swallow
+		// that into a `logs_dir_error` line and keep running, so the worker drains jobs perfectly and
+		// records nothing. A systemd system unit whose User= has /nonexistent as its passwd home is the
+		// concrete case, and deploy/worker.service ships User=pi.
+		if (!env.PI_LOGS_DIR && !underOsTempDir(logsDir, env) && !fileExists(home)) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `this account has no home directory on disk (${home}), so ${logsDir} cannot be created`,
+				fix: "set PI_LOGS_DIR and PI_SETTINGS_FILE to a path this account can write; without it the worker logs logs_dir_error at boot and drops every run record",
+			});
+		}
+
+		// The migration hint, on the advisory tier (ok:true + warn:true), where the fix line is NOT
+		// rendered -- so the whole remedy lives in the label. It is gated on three facts so that it retires
+		// itself: only when the variable is unset (an explicit path means there is nothing to migrate),
+		// only while the OLD path still holds something, and only while the NEW one does not. A warning
+		// that cannot go away is a warning nobody reads.
+		const legacy = legacyTempStateDir(env);
+		if (!env.PI_LOGS_DIR) {
+			const old = recordCount(`${legacy}/logs`, fileExists);
+			if (old > 0 && recordCount(logsDir, fileExists) === 0) {
+				checks.push({
+					ok: true,
+					warn: true,
+					label: `${legacy}/logs still holds ${old} run record(s) while ${logsDir} is empty — pi-dispatch used to default there and the OS may sweep it. Move them:  mv ${legacy}/logs/* ${logsDir}/`,
+				});
+			}
+		}
+		if (!env.PI_SETTINGS_FILE && fileExists(`${legacy}/settings.json`) && !fileExists(settingsFile)) {
+			checks.push({
+				ok: true,
+				warn: true,
+				label: `your caps and settings are still at ${legacy}/settings.json while ${settingsFile} does not exist — until you move it, every cap falls back to .env and the defaults, which is a WIDER limit than you last set. Move it:  mv ${legacy}/settings.json ${settingsFile}`,
+			});
+		}
+	}
+
 	return checks;
 }
 
@@ -1551,6 +1629,22 @@ function countRetained(sandboxDir, fileExists) {
 		return { count: readdirSync(sandboxDir).length };
 	} catch {
 		return { count: 0 };
+	}
+}
+
+/**
+ * How many run records a directory holds (issue #290's migration hint).
+ *
+ * Filtered by the LOG REAPER's own rule (`.log` or `.json`, run-history.mjs), so the hint and the reaper
+ * agree on what counts as a record rather than each having an opinion. Never throws, on countRetained's
+ * posture above: an absent or unreadable directory holds zero, which is the honest answer here.
+ */
+function recordCount(dir, fileExists) {
+	if (!fileExists(dir)) return 0;
+	try {
+		return readdirSync(dir).filter((n) => n.endsWith(".log") || n.endsWith(".json")).length;
+	} catch {
+		return 0;
 	}
 }
 

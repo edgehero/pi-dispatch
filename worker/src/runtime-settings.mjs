@@ -60,8 +60,9 @@ function isIntInRange(value, min, max) {
  * empty value falls back to the shared default so the admin extension and the worker resolve the same
  * path without either coupling to the other.
  */
-export function settingsFilePath(env = process.env) {
-	return env.PI_SETTINGS_FILE || defaultSettingsFile();
+export function settingsFilePath(env = process.env, home) {
+	// `home` is forwarded, not resolved: doctor injects a home seam, and undefined activates the default.
+	return env.PI_SETTINGS_FILE || defaultSettingsFile(env, home);
 }
 
 /**

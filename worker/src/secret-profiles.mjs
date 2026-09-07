@@ -82,7 +82,8 @@ function isAbsolutePath(path) {
  * NEITHER SOURCE WINS, and that is a deliberate third answer. `runtime-settings.mjs` documents the
  * overlay's precedence as `overlay > env`, so quietly inverting it for this one key would leave two rules
  * in the codebase disagreeing about what an overlay is. But honouring it would let a settings file -- which
- * defaults into the OS temp directory -- redirect a profile the operator wrote in `.env`. So a collision is
+ * PI_SETTINGS_FILE can point anywhere, and which defaulted into the OS temp directory until issue #290 --
+ * redirect a profile the operator wrote in `.env`. So a collision is
  * refused instead, per delivery and naming only the profile name. This project already refuses ambiguity
  * rather than resolving it: `PI_EGRESS` refuses any value but 0 or 1 because "a typo must never leave you
  * believing you have a policy you do not", and two declarations of one profile is exactly that.

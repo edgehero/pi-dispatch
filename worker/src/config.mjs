@@ -5,9 +5,9 @@
  * Errors are tagged `piDispatchConfig` so the CLI/entry can print them cleanly and exit non-zero.
  */
 
-import { existsSync } from "node:fs";
-import { hostname } from "node:os";
-import { delimiter } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
+import { delimiter, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
@@ -312,8 +312,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		pauseWindowsFile: env.PI_PAUSE_WINDOWS_FILE ?? null, // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
 		scopedLimitsFile: env.PI_SCOPED_LIMITS_FILE ?? null, // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
 		schedulerStallMax: positiveInt(env, "PI_SCHEDULER_STALL_MAX", 2), // CONST-RETRY-INFRA-ONLY: per-scheduler stall backstop; positiveInt rejects <1 so a 0 threshold fails closed
-		logsDir: env.PI_LOGS_DIR || defaultLogsDir(), // || (not ??) so an empty string falls back to the default
-		settingsFile: env.PI_SETTINGS_FILE || defaultSettingsFile(), // || (not ??) so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
+		logsDir: logsDirPath(env), // || (not ??) inside logsDirPath, so an empty string falls back to the default
+		settingsFile: env.PI_SETTINGS_FILE || defaultSettingsFile(env), // || (not ??) so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
 		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
 		// REQ-RESUMABLE-SESSION. NO DEFAULT, deliberately unlike logsDir/jobsDir: unset means the feature
@@ -498,13 +498,19 @@ export function loadGitHubAuth(env, fileExists) {
 	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
-// env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job, log, graph and settings
-// paths below. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR, PI_LOGS_DIR,
-// PI_GRAPH_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and .env.example says so.
-function defaultJobsDir() {
-	// Under the OS temp dir by default. Holds only the read-only /job inputs (prompt + .pi/); the
+// env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job, sandbox and graph paths
+// below -- and, only on a host with no home directory to name, as the last-resort fallback for the
+// durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,
+// PI_LOGS_DIR, PI_GRAPH_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and
+// .env.example says so.
+function defaultJobsDir(env = process.env) {
+	// Under the OS temp dir by default, and it STAYS there (issue #290 moved only the two durable
+	// stores). Holds only the read-only /job inputs (prompt + .pi/), rebuilt from scratch every job; the
 	// workspace for a local job is the operator's own folder, not here.
-	return `${process.env.TMPDIR ?? process.env.TEMP ?? "/tmp"}/pi-dispatch/jobs`.replace(/\\/g, "/");
+	//
+	// Takes `env` because its caller `defaultSandboxDir` advertises one and could not honour it while
+	// this function read `process.env` directly -- an injected TMPDIR was silently ignored one frame in.
+	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/jobs`.replace(/\\/g, "/");
 }
 
 export function defaultSandboxDir(env = process.env) {
@@ -513,13 +519,163 @@ export function defaultSandboxDir(env = process.env) {
 	// the retention step, since the OS temp dir is 1777 on POSIX and a retained tree holds a repository
 	// clone plus the run's prompt.md/event.json. Exported so the admin extension resolves the same default
 	// without calling loadConfig, which throws on unrelated env problems.
-	return `${env.PI_JOBS_DIR ?? defaultJobsDir()}/sandboxes`.replace(/\\/g, "/");
+	//
+	// Under temp deliberately, and unmoved by issue #290: a retained workspace is bounded by
+	// PI_SANDBOX_RETENTION_HOURS and is disposable by design, so a swept temp dir costs nothing that the
+	// sweep was not already going to take.
+	return `${env.PI_JOBS_DIR ?? defaultJobsDir(env)}/sandboxes`.replace(/\\/g, "/");
 }
 
-export function defaultLogsDir() {
-	// Under the OS temp dir by default. Holds durable per-run history/log artifacts written host-side;
-	// a worker-owned path that never enters the container env allowlist (no-broad-env-into-container).
-	return `${process.env.TMPDIR ?? process.env.TEMP ?? "/tmp"}/pi-dispatch/logs`.replace(/\\/g, "/");
+/**
+ * The home directory, or "" when this host cannot name one.
+ *
+ * `homedir()` throws on a host with no passwd entry (a bare uid in a container) and returns "" when
+ * HOME is set but empty -- both measured. This takes `defaultWorkerName`'s posture below: a path is
+ * never worth refusing boot for, so an unanswerable home degrades to the temp fallback rather than
+ * throwing, and `underOsTempDir` is what makes that degradation VISIBLE instead of silent.
+ */
+function safeHomeDir() {
+	try {
+		const home = homedir();
+		return typeof home === "string" ? home.trim() : "";
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * The root of the two DURABLE stores: the run history and the settings overlay (issue #290).
+ *
+ * Under the home directory, NOT the OS temp dir. Linux leaves TMPDIR unset so the old default was
+ * literally `/tmp/pi-dispatch`, and on the distros where /tmp is tmpfs that is RAM: the run history
+ * REQ-DURABLE-RUN-HISTORY promises and every cap the operator tuned from the panel were gone on the
+ * next reboot, while the queue beside them survived on Valkey's AOF volume.
+ *
+ * `~/.pi-dispatch` rather than a per-platform state dir (XDG_STATE_HOME, ~/Library/Application
+ * Support, LOCALAPPDATA), for four reasons. This project has exactly ONE home-dir pattern and it is
+ * this shape (`PI_CODING_AGENT_DIR || ~/.pi/agent`). docs/sessions.md already teaches
+ * `~/.pi-dispatch/sessions` as the place to put the session store, so these two land beside a
+ * directory the docs already tell an operator to create, and docs/backup.md can name one target.
+ * `~/Library/Application Support` contains a space, and doctor prints copy-pasteable fix lines. And a
+ * per-platform trio would be three new ENV reads needing their own env-internal markers, where
+ * `homedir()` is a node:os call that the env-docs scan does not see at all.
+ *
+ * WITH NO HOME, this falls back to the old temp path, and that is load-bearing rather than a leak:
+ * the fallback is exactly what `underOsTempDir` detects, so doctor prints one line naming the path
+ * that will not survive a reboot. Defining `legacyTempStateDir` as this function with no home is what
+ * keeps the fallback and doctor's migration hint from ever disagreeing about the old address.
+ */
+function defaultStateDir(env = process.env, home = safeHomeDir()) {
+	// posix.normalize, not path.join: every sibling default here is composed with a template literal and
+	// slash-normalized, and join() would emit backslashes on Windows and break that convention.
+	// Strip the home dir's own trailing separator BEFORE composing, not after: stripping the composed
+	// string only reaches a slash at the END, and `${"/home/u/"}/.pi-dispatch` puts one in the MIDDLE.
+	if (home !== "") return `${home.replace(/\\/g, "/").replace(/\/+$/, "")}/.pi-dispatch`;
+	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch`.replace(/\\/g, "/");
+}
+
+/** The address the durable stores had before issue #290, so doctor's migration hint can name it. */
+export function legacyTempStateDir(env = process.env) {
+	return defaultStateDir(env, "");
+}
+
+export function defaultLogsDir(env = process.env, home = safeHomeDir()) {
+	// Durable by default (issue #290, REQ-DURABLE-RUN-HISTORY): holds the per-run history sidecars and,
+	// when PI_CAPTURE_JOB_LOGS=1, the raw logs. A worker-owned path that never enters the container env
+	// allowlist (no-broad-env-into-container). Exported so the admin extension resolves the same default
+	// without calling loadConfig, which throws on unrelated env problems -- and the admin resolving the
+	// SAME answer is the whole point: a panel reading a different directory shows an empty history and
+	// says nothing about why.
+	return `${defaultStateDir(env, home)}/logs`;
+}
+
+export function defaultSettingsFile(env = process.env, home = safeHomeDir()) {
+	// Durable by default, beside the run history (issue #290). Holds the runtime-tunable settings overlay
+	// shared with the admin extension (INT-CONFIG-OVERLAY-CONTRACT); a worker-owned path that never
+	// enters the container env allowlist (no-broad-env-into-container).
+	//
+	// Losing this file is not neutral: readOverlay treats a missing file as an EMPTY overlay, so a swept
+	// settings.json silently restores the wider env cap. That is the same fail-open
+	// DES-RUNTIME-SETTINGS-FILE-OVERLAY already refuses on a bad parse, arriving through the filesystem
+	// instead of through the parser.
+	return `${defaultStateDir(env, home)}/settings.json`;
+}
+
+/**
+ * The resolved run-history directory. ONE derivation, so loadConfig, the admin and doctor cannot drift.
+ *
+ * `home` is forwarded rather than resolved here: doctor injects a home seam (it has to, to exercise the
+ * no-home case on a host that has one), and a helper that read the real homedir behind that seam's back
+ * would answer a different question than the one doctor is asking. Passing `undefined` is what keeps the
+ * ordinary caller on `safeHomeDir()`, since an undefined argument activates a default parameter.
+ */
+export function logsDirPath(env = process.env, home) {
+	return env.PI_LOGS_DIR || defaultLogsDir(env, home);
+}
+
+/** One path in the slash alphabet these defaults are written in, with any trailing separators dropped. */
+function slashy(p) {
+	const s = posix.normalize(String(p).replace(/\\/g, "/")).replace(/\/+$/, "");
+	return s === "" ? "/" : s;
+}
+
+/** A path's spellings: as written, plus its realpath when one resolves. */
+function spellings(p, realpath) {
+	const out = new Set([slashy(p)]);
+	try {
+		out.add(slashy(realpath(p)));
+	} catch {
+		// ENOENT is the NORMAL case, not an error: doctor asks this question before these directories
+		// exist. The lexical spelling always remains, and the ROOT usually resolves even when the
+		// candidate does not, which is what still catches macOS's /var -> /private/var on a fresh host.
+	}
+	return out;
+}
+
+/**
+ * Does this path sit under a directory the OS is entitled to sweep (issue #290)?
+ *
+ * ADVISORY, and therefore FAILS OPEN -- the opposite posture from `withinRoots` in
+ * secret-profiles.mjs and `folderUnderRoots` in the admin's read-model, which are boundaries and fail
+ * closed. Nothing is gated on this answer; it decides whether doctor prints one warning. A false
+ * alarm on a durable path is the worse error, because a warning an operator learns to skim is a
+ * warning that stops working.
+ *
+ * It reuses `withinRoots`' ALGORITHM -- normalize, strip trailing separators, then `===` or
+ * `startsWith(base + separator)` so a sibling like `<tmp>-notmine` cannot match -- but deliberately
+ * does not call it. `withinRoots` compares in the NATIVE alphabet (path.sep), while every default in
+ * this file is stored slash-normalized, so its Windows branch would be untestable anywhere but
+ * Windows. Comparing in the alphabet the values are written in makes this checkable on every platform.
+ *
+ * Four cases it has to get right, all measured on this project's own hosts:
+ *   - macOS TMPDIR carries a TRAILING SLASH, so the old default composed `<tmp>//pi-dispatch/logs`;
+ *   - macOS /var/folders/... realpaths to /private/var/folders/..., so an operator's /private path
+ *     is a FALSE NEGATIVE unless both sides are expanded;
+ *   - `<tmp>-notmine/logs` is a FALSE POSITIVE for a bare prefix test;
+ *   - realpathSync THROWS on a path that does not exist yet, which is doctor's ordinary situation.
+ *
+ * os.tmpdir() is checked beside TMPDIR/TEMP because it consults TMP internally, which covers a third
+ * variable without naming one here. The literal "/tmp" is checked because it is what the pre-#290
+ * default resolved to on Linux, where TMPDIR is unset.
+ */
+export function underOsTempDir(candidate, env = process.env, { realpath = realpathSync, osTmpDir = tmpdir } = {}) {
+	if (typeof candidate !== "string" || candidate.trim() === "") return false;
+	let tmp = "";
+	try {
+		tmp = osTmpDir();
+	} catch {
+		// A host that cannot name its own temp dir is not one to throw over from an advisory check.
+	}
+	const targets = spellings(candidate, realpath);
+	for (const root of [env.TMPDIR, env.TEMP, tmp, "/tmp"]) {
+		if (typeof root !== "string" || root.trim() === "") continue;
+		for (const base of spellings(root, realpath)) {
+			for (const target of targets) {
+				if (target === base || target.startsWith(`${base}/`)) return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**
@@ -606,13 +762,6 @@ export function defaultGraphDir(env = process.env) {
 	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/graph`.replace(/\\/g, "/");
 }
 
-export function defaultSettingsFile() {
-	// Under the OS temp dir by default. Holds the runtime-tunable settings overlay shared with the admin
-	// extension (INT-CONFIG-OVERLAY-CONTRACT); a worker-owned path that never enters the container env
-	// allowlist (no-broad-env-into-container). Exported so the admin extension resolves the same default
-	// without calling loadConfig, which throws on unrelated env problems.
-	return `${process.env.TMPDIR ?? process.env.TEMP ?? "/tmp"}/pi-dispatch/settings.json`.replace(/\\/g, "/");
-}
 
 /**
  * The worker's Azure DevOps auth config, or `null` when none is configured -- same presence rule as the
