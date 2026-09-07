@@ -80,7 +80,9 @@ const REGEX_PRECEDING_WORDS = new Set(["return", "typeof", "instanceof", "in", "
  *     operands cannot carry an unbalanced quote or a backtick. When the candidate span does, the regex
  *     reading is taken.
  *   - `word` resets at whitespace. Without that, `else return` concatenates to `elsereturn`, which is in
- *     no keyword set, so the regex after it reads as division.
+ *     no keyword set, so the regex after it reads as division. This one is also redundant with the
+ *     content rule below, and kept for the same reason: it settles the case before a coarser layer has
+ *     to. Reverting it leaves this file green.
  */
 export function stripComments(src) {
 	let out = "";
@@ -185,11 +187,14 @@ function startsRegex(prevChar, word) {
 }
 
 /**
- * Settle a `/` that the preceding character called division. Two facts separate the cases, and both are
- * needed: a real division's operands carry no backtick and no unbalanced quote, and a regular expression
- * never opens with a space while `x / y` always does. Without the first, `if (a) /["]/.test(b)` misreads
- * and its quote eats the line; without the second, `(x) / y + "a/b"` misreads the other way and the same
- * thing happens from the opposite side.
+ * Settle a `/` that the preceding character called division: a real division's operands carry no backtick
+ * and no unbalanced quote, and a regular expression never opens with a space while `x / y` always does.
+ *
+ * Both rules are REDUNDANT with the per-line repair below, and deliberately kept. Reverting either one
+ * leaves this file green, which was measured rather than assumed. They earn their place by keeping the
+ * common cases from reaching the repair at all: the repair is a last resort that throws away everything
+ * it knew about where the strings on that line were, so the fewer lines that need it, the less of the
+ * file is read by a rule that coarse.
  */
 function ambiguousSpanIsRegex(span) {
 	if (/^\/\s/.test(span)) return false; // `/ y + ...` is division, whatever it contains
@@ -395,6 +400,9 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 		['const a = (x) / y + "a/b";', "division on a line that also holds a quoted slash"],
 		["const t = `pre ${s.replace(/`/g, \"x\")} post`;", "a backtick regex inside a template expression"],
 		["function f(s) { if (a) {} else return /[\"]/.test(s); }", "a regex after `else return`, two words deep"],
+		["const t = `a ${ `inner ${x}` } b`;", "a template nested inside another template's expression"],
+		["const t = `a ${ JSON.stringify({k: 1}) } b`;", "an object literal in an expression, whose braces must not close it"],
+		["const t = `a ${ `i ${s.replace(/`/g, 1)}` } b`;", "a backtick regex inside a NESTED template expression"],
 	];
 	for (const [code, what] of cases) {
 		// BOTH directions. Every case here used to append the comment on the NEXT line, which is the half
@@ -420,6 +428,16 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 	// the `//` reads as a comment, and a live read after it is deleted silently.
 	const survives = stripComments('if (a) /["]/.test(b) && f("x//y"); const v = env.PI_REAL_READ;\n');
 	assert.ok(survives.includes("env.PI_REAL_READ"), "a real read was stripped as if it were a comment");
+
+	// Reads inside a template EXPRESSION are code and must survive, including after nesting closes: the
+	// frame stack is the newest part of this parser and has the most ways to go wrong.
+	for (const [code, what] of [
+		["const t = `a ${env.PI_INNER} b`;", "a read inside a template expression"],
+		["const t = `a ${ `i` } b`;\nconst v = env.PI_INNER;", "a read after a nested template closes"],
+		["const t = `${ {a:1} }`;\nconst v = env.PI_INNER;", "a read after an object literal inside an expression"],
+	]) {
+		assert.ok(stripComments(code).includes("env.PI_INNER"), `a read was lost: ${what}`);
+	}
 
 	// A template literal genuinely spans lines and must NOT be reset at the newline.
 	const template = stripComments("const t = `one\n// still inside the template\ntwo`;\n// env.PI_TAIL\n");
