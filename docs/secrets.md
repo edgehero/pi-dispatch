@@ -446,13 +446,16 @@ Nothing alarming, and this is worth seeing once before you trust it:
 ```
 ⚠ .env present
     → run `pi-dispatch init` to scaffold one (or supply env via your service manager)
-✓ Provider key set (anthropic: ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN)
+✓ Provider key set (anthropic: ANTHROPIC_API_KEY)
 ```
 
 That is `pi-dispatch doctor` under Recipe A with no `.env` anywhere on the host. The warning is advisory
 by design, the provider key resolved from the injected environment, and every other check behaved
-normally. Run `doctor` through your manager once, exactly the way the unit will, before you enable the
-service.
+normally. The line names the variable pi will actually read, and only that one: doctor asks pi which
+variables the provider uses rather than keeping a list of its own, so it cannot bless a variable pi does
+not read (issue #286). If the value it finds is an `ANTHROPIC_OAUTH_TOKEN`, the line is a warning
+instead, because a subscription login cannot power an unattended service. Run `doctor` through your
+manager once, exactly the way the unit will, before you enable the service.
 
 ## What doctor says about the setup script itself
 
