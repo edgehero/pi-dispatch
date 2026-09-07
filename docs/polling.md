@@ -56,15 +56,15 @@ issue and waits.
 
 ## What it watches
 
-All five trigger types the webhook path serves, from four endpoints:
+Four endpoints, covering every trigger type a forge event can fire. `cron` is the worker's own
+scheduler and has nothing to do with ingest, so it is not here.
 
-| Trigger | Endpoint | Notes |
+| Endpoint | Serves | Notes |
 |---|---|---|
-| `label` | `GET /repos/{o}/{r}/issues/events` | `labeled` entries cover issues and pull requests alike; a PR is an issue here. A PR label fetches the PR once so the synthesized payload carries the same author association, labels, head and base a real delivery would |
-| `comment` | `GET /repos/{o}/{r}/issues/comments?since=` | PR conversation comments are issue comments, so one endpoint covers both, as one webhook event does. Each new comment fetches its issue once for the fields the subset needs |
-| `pull_request` | `GET /repos/{o}/{r}/pulls?state=open` | diffed against a per PR head sha snapshot: an unknown number is `opened`, a known number with a new sha is `synchronize`, a number that left the open list and came back is `reopened` |
-| `review` | `GET /repos/{o}/{r}/pulls/{n}/reviews` | per open PR, cursor is the last processed review id. Only open PRs are swept, and at most 50 per cycle, with a `poll_reviews_gap` line when there are more |
-| `close` | the same `issues/events` feed | `closed` entries carry the closer as `actor`, and a merged PR emits `closed` too, which is what lets a close trigger release post merge work. Read only when a close rule is armed, so an unarmed deployment's cycle is byte identical to one before close triggers existed |
+| `GET /repos/{o}/{r}/issues/events` | `label`, and the close action of `pull_request` and `issue` | `labeled` entries cover issues and pull requests alike, because a PR is an issue here. A PR label fetches the PR once so the synthesized payload carries the same author association, labels, head and base a real delivery would. `closed` entries carry the closer as `actor`, and a merged PR emits `closed` too, which is what lets a close trigger release post merge work. The close half is read only when a close rule is armed, so an unarmed deployment's cycle is byte identical to one before close triggers existed |
+| `GET /repos/{o}/{r}/issues/comments?since=` | `comment` | PR conversation comments are issue comments, so one endpoint covers both, as one webhook event does. The comment object lacks the issue fields the subset needs, so each new comment fetches its issue once |
+| `GET /repos/{o}/{r}/pulls?state=open` | `pull_request`, actions `opened` `synchronize` `reopened` | diffed against a per PR head sha snapshot: an unknown number is `opened`, a known number with a new sha is `synchronize`, a number that left the open list and came back is `reopened` |
+| `GET /repos/{o}/{r}/pulls/{n}/reviews` | `pull_request`, action `review_submitted` | per open PR, cursor is the last processed review id. Only open PRs are swept, because a review on a closed PR has nothing left to act on, and at most 50 per cycle, with a `poll_reviews_gap` line when a repository has more open than that |
 
 ## How it works
 

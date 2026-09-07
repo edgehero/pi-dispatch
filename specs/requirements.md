@@ -1696,13 +1696,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   comment at its own read site naming it internal and saying why it cannot be a key. The comment rides
   the read rather than a list, because a list is a second thing to keep true and drifts from the code it
   describes; `worker/src/reserved-env.mjs` states that rule for the reserved-name sets and it holds here
-  for the same reason. Four categories of reason exist today and each is stated rather than assumed: the
+  for the same reason. Four reasons carry a marker today and each is stated rather than assumed: the
   worker writes the value into the container per job, so a deployment's value is overwritten before
   anything reads it; the variable is unit configuration a wrapper captures before it sources `./.env`,
-  which is what stops file content naming a script the wrapper runs; the variable is the surrounding
-  system's, not this project's; or it is a test seam read only from `test/`. Provider key names are the
-  one set that cannot be enumerated at all, because pi names them per provider, and the file says so
-  instead of pretending to a closed list.
+  which is what stops file content naming a script the wrapper runs; the variable belongs to the
+  surrounding system rather than to this project; or nothing on the host writes it at all, so a value in
+  `.env` reaches no container. Two more are named in `.env.example` and carry no marker, because neither
+  is read from these trees: the test seams, which live in `test/`, and the provider keys, which cannot be
+  enumerated at all because pi names them per provider. The file says that rather than pretending to a
+  closed list.
 - **Scope**: Deployment setup, repair, and process supervision on the operator's own host —
   `pi-dispatch service <render|install|uninstall|status|start|stop|restart [--drain]>` renders the
   shipped deploy/ templates with computed absolutes (`process.execPath`, the real repo root — the

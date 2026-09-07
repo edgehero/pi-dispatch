@@ -13,10 +13,10 @@ import { configError } from "./outcome.mjs";
  */
 // env-internal PI_FLOW, PI_COMMAND, PI_PACKAGES, PI_SESSION_FILE: the worker writes these into every
 // container per job (INT-CONTAINER-RUNTIME-CONTRACT), so a value in a host .env is overwritten before this
-// function reads it, and a trigger that tries to bind one by name is refused at load.
+// function reads it, and a trigger naming one in `run.secrets` is refused at load for the same reason.
 // env-internal PI_RETRY_MAX, PI_RETRY_BASE_MS: this runner's own provider retry bounds, and the one pair
-// here that the worker does NOT write. They reach a job only through PI_FORWARD_ENV or a trigger's own
-// `env` block, so a bare line in .env would set them on the host and change nothing inside the container.
+// here that the worker does NOT write. Nothing puts them on a container by default, so a bare .env line
+// sets them on the host and changes nothing in here; PI_FORWARD_ENV is what carries a host value in.
 export function parseRunnerEnv(env) {
 	const provider = requireEnv(env, "PI_PROVIDER");
 	const model = requireEnv(env, "PI_MODEL");
@@ -305,7 +305,7 @@ export function assertPackagePathsExist(paths, { fileExists = existsSync } = {})
  * assert on and the value pi reads identical.
  */
 // env-internal PI_OFFLINE: the worker sets it on the container and this function then forces it, so it
-// states what the sandbox already is rather than choosing it. Reserved by name against a trigger `env`.
+// states what the sandbox already is rather than choosing it. Reserved by name, so `run.secrets` cannot bind it.
 export function enforceOfflineMode(env = process.env) {
 	if (env.PI_OFFLINE === "1") return;
 	env.PI_OFFLINE = "1";
