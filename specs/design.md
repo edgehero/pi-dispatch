@@ -532,10 +532,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   loadable and the lost update is one edit or one disarm — the disarm retries, the operator re-presses.
   **The staleness test compares two different clocks, and that residual is stated rather than fixed**
   (issue #293): `Date.now()` is this process's, while the lock's `mtime` is the FILESYSTEM's, which on a
-  network mount is a server's. A server more than 10s behind makes every LIVE lock read as stale, so the
-  takeover fires on every attempt and the millisecond-wide window above stops being a rare race and
-  becomes the normal case — `OQ-031` already records two hosts sharing one working tree as a live hazard,
-  and this is exactly the file such a deployment shares. `takeLock` takes an injected `now`, defaulted to
+  network mount is a server's. `OQ-031` already records two hosts sharing one working tree as a live
+  hazard, and this is exactly the file such a deployment shares. Both signs hurt, differently. A server
+  more than 10s BEHIND makes every live lock read as stale, so the takeover fires every time and the
+  window above becomes the normal case — and because `releaseLock` unlinks by PATH rather than by fd, a
+  writer whose lock was stolen then deletes its successor's, so the lock is functionally absent rather
+  than merely racy. A server AHEAD makes the difference negative, so a crashed writer's lock is NEVER
+  swept: writes refuse forever and a spent one-shot never records its disarm, which is the expensive
+  direction. `takeLock` takes an injected `now`, defaulted to
   the real clock so every shipped path is byte-identical; the seam is what lets a test demonstrate the
   skew, and it also gave the 10s threshold its first test, which had none because pinning it meant a
   ten-second sleep.

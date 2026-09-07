@@ -37,27 +37,57 @@
  *     it is the same class, reached through a timestamp instead of a literal, and it is how the
  *     `takeLock` two-clocks defect in `worker/src/triggers-file.mjs` was found.
  *
- * Delivered through `NODE_OPTIONS` so it reaches the child processes `node --test` forks per file.
+ * Delivered through `NODE_OPTIONS` so it reaches the child processes `node --test` forks per file, and it
+ * survives a grandchild too (measured: applied exactly once, not twice). The one hole is a test that
+ * spawns with an env ALLOWLIST rather than inheriting: `receiver/test/start.test.mjs` passes only PATH and
+ * two config vars, so that subprocess runs on the real clock inside the shifted step. Harmless today, and
+ * the kind of thing that grows quietly, so it is named here rather than discovered later.
  */
-const SHIFT_MS = 399 * 24 * 60 * 60 * 1000;
+/**
+ * The offset, in days. Overridable so that whoever debugs a red here can bisect it in one command
+ * (`SHIFT_DAYS=490 npm test`) instead of editing this file: the guard is green at +399 today, and the
+ * TARGET date moves with the wall clock, so a future red may be about a specific calendar shape rather
+ * than about the class. Keep any override a whole number of WEEKS, or the weekday changes and the
+ * failures stop meaning what this file says they mean.
+ */
+const SHIFT_DAYS = Number(process.env.SHIFT_DAYS ?? 399);
+const SHIFT_MS = SHIFT_DAYS * 24 * 60 * 60 * 1000;
 const RealDate = Date;
 const realNow = RealDate.now;
 
-class ShiftedDate extends RealDate {
-	constructor(...args) {
-		if (args.length === 0) super(realNow() + SHIFT_MS);
-		else super(...args);
-	}
-	static now() {
-		return realNow() + SHIFT_MS;
-	}
+/**
+ * A FUNCTION sharing `Date.prototype`, not `class ShiftedDate extends Date`.
+ *
+ * A subclass gets its own `prototype`, and `globalThis.Date = Subclass` then makes `Date.prototype` a
+ * different object from the intrinsic every other Date in the process was built against. Measured
+ * consequences inside a shifted test child: `statSync(f).mtime instanceof Date` was FALSE, so was
+ * `structuredClone(d) instanceof Date`, `deepStrictEqual` on two equal dates threw on the prototype
+ * mismatch, and `Date()` without `new` threw outright. Nothing in this tree trips those today, but zod,
+ * typebox, cron-parser and the AWS/OpenAI SDKs all validate with `instanceof Date` -- and the red would
+ * arrive wearing this job's canned "the wall clock moved 399 days" message, which would be a lie.
+ *
+ * Sharing the intrinsic prototype keeps every one of those true. The only visible difference left is
+ * `Date.name`, which is restored below.
+ */
+function ShiftedDate(...args) {
+	// `Date()` without `new` returns a STRING and ignores its arguments, per spec.
+	if (new.target === undefined) return RealDate();
+	return args.length === 0 ? new RealDate(realNow() + SHIFT_MS) : new RealDate(...args);
 }
+ShiftedDate.prototype = RealDate.prototype;
 // Carry the statics (`parse`, `UTC`) through unchanged: they answer about a GIVEN instant, not about now.
 Object.setPrototypeOf(ShiftedDate, RealDate);
+ShiftedDate.now = () => realNow() + SHIFT_MS;
+Object.defineProperty(ShiftedDate, "name", { value: "Date", configurable: true });
 globalThis.Date = ShiftedDate;
 
-// Self-check, because a silently broken shim would turn this whole job green for the wrong reason.
+// Self-checks, because a silently broken shim turns this whole job green for the wrong reason. Each one
+// is a property something in the dependency tree actually relies on.
 const FIXED = "2026-08-30T12:00:00.000Z";
-if (new ShiftedDate(FIXED).toISOString() !== FIXED) throw new Error("shift-clock: new Date(<arg>) must not shift");
-if (ShiftedDate.parse(FIXED) !== RealDate.parse(FIXED)) throw new Error("shift-clock: Date.parse must not shift");
-if (ShiftedDate.now() - realNow() < SHIFT_MS - 5000) throw new Error("shift-clock: Date.now() is not shifted");
+const drift = ShiftedDate.now() - realNow();
+if (new Date(FIXED).toISOString() !== FIXED) throw new Error("shift-clock: new Date(<arg>) must not shift");
+if (Date.parse(FIXED) !== RealDate.parse(FIXED)) throw new Error("shift-clock: Date.parse must not shift");
+if (Math.abs(drift - SHIFT_MS) > 5000) throw new Error(`shift-clock: expected a ${SHIFT_DAYS}d shift, got ${drift}ms`);
+if (!(new Date() instanceof Date)) throw new Error("shift-clock: instanceof Date must still hold");
+if (Date.prototype !== RealDate.prototype) throw new Error("shift-clock: Date.prototype must stay the intrinsic");
+if (typeof Date() !== "string") throw new Error("shift-clock: Date() without new must still return a string");

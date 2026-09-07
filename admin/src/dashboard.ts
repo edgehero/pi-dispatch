@@ -367,6 +367,13 @@ export function makeDashboard({
 
     try {
       snapshot = await deps.fetchSnapshot();
+      // Stamp WHEN this data was fetched, and render that rather than reading the wall clock mid-paint.
+      // The header's clock used to be `new Date()` inside the renderer, which made the same snapshot
+      // render two different frames either side of a second boundary -- issue #293's own class, and it
+      // had already produced a real intermittent failure. Fetch time is also the more honest number: the
+      // panel repaints on keystrokes, and a clock that ticks on keypress claims a freshness the data
+      // does not have.
+      if (snapshot && typeof snapshot === "object") snapshot.fetchedAt = deps.now ? deps.now() : Date.now();
       // Only while the tail view is open, and only through the injected capability, re-read the tail keyed
       // by the id-only `tailJobId`. `await` unwraps a synchronous return too. The bytes stay in `tail`.
       if (view === "LIVE_TAIL" && tailJobId && deps.tailLog) {
@@ -943,7 +950,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // the collapsed divider names. Status and runs carry no priority: the header is the panel's one
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
-    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler)] },
+    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt)] },
     { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler), priority: 4, viewKey: "s" },
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
@@ -1039,7 +1046,7 @@ function fmtDuration(ms: any): string {
 }
 
 /** The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. */
-function statusHeader(queue: any, inner: number, styler: any): string {
+function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): string {
   if (!queue || queue.unreachable) {
     return styler.cell(`queue unreachable (${queue?.unreachable ?? "?"})`, inner, { color: "error" });
   }
@@ -1065,7 +1072,9 @@ function statusHeader(queue: any, inner: number, styler: any): string {
     (delayed > 0 ? `${delayed} delayed` + sep : "") +
     (failed > 0 ? styler.fg("error", `${failed} failed`) : `${failed} failed`) + sep +
     `${queue.workers ?? "?"} workers`;
-  const clock = new Date().toISOString().slice(11, 19); // HH:MM:SS UTC
+  // From the SNAPSHOT, never from the wall clock here: a renderer that reads the time is not a function
+  // of its input, and two renders of one snapshot could disagree across a second boundary.
+  const clock = new Date(Number.isFinite(fetchedAt) ? fetchedAt : 0).toISOString().slice(11, 19); // HH:MM:SS UTC
   const left = `${dot} ${word}  ${vitals}`;
   const gap = inner - styler.visibleLen(left) - clock.length;
   if (gap < 1) return styler.cell(styler.stripAnsi(left), inner);

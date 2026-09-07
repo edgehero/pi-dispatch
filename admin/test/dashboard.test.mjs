@@ -1818,3 +1818,28 @@ test("schedulers are read across the fleet, or TRIGGERS shows zero while cron ru
   assert.equal(snap.schedulers.length, 1, "the host queue's scheduler is visible");
   await deps.dispose();
 });
+
+test("the header clock comes from the SNAPSHOT, so one snapshot always renders one frame (issue #293)", async () => {
+	// This was a real intermittent failure, roughly once in thirteen full-suite runs: `statusHeader` read
+	// `new Date()` while painting, so two renders of identical data disagreed whenever they straddled a
+	// second boundary. Issue #293's own class -- a subject on the default clock -- and neither of that
+	// issue's guards can see it: there is no date literal for the static check, and it fails at ANY clock
+	// offset, so the shifted run is not an oracle for it either. Hence a test.
+	const at = Date.parse("2026-08-30T12:34:56.000Z");
+	const render = async (now) => {
+		const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ now }) });
+		await flush();
+		const out = comp.render(80).join("\n");
+		await comp.dispose();
+		return out;
+	};
+	const a = await render(() => at);
+	const b = await render(() => at + 999);
+	assert.equal(a, b, "same fetch second, byte-identical frames");
+	assert.match(a, /12:34:56/, "and it is the FETCH time, not the paint time");
+
+	// A different fetch second is a different frame, which is what makes the assertion above meaningful.
+	const later = await render(() => at + 1000);
+	assert.match(later, /12:34:57/);
+	assert.notEqual(a, later);
+});

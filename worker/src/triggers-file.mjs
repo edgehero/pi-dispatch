@@ -71,12 +71,21 @@ function lockPathFor(triggersPath) {
  * a two-line assertion, and a bound nothing exercises is a bound that drifts.
  *
  * And the comparison it feeds is between TWO DIFFERENT CLOCKS. `Date.now()` is this process's;
- * `mtimeMs` is the FILESYSTEM's, which on a network mount is a server's. A server more than
- * LOCK_STALE_MS behind makes every LIVE lock read as stale, so the takeover fires on every attempt and
- * the millisecond-wide double-take window this module deliberately concedes stops being a rare race and
- * becomes the normal case -- `OQ-031` already records two hosts sharing one working tree as a live
- * hazard, and `triggers.json` is exactly the file such a deployment shares. Nothing here closes that;
- * the seam is what let a test demonstrate it, and issue #293's clock-shifted CI run is what found it.
+ * `mtimeMs` is the FILESYSTEM's, which on a network mount is a server's. `OQ-031` already records two
+ * hosts sharing one working tree as a live hazard, and `triggers.json` is exactly the file such a
+ * deployment shares. BOTH signs of the skew are bad, and differently:
+ *
+ *   - A server more than LOCK_STALE_MS BEHIND makes every LIVE lock read as stale, so the takeover fires
+ *     on every attempt and the millisecond-wide double-take window this module concedes stops being a
+ *     rare race and becomes the normal case. Worse than it sounds, because `releaseLock` unlinks by PATH
+ *     rather than by fd: once A's lock is stolen, A's release deletes B's, so under sustained skew the
+ *     lock is not merely racy, it is functionally absent.
+ *   - A server AHEAD makes the difference negative, so the comparison is always true and a genuinely
+ *     crashed writer's lock is NEVER swept. `writeTriggers` then refuses forever and `disarmTrigger`
+ *     exhausts its retries, which means a spent one-shot never records its disarm and can fire again.
+ *
+ * Nothing here closes either; the seam is what let a test demonstrate the skew, and issue #293's
+ * clock-shifted CI run is what found it.
  */
 function takeLock(triggersPath, fs, log, now = () => Date.now()) {
 	const lock = lockPathFor(triggersPath);
