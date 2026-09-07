@@ -1452,6 +1452,9 @@ function realArtifactDeps(): any {
  * should see is the session, not the variable), and only linux gates on DISPLAY/WAYLAND_DISPLAY --
  * darwin and win32 have openers that need no display variable.
  */
+// env-internal SSH_CONNECTION, SSH_TTY, DISPLAY, WAYLAND_DISPLAY: how the session the panel is running
+// in describes itself. They decide whether opening a browser here could work at all, and a deployment
+// declaring them would be describing someone else's terminal.
 export function isHeadlessEnv(env: any, platform: string): string | null {
   if (env?.SSH_CONNECTION || env?.SSH_TTY) return "SSH session";
   if (platform === "linux" && !env?.DISPLAY && !env?.WAYLAND_DISPLAY) return "no display";
@@ -1751,6 +1754,7 @@ async function openSandboxSession(paths: any, jobId: string): Promise<void> {
     name: resolved.name,
     workspace: resolved.manifest.workspace,
     jobDir: resolved.manifest.dir,
+    // env-internal TERM: the operator's own terminal type, passed through to the sandbox shell.
     term: process.env.TERM,
     idleSeconds: (paths.sandboxIdleMinutes ?? 0) * 60,
   });

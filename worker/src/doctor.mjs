@@ -2072,6 +2072,9 @@ async function envSetupChecks(env, seams) {
 		}
 	}
 
+	// env-internal PI_ENV_SETUP: unit configuration, deliberately never an .env key. The wrappers capture
+	// it BEFORE they source ./.env so that nothing able to write that file can name a script they run
+	// (REQ-DEPLOYMENT-BOOTSTRAP). doctor reads it here only to answer for a host whose unit names none.
 	const fromEnv = (env.PI_ENV_SETUP ?? "").trim();
 	if (sources.size === 0 && fromEnv) sources.set(fromEnv, "PI_ENV_SETUP in this environment");
 

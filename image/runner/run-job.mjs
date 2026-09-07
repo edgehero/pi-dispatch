@@ -35,6 +35,7 @@ const PROMPT_PATH = "/job/prompt.md";
  *  lines on its side (`parseTailLine`), because this fix only reaches deployments that pull a new
  *  image; both halves are deliberate. */
 function log(event, fields = {}) {
+	// env-internal PI_JOB_ID: set by the worker on the container, so a log line can name its job.
 	process.stdout.write(`\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
 }
 

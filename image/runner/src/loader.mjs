@@ -49,6 +49,8 @@ function readIfExists(path) {
  * alternative default is silence, and a security drop nobody can see is the failure this whole change is
  * about: a caller that forgets to pass a log must still leave the drop in the run log.
  */
+// env-internal PI_JOB_ID: the worker's own id for this job, set on the container so every line the
+// runner writes carries it. Host-side bookkeeping, never something a deployment declares.
 function defaultLog(event, fields = {}) {
 	process.stdout.write(`\n${JSON.stringify({ event, jobId: process.env.PI_JOB_ID, ...fields })}\n`);
 }

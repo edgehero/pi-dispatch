@@ -265,6 +265,8 @@ export async function runService(argv = [], deps = {}) {
 		moduleDir = MODULE_DIR,
 		resolveReceiver = resolveReceiverStart,
 		home = homedir(),
+		// env-internal USER: whose account a rendered unit runs as, taken from the login already running
+		// this command. An operator changes it by running the command as someone else, not by declaring it.
 		user = env.USER || userInfo().username,
 		tmp = tmpdir(),
 		fs = { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync },

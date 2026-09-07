@@ -498,6 +498,9 @@ export function loadGitHubAuth(env, fileExists) {
 	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
+// env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job, log, graph and settings
+// paths below. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR, PI_LOGS_DIR,
+// PI_GRAPH_DIR and PI_SETTINGS_FILE are how an operator moves any of them, and .env.example says so.
 function defaultJobsDir() {
 	// Under the OS temp dir by default. Holds only the read-only /job inputs (prompt + .pi/); the
 	// workspace for a local job is the operator's own folder, not here.

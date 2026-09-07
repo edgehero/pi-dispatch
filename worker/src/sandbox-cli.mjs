@@ -140,6 +140,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		workspace: resolved.manifest.workspace,
 		jobDir: resolved.manifest.dir,
 		publish,
+		// env-internal TERM: the operator's own terminal type, forwarded so the sandbox shell renders the
+		// way their terminal does. Nothing a deployment declares.
 		term: env.TERM,
 		idleSeconds: config.sandboxIdleMinutes * 60,
 		network,
