@@ -52,7 +52,7 @@ type Notify = ((message: string, type?: string) => void) | undefined;
  * version, so a release bump stays atomic: bump the worker and the test fails here until this literal
  * follows in the same change.
  */
-export const RUNTIME_VERSION = "1.10.1";
+export const RUNTIME_VERSION = "1.10.2";
 
 /**
  * The `@edgehero/pi-dispatch-receiver` version the trigger-edge step installs -- pinned for exactly the
