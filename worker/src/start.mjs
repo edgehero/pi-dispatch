@@ -22,6 +22,7 @@ import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
 import { listRunningSandboxes } from "./sandbox.mjs";
+import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
@@ -305,6 +306,7 @@ export async function startWorker(
 		makeRunMirror: makeRunMirrorFn = makeRunMirror,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
+		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
 		makeImagePreflight: makeImagePreflightFn = makeImagePreflight,
@@ -432,8 +434,14 @@ export async function startWorker(
 	// REQ-LOCAL-JOB-VISIBILITY: sweep aged `.log`/`.json` history at boot so the logs directory stays
 	// bounded across restarts. Best-effort with the same double-wrap posture as the container reaper: the
 	// reaper swallows its own fs errors, and this guard keeps any reaper failure from blocking draining.
+	// HELD, not discarded: the periodic sweep (issue #292) re-runs this exact closure, so one configuration
+	// read serves boot and every tick after it and the two cannot drift. The `let` with an inert default is
+	// what keeps a throwing FACTORY from leaving the sweep holding `undefined` -- the guard below promises
+	// that no reaper failure blocks draining, and that promise now has to cover construction too.
+	let reapLogs = () => {};
 	try {
-		await makeLogReaperFn({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log })();
+		reapLogs = makeLogReaperFn({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+		await reapLogs();
 	} catch (err) {
 		log("log_reaper_skipped", { reason: err?.message });
 	}
@@ -443,13 +451,19 @@ export async function startWorker(
 	// retention policy, a different PII class, and one thing neither sibling needs: it asks docker which
 	// sandboxes are live first, because an operator's shell can outlive a worker restart by design and
 	// deleting a bind mount underneath it is a confusing failure with a boring cause. Same double-wrap.
+	// Held for the periodic sweep, same as the log reaper above. Safe to re-run on a timer without any
+	// state carried between calls: `makeSandboxReaper` declares `running` INSIDE its returned function and
+	// re-issues `listRunning` every call, so a docker outage costs one interval of retention overshoot
+	// rather than latching the sweep off until the next boot.
+	let reapSandboxes = async () => {};
 	try {
-		await makeSandboxReaperFn({
+		reapSandboxes = makeSandboxReaperFn({
 			sandboxDir: config.sandboxDir,
 			retentionHours: config.sandboxRetentionHours,
 			listRunning: listRunningSandboxes,
 			log,
-		})();
+		});
+		await reapSandboxes();
 	} catch (err) {
 		log("sandbox_reaper_skipped", { reason: err?.message });
 	}
@@ -513,8 +527,10 @@ export async function startWorker(
 		log,
 	});
 	// Boot sweep, beside the log reaper and for the same reason it is beside rather than inside it: these
-	// files have a different retention policy and a different PII class. The gate that actually matters is
-	// the age check at OPEN -- a worker that never restarts would otherwise resume forever (OQ-007).
+	// files have a different retention policy and a different PII class. Until issue #292 the age check at
+	// OPEN was carrying this alone, because a worker that never restarts never re-swept; the periodic sweep
+	// now covers the DISK half and the open gate covers the INPUT half, which is the one that matters
+	// (OQ-007, RESOLVED).
 	try {
 		sessionStore.reapSessions();
 	} catch (err) {
@@ -1052,11 +1068,37 @@ export async function startWorker(
 		extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log));
 	}
 
+	// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment
+	// is a service that restarts only on failure, so the healthy worker was the one that never re-swept.
+	// Armed HERE, at the end of boot beside the watches: all three closures exist, boot's own sweeps have
+	// long finished, and the first tick lands one full interval later rather than during the schedules
+	// reconcile, which is Redis-destructive work a small test interval would otherwise land inside.
+	//
+	// NOT CONSTRUCTED AT ALL when the knob is 0. That is how "0 is byte-identical to before" is a fact
+	// rather than a claim: with no object there is no timer, no closer and no reachable second call to any
+	// reaper. It is registered in `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
+	// this handle holds an `rmSync`, and a tick landing mid-drain could delete a retained workspace behind a
+	// worker that already reported a clean shutdown.
+	if (config.sweepIntervalHours > 0) {
+		const sweep = makeRetentionSweepFn({
+			reapers: [
+				{ name: "log", reap: reapLogs },
+				{ name: "sandbox", reap: reapSandboxes },
+				{ name: "session", reap: () => sessionStore.reapSessions() },
+			],
+			intervalMs: config.sweepIntervalHours * 3600000,
+			log,
+		});
+		sweep.start();
+		extraClosers.push(sweep);
+	}
+
 	log("worker_started", {
 		queue: "pi-jobs",
 		host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 		imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 		concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
+		sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, this version's pre-#292 behaviour
 		dailyCap: config.dailyCap,
 		weeklyCap: config.weeklyCap, // null when the weekly window is disabled
 		monthlyCap: config.monthlyCap, // null when the monthly window is disabled

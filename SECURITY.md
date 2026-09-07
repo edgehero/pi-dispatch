@@ -578,8 +578,10 @@ Stated openly rather than discovered later:
   expiry rather than by whether an agent ever ran a verbose curl. On GitLab there is no stronger option to
   prefer, so the same warning applies with no mitigation beyond rotating the token.
 - **`PI_SESSIONS_DIR` is a PII store, and it has no default.** Unset means the feature is unavailable and
-  a trigger that asked for it is refused before it costs anything — deliberately, so nobody ends up with
-  transcripts in a temp directory they never chose. Put it on the same disk you would put
+  a trigger that asked for it is refused before it costs anything — deliberately, because a default would
+  turn that refusal into a silent success, writing the most PII-bearing thing this system holds to a path
+  nobody chose. That reasoning is its own, and does not rest on where anything else defaults. Put it on
+  the same disk you would put
   `PI_CAPTURE_JOB_LOGS` output on, mode `0700`, outside every git repository, and set
   `PI_SESSIONS_TTL_DAYS` together with `PI_SESSION_MAX_AGE_DAYS`, which bound two different clocks: the
   first is time since the last run on a key, the second is the age of the conversation itself. Retention

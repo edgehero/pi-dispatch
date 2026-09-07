@@ -507,13 +507,16 @@ export function makeSessionStore({
 	}
 
 	/**
-	 * Boot-time sweep. A SIBLING of makeLogReaper rather than a widening of it: that one's `.log`/`.json`
-	 * filter and logsDir scope are a documented contract, and these files have a different retention
-	 * policy and a different PII class. Same never-throws shape, same `0 = keep forever` sentinel.
+	 * The DISK sweep: at boot, and on the retention timer thereafter (`PI_SWEEP_INTERVAL_HOURS`, issue
+	 * #292). A SIBLING of makeLogReaper rather than a widening of it: that one's `.log`/`.json` filter and
+	 * logsDir scope are a documented contract, and these files have a different retention policy and a
+	 * different PII class. Same never-throws shape, same `0 = keep forever` sentinel, and safe to re-run --
+	 * it carries no state between calls.
 	 *
-	 * Age at boot is the smaller half. The gate that matters is the one in readCanonical, which runs at
-	 * OPEN -- a worker that never restarts would otherwise keep resuming a transcript indefinitely, and a
-	 * stale transcript is a live input to a future job rather than debris (OQ-007).
+	 * Age on disk is the smaller half. The gate that matters is the one in readCanonical, which runs at
+	 * OPEN, because a stale transcript is a live INPUT to a future job rather than debris. Until #292 that
+	 * gate was also carrying the disk half alone, since a worker that never restarts never re-swept
+	 * (OQ-007, RESOLVED).
 	 */
 	function reapSessions() {
 		if (!sessionsDir || ttlDays === 0) return;

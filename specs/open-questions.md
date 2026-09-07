@@ -238,23 +238,64 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   token's short expiry, not network policy, is the exfiltration bound, so the mechanism must keep that
   expiry short and the scope narrow. `OQ-004` remains **ACCEPTED RISK** (unchanged by this entry).
 
-## OQ-007 — Run-history log & record retention: periodic (non-boot) sweep
+## OQ-007 — Run-history, sandbox and session retention: RESOLVED (a daily sweep; `PI_SWEEP_INTERVAL_HOURS=0` restores boot-only)
 
-- **Status**: **OPEN**
-- **Question**: Should the durable run-history sidecars (`logs/<jobId>.{json,log}`) be pruned by a
-  periodic, timer-driven sweep, and if so at what cadence?
-- **Why it matters**: sidecar retention is decoupled from BullMQ's queue eviction — the records are meant
-  to outlive the queue entries. Pruning is a **boot-time** age sweep only (`makeLogReaper`, window
-  `PI_LOG_RETENTION_DAYS`, `0` = keep forever). A worker that runs for a long time without restarting
-  therefore never re-sweeps, so `logs/` can grow between restarts. The boot sweep is the shipped partial
-  answer; the periodic sweep is the unresolved half.
-- **How to answer**: decide whether a timer-driven sweep is warranted and pick a cadence, or ratify
-  boot-only pruning as sufficient given the expected restart frequency.
-- **Secondary note**: `sanitizeJobId` collapses filesystem-illegal characters (e.g. the colons in a
-  `repeat:<sched>:<millis>` scheduler id) to `_`, so two distinct job ids could in principle map to one
-  filename. Considered vanishingly unlikely given the `gh-` / `local-` / `repeat:` id grammars; revisit
-  with a hash suffix only if it is ever observed.
-- **Blocks**: nothing from shipping. The boot sweep bounds growth across restarts today.
+- **Status**: **RESOLVED 2026-09-07 — a timer-driven sweep, and WIDENED from one store to three.**
+  Warranted, at a default cadence of 24 hours, for the supported deployment shape: a service unit that
+  restarts only on failure (`deploy/worker.service`).
+- **Why the answer is widened rather than answered as asked, which is the substance of this closure**:
+  the row was scoped to `logs/<jobId>.{json,log}` because that was the only sweep that existed when it
+  was written. Two more shipped afterwards — the retained sandbox directories
+  (`REQ-RESURRECTABLE-SANDBOX`) and the session store (`REQ-RESUMABLE-SESSION`) — and **each was given a
+  boot sweep on this row's own reasoning without this row being updated**. Answering only the logs half
+  would have left two stores holding the identical unanswered question with no register entry naming
+  them. The three are one question because they have one cause: a process that sweeps at boot and never
+  restarts.
+- **Question**: should the host-side retention stores be pruned by a periodic, timer-driven sweep, and
+  if so at what cadence?
+- **Why it mattered**: retention was a **boot-time** age sweep only, three times over — `makeLogReaper`
+  (`PI_LOG_RETENTION_DAYS`, `0` = keep forever), `makeSandboxReaper` (`PI_SANDBOX_RETENTION_HOURS`, `0` =
+  OFF) and `sessionStore.reapSessions` (`PI_SESSIONS_TTL_DAYS`, `0` = keep forever). The supported
+  deployment restarts only on failure, so the HEALTHY worker was exactly the one that never swept.
+  Thirty days of uptime held thirty days of growth, and the three windows an operator configured
+  described nothing.
+- **Resolution**: one daily `.unref()`'d interval, armed at the end of boot, running the three reaper
+  closures boot already built. `PI_SWEEP_INTERVAL_HOURS` (default 24, refused above 168) sets the
+  cadence. **`0` restores boot-only and is byte-identical to every version before this one: the sweep
+  object is not CONSTRUCTED at all, so no timer, no closer and no second call to any reaper is
+  reachable** — proven by a test asserting zero constructions, not by counting effects. The tick reuses
+  the closures rather than rebuilding them, so one configuration read serves boot and every sweep after
+  it and the two cannot drift. Each store is swept in its own `try`, reusing the existing
+  `log_reaper_skipped` / `sandbox_reaper_skipped` / `session_reaper_skipped` names so one grep covers
+  boot and every tick, and a fault is one log line rather than a crash. The timer is registered in
+  `extraClosers` beside the queues, the registry and the three watches, because
+  `DES-WATCHERS-CLOSE-WITH-THE-WORKER` established that **unref'd is not cleaned up** and this handle
+  holds an `rmSync`.
+- **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
+  A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
+  `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound
+  where there was none, and an operator who needs tighter sets the knob to `1`. **The sandbox sweep can
+  also skip a tick entirely**: it asks docker which sandboxes are live before it sweeps and refuses to
+  sweep blind (`INT-SANDBOX-CONTRACT`), so a docker outage costs one interval of overshoot. It is not a
+  latch — the lookup is re-issued every tick and the reaper holds no state between calls.
+- **What this does NOT cover**, and the boundary is deliberate: `logs/` and the sandbox root are still
+  **not quota'd**. This bounds them by AGE, which is the only thing a window can bound. A byte ceiling
+  is a different mechanism with a different failure mode (what do you delete when you are over?) and is
+  not what this row asked.
+- **Secondary note, carried forward unresolved**: `sanitizeJobId` collapses filesystem-illegal characters
+  (the colons in a `repeat:<sched>:<millis>` scheduler id) to `_`, so two distinct job ids could in
+  principle map to one filename. Considered vanishingly unlikely given the `gh-` / `local-` / `repeat:`
+  id grammars; revisit with a hash suffix only if it is ever observed. Unchanged by this resolution.
+- **What would REOPEN it**: a report of a store growing without bound on a worker with the sweep armed,
+  which would mean a reaper's own filter is wrong rather than its cadence; a FOURTH host-side store
+  shipping with a boot sweep and no seat on this timer, which is the failure this widening exists to
+  prevent and which nothing mechanical catches; or a deployment shape where 24 hours of overshoot is
+  unacceptable and `1` is not acceptable either, which would mean age is the wrong bound and the quota
+  question is the one actually being asked.
+- **Related**: `OQ-014` is **amended by this change**. Its "the age gate runs at OPEN as well as at
+  boot" clause was load-bearing precisely because the boot half could never fire on a long-lived worker,
+  and the open gate no longer carries `PI_SESSIONS_TTL_DAYS` alone. The residual it records is
+  untouched: a sweep bounds how long a transcript survives, never who can name one.
 
 ## OQ-008 — Runtime trigger editing: RESOLVED (the file is the write target, applied live)
 
@@ -1295,3 +1336,4 @@ adversarial passes did.
 | 2026-08-31 | Issue #57. **`OQ-032` CLOSED**: forge deliveries binding `run.secretsProfile` or a `run.waitFor` profile are routed at enqueue by the receiver, which is where the decision has to be made -- a delayed job is promoted on each worker's own clock, so the fastest clock wins every attempt and the job cannot be handed from a host that will not serve it to one that will. Workers publish the profile NAMES they declare on their registry row; paths never leave the host, since a resolver path is operator topology everywhere and carries the account name on Windows. The rule lives in one module shared by both services so the worker's refusal and the receiver's routing cannot drift, and it abstains in four cases that each land on the previous behaviour, so the recommended deployment (the same profiles declared everywhere) is byte-identical. **`OQ-031` UNCHANGED, checked**: folder identity is untouched, and a folder is still not a routable capability -- a path hash cannot tell a shared mount from two same-path directories. **`OQ-033` UNCHANGED, checked**: the stall counter is cron-only and no forge job reaches it. **`OQ-008` UNCHANGED, checked**: `caps` is a self-description refreshed per beat, not configuration held in Redis; delete the whole `host:*` keyspace and every delivery goes to the shared queue, which is what this receiver did before any of it existed. **Code evidence**: worker/src/capabilities.mjs -> capabilityTokens, jobNeeds, routeForgeJob; receiver/src/route.mjs -> makeForgeRouter; worker/src/start.mjs -> the registry `caps` thunk. |
 | 2026-08-31 | Issue #267. **`OQ-033` CLOSED**, and both of its supporting claims corrected as false: the panel indexed the hash directly rather than summing it, and the "resets every live count on upgrade" objection was moot because the guard had never counted anything -- `start.mjs` invoked `guard.onStalled(...)` on a factory that returns the listener itself, so every stall threw a `TypeError` from the day the feature was wired. The row's proposed `<schedulerId>@<host>` field is still refused for the reason recorded when it was declined standalone: the counter's subject is the scheduler, both workers on one queue drain ONE scheduler, and host-namespacing would double the paid re-runs before the backstop fires. The real defect was the WINDOW -- a single `EXPIRE` on the whole hash, so any scheduler's stall refreshed every other scheduler's count and the guard degraded from "sustained stalling inside one window" to "cumulative stalling ever". Now one key per scheduler with its own expiry. **`OQ-002` UNCHANGED, checked**: concurrency is untouched. **`OQ-031` UNCHANGED, checked**: folder identity is untouched, and a shared working tree still puts one scheduler id on two host queues -- with per-scheduler keys those two now share one counter across hosts, which is the same pooling this row's closure argues is correct. |
 | 2026-09-07 | Issue #295. **`OQ-008` UNCHANGED, checked**: its two-sources-of-truth refusal is about WHERE live-editable operator config lives, and nothing moved -- the reviewed file remains the only source, no state migrates to Redis, and the keep-last-good-on-a-bad-edit posture it argues for is untouched on all three watched files. What changed is when the watch stops, which `OQ-008` never spoke to. No new open question is minted: the two residuals this slice leaves, that a reload can still fire once during the worker's drain and that the receiver's own watch is still never closed because its shutdown exits the process, are recorded as decisions with their reasons in `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, not as questions -- an open question is for a choice not yet made, and both of these were made. |
+| 2026-09-07 | Issue #292. **`OQ-007` RESOLVED, and WIDENED from one store to three.** The row asked about `logs/<jobId>.{json,log}` and is answered for the sandbox root and the session store as well, because the two later stores were each given a boot sweep on this row's own reasoning without the row being updated -- answering only the logs half would have left two stores holding the identical unanswered question and no register entry naming them. The resolution is one daily `.unref()`'d interval armed at the end of boot, running the three reaper closures boot already built rather than rebuilding them, so one configuration read serves boot and every tick after it and the two cannot drift. `PI_SWEEP_INTERVAL_HOURS` (default 24, refused above 168 because `setInterval` clamps a delay past 2^31-1 ms to 1ms, and a hot loop over the filesystem is a worse failure than a slow sweep) sets the cadence, and `0` restores boot-only by NOT CONSTRUCTING the sweep at all -- proven by a test asserting zero constructions and an unchanged `extraClosers` count, rather than asserted by counting effects. Two things went on the record because a later reader would get them wrong. The window becomes a FLOOR rather than a ceiling: a file dies on the first sweep AFTER its window closes, so the effective ceiling is window plus interval, up to 48 hours for a sandbox at both defaults -- stated in `.env.example` and `docs/sandbox.md` rather than left to be derived. And the timer is an `extraClosers` entry rather than resting on its unref, on `DES-WATCHERS-CLOSE-WITH-THE-WORKER`'s finding that UNREF'D IS NOT CLEANED UP: this handle holds an `rmSync`, and the suite's own shut-down canary waits 600ms, so a leaked DAILY timer would have been invisible in the suite and real in production. **`OQ-014` AMENDED**, one clause: its "the age gate runs at OPEN as well as at boot" was load-bearing precisely because the boot half could never fire on a worker that does not restart, and the open gate no longer carries `PI_SESSIONS_TTL_DAYS` alone. The residual that row records is untouched -- a sweep bounds how long a transcript survives, never who can name one. **`OQ-008` UNCHANGED, checked**: no state moves to Redis, the cadence is one environment variable read once at boot like every other, and there is no second write authority. **`OQ-003` UNCHANGED, checked**: nothing here reads or writes a run record's contents. **Code evidence**: worker/src/retention-sweep.mjs -> makeRetentionSweep (start, sweepOnce, close); worker/src/start.mjs -> startWorker (the two hoisted closures, the arm beside the watches); worker/src/config.mjs -> sweepIntervalHours. |

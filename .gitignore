@@ -14,6 +14,13 @@ plans/
 # issue text, and a job dir transiently holds a scoped GITHUB_TOKEN's working tree.
 # Never commit either.
 logs/
+# The run history and the settings overlay when a deployment folder IS a checkout of this repo, which
+# the README supports (`git clone` + `npm ci`). `logs/` above covers the pre-#290 name and the daemon's
+# own capture; these two cover what `pi-dispatch up` and an explicit PI_LOGS_DIR put here. The records
+# are PII-free by construction, so this is hygiene rather than a leak -- the raw `*.log` capture, which
+# is NOT PII-free, is caught separately below.
+run-history/
+/settings.json
 jobs/
 
 # Persisted agent session transcripts (PI_SESSIONS_DIR, REQ-RESUMABLE-SESSION). Strictly MORE

@@ -47,6 +47,7 @@ PI_SANDBOX_RETENTION_HOURS=24   # 0 = OFF. Note: not "keep forever" — see belo
 PI_SANDBOX_DIR=                 # default <PI_JOBS_DIR>/sandboxes, created mode 0700
 PI_SANDBOX_PIN_DAYS=7           # what --pin extends a run to
 PI_SANDBOX_IDLE_MINUTES=30      # TMOUT inside the sandbox; 0 = no idle logout
+PI_SWEEP_INTERVAL_HOURS=24      # how often the sweep re-runs while the worker is up; 0 = boot-only
 ```
 
 **The `0` sentinel is inverted here, and that is on purpose.** `PI_LOG_RETENTION_DAYS=0` and
@@ -153,10 +154,12 @@ session that ends in a closed laptop still keeps the workspace.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>`. The
-  retained **directories** are swept, and by a separate reaper: every worker boot deletes the ones past
-  their window, skipping any id whose container is live so a mount is never pulled out from under a shell.
-  That boot sweep is what actually enforces the 24-hour window, which is worth knowing in both
-  directions: a worker that never restarts never sweeps, and a restart after you lower the retention
-  setting sweeps what the old one kept.
+  retained **directories** are swept, and by a separate reaper: it deletes the ones past their window,
+  skipping any id whose container is live so a mount is never pulled out from under a shell. It runs at
+  every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
+  `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Two things follow.
+  The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window
+  closes, so at both defaults a retained workspace can live up to 48 hours. And a restart after you lower
+  the retention setting still sweeps what the old one kept.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.

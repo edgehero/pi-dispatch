@@ -11,6 +11,7 @@ import { delimiter, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
+import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
 
@@ -27,14 +28,16 @@ export function configError(message) {
 export const CHAIN_DEPTH_MAX_DEFAULT = 1; // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
 export const CHAIN_MAX_PER_JOB_DEFAULT = 2; // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
 
-function boundedInt(env, name, fallback, min, want) {
+// `max` is optional and defaults to no upper bound, which is the convention `optionalBoundedInt` below
+// already documents -- so every existing caller is unchanged by its arrival.
+function boundedInt(env, name, fallback, min, want, max = undefined) {
 	const raw = env[name];
 	if (raw === undefined || raw === "") {
 		if (fallback !== undefined) return fallback;
 		throw configError(`missing required env: ${name}`);
 	}
 	const n = Number.parseInt(raw, 10);
-	if (!Number.isInteger(n) || n < min || String(n) !== String(raw).trim()) {
+	if (!Number.isInteger(n) || n < min || (max !== undefined && n > max) || String(n) !== String(raw).trim()) {
 		throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want ${want})`);
 	}
 	return n;
@@ -45,8 +48,8 @@ export function positiveInt(env, name, fallback) {
 }
 
 // min=0: accepts 0 (a sentinel, e.g. "keep forever" for log retention), still rejects negatives and non-integers.
-function nonNegativeInt(env, name, fallback) {
-	return boundedInt(env, name, fallback, 0, "a non-negative integer");
+function nonNegativeInt(env, name, fallback, max = undefined) {
+	return boundedInt(env, name, fallback, 0, max === undefined ? "a non-negative integer" : `an integer 0-${max}`, max);
 }
 
 // An OPTIONAL bounded int: an unset or empty var is `null` (the feature it gates is disabled), a present
@@ -316,11 +319,19 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		settingsFile: settingsFilePath(env), // || (not ??) inside settingsFilePath, so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
 		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
-		// REQ-RESUMABLE-SESSION. NO DEFAULT, deliberately unlike logsDir/jobsDir: unset means the feature
-		// is unavailable, and a trigger that armed run.resume then refuses PRE-SPEND rather than running
-		// silently without persistence. A transcript is the most PII-bearing artifact this system holds --
-		// tool output, file contents, the agent's own reasoning -- and defaulting it into <OS temp>, which
-		// is mode 1777 on POSIX, is not a place to put that by accident.
+		// issue #292, OQ-007: how often the three host-side retention sweeps re-run while the worker is up.
+		// 0 = BOOT-ONLY, which is byte-identical to every version before this one -- start.mjs does not even
+		// CONSTRUCT the sweep at 0, so no timer, no closer and no second invocation of any reaper is reachable.
+		// The ceiling is enforced because setInterval clamps a delay past 2^31-1 ms to 1ms (see
+		// SWEEP_INTERVAL_MAX_HOURS); a hot loop over the filesystem is a worse failure than a slow sweep.
+		sweepIntervalHours: nonNegativeInt(env, "PI_SWEEP_INTERVAL_HOURS", SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS),
+		// REQ-RESUMABLE-SESSION. NO DEFAULT AT ALL, deliberately unlike every sibling above: unset means the
+		// feature is unavailable, and a trigger that armed run.resume then refuses PRE-SPEND rather than
+		// running silently without persistence. A transcript is the most PII-bearing artifact this system
+		// holds -- tool output, file contents, the agent's own reasoning -- and a DEFAULT would turn that
+		// refusal into a silent success on a path nobody chose. That reasoning stands on its own and does
+		// not rest on where the other stores default: issue #290 moved logs and settings to ~/.pi-dispatch
+		// and this one still has no default, for the same reason it never did.
 		sessionsDir: env.PI_SESSIONS_DIR || null,
 		sessionsTtlDays: nonNegativeInt(env, "PI_SESSIONS_TTL_DAYS", 14), // 0 = keep forever
 		// A bound on how large a transcript may be before it stops being resumed. Not disk hygiene: an

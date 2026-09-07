@@ -569,16 +569,19 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
   // only when pi runs FROM the deployment dir. VALKEY_URL's default already matches the container `up`
   // starts, so it stays out. Absolute paths by pointer contract (a relative value is dropped).
   //
-  // logsDir and settingsFile are here for a DIFFERENT and newer reason (issue #290), and the argument
-  // that once excluded them is now the argument for including them. They used to default to
-  // `<OS temp>/pi-dispatch/...`, which on Linux is a GLOBAL path: the worker and the panel resolved the
-  // same directory whatever account each ran under, so pointing at it bought nothing. Their default is
-  // now `~/.pi-dispatch`, which is per ACCOUNT -- and the shipped worker unit runs `User=pi` while the
-  // panel is a pi extension in the operator's own session. Left unpointed, the panel would resolve its
-  // OWN home: the run list reads empty, `dispatch_costs` reports no spend, and every cap set from the
-  // panel is written to a settings.json the worker never opens, which the worker then reads as an empty
-  // overlay and silently replaces with the .env defaults. Nothing detects that, so the pointer is what
-  // keeps the panel pointed at the deployment the worker actually writes.
+  // logsDir and settingsFile are deliberately NOT here, and the reason changed with issue #290 even
+  // though the answer did not. They used to be excluded because they defaulted to `<OS temp>/pi-dispatch`,
+  // a path both sides resolved identically. They default to `~/.pi-dispatch` now, which is per ACCOUNT --
+  // and they are still excluded, because every deployment this tooling installs runs the worker as the
+  // INVOKING user: `service install --user` strips the template's `User=pi` outright (systemd rejects it
+  // in user scope) and `--system` rewrites it to the invoking user, while launchd gets a LaunchAgent. So
+  // the worker and this panel share an account and resolve the same two paths with nothing written down.
+  //
+  // Pinning them here would be worse than useless: the pointer moves only the PANEL, so unless the same
+  // two values also reach the worker's own environment the two would read different directories -- an
+  // empty run list and panel-set caps landing where the worker never looks. The one shape where the
+  // accounts genuinely differ is a hand-rolled unit whose `User=` the operator edited, and the fix there
+  // belongs in that operator's `.env`, which is exactly what all three deploy templates now say.
   const pointer = {
     version: POINTER_VERSION,
     deploymentDir: dir,
@@ -587,8 +590,6 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
       PI_PAUSE_WINDOWS_FILE: join(dir, "pause-windows.json"),
       PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"),
       PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
-      PI_LOGS_DIR: join(dir, "run-history"),
-      PI_SETTINGS_FILE: join(dir, "settings.json"),
     },
   };
   const pPath = pointerPath(env);

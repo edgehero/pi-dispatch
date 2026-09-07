@@ -1,7 +1,7 @@
 # Backing up a deployment
 
 This service keeps state in three places: a Valkey volume, a handful of files in your deployment
-folder, and two durable directories under your home. Nothing here is a database, so a backup is a
+folder, and a durable directory and a file under your home. Nothing here is a database, so a backup is a
 copy, and the only hard part is the order you stop things in.
 
 If you read one section, read [Stop, copy, start](#stop-copy-start) and the two bolded rules in it.
@@ -57,30 +57,44 @@ These are all regenerated or bounded, and copying them buys nothing:
 
 ## Stop, copy, start
 
-Stop writers before you copy, outermost first. None of these files is snapshot atomic: `settings.json`
-is written with a temp file and a rename and is safe on its own, but `triggers.json` has two writers,
-and a run record is written when a job reaches a terminal state with no lock at all.
+Stop writers before you copy, outermost first. Each individual file is safe to copy on its own:
+`settings.json` and `triggers.json` are both written with a temp file and a rename, and `triggers.json`
+takes a lock as well because it has two writers. What you cannot get while things are running is a
+consistent snapshot of the SET, and a run record is written at a job's terminal state with no lock at
+all, so a copy taken mid-run can catch a partial one. Stopping first is what buys the group.
 
 1. **Stop the worker.** It owns the record writer, the retention sweep and one of the two
-   `triggers.json` writers.
+   `triggers.json` writers. If you installed it with `pi-dispatch service install`, use this project's
+   own wrapper, which knows the scope it installed into:
    ```bash
-   launchctl unload ~/Library/LaunchAgents/com.pi-dispatch.worker.plist   # macOS
-   systemctl --user stop pi-dispatch-worker                               # Linux
+   pi-dispatch service stop
    ```
+   For a hand-rolled unit, stop it however you started it.
 2. **Stop the receiver**, if you run one. It enqueues while you copy.
 3. **Close any `/dispatch` panel.** It is the other writer of `triggers.json` and the only writer of
    `settings.json`.
-4. **Copy the Valkey volume.** A live `BGSAVE` is not enough with AOF on, so stop the container first:
+4. **Copy the Valkey volume.** A live `BGSAVE` is not enough with AOF on, so stop the container first.
+   Which names to use depends on how you started it. For `pi-dispatch up`:
    ```bash
    docker stop pi-dispatch-valkey
    docker run --rm -v pi-dispatch-valkey-data:/data -v "$PWD":/backup alpine \
      tar czf /backup/valkey.tgz -C /data .
    ```
-5. **Copy the files with `cp -a`.**
+   For `deploy/docker-compose.yml`, the service has no fixed container name and Compose prefixes the
+   volume with the project name, so ask it:
    ```bash
-   cp -a ~/.pi-dispatch                 /backup/pi-dispatch-state
+   docker compose -f deploy/docker-compose.yml stop valkey
+   docker volume ls --filter name=valkey-data          # the prefixed name is what you tar
+   ```
+5. **Copy the files with `cp -a`.** The session store is listed separately and on purpose: it is the
+   most PII bearing thing here, so it is never swept up by a wildcard. If yours lives under
+   `~/.pi-dispatch/sessions`, which is what `docs/sessions.md` suggests, then copying that whole
+   directory takes the transcripts with it. Decide that deliberately.
+   ```bash
+   cp -a ~/.pi-dispatch/logs            /backup/run-history
+   cp -a ~/.pi-dispatch/settings.json   /backup/settings.json
    cp -a /path/to/deployment            /backup/deployment      # includes .env and the *.pem
-   cp -a "$PI_SESSIONS_DIR"             /backup/sessions        # only if you run resumable sessions
+   cp -a "$PI_SESSIONS_DIR"             /backup/sessions        # ONLY if you accept holding transcripts
    ```
    **Use `cp -a`, or an archive that preserves timestamps.** The retention sweep decides a run
    record's age from its `mtime` and never from anything in its filename, so a copy that resets
@@ -92,14 +106,53 @@ and a run record is written when a job reaches a terminal state with no lock at 
 
 Same order reversed. Two things are worth knowing before you do it.
 
-Run records are keyed by job id and the writer is last write wins, so restoring a newer file store
-over an older Valkey re-runs nothing. That direction is safe.
+Run records are keyed by job id and the writer is last write wins, so a newer file store over an older
+Valkey does not corrupt the history. What an older Valkey *does* restore is an older wait list and older
+spend counters (`budget:*`), so caps under count for the rest of that window and held jobs come back.
+Nothing about the file store gates a re-run: dedup and the wait list live entirely in Valkey.
 
 **Restoring an old `triggers.json` over a newer one re-arms spent one-shots.** A trigger with
-`"once": <number>` records that it fired by rewriting its own entry in that file, so an older copy is
-a copy from before it fired. Restore it and the one-shot fires again, which costs a real job against
+`"once": true` (and the `"number"` naming the item it watches) records that it fired by rewriting its
+own entry in that file, so an older copy is a copy from before it fired. Restore it and the one-shot fires again, which costs a real job against
 a real provider. If you are restoring triggers from a backup, diff it against the current file first
 and keep the newer `on.disarmed` marks.
+
+## Upgrading from a version that kept state in the OS temp directory
+
+Run history and the settings overlay used to default under your OS temp directory. They now default to
+`~/.pi-dispatch`. Nothing is moved for you, and the ORDER matters, because the thing that tells you where
+your old records are turns itself off once you have moved on.
+
+1. **Run `pi-dispatch doctor` before you restart anything.** It prints one line per store while the old
+   path still holds files and the new one is empty, naming both paths and the command.
+2. **Act on those lines, or decide you do not care about the old records.** Anything older than
+   `PI_LOG_RETENTION_DAYS` is swept on the next worker start whichever directory it is in, because `mv`
+   keeps timestamps and the sweep ages a record by its mtime. Moving old records does not preserve them
+   past their window; it just puts them where the panel can see them until then.
+3. **Then restart.** Both hints retire themselves, deliberately, and both retire on things you are about
+   to do: the run history hint goes as soon as one new record lands, and the settings hint goes as soon
+   as the panel writes an overlay for any reason. That is what keeps a permanent warning off a healthy
+   deployment, and it is why step 1 comes first.
+
+Two more things worth knowing:
+
+- **`pi-dispatch up` does not migrate anything.** It scaffolds and checks; it never moves a file.
+- **If your worker runs as a different account than your `/dispatch` panel**, set `PI_LOGS_DIR` and
+  `PI_SETTINGS_FILE` explicitly in the deployment's `.env`. The default sits under a home directory, so
+  two accounts resolve two different directories, and the symptom is not an error: the panel shows an
+  empty run list and reports no spend, while caps set from the panel land in a file the worker never
+  opens. Everything `pi-dispatch service install` sets up runs the worker as the account that installed
+  it, so this only bites a hand-rolled unit whose `User=` you chose. All three templates under `deploy/`
+  say so at the top.
+
+## About permissions
+
+`~/.pi-dispatch` and the run history inside it are created with your default umask, so on a typical
+POSIX host they are readable by other local accounts. That is a large improvement on the old default,
+which was a directory anyone could write to, and the run records are PII free by construction. The raw
+container logs are not: with `PI_CAPTURE_JOB_LOGS=1` that directory holds issue and comment text. If
+that matters on your host, `chmod 700 ~/.pi-dispatch`, the same thing `docs/sessions.md` tells you to do
+for the transcript store.
 
 ## Moving a deployment, or changing where state lives
 
@@ -117,8 +170,10 @@ run history by accident. That is a supported shape, but it should be a decision.
 `pi-dispatch doctor` reports on this directly:
 
 ```
-✓ Durable state: run history ~/.pi-dispatch/logs, settings ~/.pi-dispatch/settings.json — both survive a reboot (docs/backup.md)
+✓ Durable state: run history /home/you/.pi-dispatch/logs, settings /home/you/.pi-dispatch/settings.json — both survive a reboot (docs/backup.md)
 ```
+
+(doctor prints the expanded absolute paths, never a `~`.)
 
 If either path resolves under your OS temp directory, which the OS may sweep on its own schedule, it
 says so instead and keeps going. It is a warning, not a failure, and doctor still exits 0. You will

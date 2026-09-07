@@ -74,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order } = {}) {
 	const calls = [];
 	const registered = {};
 	const createWorkerFn = (arg) => {
@@ -168,6 +168,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
+			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
@@ -919,10 +920,13 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		for (const event of ["triggers_watching", "pause_windows_watching", "scoped_limits_watching"]) {
 			assert.ok(logs.some((l) => l.event === event), `${event}: the canary must ARM the watch it claims to close`);
 		}
-		// The runtime queue, the registry, and one closer per armed watch. Not `>=`: the count IS the claim.
-		// Before the fix this was 2 -- the watches were never registered at all, so an eye passing over
-		// `extraClosers` looking for a broken `close()` would have found nothing wrong.
-		assert.equal(captured.extraClosers.length, 5, "runtimeQueue + registry + one closer per armed watch");
+		// The runtime queue, the registry, one closer per armed watch, and the retention sweep. Not `>=`:
+		// the count IS the claim. Before issue #295 this was 2 -- the watches were never registered at all,
+		// so an eye passing over `extraClosers` looking for a broken `close()` would have found nothing
+		// wrong. It became 6 with issue #292's periodic sweep, registered on #295's own finding that
+		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
+		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
+		assert.equal(captured.extraClosers.length, 6, "runtimeQueue + registry + one closer per armed watch + the retention sweep");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -1256,4 +1260,78 @@ test("startWorker CONNECTS the registry to the processor, and to the abort (#227
 	assert.deepEqual(seen.sort(), ["far:egressPreflight", "far:imagePreflight", "far:runContainer", "far:stopContainer"].sort());
 	assert.deepEqual(captured.deps.neverStartedExits(job), [7], "the exit set is the venue's too");
 	assert.equal(captured.containerName(job), "far-j", "and the NAME the abort stops is built by that venue");
+});
+
+// ── issue #292: the periodic retention sweep ────────────────────────────────────────────────────────
+
+test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it could do is reachable", { skip }, async () => {
+	// "0 is byte-identical to before" is proven by proving the OBJECT DOES NOT EXIST, not by counting
+	// effects. With no construction there is no timer, no closer, and no reachable second call to any
+	// reaper -- a stronger and much cheaper claim than asserting that a sweep did not happen.
+	const constructions = [];
+	const { captured, logs } = await runStart({
+		env: { PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeRetentionSweep: (args) => {
+			constructions.push(args);
+			return { start() {}, sweepOnce: async () => {}, close: async () => {} };
+		},
+	});
+	assert.equal(constructions.length, 0, "the factory is never called at all");
+	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
+	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
+	assert.equal(captured.extraClosers.length, 2, "runtimeQueue + registry, and nothing from the sweep");
+	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
+});
+
+test("the default arms one daily sweep and registers it as a closer", { skip }, async () => {
+	// The positive twin of the test above. Without it the count of 5 there could drift to mean anything.
+	const constructions = [];
+	const starts = [];
+	const { captured, logs } = await runStart({
+		makeRetentionSweep: (args) => {
+			constructions.push(args);
+			const handle = { start: () => starts.push(args), sweepOnce: async () => {}, close: async () => {} };
+			return handle;
+		},
+	});
+	assert.equal(constructions.length, 1);
+	assert.equal(starts.length, 1, "constructed AND started");
+	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "sandbox", "session"], "boot's own order");
+	assert.equal(captured.extraClosers.length, 3, "runtimeQueue + registry + the sweep (no watch files in this env)");
+	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
+});
+
+test("the sweep re-runs the SAME closures boot already built, so one config read serves both", { skip }, async () => {
+	// The claim that makes this safe: nothing is rebuilt on a tick, so a tick cannot read a different
+	// logsDir or a different retention window than boot did.
+	const logReaperCalls = [];
+	const sandboxReaperCalls = [];
+	let handed;
+	await runStart({
+		env: { PI_LOGS_DIR: "/x/logs", PI_LOG_RETENTION_DAYS: "9" },
+		makeLogReaper: (args) => {
+			logReaperCalls.push(args);
+			return () => {};
+		},
+		makeSandboxReaper: (args) => {
+			sandboxReaperCalls.push(args);
+			return async () => {};
+		},
+		makeRetentionSweep: (args) => {
+			handed = args;
+			return { start() {}, sweepOnce: async () => {}, close: async () => {} };
+		},
+	});
+	assert.equal(logReaperCalls.length, 1, "built once at boot, not once per tick");
+	assert.equal(sandboxReaperCalls.length, 1);
+	assert.equal(logReaperCalls[0].logsDir, "/x/logs");
+	assert.equal(logReaperCalls[0].retentionDays, 9);
+
+	// Driving the handed reapers must reach those same closures, which is what "no drift" means.
+	const before = logReaperCalls.length + sandboxReaperCalls.length;
+	for (const r of handed.reapers) await r.reap();
+	assert.equal(logReaperCalls.length + sandboxReaperCalls.length, before, "a sweep constructs nothing");
 });

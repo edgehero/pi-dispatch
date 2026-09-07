@@ -724,3 +724,25 @@ test("underOsTempDir expands BOTH sides through realpath, which is the /private/
 	const never = { realpath: () => { throw new Error("ENOENT"); }, osTmpDir: () => "/var/x" };
 	assert.equal(underOsTempDir("/var/x/logs", { TMPDIR: "/var/x" }, never), true);
 });
+
+test("PI_SWEEP_INTERVAL_HOURS: 24 by default, 0 is the boot-only sentinel, and a week is the ceiling", () => {
+	assert.equal(loadConfig({}).sweepIntervalHours, 24);
+	assert.equal(loadConfig({ PI_SWEEP_INTERVAL_HOURS: "0" }).sweepIntervalHours, 0, "0 = boot-only, the pre-#292 behaviour");
+	assert.equal(loadConfig({ PI_SWEEP_INTERVAL_HOURS: "1" }).sweepIntervalHours, 1);
+	assert.equal(loadConfig({ PI_SWEEP_INTERVAL_HOURS: "168" }).sweepIntervalHours, 168, "one week is accepted");
+
+	// The ceiling is load-bearing, not decoration: setInterval clamps a delay past 2^31-1 ms to 1ms, so an
+	// unbounded knob turns a fat-fingered 1000 into a hot loop sweeping the filesystem.
+	for (const bad of ["169", "1000", "-1", "1.5", "abc"]) {
+		assert.throws(() => loadConfig({ PI_SWEEP_INTERVAL_HOURS: bad }), /PI_SWEEP_INTERVAL_HOURS/, `refused: ${bad}`);
+	}
+	assert.equal(loadConfig({ PI_SWEEP_INTERVAL_HOURS: "" }).sweepIntervalHours, 24, "empty falls back like every other knob");
+});
+
+test("the ceiling on one knob did not loosen the shared parser for the others", () => {
+	// boundedInt gained an optional `max`. Absent means no upper bound, which is the convention
+	// optionalBoundedInt already documented -- so every pre-existing caller must be untouched by it.
+	assert.equal(loadConfig({ PI_LOG_RETENTION_DAYS: "100000" }).logRetentionDays, 100000);
+	assert.equal(loadConfig({ PI_SESSIONS_TTL_DAYS: "99999" }).sessionsTtlDays, 99999);
+	assert.equal(loadConfig({ PI_SANDBOX_RETENTION_HOURS: "8760" }).sandboxRetentionHours, 8760);
+});
