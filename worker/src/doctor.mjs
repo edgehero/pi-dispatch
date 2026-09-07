@@ -66,14 +66,16 @@ import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
-// Which env var holds the credential for each provider. Presence is checked, value never read out.
-// anthropic lists the OAuth token too because it silently takes precedence over the API key upstream.
-const PROVIDER_KEYS = {
-	anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"],
-	openai: ["OPENAI_API_KEY"],
-	google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-	gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-};
+// The ONE credential fact doctor holds itself, and it has to hold one: this is a message ABOUT a
+// credential that must NOT be used, so it cannot come from pi's table of credentials that DO work --
+// that table says which variables pi reads, never which of them is a subscription login.
+// Checked and rejected: pi's provider descriptors carry an `auth.oauth` block, but it is per-PROVIDER,
+// not per-variable -- `github-copilot` has one and exactly ONE key variable, so "this provider supports
+// oauth" cannot name WHICH variable is the token.
+// A suffix rule rather than a one-name set, because the expensive direction is the false green: the day
+// pi adds a second provider's OAuth variable a set would silently bless it. Pinned against pi in
+// worker/test/doctor.test.mjs -- never against a second copy of a table.
+export const OAUTH_KEY_RE = /_OAUTH_TOKEN$/;
 
 // gh login scopes that reach well past what a job should ever hold — called out by name in the fix line.
 const BROAD_SCOPES = ["admin:org", "delete_repo", "workflow"];
@@ -215,7 +217,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -911,29 +913,11 @@ export async function collectChecks(env, seams) {
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${fleet.unreachable})` });
 	}
 
-	const keys = PROVIDER_KEYS[provider] ?? [`${provider.toUpperCase()}_API_KEY`];
-	let keyOk = keys.some((k) => (env[k] ?? "").trim().length > 0);
-	let keyNote = "";
-	// The key may come from pi's auth.json when the env has none (ON by default; PI_AUTH_FROM_PI=0 forces
-	// env-only) — so don't falsely report it missing.
-	const authFromPi = env.PI_AUTH_FROM_PI !== "0";
-	if (!keyOk && authFromPi) {
-		const agentDir = env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-		try {
-			const cred = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))?.[provider];
-			if (cred?.type === "api_key" && cred.key) {
-				keyOk = true;
-				keyNote = " — from pi auth.json";
-			} else if (cred?.type === "oauth") {
-				keyNote = " — pi login is OAuth/subscription: not usable for an unattended service, configure an API key";
-			}
-		} catch {}
-	}
-	checks.push({
-		ok: keyOk,
-		label: `Provider key set (${provider}: ${keys.join(" or ")})${keyNote}`,
-		fix: authFromPi ? `run \`pi login\` with an API key for ${provider}, or set ${keys[0]} in .env` : `set ${keys[0]} in .env`,
-	});
+	// Which variable holds a provider's key is PI'S fact, asked of pi rather than copied (issue #286).
+	// The copy this replaced had anthropic's two variables in the WRONG precedence order, invented
+	// GOOGLE_API_KEY, and invented a `gemini` provider pi has never had -- three ways for doctor to bless
+	// a deployment the worker then refuses, which is the one thing doctor must never do.
+	checks.push(providerKeyCheck({ provider, env, agentDir, oracle: await providerOracle() }));
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -1719,6 +1703,138 @@ function nonNegativeEnvInt(raw, fallback) {
 	if (raw === undefined || raw === "") return fallback;
 	const n = Number.parseInt(raw, 10);
 	return Number.isInteger(n) && n >= 0 && String(n) === String(raw).trim() ? n : fallback;
+}
+
+/**
+ * doctor's ONLY contact with pi's own package, deliberately lazy and failure-tolerant.
+ *
+ * `env-allowlist.mjs` imports `@earendil-works/pi-ai`. A STATIC import here would run pi at doctor's
+ * MODULE load -- before the Node-floor check that is deliberately doctor's FIRST line has said anything
+ * -- on precisely the below-floor or dependency-less host doctor exists to diagnose. `.env present`
+ * reaches `init.mjs` through `await import` for the same reason.
+ *
+ * Returns null rather than throwing, so a host where pi will not load still gets every other check.
+ */
+async function defaultProviderOracle() {
+	try {
+		const { piProviders, providerKeyCandidates } = await import("./env-allowlist.mjs");
+		return { piProviders, providerKeyCandidates };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Does this deployment hold a credential the worker can actually spend? Three questions, in this order
+ * because each has a different answer to give:
+ *
+ *   1. WHICH variables pi reads for this provider -- pi's own list, in pi's own order. Asked even when
+ *      none is set, which `findEnvKeys` alone cannot answer: a failure that cannot name the variable to
+ *      set is not a fix line.
+ *   2. Whether any of them is set HERE. Answered against `env` by this function and NOT by pi's
+ *      `findEnvKeys`, because `getProviderEnvValue` falls back to the real `process.env` for any name the
+ *      injected env lacks -- so asking pi would report a key that exists on the operator's laptop and not
+ *      on the host they are diagnosing, and would make every test in doctor.test.mjs non-hermetic. The
+ *      candidate list is pi's; the presence test is ours, and must be.
+ *   3. Failing both, whether pi's own auth.json holds one -- the same fallback, read the same way, that
+ *      `resolveProviderCredential` will take at job time.
+ *
+ * Never carries a fixAction (the never tier): doctor cannot know which provider an operator meant, and
+ * never mints a credential.
+ */
+function providerKeyCheck({ provider, env, agentDir, oracle }) {
+	if (!oracle) {
+		// pi-ai did not load: below-floor Node, or a tree with no dependencies installed. WARN rather than
+		// fail -- the Node-floor check above already failed HARD for the case that actually causes this, and
+		// one root cause printing two ✗ reads as two problems. Says nothing that could be mistaken for a
+		// verdict on the key itself, and names no variable: guessing one is the defect being fixed.
+		return {
+			ok: false,
+			warn: true,
+			label: `Provider key: not checked (pi did not load, so the variable ${JSON.stringify(provider)} needs cannot be asked for)`,
+			fix: "install the worker's dependencies (`npm ci` in the deployment directory) on a Node meeting the floor above, then re-run doctor",
+		};
+	}
+	const candidates = oracle.providerKeyCandidates(provider);
+	if (candidates.length === 0) return noKeyVariableCheck(provider, oracle);
+
+	// `.trim()`, deliberately stricter than pi's own truthiness: a whitespace-only value passes pi and then
+	// fails at the provider, which is a paid failure doctor can refuse for free.
+	const set = candidates.filter((name) => (env[name] ?? "").trim().length > 0);
+	// The variable to TELL an operator to set is never the OAuth token, whatever pi's precedence says: pi
+	// returns ANTHROPIC_OAUTH_TOKEN first, and "set your subscription login" is wrong advice for an
+	// unattended service. Falls back only for a provider with no non-OAuth variable at all.
+	const apiKeyVar = candidates.find((name) => !OAUTH_KEY_RE.test(name)) ?? candidates[0];
+
+	if (set.length > 0) {
+		// `set[0]`, not "one of these": pi reads the FIRST present name and ignores the rest, so this names
+		// the credential the deployment will actually spend. The old line named variables that were not set,
+		// which is half of what made it misleading.
+		const using = set[0];
+		if (!OAUTH_KEY_RE.test(using)) return { ok: true, label: `Provider key set (${provider}: ${using})` };
+		// Warn, not fail, and the choice is deliberate: the worker forwards this variable and the job WILL
+		// run, so failing here would put doctor in disagreement with the worker -- the exact disease this
+		// issue is about. What doctor must stop doing is what it did before: pass in silence, as though a
+		// subscription login were a service credential.
+		const shadowed = set[1] ?? null;
+		return {
+			ok: false,
+			warn: true,
+			label: `Provider key set (${provider}: ${using}) -- an OAuth/subscription login, not an API key`,
+			fix: shadowed
+				? `unset ${using}: pi reads it BEFORE ${shadowed}, so every job spends the subscription login and your API key is ignored`
+				: `set ${apiKeyVar} instead -- an OAuth/subscription token expires, the container cannot refresh it, and it is not the credential for an unattended service`,
+		};
+	}
+
+	// Nothing in the env. The key may still come from pi's auth.json (ON by default; PI_AUTH_FROM_PI=0
+	// forces env-only), so don't report it missing yet.
+	const authFromPi = env.PI_AUTH_FROM_PI !== "0";
+	let note = "";
+	if (authFromPi) {
+		let cred;
+		try {
+			cred = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))?.[provider];
+		} catch {}
+		if (cred?.type === "api_key" && cred.key) return { ok: true, label: `Provider key set (${provider}) — from pi auth.json` };
+		if (cred?.type === "oauth") note = " — pi login is OAuth/subscription: not usable for an unattended service, configure an API key";
+	}
+	return {
+		ok: false,
+		label: `Provider key set (${provider}: ${candidates.join(" or ")})${note}`,
+		fix: authFromPi ? `run \`pi login\` with an API key for ${provider}, or set ${apiKeyVar} in .env` : `set ${apiKeyVar} in .env`,
+	};
+}
+
+/**
+ * pi reads no API-key variable for this id, and the two reasons need different fixes -- which is exactly
+ * the distinction `findEnvKeys`'s single `undefined` cannot make, and the reason issue #286 needed a
+ * second question at all.
+ */
+function noKeyVariableCheck(provider, oracle) {
+	if (oracle.piProviders().includes(provider)) {
+		// `amazon-bedrock` wants AWS credentials or a profile, `openai-codex` an OAuth login. Both are
+		// credential SOURCES the closed container env has no door for, so buildContainerEnv refuses every
+		// such job pre-spend. Doctor says so at setup time rather than at 03:00.
+		return {
+			ok: false,
+			label: `PI_PROVIDER is ${JSON.stringify(provider)}, which pi authenticates without an API-key variable`,
+			fix: "pick a provider whose credential is a single environment variable -- the container env is a closed set of variables, so a credential file, an AWS profile or an OAuth login has no way in (docs/secrets.md)",
+		};
+	}
+	// The did-you-mean is DERIVED like everything else here: ask pi which provider reads
+	// `<PROVIDER>_API_KEY`. For the case that motivated this -- PI_PROVIDER=gemini -- GEMINI_API_KEY is
+	// `google`'s variable, so the answer is exact. Nothing edit-distance-based would find it (gemini and
+	// google differ by five characters), which is why this matches on the VARIABLE, not on the name.
+	const wanted = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+	const owner = oracle.piProviders().find((id) => oracle.providerKeyCandidates(id).includes(wanted));
+	return {
+		ok: false,
+		label: `PI_PROVIDER is ${JSON.stringify(provider)}, which is not a provider pi has`,
+		fix: owner
+			? `set PI_PROVIDER=${owner}, the provider pi reads ${wanted} from -- or unset it for the default \`anthropic\``
+			: `set PI_PROVIDER to a provider id pi has, or unset it for the default \`anthropic\`: ${oracle.piProviders().join(", ")}`,
+	};
 }
 
 function nodeCheck(version) {

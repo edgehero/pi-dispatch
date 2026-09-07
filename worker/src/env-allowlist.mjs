@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { findEnvKeys } from "@earendil-works/pi-ai/compat";
+import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 
@@ -31,6 +32,57 @@ function configError(message) {
  */
 export function providerKeyVars(provider, hostEnv) {
 	return findEnvKeys(provider, hostEnv);
+}
+
+/**
+ * An environment in which EVERY variable is set, used only to interrogate pi.
+ *
+ * `findEnvKeys(provider, env)` filters pi's own candidate list by PRESENCE, so against an env where
+ * nothing is absent the filter is the identity and the return value IS pi's table for that provider,
+ * in pi's own precedence order. That is how `providerKeyCandidates` recovers a list pi deliberately
+ * does not export (`getApiKeyEnvVars` is module-private). It is a dependency on pi filtering rather
+ * than short-circuiting, which is stated here rather than discovered later: it holds at the pin, it is
+ * round-tripped for every provider by env-allowlist.test.mjs, and CONST-PI-VERSION-PINNED is what
+ * makes that test the upgrade gate.
+ *
+ * A Proxy rather than a literal, and the second reason is the load-bearing one:
+ *   - the candidate NAMES are the thing being asked for, so they cannot be enumerated in advance;
+ *   - `getProviderEnvValue` (pi-ai/dist/utils/provider-env.js) falls back to the REAL `process.env`
+ *     for any name the injected env has no value for. A plain `{}` therefore answers with whatever the
+ *     machine happens to export -- a doctor run on a laptop would disagree with the server it is
+ *     diagnosing, and every test injecting a fake env would be non-hermetic. A trap that always returns
+ *     a non-empty string short-circuits that `||` before the fallback is reached.
+ * Strings only: a symbol read (Symbol.toPrimitive and friends) answering with a string would make this
+ * object lie about being one.
+ */
+const EVERY_VAR_SET = new Proxy({}, { get: (_target, name) => (typeof name === "string" ? "set" : undefined) });
+
+/**
+ * Every variable pi reads this provider's key from, in pi's precedence order, set or not. `[]` means pi
+ * reads no API-key variable for this id -- either there is no such provider, or it authenticates some
+ * other way. `piProviders` is what tells those two apart.
+ *
+ * Distinct from `providerKeyVars` on purpose. That one answers "what does this HOST have", and its
+ * `undefined` conflates "unknown provider" with "known provider, nothing set" -- fine for the worker,
+ * which only ever forwards keys it holds, useless for `doctor`, which has to NAME the variable an
+ * operator should go and set (issue #286).
+ */
+export function providerKeyCandidates(provider) {
+	return findEnvKeys(provider, EVERY_VAR_SET) ?? [];
+}
+
+/**
+ * pi's provider catalog, through the same side-effect-free specifier `pricing.mjs` uses -- never
+ * `getProviders` from "/compat", which is a @deprecated alias for this exact function and reaching it
+ * means loading compat's module-scope provider registration.
+ *
+ * Only ever consulted AFTER `providerKeyCandidates` comes back empty, and the order is load-bearing:
+ * the catalog is NOT a superset of the ids `findEnvKeys` answers for. `radius` is a purely dynamic
+ * provider with a real key variable (PI_GATEWAY_API_KEY) and no catalog entry, so asking this first
+ * would call a working configuration unknown.
+ */
+export function piProviders() {
+	return getBuiltinProviders();
 }
 
 /**
