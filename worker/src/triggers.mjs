@@ -37,7 +37,8 @@ import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // fs-free, so importing it keeps parseTriggers pure.
 import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-for.mjs";
 
-const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
+// EXPORTED for the same reason as PR_ACTIONS: the admin re-states this vocabulary to a MODEL.
+export const ON_TYPES = new Set(["cron", "label", "comment", "pull_request", "issue"]);
 
 /**
  * The `on.type` a DISARMED one-shot normalizes to (issue #231). Producible only by this validator:
@@ -82,7 +83,9 @@ export { FORGE_KINDS };
  * have made one forge's review a type and the other's an action. The gate on it is the REVIEWER's
  * `author_association`, never the PR author's -- see filter.mjs and CONST-TRIGGER-AUTHOR-GATE.
  */
-const PR_ACTIONS = {
+// EXPORTED for the receiver's four route gates, which each carry this vocabulary MINUS their own named
+// exclusions and must be able to prove that relation rather than restate it (issue #286's sweep).
+export const PR_ACTIONS = {
 	github: new Set(["labeled", "opened", "synchronize", "reopened", "review_submitted", "closed"]),
 	// GitLab's `approved` is its review gate (a member approved the MR). It is NOT github's
 	// `review_submitted` renamed: `approved` is one verdict, `review_submitted` is every verdict, which is
@@ -132,7 +135,10 @@ export const PR_CLOSE_ACTIONS = { github: "closed", gitlab: "close", forgejo: "c
  * guess at. Not yet covered, not impossible -- validateResumeFlag's distinction, kept for the same
  * reason.
  */
-const ISSUE_ACTIONS = {
+// EXPORTED beside PR_ACTIONS: the admin's ISSUE_CLOSE_WORD is derived from THIS table and not from
+// PR_CLOSE_ACTIONS. The two hold identical values today and are separately justified, so deriving the
+// issue word from the pull-request one would be a coincidence dressed as a derivation.
+export const ISSUE_ACTIONS = {
 	github: new Set(["closed"]),
 	gitlab: new Set(["close"]),
 	forgejo: new Set(["closed"]),
@@ -151,7 +157,8 @@ const ISSUE_ACTIONS = {
  * `dismissed` is absent because it is an ACTION on the `pull_request_review` event, not a state a
  * submitted review carries.
  */
-const REVIEW_STATES = new Set(["approved", "changes_requested", "commented"]);
+// EXPORTED so the admin's tool description can state the vocabulary rather than retype it.
+export const REVIEW_STATES = new Set(["approved", "changes_requested", "commented"]);
 
 /** The one action `on.reviewState` can narrow. Spelled once, read by the validator and named in its error. */
 const REVIEW_ACTION = "review_submitted";

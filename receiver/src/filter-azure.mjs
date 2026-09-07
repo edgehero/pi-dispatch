@@ -29,7 +29,7 @@ import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } 
 import { PR_COMMENT_EVENT, PR_EVENTS, WORK_ITEM_EVENTS } from "./azure-subset.mjs";
 
 /** The `pull_request` actions a trigger may name, mirrored from the loader's azure vocabulary. */
-const PR_ACTION_FOR = {
+export const PR_ACTION_FOR = {
 	"git.pullrequest.created": "created",
 	"git.pullrequest.updated": "updated",
 };

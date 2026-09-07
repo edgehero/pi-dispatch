@@ -38,7 +38,7 @@ import { findCloseRule } from "./close.mjs";
 import { isRecognizedAction, mapAction } from "./forgejo-subset.mjs";
 
 const LABEL_ACTIONS = new Set(["opened", "labeled", "reopened"]);
-const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened"]);
+export const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened"]);
 
 /**
  * Decide. Returns `{ enqueue: false, reason }` or `{ enqueue: true, job }`.

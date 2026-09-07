@@ -2,16 +2,28 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf, commandSlashLabel } from "../src/render.mjs";
 
 test("render.mjs has no path to raw .log content", () => {
   const src = readFileSync(fileURLToPath(new URL("../src/render.mjs", import.meta.url)), "utf8");
   // A renderer has no I/O: no fs read and no call into the log tail. (A doc comment may name `.log`;
-  // what matters is that no code path reads one.)
+  // what matters is that no code path reads one.) The ban is on THIS module's own reads, not on its
+  // import graph: it imports the worker's KNOWN_KEYS and budget helpers, which reach node:fs
+  // transitively, and that has always been true of the budget import. What must stay absent is a read
+  // written here.
   assert.ok(
     !/readLogTail|readFileSync|\breadFile\b|require\(|import\s+.*node:fs/.test(src),
     "renderers must never read raw log content -- that surface belongs to the overlay viewer only",
   );
+});
+
+test("the settings view covers every key the worker will accept, because it IS that array", () => {
+  // Not a second list to keep true: renderSettingsView loops KNOWN_KEYS itself. The assertion is that a
+  // key added to the worker's overlay shows up here with no edit -- an unset one rendering as "(unset)"
+  // is the whole point of the view, so a key it cannot print is a knob an operator sets and never sees.
+  const out = renderSettingsView({ settings: {}, path: "/tmp/settings.json" });
+  for (const key of KNOWN_KEYS) assert.match(out, new RegExp(key), `the settings view must print ${key}`);
 });
 
 test("renderStatus shows paused state, counts, and workers", () => {

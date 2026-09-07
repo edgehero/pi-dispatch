@@ -987,14 +987,14 @@ function triggerList(paths: any): any[] {
  * chain, and an operator offered "github or gitlab" cannot discover that two more exist -- which is a
  * different failure from being refused: they simply never try.
  */
-const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
+export const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
 // The per-forge issue close word (issue #231), the tool's default `action` for kind "issue": the
 // shared validator's ISSUE_ACTIONS accepts exactly one word per forge today, so defaulting to it
 // makes the kind authorable without knowing three forges' spellings. No azure entry on purpose --
 // the validator refuses the whole type there with its own message (a work item's close is a state
 // transition the projected payload subset cannot see), and a default here would only reword it.
-const ISSUE_CLOSE_WORD: Record<string, string> = { github: "closed", gitlab: "close", forgejo: "closed" };
-const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
+export const ISSUE_CLOSE_WORD: Record<string, string> = { github: "closed", gitlab: "close", forgejo: "closed" };
+export const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
   // The close words ride the hint too (issue #231): the dialog passes whatever is typed through the
   // shared validator, so a close-only rule IS authorable here, and a hint that omits the word reads
   // as the word not existing. The loader refuses a list mixing a close word with any other action.

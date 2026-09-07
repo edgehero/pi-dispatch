@@ -50,7 +50,7 @@ import { escapeRegExp, firstMatchingRule, labelSet, matchedLabel, matchesRule } 
 
 const AUTHOR_ALLOWLIST = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const LABEL_ACTIONS = new Set(["opened", "labeled", "reopened"]);
-const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened"]);
+export const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened"]);
 const PR_AUTO_ACTIONS = new Set(["opened", "synchronize", "reopened"]);
 // The triggers.json word for a submitted review, and the raw action GitHub sends on the
 // `pull_request_review` event. They differ on purpose -- see the routing block below.

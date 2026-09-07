@@ -4,7 +4,8 @@
  * testable with plain fixtures.
  *
  * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): a renderer only ever sees the PII-free
- * record fields (`target` is `repo#issue` / `local:<basename>` only), the ten settings keys, scheduler
+ * record fields (`target` is `repo#issue` / `local:<basename>` only), the settings keys (`KNOWN_KEYS`,
+ * imported from the worker, never a count), scheduler
  * keys, and flow labels. Raw `.log` bytes are untrusted, PII-bearing container output and NEVER reach a
  * renderer -- the logs overlay in index.ts is their only surface, so there is deliberately no code path
  * from here to a `.log` file (asserted by render.test.mjs).
@@ -15,8 +16,13 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 // text module (asserted so by panel.test.mjs), and fmtCost is THE single renderer of typed cost values,
 // so the what-if below routes every dollar through it rather than grow a second money formatter here.
 import { fmtCost } from "./panel.mjs";
-
-const SETTINGS_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyCap", "monthlyCap", "maxTokens", "dailyTokenCap", "concurrency", "softHoldPct"];
+// The overlay keys, IMPORTED rather than retyped. This was a verbatim copy of the worker's array, in the
+// order the worker declares them, and the worker's side is pinned while this side was not -- so a key
+// added there would have failed a test, been added, and left the settings VIEW silently ten keys wide
+// while eleven were settable. read-model.mjs already imports and re-exports this exact array, so the copy
+// was the second one. Imported straight from the worker rather than through read-model.mjs: this module
+// is asserted to do no I/O of its own, and reaching for it through the I/O module is the wrong direction.
+import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 
 // The three spend windows and the overlay cap key each reads. Order is day -> week -> month.
 const BUDGET_WINDOWS = [
@@ -355,7 +361,7 @@ export function renderSettingsView(settings) {
   if (settings && settings.invalid) return `Settings (${path}): invalid: ${settings.invalid}`;
   const overlay = (settings && settings.overlay) ?? {};
   const out = [`Settings (${path}):`];
-  for (const key of SETTINGS_KEYS) {
+  for (const key of KNOWN_KEYS) {
     const v = overlay[key];
     out.push(`  ${key}: ${v === undefined ? "(unset)" : v}`);
   }

@@ -45,7 +45,7 @@ import { findCloseRule } from "./close.mjs";
 
 /**
 /** The merge-request actions a trigger may name, mirrored from the loader's gitlab vocabulary. */
-const MR_ACTIONS = new Set(["open", "update", "reopen", "approved"]);
+export const MR_ACTIONS = new Set(["open", "update", "reopen", "approved"]);
 
 /**
  * Decide. Returns `{ enqueue: false, reason }` or `{ enqueue: true, job }`.

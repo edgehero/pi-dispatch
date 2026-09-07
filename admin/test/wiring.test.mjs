@@ -974,3 +974,70 @@ test("the REQ/DES admin entries name every registered tool and no other -- the s
     );
   }
 });
+
+/**
+ * The trigger vocabularies the admin re-states, against the loader tables that own them.
+ *
+ * These are the surface a MODEL authors triggers through, so both drift directions are silent and both
+ * are expensive. A widened loader table that does not reach `PR_ACTION_VOCAB` means the model is told the
+ * word does not exist and never writes it -- a capability lost with no error anywhere. A narrowed one
+ * means the model proposes an entry, the operator approves a confirm dialog, and `writeTriggers` rejects
+ * it: a wasted human approval.
+ *
+ * `FORGE_PROMPT`'s own header already records this failure once, in the words of the person who
+ * hand-wrote it: "an operator offered 'github or gitlab' cannot discover that two more exist -- which is
+ * a different failure from being refused: they simply never try."
+ *
+ * These pins are written BEFORE the derive that replaces the literals, deliberately. A pin authored in
+ * the same commit as the change it guards only prevents the NEXT drift; it proves nothing about the
+ * moment of change, which is the moment most likely to introduce one.
+ */
+const { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, REVIEW_STATES } = await import("@edgehero/pi-dispatch/triggers");
+
+test("FORGE_PROMPT offers every forge the loader accepts", async () => {
+  const { mod } = await loadRegistered();
+  for (const kind of FORGE_KINDS) {
+    assert.match(mod.FORGE_PROMPT, new RegExp(`\\b${kind}\\b`), `an operator cannot pick ${kind} if the prompt never names it`);
+  }
+});
+
+test("PR_ACTION_VOCAB's hints are the loader's per-forge action words, in the loader's order", async () => {
+  const { mod } = await loadRegistered();
+  for (const kind of FORGE_KINDS) {
+    assert.equal(
+      mod.PR_ACTION_VOCAB[kind].hint,
+      [...PR_ACTIONS[kind]].join(" "),
+      `${kind}: the hint must be the loader's vocabulary, or the model is told the wrong words`,
+    );
+  }
+  // `dflt` is deliberately NOT pinned to the set: gitlab's is `update`, which is not its set's first
+  // member. It answers "what does an operator usually want", not "what does the loader accept", and
+  // pinning it would manufacture a relation that does not exist.
+  assert.equal(mod.PR_ACTION_VOCAB.gitlab.dflt, "update");
+  assert.notEqual(mod.PR_ACTION_VOCAB.gitlab.dflt, [...PR_ACTIONS.gitlab][0], "the default is an editorial choice, not the set's head");
+});
+
+test("ISSUE_CLOSE_WORD is ISSUE_ACTIONS' single word per forge, and azure is absent from both", async () => {
+  const { mod } = await loadRegistered();
+  for (const [kind, actions] of Object.entries(ISSUE_ACTIONS)) {
+    // The premise a `[...set][0]` derive rests on. Without this, a second issue action would silently
+    // make the admin's close word a coin flip on insertion order.
+    assert.equal(actions.size, 1, `${kind}: ISSUE_CLOSE_WORD assumes exactly one issue action per forge`);
+    assert.equal(mod.ISSUE_CLOSE_WORD[kind], [...actions][0], `${kind}: the close word must be the loader's`);
+  }
+  assert.equal(mod.ISSUE_CLOSE_WORD.azure, undefined, "azure has no issue close word, and the validator refuses the kind there");
+  assert.equal(Object.hasOwn(ISSUE_ACTIONS, "azure"), false, "and the loader agrees -- the absence is shared, not a local omission");
+});
+
+test("the dispatch_trigger_add description states each forge's vocabulary exactly as the loader spells it", async () => {
+  const { calls } = await loadRegistered();
+  const { description } = toolByName(calls, "dispatch_trigger_add");
+  for (const kind of FORGE_KINDS) {
+    assert.ok(
+      description.includes(`${kind} is ${[...PR_ACTIONS[kind]].join("|")}`),
+      `${kind}: the model reads this description as the closed list of actions it may write`,
+    );
+  }
+  assert.ok(description.includes([...REVIEW_STATES].join("|")), "reviewState's vocabulary is stated too");
+  for (const kind of ON_TYPES) assert.match(description, new RegExp(`\\b${kind}\\b`), `the model must know the kind ${kind} exists`);
+});
