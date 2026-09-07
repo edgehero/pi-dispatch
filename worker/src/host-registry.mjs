@@ -194,9 +194,9 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 
 		/**
 		 * Start beating. ONE `setInterval` -- the first in `worker/src`, every other timer here being a
-		 * `setTimeout` -- and `.unref()`'d so it can never hold the process open, which is the posture the
-		 * three `fs.watch` watchers already take. `stop` is registered as an extraCloser beside the runtime
-		 * queue, so a clean shutdown clears it before `process.exit`.
+		 * `setTimeout` -- and `.unref()`'d so it can never hold the process open. `close` is registered as an
+		 * extraCloser beside the runtime queue, so a clean shutdown clears it before `process.exit`; the three
+		 * `fs.watch` watchers take the same two-part posture since issue #295, unref'd AND closed.
 		 */
 		async start(fields = {}, { intervalMs = HOST_BEAT_MS } = {}) {
 			if (closed || timer) return; // a second start would leak the first interval

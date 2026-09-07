@@ -836,10 +836,30 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		// outlive the handler that was meant to stop them.
 		for (const w of workers) await Promise.resolve(w.cancelAllJobs?.("shutdown")).catch(() => {});
 		for (const w of workers) await w.close().catch(() => {});
-		// Close auxiliary resources (e.g. a cron scheduler) after the worker drains. Per-item catch
-		// so one failing or absent closer never strands the others or blocks exit -- matches the
-		// swallow posture on cancelAllJobs above.
-		await Promise.all(extraClosers.map((c) => Promise.resolve(c.close?.()).catch(() => {})));
+		// Close auxiliary resources (a cron scheduler, the live-edit file watchers) after the worker drains.
+		// Per-item catch so one failing or absent closer never strands the others or blocks exit -- matches
+		// the swallow posture on cancelAllJobs above. The try/catch is NOT redundant with the `.catch`:
+		// `Promise.resolve(x)` does not catch a SYNCHRONOUS throw from `x`, and `c.close` on a null entry
+		// throws before `Promise.resolve` is ever reached. Either would escape this callback, reject the whole
+		// shutdown and skip the `process.exit(0)` below. Jobs and containers are already stopped by then, so
+		// what a stranded loop leaks is the rest of the list: `registry.close()` is the DEL that keeps a
+		// stopped host from lingering as a ghost peer for its full TTL, and a ghost peer with a stale
+		// `fpCron` is what makes a later `reconcileGated` refuse a legitimate reconcile. The comment above
+		// promised this isolation before the code delivered it (issue #295). It bounds nothing, though: a
+		// closer that never settles still blocks exit, which no closer here does.
+		//
+		// Read LATE and deliberately: `start.mjs` pushes its live-edit watchers into this array AFTER handing
+		// it over, because they are armed after the boot reconcile. Anything here that snapshots or copies
+		// the array un-registers them in silence.
+		await Promise.all(
+			extraClosers.map((c) => {
+				try {
+					return Promise.resolve(c?.close?.()).catch(() => {});
+				} catch {
+					return Promise.resolve();
+				}
+			}),
+		);
 		process.exit(0);
 	};
 	process.once("SIGTERM", shutdown);

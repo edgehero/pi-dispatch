@@ -85,56 +85,143 @@ const WORKER_VERSION = (() => {
  * `reaper_skipped`, and boot continues to the worker.
  */
 /**
+ * The stop handle every live-edit watch below hands back, so `startWorker` can register it in the same
+ * `extraClosers` list that already closes the queues and the host registry (`index.mjs` -> shutdown).
+ *
+ * A WATCH NOTHING CAN CLOSE IS NOT A DETAIL (issue #295). `watch(dir, cb).unref?.()` retained nothing, so
+ * the watch outlived the worker that armed it, and the reload it later fired ran through THAT boot's
+ * `log` closure: that boot's injected `write`, stamped with that boot's `workerName`. One process running
+ * one worker, that is a rounding error at exit. One process running forty boots, which is what a test file
+ * is, and a worker that shut down two tests ago writes into a live worker's capture under a host that is
+ * not running -- `every log line carries the host` went red in CI reading `runnervmejwal` where it
+ * asserted `mac-mini-1`.
+ *
+ * UNREF'D IS NOT CLEANED UP, and that difference is what hid this across three features. `unref` says only
+ * that a handle will not hold the event loop open; the watch stays armed either way.
+ * `INT-HOST-REGISTRY-CONTRACT` states the same distinction from the opposite side, where a bound's timer
+ * is deliberately NOT unref'd because an unref'd timer does not fire when the hung command is the last
+ * thing holding the loop.
+ *
+ * Three properties, each one a way the shutdown breaks without it:
+ *
+ * - It CLOSES the FSWatcher, which is the leak itself.
+ * - It CANCELS the debounce the watcher already armed. Closing a watcher does not cancel a `setTimeout`
+ *   the callback already set, and only the watcher was ever unref'd -- the 150ms timer never was. In a
+ *   real worker that costs nothing, because the shutdown ends in `process.exit(0)` either way; it is the
+ *   harness, where the loop is left to drain on its own, that the stray timer reaches.
+ * - Its `close()` NEVER THROWS for the handles its three callers build, and is idempotent -- by NULLING
+ *   what it closed rather than by an early return, which would be a guard with nothing behind it. Node's
+ *   own `FSWatcher.close()` is already both (measured: a second close returns early and neither throws),
+ *   but this closer must not
+ *   INHERIT that guarantee, it must MAKE it: the shutdown loop in `index.mjs` cannot catch a SYNCHRONOUS
+ *   throw from a closer, and the comment there carries the argument. The swallow is
+ *   `makeHostRegistry.close`'s posture rather than a new one.
+ *
+ * A watch that was never created -- the `catch` arm of each function below, a platform without `fs.watch`
+ * -- still gets a closer, so registration is unconditional and the list's shape never depends on the
+ * platform. That is why all three return from OUTSIDE their try/catch.
+ *
+ * WHAT IT CANNOT DO, because the list above would otherwise read as complete: cancel a reload that has
+ * ALREADY started. `reloadSchedules` is async and awaits a Valkey round trip, so a debounce that fired
+ * just before the close is still running after it -- and the watchers stay armed for the whole drain
+ * ahead of the closer loop, not merely 150ms. That reload cannot be recalled, so what is gated instead is
+ * its VOICE: `reloadLog` below goes quiet once `closed` is set, and every reload is handed that instead
+ * of the boot's own `log`, which is what the
+ * issue actually asks for -- a stopped worker writes no line. The reload's own Valkey work may still be
+ * cut off mid-flight by the queue closing beside it, leaving a scheduler set the next boot's reconcile
+ * repairs; that race predates this change and is not narrowed by it.
+ *
+ * EXPORTED for the reason `reloadScopedLimits` is: none of the three properties is observable through a
+ * real `fs.watch` without racing the filesystem, and a guarantee the shutdown rests on deserves a
+ * deterministic pin rather than a sleep.
+ */
+export function makeWatchCloser(handles, log) {
+	return {
+		// The reload's voice, and the reason this factory is handed the boot's `log` rather than only its
+		// handles. A reload already in flight cannot be recalled, so what the close gates is what it can
+		// still SAY: after `closed`, a line from this watch would carry the host of a worker that has
+		// stopped, which is the bleed the issue is about. The arming lines keep the real `log` -- they run
+		// before any close.
+		reloadLog: (event, fields) => {
+			if (!handles.closed) log(event, fields);
+		},
+		close() {
+			// `closed` FIRST, before anything is torn down: it is what gates `reloadLog` above and the watch
+			// callback below, so a callback or a reload landing mid-close is already silenced.
+			handles.closed = true;
+			clearTimeout(handles.timer);
+			handles.timer = null;
+			try {
+				handles.watcher?.close();
+			} catch {
+				// A close that failed has already stopped mattering, and a THROW here rejects the shutdown.
+			}
+			handles.watcher = null;
+		},
+	};
+}
+
+/**
  * Watch the DIRECTORY holding the triggers file (robust to the admin's atomic tmp+rename, which swaps the
  * inode a file-watch would lose), debounce, and re-reconcile the cron schedulers on change via
- * `reloadSchedules`. Best-effort and unref'd so it never blocks shutdown; a platform without `fs.watch`
- * logs and the worker keeps its boot-time schedulers.
+ * `reloadSchedules`. Best-effort: a platform without `fs.watch` logs and the worker keeps its boot-time
+ * schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned closer is what
+ * `startWorker` registers so the watch dies with the worker that armed it (issue #295).
  */
 function watchTriggersFile(config, queue, log, ref, registry, tz, fleet) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
-	let timer = null;
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
 	try {
-		watch(dir, (_event, changed) => {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
-			clearTimeout(timer);
-			timer = setTimeout(() => void reloadSchedules(config, queue, { log, ref, registry, tz, fleet }), 150);
-		}).unref?.();
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }), 150);
+		});
+		handles.watcher.unref?.();
 		log("triggers_watching", { path });
 	} catch (err) {
 		log("triggers_watch_unavailable", { reason: err?.message });
 	}
+	return closer;
 }
 
 /**
  * Watch the DIRECTORY holding the pause-windows file (same atomic-rename robustness as the triggers watch)
  * and hot-swap the in-memory windows in `ref.current` on change. A bad edit keeps the last-good windows in
- * effect (OQ-008 live-edit safety) — the pause gate never loses its config to a typo. Best-effort + unref'd.
+ * effect (OQ-008 live-edit safety) — the pause gate never loses its config to a typo. Best-effort; the
+ * FSWatcher is unref'd and the returned closer stops the watch with the worker (issue #295).
  */
 function watchPauseWindowsFile(config, ref, log) {
 	const path = config.pauseWindowsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
-	let timer = null;
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
 	const reload = () => {
 		try {
 			ref.current = loadPauseWindows(config);
-			log("pause_windows_reloaded", { count: ref.current.length });
+			closer.reloadLog("pause_windows_reloaded", { count: ref.current.length });
 		} catch (err) {
-			log("pause_windows_reload_invalid", { reason: err?.message });
+			closer.reloadLog("pause_windows_reload_invalid", { reason: err?.message });
 		}
 	};
 	try {
-		watch(dir, (_event, changed) => {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
-			clearTimeout(timer);
-			timer = setTimeout(reload, 150);
-		}).unref?.();
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(reload, 150);
+		});
+		handles.watcher.unref?.();
 		log("pause_windows_watching", { path });
 	} catch (err) {
 		log("pause_windows_watch_unavailable", { reason: err?.message });
 	}
+	return closer;
 }
 
 /**
@@ -154,23 +241,28 @@ export function reloadScopedLimits(config, ref, log) {
 
 /**
  * Watch the scoped-limits file (issue #242) the way the pause-windows watcher above does: the DIRECTORY,
- * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort + unref'd.
+ * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort; the FSWatcher is
+ * unref'd and the returned closer stops the watch with the worker (issue #295).
  */
 function watchScopedLimitsFile(config, ref, log) {
 	const path = config.scopedLimitsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
-	let timer = null;
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
 	try {
-		watch(dir, (_event, changed) => {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
-			clearTimeout(timer);
-			timer = setTimeout(() => reloadScopedLimits(config, ref, log), 150);
-		}).unref?.();
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog), 150);
+		});
+		handles.watcher.unref?.();
 		log("scoped_limits_watching", { path });
 	} catch (err) {
 		log("scoped_limits_watch_unavailable", { reason: err?.message });
 	}
+	return closer;
 }
 
 /**
@@ -677,6 +769,18 @@ export async function startWorker(
 		reaps: backendReaps,
 	});
 
+	// The auxiliary handles the shutdown closes after the worker drains (`index.mjs` -> shutdown). A NAMED
+	// array rather than the literal it used to be, because up to three of its members do not exist yet: the
+	// live-edit watchers are armed at the END of boot, below, and deliberately after the boot reconcile --
+	// arming them earlier would let an operator edit run `reloadSchedules` concurrently with the boot
+	// `reconcileGated`, on a different queue handle, and reconcile's orphan prune is not safe against that.
+	//
+	// PUSHING AFTER THE HANDOFF IS SOUND FOR ONE REASON ONLY: `index.mjs` reads this array at SHUTDOWN time,
+	// not when it receives it, and so does the test harness at teardown. A refactor that COPIES it there --
+	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
+	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
+	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
 		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
@@ -696,7 +800,7 @@ export async function startWorker(
 		getSettings,
 		redis,
 		recordRun,
-		extraClosers: [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])],
+		extraClosers,
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
@@ -931,20 +1035,21 @@ export async function startWorker(
 
 	// DES-CRON-VIA-BULLMQ-SCHEDULER live edit (OQ-008): watch the triggers file and re-reconcile schedulers
 	// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
-	// Only when a triggers file is configured; best-effort + unref'd; a bad edit keeps the running schedulers.
+	// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
+	// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 	if (config.triggersFile) {
-		watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared);
+		extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared));
 	}
 
 	// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
 	// an operator's add/delete of a pause window takes effect without a worker restart. A bad edit is kept out.
 	if (config.pauseWindowsFile) {
-		watchPauseWindowsFile(config, pauseWindows, log);
+		extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log));
 	}
 
 	// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 	if (config.scopedLimitsFile) {
-		watchScopedLimitsFile(config, scopedLimits, log);
+		extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log));
 	}
 
 	log("worker_started", {
