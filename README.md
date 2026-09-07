@@ -656,11 +656,17 @@ which is what it offers right after the credentials step):
 3. **No public URL at all**: `pi-dispatch-receiver poll` fetches issue events, comments and PRs over TLS
    with your own credential (conditional requests, nearly free against the rate limit). Same gates, same
    queue, about 60 seconds of latency, zero public surface. Pair with `setup github --no-webhook`. A
-   fresh poller starts from now and never replays old labels.
+   fresh poller starts from now and never replays old labels. Name the repositories in `POLL_REPOS`, or
+   run under `GITHUB_AUTH_SOURCE=app` and let the App installation name them
+   ([`docs/polling.md`](docs/polling.md)).
 
 ## Other forges
 
-Same machinery, per-forge correctness differences, each with a full setup doc:
+Same machinery, per-forge correctness differences, each with a full setup doc. One thing they share:
+GitHub picks between three auth sources, and these three have exactly one each, so `GITLAB_AUTH_SOURCE`,
+`FORGEJO_AUTH_SOURCE` and `AZURE_AUTH_SOURCE` accept only `pat` and default to it. They exist to refuse
+the wrong assumption, not to offer a choice: none of these forges has an App or installation token, so
+setting one to `app` gets you a sentence at boot saying so rather than a knob that is quietly ignored.
 
 - **GitLab** ([`docs/gitlab.md`](docs/gitlab.md)): webhook at `/gitlab`, project token with `api` scope.
   A GitLab label is not an approval, so every trigger is gated on the actor's resolved access level
