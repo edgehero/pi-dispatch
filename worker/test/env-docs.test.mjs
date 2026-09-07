@@ -30,10 +30,12 @@
  *     holding braces, or a spread copy, still slips past that guard, and it is named here rather than
  *     implied to be covered.
  *   - It does NOT see a read through a NAME ARRAY. `["A","B"].filter((k) => env[k])` at
- *     `worker/src/doctor.mjs:565`, `:595` and `:915` reads real variables this scan cannot attribute.
- *     Every name those three sites touch is covered from another file today, which is why nothing
- *     fails, and that is luck rather than design. It is stated here so the next person meets it as a
- *     known limit rather than as a surprise; closing it needs a parser, not a wider regex.
+ *     `worker/src/doctor.mjs:567` and `:597` reads real variables this scan cannot attribute. Every
+ *     name those two sites touch is covered from another file today, which is why nothing fails, and
+ *     that is luck rather than design. It is stated here so the next person meets it as a known limit
+ *     rather than as a surprise; closing it needs a parser, not a wider regex. There were three sites
+ *     until issue #286: doctor's provider check read a hand-written provider->variable table, and now
+ *     reads names pi supplies at runtime, which the bullet above already excuses for the same reason.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

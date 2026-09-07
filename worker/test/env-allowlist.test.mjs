@@ -20,7 +20,7 @@ if (!mod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 	throw new Error(`env-allowlist tests are REQUIRED here but pi-ai could not import.\n${importError}`);
 }
 const skip = mod ? false : `pi-ai not installed (node ${process.version} < 22.19.0); CI runs these`;
-const { buildContainerEnv, providerKeyVars } = mod ?? {};
+const { buildContainerEnv, piProviders, providerKeyCandidates, providerKeyVars } = mod ?? {};
 
 const HOST = {
 	ANTHROPIC_API_KEY: "sk-ant-real",
@@ -43,6 +43,56 @@ test("derives the provider key var from the host env, in precedence order", { sk
 
 test("an unconfigured provider yields undefined (=> refuse before spend)", { skip }, () => {
 	assert.equal(providerKeyVars("google", HOST), undefined);
+});
+
+// ── providerKeyCandidates / piProviders: pi's own table, recovered (issue #286) ──────────────────
+
+test("providerKeyCandidates recovers pi's OWN list, present or not", { skip }, () => {
+	// The list `findEnvKeys` filters, before it filters -- which is what doctor needs to NAME the
+	// variable an operator should set. Order is pi's precedence, OAuth first.
+	assert.deepEqual(providerKeyCandidates("anthropic"), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+	assert.deepEqual(providerKeyCandidates("openai"), ["OPENAI_API_KEY"]);
+	// The drift issue #286 reports: GOOGLE_API_KEY is not a name pi reads for google, or for anything.
+	assert.deepEqual(providerKeyCandidates("google"), ["GEMINI_API_KEY"]);
+});
+
+test("providerKeyCandidates is hermetic: the real process.env cannot reach it", { skip }, () => {
+	// pi's getProviderEnvValue falls back to process.env for any name the injected env lacks, so the
+	// difference between these two functions is a TESTED fact and not a comment. If this ever stops
+	// holding, every doctor test that injects a fake env is silently reading the developer's shell.
+	const before = providerKeyCandidates("anthropic");
+	const had = Object.hasOwn(process.env, "ANTHROPIC_API_KEY");
+	const prior = process.env.ANTHROPIC_API_KEY;
+	try {
+		process.env.ANTHROPIC_API_KEY = "leaked-from-the-shell";
+		assert.deepEqual(providerKeyCandidates("anthropic"), before, "the candidate list ignores the host");
+		// The other direction, asserted positively: providerKeyVars DOES see it, which is why doctor may
+		// not use it for the presence test.
+		assert.deepEqual(providerKeyVars("anthropic", {}), ["ANTHROPIC_API_KEY"]);
+	} finally {
+		if (had) process.env.ANTHROPIC_API_KEY = prior;
+		else delete process.env.ANTHROPIC_API_KEY;
+	}
+});
+
+test("pi's catalog is NOT a superset of the ids findEnvKeys answers for", { skip }, () => {
+	// The pin for the QUESTION ORDER in doctor's provider check: candidates first, catalog second.
+	// `radius` is purely dynamic -- a real key variable and no catalog entry -- so asking the catalog
+	// first would report a working configuration as an unknown provider.
+	assert.deepEqual(providerKeyCandidates("radius"), ["PI_GATEWAY_API_KEY"]);
+	assert.equal(piProviders().includes("radius"), false);
+});
+
+test("an empty candidate list means two different things, and piProviders tells them apart", { skip }, () => {
+	// Known to pi, authenticates without a key variable (AWS credentials, an OAuth login): the closed
+	// container env has no door for either.
+	for (const id of ["amazon-bedrock", "openai-codex"]) {
+		assert.deepEqual(providerKeyCandidates(id), [], id);
+		assert.equal(piProviders().includes(id), true, id);
+	}
+	// Not a provider at all -- the second configuration issue #286 reports doctor passing.
+	assert.deepEqual(providerKeyCandidates("gemini"), []);
+	assert.equal(piProviders().includes("gemini"), false);
 });
 
 test("the container env is a CLOSED set: only the provider key, never the whole host", { skip }, () => {

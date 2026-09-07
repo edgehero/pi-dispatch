@@ -5,7 +5,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
+import { OAUTH_KEY_RE, collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
+import { piProviders, providerKeyCandidates } from "../src/env-allowlist.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 
 // A fake `spawn`: plan keys are command-line prefixes ("docker info", "docker image", "docker run",
@@ -109,7 +110,7 @@ test("doctor: docker down, valkey down, no key exits 1 with fixes", async () => 
 	const { out, text } = capture();
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic" }, // no credential
-		{ out, spawn: fakeSpawn({ "docker info": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0" },
+		{ out, spawn: fakeSpawn({ "docker info": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR },
 	);
 	assert.equal(code, 1);
 	assert.match(text(), /start Docker/, "a down daemon (exit != 0) is distinguished from a missing binary");
@@ -214,6 +215,9 @@ const overlayEnv = (dir, extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_A
 // `agentDir` points at a path that does not exist, so the host-vs-overlay comparison (issue #102) finds
 // nothing and, crucially, never reads the developer's real ~/.pi/agent or spawns their package manager.
 // A test that wants the comparison passes its own agentDir.
+// An agent dir that cannot hold an auth.json, for every test that means "this deployment has NO
+// credential". Without it the provider-key check reads the DEVELOPER's real ~/.pi/agent/auth.json, so a
+// box where someone has run `pi login` disagrees with CI about whether a key exists (issue #286).
 const NO_AGENT_DIR = join(tmpdir(), "pi-dispatch-no-such-agent-dir");
 const overlayDeps = (out, extra = {}) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR, ...extra });
 
@@ -470,6 +474,84 @@ test("doctor: an OAuth login in pi auth.json is flagged as not usable for a serv
 	);
 	assert.equal(code, 1, "an OAuth/subscription login is not a usable service credential");
 	assert.match(text(), /OAuth\/subscription/);
+});
+
+// ── The provider key is PI's fact, asked of pi (issue #286) ──────────────────────────────────────
+// doctor used to carry a hand-written provider->variable table. It had drifted three ways, and each way
+// let a deployment pass doctor that the worker then refused pre-spend on every job. These pin the
+// acceptance of #286 against pi itself; none of them asserts a copied table.
+const provEnv = (extra) => ({ PI_AUTH_FROM_PI: "0", ...extra });
+const provDeps = (out) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR });
+
+test("doctor: PI_PROVIDER=google with only GOOGLE_API_KEY fails, and the failure names GEMINI_API_KEY", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "google", GOOGLE_API_KEY: "g" }), provDeps(out));
+	assert.equal(code, 1, "the worker would refuse every job here, so doctor must not be green");
+	assert.match(text(), /Provider key set \(google: GEMINI_API_KEY\)/, "it names the variable pi actually reads");
+	assert.match(text(), /set GEMINI_API_KEY in \.env/, "and the fix line names it too");
+	// The whole defect in one assertion: GOOGLE_API_KEY is not a name pi reads, for google or anything
+	// else, so doctor must never print it again -- not as a candidate, not as a fix.
+	assert.doesNotMatch(text(), /GOOGLE_API_KEY/, "the invented variable is gone from doctor's vocabulary");
+});
+
+test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the one they meant", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "gemini", GEMINI_API_KEY: "g" }), provDeps(out));
+	assert.equal(code, 1, "pi has no `gemini` provider, so no key could ever satisfy it");
+	assert.match(text(), /is not a provider pi has/);
+	// Derived, not guessed: pi is asked which provider reads GEMINI_API_KEY. Edit distance would never
+	// find this -- `gemini` and `google` differ by five characters.
+	assert.match(text(), /set PI_PROVIDER=google/, "the suggestion comes from pi's own table");
+});
+
+test("doctor: a provider pi DOES know, with its key set, still passes", async () => {
+	for (const [provider, variable] of [["anthropic", "ANTHROPIC_API_KEY"], ["openai", "OPENAI_API_KEY"], ["google", "GEMINI_API_KEY"], ["xai", "XAI_API_KEY"]]) {
+		const { out, text } = capture();
+		const code = await runDoctor(provEnv({ PI_PROVIDER: provider, [variable]: "sk-x" }), provDeps(out));
+		assert.equal(code, 0, `${provider} with ${variable} set is a working deployment`);
+		assert.match(text(), new RegExp(`✓ Provider key set \\(${provider}: ${variable}\\)`));
+		assert.doesNotMatch(text(), /✗/, `${provider}: no hard failures`);
+	}
+});
+
+test("doctor: an OAuth token in the ENV is reported, never silently blessed", async () => {
+	// It used to pass in silence: the old table listed ANTHROPIC_OAUTH_TOKEN as a credential that works.
+	// A warn, not a failure -- the worker forwards it and the job DOES run, so a ✗ would put doctor back
+	// in disagreement with the worker, which is the disease rather than the cure.
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_OAUTH_TOKEN: "oauth" }), provDeps(out));
+	assert.equal(code, 0, "a warn does not fail the run");
+	assert.match(text(), /⚠ Provider key set \(anthropic: ANTHROPIC_OAUTH_TOKEN\) -- an OAuth\/subscription login/);
+	assert.match(text(), /set ANTHROPIC_API_KEY instead/, "the fix names an API key, never the OAuth token");
+
+	// Both set: pi reads the OAuth token FIRST, so the API key the operator thinks they configured is
+	// the one being ignored. That is the sentence they need, and the old check printed neither.
+	const second = capture();
+	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_OAUTH_TOKEN: "oauth", ANTHROPIC_API_KEY: "sk-x" }), provDeps(second.out));
+	assert.match(second.text(), /unset ANTHROPIC_OAUTH_TOKEN: pi reads it BEFORE ANTHROPIC_API_KEY/);
+});
+
+test("doctor: the OAuth suffix rule is pinned against pi, not against a table", async () => {
+	// Both directions, with pi as the oracle. The suffix rule is the ONE credential fact doctor holds
+	// itself, because it is a message about a credential that must NOT be used and so cannot come from a
+	// table of credentials that do.
+	assert.ok(OAUTH_KEY_RE.test(providerKeyCandidates("anthropic")[0]), "anthropic's first candidate IS the OAuth token");
+	const matching = [...piProviders(), "radius"].flatMap((id) => providerKeyCandidates(id).filter((name) => OAUTH_KEY_RE.test(name)));
+	assert.deepEqual(matching, ["ANTHROPIC_OAUTH_TOKEN"], "exactly one variable pi reads is an OAuth token today");
+});
+
+test("doctor: a host where pi will not load warns instead of guessing a variable name", async () => {
+	// Below-floor Node, or a tree with no dependencies. The Node-floor check above already failed HARD
+	// for the cause, so this warns rather than printing a second ✗ for one root cause -- and it names no
+	// variable at all, because guessing one is the defect #286 is about.
+	const checks = await collectChecks({ PI_PROVIDER: "google" }, collectSeams(green, { providerOracle: async () => null }));
+	const c = checks.find((x) => /^Provider key/.test(x.label));
+	assert.ok(c, "the check still appears");
+	assert.equal(c.ok, false);
+	assert.equal(c.warn, true, "one root cause, one hard failure");
+	assert.equal(c.fixAction, undefined, "never tier");
+	assert.doesNotMatch(`${c.label} ${c.fix}`, /_API_KEY/, "it does not invent a variable it could not ask for");
+	assert.doesNotMatch(`${c.label} ${c.fix}`, /package/i, "and does not trip the staged-packages no-op pins");
 });
 
 // GITHUB_AUTH_SOURCE=gh (the default) forwards the operator's full gh login into every token-carrying job
@@ -1765,6 +1847,7 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	never(/^Overlay models\.json is credential-free$/, "malformed JSON is never rewritten");
 	never(/^Staged package looks like the dispatch admin/, "removing staged code is the operator's call");
 	never(/^Node ≥/, "doctor does not upgrade the host runtime");
+	never(/^Provider key/, "doctor cannot know which provider an operator meant, and never mints a credential");
 	never(/but WEBHOOK_SECRET is unset/, "secrets are never minted or set");
 	never(/AZURE_WEBHOOK_MODE is/, "an undefaulted mode must stay a chosen thing");
 	never(/GITHUB_AUTH_SOURCE is gh but/, "auth posture is never changed behind the operator");
