@@ -148,7 +148,9 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	// stdout, so holding a replacement across this `await` swallowed the runner's result frames: three tests
 	// in this file were reported as never existing -- no name, no count, exit 0 (issue #266).
 	const from = bootLines.length;
-	{
+	let captured;
+	let booted = false;
+	try {
 		await mod.startWorker(env, {
 			write: (chunk) => {
 				bootLines.push(String(chunk));
@@ -171,45 +173,61 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 		});
-	}
-
-	const captured = calls[0];
-
-	captured?.redis?.disconnect?.(); // release the background reconnect handle
-	// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name also
-	// opens a host-queue handle, and one unclosed ioredis connection holds the event loop open forever --
-	// which shows up as the whole test FILE hanging rather than as a failure anyone can read.
-	for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
-
-	// DELETE THE HOST QUEUE THIS RUN CREATED (issue #262). A declared `PI_WORKER_NAME` makes `startWorker`
-	// open `pi-jobs@<name>`, and BullMQ's meta key for it outlives the process: they accumulate across runs
-	// and are exactly what `discoverHostQueues` reads to find host queues. Nothing in the suite reads the
-	// live keyspace for them today, but the read they would pollute was added by the same slice that created
-	// the residue, and it has already produced one false result: a live check of "a deployment that never had
-	// a named worker opens exactly one queue" reported the claim FALSE against leftover keys. The claim was
-	// true; the fixture was dirty.
-	//
-	// AFTER the closers and on its OWN client, both deliberately. Deleting before `queue.close()` does not
-	// work -- BullMQ writes `:meta` back on the way out, so the keys reappear -- and the worker's own client
-	// is disconnected by then. The MATCH is narrowed to this run's declared name, so it can only ever remove
-	// what this file made.
-	if (env.PI_WORKER_NAME) {
-		const { makeRedisClient } = await import("../src/connection.mjs");
-		const sweeper = makeRedisClient(env.VALKEY_URL ?? VALKEY_URL);
-		sweeper.on("error", () => {});
+		booted = true;
+	} finally {
+		// TEARDOWN RUNS ON A REJECTING BOOT TOO (issue #295). A boot can refuse AFTER `createWorkerFn` has
+		// already been handed the queue, the registry and the redis client -- `reconcileGated` awaits
+		// `livePeers()` outside its own try, and the backend registry refuses on nine conditions -- and
+		// without this `finally` every one of those paths skipped the disconnect, the closer drain and the
+		// host-queue sweep. One unclosed ioredis connection holds the event loop open forever, which shows
+		// up as the whole test FILE hanging rather than as a failure anyone can read.
+		captured = calls[0];
 		try {
-			let cursor = "0";
-			const keys = [];
-			do {
-				const [next, batch] = await sweeper.scan(cursor, "MATCH", `bull:pi-jobs@${env.PI_WORKER_NAME}:*`, "COUNT", 200);
-				cursor = next;
-				keys.push(...batch);
-			} while (cursor !== "0");
-			if (keys.length > 0) await sweeper.del(...keys);
-		} catch {
-			// Best effort: a surviving key costs a FUTURE test a confusing fixture, never this one a failure.
-		} finally {
-			sweeper.disconnect();
+			captured?.redis?.disconnect?.(); // release the background reconnect handle
+			// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name
+			// also opens a host-queue handle, and since issue #295 the three live-edit file watchers ride the
+			// same list -- so this loop is what proves, on every test in this file, that a watch does not
+			// outlive the boot that armed it.
+			for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
+
+		// DELETE THE HOST QUEUE THIS RUN CREATED (issue #262). A declared `PI_WORKER_NAME` makes `startWorker`
+		// open `pi-jobs@<name>`, and BullMQ's meta key for it outlives the process: they accumulate across runs
+		// and are exactly what `discoverHostQueues` reads to find host queues. Nothing in the suite reads the
+		// live keyspace for them today, but the read they would pollute was added by the same slice that created
+		// the residue, and it has already produced one false result: a live check of "a deployment that never had
+		// a named worker opens exactly one queue" reported the claim FALSE against leftover keys. The claim was
+		// true; the fixture was dirty.
+		//
+		// AFTER the closers and on its OWN client, both deliberately. Deleting before `queue.close()` does not
+		// work -- BullMQ writes `:meta` back on the way out, so the keys reappear -- and the worker's own client
+		// is disconnected by then. The MATCH is narrowed to this run's declared name, so it can only ever remove
+		// what this file made.
+		if (env.PI_WORKER_NAME) {
+			const { makeRedisClient } = await import("../src/connection.mjs");
+			const sweeper = makeRedisClient(env.VALKEY_URL ?? VALKEY_URL);
+			sweeper.on("error", () => {});
+			try {
+				let cursor = "0";
+				const keys = [];
+				do {
+					const [next, batch] = await sweeper.scan(cursor, "MATCH", `bull:pi-jobs@${env.PI_WORKER_NAME}:*`, "COUNT", 200);
+					cursor = next;
+					keys.push(...batch);
+				} while (cursor !== "0");
+				if (keys.length > 0) await sweeper.del(...keys);
+			} catch {
+				// Best effort: a surviving key costs a FUTURE test a confusing fixture, never this one a failure.
+			} finally {
+				sweeper.disconnect();
+			}
+		}
+		} catch (teardownError) {
+			// SWALLOWED ONLY ON A REFUSED BOOT, where a throw here would surface instead of the configError the
+			// caller's `assert.rejects` is matching on and the real failure would vanish. On a boot that
+			// SUCCEEDED there is nothing to protect and everything to lose: a teardown that started failing used
+			// to turn forty tests in this file red, and a blanket swallow would buy the refused-boot case by
+			// making a leaked handle silent -- which is the trade this file exists downstream of.
+			if (booted) throw teardownError;
 		}
 	}
 
@@ -864,6 +882,159 @@ test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good o
 		assert.deepEqual(logs[1], { event: "scoped_limits_reloaded", fields: { count: 1 } });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── live-edit watcher lifecycle (issue #295) ────────────────────────────────────────────────────────
+
+test("the live-edit watchers are CLOSED with the worker that armed them", { skip }, async () => {
+	// THE DEFECT THIS PINS. `watch(dir, cb).unref?.()` retained nothing, so no code path could close the
+	// FSWatcher and `extraClosers` never carried one: the watch outlived its boot, and the debounce it later
+	// fired logged through THAT boot's `log` -- that boot's injected `write`, stamped with that boot's host.
+	// Every boot in this file writes into one never-reset `bootLines`, so a dead worker's line landed inside
+	// a LATER test's window under a host that had shut down two tests earlier, and CI reported
+	// `scoped_limits_reload_invalid` carrying `runnervmejwal` inside the test that asserts `mac-mini-1`.
+	//
+	// The negative half below is only worth what its arming half is worth, so both are asserted. A plain
+	// write is also the right provocation: it passes the basename filter on both platforms this runs on,
+	// where removing the DIRECTORY does not -- Linux names the file in that event and macOS names the
+	// directory, which is why every leak here was reachable in CI and unreachable on a laptop.
+	const dir = mkdtempSync(join(tmpdir(), "pi-watch-close-"));
+	try {
+		const triggersPath = join(dir, "triggers.json");
+		const pausePath = join(dir, "pause-windows.json");
+		const limitsPath = join(dir, "scoped-limits.json");
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
+		writeFileSync(pausePath, JSON.stringify({ windows: [] }));
+		writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [] }));
+
+		const { captured, logs } = await runStart({
+			env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_PAUSE_WINDOWS_FILE: pausePath, PI_SCOPED_LIMITS_FILE: limitsPath },
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+		});
+
+		// Armed, or the silence below proves nothing. `PI_PAUSE_WINDOWS_FILE` reaches `startWorker` from no
+		// other test in this repo, so this is also the only place its watcher is exercised at all.
+		for (const event of ["triggers_watching", "pause_windows_watching", "scoped_limits_watching"]) {
+			assert.ok(logs.some((l) => l.event === event), `${event}: the canary must ARM the watch it claims to close`);
+		}
+		// The runtime queue, the registry, and one closer per armed watch. Not `>=`: the count IS the claim.
+		// Before the fix this was 2 -- the watches were never registered at all, so an eye passing over
+		// `extraClosers` looking for a broken `close()` would have found nothing wrong.
+		assert.equal(captured.extraClosers.length, 5, "runtimeQueue + registry + one closer per armed watch");
+
+		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
+		const before = bootLines.length;
+		writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
+		writeFileSync(pausePath, `${JSON.stringify({ windows: [{ scope: "acme/web", from: "01:00", to: "02:00" }] })}\n`);
+		writeFileSync(limitsPath, `${JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] })}\n`);
+		await new Promise((resolve) => setTimeout(resolve, 600));
+
+		assert.deepEqual(
+			parseLines(bootLines.slice(before)),
+			[],
+			"a shut-down worker must write NOTHING once its closers have run: whatever lands here would land in a later test's window carrying THIS worker's host. The watches are the expected culprit, not the only possible one -- read the event name before assuming which closer leaked",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a watch closer closes once, cancels the debounce it armed, silences a reload already in flight, and never throws", { skip }, async () => {
+	// The properties the shutdown rests on, none of which a real `fs.watch` can pin without racing the
+	// filesystem -- which is why the closer is exported apart from its watchers, `reloadScopedLimits`'s own
+	// reasoning applied to the other half of the same three functions.
+	let closes = 0;
+	let fired = 0;
+	const handles = {
+		watcher: {
+			close() {
+				closes += 1;
+				throw new Error("a platform whose close fails");
+			},
+		},
+		timer: setTimeout(() => (fired += 1), 20),
+		closed: false,
+	};
+	const emitted = [];
+	const closer = mod.makeWatchCloser(handles, (event, fields) => emitted.push({ event, fields }));
+
+	// A reload that has ALREADY started cannot be recalled: `reloadSchedules` is async and awaits Valkey, so
+	// the close can land mid-flight. What is gated is what it can still SAY, because a line written then
+	// carries the host of a worker that has stopped.
+	closer.reloadLog("schedules_reloaded", { installed: 1 });
+	assert.deepEqual(emitted, [{ event: "schedules_reloaded", fields: { installed: 1 } }], "before close a reload logs normally");
+
+	// MUST NOT THROW: `index.mjs` wraps each closer in `Promise.resolve(c?.close?.()).catch(...)`, which does
+	// not catch a SYNCHRONOUS throw -- one escapes the `.map()` callback, rejects the whole shutdown and
+	// skips the `process.exit(0)` after it, stranding every closer that had not run yet.
+	assert.doesNotThrow(() => closer.close());
+	assert.doesNotThrow(() => closer.close(), "a second close is a no-op, not a second throw");
+	// Idempotence is the NULLING, not an early return: the second close finds no watcher to close. That is
+	// the assertion below, and it is what a guard with nothing behind it would have hidden.
+	assert.equal(closes, 1, "the watcher is closed exactly once -- an unclosed one outlives the worker that armed it");
+
+	closer.reloadLog("schedules_reload_failed", { reason: "Connection is closed." });
+	assert.equal(emitted.length, 1, "after close the in-flight reload is SILENT -- this is the line that used to reach a later test");
+
+	await new Promise((resolve) => setTimeout(resolve, 120));
+	assert.equal(fired, 0, "the ARMED debounce is cancelled: closing a watcher does not cancel a timer its callback already set");
+
+	// The `fs.watch`-threw arm's HANDLES, not its registration: a bag that never received a watcher still
+	// closes clean. That the three watch functions RETURN a closer on that arm regardless is structural --
+	// they return from outside their try/catch -- and is not what this line proves.
+	assert.doesNotThrow(() => mod.makeWatchCloser({ watcher: null, timer: null, closed: false }, () => {}).close());
+});
+
+test("a boot that refuses AFTER the handoff still drains what it opened", { skip }, async () => {
+	// `reconcileGated` awaits `livePeers()` outside its own try, so a registry read that fails refuses the
+	// boot with the queue, the registry and the redis client ALREADY handed to `createWorker`. Before the
+	// teardown moved into a `finally`, every such path skipped the drain -- and one unclosed ioredis
+	// connection does not fail this file, it HANGS it, which is the trap this whole file sits downstream of.
+	//
+	// This guards the issue #57 and #262 handles, NOT the live-edit watches: their closers are registered in
+	// the last statements before `startWorker` returns, so no refused boot can leave one armed. Found while
+	// closing #295 and fixed here because the drain it protects is the same drain.
+	const { makeHostRegistry } = await import("../src/host-registry.mjs");
+	const dir = mkdtempSync(join(tmpdir(), "pi-boot-refuse-"));
+	const folder = mkdtempSync(join(tmpdir(), "pi-boot-refuse-f-"));
+	try {
+		const triggersPath = join(dir, "triggers.json");
+		// A cron trigger, because the boot reconcile is what reads the peer list -- a triggers file with no
+		// schedule in it never reaches `reconcileGated` and the boot would simply succeed.
+		writeFileSync(
+			triggersPath,
+			JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder, flow: "tidy", task: "t" } }] }),
+		);
+		let registryClosed = false;
+		await assert.rejects(
+			() =>
+				runStart({
+					env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath },
+					makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+					makeHost: () => fakeHost(),
+					makeHostRegistry: (args) => {
+						const real = makeHostRegistry(args);
+						return {
+							...real,
+							livePeers: async () => {
+								throw new Error("registry read blew up");
+							},
+							close: async () => {
+								registryClosed = true;
+								await real.close();
+							},
+						};
+					},
+				}),
+			/registry read blew up/,
+			"the boot refusal must still reach the caller -- the teardown may not replace it",
+		);
+		assert.equal(registryClosed, true, "what the refused boot had already opened is drained anyway");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(folder, { recursive: true, force: true });
 	}
 });
 

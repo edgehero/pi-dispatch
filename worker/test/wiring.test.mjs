@@ -149,6 +149,96 @@ test("shutdown closes each extraCloser after the worker drains", { skip }, async
 	}
 });
 
+test("a closer pushed AFTER createWorker returns is still closed by the shutdown", { skip }, async () => {
+	// `start.mjs` hands this array over BEFORE its three live-edit watches exist, then pushes their closers in
+	// once they are armed -- which it may only do because this shutdown reads the array LATE, at signal time,
+	// rather than keeping what it was handed. A refactor that snapshots or copies it at construction (a
+	// spread, a freeze, a `slice`) would un-register all three watches in SILENCE: every other test here would
+	// stay green, because they all hand `createWorker` a complete array up front and the start-wiring harness
+	// drains the array it owns rather than the one the worker kept. That is how issue #295 survived the first
+	// time, so the late read gets a test of its own rather than only a comment.
+	const origExit = process.exit;
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let lateClosed = false;
+	let worker;
+	try {
+		process.exit = () => {};
+		const extraClosers = [];
+		worker = mod.createWorker({
+			connection: { host: "127.0.0.1", port: 1 },
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: {},
+			deps: {},
+			stopContainer: async () => {},
+			extraClosers,
+		});
+		worker.on("error", () => {}); // swallow the connection-refused error against the dead port
+		// AFTER the handoff, exactly as `startWorker` registers its watches.
+		extraClosers.push({ close: async () => { lateClosed = true; } });
+		const shutdown = process.listeners("SIGTERM").find((l) => !beforeTerm.has(l));
+		assert.ok(shutdown, "createWorker must register a SIGTERM shutdown handler");
+		await shutdown();
+		assert.equal(lateClosed, true, "the shutdown must close what was registered after it was handed the list");
+	} finally {
+		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});
+
+test("a closer that throws SYNCHRONOUSLY, and an absent one, never strand the closers after them", { skip }, async () => {
+	// The comment on that loop promised per-item isolation for "one failing or absent closer" long before the
+	// code delivered it (issue #295): `Promise.resolve(c.close?.())` does not catch a SYNCHRONOUS throw, and
+	// `c.close` on a null entry throws before `Promise.resolve` is even reached. Either escaped the `.map()`
+	// callback, rejected the shutdown, and skipped the `process.exit(0)` after it -- so every closer past the
+	// bad one never ran, including `registry.close()`, the DEL that keeps a stopped host from lingering as a
+	// ghost peer for its full TTL. Both bad shapes are reachable: `registry` comes from an injected factory,
+	// and the three live-edit file watchers now ride this same list.
+	const origExit = process.exit;
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let closed = false;
+	let exitCode = null;
+	let worker;
+	try {
+		process.exit = (code) => {
+			exitCode = code;
+		};
+		worker = mod.createWorker({
+			connection: { host: "127.0.0.1", port: 1 },
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: {},
+			deps: {},
+			stopContainer: async () => {},
+			// The good closer is LAST on purpose: it is only reached if neither bad entry stopped the loop.
+			extraClosers: [
+				{
+					close: () => {
+						throw new Error("a closer that fails before it returns a promise");
+					},
+				},
+				null,
+				{ close: async () => { closed = true; } },
+			],
+		});
+		worker.on("error", () => {}); // swallow the connection-refused error against the dead port
+		const shutdown = process.listeners("SIGTERM").find((l) => !beforeTerm.has(l));
+		assert.ok(shutdown, "createWorker must register a SIGTERM shutdown handler");
+		await assert.doesNotReject(() => shutdown(), "a bad closer must not reject the shutdown itself");
+		assert.equal(closed, true, "the closer AFTER the bad ones must still run");
+		assert.equal(exitCode, 0, "and the shutdown must still reach its own exit");
+	} finally {
+		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});
+
 test("createWorker NAMES the BullMQ Worker when given one, and omits the option when not", { skip }, async () => {
 	// Naming is what makes `getWorkers()` rows tell hosts apart -- bullmq appends `:w:<name>` to the client
 	// name and `moveToActive` stamps `processedBy` onto each active job's hash. Conditional, so a bare
