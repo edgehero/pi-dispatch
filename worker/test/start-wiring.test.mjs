@@ -1286,7 +1286,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 });
 
 test("the default arms one daily sweep and registers it as a closer", { skip }, async () => {
-	// The positive twin of the test above. Without it the count of 5 there could drift to mean anything.
+	// The positive twin of the test above. Without it the count of 2 there could drift to mean anything.
 	const constructions = [];
 	const starts = [];
 	const { captured, logs } = await runStart({

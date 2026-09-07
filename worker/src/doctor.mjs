@@ -1636,8 +1636,8 @@ export async function collectChecks(env, seams) {
 					// past PI_LOG_RETENTION_DAYS is deleted by the next boot sweep rather than rescued. Say so:
 					// an operator who wanted those records would otherwise learn it by losing them.
 					fix: shared
-						? `that directory is writable by every local account, so confirm those files are yours before adopting them, then: mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept on the next start; mv keeps their timestamps)`
-						: `mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept on the next start; mv keeps their timestamps)`,
+						? `that directory is writable by every local account, so confirm those files are yours before adopting them, then: mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept by the next sweep, which no longer waits for a restart; mv keeps their timestamps)`
+						: `mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept by the next sweep, which no longer waits for a restart; mv keeps their timestamps)`,
 				});
 			}
 		}

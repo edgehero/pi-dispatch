@@ -25,10 +25,34 @@
  * The interval idiom is `host-registry.mjs`'s, deliberately, down to the ordering inside `close()`. Two
  * divergences from it are marked at their sites, because a reader who knows that file will otherwise
  * "fix" them back.
+ *
+ * WHAT THIS COSTS THAT THE BOOT SWEEP DID NOT, and it is the one genuinely new failure mode here. All
+ * three reapers delete SYNCHRONOUSLY (`rmSync`, `unlinkSync`), which was free at boot because nothing was
+ * in flight, and is not free on a timer beside draining jobs: a long delete blocks the event loop, and
+ * `index.mjs` sets `maxStalledCount: 0` against BullMQ's 30s lock, so a loop blocked past the renewal
+ * window FAILS a paid job rather than silently re-running it. The direction is safe and the outcome is
+ * still new. Two things bound it: this loop yields between stores, and the sandbox reaper -- the only one
+ * that deletes whole trees, each a repository clone -- yields between entries. What remains is one
+ * directory's own `rmSync`, which is why that residual is stated here rather than implied.
  */
 
 /** The default cadence. A named constant on HOST_BEAT_MS's precedent, not a literal at the call site. */
 export const SWEEP_INTERVAL_HOURS = 24;
+
+/**
+ * How long `close()` will wait for an in-flight sweep before giving up on it.
+ *
+ * `index.mjs`'s shutdown says a closer that never settles blocks `process.exit(0)`, "which no closer
+ * here does" -- and an unbounded drain would have made that sentence false. The obvious defence, that
+ * the sweep's own docker call is capped at 5s, is NOT true: `listRunningSandboxes` uses
+ * `execFile`'s `timeout`, which only sends SIGTERM and then still waits for the child's `close`, so a
+ * `docker ps` wedged on a dead daemon socket never settles at all.
+ *
+ * NOT unref'd, on `host-registry`'s own reasoning: an unref'd timer does not fire when nothing else
+ * holds the loop, which is exactly the shutdown this bound exists for. The cost is that a hung sweep
+ * delays exit by at most this long, which is the point.
+ */
+const SWEEP_DRAIN_TIMEOUT_MS = 10_000;
 
 /**
  * The ceiling, and it is not decoration. `setInterval` clamps a delay above 2^31-1 ms (about 24.85 days)
@@ -69,23 +93,33 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 		}
 		const startedAt = Date.now();
 		inFlight = (async () => {
-			for (const { name, reap } of reapers) {
+			for (const entry of reapers) {
 				try {
+					// Destructured INSIDE the try: a malformed entry must be one log line like any other
+					// reaper fault, not a rejection out of a function the interval calls with `void`.
+					const { name, reap } = entry;
 					await reap();
+					// Between stores, so one tick is never a single uninterruptible block. See the note on
+					// synchronous deletes in the module docblock.
+					await new Promise((resolve) => setImmediate(resolve));
 				} catch (err) {
 					// The existing per-store event names, reused rather than invented: an operator greps one
 					// name and gets both the boot sweep and every tick. Fault isolation per store, so one
 					// broken reaper cannot stop the other two.
-					log(`${name}_reaper_skipped`, { reason: err?.message });
+					log(`${entry?.name}_reaper_skipped`, { reason: err?.message });
 				}
 			}
 		})();
 		try {
 			await inFlight;
+			log("retention_sweep", { ms: Date.now() - startedAt });
+		} catch {
+			// Unreachable today: every reaper is wrapped above. Here because the interval calls this with
+			// `void`, so ANY rejection is an unhandled rejection, and Node kills the process for one by
+			// default. A sweep must never be able to take the worker down.
 		} finally {
 			inFlight = null;
 		}
-		log("retention_sweep", { ms: Date.now() - startedAt });
 	}
 
 	return {
@@ -122,7 +156,17 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 			closed = true;
 			if (timer) clearIntervalFn(timer);
 			timer = null;
-			await (inFlight ?? Promise.resolve()).catch(() => {});
+			if (!inFlight) return;
+			await new Promise((resolve) => {
+				const t = setTimeout(() => {
+					log("retention_sweep_drain_timeout", { ms: SWEEP_DRAIN_TIMEOUT_MS });
+					resolve();
+				}, SWEEP_DRAIN_TIMEOUT_MS);
+				inFlight.catch(() => {}).then(() => {
+					clearTimeout(t);
+					resolve();
+				});
+			});
 		},
 	};
 }

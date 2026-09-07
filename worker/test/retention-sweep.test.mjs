@@ -21,9 +21,17 @@ function timers() {
 			return handle;
 		},
 		clearIntervalFn: (handle) => cleared.push(handle),
-		/** Fire the armed callback the way the event loop would. */
+		/**
+		 * Fire the armed callback the way the event loop would, then drain.
+		 *
+		 * The drain is not decoration: the sweep yields to the macrotask queue between stores, and the
+		 * interval callback is `void sweepOnce()`, so the callback returns long before the sweep settles.
+		 * A fixed number of `setImmediate` turns is deterministic where a `setTimeout` would be a wall
+		 * clock in a test file whose whole subject is not depending on one.
+		 */
 		tick: async () => {
-			for (const a of armed) await a.fn();
+			for (const a of armed) a.fn();
+			for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
 		},
 	};
 }
@@ -143,6 +151,7 @@ test("an overlapping tick is skipped, not stacked", async () => {
 	const first = s.sweepOnce();
 	const second = s.sweepOnce();
 	await second;
+	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(entered, 1, "the second tick did not enter the reaper");
 	assert.equal(l.lines.filter(([e]) => e === "retention_sweep_overlapped").length, 1);
 	release();
@@ -193,4 +202,56 @@ test("the exported cadence constants are the literals, so a bump is a reviewed e
 	// therefore blind to a change IN that value.
 	assert.equal(SWEEP_INTERVAL_HOURS, 24);
 	assert.equal(SWEEP_INTERVAL_MAX_HOURS, 168);
+});
+
+test("close() is BOUNDED: a reaper that never settles delays exit, it does not prevent it", async () => {
+	// `index.mjs`'s shutdown states that no closer here fails to settle, and an unbounded drain would have
+	// made that false. The sweep's own docker call is NOT the backstop people assume: execFile's timeout
+	// only sends SIGTERM and still waits for the child to close, so a `docker ps` against a dead daemon
+	// socket hangs forever.
+	const l = logger();
+	const s = makeRetentionSweep({
+		reapers: [{ name: "log", reap: () => new Promise(() => {}) }], // never settles, ever
+		intervalMs: 1000,
+		log: l.log,
+		...timers(),
+	});
+	void s.sweepOnce();
+	await new Promise((resolve) => setImmediate(resolve));
+	const started = Date.now();
+	await s.close();
+	const waited = Date.now() - started;
+	assert.ok(waited < 30_000, `close must return; waited ${waited}ms`);
+	assert.equal(l.lines.filter(([e]) => e === "retention_sweep_drain_timeout").length, 1, "and it says it gave up rather than pretending it drained");
+});
+
+test("sweepOnce NEVER rejects, because the interval calls it with `void`", async () => {
+	// An unhandled rejection kills the process by default and nothing in worker/src installs a handler.
+	// A malformed reaper entry used to reject out of the destructure, above the per-reaper try.
+	for (const reapers of [[null], [{ name: "log" }], [{ name: "log", reap: 42 }], [undefined]]) {
+		const s = makeRetentionSweep({ reapers, intervalMs: 1000, ...timers() });
+		await s.sweepOnce(); // must not throw
+	}
+	const l = logger();
+	const s = makeRetentionSweep({ reapers: [null], intervalMs: 1000, log: l.log, ...timers() });
+	await s.sweepOnce();
+	assert.equal(l.lines.filter(([e]) => /_reaper_skipped$/.test(e)).length, 1, "a malformed entry is one log line like any other fault");
+});
+
+test("a tick yields between stores, so one sweep is never a single uninterruptible block", async () => {
+	// The reapers delete synchronously. At boot that was free; on a timer beside draining jobs a long
+	// block can outlast BullMQ's lock renewal, and `maxStalledCount: 0` turns that into a FAILED paid job.
+	const order = [];
+	const s = makeRetentionSweep({
+		reapers: [
+			{ name: "log", reap: () => order.push("log") },
+			{ name: "sandbox", reap: () => order.push("sandbox") },
+		],
+		intervalMs: 1000,
+		...timers(),
+	});
+	const sweeping = s.sweepOnce();
+	setImmediate(() => order.push("<loop got a turn>"));
+	await sweeping;
+	assert.deepEqual(order, ["log", "<loop got a turn>", "sandbox"], "the event loop runs between stores, not only after all of them");
 });

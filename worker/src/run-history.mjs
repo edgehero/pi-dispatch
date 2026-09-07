@@ -15,7 +15,7 @@ import { isForgeKind, targetSeparator } from "./forges.mjs";
  * with a fake and no disk. `makeLogSink` streams a job's raw output to a per-job `.log` and recovers the
  * turn count from a bounded tail; `makeRecordWriter` serialises a finished run to a JSON sidecar;
  * `makeFindPreviousRun` reads a scheduler's most recent prior sidecar back; `makeLogReaper` sweeps aged
- * `.log`/`.json` files at boot.
+ * `.log`/`.json` files at boot and on the retention timer (issue #292).
  */
 
 /**
@@ -664,8 +664,11 @@ export function makeFindPreviousRun({ logsDir, fs = nodeFs }) {
 }
 
 /**
- * The durable log reaper: a boot-time sweep that deletes `.log` and `.json` history files older than
- * the retention window, keeping the logs directory bounded across restarts.
+ * The durable log reaper: an age sweep that deletes `.log` and `.json` history files older than the
+ * retention window, keeping the logs directory bounded. Runs at boot AND on the retention timer since
+ * issue #292 (`PI_SWEEP_INTERVAL_HOURS`), because a worker that never restarts never re-swept. It holds
+ * no state between calls, so it is safe to re-run; deletes are per FILE, so no single call is unbounded
+ * the way the sandbox reaper's tree deletes are.
  *
  * Fault isolation is the contract, mirroring `makeReaper` in `start.mjs`: `reapLogs` NEVER throws under
  * any input. A missing logs directory on first boot (`readdirSync` ENOENT), an unreadable entry, or an

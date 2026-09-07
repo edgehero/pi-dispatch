@@ -23,7 +23,7 @@ import { sanitizeJobId } from "./run-history.mjs";
  *     authority" and is right about an append-once log file. Here an operator working inside a resurrected
  *     sandbox writes into the directory, so mtime would keep moving and the window would never close --
  *     for exactly the directories most likely to be large.
- *   - A directory whose sandbox container is RUNNING is skipped. The sweep runs at worker boot, an
+ *   - A directory whose sandbox container is RUNNING is skipped. The sweep runs at worker boot and on the retention timer, an
  *     operator's shell can outlive a worker restart by design (the container is named outside the
  *     `pi-job-` reaper's filter), and deleting a live bind mount underneath it is a confusing failure
  *     with a boring cause.
@@ -182,7 +182,7 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
 }
 
 /**
- * The boot sweep. Fault isolation is the contract, mirroring makeLogReaper and makeReaper: `reapSandboxes`
+ * The retention sweep: at boot, and on the timer since issue #292 (`PI_SWEEP_INTERVAL_HOURS`). Fault isolation is the contract, mirroring makeLogReaper and makeReaper: `reapSandboxes`
  * NEVER throws under any input, and one bad entry cannot abort the rest of the sweep.
  *
  * There is NO keep-forever sentinel here, unlike PI_LOG_RETENTION_DAYS and PI_SESSIONS_TTL_DAYS.
@@ -239,6 +239,13 @@ export function makeSandboxReaper({
 				if (!verdict.expired) continue;
 				fs.rmSync(dir, { recursive: true, force: true });
 				log("reaped_sandbox", { entry: name, reason: verdict.reason });
+				// Yield after each tree. Free at boot, where nothing is in flight; NOT free since issue
+				// #292 put this on a timer beside draining jobs, because a retained directory is a
+				// repository clone and `rmSync` is synchronous, so deleting a set of them back to back
+				// wedges the event loop for the whole set. `index.mjs` runs with `maxStalledCount: 0`
+				// against BullMQ's 30s lock, so a block past the renewal window FAILS a paid job. This
+				// bounds the contiguous block to ONE directory, which is the part that cannot be yielded.
+				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
 				log("sandbox_reaper_skipped", { entry: name, reason: err?.message });
 			}

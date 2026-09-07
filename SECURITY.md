@@ -322,8 +322,8 @@ Stated openly rather than discovered later:
   default**) it also tees the container's raw stdout/stderr to `logs/<jobId>.log`, and that stream **can**
   carry issue/comment text. Both live host-side under `PI_LOGS_DIR`, are **never mounted into the job
   container**, and default to `~/.pi-dispatch/logs`, outside any repository (they are **gitignored** as
-  well, for the deployments that keep them in one); a boot-time sweep prunes them
-  (`PI_LOG_RETENTION_DAYS`, `0` = keep forever). Leave capture off unless you need it, and treat the log directory as personal data while it is on.
+  well, for the deployments that keep them in one); an age sweep prunes them at boot and on the retention timer
+  (`PI_LOG_RETENTION_DAYS`, `0` = keep forever; `PI_SWEEP_INTERVAL_HOURS` sets the cadence). Leave capture off unless you need it, and treat the log directory as personal data while it is on.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,

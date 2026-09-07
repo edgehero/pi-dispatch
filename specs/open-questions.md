@@ -595,7 +595,11 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   (short-lived, single-purpose jobs) is exactly what resume removes. `OQ-004` is unchanged in kind and
   **wider in reach**: exfiltration was bounded to one job's own view and is now bounded to the key's
   accumulated history, retrievable in one request. `OQ-007` stops being disk hygiene for this store and
-  becomes a resume-window question, which is why the age gate runs at open as well as at boot. `OQ-009` is
+  becomes a resume-window question, which is why the age gate runs at open as well as at boot.
+  **AMENDED (issue #292, 2026-09-07)**: `OQ-007` is RESOLVED, and the disk half now runs on a timer too
+  (`PI_SWEEP_INTERVAL_HOURS`), so the open gate no longer carries `PI_SESSIONS_TTL_DAYS` alone the way it
+  did on a worker that never restarted. What this row records is untouched: a sweep bounds how long a
+  transcript survives, never who can name one. `OQ-009` is
   **not** resolved by the new mount — `/outbox` nominates host folders and enqueues paid jobs; `/session`
   returns bytes to one key, creates no job and names no host path.
 - **What would REOPEN it** (the ratification above is not permanent): a mechanism that lets the harness
