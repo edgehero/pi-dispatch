@@ -2356,7 +2356,9 @@ validator rather than a second copy of it.
   ```
   <logsDir>/<sanitizedJobId>.log      append-only container stdout+stderr; untrusted, PII-bearing; written ONLY when PI_CAPTURE_JOB_LOGS=1
   <logsDir>/<sanitizedJobId>.json     one JSON object, PII-free, overwritten on each terminal state (last-write-wins across retries)
-  (logsDir via PI_LOGS_DIR; empty/unset = <OS temp>/pi-dispatch/logs)
+  (logsDir via PI_LOGS_DIR; empty/unset = <home>/.pi-dispatch/logs, a DURABLE per-user state root and
+   deliberately not the OS temp dir, which several platforms sweep on reboot. A host that cannot name a
+   home falls back to <OS temp>/pi-dispatch/logs and `pi-dispatch doctor` says so in one line.)
   { "jobId":   "<raw job id: delivery id | local-<hex> | repeat:<sched>:<millis>>",
     "kind":    "github" | "gitlab" | "local" | null,
     "target":  "<repo>#<issue>"  |  "<project>!<iid>"  |  "local:<basename>" | null,
@@ -2769,7 +2771,7 @@ validator rather than a second copy of it.
 
 - **Contract**:
   ```
-  settings.json  (PI_SETTINGS_FILE; absolute; unset -> <OS temp>/pi-dispatch/settings.json — same defaulting convention as PI_LOGS_DIR)
+  settings.json  (PI_SETTINGS_FILE; absolute; unset -> <home>/.pi-dispatch/settings.json — the same durable state root as PI_LOGS_DIR, and the same no-home fallback)
   {
     "model":       "<optional, non-empty string>",   // provider-native model id
     "provider":    "<optional, non-empty string>",   // pi provider id

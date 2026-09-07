@@ -447,7 +447,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Acceptance**: Given a job reaching a terminal state, a record keyed by its job id exists carrying the
   correct outcome and is present after a worker restart; the record contains no issue or comment body,
   title, or username (`target` is `repo#issue`, `project!iid` for a GitLab merge request, or `local:<basename>` — no other shape); the raw `logs/<jobId>.log`
-  exists only when `PI_CAPTURE_JOB_LOGS` is set and is gitignored.
+  exists only when `PI_CAPTURE_JOB_LOGS` is set and is gitignored. Given a host on which nothing sets
+  `PI_LOGS_DIR` or `PI_SETTINGS_FILE`, when the host reboots and the OS sweeps its temp directory, then
+  the records and the settings overlay are still readable at the same paths — or `pi-dispatch doctor`
+  names, on one line, the path that will not survive and why (issue #290; "survive a worker restart" was
+  the weaker claim this entry made while both defaulted under the OS temp dir).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 

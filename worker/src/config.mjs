@@ -313,7 +313,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		scopedLimitsFile: env.PI_SCOPED_LIMITS_FILE ?? null, // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
 		schedulerStallMax: positiveInt(env, "PI_SCHEDULER_STALL_MAX", 2), // CONST-RETRY-INFRA-ONLY: per-scheduler stall backstop; positiveInt rejects <1 so a 0 threshold fails closed
 		logsDir: logsDirPath(env), // || (not ??) inside logsDirPath, so an empty string falls back to the default
-		settingsFile: env.PI_SETTINGS_FILE || defaultSettingsFile(env), // || (not ??) so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
+		settingsFile: settingsFilePath(env), // || (not ??) inside settingsFilePath, so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
 		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
 		// REQ-RESUMABLE-SESSION. NO DEFAULT, deliberately unlike logsDir/jobsDir: unset means the feature
@@ -534,13 +534,25 @@ export function defaultSandboxDir(env = process.env) {
  * never worth refusing boot for, so an unanswerable home degrades to the temp fallback rather than
  * throwing, and `underOsTempDir` is what makes that degradation VISIBLE instead of silent.
  */
-function safeHomeDir() {
+export function safeHomeDir() {
 	try {
-		const home = homedir();
-		return typeof home === "string" ? home.trim() : "";
+		return homeOrEmpty(homedir());
 	} catch {
 		return "";
 	}
+}
+
+/**
+ * Normalise anything offered as a home directory to a usable string, or "".
+ *
+ * Split out of `safeHomeDir` because `home` is also a SEAM (doctor injects one to exercise the no-home
+ * case on a host that has one), and a seam that only the guarded path validates is a guard with a hole:
+ * `defaultLogsDir({}, null)` threw a TypeError before this existed. Blank-but-present is "" for the same
+ * reason `loadConfig` spells the durable paths with `||` -- an empty value can only mask a working
+ * default, never express one.
+ */
+function homeOrEmpty(home) {
+	return typeof home === "string" ? home.trim() : "";
 }
 
 /**
@@ -564,14 +576,36 @@ function safeHomeDir() {
  * the fallback is exactly what `underOsTempDir` detects, so doctor prints one line naming the path
  * that will not survive a reboot. Defining `legacyTempStateDir` as this function with no home is what
  * keeps the fallback and doctor's migration hint from ever disagreeing about the old address.
+ *
+ * That pairing is why the temp fallback reads a BLANK `TMPDIR`/`TEMP` as absent rather than using it.
+ * The pre-#290 code spelled this `??`, so `TMPDIR=""` composed the bare `/pi-dispatch` -- a path at the
+ * filesystem root that a non-root worker cannot create, and one `underOsTempDir` cannot recognise either,
+ * because an empty root is not a prefix of anything. The detector would then have reported "survives a
+ * reboot" over a directory that does not even exist. `||` in both places is what keeps the fallback and
+ * the detector describing the same world; it is the same rule `loadConfig` applies to PI_LOGS_DIR itself.
  */
 function defaultStateDir(env = process.env, home = safeHomeDir()) {
-	// posix.normalize, not path.join: every sibling default here is composed with a template literal and
-	// slash-normalized, and join() would emit backslashes on Windows and break that convention.
 	// Strip the home dir's own trailing separator BEFORE composing, not after: stripping the composed
 	// string only reaches a slash at the END, and `${"/home/u/"}/.pi-dispatch` puts one in the MIDDLE.
-	if (home !== "") return `${home.replace(/\\/g, "/").replace(/\/+$/, "")}/.pi-dispatch`;
-	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch`.replace(/\\/g, "/");
+	const h = homeOrEmpty(home);
+	if (h !== "") return `${h.replace(/\\/g, "/").replace(/\/+$/, "")}/.pi-dispatch`;
+	return `${tempRoot(env)}/pi-dispatch`.replace(/\\/g, "/");
+}
+
+/**
+ * The OS temp dir as this project reads it, or "/tmp".
+ *
+ * TRIMMED and stripped of a trailing separator, which is not cosmetic on either count. A whitespace-only
+ * `TMPDIR` composed a RELATIVE path ("   /pi-dispatch/logs") that would resolve against whatever cwd the
+ * worker was started in, and macOS hands back a trailing slash that otherwise rides into the `//` doctor
+ * prints in its copy-pasteable fix lines. Blank reads as absent for the reason `defaultStateDir` explains.
+ */
+function tempRoot(env = process.env) {
+	for (const raw of [env.TMPDIR, env.TEMP]) {
+		const v = typeof raw === "string" ? raw.trim() : "";
+		if (v !== "") return v.replace(/\\/g, "/").replace(/(?!^)\/+$/, "");
+	}
+	return "/tmp";
 }
 
 /** The address the durable stores had before issue #290, so doctor's migration hint can name it. */
@@ -613,13 +647,24 @@ export function logsDirPath(env = process.env, home) {
 	return env.PI_LOGS_DIR || defaultLogsDir(env, home);
 }
 
+/**
+ * The resolved settings-overlay path. Lives HERE, beside `logsDirPath`, so the pair of durable stores has
+ * one derivation each and `loadConfig` does not open-code either. `runtime-settings.mjs` re-exports it, so
+ * `@edgehero/pi-dispatch/runtime-settings` stays the import path the admin and the probe fixture already
+ * use; the alternative (config importing runtime-settings) would be a cycle, since that module reads
+ * `defaultSettingsFile` from here.
+ */
+export function settingsFilePath(env = process.env, home) {
+	return env.PI_SETTINGS_FILE || defaultSettingsFile(env, home);
+}
+
 /** One path in the slash alphabet these defaults are written in, with any trailing separators dropped. */
 function slashy(p) {
 	const s = posix.normalize(String(p).replace(/\\/g, "/")).replace(/\/+$/, "");
 	return s === "" ? "/" : s;
 }
 
-/** A path's spellings: as written, plus its realpath when one resolves. */
+/** A root's spellings: as written, plus its realpath when one resolves. Both count, for a root. */
 function spellings(p, realpath) {
 	const out = new Set([slashy(p)]);
 	try {
@@ -631,6 +676,46 @@ function spellings(p, realpath) {
 	}
 	return out;
 }
+
+/**
+ * WHERE THE CANDIDATE'S BYTES ACTUALLY LAND, as one spelling.
+ *
+ * Deliberately not `spellings()`: unioning the written and resolved forms and accepting any match makes a
+ * symlink that points OUT of the temp dir a false positive, and this check's stated posture is that a
+ * false alarm on a durable path is the worse error. A resolved path is the honest answer to "will the OS
+ * sweep this", so it wins whenever it exists. The dirname retry covers the ordinary case where the leaf
+ * has not been created yet but its parent is a symlink; when neither resolves, the written form is all
+ * there is, which is doctor's situation on a fresh host.
+ */
+function landingSpelling(p, realpath) {
+	try {
+		return slashy(realpath(p));
+	} catch {
+		// fall through to the parent
+	}
+	const written = slashy(p);
+	const cut = written.lastIndexOf("/");
+	if (cut > 0) {
+		try {
+			return `${slashy(realpath(written.slice(0, cut)))}${written.slice(cut)}`;
+		} catch {
+			// fall through to the written form
+		}
+	}
+	return written;
+}
+
+/**
+ * Directories a POSIX host clears without being asked, beyond whatever TMPDIR names.
+ *
+ * `/tmp` is here because it is what the pre-#290 default resolved to on Linux, where TMPDIR is unset,
+ * and it is tmpfs on several distributions. The other three are the ones an operator most plausibly
+ * reaches for while looking for somewhere fast: `/dev/shm` and `/run` are tmpfs by definition, so they
+ * are RAM and do not survive a reboot at all (`/run` does not survive a service restart on some
+ * layouts), and `/var/tmp` is swept by systemd-tmpfiles on a 30 day timer, which is the same order as
+ * the run history's own retention window. Each of these would otherwise have been reported as durable.
+ */
+const POSIX_VOLATILE_ROOTS = Object.freeze(["/tmp", "/var/tmp", "/dev/shm", "/run"]);
 
 /**
  * Does this path sit under a directory the OS is entitled to sweep (issue #290)?
@@ -658,7 +743,7 @@ function spellings(p, realpath) {
  * variable without naming one here. The literal "/tmp" is checked because it is what the pre-#290
  * default resolved to on Linux, where TMPDIR is unset.
  */
-export function underOsTempDir(candidate, env = process.env, { realpath = realpathSync, osTmpDir = tmpdir } = {}) {
+export function underOsTempDir(candidate, env = process.env, { realpath = realpathSync, osTmpDir = tmpdir, platform = process.platform } = {}) {
 	if (typeof candidate !== "string" || candidate.trim() === "") return false;
 	let tmp = "";
 	try {
@@ -666,13 +751,17 @@ export function underOsTempDir(candidate, env = process.env, { realpath = realpa
 	} catch {
 		// A host that cannot name its own temp dir is not one to throw over from an advisory check.
 	}
-	const targets = spellings(candidate, realpath);
-	for (const root of [env.TMPDIR, env.TEMP, tmp, "/tmp"]) {
+	const target = landingSpelling(candidate, realpath);
+	// TEMP is consulted on WINDOWS ONLY. On POSIX it is not an OS temp variable, and plenty of shells
+	// export one for a ported toolchain -- honouring it there turns an ordinary durable subtree into a
+	// false "swept" verdict, which is the direction this check says it cares about most.
+	const win = platform === "win32";
+	for (const root of [env.TMPDIR, win ? env.TEMP : "", tmp, ...(win ? [] : POSIX_VOLATILE_ROOTS)]) {
 		if (typeof root !== "string" || root.trim() === "") continue;
 		for (const base of spellings(root, realpath)) {
-			for (const target of targets) {
-				if (target === base || target.startsWith(`${base}/`)) return true;
-			}
+			// `base` is "/" only when the root IS the filesystem root, where `${base}/` would be "//" and
+			// match nothing. Everything absolute is under it, which is the honest answer for TMPDIR=/.
+			if (target === base || target.startsWith(base === "/" ? "/" : `${base}/`)) return true;
 		}
 	}
 	return false;

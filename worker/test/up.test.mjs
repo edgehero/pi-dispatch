@@ -189,10 +189,39 @@ test("up: init and doctor always run, even when every docker action was declined
 	assert.match(h.text(), /never overwrites/, "the never-clobber contract is said out loud");
 });
 
+/**
+ * What `up` appends to a scaffolded `.env` for issue #290: the two durable stores, pinned to the
+ * deployment folder so the worker (which reads .env) and the panel (which follows the setup wizard's
+ * pointer) resolve the SAME directories. Without the pin they resolve per-account homes and diverge
+ * silently. `run-history` and not `logs`, because `service install` owns <deployDir>/logs for the
+ * daemon's own stdout and the log reaper would delete it.
+ */
+const DURABLE_PINS = "PI_LOGS_DIR=/deploy/run-history\nPI_SETTINGS_FILE=/deploy/settings.json\n";
+
+test("up: the durable stores are pinned to the deployment folder, never onto the daemon's log dir", async () => {
+	const h = harness({ plan: green, files: { "/deploy/.env": "" } });
+	await h.run();
+	const env = h.store.get("/deploy/.env");
+	assert.match(env, /^PI_LOGS_DIR=\/deploy\/run-history$/m);
+	assert.match(env, /^PI_SETTINGS_FILE=\/deploy\/settings.json$/m);
+	assert.ok(!/^PI_LOGS_DIR=\/deploy\/logs$/m.test(env), "never <deployDir>/logs: service install owns it and the reaper would eat worker.out.log");
+	assert.match(h.text(), /pinned PI_LOGS_DIR and PI_SETTINGS_FILE/);
+});
+
+test("up: durable-store values the operator already chose are never clobbered", async () => {
+	const h = harness({ plan: green, files: { "/deploy/.env": "PI_LOGS_DIR=/srv/history\nPI_SETTINGS_FILE=/srv/settings.json\n" } });
+	await h.run();
+	const env = h.store.get("/deploy/.env");
+	assert.match(env, /^PI_LOGS_DIR=\/srv\/history$/m, "the operator's own path survives");
+	assert.match(env, /^PI_SETTINGS_FILE=\/srv\/settings.json$/m);
+	assert.ok(!env.includes("/deploy/run-history"), "and up does not add a second, conflicting value");
+	assert.match(h.text(), /already set/);
+});
+
 test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER reaches output", async () => {
 	const h = harness({ plan: green, files: { "/deploy/.env": "A=1\nWEBHOOK_SECRET=\n" } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), `A=1\nWEBHOOK_SECRET=${SECRET}\n`, "the key was filled, other lines untouched");
+	assert.equal(h.store.get("/deploy/.env"), `A=1\nWEBHOOK_SECRET=${SECRET}\n${DURABLE_PINS}`, "the key was filled, other lines untouched");
 	assert.ok(!h.text().includes(SECRET), "the secret value must never be printed");
 	assert.match(h.text(), /generated WEBHOOK_SECRET/);
 });
@@ -200,7 +229,7 @@ test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER rea
 test("up: an operator's existing WEBHOOK_SECRET is never touched", async () => {
 	const h = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=operator-chose-this\n" } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), "WEBHOOK_SECRET=operator-chose-this\n");
+	assert.equal(h.store.get("/deploy/.env"), `WEBHOOK_SECRET=operator-chose-this\n${DURABLE_PINS}`);
 	assert.match(h.text(), /already set/);
 	assert.ok(!h.text().includes("operator-chose-this"), "existing values are secrets too");
 });

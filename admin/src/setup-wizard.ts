@@ -115,9 +115,11 @@ async function defaultProbeQueue(url: string): Promise<boolean> {
  * detection exactly as `/dispatch` itself degrades -- the retained notice, not this function, tells the
  * operator the file is broken.
  *
- * NEVER consulted: `logsDir` / `settingsFile` absence. Both default lazily into OS temp locations
- * (see resolvePaths), so their absence proves nothing about a deployment and testing them would drag
- * OS-temp paths into a detection that is otherwise pure over the operator's own files.
+ * NEVER consulted: `logsDir` / `settingsFile` absence. Both default lazily (since issue #290, under
+ * `~/.pi-dispatch`), so their absence proves nothing about a deployment -- and neither does their
+ * PRESENCE, which is the sharper half now that the default is a stable per-user path a previous
+ * deployment may well have created. Testing them would also drag a resolved path into a detection that
+ * is otherwise pure over the operator's own files.
  */
 export async function detectDeployment({
   env = process.env,
@@ -563,10 +565,20 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
   }
 
   // ── (6) the deployment pointer ─────────────────────────────────────────────────────────────────
-  // Only the four cwd-default files need pointing: resolvePaths defaults them to "./" (right only
-  // when pi runs FROM the deployment dir), while logsDir/settingsFile default to absolute OS-temp
-  // locations and VALKEY_URL's default already matches the container up starts. Absolute paths by
-  // pointer contract (a relative value is dropped by the normalizer).
+  // The four cwd-default files need pointing because resolvePaths defaults them to "./", which is right
+  // only when pi runs FROM the deployment dir. VALKEY_URL's default already matches the container `up`
+  // starts, so it stays out. Absolute paths by pointer contract (a relative value is dropped).
+  //
+  // logsDir and settingsFile are here for a DIFFERENT and newer reason (issue #290), and the argument
+  // that once excluded them is now the argument for including them. They used to default to
+  // `<OS temp>/pi-dispatch/...`, which on Linux is a GLOBAL path: the worker and the panel resolved the
+  // same directory whatever account each ran under, so pointing at it bought nothing. Their default is
+  // now `~/.pi-dispatch`, which is per ACCOUNT -- and the shipped worker unit runs `User=pi` while the
+  // panel is a pi extension in the operator's own session. Left unpointed, the panel would resolve its
+  // OWN home: the run list reads empty, `dispatch_costs` reports no spend, and every cap set from the
+  // panel is written to a settings.json the worker never opens, which the worker then reads as an empty
+  // overlay and silently replaces with the .env defaults. Nothing detects that, so the pointer is what
+  // keeps the panel pointed at the deployment the worker actually writes.
   const pointer = {
     version: POINTER_VERSION,
     deploymentDir: dir,
@@ -575,6 +587,8 @@ export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps:
       PI_PAUSE_WINDOWS_FILE: join(dir, "pause-windows.json"),
       PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"),
       PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
+      PI_LOGS_DIR: join(dir, "run-history"),
+      PI_SETTINGS_FILE: join(dir, "settings.json"),
     },
   };
   const pPath = pointerPath(env);

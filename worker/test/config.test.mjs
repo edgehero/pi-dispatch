@@ -640,13 +640,19 @@ test("the durable defaults compose one state root under the home dir, in the sla
 	const dir = (p) => p.slice(0, p.lastIndexOf("/"));
 	assert.equal(dir(defaultSettingsFile({}, "/home/u")), dir(defaultLogsDir({}, "/home/u")));
 
-	// A home that cannot be named falls back to the OLD address, byte for byte -- including the `//`
-	// that a macOS TMPDIR's trailing slash composes. That is deliberate, not a leak: the fallback is
+	// A home that cannot be named falls back to the OLD address. Deliberate, not a leak: the fallback is
 	// exactly what underOsTempDir detects, so doctor prints one line instead of failing silently.
-	assert.equal(defaultLogsDir({ TMPDIR: "/var/T/" }, ""), "/var/T//pi-dispatch/logs");
+	//
+	// The temp root is TRIMMED and stripped of its trailing separator, which the pre-#290 code did not do.
+	// macOS hands back a trailing slash, so the old default composed a `//` that then rode into doctor's
+	// copy-pasteable fix lines; and a WHITESPACE-only TMPDIR composed a RELATIVE path that would resolve
+	// against whatever cwd the worker was started in.
+	assert.equal(defaultLogsDir({ TMPDIR: "/var/T/" }, ""), "/var/T/pi-dispatch/logs");
+	assert.equal(defaultLogsDir({ TMPDIR: "   " }, ""), "/tmp/pi-dispatch/logs", "blank reads as absent, never as a relative root");
+	assert.equal(defaultLogsDir({ TMPDIR: "" }, ""), "/tmp/pi-dispatch/logs");
 	assert.equal(defaultLogsDir({ TEMP: "C:\\Temp" }, ""), "C:/Temp/pi-dispatch/logs");
 	assert.equal(defaultLogsDir({}, ""), "/tmp/pi-dispatch/logs", "the Linux shape, where TMPDIR is unset");
-	assert.equal(legacyTempStateDir({ TMPDIR: "/var/T/" }), "/var/T//pi-dispatch", "the migration hint and the fallback share one derivation");
+	assert.equal(legacyTempStateDir({ TMPDIR: "/var/T/" }), "/var/T/pi-dispatch", "the migration hint and the fallback share one derivation");
 
 	assert.ok(!defaultLogsDir({ TMPDIR: "/t" }, "/home/u").startsWith("/t"), "a home that exists beats TMPDIR");
 });
@@ -682,9 +688,20 @@ test("underOsTempDir answers the four cases a naive prefix test gets wrong", () 
 	assert.equal(underOsTempDir("/tmpfoo/x", {}, noRealpath), false);
 
 	// Windows, in both alphabets, which is why this compares in slashes rather than calling withinRoots.
+	// TEMP is consulted ONLY on win32: on POSIX it is not an OS temp variable, and a shell that exports
+	// one for a ported toolchain would otherwise turn a durable subtree into a false swept verdict.
 	const win = { TEMP: "C:\\Temp" };
-	assert.equal(underOsTempDir("C:/Temp/pi-dispatch/logs", win, noRealpath), true);
-	assert.equal(underOsTempDir("C:\\Temp\\pi-dispatch\\logs", win, noRealpath), true);
+	const onWin = { ...noRealpath, platform: "win32" };
+	assert.equal(underOsTempDir("C:/Temp/pi-dispatch/logs", win, onWin), true);
+	assert.equal(underOsTempDir("C:\\Temp\\pi-dispatch\\logs", win, onWin), true);
+	assert.equal(underOsTempDir("/data/pi/logs", { TEMP: "/data" }, { ...noRealpath, platform: "linux" }), false, "TEMP on POSIX must not raise a false alarm");
+
+	// The volatile roots a POSIX host clears on its own, which were reported DURABLE before.
+	const posix = { ...noRealpath, platform: "linux", osTmpDir: () => "/none" };
+	for (const p of ["/dev/shm/pi/logs", "/run/pi/logs", "/run/user/1000/pi/logs", "/var/tmp/pi/logs"]) {
+		assert.equal(underOsTempDir(p, {}, posix), true, `${p} is OS-managed and does not survive`);
+	}
+	assert.equal(underOsTempDir("/srv/pi/logs", {}, posix), false, "an ordinary durable path stays durable");
 
 	// Advisory means it FAILS OPEN and never throws: junk is "not under temp", not an exception.
 	for (const junk of ["", "   ", undefined, null, 42, {}]) {

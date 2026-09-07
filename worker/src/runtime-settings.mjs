@@ -1,6 +1,5 @@
 import * as nodeFs from "node:fs";
 import { dirname } from "node:path";
-import { defaultSettingsFile } from "./config.mjs";
 
 /**
  * Runtime-settings overlay: the shared, durable truth between the admin extension and the worker
@@ -56,14 +55,15 @@ function isIntInRange(value, min, max) {
 }
 
 /**
- * The absolute path of the settings overlay. Mirrors config.mjs: `PI_SETTINGS_FILE` wins, an unset or
- * empty value falls back to the shared default so the admin extension and the worker resolve the same
- * path without either coupling to the other.
+ * The absolute path of the settings overlay: `PI_SETTINGS_FILE` wins, an unset or empty value falls back
+ * to the durable default.
+ *
+ * RE-EXPORTED, not re-derived. It used to be a second copy of `config.mjs`'s expression, and two copies
+ * of a defaulting rule are how a panel and a worker come to read different files. This module keeps the
+ * name because `@edgehero/pi-dispatch/runtime-settings` is the import path the admin and the export-map
+ * probe already use; config.mjs owns the rule because it owns the default the rule falls back to.
  */
-export function settingsFilePath(env = process.env, home) {
-	// `home` is forwarded, not resolved: doctor injects a home seam, and undefined activates the default.
-	return env.PI_SETTINGS_FILE || defaultSettingsFile(env, home);
-}
+export { settingsFilePath } from "./config.mjs";
 
 /**
  * Validate a parsed overlay against the key contract, returning the sanitized overlay (known keys only)

@@ -684,10 +684,13 @@ with it.
 ## Run history, costs, and re-opening a run
 
 Every job writes a durable, id-only record under `PI_LOGS_DIR` (never issue or comment text; raw logs
-are opt-in via `PI_CAPTURE_JOB_LOGS=1` and stay host-side). Each record carries a per-model **usage
-ledger**, which is what the insights page, `dispatch_costs`, and the what-if re-pricing fold over. Declare
-what your subscriptions cost in `subscriptions.json` and the screen shows whether they actually save
-money; without it, zero-rate runs show `$0 (unrated)`, never "free" ([`docs/costs.md`](docs/costs.md)).
+are opt-in via `PI_CAPTURE_JOB_LOGS=1` and stay host-side). That directory and your panel-set caps
+default to `~/.pi-dispatch`, outside any repository and outside the OS temp dir, so they survive a
+reboot; [`docs/backup.md`](docs/backup.md) lists every stateful store with the order to stop, copy
+and start. Each record carries a per-model **usage ledger**, which is what the insights page,
+`dispatch_costs`, and the what-if re-pricing fold over. Declare what your subscriptions cost in
+`subscriptions.json` and the screen shows whether they actually save money; without it, zero-rate
+runs show `$0 (unrated)`, never "free" ([`docs/costs.md`](docs/costs.md)).
 
 A finished run's workspace is kept for a bounded window (24h by default), so you can re-open it:
 

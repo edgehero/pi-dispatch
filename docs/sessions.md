@@ -16,8 +16,10 @@ with exactly the arguments they were before this feature existed.
 
 ## Setup
 
-`PI_SESSIONS_DIR` has **no default**, deliberately — unlike `PI_LOGS_DIR`, which falls back to your OS
-temp dir. That directory is mode `1777` on POSIX and is not where this belongs.
+`PI_SESSIONS_DIR` has **no default**, deliberately. `PI_LOGS_DIR` and `PI_SETTINGS_FILE` fall back to
+`~/.pi-dispatch`; a transcript does not, because unset here means the feature is unavailable and a trigger
+that armed `run.resume` refuses **pre-spend** rather than running unpersisted and looking like it worked.
+A default would turn that refusal into a silent success on a path you never chose.
 
 ```bash
 mkdir -p ~/.pi-dispatch/sessions && chmod 700 ~/.pi-dispatch/sessions

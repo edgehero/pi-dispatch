@@ -1635,7 +1635,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-RUNTIME-SETTINGS-FILE-OVERLAY
 
 - **Decision**: Runtime-tunable settings are a flat `settings.json` **overlay** — path `PI_SETTINGS_FILE`,
-  default `<OS temp>/pi-dispatch/settings.json` — written **atomically** (tmp + rename) by the admin
+  default `<home>/.pi-dispatch/settings.json` — written **atomically** (tmp + rename) by the admin
   extension and **re-read by the worker at each job start**. The keys are exactly `model`, `provider`
   (non-empty strings), `maxTurns`, `dailyCap`, `weeklyCap`, `monthlyCap`, `maxTokens`, `dailyTokenCap`
   (int ≥1), `concurrency` (int 1–10), and `softHoldPct` (int 1–99) — plus `secretProfiles`, which rides
@@ -1657,6 +1657,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     **before `reserveBudget`**, so it burns no budget slot. Fail-open would fall back to env and could
     silently **restore a higher daily cap** than the operator last set — money fails closed, matching the
     `config.mjs` posture where a cap of `0` fails closed rather than meaning "unlimited".
+  - **The default is DURABLE, not temporary** (issue #290). A missing file is an empty overlay, so a file
+    the OS swept between reboots restores the wider env cap in exactly the way the fail-closed rule above
+    refuses to — the same failure arriving through the filesystem instead of through the parser, and
+    silently, because nothing about a swept file is invalid. The default therefore sits under the home
+    directory rather than the OS temp dir, and `pi-dispatch doctor` warns when `PI_SETTINGS_FILE` resolves
+    somewhere sweepable. It is a warning and not a refusal: an operator may have a good reason, and a
+    deployment that refused to start over a directory choice would be worse than one that says so.
   - **The overlay may never carry persona or hard rules.** It tunes task/config knobs only; the immutable
     rules stay baked. This is the `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` boundary applied to settings:
     mutable = task/config tuning, immutable = hard rules, and the split falls on the risk, not on the

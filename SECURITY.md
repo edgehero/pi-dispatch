@@ -321,8 +321,9 @@ Stated openly rather than discovered later:
   `repo#issue`) and never on issue or comment bodies. With `PI_CAPTURE_JOB_LOGS=1` (opt-in, **off by
   default**) it also tees the container's raw stdout/stderr to `logs/<jobId>.log`, and that stream **can**
   carry issue/comment text. Both live host-side under `PI_LOGS_DIR`, are **never mounted into the job
-  container**, and are **gitignored**; a boot-time sweep prunes them (`PI_LOG_RETENTION_DAYS`, `0` = keep
-  forever). Leave capture off unless you need it, and treat the log directory as personal data while it is on.
+  container**, and default to `~/.pi-dispatch/logs`, outside any repository (they are **gitignored** as
+  well, for the deployments that keep them in one); a boot-time sweep prunes them
+  (`PI_LOG_RETENTION_DAYS`, `0` = keep forever). Leave capture off unless you need it, and treat the log directory as personal data while it is on.
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,
@@ -534,7 +535,8 @@ Stated openly rather than discovered later:
   30-minute container timeout, the job-count caps, and your provider-side spend limit — not the meter.
 - **The admin surface is not a network service.** It is a pi extension in your own terminal session plus
   a `settings.json` file — it binds no port. Whoever can run pi with the extension loaded, or write
-  `PI_SETTINGS_FILE`, holds operator power: the same trust as shell access on the host. Treat it that way.
+  `PI_SETTINGS_FILE` (default `~/.pi-dispatch/settings.json`, whose permissions are therefore part of your
+  threat model), holds operator power: the same trust as shell access on the host. Treat it that way.
   It is operator-present, processes no adversarial input, and holds no harness credentials — which is why
   pi running here is scoped out of the container-per-job constraint. Raw job logs are untrusted container
   output, and the extension never routes them into model context.

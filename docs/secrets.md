@@ -324,8 +324,8 @@ PI_SECRET_RESOLVER_ROOTS=/opt/pi
 
 Unset is the default and it is fail-closed: the panel can declare nothing, and only `PI_SECRET_PROFILES`
 is honoured. The worker re-checks that bound itself, on the real path, every time it resolves. That is not
-belt-and-braces: the settings file the panel writes lives under your OS temp directory unless you moved it
-with `PI_SETTINGS_FILE`, so a check that lived only in the panel would prove nothing on a shared host.
+belt-and-braces: `PI_SETTINGS_FILE` can put the file the panel writes anywhere, so a check that lived only
+in the panel would prove nothing on a shared host.
 
 **Binding a secret to a trigger stays a file edit.** The panel declares managers; `triggers.json` says which
 job reaches one. No `dispatch_*` tool has a `secrets` parameter.

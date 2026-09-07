@@ -49,8 +49,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
-import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, legacyTempStateDir, logsDirPath, underOsTempDir } from "./config.mjs";
-import { settingsFilePath } from "./runtime-settings.mjs";
+import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -112,7 +111,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// rather than bare process.platform/homedir() because the --env-setup check has to be exercised
 		// for all three unit formats, and only one of them exists on whichever host runs the suite.
 		platform = process.platform,
-		home = homedir(),
+		home = safeHomeDir(),
 	} = deps;
 	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home };
 
@@ -216,7 +215,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = homedir() } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -1551,27 +1550,50 @@ export async function collectChecks(env, seams) {
 		// describing, and the no-home case has to be exercisable on a host that has one.
 		const logsDir = logsDirPath(env, home);
 		const settingsFile = settingsFilePath(env, home);
-		const swept = [
-			["PI_LOGS_DIR", logsDir],
-			["PI_SETTINGS_FILE", settingsFile],
-		].filter(([, p]) => underOsTempDir(p, env));
+		const stores = [
+			{ key: "PI_LOGS_DIR", path: logsDir, explicit: Boolean(env.PI_LOGS_DIR) },
+			{ key: "PI_SETTINGS_FILE", path: settingsFile, explicit: Boolean(env.PI_SETTINGS_FILE) },
+		];
+		const swept = stores.filter((st) => underTemp(st.path, env));
+		// Computed BEFORE the green line, because it is a reason not to print one. The two used to be
+		// independent, so a homeless host was told "both survive a reboot" and then, one line later, that
+		// the directory cannot be created.
+		const homeless = stores.filter((st) => !st.explicit && !underTemp(st.path, env));
+		const noHome = homeless.length > 0 && !fileExists(home);
 
-		if (swept.length === 0) {
+		if (swept.length === 0 && !noHome) {
 			checks.push({ ok: true, label: `Durable state: run history ${logsDir}, settings ${settingsFile} — both survive a reboot (docs/backup.md)` });
-		} else {
-			// ok:false + warn:true is the tier that renders a warning WITHOUT failing doctor and still
-			// prints its fix line; an ok:true check's fix is never rendered (see render() above). One check
-			// for both variables, because the acceptance asks for one line and they are nearly always both
-			// set or both unset.
+		} else if (swept.length > 0) {
+			// ok:false + warn:true is the tier that renders a ⚠ WITHOUT failing doctor and still prints its
+			// fix line; an ok:true check's fix is never rendered (see render() above). No fixAction, which
+			// is the never tier working as designed: choosing a durable path is a semantic env value, and
+			// doctor does not move an operator's records for them.
 			//
-			// No fixAction, and that is the never tier working as designed: choosing a durable path is a
-			// semantic env value, and doctor does not move an operator's records for them.
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `${swept.map(([k, p]) => `${k} (${p})`).join(" and ")} ${swept.length > 1 ? "point" : "points"} into the OS temp dir, which the OS may sweep — a reboot can take your run history and your caps with it`,
-				fix: `point ${swept.length > 1 ? "them" : "it"} at a durable path and move the existing files there; unset falls back to ${defaultLogsDir(env, home)} and ${defaultSettingsFile(env, home)}`,
-			});
+			// The two cases below say DIFFERENT things, and collapsing them was a real defect: naming a
+			// variable that is not set states something false, and telling an operator to "unset" a
+			// variable they never set points them back at the path being complained about.
+			const explicit = swept.filter((st) => st.explicit);
+			if (explicit.length > 0) {
+				const plural = explicit.length > 1;
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${explicit.map((st) => `${st.key} (${st.path})`).join(" and ")} ${plural ? "point" : "points"} into the OS temp dir, which the OS may sweep — a reboot can take your run history and your caps with it`,
+					fix: `point ${plural ? "them" : "it"} at a durable path and move the existing files there; unsetting ${plural ? "them" : "it"} falls back to ${explicit.map((st) => (st.key === "PI_LOGS_DIR" ? defaultLogsDir(env, home) : defaultSettingsFile(env, home))).join(" and ")}`,
+				});
+			}
+			const defaulted = swept.filter((st) => !st.explicit);
+			if (defaulted.length > 0) {
+				// The default itself landed under a swept directory, which means this account's home IS one
+				// (a service account homed under /tmp, or no home at all, where defaultStateDir falls back to
+				// the pre-#290 temp path on purpose so that it lands here rather than nowhere).
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `durable state defaults under the OS temp dir on this host (${defaulted.map((st) => st.path).join(", ")}), because this account's home directory is there or cannot be resolved — the OS may sweep it, and a reboot can take your run history and your caps with it`,
+					fix: `set ${defaulted.map((st) => st.key).join(" and ")} to a path outside the temp dir that this account can write`,
+				});
+			}
 		}
 
 		// The failure mode the MOVE introduces, which the temp default did not have: under <OS temp> the
@@ -1579,36 +1601,59 @@ export async function collectChecks(env, seams) {
 		// that into a `logs_dir_error` line and keep running, so the worker drains jobs perfectly and
 		// records nothing. A systemd system unit whose User= has /nonexistent as its passwd home is the
 		// concrete case, and deploy/worker.service ships User=pi.
-		if (!env.PI_LOGS_DIR && !underOsTempDir(logsDir, env) && !fileExists(home)) {
+		//
+		// Asked for BOTH stores, not just the run history: a settings overlay that cannot be written is the
+		// quieter half of the same fault, since readOverlay treats an absent file as an empty overlay and
+		// every cap silently widens to the env default.
+		if (noHome) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `this account has no home directory on disk (${home}), so ${logsDir} cannot be created`,
-				fix: "set PI_LOGS_DIR and PI_SETTINGS_FILE to a path this account can write; without it the worker logs logs_dir_error at boot and drops every run record",
+				label: `this account has no home directory on disk (${home}), so ${homeless.map((st) => st.path).join(" and ")} cannot be created`,
+				fix: `set ${homeless.map((st) => st.key).join(" and ")} to a path this account can write; without it the worker logs logs_dir_error at boot, drops every run record, and reads an empty settings overlay, which widens every cap to the .env default`,
 			});
 		}
 
-		// The migration hint, on the advisory tier (ok:true + warn:true), where the fix line is NOT
-		// rendered -- so the whole remedy lives in the label. It is gated on three facts so that it retires
-		// itself: only when the variable is unset (an explicit path means there is nothing to migrate),
-		// only while the OLD path still holds something, and only while the NEW one does not. A warning
-		// that cannot go away is a warning nobody reads.
+		// The migration hints. ⚠ rather than ✓, because render() draws ok:true as a green tick whatever
+		// `warn` says, and "your run history is stranded at the old path" is not good news. Gated on three
+		// facts so each retires itself: only while the variable is unset (an explicit path means there is
+		// nothing to migrate), only while the OLD path still holds records, and only while the NEW one holds
+		// none. A warning that cannot go away is a warning nobody reads.
+		//
+		// Both commands lead with `mkdir -p`, because the very condition that prints them -- the new store
+		// is empty -- is usually the condition in which its directory does not exist yet, and a bare `mv`
+		// into a missing directory fails.
 		const legacy = legacyTempStateDir(env);
-		if (!env.PI_LOGS_DIR) {
+		if (!env.PI_LOGS_DIR && !underTemp(logsDir, env)) {
 			const old = recordCount(`${legacy}/logs`, fileExists);
 			if (old > 0 && recordCount(logsDir, fileExists) === 0) {
+				const shared = sharedDirectory(`${legacy}/logs`);
 				checks.push({
-					ok: true,
+					ok: false,
 					warn: true,
-					label: `${legacy}/logs still holds ${old} run record(s) while ${logsDir} is empty — pi-dispatch used to default there and the OS may sweep it. Move them:  mv ${legacy}/logs/* ${logsDir}/`,
+					label: `${legacy}/logs holds ${old} run record(s) while ${logsDir} is empty — an older pi-dispatch defaulted there, and the OS may sweep it`,
+					// mtime is what the log reaper ages a record by, and `mv` preserves it, so anything already
+					// past PI_LOG_RETENTION_DAYS is deleted by the next boot sweep rather than rescued. Say so:
+					// an operator who wanted those records would otherwise learn it by losing them.
+					fix: shared
+						? `that directory is writable by every local account, so confirm those files are yours before adopting them, then: mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept on the next start; mv keeps their timestamps)`
+						: `mkdir -p ${logsDir} && mv ${legacy}/logs/* ${logsDir}/ (records already past PI_LOG_RETENTION_DAYS are swept on the next start; mv keeps their timestamps)`,
 				});
 			}
 		}
-		if (!env.PI_SETTINGS_FILE && fileExists(`${legacy}/settings.json`) && !fileExists(settingsFile)) {
+		if (!env.PI_SETTINGS_FILE && !underTemp(settingsFile, env) && fileExists(`${legacy}/settings.json`) && !fileExists(settingsFile)) {
+			// The overlay outranks .env, so adopting one is handing it your caps, your model and your
+			// secret-profile declarations. On a world-writable legacy directory that file may not be yours
+			// at all, and doctor must not hand an operator a one-line command that installs a stranger's
+			// spend limits. There, the remedy is to READ it first and no command is offered.
+			const shared = sharedDirectory(legacy);
 			checks.push({
-				ok: true,
+				ok: false,
 				warn: true,
-				label: `your caps and settings are still at ${legacy}/settings.json while ${settingsFile} does not exist — until you move it, every cap falls back to .env and the defaults, which is a WIDER limit than you last set. Move it:  mv ${legacy}/settings.json ${settingsFile}`,
+				label: `a settings overlay is still at ${legacy}/settings.json while ${settingsFile} does not exist — until it moves, every cap, the model and any secret profiles fall back to .env and the built-in defaults, which may be wider than what you last set`,
+				fix: shared
+					? `${legacy} is writable by every local account, so that file is not necessarily yours: read it before adopting it (an overlay outranks .env), then copy it to ${settingsFile} yourself`
+					: `mkdir -p ${dirname(settingsFile)} && mv ${legacy}/settings.json ${settingsFile}`,
 			});
 		}
 	}
@@ -1629,6 +1674,27 @@ function countRetained(sandboxDir, fileExists) {
 		return { count: readdirSync(sandboxDir).length };
 	} catch {
 		return { count: 0 };
+	}
+}
+
+/**
+ * Is this directory one any local account can write, or one owned by somebody else?
+ *
+ * The legacy state root is `<OS temp>/pi-dispatch`, and on POSIX the OS temp dir is mode 1777. So the
+ * files doctor finds there were not necessarily written by this operator, or even by pi-dispatch: on a
+ * shared host another account can create them. That matters because the migration hint would otherwise
+ * offer a one-line command adopting a settings overlay, and an overlay OUTRANKS `.env` for every spend
+ * cap. Answers false when it cannot tell (Windows has no meaningful mode here, and an unreadable
+ * directory is not a claim), because this only ever softens advice and never gates anything.
+ */
+function sharedDirectory(dir) {
+	try {
+		const st = statSync(dir);
+		if ((st.mode & 0o002) !== 0) return true; // world-writable, sticky or not
+		const uid = process.getuid?.();
+		return typeof uid === "number" && st.uid !== uid;
+	} catch {
+		return false;
 	}
 }
 

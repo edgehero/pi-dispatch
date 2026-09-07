@@ -735,6 +735,14 @@ test("wizard: the pointer is written only after a confirm showing the JSON verba
     PI_PAUSE_WINDOWS_FILE: join(dir, "pause-windows.json"),
     PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"),
     PI_SUBSCRIPTIONS_FILE: join(dir, "subscriptions.json"),
+    // Issue #290. These two carry BECAUSE their default moved: `<OS temp>/pi-dispatch` was a global path
+    // on Linux, so the worker and the panel agreed whatever account each ran under, and pointing at it
+    // bought nothing. `~/.pi-dispatch` is per account, and the shipped unit runs `User=pi` while the
+    // panel is an extension in the operator's session. Unpointed, the panel reads its own home: an empty
+    // run list, and every cap it writes lands in a file the worker never opens. They match the two values
+    // `pi-dispatch up` pins into the deployment's .env, which is what the worker itself reads.
+    PI_LOGS_DIR: join(dir, "run-history"),
+    PI_SETTINGS_FILE: join(dir, "settings.json"),
   });
   const pointerConfirm = seen.confirm.find((c) => /pointer/.test(c.title));
   assert.ok(pointerConfirm.message.includes(JSON.stringify(pointer, null, 2)), "the confirm shows the exact JSON-to-be");

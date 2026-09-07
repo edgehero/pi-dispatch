@@ -199,6 +199,34 @@ export async function runUp(argv = [], deps = {}) {
 		summary.push(["WEBHOOK_SECRET", "no .env here — skipped (set it wherever your env lives)"]);
 	}
 
+	// (e1) the two DURABLE stores, pinned to THIS deployment folder (issue #290). Same never-clobber
+	// contract as WEBHOOK_SECRET above: a value the operator already set survives untouched.
+	//
+	// Why pin them at all, when the defaults are already durable: the default is `~/.pi-dispatch`, which
+	// is per ACCOUNT. The shipped worker unit runs `User=pi` while the panel is a pi extension in the
+	// operator's own session, so an unpinned deployment has the worker writing one home and the panel
+	// reading another. The panel's run list then reads empty and every cap it sets lands in a file the
+	// worker never opens, which the worker reads as an empty overlay and replaces with the .env defaults.
+	// Writing the deployment folder into .env is what makes the two agree by construction, and the setup
+	// wizard writes the SAME two paths into the deployment pointer so the panel follows.
+	//
+	// `run-history`, deliberately NOT `logs`: `service install` creates <deployDir>/logs for the daemon's
+	// own worker.out.log/worker.err.log, and the log reaper deletes every .log and .json past the
+	// retention window in whatever PI_LOGS_DIR names. Pointing it at that directory would have the worker
+	// eating its own service logs.
+	if (fs.existsSync(envPath)) {
+		const pinned = [
+			["PI_LOGS_DIR", join(cwd, "run-history")],
+			["PI_SETTINGS_FILE", join(cwd, "settings.json")],
+		].filter(([key, value]) => updateEnvFile(envPath, key, value, { fs }).changed);
+		if (pinned.length > 0) {
+			out(`\n✓ pinned ${pinned.map(([k]) => k).join(" and ")} into .env, under ${cwd}\n`);
+			summary.push(["durable state", `${pinned.map(([k]) => k).join(" + ")} pinned to this folder, so the worker and the panel agree`]);
+		} else {
+			summary.push(["durable state", "PI_LOGS_DIR and PI_SETTINGS_FILE already set — left untouched"]);
+		}
+	}
+
 	// (e2) the egress policy's proxy, and ONLY when the operator has already armed it. up never invents
 	// operator policy -- the same doctrine that keeps it pulling this repo's own image and no other -- so a
 	// deployment that has not set PI_EGRESS hears nothing about this at all.

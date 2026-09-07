@@ -101,7 +101,7 @@ labeled `unmeasured (OQ-002)`.
 
 | variable | default | effect |
 |---|---|---|
-| `PI_LOGS_DIR` | `<OS temp>/pi-dispatch/logs` | the run history this whole fold scans |
+| `PI_LOGS_DIR` | `~/.pi-dispatch/logs` | the run history this whole fold scans |
 | `PI_SUBSCRIPTIONS_FILE` | `./subscriptions.json` | where the admin reads plan declarations (relative to its own working directory; the deployment pointer can set an absolute path instead) |
 | `PI_DISPATCH_ASCII` | unset | `1` = ASCII glyphs (frames, meters, sparkline ramp) for glyph-hostile terminals |
 | `PI_LOG_RETENTION_DAYS` | `30` | bounds the analyzable history (`0` = keep forever; scan still caps at 92 days) |
