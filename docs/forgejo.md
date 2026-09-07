@@ -32,6 +32,11 @@ FORGEJO_BOT_ID=42          # the harness account's numeric id, from its profile 
 FORGEJO_WEBHOOK_SECRET=... # a long random string
 ```
 
+There is no source to choose here either. `FORGEJO_AUTH_SOURCE` accepts only `pat` and defaults to it,
+for the same reason GitLab's does: Forgejo has no App or installation token, so the variable exists to
+refuse a wrong assumption of symmetry with `GITHUB_AUTH_SOURCE` rather than to offer an alternative
+([`docs/gitlab.md`](gitlab.md#set-it-up) states it once).
+
 If you use an account-scoped token that *can* read `/user`, leave `FORGEJO_BOT_ID` unset and it is looked
 up. What must not happen is neither: the receiver **refuses to boot** without an identity, because the
 bot-loop guard compares the sender against it, and an unresolved identity never matches — so it would fail

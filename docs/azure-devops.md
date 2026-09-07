@@ -44,6 +44,10 @@ AZURE_WEBHOOK_SECRET=...         # for basic: the base64 of "user:password" you 
 # AZURE_WEBHOOK_HEADER=X-Pi-Secret   # required only when MODE=header
 ```
 
+`AZURE_AUTH_SOURCE` accepts only `pat` and defaults to it. Azure DevOps has no App or installation-token
+equivalent, so the variable exists to refuse a wrong assumption of symmetry with `GITHUB_AUTH_SOURCE`
+rather than to offer an alternative ([`docs/gitlab.md`](gitlab.md#set-it-up) states it once).
+
 `AZURE_WEBHOOK_MODE` is **required** and deliberately not defaulted. Both modes are shared-secret compares
 that cover no bytes, so which header carries the secret is something somebody has to have decided — a
 default would let you arm an endpoint without ever noticing what its gate does and does not prove.
