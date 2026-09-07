@@ -267,7 +267,10 @@ const DISPATCH_RUN_TTL_SECONDS = 2 * 60 * 60;
  */
 export function revParseHead(folder, { exec = execFileSync } = {}) {
   try {
-    const out = exec("git", ["-C", folder, "rev-parse", "HEAD"], { encoding: "utf8" });
+    // Hardened like every other host-side read. `rev-parse` does not refresh the index, so it does not
+    // invoke fsmonitor and nothing here was reachable -- but "this particular subcommand is harmless" is
+    // the reasoning that left `git-dirty.mjs` unhardened while `status` sat one module over.
+    const out = exec("git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"], { encoding: "utf8" });
     const sha = out.trim();
     return sha.length > 0 ? sha : null;
   } catch {

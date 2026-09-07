@@ -1013,6 +1013,13 @@ test("PR_ACTION_VOCAB's hints are the loader's per-forge action words, in the lo
   // `dflt` is deliberately NOT pinned to the set: gitlab's is `update`, which is not its set's first
   // member. It answers "what does an operator usually want", not "what does the loader accept", and
   // pinning it would manufacture a relation that does not exist.
+  // ...but it must still COVER every forge. The keys are derived now, so a fifth forge gets a correct
+  // hint and an undefined default -- and because the key exists, the `?? PR_ACTION_VOCAB.github`
+  // fallback at the dialog no longer fires, turning "wrong default" into "no default".
+  for (const kind of FORGE_KINDS) {
+    assert.ok(mod.PR_ACTION_VOCAB[kind].dflt, `${kind} has no default action`);
+    assert.ok(PR_ACTIONS[kind].has(mod.PR_ACTION_VOCAB[kind].dflt), `${kind}'s default must be an action the loader accepts`);
+  }
   assert.equal(mod.PR_ACTION_VOCAB.gitlab.dflt, "update");
   assert.notEqual(mod.PR_ACTION_VOCAB.gitlab.dflt, [...PR_ACTIONS.gitlab][0], "the default is an editorial choice, not the set's head");
 });

@@ -99,7 +99,7 @@ import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 // capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
 // approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
 // below is the precedent, and its header is a post-mortem of the same mistake.
-import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, REVIEW_STATES } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, PR_CLOSE_ACTIONS, REVIEW_STATES } from "@edgehero/pi-dispatch/triggers";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -492,7 +492,7 @@ function registerTools(pi: ExtensionAPI): void {
       "close-only pull_request rule accepts the same number/once narrowing. " +
       "Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
       "also decides which action words pull_request accepts: " +
-      FORGE_KINDS.map((f: string) => `${f} is ${[...(PR_ACTIONS[f] as Set<string>)].join("|")}${ISSUE_CLOSE_WORD[f] ? "" : " (no close word)"}`).join(", ") +
+      FORGE_KINDS.map((f: string) => `${f} is ${[...(PR_ACTIONS[f] as Set<string>)].join("|")}${PR_CLOSE_ACTIONS[f] ? "" : " (no close word)"}`).join(", ") +
       ". " +
       "The close word rides alone: it cannot be mixed with other actions in one entry. An azure label or comment " +
       "trigger must also set `repository` (a work item belongs to a project, not a repository), and an azure " +
@@ -1014,6 +1014,9 @@ export const ISSUE_CLOSE_WORD: Record<string, string> = Object.fromEntries(
 // The close words ride the hint too (issue #231): the dialog passes whatever is typed through the shared
 // validator, so a close-only rule IS authorable here, and a hint that omits the word reads as the word
 // not existing. The loader refuses a list mixing a close word with any other action.
+// Keyed against a DERIVED key set, so a fifth forge would otherwise get a correct hint and an undefined
+// default -- and worse, because the key would exist, the `?? PR_ACTION_VOCAB.github` fallback at the
+// dialog would stop firing. `wiring.test.mjs` asserts this covers FORGE_KINDS.
 const PR_ACTION_DEFAULT: Record<string, string> = {
   github: "labeled",
   gitlab: "update",

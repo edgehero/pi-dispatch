@@ -151,46 +151,52 @@ test("a missing folder is a clear config error", async () => {
 	);
 });
 
-// ── The host-side git argv (issue #286's sweep) ──────────────────────────────────────────────────
+// ── The host-side git argv (issue #286's sweep) ─────────────────────────────────────────────────
 //
 // `prepare-local`'s own git was the one copy of seven missing `core.fsmonitor=false`. The existing tests
 // here drive the REAL default git against a temp repo, so they exercise the flags and can never see them
-// -- which is how the omission survived. This asserts the argv itself.
-test("prepare-local's host-side git carries the same hardening as every other read", async () => {
-	// A REAL repo, so the function reaches its git call rather than refusing above it -- a fixture that
-	// throws first would make this pin vacuous.
-	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-argv-"));
-	const calls = [];
-	await prepareLocalWorkspace({
-		folder,
-		task: "t",
-		jobDir,
-		git: async (gitDir, args) => {
-			calls.push({ gitDir, args });
-			return execFileSync("git", ["-C", gitDir, ...args], { encoding: "utf8" });
-		},
-	});
-	assert.deepEqual(calls.map((c) => c.args), [["rev-parse", "HEAD"]], "the seam must be reached, or this pin is vacuous");
-	// The seam receives the SUBcommand; the hardening rides in front of it inside `defaultGit`, which
-	// spreads this exact array. Asserting the constant is asserting what the real git is invoked with,
-	// and `rev-parse` is precisely the command whose harmlessness hid the missing flag for so long.
-	assert.deepEqual([...GIT_READ_FLAGS], ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager"]);
+// -- which is how the omission survived, and why the guard below reads SOURCE rather than behaviour.
+test("prepare-local's host-side git spreads the shared hardening, not a copy of it", () => {
+	// Asserted against the SOURCE, deliberately. `prepareLocalWorkspace` takes an injected `git` that
+	// replaces `defaultGit` wholesale, so the flags are structurally invisible through the seam: a test
+	// driving the seam and then asserting GIT_READ_FLAGS' own contents proves only that the constant is
+	// what it is, and stays green with the fix reverted. That test was written first and it was hollow.
+	const src = readFileSync(fileURLToPath(new URL("../src/prepare-local.mjs", import.meta.url)), "utf8");
+	assert.match(src, /exec\("git", \[\.\.\.GIT_READ_FLAGS,/, "prepare-local must spread the shared constant into its git argv");
 });
 
-test("no host-side git config is hardened by hand any more", () => {
-	// The guard that outlives the refactor. Seven files carried these `-c` pairs and the drift was a
-	// missing one in a copy nobody re-read; an eighth copy is how it comes back.
-	const roots = ["worker/src", "admin/src"];
+/**
+ * EVERY host-side `git` invocation carries the hardening -- a COVERAGE scan, not a copy detector.
+ *
+ * The first version of this guard grepped for the flag names as quoted argv tokens, which finds a file
+ * that spells them out and misses the two failure modes that actually happened. It could be evaded by
+ * writing the same literals in single quotes -- verified, the original defect reinstated that way shipped
+ * green -- and, worse, it was blind by construction to a site carrying NO flags at all. That is exactly
+ * how `git-dirty.mjs` was missed: the census that found "seven sites" grepped for flags that were
+ * PRESENT, and the one running `git status` on an agent-writable folder had none.
+ *
+ * So this enumerates the call sites instead and requires each argv to begin with the shared constant.
+ * `receiver/` and `image/runner` are deliberately not scanned: neither invokes git at all, checked.
+ */
+test("every host-side git invocation begins with the shared hardening flags", () => {
 	const offenders = [];
-	for (const root of roots) {
+	for (const root of ["worker/src", "admin/src"]) {
 		const dir = fileURLToPath(new URL(`../../${root}`, import.meta.url));
 		for (const name of readdirSync(dir)) {
 			if (!/\.(mjs|ts)$/.test(name) || name === "git-hardening.mjs") continue;
-			// A leading double quote is what makes it an ARGV token rather than prose. Several of these files
-			// legitimately name the flags in a comment explaining why they no longer spell them.
-			if (/"core\.hooksPath|"core\.fsmonitor/.test(readFileSync(join(dir, name), "utf8"))) offenders.push(`${root}/${name}`);
+			const src = readFileSync(join(dir, name), "utf8");
+			// Both call shapes in the tree: `exec("git", [ ... ])` and `runCmd(spawn, "git", [ ... ])`.
+			for (const m of src.matchAll(/["'`]git["'`],\s*\[([^\]]*)/g)) {
+				const argv = m[1].trimStart();
+				if (!argv.startsWith("...GIT_READ_FLAGS") && !argv.startsWith("...GIT_SAFE_CONFIG") && !argv.startsWith("...HARDEN_FLAGS") && !argv.startsWith("...hardened")) {
+					offenders.push(`${root}/${name}: git ${argv.split("\n")[0].trim().slice(0, 60)}`);
+				}
+			}
 		}
 	}
-	assert.deepEqual(offenders, [], "these must import GIT_SAFE_CONFIG / GIT_READ_FLAGS from worker/src/git-hardening.mjs instead of restating the flags");
+	assert.deepEqual(
+		offenders,
+		[],
+		"every host-side git argv must start by spreading worker/src/git-hardening.mjs's constants -- a hostile repo config runs code on the HOST, outside any container, and `git status`/`check-ignore` really do invoke core.fsmonitor",
+	);
 });

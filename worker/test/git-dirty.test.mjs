@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { gitDirty } from "../src/git-dirty.mjs";
 
 // --- against a REAL git repo: the dirty/clean/not-a-repo contract ---
@@ -66,5 +67,10 @@ test("injected exec receives the porcelain status args for the folder", () => {
 		},
 	});
 	assert.equal(received.bin, "git");
-	assert.deepEqual(received.args, ["-C", "/some/folder", "status", "--porcelain"]);
+	// The hardening rides in FRONT of the subcommand, and this is the site where it is load-bearing rather
+	// than defensive: `status` refreshes the index, so it invokes `core.fsmonitor`, and the folder it reads
+	// is the one a local job mounts writable at /workspace. An agent that writes `.git/config` there gets
+	// its command run on the HOST by the next `pi-dispatch run`.
+	assert.deepEqual(received.args, [...GIT_READ_FLAGS, "-C", "/some/folder", "status", "--porcelain"]);
+	assert.ok(received.args.includes("core.fsmonitor=false"), "the flag that actually stops the hook must be present");
 });

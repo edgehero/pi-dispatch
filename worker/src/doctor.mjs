@@ -1985,11 +1985,11 @@ function aiTriggerNames(dir) {
  * for a gate and exactly wrong here, where deny-because-git-broke would print a confident wrong
  * answer on an advisory line. Doctor resolving HEAD itself is also fine: the gate's no-ref rule
  * defends against an agent self-authorizing mid-run, and a host-side preflight has no agent. What IS
- * the gate's, verbatim, is the ls-tree read, the 100644-blob requirement and the hardening flags --
- * copied so the two readers cannot disagree about what "a committed skill file" means, and so a
- * hostile repo config cannot run code during the read (flow-gate.mjs's defaultGit, restated).
+ * the gate's, verbatim, is the ls-tree read and the 100644-blob requirement -- so the two readers cannot
+ * disagree about what "a committed skill file" means. The hardening flags used to be restated here from
+ * flow-gate.mjs's defaultGit and are now imported from git-hardening.mjs, so "restated" is retired: both
+ * readers spread the same constant and a hostile repo config cannot run code during either read.
  */
-
 async function repoFlowAtHead(spawn, folder, flow) {
 	if (!SKILL_NAME_RE.test(flow)) return "unknown"; // the caller pre-checks; belt against interpolation
 	const head = await runCmdCapture(spawn, "git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"]);
