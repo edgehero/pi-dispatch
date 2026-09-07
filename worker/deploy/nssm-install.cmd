@@ -20,13 +20,17 @@ REM multiple services. Requires the AOF-enabled Valkey from deploy/docker-compos
 REM
 REM Per-host PLACEHOLDERS: set SERVICE / REPO / LOGDIR below for your host before running.
 REM
-REM PI_LOGS_DIR (run-history records; default OS-temp \pi-dispatch\logs) is created and written by the
-REM worker at boot, so it must be writable by the service account. Set via `.env` (the wrapper), not a
-REM change here; its default avoids colliding with the nssm LOGDIR worker.out log set below.
+REM PI_LOGS_DIR (run-history records) and PI_SETTINGS_FILE (the settings overlay) default to
+REM %USERPROFILE%\.pi-dispatch, which is DURABLE across a reboot. Both are created and written by the
+REM worker at boot, so they must be writable by the service account.
 REM
-REM PI_SETTINGS_FILE is the runtime-tunable settings overlay (default under OS temp, which may be wiped
-REM on reboot) -- point it at a durable path in production. Set via `.env` (the wrapper), not a change
-REM here; it is worker-owned and never belongs in the container env allowlist.
+REM SET BOTH EXPLICITLY via `.env` (the wrapper), not a change here. The default is per USER, and a
+REM service running as LocalSystem resolves it under the system profile, not yours -- so the worker and
+REM your /dispatch panel would read different directories, the run list would show nothing, and caps set
+REM from the panel would land where the worker never looks. `pi-dispatch up` writes both into `.env`.
+REM Keep PI_LOGS_DIR away from the nssm LOGDIR worker.out log set below: the retention sweep deletes
+REM every .log and .json past its window. Both are worker-owned and never belong in the container env
+REM allowlist.
 
 setlocal
 

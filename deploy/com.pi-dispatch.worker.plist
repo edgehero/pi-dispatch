@@ -37,9 +37,13 @@
   One worker per host (DES-CONCURRENCY-3): parallelism is PI_CONCURRENCY inside the one process.
   Requires the AOF-enabled Valkey from deploy/docker-compose.yml.
 
-  PI_LOGS_DIR (run-history records; default OS-temp /pi-dispatch/logs) is created and written by the
-  worker at boot, so it must be writable by the account the daemon runs as. Set via `.env` (the wrapper),
-  not a plist change; its default is distinct from the StandardOutPath worker.out.log below.
+  PI_LOGS_DIR (run-history records) and PI_SETTINGS_FILE (the settings overlay) default to
+  ~/.pi-dispatch, which is DURABLE across a reboot, and are created and written by the worker at boot,
+  so they must be writable by the account the daemon runs as. SET BOTH EXPLICITLY via `.env` (the
+  wrapper), not a plist change: the default is per USER, so a daemon running as another account writes
+  a different directory than the panel reads, and the run list then shows nothing while panel-set caps
+  land where the worker never looks. `pi-dispatch up` writes both into `.env` for you. Keep PI_LOGS_DIR
+  distinct from the StandardOutPath worker.out.log below: the retention sweep would delete it.
 -->
 <plist version="1.0">
 <dict>

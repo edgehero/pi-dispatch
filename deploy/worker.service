@@ -13,14 +13,19 @@
 # WorkingDirectory / EnvironmentFile / User / node path below are PLACEHOLDERS: set them to wherever
 # you cloned the repo and whoever owns it.
 #
-# PI_LOGS_DIR (run-history records; default OS-temp /pi-dispatch/logs) is created and written by the
-# worker at boot, so it must be writable by User= (pi) -- do NOT pre-create it as root, or the non-root
-# worker hits EACCES at boot. Set via `.env` (EnvironmentFile), no unit change needed; the default path
-# avoids colliding with the daemon's own logs/worker.out.log.
+# PI_LOGS_DIR (run-history records) and PI_SETTINGS_FILE (the runtime-tunable settings overlay) both
+# default to ~/.pi-dispatch, which is DURABLE across a reboot. Both are created and written by the
+# worker at boot, so they must be writable by User= (pi) -- do NOT pre-create them as root, or the
+# non-root worker hits EACCES at boot.
 #
-# PI_SETTINGS_FILE is the runtime-tunable settings overlay (default under OS temp, which may be wiped on
-# reboot) -- point it at a durable path in production. Set via `.env` (EnvironmentFile), no unit change
-# needed; it is worker-owned and never belongs in the container env allowlist.
+# SET BOTH EXPLICITLY HERE, and this is the one setting on this page you should not skip. The default
+# is per USER, and User= below is very likely not the account you run `/dispatch` from: leave them
+# unset and the worker writes ~pi/.pi-dispatch while your panel reads ~you/.pi-dispatch, so the run
+# list shows nothing and every cap you set from the panel lands in a file this worker never opens.
+# `pi-dispatch up` writes both into `.env` for you, pointing at the deployment folder. Set via `.env`
+# (EnvironmentFile), no unit change needed; both are worker-owned and never belong in the container
+# env allowlist. Do not point PI_LOGS_DIR at the daemon's own logs/ directory: the retention sweep
+# deletes every .log and .json past its window and would eat worker.out.log.
 
 [Unit]
 Description=pi-dispatch worker (drains the job queue on the host; launches job containers via docker)

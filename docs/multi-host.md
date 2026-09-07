@@ -25,7 +25,10 @@ not do is route. `pi-dispatch doctor` warns when it can see peers and nobody has
 because in that state the routing that makes a fleet safe is simply off.
 
 Point every host at the same Valkey, and give each one its own `PI_LOGS_DIR`, `PI_JOBS_DIR` and
-`PI_SANDBOX_DIR` unless you have read the sharing section below.
+`PI_SANDBOX_DIR` unless you have read the sharing section below. Set `PI_LOGS_DIR` explicitly on a fleet
+rather than leaving it defaulted: the default is `~/.pi-dispatch/logs`, and whether that is per host or
+shared depends on whether the home directory is, which is not a decision you want made by your mount
+table. See trap 4 below.
 
 ## What is shared, and how
 
@@ -190,6 +193,13 @@ What it costs: the raw job logs, which hold issue and comment text, then live on
 mount outage becomes a *lost record* rather than a missing panel row. Retention also becomes fleet-wide by
 accident, because each host prunes by its own `PI_LOG_RETENTION_DAYS` and the shortest setting wins for
 everybody.
+
+**You can now arrive here without choosing it.** `PI_LOGS_DIR` and `PI_SETTINGS_FILE` default under the
+home directory, so on a fleet whose home directories are one NFS or SMB mount, every host shares one run
+history and one settings overlay by default, with all the costs above and none of the deliberation. The
+settings overlay is the sharper half: it is read per job and written by whichever panel saved last, so a
+cap set on one host silently becomes the cap everywhere. Set both variables per host, or decide to share
+them on purpose.
 
 ### 5. A folder on two machines is not the same folder
 
