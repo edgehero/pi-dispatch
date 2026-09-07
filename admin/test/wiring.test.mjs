@@ -257,12 +257,17 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
 });
 
 /**
- * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): reads
- * (`dispatch_status`/`_runs`/`_costs`/`_triggers`), the on/off controls (`_pause`/`_resume`), the gated PAID enqueue
- * (`_run`), and the confirm-gated writes (`_set`, `_trigger_add`/`_edit`/`_delete`). Two invariants are locked
- * here: there is still NO raw-log tool (no name contains "log"), and every WRITE tool is `sequential` so two
- * writes cannot interleave. This test is the deliberate record that model-callable writes were added on
- * purpose -- gated by an operator confirm (behaviour proven in crud.test.mjs), not tool absence.
+ * The model-facing control surface (DES-ADMIN-VIA-PI-EXTENSION, amended): seven reads
+ * (`dispatch_status`/`_runs`/`_costs`/`_triggers`/`_pauses`/`_limits`/`_waits`), the on/off controls
+ * (`_pause`/`_resume`), the gated PAID enqueue (`_run`), and eleven confirm-gated writes (`_set`, the
+ * trigger, pause-window and scoped-limit CRUD, and `_wait_cancel`). Two invariants are locked here: there
+ * is still NO raw-log tool (no name contains "log"), and every WRITE tool is `sequential` so two writes
+ * cannot interleave. This test is the deliberate record that model-callable writes were added on purpose
+ * -- gated by an operator confirm (behaviour proven in crud.test.mjs), not tool absence.
+ *
+ * This comment described ELEVEN tools for as long as the array below said twenty-one, three lines apart,
+ * and the two spec entries that carry the same enumeration had drifted identically (issue #280). That is
+ * why the spec scan below exists rather than a fourth hand-maintained copy.
  */
 const WRITE_TOOLS = ["dispatch_set", "dispatch_trigger_add", "dispatch_trigger_edit", "dispatch_trigger_delete", "dispatch_pause_add", "dispatch_pause_edit", "dispatch_pause_delete", "dispatch_limit_add", "dispatch_limit_edit", "dispatch_limit_delete", "dispatch_wait_cancel"];
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
@@ -897,4 +902,66 @@ test("the panel reads PI_BACKENDS through the WORKER's parser, not a private cop
   assert.deepEqual(blessedBackends({ PI_BACKENDS: "local" }), ["local"]);
   assert.deepEqual(blessedBackends({ PI_BACKENDS: " local , local " }), ["local"], "deduped, like the worker");
   assert.deepEqual(blessedBackends({ PI_BACKENDS: "vapour" }), [], "a value the worker refuses to boot on offers nothing");
+});
+
+/**
+ * The spec entries that enumerate the model-callable surface ARE the pin (issue #280).
+ *
+ * Both `REQ-ADMIN-VIA-PI-EXTENSION` and `DES-ADMIN-VIA-PI-EXTENSION` carry the enumeration, both said
+ * ELEVEN while twenty-one shipped, and the count was never the load-bearing half: seven of the ten
+ * missing are CONFIRM-GATED WRITES, so the sentence the prompt-injection argument rests on -- "what can a
+ * compromised operator model reach" -- was answered by a list two thirds complete. Prose discipline had
+ * four independent chances to catch that in one feature area and caught none of them, which is the
+ * argument for a mechanism.
+ *
+ * The region is delimited by the entries' OWN structure -- the heading, then the first `- **Statement**:`
+ * / `- **Decision**:` line, to the next `- **Field**:` -- rather than by marker comments. `specs/` holds
+ * no HTML comments at all, and a marker pair would be a second thing to keep true, which is the failure
+ * being fixed. It fails loudly when a region cannot be found: a restructured entry must break this test,
+ * never silently scan an empty string and pass.
+ *
+ * An elision like `_trigger_add`/`_edit` therefore FAILS, and that is the feature rather than a
+ * limitation: an elision is exactly how `dispatch_pause_edit` came to appear in no spec file at all. A
+ * tool discussed as REJECTED belongs in `Why` / `Rejected`, which this scan does not read.
+ *
+ * Neither region contains a code fence today, so none is stripped, and that assumption is recorded here
+ * rather than silently relied upon.
+ */
+const SPEC_ENUMERATIONS = [
+  { file: "requirements.md", heading: "## REQ-ADMIN-VIA-PI-EXTENSION", field: "- **Statement**:" },
+  { file: "design.md", heading: "## DES-ADMIN-VIA-PI-EXTENSION", field: "- **Decision**:" },
+];
+
+function specEnumerationRegion({ file, heading, field }) {
+  const path = fileURLToPath(new URL(`../../specs/${file}`, import.meta.url));
+  const lines = readFileSync(path, "utf8").split("\n");
+  const start = lines.indexOf(heading);
+  assert.notEqual(start, -1, `${file}: the heading ${heading} is gone -- this scan cannot find its subject`);
+  const fieldAt = lines.findIndex((l, i) => i > start && l.startsWith(field));
+  assert.notEqual(fieldAt, -1, `${file}: ${heading} no longer has a ${field} line`);
+  let end = lines.findIndex((l, i) => i > fieldAt && l.startsWith("- **"));
+  if (end === -1) end = lines.length;
+  const region = lines.slice(fieldAt, end).join("\n");
+  assert.ok(region.trim().length > 0, `${file}: the ${field} region under ${heading} is empty`);
+  return region;
+}
+
+test("the REQ/DES admin entries name every registered tool and no other -- the spec entry IS the pin", async () => {
+  const { calls } = await loadRegistered();
+  const registered = new Set(calls.registerTool.map((t) => t.name));
+  for (const entry of SPEC_ENUMERATIONS) {
+    const named = new Set(specEnumerationRegion(entry).match(/dispatch_[a-z_]+/g) ?? []);
+    const missing = [...registered].filter((n) => !named.has(n)).sort();
+    const extra = [...named].filter((n) => !registered.has(n)).sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `${entry.file}: registered but not named in ${entry.heading}. That entry IS the model-callable surface's spec, so a tool absent from it is a confirm gate no reviewer of this requirement knows exists. Spell every name in full -- \`_edit\` shorthand does not count.`,
+    );
+    assert.deepEqual(
+      extra,
+      [],
+      `${entry.file}: named in ${entry.heading} but registered nowhere. Discuss a removed or rejected tool in Why/Rejected, which this scan does not read.`,
+    );
+  }
 });

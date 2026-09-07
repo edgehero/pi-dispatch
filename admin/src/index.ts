@@ -601,7 +601,7 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch pause windows",
     description:
       "Read-only. Lists the scheduled pause windows (per folder/repo quiet hours) with their array index. " +
-      "Use the index for dispatch_pause_delete.",
+      "Use the index for dispatch_pause_edit / dispatch_pause_delete.",
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(process.env);
