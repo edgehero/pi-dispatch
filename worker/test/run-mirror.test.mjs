@@ -4,6 +4,15 @@ import { MIRROR_MAX_DAYS, RUNS_INDEX, hostsIn, makeRunMirror, mergeRuns, mirrorW
 
 const DAY = 24 * 60 * 60 * 1000;
 
+// Every fixture in this file is dated 2026-08-30, and the writer trims its own index by AGE against
+// its own clock immediately after adding to it. A mirror built on the default `Date.now` therefore
+// deletes the member it just wrote, the moment the wall clock passes the retention window past the
+// fixture date -- which is exactly what happened seven days after this file was written, in CI, on a
+// tree nobody had touched (issue #284). So the clock is pinned to the fixtures rather than the
+// fixtures being chased to the clock: these tests describe an instant, not a distance from today.
+const AT = Date.parse("2026-08-30T12:00:00.000Z");
+const anchored = (opts) => makeRunMirror({ now: () => AT, ...opts });
+
 // A Valkey with real ZSET-and-string semantics for the handful of commands this uses. The ordering IS the
 // mechanism under test, so a fake that only records calls would prove nothing.
 function fakeRedis({ fail = false, hang = false } = {}) {
@@ -83,7 +92,7 @@ test("a record is stored whole, under its own TTL, and indexed by when it ended"
 	// WHOLE, not a projection: the record is PII-free by construction, so copying it inherits that property
 	// rather than re-deriving it at a second serialiser where the next added field must remember this file.
 	const redis = fakeRedis();
-	const m = makeRunMirror({ redis, retentionDays: 7 });
+	const m = anchored({ redis, retentionDays: 7 });
 	const rec = record("job-1", "2026-08-30T12:00:00.000Z", { tokens: { total: 10 } });
 	assert.equal(await m.mirror(rec, "job-1"), true);
 	assert.deepEqual(JSON.parse(redis.strings.get(runRecordKey("job-1")).v), rec, "byte-for-byte the sidecar's own content");
@@ -95,18 +104,21 @@ test("the index rolls with traffic and is trimmed by the writer", async () => {
 	// Rolling expiry, deliberately unlike `budget.mjs`'s set-once rule: a budget window pushed forward by
 	// traffic never resets, but an ACTIVITY index should roll, because that is what it describes.
 	const redis = fakeRedis();
-	await makeRunMirror({ redis, retentionDays: 7 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j");
+	await anchored({ redis, retentionDays: 7 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j");
 	assert.deepEqual(
 		redis.calls.filter((c) => c[0] === "pexpire"),
 		[["pexpire", RUNS_INDEX, 7 * DAY]],
 	);
+	// The expiry is only half the claim. Without this the test passed for a week against an index the
+	// writer's own age trim had already emptied: a `pexpire` on nothing is still a `pexpire`.
+	assert.deepEqual([...redis.zset.keys()], ["j"], "and the member the expiry is being set over survives");
 });
 
 test("the index is capped by COUNT as well as by age", async () => {
 	// The window alone does not bound memory: thousands of jobs a day would hold a quarter of a million
 	// members for ninety-two days. The files on disk stay the complete history either way.
 	const redis = fakeRedis();
-	const m = makeRunMirror({ redis, retentionDays: 90, indexMax: 3 });
+	const m = anchored({ redis, retentionDays: 90, indexMax: 3 });
 	for (let i = 0; i < 6; i++) await m.mirror(record(`j${i}`, new Date(Date.UTC(2026, 7, 30, 12, i)).toISOString()), `j${i}`);
 	assert.equal(redis.zset.size, 3);
 	assert.deepEqual([...redis.zset.keys()].sort(), ["j3", "j4", "j5"], "the newest survive");
@@ -143,7 +155,7 @@ test("a HANGING Valkey is bounded, because maxRetriesPerRequest null never rejec
 
 test("two round trips regardless of how many runs come back", async () => {
 	const redis = fakeRedis();
-	const m = makeRunMirror({ redis, retentionDays: 7 });
+	const m = anchored({ redis, retentionDays: 7 });
 	for (let i = 0; i < 20; i++) await m.mirror(record(`j${i}`, new Date(Date.UTC(2026, 7, 30, 12, i)).toISOString()), `j${i}`);
 	let ranges = 0;
 	let gets = 0;
@@ -157,7 +169,7 @@ test("an id whose body expired is pruned by the READER", async () => {
 	// The per-key TTL fires independently of the index, so a member can outlive its body. A writer that
 	// crashed cannot clean up after itself and a reader is already here -- `wait:held`'s posture.
 	const redis = fakeRedis();
-	await makeRunMirror({ redis, retentionDays: 7 }).mirror(record("alive", "2026-08-30T12:00:00.000Z"), "alive");
+	await anchored({ redis, retentionDays: 7 }).mirror(record("alive", "2026-08-30T12:00:00.000Z"), "alive");
 	redis.zset.set("gone", Date.parse("2026-08-30T11:00:00.000Z"));
 	const { runs } = await readMirroredRuns(redis, { limit: 10 });
 	assert.deepEqual(runs.map((r) => r.jobId), ["alive"]);
@@ -176,7 +188,7 @@ test("OFF and UNREACHABLE are different facts and must not collapse", async () =
 
 test("hitting the cap reports TRUNCATED, so a fold can be labelled a floor", async () => {
 	const redis = fakeRedis();
-	const m = makeRunMirror({ redis, retentionDays: 7 });
+	const m = anchored({ redis, retentionDays: 7 });
 	for (let i = 0; i < 5; i++) await m.mirror(record(`j${i}`, new Date(Date.UTC(2026, 7, 30, 12, i)).toISOString()), `j${i}`);
 	assert.equal((await readMirroredRuns(redis, { limit: 3 })).degraded, "truncated");
 	assert.equal((await readMirroredRuns(redis, { limit: 50 })).degraded, "ok");
