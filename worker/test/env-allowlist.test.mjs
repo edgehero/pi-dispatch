@@ -61,18 +61,34 @@ test("providerKeyCandidates is hermetic: the real process.env cannot reach it", 
 	// difference between these two functions is a TESTED fact and not a comment. If this ever stops
 	// holding, every doctor test that injects a fake env is silently reading the developer's shell.
 	const before = providerKeyCandidates("anthropic");
-	const had = Object.hasOwn(process.env, "ANTHROPIC_API_KEY");
-	const prior = process.env.ANTHROPIC_API_KEY;
+	// BOTH anthropic variables are controlled, not just the one being set. A box that exports
+	// ANTHROPIC_OAUTH_TOKEN -- any operator with a pi subscription login -- would otherwise make the
+	// leak assertion below read ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], so the test written to
+	// prove hermeticity would be the one non-hermetic test in the file.
+	const saved = Object.fromEntries(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"].map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
+	const restore = () => {
+		for (const [n, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[n];
+			else process.env[n] = v;
+		}
+	};
 	try {
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
 		process.env.ANTHROPIC_API_KEY = "leaked-from-the-shell";
 		assert.deepEqual(providerKeyCandidates("anthropic"), before, "the candidate list ignores the host");
 		// The other direction, asserted positively: providerKeyVars DOES see it, which is why doctor may
 		// not use it for the presence test.
 		assert.deepEqual(providerKeyVars("anthropic", {}), ["ANTHROPIC_API_KEY"]);
 	} finally {
-		if (had) process.env.ANTHROPIC_API_KEY = prior;
-		else delete process.env.ANTHROPIC_API_KEY;
+		restore();
 	}
+});
+
+test("a provider id that is a prototype key yields no candidate, not a coerced one", { skip }, () => {
+	// pi looks providers up in a plain object literal, so these resolve up the prototype chain to a
+	// non-string. Doctor prints candidates in its fix line, so an unfiltered one becomes the advice
+	// "set [object Object] in .env".
+	for (const id of ["__proto__", "constructor", "toString"]) assert.deepEqual(providerKeyCandidates(id), [], id);
 });
 
 test("pi's catalog is NOT a superset of the ids findEnvKeys answers for", { skip }, () => {

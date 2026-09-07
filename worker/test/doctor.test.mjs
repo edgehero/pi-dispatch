@@ -6,8 +6,25 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { OAUTH_KEY_RE, collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
-import { piProviders, providerKeyCandidates } from "../src/env-allowlist.mjs";
 import { underOsTempDir } from "../src/config.mjs";
+
+// env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
+// itself reaches it through `await import` for exactly that reason, and a STATIC import here would undo
+// that: on a below-floor or dependency-less box the whole file would throw at load and every doctor test
+// would ERROR instead of skipping, with PI_DISPATCH_REQUIRE_WORKER_TESTS -- the mechanism built to tell
+// those two cases apart -- never getting to speak. Same guard as env-allowlist.test.mjs, same reason.
+let piMod;
+let piImportError;
+try {
+	piMod = await import("../src/env-allowlist.mjs");
+} catch (error) {
+	piImportError = error;
+}
+if (!piMod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
+	throw new Error(`the doctor provider-key tests are REQUIRED here but pi-ai could not import.\n${piImportError}`);
+}
+const skipNoPi = piMod ? false : `pi-ai not installed (node ${process.version} < 22.19.0); CI runs these`;
+const { piProviders, providerKeyCandidates } = piMod ?? {};
 
 // A fake `spawn`: plan keys are command-line prefixes ("docker info", "docker image", "docker run",
 // "gh auth status", "gh auth token") mapped to a canned exit code, a `{code, output}` pair (output is
@@ -483,7 +500,7 @@ test("doctor: an OAuth login in pi auth.json is flagged as not usable for a serv
 const provEnv = (extra) => ({ PI_AUTH_FROM_PI: "0", ...extra });
 const provDeps = (out) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR });
 
-test("doctor: PI_PROVIDER=google with only GOOGLE_API_KEY fails, and the failure names GEMINI_API_KEY", async () => {
+test("doctor: PI_PROVIDER=google with only GOOGLE_API_KEY fails, and the failure names GEMINI_API_KEY", { skip: skipNoPi }, async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(provEnv({ PI_PROVIDER: "google", GOOGLE_API_KEY: "g" }), provDeps(out));
 	assert.equal(code, 1, "the worker would refuse every job here, so doctor must not be green");
@@ -494,7 +511,7 @@ test("doctor: PI_PROVIDER=google with only GOOGLE_API_KEY fails, and the failure
 	assert.doesNotMatch(text(), /GOOGLE_API_KEY/, "the invented variable is gone from doctor's vocabulary");
 });
 
-test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the one they meant", async () => {
+test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the one they meant", { skip: skipNoPi }, async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(provEnv({ PI_PROVIDER: "gemini", GEMINI_API_KEY: "g" }), provDeps(out));
 	assert.equal(code, 1, "pi has no `gemini` provider, so no key could ever satisfy it");
@@ -504,7 +521,7 @@ test("doctor: PI_PROVIDER=gemini says pi has no such provider, and derives the o
 	assert.match(text(), /set PI_PROVIDER=google/, "the suggestion comes from pi's own table");
 });
 
-test("doctor: a provider pi DOES know, with its key set, still passes", async () => {
+test("doctor: a provider pi DOES know, with its key set, still passes", { skip: skipNoPi }, async () => {
 	for (const [provider, variable] of [["anthropic", "ANTHROPIC_API_KEY"], ["openai", "OPENAI_API_KEY"], ["google", "GEMINI_API_KEY"], ["xai", "XAI_API_KEY"]]) {
 		const { out, text } = capture();
 		const code = await runDoctor(provEnv({ PI_PROVIDER: provider, [variable]: "sk-x" }), provDeps(out));
@@ -514,7 +531,7 @@ test("doctor: a provider pi DOES know, with its key set, still passes", async ()
 	}
 });
 
-test("doctor: an OAuth token in the ENV is reported, never silently blessed", async () => {
+test("doctor: an OAuth token in the ENV is reported, never silently blessed", { skip: skipNoPi }, async () => {
 	// It used to pass in silence: the old table listed ANTHROPIC_OAUTH_TOKEN as a credential that works.
 	// A warn, not a failure -- the worker forwards it and the job DOES run, so a ✗ would put doctor back
 	// in disagreement with the worker, which is the disease rather than the cure.
@@ -531,13 +548,72 @@ test("doctor: an OAuth token in the ENV is reported, never silently blessed", as
 	assert.match(second.text(), /unset ANTHROPIC_OAUTH_TOKEN: pi reads it BEFORE ANTHROPIC_API_KEY/);
 });
 
-test("doctor: the OAuth suffix rule is pinned against pi, not against a table", async () => {
+test("doctor: the OAuth suffix rule is pinned against pi, not against a table", { skip: skipNoPi }, async () => {
 	// Both directions, with pi as the oracle. The suffix rule is the ONE credential fact doctor holds
 	// itself, because it is a message about a credential that must NOT be used and so cannot come from a
 	// table of credentials that do.
 	assert.ok(OAUTH_KEY_RE.test(providerKeyCandidates("anthropic")[0]), "anthropic's first candidate IS the OAuth token");
 	const matching = [...piProviders(), "radius"].flatMap((id) => providerKeyCandidates(id).filter((name) => OAUTH_KEY_RE.test(name)));
 	assert.deepEqual(matching, ["ANTHROPIC_OAUTH_TOKEN"], "exactly one variable pi reads is an OAuth token today");
+});
+
+test("doctor: a whitespace value is refused against the variable pi will actually read", async () => {
+	// The trap this replaced a `.trim()` presence filter to close. A blank OAuth token beside a real API
+	// key USED to read as "the API key is set, all good" -- while pi, whose truthiness is plain, reads the
+	// token, wins precedence with it, and fails auth on every job. doctor must name the variable pi reads.
+	const { out, text } = capture();
+	const code = await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_OAUTH_TOKEN: "   ", ANTHROPIC_API_KEY: "sk-real" }), provDeps(out));
+	assert.equal(code, 1, "the deployment cannot run a job, so doctor is not green");
+	assert.match(text(), /Provider key set \(anthropic: ANTHROPIC_OAUTH_TOKEN\) -- but the value is whitespace/);
+	assert.doesNotMatch(text(), /✓ Provider key set/, "the real API key beside it does not rescue the line");
+});
+
+test("doctor: a whitespace key in pi auth.json is refused too, on the same argument", async () => {
+	// doctor and the worker AGREE on this one -- they agree on a credential that cannot buy anything,
+	// which is the failure REQ-DEPLOYMENT-BOOTSTRAP's new clause names.
+	const dir = agentDirWith({ type: "api_key", key: "   " });
+	const { out, text } = capture();
+	const code = await runDoctor(
+		{ PI_PROVIDER: "anthropic", PI_CODING_AGENT_DIR: dir },
+		{ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" },
+	);
+	assert.equal(code, 1);
+	assert.match(text(), /the key in pi auth\.json is whitespace/);
+});
+
+test("doctor: a tree where pi cannot load FAILS -- it never reports ready on an unusable deployment", async () => {
+	// The regression this guards is the worst one available here: doctor's own import graph has no
+	// external specifiers, so it runs on a tree with no node_modules -- where the Node floor is green,
+	// the worker cannot boot at all, and a warn would let doctor print "ready" and exit 0.
+	const { out, text } = capture();
+	const code = await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
+		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", providerOracle: async () => ({ loadError: Object.assign(new Error("no pi here"), { code: "ERR_MODULE_NOT_FOUND" }) }) },
+	);
+	assert.equal(code, 1, "green floor plus absent dependency is a hard failure, not an advisory");
+	assert.match(text(), /✗ Provider key: not checked \(pi did not load/);
+
+	// Below the floor the SAME state warns instead, because the Node check beside it already failed hard
+	// and one root cause printing two ✗ reads as two problems.
+	const below = capture();
+	const belowCode = await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
+		{ out: below.out, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "20.10.0", providerOracle: async () => null },
+	);
+	assert.equal(belowCode, 1, "the Node floor is what fails it");
+	assert.match(below.text(), /⚠ Provider key: not checked/);
+});
+
+test("doctor: a broken provider table is named as such, never blamed on a missing dependency", async () => {
+	// A bare `catch {}` reported a SyntaxError in our OWN module as "pi did not load", and doctor went on
+	// to say ready. The error is carried and printed instead.
+	const { out, text } = capture();
+	const code = await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
+		{ out, spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", providerOracle: async () => ({ loadError: new SyntaxError("unexpected token") }) },
+	);
+	assert.equal(code, 1);
+	assert.match(text(), /loading the provider table failed: unexpected token/);
 });
 
 test("doctor: a host where pi will not load warns instead of guessing a variable name", async () => {
@@ -1848,6 +1924,13 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	never(/^Staged package looks like the dispatch admin/, "removing staged code is the operator's call");
 	never(/^Node ≥/, "doctor does not upgrade the host runtime");
 	never(/^Provider key/, "doctor cannot know which provider an operator meant, and never mints a credential");
+	// noKeyVariableCheck's two labels start differently and the fixture above cannot reach them, so they
+	// are collected separately rather than left pinned only by the count.
+	const unknownProvider = await collectChecks({ ...env, PI_PROVIDER: "gemini" }, collectSeams({ ...EGRESS_OK, "docker info": 0 }));
+	const unknown = unknownProvider.find((c) => /^PI_PROVIDER is/.test(c.label));
+	assert.ok(unknown, "the unknown-provider check is reachable");
+	assert.ok(!unknown.ok, "and is failing here");
+	assert.equal(unknown.fixAction, undefined, "doctor never rewrites PI_PROVIDER for the operator");
 	never(/but WEBHOOK_SECRET is unset/, "secrets are never minted or set");
 	never(/AZURE_WEBHOOK_MODE is/, "an undefaulted mode must stay a chosen thing");
 	never(/GITHUB_AUTH_SOURCE is gh but/, "auth posture is never changed behind the operator");

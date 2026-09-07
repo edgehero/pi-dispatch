@@ -68,7 +68,12 @@ const EVERY_VAR_SET = new Proxy({}, { get: (_target, name) => (typeof name === "
  * operator should go and set (issue #286).
  */
 export function providerKeyCandidates(provider) {
-	return findEnvKeys(provider, EVERY_VAR_SET) ?? [];
+	// The string filter is on the RESULT, not just on the trap. pi looks its provider up in a plain object
+	// literal, so `__proto__` and `constructor` resolve up the prototype chain and hand back a non-string
+	// "variable name"; against a real environment that candidate reads as undefined and pi drops it, but
+	// an environment where everything is present keeps it, and doctor would print `set [object Object] in
+	// .env`. pricing.mjs guards pi's other generated lookups the same way and for the same reason.
+	return (findEnvKeys(provider, EVERY_VAR_SET) ?? []).filter((name) => typeof name === "string");
 }
 
 /**

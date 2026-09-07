@@ -114,8 +114,12 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// for all three unit formats, and only one of them exists on whichever host runs the suite.
 		platform = process.platform,
 		home = safeHomeDir(),
+		// doctor's one contact with pi's package, injectable so a test can drive the could-not-load arm
+		// without uninstalling a dependency. Threaded like every other seam: a seam collectChecks honours
+		// and runDoctor silently drops is a seam that cannot pin an EXIT CODE, only a check object.
+		providerOracle = defaultProviderOracle,
 	} = deps;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -917,7 +921,10 @@ export async function collectChecks(env, seams) {
 	// The copy this replaced had anthropic's two variables in the WRONG precedence order, invented
 	// GOOGLE_API_KEY, and invented a `gemini` provider pi has never had -- three ways for doctor to bless
 	// a deployment the worker then refuses, which is the one thing doctor must never do.
-	checks.push(providerKeyCheck({ provider, env, agentDir, oracle: await providerOracle() }));
+	// `checks[0]` is the Node floor, pushed first and deliberately so. The degraded arm needs it: below a
+	// floor that already failed hard it warns, and on a green floor it fails, because those are different
+	// deployments with different remedies.
+	checks.push(providerKeyCheck({ provider, env, agentDir, oracle: await providerOracle(), nodeOk: checks[0]?.ok }));
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -1719,8 +1726,11 @@ async function defaultProviderOracle() {
 	try {
 		const { piProviders, providerKeyCandidates } = await import("./env-allowlist.mjs");
 		return { piProviders, providerKeyCandidates };
-	} catch {
-		return null;
+	} catch (error) {
+		// The error is CARRIED, never swallowed. A missing dependency is the case this seam exists for; a
+		// SyntaxError or a broken export in our OWN module is a defect wearing a missing-dependency costume,
+		// and a bare `catch {}` would report it as "pi did not load" while doctor went on to say ready.
+		return { loadError: error };
 	}
 }
 
@@ -1742,25 +1752,41 @@ async function defaultProviderOracle() {
  * Never carries a fixAction (the never tier): doctor cannot know which provider an operator meant, and
  * never mints a credential.
  */
-function providerKeyCheck({ provider, env, agentDir, oracle }) {
-	if (!oracle) {
-		// pi-ai did not load: below-floor Node, or a tree with no dependencies installed. WARN rather than
-		// fail -- the Node-floor check above already failed HARD for the case that actually causes this, and
-		// one root cause printing two ✗ reads as two problems. Says nothing that could be mistaken for a
-		// verdict on the key itself, and names no variable: guessing one is the defect being fixed.
+function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
+	if (!oracle?.providerKeyCandidates) {
+		// pi did not load: below-floor Node, or a tree with no dependencies installed.
+		//
+		// It WARNS only when the Node-floor check -- which runs first and is right there in the same array
+		// -- already failed hard, because then one root cause is printing one ✗ and a second would read as
+		// two problems. Otherwise it FAILS, and that distinction is the whole point: a tree with no
+		// `node_modules` leaves the floor green, doctor's own graph has no external imports so it still
+		// runs, and a warn here would let doctor print "ready" and exit 0 on a deployment whose worker
+		// cannot even boot. REQ-DEPLOYMENT-BOOTSTRAP now says doctor never reports green on a credential
+		// the worker cannot spend, and this arm is the one that would have broken that rule first.
+		//
+		// Names no variable in either case: guessing one is the defect this whole check exists to stop.
+		const loadError = oracle?.loadError;
+		const missingDep = loadError?.code === "ERR_MODULE_NOT_FOUND" || loadError?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
 		return {
 			ok: false,
-			warn: true,
-			label: `Provider key: not checked (pi did not load, so the variable ${JSON.stringify(provider)} needs cannot be asked for)`,
+			warn: nodeOk === false,
+			label: loadError && !missingDep
+				// A defect in our own module, said in those words rather than blamed on the dependency.
+				? `Provider key: not checked (loading the provider table failed: ${loadError.message})`
+				: `Provider key: not checked (pi did not load, so the variable ${JSON.stringify(provider)} needs cannot be asked for)`,
 			fix: "install the worker's dependencies (`npm ci` in the deployment directory) on a Node meeting the floor above, then re-run doctor",
 		};
 	}
 	const candidates = oracle.providerKeyCandidates(provider);
 	if (candidates.length === 0) return noKeyVariableCheck(provider, oracle);
 
-	// `.trim()`, deliberately stricter than pi's own truthiness: a whitespace-only value passes pi and then
-	// fails at the provider, which is a paid failure doctor can refuse for free.
-	const set = candidates.filter((name) => (env[name] ?? "").trim().length > 0);
+	// Presence by PI'S truthiness, not a stricter one. This used to trim, and trimming made doctor pick a
+	// DIFFERENT variable than the worker will: with a whitespace `ANTHROPIC_OAUTH_TOKEN` beside a real
+	// `ANTHROPIC_API_KEY`, a trimming filter drops the token and reports the API key green, while pi reads
+	// the token (non-empty to it), wins precedence with it, and fails auth on every job. Whitespace is
+	// still refused -- one step further down, against the variable pi actually reads, where it is a fact
+	// about THAT credential rather than a reason to pretend the variable is unset.
+	const set = candidates.filter((name) => (env[name] ?? "") !== "");
 	// The variable to TELL an operator to set is never the OAuth token, whatever pi's precedence says: pi
 	// returns ANTHROPIC_OAUTH_TOKEN first, and "set your subscription login" is wrong advice for an
 	// unattended service. Falls back only for a provider with no non-OAuth variable at all.
@@ -1771,6 +1797,17 @@ function providerKeyCheck({ provider, env, agentDir, oracle }) {
 		// the credential the deployment will actually spend. The old line named variables that were not set,
 		// which is half of what made it misleading.
 		const using = set[0];
+		// Judged on the variable pi will read, after precedence rather than before it. A value that is all
+		// whitespace is a credential the worker forwards and the provider rejects: a paid failure per job,
+		// refused here for free. Hard, not a warn -- unlike the OAuth case below, nothing about this
+		// deployment can work.
+		if ((env[using] ?? "").trim() === "") {
+			return {
+				ok: false,
+				label: `Provider key set (${provider}: ${using}) -- but the value is whitespace`,
+				fix: `set a real value for ${using}, or unset it: pi reads it as present, so every job spends a container to fail auth`,
+			};
+		}
 		if (!OAUTH_KEY_RE.test(using)) return { ok: true, label: `Provider key set (${provider}: ${using})` };
 		// Warn, not fail, and the choice is deliberate: the worker forwards this variable and the job WILL
 		// run, so failing here would put doctor in disagreement with the worker -- the exact disease this
@@ -1796,8 +1833,11 @@ function providerKeyCheck({ provider, env, agentDir, oracle }) {
 		try {
 			cred = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))?.[provider];
 		} catch {}
-		if (cred?.type === "api_key" && cred.key) return { ok: true, label: `Provider key set (${provider}) — from pi auth.json` };
-		if (cred?.type === "oauth") note = " — pi login is OAuth/subscription: not usable for an unattended service, configure an API key";
+		// Same whitespace rule as the env arm above, and for the same reason: credentialFromPiAuth accepts a
+		// blank key, so doctor and the worker AGREE -- they agree on a credential that cannot buy anything.
+		if (cred?.type === "api_key" && cred.key?.trim()) return { ok: true, label: `Provider key set (${provider}) -- from pi auth.json` };
+		if (cred?.type === "api_key") note = " -- but the key in pi auth.json is whitespace, so every job would spend a container to fail auth";
+		if (cred?.type === "oauth") note = " -- pi login is OAuth/subscription: not usable for an unattended service, configure an API key";
 	}
 	return {
 		ok: false,
