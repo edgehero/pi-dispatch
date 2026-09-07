@@ -43,6 +43,7 @@
     ".": "./src/index.mjs",
     "./config": "./src/config.mjs",
     "./exit-code": "./src/exit-code.mjs",
+    "./git-hardening": "./src/git-hardening.mjs",
     "./flow-gate": "./src/flow-gate.mjs",
     "./materialize": "./src/materialize.mjs",
     "./open-browser": "./src/open-browser.mjs",

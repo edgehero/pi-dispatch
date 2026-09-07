@@ -92,6 +92,14 @@ import {
 import { buildGraphModel } from "./graph-model.mjs";
 import { buildInsightsHtml } from "./insights-html.mjs";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
+// The trigger vocabularies, IMPORTED from the loader that validates them rather than retyped. Every one
+// of these was a hand-written copy of a table one package over, and this is the surface a MODEL authors
+// triggers through -- so both drift directions are silent and both are expensive. A widened loader table
+// that never reaches the hint means the model is told a word does not exist and never writes it: a
+// capability lost with no error anywhere. A narrowed one means the model proposes an entry, the operator
+// approves a confirm dialog, and writeTriggers rejects it: a wasted human approval. `blessedBackends`
+// below is the precedent, and its header is a post-mortem of the same mistake.
+import { FORGE_KINDS, ISSUE_ACTIONS, ON_TYPES, PR_ACTIONS, REVIEW_STATES } from "@edgehero/pi-dispatch/triggers";
 import { openBrowser } from "@edgehero/pi-dispatch/open-browser";
 // The worker's OWN window classifier (the same one reserveBudget enforces), so the budget states the
 // insights payload carries are words the page never derives and the panel and enforcement cannot drift.
@@ -473,7 +481,7 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Adds a trigger to triggers.json and applies it live. The operator MUST approve a confirm dialog showing " +
       "the entry; with no interactive operator it is refused. `flow` is the .pi/skills/<name> skill the job runs " +
-      "(its SKILL.md is the agent's instructions). `kind` = cron|label|comment|pull_request|issue. cron (local) needs " +
+      "(its SKILL.md is the agent's instructions). `kind` = " + [...ON_TYPES].join("|") + ". cron (local) needs " +
       "id, pattern, `folder` (absolute host path the job runs in), `flow`, and `task` (the prompt text handed to " +
       "the agent), and may set optional model/provider/maxTurns for that schedule (omit = deployment default). " +
       "label needs labels[]+flow; comment needs phrase+flow; pull_request needs action[] (+ optional labels[]) + " +
@@ -483,13 +491,13 @@ function registerTools(pi: ExtensionAPI): void {
       "run is recorded, then the worker disarms the entry by writing on.disarmed; once requires number). A " +
       "close-only pull_request rule accepts the same number/once narrowing. " +
       "Webhook triggers take an optional `forge` = github (default) | gitlab | forgejo | azure, which " +
-      "also decides which action words pull_request accepts: github is " +
-      "labeled|opened|synchronize|reopened|review_submitted|closed, gitlab is open|update|reopen|approved|close, " +
-      "forgejo is label_updated|opened|synchronized|reopened|closed, azure is created|updated (no close word). " +
+      "also decides which action words pull_request accepts: " +
+      FORGE_KINDS.map((f: string) => `${f} is ${[...(PR_ACTIONS[f] as Set<string>)].join("|")}${ISSUE_CLOSE_WORD[f] ? "" : " (no close word)"}`).join(", ") +
+      ". " +
       "The close word rides alone: it cannot be mixed with other actions in one entry. An azure label or comment " +
       "trigger must also set `repository` (a work item belongs to a project, not a repository), and an azure " +
       "pull_request trigger may not carry labels[] at all. A github review_submitted trigger may also set " +
-      "reviewState[] (approved|changes_requested|commented) to narrow which verdicts fire; omitted, all " +
+      "reviewState[] (" + [...REVIEW_STATES].join("|") + ") to narrow which verdicts fire; omitted, all " +
       "three do. For webhook triggers the repo and the task come from the triggering " +
       "issue/PR event — set only the match + flow — and they run under the deployment default model. " +
       "`backend` (optional, any kind) names WHERE the job's container is built, chosen from the names this " +
@@ -987,22 +995,34 @@ function triggerList(paths: any): any[] {
  * chain, and an operator offered "github or gitlab" cannot discover that two more exist -- which is a
  * different failure from being refused: they simply never try.
  */
-export const FORGE_PROMPT = "forge — github, gitlab, forgejo or azure";
+export const FORGE_PROMPT = `forge — ${FORGE_KINDS.slice(0, -1).join(", ")} or ${FORGE_KINDS.at(-1)}`;
 // The per-forge issue close word (issue #231), the tool's default `action` for kind "issue": the
 // shared validator's ISSUE_ACTIONS accepts exactly one word per forge today, so defaulting to it
 // makes the kind authorable without knowing three forges' spellings. No azure entry on purpose --
 // the validator refuses the whole type there with its own message (a work item's close is a state
 // transition the projected payload subset cannot see), and a default here would only reword it.
-export const ISSUE_CLOSE_WORD: Record<string, string> = { github: "closed", gitlab: "close", forgejo: "closed" };
-export const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = {
-  // The close words ride the hint too (issue #231): the dialog passes whatever is typed through the
-  // shared validator, so a close-only rule IS authorable here, and a hint that omits the word reads
-  // as the word not existing. The loader refuses a list mixing a close word with any other action.
-  github: { hint: "labeled opened synchronize reopened review_submitted closed", dflt: "labeled" },
-  gitlab: { hint: "open update reopen approved close", dflt: "update" },
-  forgejo: { hint: "label_updated opened synchronized reopened closed", dflt: "label_updated" },
-  azure: { hint: "created updated", dflt: "updated" },
+export const ISSUE_CLOSE_WORD: Record<string, string> = Object.fromEntries(
+  Object.entries(ISSUE_ACTIONS).map(([forge, actions]) => [forge, [...(actions as Set<string>)][0]]),
+);
+// The DEFAULTS stay hand-written and the hints do not, which is the whole distinction this sweep is
+// about. A hint restates what the loader ACCEPTS, so it is derived and cannot drift. A default answers
+// what an operator most often wants, which is an editorial judgement and not a property of the table:
+// gitlab's is `update`, not its set's first member `open`. Deriving it would manufacture a relation that
+// does not exist, and `admin/test/wiring.test.mjs` asserts that it is NOT the set's head so this stays a
+// decision rather than quietly becoming a coincidence.
+//
+// The close words ride the hint too (issue #231): the dialog passes whatever is typed through the shared
+// validator, so a close-only rule IS authorable here, and a hint that omits the word reads as the word
+// not existing. The loader refuses a list mixing a close word with any other action.
+const PR_ACTION_DEFAULT: Record<string, string> = {
+  github: "labeled",
+  gitlab: "update",
+  forgejo: "label_updated",
+  azure: "updated",
 };
+export const PR_ACTION_VOCAB: Record<string, { hint: string; dflt: string }> = Object.fromEntries(
+  FORGE_KINDS.map((forge: string) => [forge, { hint: [...(PR_ACTIONS[forge] as Set<string>)].join(" "), dflt: PR_ACTION_DEFAULT[forge] }]),
+);
 
 /**
  * Which backends this deployment blessed, answered by the WORKER'S OWN parser.

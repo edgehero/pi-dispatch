@@ -113,6 +113,17 @@ Two consequences worth internalising before you design anything:
   `.env.example`, and `worker/deploy/*` to `deploy/*`. Edit both.
 - The wizard's `RUNTIME_VERSION` and `RECEIVER_VERSION` are bolted to the workspace versions by anti-drift
   tests. A release bump moves all of them together.
+- **A hand-written table that restates a derivable source is either derived or pinned, never trusted.**
+  Every instance found so far had drifted, and every one was load-bearing. Current bolts: the
+  model-callable tool list in `REQ-`/`DES-ADMIN-VIA-PI-EXTENSION` against the registrations, and
+  `INT-TRIGGERS-FILE-CONTRACT`'s forge vocabularies against `PR_ACTIONS` (the two tests that read a spec
+  file); the admin's forge, action and settings vocabularies against `worker/src/triggers.mjs` and
+  `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
+  filters' action sets as the loader's set minus their own named exclusions; and the git hardening flags,
+  which live in `worker/src/git-hardening.mjs` because seven files carried them by hand and one had
+  quietly lost a flag. Add a table, add its bolt. Where the relation is NOT real, say so in the test
+  rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
+  that gitlab's default is not its set's first member.
 
 ## Commits and PRs
 

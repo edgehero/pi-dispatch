@@ -1,3 +1,4 @@
+import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -343,17 +344,9 @@ export async function materializePiDir({ gitDir, sha, destDir, git = defaultGit 
 }
 
 async function defaultGit(gitDir, args, { raw = false, maxBuffer = 16 * 1024 * 1024 } = {}) {
-	// -c protecting against a hostile repo config: no hooks, no external filters, no pager.
-	const hardened = [
-		"-c",
-		"core.hooksPath=/dev/null",
-		"-c",
-		"core.fsmonitor=false",
-		"--no-pager",
-		"-C",
-		gitDir,
-		...args,
-	];
+	// -c protecting against a hostile repo config: no hooks, no external filters, no pager. The flags moved
+	// to git-hardening.mjs when a seventh copy of them turned out to be missing one (issue #286's sweep).
+	const hardened = [...GIT_READ_FLAGS, "-C", gitDir, ...args];
 	const { stdout } = await exec("git", hardened, {
 		encoding: raw ? "buffer" : "utf8",
 		maxBuffer,

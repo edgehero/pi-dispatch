@@ -1,3 +1,4 @@
+import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -73,7 +74,12 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 }
 
 async function defaultGit(gitDir, args) {
-	const { stdout } = await exec("git", ["-c", "core.hooksPath=/dev/null", "--no-pager", "-C", gitDir, ...args], {
+	// This was the one copy of seven missing `core.fsmonitor=false`, which is why the flags are imported
+	// now rather than restated (issue #286's sweep). Nothing was exploitable -- the only command below is
+	// `rev-parse HEAD`, which does not refresh the index -- but a local-folder job's agent can write
+	// `.git/config` inside /workspace, so the moment this grows a second command that touches the index,
+	// an attacker-controlled fsmonitor hook runs on the worker HOST, outside any container.
+	const { stdout } = await exec("git", [...GIT_READ_FLAGS, "-C", gitDir, ...args], {
 		encoding: "utf8",
 		maxBuffer: 16 * 1024 * 1024,
 	});

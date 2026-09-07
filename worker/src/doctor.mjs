@@ -58,6 +58,7 @@ import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
+import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
@@ -1988,7 +1989,7 @@ function aiTriggerNames(dir) {
  * copied so the two readers cannot disagree about what "a committed skill file" means, and so a
  * hostile repo config cannot run code during the read (flow-gate.mjs's defaultGit, restated).
  */
-const GIT_READ_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager"];
+
 async function repoFlowAtHead(spawn, folder, flow) {
 	if (!SKILL_NAME_RE.test(flow)) return "unknown"; // the caller pre-checks; belt against interpolation
 	const head = await runCmdCapture(spawn, "git", [...GIT_READ_FLAGS, "-C", folder, "rev-parse", "HEAD"]);

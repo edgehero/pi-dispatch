@@ -16,6 +16,7 @@
  */
 
 import * as nodeFs from "node:fs";
+import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { logsDirPath, defaultSandboxDir, defaultGraphDir, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
@@ -1626,11 +1627,12 @@ export function readFolderSkills({ folder, exec = execFileSync } = {}) {
   if (head === null) return { ...empty, unreachable: "not-a-git-repo" };
   let listing;
   try {
-    // Hardening flags mirror materialize.mjs defaultGit -- keep in sync: no hooks, no fsmonitor, no
-    // pager, so a hostile repo config cannot run code or corrupt output during a read.
+    // No hooks, no fsmonitor, no pager, so a hostile repo config cannot run code or corrupt output
+    // during a read. Imported from the worker rather than mirrored: this comment used to say "keep in
+    // sync" and one of the seven copies had not (issue #286's sweep).
     listing = exec(
       "git",
-      ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager", "-C", folder, "ls-tree", "-r", "-l", "-z", head, ".pi/"],
+      [...GIT_READ_FLAGS, "-C", folder, "ls-tree", "-r", "-l", "-z", head, ".pi/"],
       { encoding: "utf8", maxBuffer: GRAPH_LS_TREE_MAX_BYTES },
     );
   } catch {
@@ -1671,7 +1673,7 @@ export function readFolderSkills({ folder, exec = execFileSync } = {}) {
     try {
       const buf = exec(
         "git",
-        ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager", "-C", folder, "cat-file", "blob", entry.oid],
+        [...GIT_READ_FLAGS, "-C", folder, "cat-file", "blob", entry.oid],
         { maxBuffer: GRAPH_LIMITS.maxSkillBytes },
       );
       text = buf.toString("utf8");

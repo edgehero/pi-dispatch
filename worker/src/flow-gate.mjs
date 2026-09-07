@@ -1,3 +1,4 @@
+import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -74,9 +75,10 @@ export function aiTriggerAllows(buf) {
 }
 
 async function defaultGit(gitDir, args, { raw = false } = {}) {
-	// hardening flags mirror materialize.mjs defaultGit — keep in sync. No hooks, no fsmonitor, no
-	// pager, so a hostile repo config cannot run code or corrupt output during a read.
-	const hardened = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager", "-C", gitDir, ...args];
+	// No hooks, no fsmonitor, no pager, so a hostile repo config cannot run code or corrupt output during
+	// a read. This said "mirror materialize.mjs -- keep in sync" until the copy that had NOT stayed in
+	// sync was found (issue #286's sweep); it is an import now, so there is nothing left to remember.
+	const hardened = [...GIT_READ_FLAGS, "-C", gitDir, ...args];
 	const { stdout } = await exec("git", hardened, {
 		encoding: raw ? "buffer" : "utf8",
 		maxBuffer: 16 * 1024 * 1024,

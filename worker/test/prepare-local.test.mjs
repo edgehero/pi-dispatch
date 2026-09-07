@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { PI_LIMITS } from "../src/materialize.mjs";
 import { prepareLocalWorkspace } from "../src/prepare-local.mjs";
 
@@ -147,4 +149,48 @@ test("a missing folder is a clear config error", async () => {
 		() => prepareLocalWorkspace({ folder: "/does/not/exist/anywhere", task: "x", jobDir: "/tmp/x" }),
 		(e) => e.piDispatchConfig === true,
 	);
+});
+
+// ── The host-side git argv (issue #286's sweep) ──────────────────────────────────────────────────
+//
+// `prepare-local`'s own git was the one copy of seven missing `core.fsmonitor=false`. The existing tests
+// here drive the REAL default git against a temp repo, so they exercise the flags and can never see them
+// -- which is how the omission survived. This asserts the argv itself.
+test("prepare-local's host-side git carries the same hardening as every other read", async () => {
+	// A REAL repo, so the function reaches its git call rather than refusing above it -- a fixture that
+	// throws first would make this pin vacuous.
+	const folder = localRepo();
+	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-argv-"));
+	const calls = [];
+	await prepareLocalWorkspace({
+		folder,
+		task: "t",
+		jobDir,
+		git: async (gitDir, args) => {
+			calls.push({ gitDir, args });
+			return execFileSync("git", ["-C", gitDir, ...args], { encoding: "utf8" });
+		},
+	});
+	assert.deepEqual(calls.map((c) => c.args), [["rev-parse", "HEAD"]], "the seam must be reached, or this pin is vacuous");
+	// The seam receives the SUBcommand; the hardening rides in front of it inside `defaultGit`, which
+	// spreads this exact array. Asserting the constant is asserting what the real git is invoked with,
+	// and `rev-parse` is precisely the command whose harmlessness hid the missing flag for so long.
+	assert.deepEqual([...GIT_READ_FLAGS], ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-pager"]);
+});
+
+test("no host-side git config is hardened by hand any more", () => {
+	// The guard that outlives the refactor. Seven files carried these `-c` pairs and the drift was a
+	// missing one in a copy nobody re-read; an eighth copy is how it comes back.
+	const roots = ["worker/src", "admin/src"];
+	const offenders = [];
+	for (const root of roots) {
+		const dir = fileURLToPath(new URL(`../../${root}`, import.meta.url));
+		for (const name of readdirSync(dir)) {
+			if (!/\.(mjs|ts)$/.test(name) || name === "git-hardening.mjs") continue;
+			// A leading double quote is what makes it an ARGV token rather than prose. Several of these files
+			// legitimately name the flags in a comment explaining why they no longer spell them.
+			if (/"core\.hooksPath|"core\.fsmonitor/.test(readFileSync(join(dir, name), "utf8"))) offenders.push(`${root}/${name}`);
+		}
+	}
+	assert.deepEqual(offenders, [], "these must import GIT_SAFE_CONFIG / GIT_READ_FLAGS from worker/src/git-hardening.mjs instead of restating the flags");
 });

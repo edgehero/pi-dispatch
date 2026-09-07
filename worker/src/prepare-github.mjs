@@ -40,6 +40,7 @@
  * github-host.mjs's 404-vs-other split: only the determinate class becomes policy.
  */
 
+import { GIT_SAFE_CONFIG } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,13 +53,12 @@ import { InfraRetry } from "./processor.mjs";
 const exec = promisify(execFile);
 
 // The -c flags that make a clone/checkout run no repo-supplied code, applied to EVERY git invocation
-// through `hardened()` below so they cannot be omitted at a call site. Matches materialize.mjs's bar
-// (hooksPath, fsmonitor, --no-pager) plus the clone-specific transport/credential locks.
+// through `hardened()` below so they cannot be omitted at a call site. The shared bar comes from
+// git-hardening.mjs; the clone-specific transport/credential locks are this file's own, and they sit
+// BETWEEN the shared pairs and `--no-pager`, which is why that module exports the pairs separately from
+// the finished read prefix -- composing here must not reorder this argv.
 const HARDEN_FLAGS = [
-	"-c",
-	"core.hooksPath=/dev/null",
-	"-c",
-	"core.fsmonitor=false",
+	...GIT_SAFE_CONFIG,
 	"-c",
 	"protocol.ext.allow=never",
 	"-c",
