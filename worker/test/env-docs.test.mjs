@@ -95,6 +95,12 @@ export function stripComments(src) {
 		}
 		if (state === "line") { if (c === "\n") { state = "code"; out += c; } i++; continue; }
 		if (state === "block") { if (c === "*" && d === "/") { state = "code"; i += 2; } else { if (c === "\n") out += c; i++; } continue; }
+		// A quoted string cannot span a line in JavaScript, so a newline while inside one means the quote
+		// that opened it was never a string quote at all. This is the BOUND on the regex heuristic below:
+		// `if (a) /["]/.test(b)` opens a regex after `)`, which the heuristic reads as division, and that
+		// stray quote would otherwise swallow every comment in the rest of the FILE. Resetting here costs
+		// the remainder of one line and cannot cascade. Backticks are excluded: those really do span lines.
+		if (c === "\n" && state !== "`") { state = "code"; out += c; i++; continue; }
 		if (c === "\\") { out += c + (d ?? ""); i += 2; continue; } // an escape cannot close the literal
 		if (c === state) state = "code";
 		out += c; i++;
@@ -300,6 +306,8 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 		["const n = (a) / b / c;", "division, which must NOT be read as a regex"],
 		["const n = total / count;", "division between two identifiers"],
 		['const t = `a ${o["K"]} b`;', "a template literal with a quoted key inside its expression"],
+		['if (a) /["]/.test(b);', "a regex after `)`, which the heuristic reads as division"],
+		['const a = (x) / y + "a/b";', "division on a line that also holds a quoted slash"],
 	];
 	for (const [code, what] of cases) {
 		const out = stripComments(`${code}\n// env.PI_GHOST_NAME\n`);
@@ -309,4 +317,15 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 	const kept = stripComments('const v = env.PI_REAL; // and a trailing note\n');
 	assert.ok(kept.includes("env.PI_REAL"), "the stripper ate a real read");
 	assert.ok(!kept.includes("trailing note"), "the stripper kept a comment");
+
+	// The two cases above are handled by the line bound rather than by the regex heuristic, so pin the
+	// bound itself: a quote the scanner misreads must cost the rest of ONE line and never cascade.
+	const bounded = stripComments('const s = "unclosed\nconst v = env.PI_AFTER; // note\n');
+	assert.ok(bounded.includes("env.PI_AFTER"), "a mis-read quote swallowed the following lines");
+	assert.ok(!bounded.includes("note"), "a mis-read quote stopped comments being stripped after it");
+
+	// A template literal genuinely spans lines and must NOT be reset at the newline.
+	const template = stripComments("const t = `one\n// still inside the template\ntwo`;\n// env.PI_TAIL\n");
+	assert.ok(template.includes("still inside the template"), "a multiline template was cut at its first newline");
+	assert.ok(!template.includes("PI_TAIL"), "the comment after the template survived");
 });
