@@ -64,7 +64,9 @@ the one worth naming, would send that value to GitHub as if it were a token. And
 `FORGEJO_AUTH_SOURCE` and `AZURE_AUTH_SOURCE` accept exactly one value, `pat`, which is also their default.
 They are not unfinished: GitHub has three auth sources and these forges have one each, so the variables exist
 so that an operator reasoning by symmetry gets a refusal naming the reason rather than a setting that does
-nothing.
+nothing. The refusal is conditional on the forge's own token being set, because the whole block is skipped
+when it is not, so `GITLAB_AUTH_SOURCE=app` with no `GITLAB_TOKEN` is the one case where the variable really
+is ignored.
 
 ## The rule that governs all of it
 

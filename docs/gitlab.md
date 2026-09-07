@@ -38,7 +38,8 @@ GITLAB_URL=https://gitlab.com          # your instance, if self-hosted
 There is no source to choose. `GITLAB_AUTH_SOURCE` exists, accepts only `pat`, and defaults to it: GitLab
 has no App or installation-token equivalent, so the variable is there to answer an operator who reasons by
 symmetry with `GITHUB_AUTH_SOURCE` and sets `app`, which gets a refusal naming the reason rather than a
-setting that quietly does nothing.
+setting that quietly does nothing. It is read only once `GITLAB_TOKEN` is set: with no token there is no
+GitLab configured and the whole block, this variable included, is skipped.
 
 **2. Add the webhook.** Project Settings → Webhooks, URL `https://<your-host>/gitlab` — note the path;
 `/` is the GitHub endpoint. Subscribe to **Issues events**, **Comments**, and **Merge request events**.

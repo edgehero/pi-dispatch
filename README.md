@@ -666,7 +666,9 @@ Same machinery, per-forge correctness differences, each with a full setup doc. O
 GitHub picks between three auth sources, and these three have exactly one each, so `GITLAB_AUTH_SOURCE`,
 `FORGEJO_AUTH_SOURCE` and `AZURE_AUTH_SOURCE` accept only `pat` and default to it. They exist to refuse
 the wrong assumption, not to offer a choice: none of these forges has an App or installation token, so
-setting one to `app` gets you a sentence at boot saying so rather than a knob that is quietly ignored.
+setting one to `app`, once that forge's token is set, gets you a sentence at boot saying so rather than a
+knob that is quietly ignored. With no token the forge is not configured at all and the variable is skipped
+with it.
 
 - **GitLab** ([`docs/gitlab.md`](docs/gitlab.md)): webhook at `/gitlab`, project token with `api` scope.
   A GitLab label is not an approval, so every trigger is gated on the actor's resolved access level

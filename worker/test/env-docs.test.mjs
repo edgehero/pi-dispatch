@@ -24,9 +24,14 @@
  *     cannot follow. `env[patVar]` (`worker/src/config.mjs`) resolves `GITHUB_PAT` through a variable,
  *     and provider keys are resolved by pi at runtime through `findEnvKeys`. Asserting the reverse
  *     would fail on a correct tree.
- *   - It FAILS CLOSED on an unfamiliar idiom: any receiver whose name ends in `env` other than the
- *     three known ones is a fourth way to read the environment, and the test says so instead of
- *     silently shrinking its own scope.
+ *   - It FAILS CLOSED on an unfamiliar RECEIVER: any identifier ending in `env` other than the known
+ *     ones is a fourth way to read the environment, and the test says so instead of silently shrinking
+ *     its own scope. Destructuring the environment is refused for the same reason.
+ *   - It does NOT see a read through a NAME ARRAY. `["A","B"].filter((k) => env[k])` at
+ *     `worker/src/doctor.mjs:565`, `:595` and `:915` reads real variables this scan cannot attribute.
+ *     Every name those three sites touch is covered from another file today, which is why nothing
+ *     fails, and that is luck rather than design. It is stated here so the next person meets it as a
+ *     known limit rather than as a surprise; closing it needs a parser, not a wider regex.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,26 +50,48 @@ const SKIP_DIRS = new Set(["test", "node_modules", "dist"]);
 
 // The receivers an environment read is allowed to have. `process.env.X` presents as `env` too.
 const ENV_RECEIVERS = new Set(["env", "hostEnv"]);
+// Names that END in "env" and are not one. Empty today, and a maintainer adding a `Env` enum or a
+// `containerEnv` map they BUILD rather than read puts it here with the reason, which is the escape hatch
+// that lets the check below stay loud instead of being loosened.
+const NON_ENV_RECEIVERS = new Map();
+
+// Words after which a `/` opens a regular expression rather than dividing. The character before is not
+// enough on its own: `return /x/` ends in a letter and `a / b` ends in a letter too.
+const REGEX_PRECEDING_WORDS = new Set(["return", "typeof", "instanceof", "in", "of", "case", "do", "else", "yield", "await", "new", "delete", "void", "throw"]);
 
 /**
  * Strip line and block comments, keeping string and template literals (a name passed to a helper as
  * `positiveInt(env, "PI_DAILY_CAP", 25)` is a read and must survive). Newlines inside a stripped block
  * are kept so reported line numbers stay honest.
  *
- * A regex literal cannot begin `//` or an unescaped `/*` in valid JavaScript, so the two-character
- * lookahead is safe without tracking regex state.
+ * Regular expressions are tracked, and that is not fussiness. A literal like `/^["\']$/` holds a quote,
+ * and without regex state that quote opens a phantom string that never closes, so EVERY comment after it
+ * in the file survives into the scanned text and every variable a comment merely names reads as a live
+ * read. The failure is a red test on a correct tree, and `["\']` is an ordinary idiom, used by this file's
+ * own patterns below. The stripper's own behaviour is pinned by tests at the bottom of this file.
  */
 export function stripComments(src) {
 	let out = "";
 	let state = "code";
+	let prevChar = ""; // last non-space character emitted in code state
+	let word = ""; // and the identifier it belongs to, when it is one
 	for (let i = 0; i < src.length; ) {
 		const c = src[i];
 		const d = src[i + 1];
 		if (state === "code") {
 			if (c === "/" && d === "/") { state = "line"; i += 2; continue; }
 			if (c === "/" && d === "*") { state = "block"; i += 2; continue; }
+			if (c === "/" && startsRegex(prevChar, word)) {
+				const end = regexEnd(src, i);
+				if (end > 0) { out += src.slice(i, end); prevChar = "/"; word = ""; i = end; continue; }
+			}
 			if (c === '"' || c === "'" || c === "`") state = c;
-			out += c; i++; continue;
+			out += c;
+			if (!/\s/.test(c)) {
+				prevChar = c;
+				word = /[\w$]/.test(c) ? word + c : "";
+			}
+			i++; continue;
 		}
 		if (state === "line") { if (c === "\n") { state = "code"; out += c; } i++; continue; }
 		if (state === "block") { if (c === "*" && d === "/") { state = "code"; i += 2; } else { if (c === "\n") out += c; i++; } continue; }
@@ -75,7 +102,28 @@ export function stripComments(src) {
 	return out;
 }
 
-function sourceFiles(dir, acc = []) {
+function startsRegex(prevChar, word) {
+	if (prevChar === "") return true; // start of file
+	if (/[\w$)\]]/.test(prevChar)) return REGEX_PRECEDING_WORDS.has(word);
+	return true; // an operator, a comma, a brace: a value is expected, so this opens one
+}
+
+/** Index just past the closing `/` of the literal starting at `i`, or -1 when it does not terminate on
+ *  its own line, which means it was a division after all. */
+function regexEnd(src, i) {
+	let inClass = false;
+	for (let j = i + 1; j < src.length; j++) {
+		const c = src[j];
+		if (c === "\\") { j++; continue; }
+		if (c === "\n") return -1;
+		if (c === "[") inClass = true;
+		else if (c === "]") inClass = false;
+		else if (c === "/" && !inClass) return j + 1;
+	}
+	return -1;
+}
+
+export function sourceFiles(dir, acc = []) {
 	for (const entry of readdirSync(dir)) {
 		const p = join(dir, entry);
 		if (statSync(p).isDirectory()) {
@@ -163,7 +211,36 @@ test("every environment variable the code reads is a documented key or is marked
 		[],
 		"an operator cannot discover these: add each to .env.example, or mark it `env-internal <NAME>: <why>` beside the read",
 	);
-	assert.ok(read.size > 90, `the scan found only ${read.size} names, which means it stopped working, not that the code shrank`);
+});
+
+test("the scan still reaches every tree it claims to cover", () => {
+	// A single total was the wrong canary: measured, dropping `receiver/src`, `admin/src` or
+	// `image/runner` from the walk still left over 90 names, so three of the four could fall out of the
+	// scan (a rename, a moved file, a new SKIP_DIRS entry) with the check green.
+	//
+	// Iterating TREES was the wrong SECOND canary, and for the more instructive reason: a check derived
+	// from the constant is correct at every value of it, so deleting a tree deleted its own assertion.
+	// The list is pinned literally first. Adding a deployment tree is meant to be a deliberate edit here.
+	assert.deepEqual(TREES, ["worker/src", "receiver/src", "admin/src", "image/runner"], "the scanned trees changed");
+	for (const tree of TREES) {
+		const names = scanEnvReads(sourceFiles(join(REPO_ROOT, tree)));
+		assert.ok(names.size > 0, `${tree} contributed no environment reads at all, so the walk is not reaching it`);
+	}
+	assert.ok(scanEnvReads().size > 90, "the whole scan collapsed");
+});
+
+test("a read shape the scan cannot see is refused rather than missed", () => {
+	// `const { PI_A, PI_B } = process.env` is a real read that no pattern here matches, so it would be
+	// invisible to BOTH halves of the accounting: not scanned, and therefore never demanding a marker.
+	// The repo does not use it today. Refusing it keeps that true, rather than trusting that it stays so.
+	const offenders = [];
+	for (const f of allSources()) {
+		const code = stripComments(readFileSync(f, "utf8"));
+		for (const m of code.matchAll(/\{[^{}]*\}\s*=\s*(?:process\.env|env|hostEnv)\b/g)) {
+			offenders.push(`${rel(f)}: ${m[0].replace(/\s+/g, " ").slice(0, 60)}`);
+		}
+	}
+	assert.deepEqual(offenders.sort(), [], "destructuring the environment hides the read from this scan: use env.NAME");
 });
 
 test("a name is documented or internal, never both", () => {
@@ -197,7 +274,9 @@ test("no fourth way to read the environment slips past the scan", () => {
 		const re = /(?:^|[^\w$.])([A-Za-z_$][\w$]*)\??\.[A-Z][A-Z0-9_]{2,}\b/g;
 		for (let m; (m = re.exec(code)) !== null; ) {
 			const receiver = m[1];
-			if (/env$/i.test(receiver) && !ENV_RECEIVERS.has(receiver)) offenders.push(`${rel(f)}: ${receiver}`);
+			if (/env$/i.test(receiver) && !ENV_RECEIVERS.has(receiver) && !NON_ENV_RECEIVERS.has(receiver)) {
+				offenders.push(`${rel(f)}: ${receiver}`);
+			}
 		}
 	}
 	assert.deepEqual(
@@ -205,4 +284,29 @@ test("no fourth way to read the environment slips past the scan", () => {
 		[],
 		"a new environment holder: teach READ_PATTERNS and ENV_RECEIVERS about it, or the scan silently stops covering it",
 	);
+});
+
+test("the stripper survives the literal forms that would otherwise fake a read", () => {
+	// Each of these leaked before regex state was tracked: a quote inside a regular expression opened a
+	// string that never closed, so every comment after it in the file reached the scan and any variable
+	// a comment merely named counted as read. The failure mode is a red test on a correct tree, which is
+	// worse than a missed name, so it is pinned here rather than argued about in a header.
+	const cases = [
+		['const re = /^["\']$/;', "a regex holding both quote characters"],
+		["const r = /don't/;", "a regex holding an apostrophe"],
+		["const r = /`/;", "a regex holding a backtick"],
+		["function f() { return /['\"]/; }", "a regex after `return`, which ends in a letter"],
+		["const r = /[^\\s/]+\\/[^\\s/]+/;", "a regex with a slash inside a character class"],
+		["const n = (a) / b / c;", "division, which must NOT be read as a regex"],
+		["const n = total / count;", "division between two identifiers"],
+		['const t = `a ${o["K"]} b`;', "a template literal with a quoted key inside its expression"],
+	];
+	for (const [code, what] of cases) {
+		const out = stripComments(`${code}\n// env.PI_GHOST_NAME\n`);
+		assert.ok(!out.includes("PI_GHOST_NAME"), `a comment survived after ${what}: ${JSON.stringify(out)}`);
+	}
+	// And the other direction: a real read must never be stripped along with the comments.
+	const kept = stripComments('const v = env.PI_REAL; // and a trailing note\n');
+	assert.ok(kept.includes("env.PI_REAL"), "the stripper ate a real read");
+	assert.ok(!kept.includes("trailing note"), "the stripper kept a comment");
 });

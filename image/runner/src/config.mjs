@@ -11,9 +11,10 @@ import { configError } from "./outcome.mjs";
  * rediscover the same typo forever. This is a pure function so the classification is testable
  * without a container or a real pi.
  */
-// env-internal PI_FLOW, PI_COMMAND, PI_PACKAGES, PI_SESSION_FILE: the worker writes these into every
-// container per job (INT-CONTAINER-RUNTIME-CONTRACT), so a value in a host .env is overwritten before this
-// function reads it, and a trigger naming one in `run.secrets` is refused at load for the same reason.
+// env-internal PI_FLOW, PI_COMMAND, PI_PACKAGES, PI_SESSION_FILE: the worker's own per-job inputs
+// (INT-CONTAINER-RUNTIME-CONTRACT). The container environment is BUILT rather than inherited, so a value in
+// a host .env never arrives here to be overridden, and each of these four is present only when the job
+// actually has one. A trigger naming one in `run.secrets` is refused at load, for the same reason.
 // env-internal PI_RETRY_MAX, PI_RETRY_BASE_MS: this runner's own provider retry bounds, and the one pair
 // here that the worker does NOT write. Nothing puts them on a container by default, so a bare .env line
 // sets them on the host and changes nothing in here; PI_FORWARD_ENV is what carries a host value in.
