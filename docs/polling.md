@@ -6,7 +6,8 @@ the same job from the other direction: it reads `api.github.com` with your own c
 connections it opens itself, and enqueues exactly the same jobs. No inbound surface at all.
 
 It is the same gate, not a second one (with one addition: a close rule resolves the closer's write
-access first, which the webhook arm does too, and which has its own failure mode below). Every object the poller reads is reshaped into the webhook
+access first, which the webhook arm does too, and which has its own failure mode below). Every
+object the poller reads is reshaped into the webhook
 payload it corresponds to and run through the receiver's own `parseSubset` and the unchanged
 `filter()`: the label allowlist, the author gate, the pull request author gate and the bot loop guard
 have one implementation, and the poller cannot drift from it because it reimplements none of it. What
@@ -29,11 +30,13 @@ npx pi-dispatch-receiver poll
 ```
 
 `WEBHOOK_SECRET` is not needed: there is no inbound delivery to verify, so demanding one would block
-exactly the deployment this mode exists for. It is not quite unread, though, and the difference can
-stop a boot. `poll` builds its config through the receiver's own loader rather than forking it, so a
-`WEBHOOK_SECRET` that is present but blank-ish (spaces) still fails that loader's own check, and a
-malformed `RECEIVER_PORT` refuses too, even though `poll` binds no port. A secret with a real value is
-simply carried and unused, which is what lets one env file serve both commands.
+exactly the deployment this mode exists for. It is not quite unread, though, and the difference can stop
+a boot. `poll` builds its config through the receiver's own loader rather than forking it, and a
+genuinely empty value is swapped for a placeholder before that loader ever sees it, so `WEBHOOK_SECRET=`
+boots while `WEBHOOK_SECRET=" "` does not: a space is a value, and the loader rejects it as one that
+cannot verify a signature. A malformed `RECEIVER_PORT` refuses too, even though `poll` binds no port. A
+secret with a real value is simply carried and unused, which is what lets one env file serve both
+commands.
 
 Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_FILE`), the same GitHub
 auth block, the same queue. Pair it with `pi-dispatch setup github --no-webhook`, which mints
@@ -132,7 +135,8 @@ servicing those forges needs the webhook edge for them, and can still poll GitHu
 
 `POLL_INTERVAL_SECONDS` defaults to 60, and a positive value below 30 is raised to 30: a typo'd `1`
 must not turn the harness into a hammer. Only a positive integer gets that treatment. `0`, a negative,
-a fraction or junk refuses the boot instead, which is the same split `PI_WAIT_INTERVAL_MS` makes. The effective delay is the larger of your interval and any `x-poll-interval`
+a fraction or junk refuses the boot instead, which is the same split `PI_WAIT_INTERVAL_MS` makes.
+The effective delay is the larger of your interval and any `x-poll-interval`
 GitHub asked for, so it can be longer than you configured and never shorter than 30.
 
 ### 4. A reopen inside one cycle is invisible
@@ -157,6 +161,7 @@ Comments self heal, because their cursor advances and the next cycle collects th
 
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
 them, but it does load them, because it reuses the receiver's loader rather than forking it. A
-malformed value in any of the three refuses a `poll` boot with that loader's message. Everything in
-[`docs/secrets.md`](secrets.md) about the receiver applies here unchanged: the poller holds the same
-forge credential and the same queue URL.
+malformed `WEBHOOK_SECRET` or `RECEIVER_PORT` therefore refuses a `poll` boot with that loader's own
+message. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no malformed value of
+it to refuse. Everything in [`docs/secrets.md`](secrets.md) about the receiver applies here unchanged:
+the poller holds the same forge credential and the same queue URL.

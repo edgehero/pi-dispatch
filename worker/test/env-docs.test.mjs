@@ -26,7 +26,9 @@
  *     would fail on a correct tree.
  *   - It FAILS CLOSED on an unfamiliar RECEIVER: any identifier ending in `env` other than the known
  *     ones is a fourth way to read the environment, and the test says so instead of silently shrinking
- *     its own scope. Destructuring the environment is refused for the same reason.
+ *     its own scope. Destructuring the environment is refused too, in its plain form: a default value
+ *     holding braces, or a spread copy, still slips past that guard, and it is named here rather than
+ *     implied to be covered.
  *   - It does NOT see a read through a NAME ARRAY. `["A","B"].filter((k) => env[k])` at
  *     `worker/src/doctor.mjs:565`, `:595` and `:915` reads real variables this scan cannot attribute.
  *     Every name those three sites touch is covered from another file today, which is why nothing
@@ -56,7 +58,7 @@ const ENV_RECEIVERS = new Set(["env", "hostEnv"]);
 const NON_ENV_RECEIVERS = new Map();
 
 // Words after which a `/` opens a regular expression rather than dividing. The character before is not
-// enough on its own: `return /x/` ends in a letter and `a / b` ends in a letter too.
+// enough on its own: `return /x/` ends in a letter, and so does `a / b`.
 const REGEX_PRECEDING_WORDS = new Set(["return", "typeof", "instanceof", "in", "of", "case", "do", "else", "yield", "await", "new", "delete", "void", "throw"]);
 
 /**
@@ -64,54 +66,135 @@ const REGEX_PRECEDING_WORDS = new Set(["return", "typeof", "instanceof", "in", "
  * `positiveInt(env, "PI_DAILY_CAP", 25)` is a read and must survive). Newlines inside a stripped block
  * are kept so reported line numbers stay honest.
  *
- * Regular expressions are tracked, and that is not fussiness. A literal like `/^["\']$/` holds a quote,
- * and without regex state that quote opens a phantom string that never closes, so EVERY comment after it
- * in the file survives into the scanned text and every variable a comment merely names reads as a live
- * read. The failure is a red test on a correct tree, and `["\']` is an ordinary idiom, used by this file's
- * own patterns below. The stripper's own behaviour is pinned by tests at the bottom of this file.
+ * Three things here exist because a simpler version was measured and found wrong, and every one of them
+ * fails in the same direction: a quote the scanner misreads opens a string that never closes, every
+ * later comment survives into the scanned text, and a variable some comment merely NAMES reads as a live
+ * read. That is a red test on a correct tree, which is worse than a name slipping through.
+ *
+ *   - Template EXPRESSIONS are code. `${...}` returns to code state and the matching `}` returns to the
+ *     template, tracked with a brace count per frame. Without it, a backtick inside a regex inside a
+ *     `${}` closes the template early and the rest of the file cascades, and `/`/` is an ordinary
+ *     escaping regex.
+ *   - The `/` ambiguity is settled by CONTENT, not only by the preceding character. `)` is followed by
+ *     division far more often than by a regex, so the heuristic says division, but a real division's
+ *     operands cannot carry an unbalanced quote or a backtick. When the candidate span does, the regex
+ *     reading is taken.
+ *   - `word` resets at whitespace. Without that, `else return` concatenates to `elsereturn`, which is in
+ *     no keyword set, so the regex after it reads as division.
  */
 export function stripComments(src) {
 	let out = "";
+	let line = 0;
+	const templateLines = new Set();
+	const damagedLines = new Set(); // lines where a quote never closed, so the read of them is not trusted
 	let state = "code";
+	const frames = []; // one per open `${`, holding its brace depth
 	let prevChar = ""; // last non-space character emitted in code state
 	let word = ""; // and the identifier it belongs to, when it is one
+	let afterSpace = false;
 	for (let i = 0; i < src.length; ) {
 		const c = src[i];
 		const d = src[i + 1];
 		if (state === "code") {
 			if (c === "/" && d === "/") { state = "line"; i += 2; continue; }
 			if (c === "/" && d === "*") { state = "block"; i += 2; continue; }
-			if (c === "/" && startsRegex(prevChar, word)) {
+			if (c === "/") {
 				const end = regexEnd(src, i);
-				if (end > 0) { out += src.slice(i, end); prevChar = "/"; word = ""; i = end; continue; }
+				if (end > 0 && (startsRegex(prevChar, word) || ambiguousSpanIsRegex(src.slice(i, end)))) {
+					out += src.slice(i, end);
+					prevChar = "/"; word = ""; afterSpace = false;
+					i = end; continue;
+				}
 			}
-			if (c === '"' || c === "'" || c === "`") state = c;
+			if (c === "`") { state = "`"; frames.push({ braces: 0, template: true }); out += c; i++; continue; }
+			if (c === '"' || c === "'") state = c;
+			if (frames.length > 0 && frames[frames.length - 1].template === false) {
+				if (c === "{") frames[frames.length - 1].braces++;
+				else if (c === "}") {
+					if (frames[frames.length - 1].braces === 0) { frames.pop(); state = "`"; out += c; i++; continue; }
+					frames[frames.length - 1].braces--;
+				}
+			}
 			out += c;
-			if (!/\s/.test(c)) {
+			if (c === "\n") line++;
+			if (/\s/.test(c)) { afterSpace = true; } else {
 				prevChar = c;
-				word = /[\w$]/.test(c) ? word + c : "";
+				word = /[\w$]/.test(c) ? (afterSpace ? c : word + c) : "";
+				afterSpace = false;
 			}
 			i++; continue;
 		}
-		if (state === "line") { if (c === "\n") { state = "code"; out += c; } i++; continue; }
-		if (state === "block") { if (c === "*" && d === "/") { state = "code"; i += 2; } else { if (c === "\n") out += c; i++; } continue; }
-		// A quoted string cannot span a line in JavaScript, so a newline while inside one means the quote
-		// that opened it was never a string quote at all. This is the BOUND on the regex heuristic below:
-		// `if (a) /["]/.test(b)` opens a regex after `)`, which the heuristic reads as division, and that
-		// stray quote would otherwise swallow every comment in the rest of the FILE. Resetting here costs
-		// the remainder of one line and cannot cascade. Backticks are excluded: those really do span lines.
-		if (c === "\n" && state !== "`") { state = "code"; out += c; i++; continue; }
+		if (state === "line") { if (c === "\n") { state = "code"; out += c; line++; } i++; continue; }
+		if (state === "block") { if (c === "*" && d === "/") { state = "code"; i += 2; } else { if (c === "\n") { out += c; line++; } i++; } continue; }
 		if (c === "\\") { out += c + (d ?? ""); i += 2; continue; } // an escape cannot close the literal
+		if (state === "`") {
+			templateLines.add(line);
+			if (c === "\n") line++;
+			if (c === "$" && d === "{") { frames.push({ braces: 0, template: false }); state = "code"; out += "${"; i += 2; continue; }
+			if (c === "`") { frames.pop(); state = frames.length > 0 && frames[frames.length - 1].template === false ? "code" : "code"; }
+			out += c; i++; continue;
+		}
+		// A quoted string cannot span a line, so a newline inside one means the quote that opened it was
+		// never a string quote. The bound on everything above: a misreading costs one line, not a file.
+		if (c === "\n") { damagedLines.add(line); state = "code"; out += c; line++; i++; continue; }
 		if (c === state) state = "code";
 		out += c; i++;
 	}
-	return out;
+	return repairPerLine(out, templateLines, damagedLines);
+}
+
+/**
+ * The last resort, applied ONLY to lines the pass above knows it misread: a quote that never closed
+ * before the newline, which a real quoted string cannot do. Such a line is re-scanned on its own and cut
+ * at the first `//`, because whatever the quote was, it was not a string, and the comment after it must
+ * not survive. Scoping it to those lines is the point: a line the pass read correctly is left alone, so
+ * a live read cannot be cut by a repair aimed at a line that did not need one.
+ *
+ * Lines written from inside a multi-line template are skipped as well: a `//` in template TEXT is content.
+ */
+function repairPerLine(text, templateLines, damagedLines) {
+	return text
+		.split("\n")
+		.map((l, n) => {
+			if (!damagedLines.has(n) || templateLines.has(n) || !l.includes("//")) return l;
+			let quote = "";
+			for (let i = 0; i < l.length; i++) {
+				const c = l[i];
+				if (c === "\\") { i++; continue; }
+				if (quote) { if (c === quote) quote = ""; continue; }
+				if (c === '"' || c === "'") { quote = c; continue; }
+				if (c === "/" && l[i + 1] === "/") return l.slice(0, i);
+			}
+			// Reaching the end still inside a quote means this line's quoting does not balance, and a real
+			// quoted string always balances within its line. So the quote was part of something else, a
+			// regular expression being the case that put this whole function here, and the quote reading is
+			// what to discard: cut at the first `//` and stop pretending to know where the strings were.
+			if (quote) {
+				const at = l.indexOf("//");
+				return at === -1 ? l : l.slice(0, at);
+			}
+			return l;
+		})
+		.join("\n");
 }
 
 function startsRegex(prevChar, word) {
 	if (prevChar === "") return true; // start of file
 	if (/[\w$)\]]/.test(prevChar)) return REGEX_PRECEDING_WORDS.has(word);
 	return true; // an operator, a comma, a brace: a value is expected, so this opens one
+}
+
+/**
+ * Settle a `/` that the preceding character called division. Two facts separate the cases, and both are
+ * needed: a real division's operands carry no backtick and no unbalanced quote, and a regular expression
+ * never opens with a space while `x / y` always does. Without the first, `if (a) /["]/.test(b)` misreads
+ * and its quote eats the line; without the second, `(x) / y + "a/b"` misreads the other way and the same
+ * thing happens from the opposite side.
+ */
+function ambiguousSpanIsRegex(span) {
+	if (/^\/\s/.test(span)) return false; // `/ y + ...` is division, whatever it contains
+	const odd = (ch) => (span.split(ch).length - 1) % 2 === 1;
+	return span.includes("`") || odd('"') || odd("'");
 }
 
 /** Index just past the closing `/` of the literal starting at `i`, or -1 when it does not terminate on
@@ -246,6 +329,8 @@ test("a read shape the scan cannot see is refused rather than missed", () => {
 			offenders.push(`${rel(f)}: ${m[0].replace(/\s+/g, " ").slice(0, 60)}`);
 		}
 	}
+	// Honest about its own reach: `const { A = {} } = process.env` and `{ ...process.env }` are NOT caught
+	// by this pattern. Widening it needs a balanced-brace scan, and the plain form is what anyone writes.
 	assert.deepEqual(offenders.sort(), [], "destructuring the environment hides the read from this scan: use env.NAME");
 });
 
@@ -308,10 +393,16 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 		['const t = `a ${o["K"]} b`;', "a template literal with a quoted key inside its expression"],
 		['if (a) /["]/.test(b);', "a regex after `)`, which the heuristic reads as division"],
 		['const a = (x) / y + "a/b";', "division on a line that also holds a quoted slash"],
+		["const t = `pre ${s.replace(/`/g, \"x\")} post`;", "a backtick regex inside a template expression"],
+		["function f(s) { if (a) {} else return /[\"]/.test(s); }", "a regex after `else return`, two words deep"],
 	];
 	for (const [code, what] of cases) {
-		const out = stripComments(`${code}\n// env.PI_GHOST_NAME\n`);
-		assert.ok(!out.includes("PI_GHOST_NAME"), `a comment survived after ${what}: ${JSON.stringify(out)}`);
+		// BOTH directions. Every case here used to append the comment on the NEXT line, which is the half
+		// the line bound handles on its own, so three same-line leaks sat under a green test.
+		const next = stripComments(`${code}\n// env.PI_GHOST_NAME\n`);
+		assert.ok(!next.includes("PI_GHOST_NAME"), `a comment on the next line survived after ${what}: ${JSON.stringify(next)}`);
+		const same = stripComments(`${code} // env.PI_GHOST_NAME\n`);
+		assert.ok(!same.includes("PI_GHOST_NAME"), `a comment on the SAME line survived after ${what}: ${JSON.stringify(same)}`);
 	}
 	// And the other direction: a real read must never be stripped along with the comments.
 	const kept = stripComments('const v = env.PI_REAL; // and a trailing note\n');
@@ -323,6 +414,12 @@ test("the stripper survives the literal forms that would otherwise fake a read",
 	const bounded = stripComments('const s = "unclosed\nconst v = env.PI_AFTER; // note\n');
 	assert.ok(bounded.includes("env.PI_AFTER"), "a mis-read quote swallowed the following lines");
 	assert.ok(!bounded.includes("note"), "a mis-read quote stopped comments being stripped after it");
+
+	// The direction that loses a name rather than inventing one: a misread `/`, an odd quote, then a real
+	// `//` inside a genuine string later on the same line. The phantom string closes on the real quote,
+	// the `//` reads as a comment, and a live read after it is deleted silently.
+	const survives = stripComments('if (a) /["]/.test(b) && f("x//y"); const v = env.PI_REAL_READ;\n');
+	assert.ok(survives.includes("env.PI_REAL_READ"), "a real read was stripped as if it were a comment");
 
 	// A template literal genuinely spans lines and must NOT be reset at the newline.
 	const template = stripComments("const t = `one\n// still inside the template\ntwo`;\n// env.PI_TAIL\n");
