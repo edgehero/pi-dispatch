@@ -331,7 +331,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     catches the divergence ITSELF -- including a timezone disagreement, which no queue split can see.
   - **Reconcile is gated on fleet AGREEMENT since issue #57.** `reconcile` prunes every resident scheduler
     not named in this worker's config, which is idempotent for one worker and mutual teardown for two: each
-    deletes the other's on every boot and every file-watch reload. A worker now publishes a fingerprint of
+    deletes the other's on every boot and every file-watch reload; the watch itself is closed by the
+    worker's own shutdown rather than left armed past it (`DES-WATCHERS-CLOSE-WITH-THE-WORKER`). A
+    worker now publishes a fingerprint of
     its NORMALIZED schedule set (plus its IANA zone, since a cron pattern carries none) and reconciles only
     when no other live worker publishes a differing one. **Agreement rather than an elected owner**, and
     the bad case is why: an elected owner reconciles from ITS file, so a stale one -- the operator edited on
@@ -949,6 +951,78 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   bought the misdiagnosis.
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-SERVICE-ENV-SETUP-SEAM`, `DES-WORKER-ON-HOST`,
   `INT-RUNNER-EXIT-CODE-PROTOCOL`, `docs/secrets.md`
+
+## DES-WATCHERS-CLOSE-WITH-THE-WORKER
+
+- **Decision** (issue #295): every live-edit directory watch the worker arms — `triggers.json`,
+  `pause-windows.json`, `scoped-limits.json` — returns a **stop handle** that `startWorker` registers in
+  the same `extraClosers` list that already closes the runtime queue, the host queue and the host
+  registry. One list, one shutdown. The handle closes the `FSWatcher`, cancels the debounce the watcher
+  already armed, silences a reload it can no longer recall, never throws, and is idempotent.
+- **Why**: **unref'd is not cleaned up**, and that difference is what hid this across three features.
+  `unref` says only that a handle will not hold the event loop open; the watch stays armed either way, and
+  the reload it later fires runs through the `log` closure of the boot that armed it — that boot's injected
+  `write`, stamped with that boot's `PI_WORKER_NAME`. One process running one worker, that is a rounding
+  error at exit. One process running forty boots, which is what a test file is, and a worker that shut down
+  two tests ago writes into a live worker's capture under a host that is not running.
+  `INT-HOST-REGISTRY-CONTRACT` states the same distinction from the opposite side, where a bound's timer is
+  deliberately NOT unref'd because an unref'd timer does not fire when the hung command is the last thing
+  holding the loop. This is `DES-WRAPPER-STOPS-WHAT-IT-STARTED` one layer up: a thing that starts something
+  owns stopping it.
+- **Why it was invisible outside CI, measured rather than reasoned**: `fs.watch` names the changed entry
+  differently when the watched DIRECTORY is removed. A recursive removal unlinks the contained file first,
+  and Linux reports that unlink under the file's own basename, which passes the `changed !== file` filter
+  and arms the reload; macOS reports the removal under the directory's name, which the filter rejects.
+  Every leak in the suite is triggered by a test's own temp-directory cleanup, so
+  the defect was structurally unreachable on a developer's machine and reachable only in CI -- and even
+  there it is a race, because the reload it arms must then land inside a LATER test's capture window to be
+  seen at all. A plain file write passes the filter on both platforms, which is why the regression test
+  provokes with one rather than with a removal.
+- **What the close cannot do, stated because the guarantee would otherwise read as complete**: cancel a
+  reload that has ALREADY started. `reloadSchedules` is async and awaits Valkey, and the watchers stay
+  armed through the whole drain that precedes the closer loop, not merely a 150ms debounce. That reload
+  cannot be recalled, so what is gated instead is its VOICE: every reload is handed a `log` that goes quiet
+  once the handle is closed, which is what the issue actually asks for — a stopped worker writes no line.
+  Its Valkey work may still be cut off mid-flight by the queue closing beside it, leaving a scheduler set
+  the next boot's reconcile repairs; that race predates this entry and is not narrowed by it.
+- **Registered after handoff, deliberately**: `extraClosers` is handed to `createWorker` before the
+  watchers exist, because the watchers are armed **after** the boot reconcile — arming them earlier would
+  let an operator edit run `reloadSchedules` concurrently with the boot `reconcileGated`, on a different
+  queue handle, and reconcile's orphan prune is not safe against that. Pushing into the array is sound only
+  because `index.mjs` reads it at **shutdown** time, and that is now stated at both ends: a refactor that
+  snapshots or copies the array un-registers the watchers in silence. Appends only, because the runtime
+  queue and the registry are pinned at index 0 and 1.
+- **The close must not throw, and that is not defensiveness**: shutdown wraps each closer in
+  `Promise.resolve(c?.close?.()).catch(...)`, which does **not** catch a synchronous throw — one would
+  escape the `.map()` callback, reject the shutdown, and skip the `process.exit(0)` after it. `Promise.all`
+  invokes each callback eagerly, so a throw at index *i* strands only what follows it: the watchers sit at
+  indices 2 and up, behind the registry, so a throwing WATCHER cannot cost the registry its DEL. The rule
+  is written for the list rather than for this change's members, because the one entry that could strand
+  `registry.close()` -- and with it the DEL that keeps a stopped host from lingering as a ghost peer whose
+  stale `fpCron` makes a later `reconcileGated` refuse a legitimate reconcile -- is the runtime queue at
+  index 0, and nothing guarantees the order stays that way. That loop's own comment promised this
+  isolation before the code delivered it.
+  Idempotence comes from NULLING what was closed, not from an early return, which would be a guard with
+  nothing behind it.
+- **Rejected**: *a separate pre-drain closer list*, so a watch dies before the queue drains. The only
+  reload that touches Valkey catches every path internally and returns rather than throwing, and a job
+  scheduler is a Redis-resident object designed to outlive the process — while a second closer list is a
+  second thing to get wrong on the one path that has no production test. *An injected `watch` seam* that
+  tests stub out: it proves a stub was called and leaves the production leak in place. *Arming the watchers
+  only on the real entry point*, which is how `receiver/src/start.mjs` avoids the same hazard: it would
+  delete the only coverage that a watcher arms at all, and it mutes a lifecycle defect rather than fixing
+  one. *A `watch_closed` log line*: it would land inside the shutdown window, and it would be one more of
+  the kind of event `INT-SCOPED-LIMITS-FILE-CONTRACT` already sets aside as log-only telemetry rather than
+  contract -- that entry names a closed set which this would not join, so the argument is the analogy, not
+  a licence the contract already grants.
+- **Residuals, recorded rather than closed**: closers run after `worker.close()` drains, so an operator
+  edit landing during the drain still reloads once — the same window that already exists for any live edit,
+  with no victim. And `receiver/src/start.mjs`'s watch is still never closed; it leaks nothing observable,
+  because it is armed only on the real entry and that shutdown ends in `process.exit(0)` — checked, and
+  deliberately not touched here.
+- **Traces to**: `DES-CRON-VIA-BULLMQ-SCHEDULER`, `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`,
+  `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-WRAPPER-STOPS-WHAT-IT-STARTED`,
+  `INT-HOST-REGISTRY-CONTRACT`
 
 ## DES-GH-APP-MANIFEST-SETUP
 
@@ -2271,7 +2345,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the job, not dropping it: in the processor, before any spend, `pauseUntilMs(windows, job.data, now)` returns
   the window-end ms for a scope-matching active window, and the worker calls `job.moveToDelayed(end, token)`
   then throws `DelayedError` (BullMQ's own recognise-as-delayed signal). Windows live in a validated
-  `pause-windows.json`, boot-loaded fail-loud and live-reloaded through a directory watch — the exact
+  `pause-windows.json`, boot-loaded fail-loud and live-reloaded through a directory watch, whose stop
+  handle is registered with the worker's shutdown (`DES-WATCHERS-CLOSE-WITH-THE-WORKER`) — the exact
   `triggers.json` machinery (shared validator, atomic write, keep-last-good-on-bad-edit). The predicate
   `pauseUntilMs` and its timezone helpers are pure and injected-`now` testable; timezones use the built-in
   `Intl` (a one-pass offset correction, DST-correct outside the ~1h transition seam).
@@ -2289,7 +2364,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **Library-first + no new dependency.** BullMQ owns the delay; `Intl` owns the timezone math. Keyed on
     `job.data.repo` (github) / `job.data.folder` (local) by `job.data.kind`, `"*"` matching all.
 - **Traces to**: `REQ-SCOPED-PAUSE-WINDOWS`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `CONST-BUDGET-BEFORE-TOKENS`,
-  `DES-CRON-VIA-BULLMQ-SCHEDULER` (the live-reload template), `DES-ADMIN-VIA-PI-EXTENSION` (the confirm-gated CRUD)
+  `DES-CRON-VIA-BULLMQ-SCHEDULER` (the live-reload template), `DES-ADMIN-VIA-PI-EXTENSION` (the confirm-gated CRUD),
+  `DES-WATCHERS-CLOSE-WITH-THE-WORKER`
 
 ---
 
@@ -2297,7 +2373,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 - **Decision** (issue #242): Per-scope run caps and per-scope concurrency live in a watched operator
   file, `scoped-limits.json` (`INT-SCOPED-LIMITS-FILE-CONTRACT`), on the pause-windows pattern: shared
-  parser, boot-load fail-loud, directory watcher keeping last-good, one mutable ref read once per
+  parser, boot-load fail-loud, directory watcher keeping last-good and closed with the worker
+  (`DES-WATCHERS-CLOSE-WITH-THE-WORKER`), one mutable ref read once per
   pickup. The money windows reserve through `reserveBudget`'s existing `keyPrefix` seam under
   `budget:s:<16-hex sha256 of the canonical scope>` — SCOPED FIRST, so a noisy scope's refusals never
   consume a global slot, with the compensating release when the GLOBAL window refuses after a scoped
@@ -2344,7 +2421,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     in-process count complete anyway, and it is answered for the two bounds that describe a
     deployment rather than a process.
 - **Traces to**: `REQ-SCOPED-LIMITS`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `DES-CONCURRENCY-3`,
-  `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` (the seam), `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+  `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` (the seam), `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `DES-WATCHERS-CLOSE-WITH-THE-WORKER`
 
 ---
 
@@ -3123,3 +3201,4 @@ a tunnel.
 | 2026-09-01 | Issue #227, slice 5: the conformance suite, the operator page, and the release. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**; **`OQ-012` AMENDED**; **`SECURITY.md` gains a CUSTODY zone**. `worker/src/backend-conformance.mjs` is the consumer every earlier slice deferred to -- `backends.mjs` said its words were "a contract, not a finding", `backend-local.mjs` said its completeness check "proves ARITY AND NOTHING ELSE", and `container-spec.mjs` said the transfer abstraction awaited one. It ships in `src/` rather than `test/` because an adapter is written elsewhere by someone who will never run this repo's suite, and `docs/backends.md` tells them to import it. It checks shape, declaration consistency, exit-code fidelity, the abort flag's independence from the code, the reaper's tri-state and the transfer downgrade -- THREE of the thirteen properties plus two structural checks -- and NAMES the ten it cannot reach, each with the live container it would need, so a green run is never read as a conformant backend. The REFERENCE ADAPTER is a fake whose behaviour is a parameter rather than a vendor, because no vendor can be exercised in offline CI and a harness only ever run against a conformant backend proves only that it can say yes; every refusal path is driven, including the copying backend that declares `readOnlyJobInputs: enforced`, which is the transfer abstraction's teeth. **`OQ-012` AMENDED and NOT closed**: a remote backend takes away BOTH of its load-bearing mitigations. "The isolation surface is the worker's argv, not the image's" holds exactly while the worker builds the argv, and a venue that is not the local daemon builds the box itself -- so a non-conformant image there is no longer merely a worse agent. And its stated path to closure, `verify-image.sh`, "runs ON THE HOST THAT HOLDS THE IMAGE, which is the only place it can", which on a remote venue is not this host. What replaces neither but bounds the gap is the table: a venue declares in words an operator reads, `PI_BACKEND_FLOOR` can require a minimum of every blessed one, and a mismatch is refused at boot -- a stated loss rather than a silent one, which is that row's own standard and not a closure of it. **`SECURITY.md`'s trust table gains a CUSTODY row**, a different axis from every row above it: those ask who WROTE this, and this asks who is HOLDING the execution. Today the answer is the operator's own machine and nothing changes; a venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and this worker's argv does not reach it. **`docs/backends.md`** is the "really easy to add a vendor" deliverable: the five functions, the three words, the thirteen properties, the three conflicts no vendor resolves (`--pull=never` cannot survive a registry fetch, ENTRYPOINT-as-runner breaks on two vendors, the root-owned HARD_RULES floor dies wherever the agent runs as root), the transfer rules including that EVERY writable mount comes back, and a worked registration. Three modules gain package exports (`./backends` arrived with slice 3), so every import that page names resolves. Release **1.10.0** (worker, admin, root, and the wizard's `RUNTIME_VERSION`); the receiver stays **1.5.0** and both its pins are unmoved. **`CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-EGRESS-POLICY-IN-THE-ARGV`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: this slice adds a harness, a page and a version, and moves no flag, mount, path or guarantee. **Code evidence**: worker/src/backend-conformance.mjs -> runBackendConformance, UNVERIFIED_BY_THIS_HARNESS · docs/backends.md · SECURITY.md (the custody row) · specs/open-questions.md -> OQ-012. |
 | 2026-09-02 | Issue #227 follow-up, a defect found by the adversarial pass over slice 5 and fixed on its own. **`REQ-RESUMABLE-SESSION` was inert on every wired worker.** `makeProcessor`'s injected `prepareWorkspace` wrapper REPLACED `runJob`'s third argument instead of extending it: `runJob` calls `prepareWorkspace(job, token, { piVersion })` and the wrapper passed `{ queueJobId: job.id }`, so `piVersion` arrived `undefined`, defaulted to `null`, and `readCanonical`'s first gate -- `if (piVersion === null) return COLD("pi-version-changed")` -- fired on every job. Every `run.resume` cold-started while reporting success. The STAMP `promoteSession` writes was correct throughout, so the sidecar on disk always held the right version; the comparison simply never happened, which is why nothing on any surface looked wrong. Introduced with the `queueJobId` injection, not by this issue. **It survived because a test pinned it**: `wiring.test.mjs` asserted `deepEqual(received.opts, { queueJobId })`, an exact-shape check on the replaced object, so the broken behaviour was the assertion. That test now asserts each key it cares about and that `runJob`'s own options survive, and a second test drives the wrapper directly and fails on the old one. The neighbouring `checkOnceSpent` wrapper takes the same extend-don't-replace shape: `runJob` passes it no options today, so there is nothing to lose yet, and the day it does a replacing wrapper would lose it in the same silence. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked** -- nothing in the requirement moved; the code simply did not do what it already said. **`INT-SESSION-STORE-CONTRACT` UNCHANGED, checked**: the sidecar format, the stamp and the cold-start reasons are all as they were. **Code evidence**: worker/src/index.mjs -> makeProcessor (the prepareWorkspace and checkOnceSpent injections). |
 | 2026-09-07 | Issue #284, a test-harness defect with no product behaviour change. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: the mirror's writer, its two trims and its rolling expiry all behave exactly as the entry describes, and the four red tests were red BECAUSE the writer did the age trim the entry requires. Every fixture in `worker/test/run-mirror.test.mjs` is dated 2026-08-30 and four `makeRunMirror` call sites took the default `Date.now`, so once the wall clock passed seven days beyond the fixture date the writer's own `zremrangebyscore` deleted the member the test had just added, and the assertions that read the index back found nothing. The file therefore carried a seven day fuse from the day it was written (`23a90a5`, issue #57) and it went off in CI, on `main`, on a tree nobody had touched -- the whole `contract-tests` check red and, with `enforce_admins` on, every merge blocked. Fixed by pinning the clock to the fixtures rather than chasing the fixtures to the clock: one shared `AT` instant and an `anchored` helper, so the tests describe an instant instead of a distance from today. Two sites that were still GREEN moved with the four red ones, which is the half worth recording: `retentionDays: 90` at the count-cap test had a fuse running to 2026-11-28, and the rolling-expiry test asserted only on the `pexpire` call, so it had been passing for a week against an index the age trim had already emptied. That one gains an assertion that the member survives, because a `pexpire` over nothing is still a `pexpire`. The one pre-existing site that already injected its own clock keeps it, since it is ABOUT the window and must name its own instant. Verified by shifting `Date.now` a year in each direction and ten years forward (16 pass, 0 fail at every offset), and mutation-checked both ways: dropping the writer's age trim goes red, and putting one test back on the real clock goes red today. **Code evidence**: worker/test/run-mirror.test.mjs -> AT, anchored; worker/src/run-mirror.mjs -> makeRunMirror (unchanged, the clock seam it already had). |
+| 2026-09-07 | Issue #295, a resource-lifecycle defect that surfaced as a false test failure. **NEW `DES-WATCHERS-CLOSE-WITH-THE-WORKER`**: every live-edit directory watch returns a stop handle registered in the same `extraClosers` list that already closes the queues and the host registry, and the handle closes the FSWatcher, cancels the debounce it armed, silences a reload it can no longer recall, never throws and is idempotent. The entry's substance is the distinction that hid this across three features: UNREF'D IS NOT CLEANED UP. `unref` says only that a handle will not hold the event loop open; the watch stayed armed, and the reload it fired ran through the `log` closure of the boot that armed it -- that boot's injected `write`, stamped with that boot's `PI_WORKER_NAME`. One process and one worker, that is a rounding error at exit; one process running forty boots into one collector array, and a shut-down worker wrote `scoped_limits_reload_invalid` into a LATER test's window under a host that had stopped two tests earlier, turning the required contract job red on a branch whose only worker/src changes were comments. Two things were measured rather than reasoned and both are recorded in the entry. WHY IT WAS CI-ONLY: `fs.watch` names the changed entry differently per platform when the watched DIRECTORY is removed -- Linux delivers the file's basename, which passes the filter and arms the reload, macOS delivers the directory's name, which the filter rejects -- and every leak in the suite is triggered by a test's own temp-directory cleanup, so the defect was structurally unreachable on a developer's machine. WHAT THE CLOSE CANNOT DO: cancel a reload already started, because `reloadSchedules` is async and the watches stay armed through the whole drain ahead of the closer loop -- so what is gated instead is its VOICE, every reload being handed a `log` that goes quiet once the handle is closed, which is what the issue asks for. Two decisions carry their reasons: the closers are pushed AFTER the array is handed to `createWorker`, because the watches are armed after the boot reconcile on purpose (arming them earlier would let an operator edit run `reloadSchedules` concurrently with the boot `reconcileGated` on one scheduler set), so the array is read at SHUTDOWN time and that is now stated at both ends; and the close swallows internally rather than relying on its caller, because `Promise.resolve(c?.close?.()).catch(...)` does not catch a SYNCHRONOUS throw -- one would escape the `.map()` callback, reject the shutdown and skip the `process.exit(0)` after it, stranding `registry.close()` and leaving a ghost peer for its full TTL. That loop's own comment had promised this isolation before the code delivered it, and now delivers it. **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**, **`DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED` AMENDED**, **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**, one clause each: the latter two describe the watch mechanism itself and the first asserts only that a file-watch reload happens, and all three now point at the entry that says where the watch ends rather than repeating the argument three times. **`DES-WRAPPER-STOPS-WHAT-IT-STARTED` UNCHANGED, checked** and cited as the rule one layer down. Two residuals recorded rather than closed: the closers run after `worker.close()` drains, so an edit landing during the drain still reloads once, and `receiver/src/start.mjs`'s watch is still never closed -- which leaks nothing observable, because it is armed only on the real entry and that shutdown exits the process. **Code evidence**: worker/src/start.mjs -> makeWatchCloser, watchTriggersFile, watchPauseWindowsFile, watchScopedLimitsFile, startWorker; worker/src/index.mjs -> createWorker (shutdown); worker/src/host-registry.mjs -> start, whose doc comment was wrong twice: it cross-referenced the watchers' old unref-only posture, and it named a `stop` method the registry has never had (the API is `close`, which is what `extraClosers` calls). |
