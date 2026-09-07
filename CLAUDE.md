@@ -101,6 +101,13 @@ Two consequences worth internalising before you design anything:
   - If Actions is down or a workflow file breaks, `main` is frozen. Escape hatch: `gh api -X DELETE
     repos/edgehero/pi-dispatch/branches/main/protection/enforce_admins`, merge, then `gh api -X POST` the
     same path to put it back.
+- **A test that touches retention, a TTL or a window takes an injected clock, always.** A fixed instant
+  in the test beside a subject built on the default `Date.now` is a fuse: it passes until the wall clock
+  drifts past that subject's own window, then fails in CI on a tree nobody touched (issue #284 blocked
+  every merge that way, from a file that had carried the fuse since the day it was written). Two guards
+  run in `contract-tests`: `.github/scripts/dated-fixture-check.mjs` flags the pairing in a second, and
+  the suite is re-run with `Date` shifted 399 days forward, which is the oracle. They catch different
+  things on purpose and neither subsumes the other. Pass `now`; never move the fixture date forward.
 - `admin/dist/` is gitignored and built by `node admin/build.mjs`. Never commit it.
 - Two mirrors must stay **byte-identical**, pinned by tests: `worker/.env.example` to the root
   `.env.example`, and `worker/deploy/*` to `deploy/*`. Edit both.

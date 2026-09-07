@@ -138,7 +138,7 @@ test("a mirror failure NEVER throws and is logged once, not once per job", async
 	// one fault into a thousand log lines.
 	const logs = [];
 	for (const redis of [fakeRedis({ fail: true }), fakeRedis({ hang: true })]) {
-		const m = makeRunMirror({ redis, retentionDays: 7, log: (e) => logs.push(e), timeoutMs: 40 });
+		const m = anchored({ redis, retentionDays: 7, log: (e) => logs.push(e), timeoutMs: 40 });
 		assert.equal(await m.mirror(record("j", "2026-08-30T12:00:00.000Z"), "j"), false);
 		assert.equal(await m.mirror(record("k", "2026-08-30T12:00:00.000Z"), "k"), false);
 	}
@@ -147,7 +147,7 @@ test("a mirror failure NEVER throws and is logged once, not once per job", async
 
 test("a HANGING Valkey is bounded, because maxRetriesPerRequest null never rejects", async () => {
 	const started = Date.now();
-	assert.equal(await makeRunMirror({ redis: fakeRedis({ hang: true }), retentionDays: 7, timeoutMs: 100 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j"), false);
+	assert.equal(await anchored({ redis: fakeRedis({ hang: true }), retentionDays: 7, timeoutMs: 100 }).mirror(record("j", "2026-08-30T12:00:00.000Z"), "j"), false);
 	assert.ok(Date.now() - started < 2_000, "bounded, not hung");
 });
 

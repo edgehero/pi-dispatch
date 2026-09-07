@@ -270,6 +270,11 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
 
+      # A second, not two minutes: the fast half of issue #293's guard, so an author who paired a dated
+      # fixture with a default clock hears about it before the suite has finished starting.
+      - name: No dated fixture rides a default clock (issue #293)
+        run: node .github/scripts/dated-fixture-check.mjs
+
       # The scariest assertions in this project are FREE: every trap lives at the resource-loader
       # boundary (pure) or at before_agent_start (which fires strictly before any provider HTTP
       # call). No API key, no tokens, no flake, no excuse not to run them on every build.
@@ -302,6 +307,35 @@ jobs:
           PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
           VALKEY_TEST_URL: "redis://127.0.0.1:6379"
         run: node .github/scripts/test-count-check.mjs
+
+      # Issue #293. A test that judges a fixed fixture against an un-injected clock passes until the wall
+      # clock drifts past that subject's own window, then fails in CI on a tree nobody touched -- issue
+      # #284 was exactly that, and `main` froze until it was fixed. Running the suite 399 days from now
+      # converts that latent fuse into a failure on the commit that introduces it.
+      #
+      # A STEP rather than a job, deliberately: a new job is a new required-check CONTEXT, which only a
+      # branch-protection edit can make blocking, and until someone remembers to make it so the guard is
+      # advisory. Here it blocks on day one at no protection cost.
+      #
+      # Blocking rather than `continue-on-error`, for this workflow's own stated reason two steps up:
+      # "skipped = pass is precisely the reasoning that lets a guardrail-less agent ship green". An
+      # advisory red nobody must fix is that reasoning wearing a different hat.
+      #
+      # Cost, stated: this is the suite's third full run in this job (the count check runs it twice).
+      # Measured green in this posture at +399 days before it was armed.
+      - name: The suite survives a clock 399 days from now (issues #284, #293)
+        env:
+          PI_DISPATCH_REQUIRE_LOADER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_WORKER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
+          VALKEY_TEST_URL: "redis://127.0.0.1:6379"
+          TZ: "UTC"
+          NODE_OPTIONS: "--import file://${{ github.workspace }}/.github/scripts/shift-clock.mjs"
+        run: |
+          if ! npm test; then
+            echo "::error::A test failed only because the wall clock moved 399 days forward. That is issue #284's class: a fixed instant in the test and a subject built on the DEFAULT Date.now, so the fixture and the clock drift apart until the subject's own window closes over it. Two correct fixes: pass an injected clock to the subject (now: () => AT), or stamp the fixture through the same clock the subject reads. worker/test/run-mirror.test.mjs is the worked example (AT + anchored). Do NOT move the fixture date forward, which re-arms the fuse."
+            exit 1
+          fi
 
   image:
     name: the job image holds its contract

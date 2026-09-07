@@ -63,8 +63,22 @@ function lockPathFor(triggersPath) {
  * Take the lock, with one stale takeover. Returns an fd, or null when a LIVE writer holds it.
  * Throws only for non-EEXIST failures -- the session-store doctrine: reporting a read-only dir or a
  * full disk as "locked" sends an operator hunting for a stuck lock file that does not exist.
+ *
+ * `now` is INJECTED and defaults to the real clock, so every production path is byte-identical. It
+ * exists for two reasons and the test is only the second of them.
+ *
+ * The staleness threshold had NO test, because pinning it meant a ten-second sleep; with a clock it is
+ * a two-line assertion, and a bound nothing exercises is a bound that drifts.
+ *
+ * And the comparison it feeds is between TWO DIFFERENT CLOCKS. `Date.now()` is this process's;
+ * `mtimeMs` is the FILESYSTEM's, which on a network mount is a server's. A server more than
+ * LOCK_STALE_MS behind makes every LIVE lock read as stale, so the takeover fires on every attempt and
+ * the millisecond-wide double-take window this module deliberately concedes stops being a rare race and
+ * becomes the normal case -- `OQ-031` already records two hosts sharing one working tree as a live
+ * hazard, and `triggers.json` is exactly the file such a deployment shares. Nothing here closes that;
+ * the seam is what let a test demonstrate it, and issue #293's clock-shifted CI run is what found it.
  */
-function takeLock(triggersPath, fs, log) {
+function takeLock(triggersPath, fs, log, now = () => Date.now()) {
 	const lock = lockPathFor(triggersPath);
 	let sweptAgeMs = null;
 	for (let attempt = 0; attempt < 2; attempt++) {
@@ -84,13 +98,13 @@ function takeLock(triggersPath, fs, log) {
 				// The holder released between our open and our stat: the next loop iteration takes it.
 				continue;
 			}
-			if (Date.now() - mtimeMs <= LOCK_STALE_MS) return null; // live writer; caller decides
+			if (now() - mtimeMs <= LOCK_STALE_MS) return null; // live writer; caller decides
 			try {
 				fs.unlinkSync(lock);
 			} catch {
 				// Someone else swept it first; the retry create answers who won.
 			}
-			sweptAgeMs = Math.round(Date.now() - mtimeMs);
+			sweptAgeMs = Math.round(now() - mtimeMs);
 		}
 	}
 	return null;
@@ -165,8 +179,8 @@ function discardTmp(fs, tmp) {
  * Returns `{ ok: true }`, or `{ invalid }` for a validation failure OR a held lock; fs failures throw,
  * the contract this function has always had.
  */
-export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {} }) {
-	const fd = takeLock(triggersPath, fs, log);
+export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
+	const fd = takeLock(triggersPath, fs, log, now);
 	if (fd === null) {
 		// Immediate, not retried: the callers sit on the pi TUI event loop, and the holder is a write
 		// that finishes in milliseconds. The operator re-presses; the file was never touched.
@@ -224,11 +238,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * not failure), or `{ invalid }` with an operator-actionable reason. NEVER throws, and NEVER repairs:
  * an unreadable file is `{ invalid }` with the bytes untouched.
  */
-export async function disarmTrigger({ triggersPath, index, number, flow, command, jobId, at, fs = nodeFs, log = () => {} }) {
+export async function disarmTrigger({ triggersPath, index, number, flow, command, jobId, at, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	for (let attempt = 0; attempt < DISARM_LOCK_ATTEMPTS; attempt++) {
 		let fd;
 		try {
-			fd = takeLock(triggersPath, fs, log);
+			fd = takeLock(triggersPath, fs, log, now);
 		} catch (err) {
 			return { invalid: `triggers file lock failed (${err?.code ?? "lock-error"}): ${triggersPath}` };
 		}

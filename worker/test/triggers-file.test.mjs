@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync as realReadFileSync, rmSync, unlinkSync as realUnlinkSync, writeFileSync as realWriteFileSync } from "node:fs";
+import { mkdtempSync, readFileSync as realReadFileSync, rmSync, statSync as realStatSync, unlinkSync as realUnlinkSync, utimesSync as realUtimesSync, writeFileSync as realWriteFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
@@ -308,7 +308,7 @@ test("disarmTrigger on an already-disarmed entry returns { already } and leaves 
 	spent.on.disarmed = { at: "2026-08-27T00:00:00.000Z", jobId: "job-first" };
 	const orig = fileOf([spent]);
 	const fs = triggerFs({ [T_PATH]: orig });
-	const res = await disarmTrigger({ triggersPath: T_PATH, index: 0, number: 40, jobId: "job-second", at: AT, fs });
+	const res = await disarmTrigger({ triggersPath: T_PATH, index: 0, number: 40, jobId: "job-second", at: AT, fs, now: () => AT });
 	assert.deepEqual(res, { already: true });
 	assert.equal(fs.files[T_PATH], orig, "the second disarm must not rewrite the mark -- first writer's provenance wins");
 });
@@ -656,6 +656,12 @@ test("cross-writer race on a real file: both disarms land, the file stays loadab
 		const lock = `${path}.lock`;
 		realWriteFileSync(path, fileOf([onceTrigger(40), onceTrigger(41)]));
 		realWriteFileSync(lock, ""); // the foreign writer, mid-write
+		// ...stamped into the clock takeLock READS, not the one the filesystem happened to use. A real
+		// mtime and this process's Date.now() are two different clocks, and issue #293's clock-shifted CI
+		// run is what exposed the gap: under it the lock reads as instantly stale, gets taken over and
+		// unlinked, and this test's own realUnlinkSync below throws ENOENT. Same class as #284, reached
+		// through a filesystem timestamp rather than a date literal.
+		realUtimesSync(lock, new Date(), new Date());
 
 		const p1 = disarmTrigger({ triggersPath: path, index: 0, number: 40, jobId: "job-a", at: AT });
 		const p2 = disarmTrigger({ triggersPath: path, index: 1, number: 41, jobId: "job-b", at: AT });
@@ -687,4 +693,53 @@ test("cross-writer race on a real file: both disarms land, the file stays loadab
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+// ── the staleness threshold, which had no test until takeLock gained a clock (issue #293) ───────────
+
+test("the stale-lock threshold: at LOCK_STALE_MS the holder is LIVE, one ms past it is taken over", async () => {
+	// Pinning this used to mean a ten-second sleep, so nothing pinned it. With an injected clock it is
+	// two assertions, and the bound stops being decorative.
+	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-lock-stale-"));
+	try {
+		const path = join(dir, "triggers.json");
+		const lock = `${path}.lock`;
+		realWriteFileSync(path, fileOf([onceTrigger(40)]));
+
+		// A lock whose mtime is exactly LOCK_STALE_MS old: still a live writer, so the caller is refused.
+		//
+		// The instant is READ BACK from the filesystem rather than taken from Date.now(). Those are two
+		// different clocks -- which is the whole defect this seam exists for -- and a test that assumed
+		// they agree would be the same fuse in miniature. It caught itself: an earlier draft of this test
+		// failed under the clock-shifted run for exactly that reason.
+		realWriteFileSync(lock, "");
+		const planted = realStatSync(lock).mtimeMs;
+		const live = writeTriggers({ triggersPath: path, mutate: (l) => l, now: () => planted + 10_000 });
+		assert.ok(live.invalid, "at exactly the threshold the lock is LIVE and the write is refused");
+		assert.match(live.invalid, /locked/);
+
+		// One millisecond past it: taken over, and the takeover is logged with the age it measured.
+		const logs = [];
+		const taken = writeTriggers({
+			triggersPath: path,
+			mutate: (l) => l,
+			log: (event, fields) => logs.push([event, fields]),
+			now: () => planted + 10_001,
+		});
+		assert.ok(taken.ok, "one ms past the threshold the stale lock is swept and the write proceeds");
+		const takeover = logs.find(([e]) => e === "triggers_lock_stale_taken");
+		assert.ok(takeover, "and the takeover is announced, never silent");
+		assert.equal(takeover[1].ageMs, 10_001);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("the injected clock is a SEAM, not a behaviour change: no production caller passes one", () => {
+	// The guard against this seam quietly becoming a way to change the lock's semantics. Both exported
+	// writers default it, and the default is the real clock.
+	const src = realReadFileSync(new URL("../src/triggers-file.mjs", import.meta.url), "utf8");
+	assert.match(src, /function takeLock\(triggersPath, fs, log, now = \(\) => Date\.now\(\)\)/);
+	assert.equal((src.match(/now = \(\) => Date\.now\(\)/g) ?? []).length, 3, "takeLock + the two exported writers, each defaulted");
+	assert.ok(!/LOCK_STALE_MS = (?!10_000)/.test(src), "the threshold itself is untouched at 10s");
 });

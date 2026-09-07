@@ -150,7 +150,10 @@ test("a pin is a TIMESTAMP, never a boolean -- there is no keep-forever", () => 
 	assert.equal(written.jobId, "gh-1", "the rest of the manifest survives the rewrite");
 	assert.equal(written.dir, undefined, "the derived dir is not persisted back into the file");
 
-	assert.deepEqual(pinSandbox({ sandboxDir: "/sbx", jobId: "gone", fs, pinDays: 7 }), { pinned: false, reason: "absent" });
+	// `now` passed here too, though this arm returns before reading it: a dated fixture beside a subject
+	// on the default clock is the pairing issue #293 flags, and "it happens not to matter today" is how a
+	// fuse gets written.
+	assert.deepEqual(pinSandbox({ sandboxDir: "/sbx", jobId: "gone", fs, pinDays: 7, now: () => at }), { pinned: false, reason: "absent" });
 });
 
 /** A retention root holding `entries`, each `{ createdAt?, keepUntil? }` or the string "<bad>". */
@@ -259,5 +262,5 @@ test("the sweep NEVER throws: a missing root, an unreadable entry, an unlink fai
 	assert.ok(logged.some(([e, d]) => e === "sandbox_reaper_skipped" && d.entry === "a"));
 
 	// And with no root configured at all it is simply inert.
-	await makeSandboxReaper({ sandboxDir: null, retentionHours: 24 })();
+	await makeSandboxReaper({ sandboxDir: null, retentionHours: 24, now: () => at })();
 });
