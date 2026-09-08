@@ -47,6 +47,12 @@ const SIMPLE_ESCAPES = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\
  * `at` is a dotted path through the enclosing keys and array indices (`triggers.2.run.flow`), because the
  * key alone is not enough to find it: `flow` appears in every entry, and the whole point of the refusal is
  * that the operator can go and look at the one that lies.
+ *
+ * The separator is NOT escaped, so a key containing a dot, or an object key that is a number, produces a
+ * path that reads like a different shape. That is a signpost rather than an address, and it is left
+ * unescaped deliberately: for this schema it is unreachable (every schema key is a fixed identifier, and
+ * `run.secrets` keys are gated by `ENV_NAME`), and quoting the segments would make the common case harder
+ * to read to fix a case the file cannot contain.
  */
 export function findDuplicateKey(text) {
 	const s = String(text);
@@ -66,7 +72,29 @@ export function findDuplicateKey(text) {
 		}
 	};
 
-	/** Read the string starting at `s[i] === '"'` and return its DECODED value. */
+	/**
+	 * Walk past the string starting at `s[i] === '"'` WITHOUT building it.
+	 *
+	 * Value position only, and it is not a micro-optimisation: `readString` accumulates about 32 bytes of
+	 * heap per source character, so a single 64MB string value cost 2GB of garbage to decode a value this
+	 * function then discards. A trigger's `run.task` and `run.instructions` are free text, and a worker
+	 * that dies at boot reading its own configuration is a worse failure than anything this file refuses.
+	 */
+	const skipString = () => {
+		i++; // the opening quote
+		while (i < n) {
+			const ch = s[i];
+			if (ch === '"') {
+				i++;
+				return;
+			}
+			// An escape consumes its own next character, which is what stops `\"` ending the string. The
+			// `\uXXXX` digits need no special case here: none of them is a quote or a backslash.
+			i += ch === "\\" ? 2 : 1;
+		}
+	};
+
+	/** Read the string starting at `s[i] === '"'` and return its DECODED value. Keys only. */
 	const readString = () => {
 		i++; // the opening quote
 		let out = "";
@@ -157,7 +185,7 @@ export function findDuplicateKey(text) {
 				expectKey = false;
 				continue;
 			}
-			readString();
+			skipString();
 			continue;
 		}
 		// A bare literal: a number, `true`, `false` or `null`. Nothing inside one can be a key or a quote,

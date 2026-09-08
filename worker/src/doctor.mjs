@@ -275,8 +275,12 @@ export async function collectChecks(env, seams) {
 	if (parseError) {
 		checks.push({
 			ok: false,
-			label: `triggers file does not parse -- the receiver will refuse to start: ${parseError}`,
-			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it parses`,
+			// "is refused at load" rather than "does not parse", because since issue #313 it is no longer
+			// only a syntax error: a duplicate key parses perfectly and is refused anyway. The loader's own
+			// message says which, and the old wording sent an operator hunting for a syntax error that was
+			// not there. It still covers the JSON case, whose message begins "is not valid JSON".
+			label: `triggers file is refused at load -- the receiver will refuse to start: ${parseError}`,
+			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
 		});
 	}
 

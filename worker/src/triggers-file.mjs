@@ -198,22 +198,26 @@ export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {
 	}
 	try {
 		let current = [];
-		let existingText = null;
+		// The text ONLY IF THE PARSE ACCEPTED IT, which is the scanner's whole contract: it never has to
+		// decide whether malformed input is malformed, so it is not asked. Assigning it before the parse
+		// would hand it a truncated file and get back a confident answer about a key, when what happened is
+		// that the file was cut in half.
+		let parsedText = null;
 		try {
-			existingText = fs.readFileSync(triggersPath, "utf8");
-			const raw = JSON.parse(existingText);
-			if (Array.isArray(raw?.triggers)) current = raw.triggers;
+			const raw = fs.readFileSync(triggersPath, "utf8");
+			const value = JSON.parse(raw);
+			parsedText = raw;
+			if (Array.isArray(value?.triggers)) current = value.triggers;
 		} catch {
 			// Missing/invalid file: start from empty; the validated atomic write below repairs it.
 		}
-		// The repair posture above cannot extend to a duplicate key (issue #313). A file that PARSES is not
-		// missing, so "start from empty" would not repair it, it would delete the operator's trigger set;
-		// and rebuilding from `current` writes back the winning value with the shadowed one silently gone,
-		// which turns a divergence a reviewer could still find into one nobody ever can. So this refuses,
-		// and `parseTriggers` below would refuse the same file anyway: this is the same answer arriving
-		// before the write rather than after it.
-		if (existingText !== null) {
-			const duplicate = findDuplicateKey(existingText);
+		// The repair posture above cannot extend to a duplicate key (issue #313), and the two are exactly
+		// separated by the parse. A file that does not parse is repairable and stays repairable. A file that
+		// PARSES is not missing, so "start from empty" would not repair it, it would delete the operator's
+		// trigger set; and rebuilding from `current` writes back the winning value with the shadowed one
+		// silently gone, which turns a divergence a reviewer could still find into one nobody ever can.
+		if (parsedText !== null) {
+			const duplicate = findDuplicateKey(parsedText);
 			if (duplicate) {
 				return { invalid: `triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}; refusing to rewrite a file whose reviewed value and running value differ: ${triggersPath}` };
 			}

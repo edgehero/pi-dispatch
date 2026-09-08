@@ -2240,7 +2240,7 @@ test("doctor: no egress probing at all on top of a down daemon", async () => {
 	assert.ok(!calls.some((c) => c.args[0] === "network"), "no network is created against a daemon that is not answering");
 });
 
-test("doctor: a triggers file that does not parse FAILS, names the reason, and says the receiver will not start", async () => {
+test("doctor: a triggers file the loader refuses FAILS, names the reason, and says the receiver will not start", async () => {
 	// This used to be swallowed to zeroes, justified by "a malformed triggers file already fails LOUD at
 	// worker boot". False for the deployment that needs doctor most: the worker reads the file only when
 	// PI_TRIGGERS_FILE is set, so a receiver-only host got no loud failure anywhere -- while the zeroes
@@ -2252,7 +2252,7 @@ test("doctor: a triggers file that does not parse FAILS, names the reason, and s
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
 
 	assert.equal(code, 1, "a file neither service can load is a failure, not a warning");
-	assert.match(text(), /triggers file does not parse/);
+	assert.match(text(), /triggers file is refused at load/);
 	assert.match(text(), /the receiver will refuse to start/, "the consequence, not just the symptom");
 	assert.match(text(), /run\.replicas must be an integer between 2 and 3/, "the loader's own message travels");
 	assert.ok(text().includes(path), "and the path to fix");
@@ -2269,7 +2269,7 @@ test("doctor: a duplicate key is reported through the SAME check, with no new on
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
 
 	assert.equal(code, 1);
-	assert.match(text(), /triggers file does not parse/, "the existing check, not a new one");
+	assert.match(text(), /triggers file is refused at load/, "the existing check, not a new one");
 	assert.match(text(), /duplicate key "flow"/, "the loader's own message travels");
 	assert.match(text(), /triggers\.0\.run\.flow/, "including where in the file to look");
 });
@@ -2277,7 +2277,7 @@ test("doctor: a duplicate key is reported through the SAME check, with no new on
 test("doctor: a VALID triggers file says nothing about parsing -- the check is silent when it passes", async () => {
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), imgDeps(out, green));
-	assert.doesNotMatch(text(), /does not parse/);
+	assert.doesNotMatch(text(), /refused at load/);
 });
 
 // --- run.secrets (REQ-TRIGGER-SECRETS, issue #225) ---

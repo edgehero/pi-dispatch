@@ -503,12 +503,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   only reject files that already failed post-budget.
   **The duplicate-key refusal (#313) is the THIRD narrowing, and the safest of them**: the only files it
   rejects are ones whose reviewed value and running value already differ, so nothing an operator believed
-  they had deployed stops working. It carries the same release-ordering constraint as the other two,
-  because the console must be republished with the loaders: `parseTriggers` is inlined into the published
-  console at build time, so an old console writing through `writeTriggers` would validate with an old
-  parser. The direction is safe either way -- an old console cannot PRODUCE a duplicate, since `serialize`
-  is `JSON.stringify` -- but it could rewrite a shadowed file that a new loader refuses, which is why the
-  refusal is also on the writer's raw read rather than only in the validator.
+  they had deployed stops working. It carries a release-ordering constraint of its own, and it runs in the
+  OPPOSITE direction to the other two: there the hazard is an old console being STRICTER than a new
+  runtime, refusing an edit the services would accept. Here the old console is more LENIENT, and the
+  failure is not a refused edit but a silent evidence-destroying rewrite. An old console cannot PRODUCE a
+  duplicate, because `serialize` is `JSON.stringify`, but it can read a shadowed file and write back the
+  winning value with the other one gone. That is why the refusal is on the writer's raw read as well as in
+  the validator, and why the console has to be republished with the loaders.
 - **Rejected**: a compat union accepting both old shapes (the repo bans backwards-compat shims,
   `.claude/rules/legacy-removal.md`) · two independent validators (they drift) · a third shared package
   (unnecessary — the one-way worker dependency already exists).

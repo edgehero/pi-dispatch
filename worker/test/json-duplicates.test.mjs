@@ -128,13 +128,16 @@ function generate(rnd, depth, wantDuplicate, path, out) {
 		return `[${parts.join(",")}]`;
 	}
 	const keys = [];
-	for (let i = 0, len = 1 + Math.floor(rnd() * 4); i < len; i++) {
+	// From ZERO, so `{}` is generated. An object frame that never appears is a path-stack case that never
+	// gets exercised, and a mutation check found exactly that: reverting the pop guard to `if (frame)`
+	// survived the whole suite while reporting `triggers.run.flow` for a file whose `on` was `{}`.
+	for (let i = 0, len = Math.floor(rnd() * 5); i < len; i++) {
 		let k = randomKey(rnd);
 		while (keys.includes(k)) k += randomKey(rnd);
 		keys.push(k);
 	}
 	const parts = keys.map((k) => `${JSON.stringify(k)}:${generate(rnd, depth + 1, wantDuplicate, [...path, k], out)}`);
-	if (wantDuplicate && out.injected === null && rnd() < 0.35) {
+	if (wantDuplicate && keys.length > 0 && out.injected === null && rnd() < 0.35) {
 		const k = keys[Math.floor(rnd() * keys.length)];
 		out.injected = [...path, k].join(".");
 		// Half the time the second occurrence is spelled with an escape, which is the case that separates a
@@ -144,6 +147,72 @@ function generate(rnd, depth, wantDuplicate, path, out) {
 	}
 	return `{${parts.join(",")}}`;
 }
+
+/** Insert JSON-legal whitespace between tokens, never inside a string. */
+function spaceOut(text, rnd) {
+	const WS = ["", " ", "\n", "\t", "\r\n", "  ", "\r"];
+	let out = "";
+	let inString = false;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		out += ch;
+		if (inString) {
+			if (ch === "\\") {
+				out += text[++i];
+				continue;
+			}
+			if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{" || ch === "}" || ch === "[" || ch === "]" || ch === ":" || ch === ",") out += WS[Math.floor(rnd() * WS.length)];
+	}
+	return out;
+}
+
+test("an empty container before the duplicate does not shift the reported path", () => {
+	// The case the generator could not produce, and the one that makes a wrong path plausible rather than
+	// obviously wrong: `triggers.0.flow` points at a real nesting level, just not this one.
+	assert.deepEqual(findDuplicateKey('{"a":{"b":{},"c":{"d":1,"d":2}}}'), { key: "d", at: "a.c.d" });
+	assert.deepEqual(findDuplicateKey('{"triggers":[{"on":{},"run":{"flow":"safe","flow":"evil"}}]}'), { key: "flow", at: "triggers.0.run.flow" });
+	assert.deepEqual(findDuplicateKey('{"triggers":[{"on":{"type":"issue"},"run":{"secrets":{},"flow":"safe","flow":"evil"}}]}'), { key: "flow", at: "triggers.0.run.flow" });
+	assert.deepEqual(findDuplicateKey('{"a":[],"b":{"c":1,"c":2}}'), { key: "c", at: "b.c" });
+});
+
+test("a value string is walked, not built, and its escapes still cannot end it early", () => {
+	// A value's text is discarded, so decoding it was pure garbage: a single 64MB `run.task` cost ~2GB of
+	// heap to produce a string this function throws away, and a worker that dies at boot reading its own
+	// configuration is a worse failure than anything this file refuses. The skip has to get escaping right
+	// or a value could end early and the rest of the document be read as structure.
+	const B = String.fromCharCode(92);
+	const Q = String.fromCharCode(34);
+	for (const v of [B + B, B + B + B + B, B + Q, "a" + B + B, "a" + B + Q + "b", B + "u0022", B + "u005C", "}" + B + Q + "{", "]" + B + Q + "[", "," + B + Q + ":"]) {
+		const clean = `{"t":[{"task":"${v}","flow":"a"}]}`;
+		const dup = `{"t":[{"task":"${v}","flow":"a","flow":"b"}]}`;
+		JSON.parse(clean); // the precondition, asserted by not throwing
+		JSON.parse(dup);
+		assert.equal(findDuplicateKey(clean), null, `value ${JSON.stringify(v)} must not read as structure`);
+		assert.deepEqual(findDuplicateKey(dup), { key: "flow", at: "t.0.flow" }, `and the duplicate after it is still seen`);
+	}
+
+	// And the resource property, which is the reason for the change: a large value must not be copied.
+	const big = JSON.stringify({ t: [{ task: "x".repeat(4 * 1024 * 1024), flow: "a", other: 1 }] });
+	const before = process.memoryUsage().heapUsed;
+	assert.equal(findDuplicateKey(big), null);
+	const grew = (process.memoryUsage().heapUsed - before) / (1024 * 1024);
+	assert.ok(grew < 8, `scanning a 4MB value must not allocate it again (grew ${grew.toFixed(1)}MB)`);
+});
+
+test("a CRLF file is read, not hung on", () => {
+	// `\r` is in STRUCTURAL, so a scanner that stopped treating it as whitespace could not advance past one
+	// and would spin forever: the worker and the receiver would HANG at boot rather than refuse, which is
+	// worse than any wrong answer. A CRLF triggers.json is what a Windows editor or core.autocrlf produces.
+	assert.deepEqual(findDuplicateKey('{\r\n\t"a": 1,\r\n\t"a": 2\r\n}'), { key: "a", at: "a" });
+	assert.equal(findDuplicateKey('{\r\n\t"a": 1,\r\n\t"b": [1,\r\n2]\r\n}'), null);
+});
 
 test("the scanner agrees with a generator that knows the answer, over thousands of documents", () => {
 	let checked = 0;
@@ -165,6 +234,13 @@ test("the scanner agrees with a generator that knows the answer, over thousands 
 		if (out.injected !== null) withDuplicate++;
 		const found = findDuplicateKey(text);
 		assert.equal(found ? found.at : null, out.injected, `seed ${seed}: ${text.slice(0, 200)}`);
+		// The same document with whitespace at every token boundary must give the identical verdict. The
+		// generator emits none, and the failure mode of the whitespace branch is not a wrong answer but a
+		// HANG: `\r` is in STRUCTURAL, so a scanner that stopped skipping it could not advance past one and
+		// the outer loop would never end. A CRLF triggers.json is ordinary on Windows.
+		const spaced = spaceOut(text, mulberry(seed ^ 0x5f5f));
+		const foundSpaced = findDuplicateKey(spaced);
+		assert.equal(foundSpaced ? foundSpaced.at : null, out.injected, `seed ${seed}: whitespace-injected`);
 		// Re-serialising a document with no duplicate cannot introduce one, and must not change the verdict.
 		if (out.injected === null) {
 			assert.equal(findDuplicateKey(JSON.stringify(JSON.parse(text), null, 2)), null, `seed ${seed}: pretty-printed`);
