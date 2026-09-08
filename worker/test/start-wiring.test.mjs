@@ -75,6 +75,7 @@ function fakeHost(overrides = {}) {
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
 async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order } = {}) {
+	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
 	const createWorkerFn = (arg) => {
@@ -165,6 +166,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeLogReaper: logReaper,
 			makeSandboxReaper: sandboxReaper,
 			makeRunContainer: runContainerFactory,
+			makeSecretsResolver: (args) => (secretsResolverCalls.push(args), async () => ({ ok: true, secrets: {} })),
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
@@ -235,7 +237,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	const logs = parseLines(bootLines.slice(from));
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
-	return { captured, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls };
+	return { captured, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls };
 }
 
 // Capture the JSON log lines a synchronous fn emits through the injected writer.
@@ -623,6 +625,24 @@ test("staged packages: a manifest that goes unreadable after boot keeps the last
 	} finally {
 		rmSync(overlay, { recursive: true, force: true });
 	}
+});
+
+test("the secrets resolver and the container builder are handed the SAME host env and forward list", { skip }, async () => {
+	// Issue #309. `hostEnv` is what the resolver SUBPROCESS runs in; the same `env` is what buildContainerEnv
+	// reads to assemble the container. They were not the same object: makeSecretsResolver was constructed
+	// without `hostEnv` and fell back to `process.env`, while makeRunContainer got startWorker's own `env`.
+	// Identical on the shipped path, where both are process.env, and divergent under an injected one, which
+	// is the hazard start.mjs already names for sessionsDir. One deployment value, one place.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { runContainerCalls, secretsResolverCalls } = await runStart({
+		env: { PI_FORWARD_ENV: "MY_CUSTOM_KEY", PI_SECRET_PROFILES: "default:/opt/pi/resolve.sh" },
+		makeAuth,
+		makeHost: () => fakeHost(),
+	});
+	assert.equal(secretsResolverCalls.length, 1, "constructed exactly once, at boot");
+	assert.equal(secretsResolverCalls[0].hostEnv, runContainerCalls[0].hostEnv, "the SAME object, not two reads of process.env");
+	assert.deepEqual(secretsResolverCalls[0].forwardEnv, runContainerCalls[0].forwardEnv, "one PI_FORWARD_ENV list, two consumers");
+	assert.deepEqual(secretsResolverCalls[0].forwardEnv, ["MY_CUSTOM_KEY"]);
 });
 
 test("the image preflight and the container factory are wired from the SAME config.jobImage", { skip }, async () => {

@@ -297,9 +297,10 @@ export function makeSecretsResolver({
 		// trigger author's key, every job, which is the exact failure the paragraph above says this exists to
 		// prevent. Same conflated `undefined` as issue #286, one module over.
 		//
-		// It also closes a second hole that never needed auth.json. `ANTHROPIC_OAUTH_TOKEN` is not set on any
-		// ordinary host, so it was never in this set, and pi reads it BEFORE `ANTHROPIC_API_KEY` -- a trigger
-		// binding it outranked the operator's own key on the pure-env path too.
+		// It also closes a second hole that never needed auth.json. The worker never WRITES the OAuth variable
+		// (`apiKeyVariable` skips it deliberately) and pi reads it BEFORE `ANTHROPIC_API_KEY`, so a presence
+		// filter held it only on hosts that happened to export it, and a trigger binding it outranked the
+		// operator's own key on the pure-env path too.
 		//
 		// The widening is bounded: it reserves the variables of THIS JOB'S provider and nothing else, so an
 		// anthropic job binding OPENAI_API_KEY for a flow that talks to OpenAI itself is still allowed. That

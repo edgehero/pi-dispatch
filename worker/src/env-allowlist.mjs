@@ -1,18 +1,3 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { findEnvKeys } from "@earendil-works/pi-ai/compat";
-import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { egressEnv } from "./egress.mjs";
-import { forgeSpec } from "./forges.mjs";
-import { apiKeyVariable } from "./provider-key.mjs";
-
-function configError(message) {
-	const error = new Error(message);
-	error.piDispatchConfig = true;
-	return error;
-}
-
 /**
  * Build the EXACT environment a job container receives. Never a pass-through.
  *
@@ -37,6 +22,21 @@ function configError(message) {
  * reaching for it. pi's own behaviour is still pinned, against `findEnvKeys` directly, in
  * `worker/test/env-allowlist.test.mjs`.
  */
+
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { findEnvKeys } from "@earendil-works/pi-ai/compat";
+import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import { egressEnv } from "./egress.mjs";
+import { forgeSpec } from "./forges.mjs";
+import { apiKeyVariable } from "./provider-key.mjs";
+
+function configError(message) {
+	const error = new Error(message);
+	error.piDispatchConfig = true;
+	return error;
+}
 
 /**
  * An environment in which EVERY variable is set, used only to interrogate pi.

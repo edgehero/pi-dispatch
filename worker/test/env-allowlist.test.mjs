@@ -56,10 +56,20 @@ const HOST = {
 // hermetic, which they were not: `HOST` carries no google key but this machine may export one, so the
 // google case read the developer's shell.
 test("pi's findEnvKeys filters its list by presence, in precedence order", { skip }, () => {
-	assert.deepEqual(findEnvKeys("anthropic", HOST), ["ANTHROPIC_API_KEY"]);
-	assert.deepEqual(findEnvKeys("openai", HOST), ["OPENAI_API_KEY"]);
-	// OAuth outranks API key -- the array order is the precedence.
-	assert.deepEqual(findEnvKeys("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth" }), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+	// `withoutEnv` around the FIRST assertion too, not only the google case below. HOST deliberately carries
+	// no ANTHROPIC_OAUTH_TOKEN, and pi answers absence from the real process.env, so on a developer or CI box
+	// that exports one -- the very variable this cluster of issues is about, and one `.env.example` offers by
+	// name -- the expectation reads ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] and the test that pins
+	// pi's presence filter becomes the one test in the file decided by the shell.
+	const restore = withoutEnv(["ANTHROPIC_OAUTH_TOKEN"]);
+	try {
+		assert.deepEqual(findEnvKeys("anthropic", HOST), ["ANTHROPIC_API_KEY"]);
+		assert.deepEqual(findEnvKeys("openai", HOST), ["OPENAI_API_KEY"]);
+		// OAuth outranks API key -- the array order is the precedence.
+		assert.deepEqual(findEnvKeys("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth" }), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+	} finally {
+		restore();
+	}
 });
 
 test("pi's findEnvKeys returns ONE undefined for two different facts, which is why we do not use it", { skip }, () => {
@@ -335,8 +345,8 @@ test("without PI_AUTH_FROM_PI, a missing env key still refuses and auth.json is 
 // --- Issue #311: the variable an auth.json login is injected under is pi's, for every provider ---
 
 test("a key variable pi reports present but this env does not carry falls through to auth.json", { skip }, () => {
-	// `providerKeyVars` is pi's `findEnvKeys`, and pi's presence test falls back to the real process.env on
-	// purpose (the test above asserts that, and doctor needs it). Reading the VALUE from the same place is
+	// pi's `findEnvKeys` presence test falls back to the real process.env, deliberately on pi's side (the
+	// test above asserts it). Reading the VALUE from the same place is
 	// what would be wrong: the old code took the env path on such a name and returned { NAME: undefined },
 	// so a host that merely exported a variable defeated a working `pi login` and the job reached the
 	// provider with no credential.

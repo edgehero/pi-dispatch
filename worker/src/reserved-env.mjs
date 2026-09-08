@@ -13,9 +13,9 @@
  * have it for free.
  *
  * Only the STATIC names live here. The rest of the closed map is deployment state and cannot be known
- * from a triggers file at all: the provider credential's variable names come from `findEnvKeys(provider,
- * hostEnv)`, and `PI_FORWARD_ENV` is an operator env list. Those two are refused PRE-SPEND, in the
- * processor, where the resolved provider and the host env are both in hand. `MINTED_TOKEN_VARS` and
+ * from a triggers file at all: the provider's credential variable names come from `providerKeyCandidates`
+ * once the job's provider is resolved, and `PI_FORWARD_ENV` is an operator env list. Those two are refused
+ * PRE-SPEND, in the processor, where the resolved provider and the operator's forward list are in hand. `MINTED_TOKEN_VARS` and
  * `FORGE_HOST_VARS` (forges.mjs) and `EGRESS_ENV_VARS`/`WORKER_ONLY_SECRET_VARS` (config.mjs) stay in
  * their own modules and are imported by the validator beside this one, never copied into it.
  *

@@ -267,7 +267,7 @@ export async function collectChecks(env, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
+	const { requiring, waiting, waitProfiles, waitAfters, optingOut, resuming, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, skillsDirs, forges, repositories, flows, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd);
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -917,7 +917,9 @@ export async function collectChecks(env, seams) {
 	// `checks[0]` is the Node floor, pushed first and deliberately so. The degraded arm needs it: below a
 	// floor that already failed hard it warns, and on a green floor it fails, because those are different
 	// deployments with different remedies.
-	checks.push(providerKeyCheck({ provider, env, agentDir, oracle: await providerOracle(), nodeOk: checks[0]?.ok }));
+	// Resolved ONCE and reused by the trigger-secret clash check further down: one seam call, one answer.
+	const oracle = await providerOracle();
+	checks.push(providerKeyCheck({ provider, env, agentDir, oracle, nodeOk: checks[0]?.ok }));
 
 
 	// REQ-GLOBAL-PI-OVERLAY: read the extensions opt-out through the WORKER's own parser, so doctor reports
@@ -1272,6 +1274,32 @@ export async function collectChecks(env, seams) {
 		// The local-workspace disclosure. Not a failure: a nightly deploy binding a secret is exactly what
 		// this feature is for. But a local job's /workspace IS the folder, read-write and un-cloned, so an
 		// agent that persists a credential to make its next command simpler writes it into a real repository.
+		// Issue #309: a trigger binding a variable pi reads for this deployment's provider. The worker refuses
+		// that pre-spend, and this is the same question asked at setup, which is `REQ-DEPLOYMENT-BOOTSTRAP`'s
+		// own rule applied one field over: the operator should not learn it from a public refusal on a live
+		// delivery. Answerable here only BECAUSE the gate stopped depending on host state -- the presence
+		// filtered version's answer would have changed with the machine doctor happened to run on.
+		//
+		// The provider is read the same way the provider-key check reads it, and the candidate list comes from
+		// the same oracle the gate uses, through the same dynamic import: one derivation, or this becomes the
+		// hand-copied table issue #286 was about.
+		// Guarded on the FUNCTION, the way providerKeyCheck guards, not on an `ok` flag: the oracle returns
+		// `{ piProviders, providerKeyCandidates }` or `{ loadError }` and never an `ok`, so a truthiness test on
+		// one would be permanently false and this check would silently never run. It is skipped rather than
+		// failed when pi did not load, because providerKeyCheck above has already reported that as its own ✗
+		// and one root cause should print one line.
+		if (secretNames.length > 0 && oracle?.providerKeyCandidates) {
+			const candidates = oracle.providerKeyCandidates(provider);
+			const clashing = secretNames.filter((n) => candidates.includes(n));
+			checks.push({
+				ok: clashing.length === 0,
+				label:
+					clashing.length === 0
+						? `No trigger binds a variable pi reads for ${provider}`
+						: `${clashing.length} trigger secret(s) bind a variable pi reads for ${provider}: ${clashing.join(", ")}`,
+				fix: "rename them in the triggers file: the worker writes this deployment's own credential into those variables, so every job of those triggers refuses pre-spend as secret-name-reserved",
+			});
+		}
 		if (localSecretFolders.length > 0) {
 			checks.push({
 				ok: true,
@@ -2078,7 +2106,7 @@ function readScopedLimitFacts(env, fileExists) {
 }
 
 function readTriggerFacts(env, fileExists, cwd) {
-	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
+	const none = { requiring: 0, waiting: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], skillsDirs: [], forges: [], repositories: [], flows: [], parseError: null, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -2120,6 +2148,11 @@ function readTriggerFacts(env, fileExists, cwd) {
 			// read-write with no clone, so a credential an agent writes into .env lands in the operator's real
 			// repository rather than a temp dir that gets swept. Deduped for skillsDirs' reason.
 			localSecretFolders: [...new Set(triggers.filter((t) => t.run.secrets !== undefined && t.run.kind === "local" && typeof t.run.folder === "string").map((t) => t.run.folder))].sort(),
+			// Issue #309. The distinct variable NAMES the file binds, deduped like the profiles above. The
+			// pre-spend gate refuses a name pi reads for the job's provider, and unlike the version that gate
+			// replaced, that question no longer needs host state to answer -- so doctor can answer it at setup
+			// rather than leaving the operator to meet it as a public refusal on a live job.
+			secretNames: [...new Set(triggers.filter((t) => t.run.secrets !== undefined).flatMap((t) => Object.keys(t.run.secrets)))].sort(),
 			// Issue #242: every local run.folder, CANONICALIZED the way the scoped-limits matcher
 			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so
 			// the unreferenced-scope advisory compares like with like across spelling variants.

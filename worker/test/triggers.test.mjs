@@ -981,6 +981,30 @@ test("a run.secrets key that is not an environment variable name is refused", ()
 	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["_X9", "db_url"]);
 });
 
+test("__proto__ as a run.secrets key is refused, because it is the one name that cannot be carried", () => {
+	// It passes ENV_NAME and is in no reserved set, and every hop after this one assigns with `=` into a
+	// plain object, where it hits Object.prototype's setter and does nothing. Left unrefused, the resolver
+	// runs against the operator's vault and the container still gets no variable, on a clean exit: the
+	// silent no-op every other check in this validator exists to refuse.
+	// JSON.parse, NOT an object literal. Written `{ __proto__: "op://a/b/c" }` this sets the PROTOTYPE, so
+	// Object.keys is empty and the file refuses as "run.secrets is empty" -- a green test for the wrong
+	// reason, which is the trap this test is about in the first place. JSON.parse makes it an own property,
+	// JSON.stringify preserves it, and that is the path a real triggers file takes.
+	const protoSecrets = JSON.parse(String.raw`{"__proto__":"op://a/b/c"}`);
+	assert.deepEqual(Object.keys(protoSecrets), ["__proto__"], "the fixture must carry an OWN __proto__ key");
+	assert.throws(
+		() => parse([withRun(LABEL, { secrets: protoSecrets })]),
+		(e) => isConfigError(e) && /__proto__/.test(e.message) && /cannot be carried/.test(e.message),
+	);
+	// The mechanism itself, so the reason for the refusal is pinned and not just its existence. A literal
+	// object with a `__proto__` key sets the PROTOTYPE, which is why the fixture above goes through
+	// JSON.parse the way a real triggers file does.
+	const carrier = {};
+	carrier.__proto__ = "vault-value";
+	assert.equal(Object.hasOwn(carrier, "__proto__"), false, "assignment is swallowed by the prototype setter");
+	assert.equal(Object.keys(JSON.parse('{"__proto__":"x"}')).length, 1, "but JSON.parse makes it an own property, so it reaches the validator");
+});
+
 test("a run.secrets key the worker sets itself is refused, from every set and derived from the table", () => {
 	// Derived, never retyped: a forge added to FORGES later stays covered without a second edit here.
 	// FORGE_HOST_VARS is the one that was missing when this was first designed -- `hostVar` is a separate

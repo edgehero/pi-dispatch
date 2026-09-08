@@ -301,13 +301,14 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    An agent handed a credential often persists it to make its next command simpler, and on a local job that
    `.env` lands in your real repository. Nothing scans for it. `pi-dispatch doctor` warns when a local
    trigger binds secrets; keep those folders out of anything you push.
-4. **You cannot bind your provider's own credential variable.** The container env is a closed set the
-   worker builds, and it writes the provider key before it writes your secrets, so a trigger naming
+4. **You cannot bind your provider's own credential variable.** The worker writes the provider key into
+   the container before it writes your secrets, so a trigger naming
    `ANTHROPIC_API_KEY` (or `GEMINI_API_KEY` for `google`, or whichever variable pi reads for the provider
    the job runs on) would replace the operator's credential with the trigger's, on every job of that
    trigger. It is refused before anything spends, as `secret-name-reserved`, and the refusal names the
-   variable. This covers every variable pi reads for that provider whether or not it is set on the host,
-   including the OAuth token variable, which pi reads first. The names on your `PI_FORWARD_ENV` list are
+   variable. This covers every variable pi reads for that provider whether or not it is set on the host. For
+   `anthropic`, the only provider at the pinned pi with more than one, that includes
+   `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your `PI_FORWARD_ENV` list are
    reserved the same way, for the same reason. Another provider's variable is fine: an `anthropic` job may
    bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
 5. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`

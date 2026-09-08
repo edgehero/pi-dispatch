@@ -200,8 +200,8 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * The env variable names a trigger may NOT bind, and why each set is here.
  *
  * These are the STATICALLY KNOWABLE half. `parseTriggers` is pure, fs-free and env-free, so it cannot see
- * the resolved provider's credential variable names (they come from `findEnvKeys(provider, hostEnv)`) or
- * the deployment's `PI_FORWARD_ENV` list. Those two are refused PRE-SPEND in the processor, where both are
+ * the resolved provider's credential variable names (they depend on which provider the job runs on, which
+ * is settings state) or the deployment's `PI_FORWARD_ENV` list. Those two are refused PRE-SPEND in the processor, where both are
  * in hand -- the same load-time / deployment-state split `run.resume` already makes against
  * `PI_SESSIONS_DIR`. Refusing here what can be answered here keeps the file's own mistakes in the file's
  * own error.
@@ -944,6 +944,17 @@ function validateSecrets(run, at, path) {
 	for (const name of names) {
 		if (!ENV_NAME.test(name)) {
 			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
+		}
+		// `__proto__` passes ENV_NAME and is in no reserved set, and it is the one name that cannot survive the
+		// journey: `JSON.parse` gives it as an own property and the spread below preserves it, but every later
+		// hop assigns with `=` into a plain object (`secrets[name]` in secrets.mjs, `env[name]` in
+		// env-allowlist.mjs), where it hits `Object.prototype`'s setter and does nothing at all. The resolver
+		// still runs, so the operator's vault is read for a value the container never receives, and the job
+		// proceeds to a clean exit with the variable unset: the silent no-op this whole feature refuses
+		// everywhere else. Refused here rather than repaired downstream, because a name that cannot be carried
+		// is a fact about the file, and the file is the reviewed artifact.
+		if (name === "__proto__") {
+			throw configError(`${at}: run.secrets key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
 		}
 		if (RESERVED_ENV_NAMES.has(name)) {
 			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is a variable the worker sets itself -- the job container would receive the worker's value, not this trigger's, and the trigger would look like it worked: ${path}`);

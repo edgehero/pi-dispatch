@@ -430,16 +430,21 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "secret-profile-ambiguous", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
-		if (resolved.reserved) {
-			// A key the worker itself writes, and one parseTriggers could not have caught: the provider
-			// credential's variable names depend on this job's resolved provider and on what this host has set,
+		if (resolved.reserved !== undefined) {
+			// A key the worker itself writes OR that pi reads for this job's provider, and one parseTriggers
+			// could not have caught: which variables the provider uses depends on this job's resolved provider,
 			// and PI_FORWARD_ENV is an operator env list. Both are deployment state, so this is the same
 			// load-time / pre-spend split run.resume makes against PI_SESSIONS_DIR.
 			//
-			// It matters most in the direction that is hardest to see: buildContainerEnv writes the provider
-			// credential BEFORE this feature's values, so a trigger binding ANTHROPIC_API_KEY would silently
-			// redirect which credential every job of that trigger spends.
-			await comment(job, `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, and the worker sets that variable itself for every job. The container would receive the worker's value rather than this trigger's, and the trigger would look like it worked. Rename it in the triggers file. Not run.`);
+			// TWO failures, opposite in direction, which is why the message names neither (issue #309):
+			//   - the worker WRITES the name: buildContainerEnv assigns the provider credential and
+			//     PI_FORWARD_ENV before this feature's values, so the trigger's value replaces the operator's
+			//     and every job of that trigger spends the trigger author's key;
+			//   - the worker does NOT write the name but pi READS it first: the OAuth token variable is
+			//     deliberately never written (apiKeyVariable skips it), so a trigger binding it lands beside
+			//     the operator's key and outranks it in pi's own precedence.
+			// The old message asserted the first for both, which is exactly backwards for the second.
+			await comment(job, `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`);
 			// The variable NAME only. It is the operator's own choice of name, not payload, and naming it is what
 			// makes the refusal actionable -- but the REFERENCE behind it never appears.
 			log("refused_secret_name_reserved", { kind: job.kind ?? null, name: resolved.reserved });

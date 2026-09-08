@@ -2271,9 +2271,10 @@ test("doctor: a VALID triggers file says nothing about parsing -- the check is s
  * or readTriggerFacts swallows the refusal to zeroes and every assertion below passes for the wrong reason
  * -- the trap the resume fixture above documents.
  */
-function secretsTriggersFile({ profile, kind = "github", folder } = {}) {
+function secretsTriggersFile({ profile, kind = "github", folder, names = ["STRIPE_KEY"] } = {}) {
 	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-secrets-")), "triggers.json");
-	const run = { kind, flow: "deploy", secrets: { STRIPE_KEY: "op://ci/stripe/api-key" }, ...(profile ? { secretsProfile: profile } : {}) };
+	const secrets = Object.fromEntries(names.map((n) => [n, `op://ci/${n.toLowerCase()}/value`]));
+	const run = { kind, flow: "deploy", secrets, ...(profile ? { secretsProfile: profile } : {}) };
 	const on = kind === "local" ? { type: "cron", id: "nightly", pattern: "0 3 * * *" } : { type: "label", any: ["pi:deploy"] };
 	if (kind === "local") Object.assign(run, { folder: folder ?? "/srv/site", task: "ship it" });
 	writeFileSync(path, JSON.stringify({ triggers: [{ on, run }] }));
@@ -2301,6 +2302,56 @@ test("doctor: with the profile declared, the check passes and the table is print
 	const hit = checks.find((c) => /bind secrets/.test(c.label));
 	assert.equal(hit.ok, true);
 	assert.ok(checks.some((c) => /Secret resolver profiles declared: prod -> \/opt\/pi\/resolve\.sh/.test(c.label)));
+});
+
+test("doctor: a trigger binding a variable pi reads for the provider FAILS at setup, not on a live job", { skip: skipNoPi }, async () => {
+	// Issue #309. The worker refuses such a trigger pre-spend, and before this the operator's first
+	// notice was that public refusal on a real delivery. The question is answerable here only BECAUSE the
+	// gate stopped depending on host state: the presence-filtered version's answer changed with whichever
+	// machine doctor happened to run on.
+	const env = {
+		PI_PROVIDER: "google",
+		GEMINI_API_KEY: "sk-x",
+		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["GEMINI_API_KEY"] }),
+		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
+	};
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /variable pi reads for/.test(c.label));
+	assert.ok(hit, "the finding must exist at all");
+	assert.equal(hit.ok, false);
+	assert.match(hit.label, /GEMINI_API_KEY/, "it names the variable the operator has to rename");
+	assert.match(hit.fix, /secret-name-reserved/, "and the refusal they would otherwise have met");
+});
+
+test("doctor: the provider clash check follows the PROVIDER, so another provider's variable passes", { skip: skipNoPi }, async () => {
+	// The same bound the gate keeps: an anthropic deployment may bind GEMINI_API_KEY for a flow that talks
+	// to Gemini itself. A check that refused it would be doctor inventing a namespace the project does not
+	// own, and would fail a deployment the worker runs happily.
+	const env = {
+		PI_PROVIDER: "anthropic",
+		ANTHROPIC_API_KEY: "sk-x",
+		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["GEMINI_API_KEY"] }),
+		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
+	};
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /variable pi reads for/.test(c.label));
+	assert.equal(hit.ok, true);
+	assert.match(hit.label, /No trigger binds/);
+});
+
+test("doctor: the OAuth variable clashes too, which is the half no host env would have revealed", { skip: skipNoPi }, async () => {
+	// ANTHROPIC_OAUTH_TOKEN is set on few hosts and the worker never writes it, so a host-state check could
+	// not have found this one at all. pi reads it BEFORE the API key, so a trigger binding it wins.
+	const env = {
+		PI_PROVIDER: "anthropic",
+		ANTHROPIC_API_KEY: "sk-x",
+		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["ANTHROPIC_OAUTH_TOKEN"] }),
+		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
+	};
+	const checks = await collectChecks(env, secretsSeams());
+	const hit = checks.find((c) => /variable pi reads for/.test(c.label));
+	assert.equal(hit.ok, false);
+	assert.match(hit.label, /ANTHROPIC_OAUTH_TOKEN/);
 });
 
 test("doctor: a garbled PI_SECRET_PROFILES is REPORTED, never thrown", async () => {

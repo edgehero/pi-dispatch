@@ -29,6 +29,24 @@ function fakeSpawn(calls, plan) {
 }
 
 const PROFILES = { default: "/opt/pi/resolve.sh" };
+
+// Clear a set of variables for the body of a test. The reserved set no longer reads the environment at
+// all, so these tests pass either way TODAY -- but a MUTATION check does not: revert the gate to the old
+// presence-filtered form and, on any machine exporting ANTHROPIC_API_KEY or GEMINI_API_KEY, pi's
+// getProviderEnvValue answers from process.env, the old set is non-empty, and all three regression tests
+// go green against the very code they exist to refuse. A regression test whose mutation is decided by the
+// developer's shell is not a regression test.
+function withoutEnv(names) {
+	const saved = Object.fromEntries(names.map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
+	for (const n of names) delete process.env[n];
+	return () => {
+		for (const [n, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[n];
+			else process.env[n] = v;
+		}
+	};
+}
+const PROVIDER_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "GEMINI_API_KEY", "OPENAI_API_KEY", "HF_TOKEN"];
 const resolver = (plan = {}, over = {}) => {
 	const calls = [];
 	const fn = makeSecretsResolver({
@@ -270,8 +288,10 @@ test("an unarmed job is not this module's business -- secretsArmed is what the g
 test("a key matching the RESOLVED provider's credential variable is refused, and never spawns", async () => {
 	// The sharpest one. buildContainerEnv writes the provider credential before this feature's values, so
 	// binding ANTHROPIC_API_KEY would silently redirect which credential every job of that trigger spends.
-	// parseTriggers cannot catch it: the name comes from findEnvKeys(provider, hostEnv), which is this
-	// host's state, and that validator is pure, fs-free and env-free by construction.
+	// parseTriggers cannot catch it: which variables the provider uses depends on the job's resolved
+	// provider, which is settings state, and that validator is pure, fs-free and env-free by construction.
+	// `hostEnv` here is scenery, not the mechanism: the set no longer depends on it (issue #309), which the
+	// sibling test below asserts with an empty one.
 	const fn = makeSecretsResolver({
 		envProfiles: PROFILES,
 		realExecutablePath: (p) => p,
@@ -316,33 +336,53 @@ test("the provider's credential variable is reserved when the credential comes f
 	// findEnvKeys, which returns undefined there, and `?? []` made the empty set silent: the trigger's value
 	// was written after the credential in buildContainerEnv and every job of that trigger spent the trigger
 	// author's key. hostEnv is empty here precisely to model that deployment.
-	const { fn, calls } = resolver({}, { hostEnv: {} });
-	const r = await fn(job({ ANTHROPIC_API_KEY: "op://ci/anthropic/key" }, { provider: "anthropic" }));
-	assert.equal(r.reserved, "ANTHROPIC_API_KEY");
-	assert.equal(calls.length, 0, "refused before any resolver spawn: the refusal is free");
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const { fn, calls } = resolver({}, { hostEnv: {} });
+		const r = await fn(job({ ANTHROPIC_API_KEY: "op://ci/anthropic/key" }, { provider: "anthropic" }));
+		assert.equal(r.reserved, "ANTHROPIC_API_KEY");
+		assert.equal(calls.length, 0, "refused before any resolver spawn: the refusal is free");
+	} finally {
+		restore();
+	}
 });
 
 test("the provider's OAuth variable is reserved too, which never needed auth.json to be a hole", async () => {
 	// ANTHROPIC_OAUTH_TOKEN is set on no ordinary host, so a presence-filtered set never contained it, and
 	// pi reads it BEFORE ANTHROPIC_API_KEY. A trigger binding it outranked the operator's own key on the
 	// pure-env path as well: the credential was written, and then shadowed by a name that wins in pi.
-	const { fn, calls } = resolver({}, { hostEnv: { ANTHROPIC_API_KEY: "sk-ant-operator" } });
-	const r = await fn(job({ ANTHROPIC_OAUTH_TOKEN: "op://ci/anthropic/token" }, { provider: "anthropic" }));
-	assert.equal(r.reserved, "ANTHROPIC_OAUTH_TOKEN");
-	assert.equal(calls.length, 0);
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const { fn, calls } = resolver({}, { hostEnv: { ANTHROPIC_API_KEY: "sk-ant-operator" } });
+		const r = await fn(job({ ANTHROPIC_OAUTH_TOKEN: "op://ci/anthropic/token" }, { provider: "anthropic" }));
+		assert.equal(r.reserved, "ANTHROPIC_OAUTH_TOKEN");
+		assert.equal(calls.length, 0);
+	} finally {
+		restore();
+	}
 });
 
 test("the reserved set follows the job's provider, not the worker's default", async () => {
 	// Every variable pi reads for the resolved provider, and only those. A google job may not bind
 	// GEMINI_API_KEY; an anthropic job may, because pi does not read it for anthropic.
-	const { fn } = resolver({}, { hostEnv: {} });
-	assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "google" }))).reserved, "GEMINI_API_KEY");
-	assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "anthropic" }))).reserved, undefined);
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const { fn } = resolver({}, { hostEnv: {} });
+		assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "google" }))).reserved, "GEMINI_API_KEY");
+		assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "anthropic" }))).reserved, undefined);
+	} finally {
+		restore();
+	}
 });
 
 test("a job with no provider reserves the PI_FORWARD_ENV half and refuses nothing else", async () => {
 	// providerKeyCandidates(undefined) is [], not a throw and not a default. There is no provider to protect
 	// a credential for, and inventing one here would refuse triggers on a shape the gate cannot reason about.
+	//
+	// Honest about what this pins: it passes under the OLD gate too (providerKeyVars(undefined, {}) was
+	// undefined, and `?? []` made the same empty set), so it is not a regression guard for issue #309. It
+	// pins "does not throw" on a DI seam that index.mjs makes unreachable on the wired path, where
+	// `provider: job.data.provider ?? settings.provider` always fills it.
 	const { fn } = resolver({}, { hostEnv: {}, forwardEnv: ["MY_CUSTOM_KEY"] });
 	assert.equal((await fn(job({ ANTHROPIC_API_KEY: "op://ci/a/key" }, { provider: undefined }))).reserved, undefined);
 	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://ci/c/key" }, { provider: undefined }))).reserved, "MY_CUSTOM_KEY");
