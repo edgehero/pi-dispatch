@@ -138,18 +138,26 @@ test("a local-folder job skips minting and branch-check entirely", async () => {
 	assert.ok(!calls.includes("branch-check"), "no branch check for a non-git folder");
 });
 
-test("an empty minted token refuses as configError BEFORE reserveBudget -- no cap slot burned", async () => {
+test("an empty minted token refuses as a config POLICY return before reserveBudget -- no cap slot burned", async () => {
+	// Issue #310: a config-tagged error is a determinate refusal, so it RETURNS (CONST-RETRY-INFRA-ONLY).
+	// It used to propagate, which index.mjs wrapped in UnrecoverableError: one attempt either way, but the
+	// record said `failed` with a null reason and the raw message became the queue's failedReason.
 	const redis = fakeRedis();
 	const { deps: d, calls } = deps({ redis, mintToken: async () => "" });
-	await assert.rejects(() => runJob(ghJob, d), (e) => e.piDispatchConfig === true);
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "config-refused");
+	assert.equal(r.budgetReserved, false);
 	assert.equal(redis.incrCalls, 0, "reserveBudget never reached -- no slot burned on a bad token");
+	assert.equal(redis.decrCalls, 0, "and nothing to give back, so no release either");
 	assert.ok(!calls.includes("run-container"), "an empty credential must never spend");
 });
 
-test("a whitespace-only minted token is also refused as configError", async () => {
+test("a whitespace-only minted token is also refused as a config policy return", async () => {
 	const redis = fakeRedis();
 	const { deps: d } = deps({ redis, mintToken: async () => "   " });
-	await assert.rejects(() => runJob(ghJob, d), (e) => e.piDispatchConfig === true);
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "config-refused");
 	assert.equal(redis.incrCalls, 0, "whitespace is empty -- no slot burned");
 });
 
@@ -208,7 +216,8 @@ test("a flagged local job whose mint rejects (config-tagged) propagates BEFORE r
 			throw e;
 		},
 	});
-	await assert.rejects(() => runJob(flaggedLocalJob, d), (e) => e.piDispatchConfig === true);
+	const r = await runJob(flaggedLocalJob, d);
+	assert.equal(r.reason, "config-refused");
 	assert.equal(redis.incrCalls, 0, "reserveBudget never reached -- no slot burned on a broken auth source");
 	assert.ok(!calls.includes("run-container"), "no container, no provider spend");
 });
@@ -216,9 +225,83 @@ test("a flagged local job whose mint rejects (config-tagged) propagates BEFORE r
 test("a flagged local job with an empty minted token is refused by the empty-credential guard", async () => {
 	const redis = fakeRedis();
 	const { deps: d, calls } = deps({ redis, mintToken: async () => "" });
-	await assert.rejects(() => runJob(flaggedLocalJob, d), (e) => e.piDispatchConfig === true);
+	assert.equal((await runJob(flaggedLocalJob, d)).reason, "config-refused");
 	assert.equal(redis.incrCalls, 0, "no slot burned on an empty credential");
 	assert.ok(!calls.includes("run-container"), "an empty credential must never reach a paid run");
+});
+
+// --- Issue #310: a provider misconfiguration is a determinate refusal, not an infra failure ---
+
+test("an unconfigured provider refuses BEFORE the mint, the clone and both reserves", async () => {
+	// The gate sits with the free determinate gates, which is further than the issue asked for: it is ahead
+	// of the image probe, the mint, the clone, the token-cap read and the reserve. Asserting the ABSENCE of
+	// each is what proves the placement; the outcome string alone would pass with the gate anywhere.
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, checkProviderCredential: () => ({ ok: false, message: 'provider anthropic has no configured credential in the worker environment' }) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "provider-unconfigured");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0, "no job-count slot burned");
+	assert.equal(redis.decrCalls, 0, "and nothing reserved means nothing to release");
+	assert.ok(!calls.some((c) => c.startsWith("mint:")), "must not mint a credential it will not use");
+	assert.ok(!calls.includes("prepare"), "must not clone");
+	assert.ok(!calls.includes("run-container"), "must not spend");
+});
+
+test("the unconfigured-provider refusal publishes no filesystem path", async () => {
+	// credentialFromPiAuth's messages name auth.json's location, and `comment` posts publicly on the issue.
+	// The message rides the LOG, which is host-side; the comment is a fixed sentence.
+	let posted = "";
+	const { deps: d } = deps({
+		checkProviderCredential: () => ({ ok: false, message: 'no credential for provider "anthropic": not in the worker environment, and no pi login at /Users/someone/.pi/agent/auth.json' }),
+		comment: async (_j, t) => {
+			posted = t;
+		},
+	});
+	await runJob(ghJob, d);
+	assert.equal(/\/Users\/|auth\.json|\.pi\//.test(posted), false, "no host path may be published");
+	assert.match(posted, /doctor/, "it must point somewhere the operator can look");
+});
+
+test("a config throw that lands AFTER the reserve releases BOTH ledgers and returns policy, never retried", async () => {
+	// The backstop half. The gate above catches the provider case for free, but any other config-tagged
+	// throw can still land post-reserve (an unknown forge kind inside buildContainerEnv, a prepare-time
+	// refusal), and those kept their slot forever: the catch released only InfraRetry/container-never-started
+	// and everything else fell to a bare rethrow. No container started, so refunding is right, and it is the
+	// same both-or-neither pair as container-never-started.
+	const redis = keyedRedis();
+	const { deps: d } = deps({
+		redis,
+		scopedCaps: SCOPED,
+		runContainer: async () => {
+			const e = new Error("githubToken set for an unknown forge kind");
+			e.piDispatchConfig = true;
+			throw e;
+		},
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy", "a determinate refusal RETURNS (CONST-RETRY-INFRA-ONLY)");
+	assert.equal(r.reason, "config-refused");
+	assert.equal(r.budgetReserved, false, "the slot was given back, so the record must not claim one is held");
+	// The STORE, not `get`: keyedRedis's `get` is a stub for the token-cap read and always answers null.
+	assert.equal(redis.store.get(G_DAY), 0, "the global ledger is back where it started: INCR then DECR");
+	assert.equal(redis.store.get(S_DAY), 0, "and so is the scoped one: both or neither");
+});
+
+test("a NON-config throw after the reserve still keeps its slot and still throws", async () => {
+	// The boundary. Only the tagged class is a policy return; an untagged throw is our bug or a real fault
+	// and index.mjs turns it into an UnrecoverableError, exactly as before. A classifier that swallowed
+	// everything would convert every defect in this function into a silent clean refusal.
+	const redis = fakeRedis();
+	const { deps: d } = deps({
+		redis,
+		runContainer: async () => {
+			throw new Error("container boom");
+		},
+	});
+	await assert.rejects(() => runJob(ghJob, d), /container boom/);
+	assert.equal(redis.decrCalls, 0, "an untagged throw releases nothing");
 });
 
 test("container-never-started (spawn fault) after reserving RELEASES the slot, still throws InfraRetry", async () => {

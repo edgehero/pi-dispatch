@@ -627,6 +627,26 @@ test("staged packages: a manifest that goes unreadable after boot keeps the last
 	}
 });
 
+test("the free credential gate resolves against the SAME inputs buildContainerEnv will use", { skip }, async () => {
+	// Issue #310. The gate is a probe of the same resolution the container builder performs, so a job it
+	// admits is a job the builder can build. If the two read different env or a different authFromPi, the
+	// gate would pass a job the container then refuses (with the budget reserved, which is the whole defect)
+	// or refuse one that would have run. Driven rather than read: the gate is invoked and its verdict flips
+	// with the env, against the SAME `hostEnv` object the container factory was handed.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const withKey = await runStart({ env: { ANTHROPIC_API_KEY: "sk-ant-x" }, makeAuth, makeHost: () => fakeHost() });
+	const gate = withKey.deps.checkProviderCredential;
+	assert.equal(typeof gate, "function", "the processor is wired with the gate at all");
+	assert.deepEqual(gate({ provider: "anthropic" }), { ok: true }, "a configured provider is admitted");
+	assert.equal(withKey.runContainerCalls[0].hostEnv.ANTHROPIC_API_KEY, "sk-ant-x", "and the builder reads the same env");
+
+	// No credential anywhere: refused, and the message is carried for the LOG, never for the comment.
+	const without = await runStart({ env: { PI_AUTH_FROM_PI: "0" }, makeAuth, makeHost: () => fakeHost() });
+	const verdict = without.deps.checkProviderCredential({ provider: "anthropic" });
+	assert.equal(verdict.ok, false);
+	assert.match(verdict.message, /no configured credential/);
+});
+
 test("the secrets resolver and the container builder are handed the SAME host env and forward list", { skip }, async () => {
 	// Issue #309. `hostEnv` is what the resolver SUBPROCESS runs in; the same `env` is what buildContainerEnv
 	// reads to assemble the container. They were not the same object: makeSecretsResolver was constructed

@@ -50,7 +50,11 @@ export function makeRunContainer({
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
-		// the provider is unconfigured -- the processor turns that into a pre-spend refusal.
+		// the provider is unconfigured, which the processor turns into a policy refusal that refunds the
+		// reserve. That sentence was aspirational until issue #310: the processor did not read the
+		// `piDispatchConfig` tag at all, so the throw fell through to a bare rethrow with the budget kept.
+		// The common case no longer reaches here either, because the processor probes the same resolution
+		// among its free gates, ahead of the mint and the clone.
 		const env = buildContainerEnv({
 			provider: job.provider,
 			model: job.model,

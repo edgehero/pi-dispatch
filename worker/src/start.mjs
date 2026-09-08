@@ -36,6 +36,7 @@ import { makeBackendRegistry, reapAll } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND } from "./backends.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
+import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { makeSecretsResolver } from "./secrets.mjs";
 import { buildRecord, makeFindPreviousRun, makeLogReaper, makeLogSink, makeRecordWriter, sanitizeJobId } from "./run-history.mjs";
 import { makeRunMirror } from "./run-mirror.mjs";
@@ -863,6 +864,29 @@ export async function startWorker(
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
 			// layer, because the receiver's single-file :ro mount pins a dead inode until restart.
 			checkOnceSpent: makeCheckOnceSpent({ triggersPath: onceTriggersFile }),
+			// Issue #310. The free provider-credential gate, bound from EXACTLY the values the container builder
+			// is handed, and asserted to be the same by a wiring test. A gate that resolves against different
+			// inputs than the writer is the divergence class this whole cluster of issues is about: it would pass
+			// a job the container then refuses, or refuse one the container would have run. `agentDir` is
+			// defaulted by both, from the same `hostEnv`.
+			//
+			// A processor dep and NOT a backend bundle member: the bundle is a closed set about how a venue runs
+			// a container, and this is a question about the deployment, asked before any venue is chosen.
+			//
+			// A PROBE: whatever it resolves is dropped on the floor. The credential itself is read where it always
+			// was, inside buildContainerEnv, so no live key is ever in scope in the processor.
+			checkProviderCredential: (job) => {
+				try {
+					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv });
+					return { ok: true };
+				} catch (error) {
+					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
+					// must not become a policy refusal on the operator's issue: it rethrows into runJob's catch, which
+					// classifies it the way it always did.
+					if (error?.piDispatchConfig !== true) throw error;
+					return { ok: false, message: error.message };
+				}
+			},
 			// Issue #230. The same file and the same fail-open posture, but its own mtime-cached read: this one
 			// asks whether the AUTHORED entry declares wait conditions the job arrived without, which is how a
 			// service below the version floor turns a wait into a paid run nothing can tell from a correct

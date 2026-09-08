@@ -58,6 +58,13 @@ export async function runJob(job, deps) {
 		// Issue #230. Admit-everything by default, like checkOnceSpent above and for its reason: an
 		// unwired seam must not refuse, and the wiring is what turns the check on.
 		checkWaitSkew = async () => ({ ok: true }),
+		// () => { ok } | { message }. Issue #310. Resolves this deployment's provider credential the way
+		// buildContainerEnv will, and answers whether it exists AT ALL, so an unconfigured provider refuses
+		// here rather than inside runContainer with the budget already reserved. Admit-everything by default,
+		// like the two above and for their reason. A PROBE, deliberately: it discards whatever it resolves and
+		// the real read happens where it always did, because threading a live credential through the processor
+		// would put it in scope for every log line and record between here and the container.
+		checkProviderCredential = () => ({ ok: true }),
 		// REQ-EGRESS-ALLOWLIST. Default admits everything, so a wiring that omits it behaves exactly as a
 		// deployment with no egress policy does -- which is also what the real factory returns when unarmed.
 		egressPreflight = async () => ({ ok: true }),
@@ -211,6 +218,28 @@ export async function runJob(job, deps) {
 			// same class as the image ref below.
 			log("refused_backend_unblessed", { backend: job.backend, blessed: blessedBackends });
 			return { outcome: "policy", reason: "backend-unblessed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
+		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
+		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
+		// pi's auth.json. So it goes here, with the other free gates, which is further than issue #310 asked
+		// for: ahead of the image probe, the mint, the clone, the token-cap read and both reserves. That is
+		// CONST-BUDGET-BEFORE-TOKENS in its own words, "every gate that costs nothing runs before every gate
+		// that costs something".
+		//
+		// It used to be discovered inside runContainer, where buildContainerEnv resolves the credential for
+		// real -- AFTER both reserves -- and the throw fell through this function's catch to a bare rethrow.
+		// The catch now classifies that too (below), so this gate is the cheap path and that is the backstop;
+		// neither alone is enough, because the backstop cannot un-mint a token or un-clone a repository.
+		//
+		// The refusal names no path. `credentialFromPiAuth`'s messages carry auth.json's location, `comment`
+		// posts publicly on the issue, and the reason an operator needs is the same either way: their
+		// deployment has no usable provider credential and `doctor` will say exactly which variable.
+		const credential = await checkProviderCredential(job);
+		if (!credential.ok) {
+			await comment(job, "Refused: this deployment has no usable credential for the provider this job runs on, so no container was started and nothing was spent. Ask the operator to run `pi-dispatch doctor`. Not run.");
+			log("refused_provider_unconfigured", { provider: job.provider ?? null, message: credential.message });
+			return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
@@ -668,6 +697,35 @@ export async function runJob(job, deps) {
 				throw new InfraRetry(`unknown container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 		}
 	} catch (e) {
+		// A CONFIG-tagged throw is a determinate policy refusal wearing an exception, and issue #310 is the
+		// bill for treating it as neither. `CONST-RETRY-INFRA-ONLY` says a determinate refusal RETURNS and only
+		// infrastructure THROWS; every other gate in this function obeys that, and this class did not, because
+		// nothing here read the tag that `cli.mjs` and `doctor` both already read.
+		//
+		// What it actually cost, corrected against the issue text: it was NOT retried. `index.mjs` wraps every
+		// non-InfraRetry throw in BullMQ's `UnrecoverableError`, so the job failed once. What it did cost is
+		// the reserve, kept and never refunded, on a fault an operator has to fix by hand -- so every later
+		// delivery took another slot out of the same daily cap and the same scope, and the record said
+		// `outcome: "failed"` with a null reason, which the panel paints red beside real infrastructure faults
+		// and insights buckets as a failure. A determinate refusal that reads as an outage is the diagnosis
+		// this project exists to make legible.
+		//
+		// Refunding is right BECAUSE no container started: identical to `container-never-started`, and the
+		// same both-or-neither pair, under the same `reserved`/`scopedReserved` guards so it still cannot
+		// double-release. The gate above catches the provider case for free, before the mint and the clone;
+		// this is the backstop for every other config throw that can still land here (an unknown forge kind in
+		// `buildContainerEnv`, a prepare-time refusal), which would otherwise keep the same slot silently.
+		if (e?.piDispatchConfig === true) {
+			if (reserved) await releaseBudget(redis, { caps, now });
+			if (scopedReserved && scopedCaps) await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+			// A FIXED sentence. The message can name a host path (`credentialFromPiAuth` puts `auth.json`'s
+			// location in three of its refusals), and `comment` posts publicly on the issue -- the restraint
+			// every other refusal in this function keeps. The message goes to the LOG, which is host-side.
+			await comment(job, "Refused: this deployment is misconfigured, so the job could not be started. Nothing was spent. Ask the operator to run `pi-dispatch doctor`. Not run.");
+			log("refused_config", { kind: job.kind ?? null, message: e.message });
+			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
 		// A spawn fault (docker daemon down / binary missing) reserved a slot but never started a
 		// container, so nothing was spent -- give the slot back before the retry. Every other throw
 		// here (exit-1 infra, unknown exit) means the container ran and legitimately spent its slot,

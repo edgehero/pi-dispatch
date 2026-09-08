@@ -245,7 +245,9 @@ function resolveEnvName(provider) {
  * run.github).
  *
  * Throws if the provider is not configured -- a deterministic misconfiguration the caller maps to
- * a pre-spend refusal, never a launched-then-failed container.
+ * a pre-spend refusal, never a launched-then-failed container. Both halves of that are real as of issue
+ * #310: the processor probes this resolution among its free gates, and classifies the throw if one still
+ * reaches it.
  *
  * `packagePaths` is the operator-staged pi package set for THIS job: already-resolved absolute
  * CONTAINER paths under the :ro overlay, empty for a job whose trigger opted OUT (or when nothing is staged).
@@ -256,7 +258,8 @@ function resolveEnvName(provider) {
 export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
-	// neither source yields one, which the processor turns into a pre-spend refusal.
+	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
+	// (issue #310); the same call is made by its free credential gate, before anything is reserved at all.
 	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv });
 
 	const env = {
