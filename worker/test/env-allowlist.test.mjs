@@ -382,6 +382,74 @@ test("an auth.json api key is NEVER injected under the OAuth token variable, hos
 	}
 });
 
+test("a pi login stored as a command or a variable reference is refused, not forwarded", { skip }, () => {
+	// pi reads auth.json through `resolveConfigValue`: a leading "!" runs the rest as a shell command and
+	// takes stdout, "$VAR" interpolates. An ENV variable is read raw, through no such grammar, so forwarding
+	// the source text hands the container a string that is not a key. doctor saw a non-empty string and went
+	// green, so this was a container spent per job with nothing to show. Refusing costs nothing.
+	for (const key of ["!op read op://vault/pi/anthropic --no-newline", "$ANTHROPIC_API_KEY", "${SOME_VAR}", "sk-$$-literal"]) {
+		assert.throws(
+			() => buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root" }, authFromPi: true, readFile: authReader({ anthropic: { type: "api_key", key } }) }),
+			(e) => e.piDispatchConfig === true && /command or a variable reference/.test(e.message),
+			`refused: ${key}`,
+		);
+	}
+	// The other direction: a literal key with neither character still resolves.
+	const env = buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root" }, authFromPi: true, readFile: authReader({ anthropic: { type: "api_key", key: "sk-ant-plain" } }) });
+	assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-plain");
+});
+
+test("a non-string key in auth.json is refused instead of coerced into the container env", { skip }, () => {
+	// pi validates no schema on auth.json, so a hand edit can leave a number, an array or an object here.
+	// The old guard was `!cred.key`, which all three pass: an object reached a paid container as
+	// `-e ANTHROPIC_API_KEY=[object Object]`.
+	for (const key of [{ a: 1 }, ["sk-x"], 12345, true]) {
+		assert.throws(
+			() => buildContainerEnv({ ...authBase, hostEnv: { HOME: "/root" }, authFromPi: true, readFile: authReader({ anthropic: { type: "api_key", key } }) }),
+			(e) => e.piDispatchConfig === true && /does not hold a string API key/.test(e.message),
+			`refused: ${JSON.stringify(key)}`,
+		);
+	}
+});
+
+test("a credential whose companion settings cannot reach the container is refused, unless they are forwarded", { skip }, () => {
+	// `cred.env` is provider CONFIG, not a variable-name hint. pi's cloudflare auth returns NO auth at all
+	// without CLOUDFLARE_ACCOUNT_ID, and the container env is a closed set, so the key alone is a container
+	// spent to fail. pi does fall back to the ambient environment for these, which makes PI_FORWARD_ENV a
+	// real fix rather than a shrug, so the refusal is scoped to the names that will not arrive.
+	const login = { "cloudflare-workers-ai": { type: "api_key", key: "cf-key", env: { CLOUDFLARE_ACCOUNT_ID: "acct-1" } } };
+	assert.throws(
+		() => buildContainerEnv({ ...authBase, provider: "cloudflare-workers-ai", hostEnv: { HOME: "/root" }, authFromPi: true, readFile: authReader(login) }),
+		(e) => e.piDispatchConfig === true && /CLOUDFLARE_ACCOUNT_ID/.test(e.message) && /PI_FORWARD_ENV/.test(e.message),
+	);
+	// Forwarded and present on the host: the deployment already works, so nothing is refused.
+	const env = buildContainerEnv({
+		...authBase,
+		provider: "cloudflare-workers-ai",
+		hostEnv: { HOME: "/root", CLOUDFLARE_ACCOUNT_ID: "acct-1" },
+		forwardEnv: ["CLOUDFLARE_ACCOUNT_ID"],
+		authFromPi: true,
+		readFile: authReader(login),
+	});
+	assert.equal(env.CLOUDFLARE_API_KEY, "cf-key");
+	assert.equal(env.CLOUDFLARE_ACCOUNT_ID, "acct-1");
+	// Listed but absent on the host is still a refusal: PI_FORWARD_ENV only forwards what the host holds.
+	assert.throws(
+		() => buildContainerEnv({ ...authBase, provider: "cloudflare-workers-ai", hostEnv: { HOME: "/root" }, forwardEnv: ["CLOUDFLARE_ACCOUNT_ID"], authFromPi: true, readFile: authReader(login) }),
+		(e) => e.piDispatchConfig === true && /CLOUDFLARE_ACCOUNT_ID/.test(e.message),
+	);
+});
+
+test("a provider pi authenticates without a key variable is told so, not told to set one", { skip }, () => {
+	// Two facts behind one old message. doctor already splits them and says an AWS profile or an OAuth
+	// login "has no way in"; the worker said "set it in the worker environment manually" for both, which
+	// for this half is advice to do the thing doctor calls impossible. Candidates first, catalog second.
+	assert.throws(
+		() => buildContainerEnv({ ...authBase, provider: "amazon-bedrock", hostEnv: {}, authFromPi: true, readFile: authReader({ "amazon-bedrock": { type: "api_key", key: "sk-x" } }) }),
+		(e) => e.piDispatchConfig === true && /without an API-key environment variable/.test(e.message) && !/set it in the worker environment/.test(e.message),
+	);
+});
+
 test("a provider pi reads no key variable for still refuses, rather than guessing a name", { skip }, () => {
 	// The refusal this change must NOT remove. `gemini` is not a provider pi has (that is #286's other
 	// half), so there is no variable to name and a guess would inject a key nothing reads.
@@ -402,6 +470,13 @@ test("a prototype-key provider id refuses instead of coercing a name out of pi's
 	// pi looks its provider up in a plain object literal, so `__proto__` resolves up the prototype chain
 	// and hands back a non-string. providerKeyCandidates filters those out, which leaves an empty list,
 	// which is a refusal. Without that filter this would build an env key named "[object Object]".
+	//
+	// The fixture is a RAW STRING, and that is the whole test. Written as the object literal
+	// `{ __proto__: { ... } }` it sets the prototype instead of an own property, so `JSON.stringify` emits
+	// "{}", `auth.__proto__` resolves to `Object.prototype`, and the refusal arrives from the
+	// `cred.type !== "api_key"` guard three lines earlier without ever reaching the name resolution. That
+	// version passed while the string filter was deleted. `JSON.parse` of the same text DOES create an own
+	// data property, so this reaches the code the comment is about, and the assertion names the message.
 	assert.throws(
 		() =>
 			buildContainerEnv({
@@ -409,20 +484,29 @@ test("a prototype-key provider id refuses instead of coercing a name out of pi's
 				provider: "__proto__",
 				hostEnv: {},
 				authFromPi: true,
-				readFile: authReader({ __proto__: { type: "api_key", key: "sk-x" } }),
+				readFile: authReader('{"__proto__":{"type":"api_key","key":"sk-x"}}'),
 			}),
-		(e) => e.piDispatchConfig === true,
+		(e) => e.piDispatchConfig === true && /could not determine the environment variable/.test(e.message),
 	);
 });
 
-test("the variable the worker WRITES is the variable doctor NAMES, for every provider pi has", { skip }, () => {
-	// The anti-drift bolt (issue #286's lesson, applied to the write path). doctor's provider-key check and
-	// this module now share apiKeyVariable, and this asserts the shared answer against the injection that
-	// actually happens, provider by provider -- so a future edit to either side that changes the name has
-	// to change it in both, or fail here.
+test("the write path goes through the shared selection, and never lands on an OAuth variable", { skip }, () => {
+	// What this pins, stated honestly: that `resolveEnvName` routes through `apiKeyVariable`, and that the
+	// variable the credential lands under is one pi actually reads and is never a subscription login.
+	// It does NOT pin agreement with doctor: it computes the expectation with the same function the code
+	// uses, so a doctor that stopped calling `apiKeyVariable` leaves this green. `doctor.test.mjs` carries
+	// that bolt, where doctor's real output is available to compare against. CLAUDE.md's rule is to say so
+	// rather than manufacture the relation.
+	//
+	// The loop's real content is `anthropic`, the only id in pi's table with more than one candidate; for
+	// the other 33 `apiKeyVariable(c) === c[0]` trivially and the assertion degrades to "an injection
+	// happened". That is still worth running: it is the sweep that would catch a new multi-candidate
+	// provider appearing in a pi bump.
+	let multiCandidate = 0;
 	for (const id of [...piProviders(), "radius"]) {
 		const candidates = providerKeyCandidates(id);
-		if (candidates.length === 0) continue; // no key variable: doctor names none and the worker refuses
+		if (candidates.length === 0) continue; // no key variable at all: the worker refuses, tested above
+		if (candidates.length > 1) multiCandidate += 1;
 		const expected = apiKeyVariable(candidates);
 		const env = buildContainerEnv({
 			...authBase,
@@ -432,7 +516,27 @@ test("the variable the worker WRITES is the variable doctor NAMES, for every pro
 			readFile: authReader({ [id]: { type: "api_key", key: `sk-${id}` } }),
 		});
 		assert.equal(env[expected], `sk-${id}`, `${id}: injected under ${expected}`);
+		assert.ok(candidates.includes(expected), `${id}: ${expected} is a name pi reads`);
+		assert.ok(!/_OAUTH_TOKEN$/.test(expected), `${id}: ${expected} is not a subscription login`);
+		assert.equal(Object.keys(env).filter((k) => env[k] === `sk-${id}`).length, 1, `${id}: the key lands in exactly one variable`);
 	}
+	assert.equal(multiCandidate, 1, "anthropic is still the only provider whose choice is a real choice");
+});
+
+test("PI_FORWARD_ENV cannot blank the provider credential with an empty host value", { skip }, () => {
+	// The forward loop runs AFTER the credential assign, and its guard was `!== undefined`, so a name listed
+	// in PI_FORWARD_ENV and set to "" on the host overwrote a working auth.json credential with an empty
+	// string. docker-run skips `undefined` but not `""`, so the container started with `-e NAME=` and every
+	// job of that deployment spent a container to fail auth. The loop's own comment already promised this.
+	const env = buildContainerEnv({
+		...authBase,
+		provider: "google",
+		hostEnv: { HOME: "/root", GEMINI_API_KEY: "" },
+		forwardEnv: ["GEMINI_API_KEY"],
+		authFromPi: true,
+		readFile: authReader({ google: { type: "api_key", key: "sk-from-pi" } }),
+	});
+	assert.equal(env.GEMINI_API_KEY, "sk-from-pi");
 });
 
 test("a gitlab job's token lands in GITLAB_TOKEN/GL_TOKEN and NEVER in the github names", () => {

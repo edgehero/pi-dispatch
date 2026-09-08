@@ -41,6 +41,18 @@ test("apiKeyVariable returns null for an empty list, which is the caller's cue t
 	assert.equal(apiKeyVariable([]), null);
 });
 
+test("provider-key.mjs imports nothing, which is the property that lets both callers share it", async () => {
+	// Load-bearing, and stated as such in INT-CONTAINER-RUNTIME-CONTRACT. doctor.mjs imports this file
+	// STATICALLY, and reaches env-allowlist.mjs only through `await import` so its Node-floor check prints
+	// before pi is loaded. An import added here would be pulled into doctor's static graph and every test in
+	// doctor.test.mjs would ERROR at load on a below-floor box instead of skipping, with
+	// PI_DISPATCH_REQUIRE_WORKER_TESTS -- the mechanism built to tell those two cases apart -- never getting
+	// to speak. Same pin, same wording, as forges.test.mjs carries for the same reason.
+	const { readFileSync } = await import("node:fs");
+	const source = readFileSync(new URL("../src/provider-key.mjs", import.meta.url), "utf8");
+	assert.equal(/^\s*import\s/m.test(source), false, "provider-key.mjs must stay import-free");
+});
+
 test("the OAuth suffix rule is pinned against pi, not against a table", { skip: skipNoPi }, () => {
 	// Both directions, with pi as the oracle. The suffix rule is the ONE credential fact this project
 	// holds itself, because it is a statement about a credential that must NOT be used and so cannot come

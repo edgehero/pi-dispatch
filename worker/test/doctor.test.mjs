@@ -481,6 +481,42 @@ test("doctor: PI_AUTH_FROM_PI=0 forces env-only — the pi login is ignored", as
 	assert.equal(code, 1, "with the fallback disabled, a missing env key fails the check");
 });
 
+test("doctor: a non-string key in pi auth.json is reported, and does not take doctor down with it", async () => {
+	// The read sits OUTSIDE the try that wraps the JSON.parse, so `cred.key?.trim()` on a number or an
+	// object threw a TypeError and killed the whole run: every later check went unreported, and the
+	// operator saw a crash instead of the one line that names the problem. pi validates no schema on that
+	// file, so a hand edit is all it takes. The worker refuses such a credential (issue #311); doctor has
+	// to survive long enough to say so.
+	for (const key of [12345, { a: 1 }, ["sk-x"], true]) {
+		const dir = agentDirWith({ type: "api_key", key });
+		const { out, text } = capture();
+		const code = await runDoctor(
+			{ PI_PROVIDER: "anthropic", PI_CODING_AGENT_DIR: dir },
+			{ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" },
+		);
+		assert.equal(code, 1, `${JSON.stringify(key)}: not a credential any job could spend`);
+		assert.match(text(), /not a string/);
+		// The run reached the end rather than dying at that line: a later check still reported.
+		assert.match(text(), /Valkey/);
+	}
+});
+
+test("doctor: a pi login stored as a command or a variable reference is not reported green", async () => {
+	// pi resolves "!cmd" and "$VAR" itself when IT reads auth.json. This service forwards the value into a
+	// container, where an environment variable is read raw, so the job gets the source text and fails auth.
+	// A non-empty string used to be enough for a green line, which is the false green issue #286 is about.
+	for (const key of ["!op read op://vault/pi/anthropic", "$ANTHROPIC_API_KEY"]) {
+		const dir = agentDirWith({ type: "api_key", key });
+		const { out, text } = capture();
+		const code = await runDoctor(
+			{ PI_PROVIDER: "anthropic", PI_CODING_AGENT_DIR: dir },
+			{ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0" },
+		);
+		assert.equal(code, 1, `${key}: the worker refuses this, so doctor must not be green`);
+		assert.match(text(), /command or variable reference/);
+	}
+});
+
 test("doctor: an OAuth login in pi auth.json is flagged as not usable for a service", async () => {
 	const dir = agentDirWith({ type: "oauth", access_token: "x" });
 	const { out, text } = capture();
@@ -498,6 +534,37 @@ test("doctor: an OAuth login in pi auth.json is flagged as not usable for a serv
 // acceptance of #286 against pi itself; none of them asserts a copied table.
 const provEnv = (extra) => ({ PI_AUTH_FROM_PI: "0", ...extra });
 const provDeps = (out) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR });
+
+test("doctor NAMES the variable the worker WRITES, for every provider pi has (issue #311)", { skip: skipNoPi }, async () => {
+	// The anti-drift bolt, and it has to live HERE, because this is the file where doctor's real output is
+	// available. env-allowlist.test.mjs cannot carry it: over there both sides of the comparison would be
+	// `apiKeyVariable(providerKeyCandidates(id))`, so a doctor that stopped calling the shared selection
+	// would leave it green. This drives the REAL runDoctor and reads the variable out of its fix line, then
+	// drives the REAL buildContainerEnv and reads the variable the credential landed in. A mismatch is the
+	// #286 defect: a green setup line pointing at a name no job uses.
+	const { buildContainerEnv, piProviders, providerKeyCandidates } = await import("../src/env-allowlist.mjs");
+	const mismatches = [];
+	for (const id of [...piProviders(), "radius"]) {
+		if (providerKeyCandidates(id).length === 0) continue; // no key variable: doctor names none, worker refuses
+		const { out, text } = capture();
+		// No key set anywhere, so doctor takes the arm that has to NAME a variable rather than report one.
+		await runDoctor(provEnv({ PI_PROVIDER: id }), provDeps(out));
+		const named = text().match(/set ([A-Z0-9_]+) in \.env/)?.[1];
+		const env = buildContainerEnv({
+			provider: id,
+			model: "m",
+			maxTurns: 5,
+			jobId: "j",
+			agentDir: "/home/u/.pi/agent",
+			hostEnv: { HOME: "/root" },
+			authFromPi: true,
+			readFile: () => JSON.stringify({ [id]: { type: "api_key", key: "sk-x" } }),
+		});
+		const written = Object.keys(env).find((k) => env[k] === "sk-x");
+		if (named !== written) mismatches.push(`${id}: doctor says ${named}, worker writes ${written}`);
+	}
+	assert.deepEqual(mismatches, [], "doctor and the container path must name the same variable");
+});
 
 test("doctor: PI_PROVIDER=google with only GOOGLE_API_KEY fails, and the failure names GEMINI_API_KEY", { skip: skipNoPi }, async () => {
 	const { out, text } = capture();

@@ -1826,10 +1826,23 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 		try {
 			cred = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))?.[provider];
 		} catch {}
+		// `typeof` before `.trim()`: a hand-edited auth.json can hold a number or an object here, and this
+		// line sits OUTSIDE the try above (which wraps only the JSON.parse), so `cred.key?.trim` on a non
+		// string threw a TypeError and took the whole doctor run down. The worker refuses that credential
+		// (issue #311); doctor has to survive long enough to say so.
+		const key = typeof cred?.key === "string" ? cred.key : null;
 		// Same whitespace rule as the env arm above, and for the same reason: credentialFromPiAuth accepts a
 		// blank key, so doctor and the worker AGREE -- they agree on a credential that cannot buy anything.
-		if (cred?.type === "api_key" && cred.key?.trim()) return { ok: true, label: `Provider key set (${provider}) -- from pi auth.json` };
-		if (cred?.type === "api_key") note = " -- but the key in pi auth.json is whitespace, so every job would spend a container to fail auth";
+		// The command/variable-reference form is the worker's refusal restated: pi resolves "!cmd" and "$VAR"
+		// itself when IT reads auth.json, but this service forwards the value into a container where it is
+		// read raw, so a login stored that way is not a key this deployment can spend.
+		if (cred?.type === "api_key" && key && !key.startsWith("!") && !key.includes("$") && key.trim()) {
+			return { ok: true, label: `Provider key set (${provider}) -- from pi auth.json` };
+		}
+		if (cred?.type === "api_key" && key && (key.startsWith("!") || key.includes("$")))
+			note = " -- but the pi login is a command or variable reference, which pi resolves itself and a job container cannot";
+		else if (cred?.type === "api_key" && !key) note = " -- but the key in pi auth.json is not a string, so no job could use it";
+		else if (cred?.type === "api_key") note = " -- but the key in pi auth.json is whitespace, so every job would spend a container to fail auth";
 		if (cred?.type === "oauth") note = " -- pi login is OAuth/subscription: not usable for an unattended service, configure an API key";
 	}
 	return {

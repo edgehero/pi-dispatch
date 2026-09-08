@@ -28,8 +28,16 @@ function configError(message) {
  *   - `undefined` return === "this provider is not configured on this host" === refuse the job
  *     BEFORE spending, rather than launch a container that will fail auth on the first call.
  *
- * `getApiKeyEnvVars` (the full candidate list) is intentionally NOT exported by pi; `findEnvKeys`
- * against our own process.env is the right tool anyway, because we only ever forward keys we have.
+ * `getApiKeyEnvVars` (the full candidate list) is intentionally NOT exported by pi, which is why
+ * `providerKeyCandidates` below has to recover it a different way.
+ *
+ * **`env` is a preference here, not a boundary.** pi's `getProviderEnvValue` is
+ * `env?.[name] || process.env[name]`, so this reports names the MACHINE carries as well as names the
+ * given env does. That is pi's behaviour and this project does not depend on it in either direction:
+ * `resolveProviderCredential` no longer calls this at all (it asks the hermetic
+ * `providerKeyCandidates` and reads values from the env it was handed), and `doctor` makes its own
+ * presence test for the same reason. What still consumes this is `secrets.mjs`'s reserved-name gate,
+ * whose `undefined` conflates "no such provider" with "known provider, nothing set" -- issue #309.
  */
 export function providerKeyVars(provider, hostEnv) {
 	return findEnvKeys(provider, hostEnv);
@@ -102,20 +110,31 @@ export function piProviders() {
  * it, and it is not the credential for an unattended service). Throws a config-tagged error (pre-spend
  * refusal) when neither source yields a credential.
  */
-export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync }) {
-	// The NAMES come from pi. The VALUES, and therefore whether the env path applies at all, come from
-	// `hostEnv` and nowhere else. Both halves are needed: `providerKeyVars` is `findEnvKeys`, whose presence
-	// test falls back to the real `process.env` (deliberately, and doctor depends on it), so on a host that
-	// exports a key this asked-for env does not carry, the unfiltered version took the env path and returned
-	// `{ NAME: undefined }` -- a credential-shaped answer with no credential in it, and no fall through to
-	// the auth.json login that would have worked. Same truthiness as pi's own filter, so a name kept here is
-	// a name pi would have read.
-	const envNames = (providerKeyVars(provider, hostEnv) ?? []).filter((name) => hostEnv[name]);
-	if (envNames.length > 0) {
-		return Object.fromEntries(envNames.map((name) => [name, hostEnv[name]]));
+export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync, forwardEnv = [] }) {
+	// The NAMES come from pi, the VALUES from `hostEnv`, and this asks each question of the thing that can
+	// answer it (issue #311). It used to be one `providerKeyVars(provider, hostEnv)` call, which conflates
+	// them: that is `findEnvKeys`, whose presence test falls back to the REAL `process.env` for any name the
+	// given env lacks, so a name could be "present" on the strength of the machine and then be read out of
+	// an env that does not carry it, yielding `{ NAME: undefined }` -- a credential-shaped answer with no
+	// credential in it, and no fall through to the auth.json login that would have worked.
+	//
+	// `providerKeyCandidates` is the hermetic half of the same oracle, so the leaky question is not asked at
+	// all rather than asked and corrected. The result is identical by construction: a name truthy in
+	// `hostEnv` is always one `findEnvKeys` would have returned, and pi's precedence order is preserved.
+	// Truthiness matches pi's own filter, so a name kept here is a name pi would read.
+	//
+	// Unreachable in the shipped worker, where `hostEnv` IS `process.env` and the two agree by identity. It
+	// is the DI seam that was dishonest, which is worth fixing where the seam is the whole test surface.
+	// ONE read per name, checked and returned, for the same reason: two reads could decide on one value and
+	// ship another.
+	const held = providerKeyCandidates(provider)
+		.map((name) => [name, hostEnv[name]])
+		.filter(([, value]) => value);
+	if (held.length > 0) {
+		return Object.fromEntries(held);
 	}
 	if (authFromPi) {
-		const { name, value } = credentialFromPiAuth(provider, agentDir ?? defaultAgentDir(hostEnv), readFile);
+		const { name, value } = credentialFromPiAuth(provider, agentDir ?? defaultAgentDir(hostEnv), readFile, { hostEnv, forwardEnv });
 		return { [name]: value };
 	}
 	throw configError(`provider ${provider} has no configured credential in the worker environment`);
@@ -126,7 +145,7 @@ function defaultAgentDir(hostEnv) {
 	return hostEnv.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
 
-function credentialFromPiAuth(provider, agentDir, readFile) {
+function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forwardEnv = [] } = {}) {
 	const path = join(agentDir, "auth.json");
 	let auth;
 	try {
@@ -142,9 +161,54 @@ function credentialFromPiAuth(provider, agentDir, readFile) {
 		);
 	}
 	if (cred.type !== "api_key" || !cred.key) throw configError(`unsupported pi credential for "${provider}" in ${path} — set an API key in .env`);
+	// `typeof`, not truthiness. A hand-edited auth.json can hold a number, an array or an object here (pi
+	// parses the file and validates no schema), and the old `!cred.key` guard passed all three: an object
+	// became `-e ANTHROPIC_API_KEY=[object Object]` in a paid container. Issue #311 made this reachable for
+	// twelve more providers, so it is guarded here rather than left to the coercion.
+	if (typeof cred.key !== "string") throw configError(`the pi login for "${provider}" in ${path} does not hold a string API key — run \`pi login\` again, or set the key in .env`);
+	// **The worker forwards this value; pi RESOLVES it.** `auth-storage.js` reads the stored key through
+	// `resolveConfigValue(cred.key, cred.env)`, a grammar where a leading "!" runs the rest as a SHELL
+	// COMMAND and takes stdout, "$VAR"/"${VAR}" interpolate from the environment, and "$$"/"$!" escape. An
+	// environment variable is read raw, through no such grammar, so a login stored in any of those forms
+	// arrives in the container as its own source text and every job spends a container to fail auth, with
+	// `doctor` green because the field is a non-empty string.
+	//
+	// This REFUSES rather than resolving. Running the command host-side is not on the table (it would
+	// execute operator shell out of a credential file, per job, in the worker); interpolating "$VAR" would
+	// be reimplementing a grammar pi does not export, which is `no-reimplementing-pi` and the same trap
+	// #311 is about. The test is deliberately a superset of pi's parse: any "$" at all, not a parse of one.
+	// A key that pi would have passed through unchanged contains neither character, and over-refusing
+	// pre-spend costs nothing, which is exactly the trade `CONST-BUDGET-BEFORE-TOKENS` asks for.
+	if (cred.key.startsWith("!") || cred.key.includes("$")) {
+		throw configError(
+			`the pi login for "${provider}" in ${path} is a command or a variable reference, not a literal key. pi resolves that form itself; this service forwards the value to a container, where it is read as-is. Resolve it and set the key in .env instead.`,
+		);
+	}
+	// The credential's companion config (`cred.env`), which is NOT a variable-name hint -- it is a
+	// `Record<string, string>` of provider settings, and for both Cloudflare providers pi returns NO auth at
+	// all without `CLOUDFLARE_ACCOUNT_ID` (and `CLOUDFLARE_GATEWAY_ID` for the gateway). The container env
+	// is a closed set, so these names do not ride along with the key; pi does fall back to the ambient
+	// environment for them, which makes `PI_FORWARD_ENV` a real answer rather than a shrug. Refuse only for
+	// the names that will NOT arrive, so a deployment that already forwards them is untouched.
+	const missing = Object.keys(cred.env ?? {}).filter((n) => !(forwardEnv.includes(n) && hostEnv?.[n]));
+	if (missing.length > 0) {
+		throw configError(
+			`the pi login for "${provider}" carries provider settings the container will not receive (${missing.join(", ")}). The job env is a closed set. Set ${missing.join(" and ")} in the worker environment and list ${missing.length > 1 ? "them" : "it"} in PI_FORWARD_ENV.`,
+		);
+	}
 	const name = resolveEnvName(provider);
 	if (!name) {
-		throw configError(`could not determine the environment variable pi expects for provider "${provider}" — set it in the worker environment manually`);
+		// Two different facts, and they need different fixes -- the same split `doctor` makes, in the same
+		// order (candidates first, catalog second: `radius` has a key variable and no catalog entry, so
+		// asking membership first would call a working configuration unknown). The old message said "set it
+		// in the worker environment manually" for BOTH, which for the first is advice `doctor` correctly
+		// calls impossible: there is no variable to set.
+		if (piProviders().includes(provider)) {
+			throw configError(
+				`pi authenticates "${provider}" without an API-key environment variable (an AWS profile or an OAuth login), and the container env is a closed set of variables, so it has no way in. Configure a provider whose credential is a single environment variable.`,
+			);
+		}
+		throw configError(`could not determine the environment variable pi expects for provider "${provider}" — pi has no such provider, so check PI_PROVIDER against pi's own ids`);
 	}
 	return { name, value: cred.key };
 }
@@ -157,9 +221,11 @@ function credentialFromPiAuth(provider, agentDir, readFile) {
  * worth recording rather than deleting (issue #311). It asked pi's own `findEnvKeys` rather than keeping a
  * provider→var table, but the CANDIDATES it asked with were hand-generated: the credential's `env` field
  * plus a conventional `<PROVIDER>_API_KEY`/`_KEY`. That convention is the part that drifts, and it was
- * already wrong for most of pi's table -- `google` is `GEMINI_API_KEY`, `huggingface` is `HF_TOKEN`,
- * `moonshotai` is `MOONSHOT_API_KEY`, `radius` is `PI_GATEWAY_API_KEY` -- so pi recognized nothing and a
- * valid `pi login` refused every job.
+ * wrong for 13 of the 34 provider ids that have a key variable at the pin -- `google` is
+ * `GEMINI_API_KEY`, `huggingface` is `HF_TOKEN`, `moonshotai` is `MOONSHOT_API_KEY`, `github-copilot` is
+ * `COPILOT_GITHUB_TOKEN`, `radius` is `PI_GATEWAY_API_KEY` -- so for those pi recognized nothing and a
+ * valid `pi login` refused every job. The convention happening to be right for the other 21 is what let
+ * this survive: `anthropic` and `openai` are both in that set.
  *
  * The `env` candidate was dead on arrival besides: at the pin `ApiKeyCredential.env` is a
  * `Record<string, string>` of provider config (Cloudflare account and gateway ids), never a variable
@@ -193,7 +259,7 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a pre-spend refusal.
-	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile });
+	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv });
 
 	const env = {
 		PI_PROVIDER: provider,
@@ -255,9 +321,14 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	// Operator-declared extra vars (PI_FORWARD_ENV), forwarded by EXACT name -- the allowlist
 	// no-broad-env-into-container prescribes, not a host pass-through. This is how a CUSTOM provider's
 	// key (one pi's findEnvKeys table does not know) reaches the container. A name whose value is unset
-	// on the host is skipped, never forwarded as empty.
+	// on the host is skipped, never forwarded as empty. That second half was a claim rather than a check
+	// until issue #311: the guard tested `!== undefined`, so a name set to "" WAS forwarded, and since this
+	// loop runs after the credential assign above, `PI_FORWARD_ENV=<the provider's key variable>` with a
+	// blank value in the host env blanked a working auth.json credential and the job spent a container to
+	// fail auth. Same emptiness rule as the secrets loop below, which had it right.
 	for (const name of forwardEnv) {
-		if (hostEnv[name] !== undefined) env[name] = hostEnv[name];
+		const value = hostEnv[name];
+		if (value !== undefined && value !== "") env[name] = value;
 	}
 
 	// The trigger's own secrets (REQ-TRIGGER-SECRETS), resolved HOST-SIDE by the processor before anything
