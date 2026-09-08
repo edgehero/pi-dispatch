@@ -19,18 +19,27 @@ test("resolves the acting bot user's integer id from GET /user", async () => {
 test("EVERY failure throws -- an unresolved id would disarm the bot-loop guard", async () => {
 	// The guard's only job is to refuse events that came from us. Returning null here would let the
 	// receiver boot with the guard silently off, and one status comment becomes an unbounded paid loop.
+	//
+	// THAT is what this test is for, and it is unchanged. What issue #316 split is the CLASS each failure
+	// throws, which was uniformly `configError` and should never have been: the tag decides whether the
+	// receiver's supervisor restarts it (untagged, exit 1) or deliberately leaves it stopped
+	// (tagged, EXIT_POLICY 2 against RestartPreventExitStatus=2). Both columns are asserted, because
+	// "it throws" and "it throws the right class" are two different properties and only one of them was
+	// ever pinned here.
 	const cases = [
-		["empty token", { token: "" }],
-		["http error", { fetchFn: async () => ok({}, 401) }],
-		["unparseable body", { fetchFn: async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad json"); } }) }],
-		["no integer id", { fetchFn: async () => ok({ id: "4242" }) }],
-		["network fault", { fetchFn: async () => { throw new Error("ECONNREFUSED"); } }],
+		["empty token", { token: "" }, true],
+		["http 401", { fetchFn: async () => ok({}, 401) }, true],
+		["no integer id", { fetchFn: async () => ok({ id: "4242" }) }, true],
+		["http 500", { fetchFn: async () => ok({}, 500) }, false],
+		["http 429", { fetchFn: async () => ok({}, 429) }, false],
+		["unparseable body", { fetchFn: async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad json"); } }) }, false],
+		["network fault", { fetchFn: async () => { throw new Error("ECONNREFUSED"); } }, false],
 	];
-	for (const [name, over] of cases) {
+	for (const [name, over, determinate] of cases) {
 		await assert.rejects(
 			() => resolveGitLabSelfId({ apiUrl: "https://gl", token: "glpat-x", fetchFn: async () => ok({ id: 1 }), ...over }),
-			(e) => e.piDispatchConfig === true,
-			`${name} must fail closed with a configError`,
+			(e) => e.piDispatchConfig === (determinate ? true : undefined),
+			`${name} must fail closed, ${determinate ? "tagged as configuration" : "untagged so the supervisor restarts"}`,
 		);
 	}
 });

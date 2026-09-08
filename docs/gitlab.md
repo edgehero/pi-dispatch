@@ -107,7 +107,10 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/your-internal-ca.pem
 Without it, every call fails, and the log names the reason rather than the bare `fetch failed` Node rejects
 with. The receiver's boot-time identity check reports `gitlab identity: GET /user failed (...)`, and inside
 those parentheses is the fetch's whole cause chain, joined with colons, so the certificate error itself is
-what you read. That message is the diagnosis; if you see it, this is what it means.
+what you read. That message is the diagnosis; if you see it, this is what it means. A trust failure is
+treated as configuration, so the receiver exits 2 and your supervisor leaves it stopped: setting the CA is
+the only thing that changes the answer, and restarting into the same failure would only hide it. An
+instance that is merely unreachable exits 1 and is restarted.
 
 The **job container** is a separate trust store: `git clone` and `glab` run inside it, so the CA has to be
 in the image. Add it to your own image (`docs/job-image.md`) — a `COPY` of the cert into

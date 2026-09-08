@@ -28,6 +28,7 @@ import { Octokit as RealOctokit } from "@octokit/rest";
 import { configError } from "./config.mjs";
 import { resolveSelfId } from "./identity.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { isDeterminateFsCode, isTransientStatus, octokitHeaderReader } from "./transient.mjs";
 
 /**
  * Build the auth surface for `cfg = { source, patVar?, appId?, installationId?, privateKeyPath? }`.
@@ -138,14 +139,34 @@ function requireToken(raw, what) {
 	return token;
 }
 
-/** Run `gh auth token` (array args, no shell) and return the trimmed token, or throw configError. */
+/**
+ * Run `gh auth token` (array args, no shell) and return the trimmed token.
+ *
+ * THIS RUNS PER JOB, not only at boot: `makeGitHubAuth`'s gh arm mints once to resolve the identity and
+ * then again on every delivery, so a fault here is a fault on the job path.
+ *
+ * `promisify(execFile)` overloads `error.code`, and issue #316 is what that overloading cost. A SPAWN
+ * failure sets it to a string errno; a non-zero EXIT sets it to the integer status. The old comment
+ * called both deterministic and tagged both, so `EAGAIN` and `EMFILE` under fd pressure -- the host being
+ * momentarily busy -- were reported to the issue author as "is the gh CLI installed and logged in?" and
+ * never retried.
+ *
+ * So: a spawn errno splits on the same allow-list every other absence question uses, and `ENOENT` (no
+ * binary on PATH) stays determinate. A NON-ZERO EXIT stays determinate too, and that is a judgment call
+ * rather than a derivation. `gh auth token` exits 1 for a logged-out host far more often than for a
+ * locked keyring or a token refresh that could not reach the network, and the only thing that separates
+ * them is a table of gh's own stderr strings, which is exactly the hand-maintained table this project
+ * keeps deleting. The residual is named here rather than papered over.
+ */
 async function runGhAuthToken(execFileAsync) {
 	let stdout;
 	try {
 		({ stdout } = await execFileAsync("gh", ["auth", "token"]));
 	} catch (error) {
-		// ENOENT (binary absent) or a non-zero exit (logged out / broken) -- both deterministic.
 		const detail = error?.code ?? error?.message ?? "unknown";
+		if (typeof error?.code === "string" && !isDeterminateFsCode(error.code)) {
+			throw new InfraRetry(`\`gh auth token\` could not be run (${detail}); the host is momentarily unable to spawn it`);
+		}
 		throw configError(`\`gh auth token\` failed (${detail}); is the gh CLI installed and logged in?`);
 	}
 	// Logged-out gh can exit 0 with empty stdout; an empty token is the money hole, so refuse it.
@@ -177,28 +198,38 @@ function repoNameOf(repo) {
 
 /**
  * Map an octokit/auth-app rejection to the retry-vs-config distinction the queue depends on.
- * Retryable (InfraRetry): 429, 403 + Retry-After (secondary rate limit), 5xx, and status-less
- * network faults (ENOTFOUND/ECONNRESET/ETIMEDOUT). Deterministic (configError): 401 bad
- * credentials, 404 unknown installation, and any other 4xx. Collapsing all 4xx to config would
- * turn a transient rate-limit into a permanent failure, so the classes are kept disjoint.
+ *
+ * Determinate (configError): 401 bad credentials and 404 unknown installation, both of which refuse
+ * identically until an operator changes something. Everything the shared rule calls transient is an
+ * `InfraRetry`; every other 4xx is determinate.
+ *
+ * TWO CORRECTIONS TO WHAT THIS COMMENT USED TO CLAIM (issue #316), because the old version described a
+ * function that did not exist.
+ *
+ * It said 403-with-retry-after was the rate-limit case. That is the SECONDARY limit. GitHub answers the
+ * PRIMARY limit -- the one a busy deployment actually hits, and which clears within the hour -- with 403,
+ * `x-ratelimit-remaining: 0` and no `retry-after`, so it fell through to the catch-all and became a
+ * permanent refusal. 408 and 425 went the same way, and so did an unparseable status, which
+ * `@octokit/request-error` reports as the NUMBER 0.
+ *
+ * It also said status-less network faults reach the bottom branch. They do not:
+ * `@octokit/request`'s fetch wrapper turns every network rejection into `RequestError(message, 500)`, so
+ * that branch is unreachable through octokit and the 5xx arm has been doing the work all along. The
+ * branch stays as a backstop for a rejection that never went through the wrapper, with its claim about
+ * which errnos arrive there removed.
  */
 function classifyAppMintError(error) {
 	const status = typeof error?.status === "number" ? error.status : undefined;
-	const retryAfter = error?.response?.headers?.["retry-after"];
 
 	if (status === 401) return configError("app token mint refused: bad app credentials (401)");
 	if (status === 404) return configError("app token mint refused: unknown installation (404)");
-	if (status === 429) return new InfraRetry("app token mint: rate limited (429)");
-	if (status === 403 && retryAfter !== undefined) {
-		return new InfraRetry("app token mint: secondary rate limit (403 + retry-after)");
-	}
-	if (status !== undefined && status >= 500) {
-		return new InfraRetry(`app token mint: upstream error (${status})`);
+	if (status !== undefined && isTransientStatus(status, octokitHeaderReader(error))) {
+		return new InfraRetry(`app token mint: transient upstream refusal (${status})`);
 	}
 	if (status !== undefined) {
 		return configError(`app token mint failed (${status}): ${error?.message ?? "unknown"}`);
 	}
-	// No HTTP status -> network-level fault. Retry per INT-RUNNER-EXIT-CODE-PROTOCOL.
+	// No HTTP status at all. Indeterminate, so retry (CONST-RETRY-INFRA-ONLY).
 	const detail = error?.code ? `${error.code}: ` : "";
 	return new InfraRetry(`app token mint: network fault: ${detail}${error?.message ?? "unknown"}`);
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -149,6 +150,74 @@ test("a missing folder is a clear config error", async () => {
 		() => prepareLocalWorkspace({ folder: "/does/not/exist/anywhere", task: "x", jobDir: "/tmp/x" }),
 		(e) => e.piDispatchConfig === true,
 	);
+});
+
+test("a folder that cannot be STATTED is retryable, not 'does not exist'", async () => {
+	// Issue #316. `existsSync` returns false for every stat error, not only ENOENT, so EACCES on a parent
+	// directory, EIO on a failing disk and a hung or not-yet-mounted autofs path all reported "local folder
+	// does not exist". Since #310 that verdict refunds the reserve, never retries the delivery, and posts a
+	// public comment telling the issue author the operator's deployment is misconfigured, about a folder
+	// that is right there.
+	//
+	// The `fs` seam exists because a chmod cannot express this: root ignores permissions, Windows differs,
+	// and EIO has no filesystem you can build in a test at all.
+	for (const code of ["EACCES", "EIO", "ETIMEDOUT", "ESTALE", "ELOOP", "EMFILE"]) {
+		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
+		await assert.rejects(
+			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
+			(e) => e.piDispatchRetry === true && e.piDispatchConfig === undefined,
+			`${code} means the folder is out of reach, never that it is absent`,
+		);
+	}
+});
+
+test("ENOENT and ENOTDIR still refuse determinately, and still name which check failed", async () => {
+	// The bound on the test above: absence is genuinely determinate, and the two messages must stay
+	// distinguishable or an operator cannot tell "wrong path" from "not a git repository".
+	for (const code of ["ENOENT", "ENOTDIR"]) {
+		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
+		await assert.rejects(
+			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
+			(e) => e.piDispatchConfig === true && /local folder does not exist/.test(e.message),
+			`${code} is absence`,
+		);
+	}
+});
+
+test("a transient fault on .git alone is retryable, and does not read as 'not a git repository'", async () => {
+	// The second check has the same hazard as the first and a worse message: telling an operator their
+	// repository is not a repository, because one stat of `.git` hit EACCES.
+	const fs = {
+		...realFs,
+		statSync: (p) => {
+			if (String(p).endsWith(".git")) throw Object.assign(new Error("EACCES: simulated"), { code: "EACCES" });
+			return { isDirectory: () => true };
+		},
+	};
+	await assert.rejects(
+		() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
+		(e) => e.piDispatchRetry === true && !/not a git repository/.test(e.message),
+	);
+});
+
+test("a worktree's .git is a FILE, and statSync accepts it exactly as existsSync did", async () => {
+	// The reason this check uses `statSync` rather than a directory test: `.git` is a FILE in a worktree
+	// and in a submodule, and both are ordinary things to point a local job at.
+	const seen = [];
+	const fs = {
+		...realFs,
+		statSync: (p) => {
+			seen.push(String(p));
+			return { isDirectory: () => false, isFile: () => true };
+		},
+	};
+	// Fails later, at the git call, which is past both existence checks: reaching that proves neither
+	// refused, and reaching it is the whole assertion.
+	await assert.rejects(
+		() => prepareLocalWorkspace({ folder: "/mnt/wt", task: "x", jobDir: "/tmp/x", fs, git: async () => { throw new Error("past the checks"); } }),
+		(e) => /past the checks/.test(e.message),
+	);
+	assert.deepEqual(seen, ["/mnt/wt", "/mnt/wt/.git"], "both paths are statted, in order, and a file is accepted");
 });
 
 // ── The host-side git argv (issue #286's sweep) ─────────────────────────────────────────────────

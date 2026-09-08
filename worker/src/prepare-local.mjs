@@ -1,9 +1,11 @@
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import * as realFs from "node:fs";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { materializePiDir } from "./materialize.mjs";
+import { InfraRetry } from "./processor.mjs";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 const exec = promisify(execFile);
 
@@ -25,25 +27,17 @@ const exec = promisify(execFile);
  * default keeps a directly-constructed call (tests, older wiring) honest: a job with no derived
  * context is a manual run.
  */
-export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaultGit, event = { source: "manual" } }) {
-	if (!existsSync(folder)) {
-		const error = new Error(`local folder does not exist: ${folder}`);
-		error.piDispatchConfig = true;
-		throw error;
-	}
-	if (!existsSync(join(folder, ".git"))) {
-		const error = new Error(`local folder is not a git repository (v1 requires one): ${folder}`);
-		error.piDispatchConfig = true;
-		throw error;
-	}
+export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs }) {
+	requirePath(fs, folder, `local folder does not exist: ${folder}`, "the local folder");
+	requirePath(fs, join(folder, ".git"), `local folder is not a git repository (v1 requires one): ${folder}`, "the local folder's .git");
 
 	const sha = (await git(folder, ["rev-parse", "HEAD"])).trim();
 
-	mkdirSync(jobDir, { recursive: true });
+	fs.mkdirSync(jobDir, { recursive: true });
 	// The outbox is the container's only signal channel back to the worker (INT-OUTBOX-CONTRACT). It is
 	// mounted /outbox:rw for local jobs only; the host reads it after the run to enqueue chained children.
 	const outboxDir = join(jobDir, "outbox");
-	mkdirSync(outboxDir, { recursive: true });
+	fs.mkdirSync(outboxDir, { recursive: true });
 	// Instructions from HEAD, via the symlink-safe git materialiser, into /job/pi (mounted :ro).
 	const pi = await materializePiDir({ gitDir: folder, sha, destDir: jobDir });
 	// A .pi/ over a materialiser cap (issue #60) refuses the job determinately, before prompt.md and
@@ -53,7 +47,7 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 	const written = pi.written;
 
 	// The task the operator asked for. Plain data below the instructions.
-	writeFileSync(join(jobDir, "prompt.md"), String(task ?? ""), { mode: 0o444 });
+	fs.writeFileSync(join(jobDir, "prompt.md"), String(task ?? ""), { mode: 0o444 });
 
 	// The trigger context, /job/event.json (INT-CONTAINER-JOB-INPUTS): one file per concern, 0o444 like
 	// the prompt, written unconditionally so every local run carries its origin. `folder` is the BASENAME
@@ -67,10 +61,39 @@ export async function prepareLocalWorkspace({ folder, task, jobDir, git = defaul
 		sha,
 		...(event.source === "cron" ? { scheduledFor: event.scheduledFor ?? null, previousRunAt: event.previousRunAt ?? null } : {}),
 	};
-	writeFileSync(join(jobDir, "event.json"), JSON.stringify(eventBody, null, 2), { mode: 0o444 });
+	fs.writeFileSync(join(jobDir, "event.json"), JSON.stringify(eventBody, null, 2), { mode: 0o444 });
 
 	// The folder itself is /workspace (rw). No clone: local jobs edit in place.
 	return { workspace: folder, jobDir, outboxDir, sha, materialised: written };
+}
+
+/**
+ * Assert that something exists at `path`, distinguishing absence from a filesystem that is momentarily
+ * unable to answer (issue #316).
+ *
+ * `existsSync` was the wrong instrument and it was the only one here for a year: it returns FALSE for
+ * every stat error, not only `ENOENT`. So `EACCES` on a parent directory, `EIO` on a failing disk, and a
+ * hung or not-yet-mounted autofs/NFS path after a host reboot all reported "your folder does not exist".
+ * #310 turned that into a refund, a never-retried delivery and a public comment telling the issue author
+ * the operator's deployment is misconfigured, on a deployment that was correct a second earlier and is
+ * correct again a second later.
+ *
+ * `statSync` FOLLOWS symlinks and accepts a file as readily as a directory, both of which this needs:
+ * `.git` is a FILE in a worktree and in a submodule, and a symlinked project folder is ordinary.
+ */
+function requirePath(fs, path, absentMessage, what) {
+	try {
+		fs.statSync(path);
+	} catch (error) {
+		if (isDeterminateFsCode(error?.code)) {
+			const refusal = new Error(absentMessage);
+			refusal.piDispatchConfig = true;
+			throw refusal;
+		}
+		// Not absent, just unreachable right now. Throw the retryable class so the queue tries again
+		// instead of spending the delivery on a verdict that is wrong by the time it is posted.
+		throw new InfraRetry(`could not read ${what} (${error?.code ?? error?.message ?? "unknown"}): ${path}`);
+	}
 }
 
 async function defaultGit(gitDir, args) {

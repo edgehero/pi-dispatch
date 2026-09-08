@@ -15,6 +15,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 
 /**
@@ -33,17 +34,22 @@ export async function resolveAzureSelfId({ orgUrl, token, fetchFn = fetch }) {
 	try {
 		res = await fetchFn(url, { headers: { Authorization: auth, accept: "application/json" }, redirect: "error" });
 	} catch (err) {
-		throw configError(`could not resolve the azure bot identity from ${url}: ${fetchFailureReason(err)}`);
+		// Transient, matching azure-host.mjs on the same condition (issue #316).
+		if (isDeterminateFetchFailure(err)) throw configError(`could not resolve the azure bot identity from ${url}: ${fetchFailureReason(err)}`);
+		throw transientError(`could not resolve the azure bot identity from ${url}: ${fetchFailureReason(err)}`, err);
 	}
 	if (!res.ok) {
 		// The status only. An Azure error body can echo the request, and the request carried the token.
+		if (isTransientStatus(res.status, responseHeaderReader(res))) {
+			throw transientError(`could not resolve the azure bot identity: connectionData returned ${res.status}`);
+		}
 		throw configError(`could not resolve the azure bot identity: connectionData returned ${res.status}`);
 	}
 	let body;
 	try {
 		body = await res.json();
 	} catch (err) {
-		throw configError(`could not resolve the azure bot identity: unparseable JSON from connectionData (${err?.message ?? "unknown"})`);
+		throw transientError(`could not resolve the azure bot identity: unparseable JSON from connectionData (${err?.message ?? "unknown"})`, err);
 	}
 
 	const user = body?.authenticatedUser ?? {};

@@ -42,6 +42,13 @@ up. What must not happen is neither: the receiver **refuses to boot** without an
 bot-loop guard compares the sender against it, and an unresolved identity never matches — so it would fail
 open silently, and the harness's own status comments would start more jobs.
 
+It refuses either way, but **how** it refuses depends on why. A token that cannot read `/user`, or an
+instance behind a CA the host does not trust, is something you have to fix: the receiver exits 2, and a
+supervisor leaves it stopped rather than looping on a configuration that can never resolve. An instance
+that was merely unreachable — restarting, answering 502, refusing the connection — exits 1 instead, so the
+supervisor brings the receiver back when the instance returns. Before this split, a Forgejo restart that
+overlapped a receiver restart left the receiver stopped until somebody noticed no webhook had arrived.
+
 **3. Point the webhook at `/forgejo`.** Type "Gitea", content type `application/json`, secret as above,
 events: Issues, Issue Comment, Pull Request.
 

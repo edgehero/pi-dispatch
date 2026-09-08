@@ -22,6 +22,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 
 const API_PREFIX = "/api/v1";
@@ -47,7 +48,9 @@ export async function resolveForgejoSelfId({ apiUrl, token, botId = null, fetchF
 	try {
 		res = await fetchFn(url, { headers: { Authorization: `token ${token}` }, redirect: "error" });
 	} catch (err) {
-		throw configError(`could not resolve the forgejo bot identity from ${url}: ${fetchFailureReason(err)}`);
+		// Transient, and forgejo-host.mjs already says so about the same condition (issue #316).
+		if (isDeterminateFetchFailure(err)) throw configError(`could not resolve the forgejo bot identity from ${url}: ${fetchFailureReason(err)}`);
+		throw transientError(`could not resolve the forgejo bot identity from ${url}: ${fetchFailureReason(err)}`, err);
 	}
 	if (res.status === 403 || res.status === 401) {
 		// The likely cause, named. A repo-scoped Forgejo token cannot carry `read:user`, so this is the
@@ -58,13 +61,19 @@ export async function resolveForgejoSelfId({ apiUrl, token, botId = null, fetchF
 	}
 	if (!res.ok) {
 		// The status only. A Forgejo error body can echo the request, and the request carried the token.
+		// 401 and 403 were answered above, where they name the scope fix; what is left splits on the
+		// shared rule, so a self-hosted instance answering 502 mid-restart no longer reads as a
+		// misconfiguration the operator has to go and find.
+		if (isTransientStatus(res.status, responseHeaderReader(res))) {
+			throw transientError(`could not resolve the forgejo bot identity: GET /user returned ${res.status}`);
+		}
 		throw configError(`could not resolve the forgejo bot identity: GET /user returned ${res.status}`);
 	}
 	let body;
 	try {
 		body = await res.json();
 	} catch (err) {
-		throw configError(`could not resolve the forgejo bot identity: unparseable JSON from GET /user (${err?.message ?? "unknown"})`);
+		throw transientError(`could not resolve the forgejo bot identity: unparseable JSON from GET /user (${err?.message ?? "unknown"})`, err);
 	}
 	const id = body?.id;
 	if (!Number.isInteger(id)) {

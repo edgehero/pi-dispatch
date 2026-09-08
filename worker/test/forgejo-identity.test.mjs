@@ -59,7 +59,11 @@ test("every other failure refuses too, and the error carries the status but neve
 	const secret = "token-echoed-back-in-the-error-body";
 	await assert.rejects(
 		() => resolveForgejoSelfId({ apiUrl: "https://fj", token: "t", fetchFn: async () => ({ ok: false, status: 500, json: async () => ({ message: secret }) }) }),
-		(e) => e.piDispatchConfig === true && e.message.includes("500") && !e.message.includes(secret),
+		// Untagged since issue #316: a self-hosted instance answering 500 mid-restart is not a
+		// misconfiguration, and tagging it left the receiver stopped with the supervisor declining to
+		// bring it back. The property this test actually guards, that the body never reaches the
+		// message, is unchanged and still asserted.
+		(e) => e.piDispatchConfig === undefined && e.message.includes("500") && !e.message.includes(secret),
 	);
 	await assert.rejects(
 		() =>
@@ -70,7 +74,7 @@ test("every other failure refuses too, and the error carries the status but neve
 					throw new Error("ECONNREFUSED");
 				},
 			}),
-		(e) => e.piDispatchConfig === true,
+		(e) => e.piDispatchConfig === undefined,
 	);
 	for (const body of [{}, { id: "7" }, { id: null }, { id: 1.5 }]) {
 		await assert.rejects(
@@ -92,7 +96,9 @@ test("every other failure refuses too, and the error carries the status but neve
 					},
 				}),
 			}),
-		(e) => e.piDispatchConfig === true,
+		// Untagged since #316: a truncated body or a proxy interstitial is not a deployment an operator
+		// can fix, and forgejo-host.mjs has classified the identical condition as retryable all along.
+		(e) => e.piDispatchConfig === undefined,
 	);
 });
 

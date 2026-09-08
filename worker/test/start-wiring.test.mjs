@@ -286,8 +286,11 @@ test("comment is best-effort: a rejecting postStatusComment does not reject the 
 });
 
 test("auth unavailable: the worker still boots; mintToken fails github jobs closed with a configError", { skip }, async () => {
+	// TAGGED, because that is what a determinate failure now has to be for this path to hold. The fixture
+	// used to throw a bare Error and rely on every throw being treated alike; issue #316 made the tag the
+	// discriminator, and a genuinely logged-out `gh` is exactly the determinate case.
 	const makeAuth = async () => {
-		throw new Error("gh CLI is logged out");
+		throw Object.assign(new Error("gh CLI is logged out"), { piDispatchConfig: true });
 	};
 	const { deps, captured, logs } = await runStart({ makeAuth, makeHost: () => fakeHost() });
 
@@ -298,6 +301,148 @@ test("auth unavailable: the worker still boots; mintToken fails github jobs clos
 		(err) => err?.piDispatchConfig === true,
 		"mintToken must reject with a .piDispatchConfig-tagged configError when auth is unavailable",
 	);
+});
+
+test("a TRANSIENT boot auth failure is re-resolved on the next job, not carried for the process lifetime", { skip }, async () => {
+	// Issue #316, and the most expensive shape in it. Boot auth is best-effort inside a try/catch, and any
+	// throw used to leave `auth` null forever. So a forge that was merely unreachable for the seconds this
+	// loop ran stayed credential-less until somebody restarted the worker, and every job of that kind then
+	// hit the configError fallback -- which, since #310, refunds the reserve and posts a public comment
+	// telling the issue author the operator's deployment is misconfigured. A deployment `doctor` calls
+	// healthy.
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT api.github.com:443"); // untagged: transient
+		return { mintToken: async () => "tok", selfId: 777, source: "gh" };
+	};
+	const { deps, logs } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+
+	assert.ok(
+		logs.some((l) => l.event === "github_auth_unavailable" && l.transient === true),
+		"the boot line must say the failure was transient, so the two cases are distinguishable in a log",
+	);
+	// `logs` is a SNAPSHOT taken when runStart returned, so the recovery line cannot be in it. Read the
+	// slice the mint itself produces instead, which is also the only way to prove the line is emitted by
+	// the re-resolve rather than by boot.
+	const from = bootLines.length;
+	assert.equal(await deps.mintToken({ kind: "github", repo: "o/r" }), "tok", "the next job re-resolves and mints");
+	assert.equal(attempt, 2, "exactly one re-resolve, on demand");
+	const afterMint = parseLines(bootLines.slice(from));
+	assert.ok(
+		afterMint.some((l) => l.event === "self_identity" && l.id === 777 && l.kind === "github"),
+		"the recovered identity is logged like any other, so an operator can see the forge came back",
+	);
+});
+
+test("a DETERMINATE boot auth failure is not retried -- the refusal stays immediate", { skip }, async () => {
+	// The bound. Re-resolving a wrong credential is how a deployment pays to be told the same thing twice,
+	// and the local-only case (no `gh` on PATH) is precisely this: it must boot and drain cron jobs with
+	// one attempt and no further calls.
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		throw Object.assign(new Error("`gh auth token` failed (ENOENT)"), { piDispatchConfig: true });
+	};
+	const { deps, logs } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+
+	assert.ok(logs.some((l) => l.event === "github_auth_unavailable" && l.transient === false));
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+	assert.equal(attempt, 1, "the determinate failure must not be retried, on this job or the next");
+});
+
+test("a re-resolve that fails transiently is retryable, never a public misconfiguration verdict", { skip }, async () => {
+	// The forge is still down when the job arrives. That is an infrastructure failure and it must reach the
+	// processor as one: the config classifier would refund the reserve, complete the job, and comment on
+	// the issue that the operator's deployment is misconfigured.
+	const makeAuth = async () => {
+		throw new Error("connect ECONNREFUSED");
+	};
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	await assert.rejects(
+		() => deps.mintToken({ kind: "github", repo: "o/r" }),
+		(e) => e.piDispatchRetry === true && e.piDispatchConfig === undefined,
+	);
+});
+
+test("a re-resolve that fails DETERMINATELY stops re-resolving -- the second job refuses immediately", { skip }, async () => {
+	// Boot failed transiently, so a re-resolver was kept; by the time a job arrives the credential has
+	// genuinely gone (revoked token, deleted app). That answer will not change, and asking again on every
+	// delivery is one identity call per job against a credential that can never work. So the determinate
+	// answer RETIRES the re-resolver, which is the same rule the boot arm applies one step earlier.
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT");
+		throw Object.assign(new Error("bad app credentials (401)"), { piDispatchConfig: true });
+	};
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+	assert.equal(attempt, 2, "boot, then one re-resolve");
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+	assert.equal(attempt, 2, "the second job must not ask again -- the determinate answer retired the retry");
+});
+
+test("comment re-resolves a transiently-failed forge, and still falls back to stdout when it cannot", { skip }, async () => {
+	// A comment is how a refusal reaches the person who asked for the job. A forge whose auth was merely
+	// unreachable during boot used to degrade every later comment to a stdout line for the lifetime of the
+	// process, which on a github deployment means the issue author is told nothing at all.
+	let attempt = 0;
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT");
+		return { mintToken: async () => "tok", selfId: 1, source: "gh" };
+	};
+	const { deps } = await runStart({ makeAuth, makeHost: () => host });
+	await deps.comment({ kind: "github", repo: "o/r", id: "j1" }, "Refused: ...");
+	assert.deepEqual(posted, ["Refused: ..."], "the re-resolved credential posts the comment for real");
+
+	// And when the forge is still unreachable, the adapter must not throw AND must not swallow the text:
+	// the stdout line is the only remaining signal, so it has to stay reachable.
+	const downHost = fakeHost();
+	const { deps: d2 } = await runStart({ makeAuth: async () => { throw new Error("connect ECONNREFUSED"); }, makeHost: () => downHost });
+	const from = bootLines.length;
+	await assert.doesNotReject(() => d2.comment({ kind: "github", repo: "o/r", id: "j2" }, "still needs saying"));
+	const after = parseLines(bootLines.slice(from));
+	assert.ok(
+		after.some((l) => l.event === "comment" && l.text === "still needs saying"),
+		"the text falls through to stdout rather than being replaced by a comment_failed line that omits it",
+	);
+});
+
+test("concurrent jobs share ONE re-resolve, not one per job", { skip }, async () => {
+	// A worker at PI_CONCURRENCY>1 draining a backlog after a forge outage would otherwise open an identity
+	// call per job, against the forge that just came back.
+	let attempt = 0;
+	let release;
+	const gate = new Promise((r) => { release = r; });
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT");
+		await gate;
+		return { mintToken: async () => "tok", selfId: 5, source: "gh" };
+	};
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	const jobs = [deps.mintToken({ kind: "github", repo: "o/r" }), deps.mintToken({ kind: "github", repo: "o/r" }), deps.mintToken({ kind: "github", repo: "o/r" })];
+	release();
+	assert.deepEqual(await Promise.all(jobs), ["tok", "tok", "tok"]);
+	assert.equal(attempt, 2, "one boot attempt and one shared re-resolve, for three concurrent jobs");
+});
+
+test("a local job still reaches github auth, because run.github borrows it", { skip }, async () => {
+	// `mintToken` maps kind "local" onto github before asking, and the re-resolve must not have moved that
+	// mapping: a cron trigger with run.github is the case.
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT");
+		return { mintToken: async () => "tok", selfId: 9, source: "gh" };
+	};
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	assert.equal(await deps.mintToken({ kind: "local", repo: "o/r" }), "tok");
 });
 
 test("resolveDefaultBranchSha is threaded into prepareWorkspace (C2)", { skip }, async () => {

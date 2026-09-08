@@ -4,6 +4,7 @@ import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
+import { InfraRetry } from "./processor.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
 import { makeGitLabHost } from "./gitlab-host.mjs";
@@ -359,24 +360,85 @@ export async function startWorker(
 	// Auth stays BEST-EFFORT per forge, exactly as it was: a local-only deployment has no GitHub
 	// credentials and must still boot and drain cron jobs. The refusal is deferred to the job that needs
 	// the missing credential (the mintToken fallback below), not raised at startup.
+	//
+	// WHAT CHANGED (issue #316): best-effort used to mean best-effort ONCE. Any throw left `auth` null for
+	// the lifetime of the process, so a forge that was merely unreachable during the seconds this loop ran
+	// stayed credential-less until somebody restarted the worker, and every job of that kind then hit the
+	// `configError` fallback below -- which, since #310, refunds the reserve and posts a public comment
+	// telling the issue author that the operator's deployment is misconfigured. A deployment that
+	// `doctor` reports as healthy. The boot posture is unchanged for a DETERMINATE failure, which is what
+	// the local-only case is (no `gh` on PATH is `ENOENT`); a TRANSIENT one now leaves a re-resolver
+	// behind instead of a permanent null.
 	const forges = { github: { auth: null, host: makeHost() } };
-	try {
-		forges.github.auth = await makeAuth(config.github);
-		log("self_identity", { kind: "github", id: forges.github.auth.selfId, source: forges.github.auth.source });
-	} catch (err) {
-		log("github_auth_unavailable", { kind: "github", reason: err?.message });
-	}
+	// Per forge kind, the closure that would resolve its auth again. Present only while the last attempt
+	// failed transiently: a determinate failure removes it, because retrying a wrong credential is how a
+	// deployment pays to be told the same thing twice.
+	const authRetries = new Map();
+	const authInFlight = new Map();
+
+	/**
+	 * Boot-time attempt for one forge, and the record of what to do if it failed.
+	 *
+	 * `idOf` exists because azure's selfId is an object while the other three are scalars, which is the
+	 * one place a forge identity does not reduce to a single value.
+	 */
+	const attachAuth = async (kind, make, cfg, idOf = (auth) => auth.selfId) => {
+		try {
+			forges[kind].auth = await make(cfg);
+			log("self_identity", { kind, id: idOf(forges[kind].auth), source: forges[kind].auth.source });
+		} catch (err) {
+			// The tag is the whole discriminator, and it is now trustworthy at these sites: the identity
+			// modules throw untagged for a fetch rejection, a transient status and an unparseable body.
+			const transient = err?.piDispatchConfig !== true;
+			if (transient) authRetries.set(kind, () => make(cfg));
+			log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient });
+		}
+	};
+
+	/**
+	 * The auth for a forge, resolving it now if boot could not and the reason was transient.
+	 *
+	 * ONE in-flight promise per forge, because a worker at PI_CONCURRENCY>1 draining a backlog after a
+	 * forge outage would otherwise open one identity call per job. A determinate failure DROPS the retry
+	 * closure, so the next job takes the null path immediately and gets the same refusal it always did.
+	 * A transient failure keeps it and rethrows, and the caller turns that into an `InfraRetry`.
+	 */
+	const ensureAuth = async (kind) => {
+		if (forges[kind]?.auth) return forges[kind].auth;
+		const retry = authRetries.get(kind);
+		if (!retry) return null;
+		if (!authInFlight.has(kind)) {
+			authInFlight.set(
+				kind,
+				(async () => {
+					try {
+						const auth = await retry();
+						forges[kind].auth = auth;
+						log("self_identity", { kind, id: kind === "azure" ? (auth.selfId?.id ?? null) : auth.selfId, source: auth.source });
+						return auth;
+					} catch (err) {
+						if (err?.piDispatchConfig === true) {
+							authRetries.delete(kind);
+							log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient: false });
+							return null;
+						}
+						throw err;
+					} finally {
+						authInFlight.delete(kind);
+					}
+				})(),
+			);
+		}
+		return await authInFlight.get(kind);
+	};
+
+	await attachAuth("github", makeAuth, config.github);
 	// GitLab joins the same map on the same best-effort terms. It appears only when configured: a forge
 	// with no entry refuses its jobs at mint time with a message naming what is missing, which is a better
 	// answer than an entry that exists and cannot authenticate.
 	if (config.gitlab) {
 		forges.gitlab = { auth: null, host: makeGitLabHostFn({ apiUrl: config.gitlab.apiUrl }) };
-		try {
-			forges.gitlab.auth = await makeGitLabAuthFn(config.gitlab);
-			log("self_identity", { kind: "gitlab", id: forges.gitlab.auth.selfId, source: forges.gitlab.auth.source });
-		} catch (err) {
-			log("gitlab_auth_unavailable", { kind: "gitlab", reason: err?.message });
-		}
+		await attachAuth("gitlab", makeGitLabAuthFn, config.gitlab);
 	}
 	// Forgejo joins on the same best-effort terms. Its auth can fail for one reason the others cannot: a
 	// repository-scoped token cannot call GET /user, so an operator who scoped their token without setting
@@ -384,24 +446,14 @@ export async function startWorker(
 	// credential-less, which refuses its jobs at mint time rather than running them unattributed.
 	if (config.forgejo) {
 		forges.forgejo = { auth: null, host: makeForgejoHostFn({ apiUrl: config.forgejo.apiUrl }) };
-		try {
-			forges.forgejo.auth = await makeForgejoAuthFn(config.forgejo);
-			log("self_identity", { kind: "forgejo", id: forges.forgejo.auth.selfId, source: forges.forgejo.auth.source });
-		} catch (err) {
-			log("forgejo_auth_unavailable", { kind: "forgejo", reason: err?.message });
-		}
+		await attachAuth("forgejo", makeForgejoAuthFn, config.forgejo);
 	}
 	// Azure joins on the same terms. Its selfId is an OBJECT (`{ id, email }`) rather than a scalar, because
 	// a pull-request delivery names an actor by GUID and a work item names them only by address -- the one
 	// place a forge's identity does not reduce to a single value.
 	if (config.azure) {
 		forges.azure = { auth: null, host: makeAzureHostFn({ orgUrl: config.azure.orgUrl }) };
-		try {
-			forges.azure.auth = await makeAzureAuthFn(config.azure);
-			log("self_identity", { kind: "azure", id: forges.azure.auth.selfId?.id ?? null, source: forges.azure.auth.source });
-		} catch (err) {
-			log("azure_auth_unavailable", { kind: "azure", reason: err?.message });
-		}
+		await attachAuth("azure", makeAzureAuthFn, config.azure, (auth) => auth.selfId?.id ?? null);
 	}
 
 	/** The `{ auth, host }` pair a job's kind names, or `undefined` for a local job (which has no forge). */
@@ -977,9 +1029,24 @@ export async function startWorker(
 				// corrupt the job outcome and could drive a wrong retry / second PR (CONST-RETRY-INFRA-ONLY).
 				// This adapter NEVER throws.
 				const forge = forgeFor(job);
-				if (forge?.auth) {
+				// Same re-resolve as the mint path, and it matters more here: a comment is how a refusal
+				// reaches the person who asked for the job, so a forge whose auth was merely unreachable at
+				// boot must not degrade every later comment to a stdout line nobody is watching.
+				//
+				// A THROWING re-resolve is treated as no auth rather than as a failed comment, which is what
+				// keeps the fallthrough below reachable: the text still lands on stdout instead of being
+				// replaced by a `comment_failed` line that does not carry it. This adapter never throws.
+				let auth = forge?.auth ?? null;
+				if (forge && !auth) {
 					try {
-						const token = await forge.auth.mintToken(job);
+						auth = await ensureAuth(job.kind);
+					} catch {
+						auth = null;
+					}
+				}
+				if (auth) {
+					try {
+						const token = await auth.mintToken(job);
 						await forge.host.postStatusComment(job, job.target, text, token);
 					} catch (err) {
 						log("comment_failed", { jobId: job?.id, reason: err?.message });
@@ -1001,7 +1068,19 @@ export async function startWorker(
 			// token comes from must always be something the trigger said.
 			mintToken: async (job) => {
 				const kind = job?.kind === "local" ? "github" : job?.kind;
-				const auth = forges[kind]?.auth;
+				// `ensureAuth` returns the boot-time auth when there is one, and otherwise re-resolves once
+				// if boot's failure was transient (issue #316). It throws the transient failure through, and
+				// that throw is UNTAGGED, so the arm below turns it into the retryable class rather than
+				// letting it reach the processor's config classifier: "the forge was unreachable a moment
+				// ago" is not "this deployment is misconfigured", and only one of those deserves a public
+				// comment saying so.
+				let auth;
+				try {
+					auth = await ensureAuth(kind);
+				} catch (err) {
+					if (err?.piDispatchConfig === true) throw err;
+					throw new InfraRetry(`${kind} auth could not be resolved: ${err?.message ?? "unknown"}`);
+				}
 				if (auth) return await auth.mintToken(job);
 				if (kind === "github") {
 					throw configError("github jobs and cron triggers with run.github require a working GITHUB_AUTH_SOURCE (gh/pat/app)");

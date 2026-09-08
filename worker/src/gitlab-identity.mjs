@@ -16,6 +16,7 @@
  */
 
 import { configError } from "./config.mjs";
+import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 
 /** Resolve the acting identity's integer user id from `GET /user`. `fetchFn` is injected for tests. */
 export async function resolveGitLabSelfId({ apiUrl, token, fetchFn = fetch }) {
@@ -27,17 +28,25 @@ export async function resolveGitLabSelfId({ apiUrl, token, fetchFn = fetch }) {
 	try {
 		res = await fetchFn(url, { headers: { "PRIVATE-TOKEN": token }, redirect: "error" });
 	} catch (err) {
-		throw configError(`gitlab identity: GET /user failed (${fetchFailureReason(err)})`);
+		// Unreachable is not misconfigured. The adjacent gitlab-host.mjs has classified this as
+		// InfraRetry since it was written; this file disagreed, and the disagreement decided whether
+		// the receiver ever came back from a forge restart (issue #316).
+		if (isDeterminateFetchFailure(err)) throw configError(`gitlab identity: GET /user failed (${fetchFailureReason(err)})`);
+		throw transientError(`gitlab identity: GET /user failed (${fetchFailureReason(err)})`, err);
 	}
 	if (!res.ok) {
 		// The status alone, never the body: an error body can echo the token back.
+		if (isTransientStatus(res.status, responseHeaderReader(res))) {
+			throw transientError(`gitlab identity: GET /user returned ${res.status}`);
+		}
 		throw configError(`gitlab identity: GET /user returned ${res.status}`);
 	}
 	let body;
 	try {
 		body = await res.json();
 	} catch (err) {
-		throw configError(`gitlab identity: GET /user returned unparseable JSON (${err?.message ?? "unknown"})`);
+		// A truncated body or a proxy interstitial, not a deployment an operator can fix.
+		throw transientError(`gitlab identity: GET /user returned unparseable JSON (${err?.message ?? "unknown"})`, err);
 	}
 	if (!Number.isInteger(body?.id)) {
 		throw configError("gitlab identity: GET /user returned no integer id");

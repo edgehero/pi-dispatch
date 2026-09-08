@@ -127,6 +127,42 @@ test("gh ENOENT (binary absent) is a config error", async () => {
 	);
 });
 
+test("gh spawn errnos other than ENOENT are retryable, not a misconfiguration", async () => {
+	// Issue #316. `promisify(execFile)` overloads `error.code`: a SPAWN failure sets a string errno, a
+	// non-zero EXIT sets the integer status. The old comment called both deterministic and tagged both, so
+	// a host momentarily out of file descriptors told the issue author to check whether the gh CLI was
+	// installed, refunded the reserve and never retried the delivery. The binary is installed. It was
+	// installed a second ago and it is installed now.
+	for (const code of ["EAGAIN", "EMFILE", "ENFILE", "ETIMEDOUT", "EPERM", "EIO"]) {
+		const error = Object.assign(new Error(`spawn gh ${code}`), { code });
+		await assert.rejects(
+			() => makeGitHubAuth({ source: "gh" }, { Octokit: FakeOctokit(USER_ROUTES), execFile: fakeExecFile({ error }) }),
+			(e) => e.piDispatchRetry === true && e.piDispatchConfig === undefined,
+			`${code} is the host being busy, not the operator being wrong`,
+		);
+	}
+});
+
+test("gh ENOTDIR joins ENOENT on the determinate side -- a PATH component that is a file means absent", async () => {
+	const error = Object.assign(new Error("spawn gh ENOTDIR"), { code: "ENOTDIR" });
+	await assert.rejects(
+		() => makeGitHubAuth({ source: "gh" }, { Octokit: FakeOctokit(USER_ROUTES), execFile: fakeExecFile({ error }) }),
+		(e) => e.piDispatchConfig === true,
+	);
+});
+
+test("gh non-zero exit stays a config error -- the residual named in runGhAuthToken", async () => {
+	// A judgment call, recorded rather than derived. `gh auth token` exits 1 for a logged-out host far more
+	// often than for a locked keyring or a token refresh that could not reach the network, and separating
+	// the two needs a table of gh's own stderr strings. `code` is a NUMBER here, which is what the spawn
+	// arm keys on.
+	const error = Object.assign(new Error("Command failed: gh auth token"), { code: 1, stdout: "", stderr: "not logged in" });
+	await assert.rejects(
+		() => makeGitHubAuth({ source: "gh" }, { Octokit: FakeOctokit(USER_ROUTES), execFile: fakeExecFile({ error }) }),
+		(e) => e.piDispatchConfig === true,
+	);
+});
+
 // -- app -----------------------------------------------------------------------------------------
 
 test("app happy: installation token minted, selfId is the bot-user id via the two-step", async () => {
@@ -275,6 +311,43 @@ test("app mint 401 (bad credentials) is a deterministic config error", async () 
 
 test("app mint 404 (unknown installation) is a deterministic config error", async () => {
 	const auth = await appAuthThrowing(httpError(404));
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+});
+
+test("app mint: GitHub's PRIMARY rate limit is retryable, and it does not send retry-after", async () => {
+	// The defect issue #316 was filed for. The old classifier tested `retry-after` alone, which is the
+	// SECONDARY limit; the primary limit answers 403 with `x-ratelimit-remaining: 0` and
+	// `x-ratelimit-reset`, clears within the hour, and fell through to the catch-all as a permanent
+	// refusal with a public comment blaming the operator. `receiver/src/poller.mjs` has read this pair
+	// correctly since it was written.
+	const auth = await appAuthThrowing(httpError(403, { response: { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1757000000" } } }));
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+});
+
+test("app mint: a plain 403 stays determinate -- a scope problem is not a rate limit", async () => {
+	// The bound on the arm above. Widening 403 wholesale would turn a genuinely revoked permission into a
+	// job that retries and then fails silently instead of saying what is wrong.
+	const auth = await appAuthThrowing(httpError(403));
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+});
+
+test("app mint: 408, 425 and an unparseable status are retryable", async () => {
+	// 408 and 425 are about timing by definition. `status: 0` is what @octokit/request-error stores when
+	// the status will not parse, and 0 is a NUMBER, so the old `status !== undefined` catch-all turned "we
+	// could not tell what happened" into a permanent refusal.
+	for (const status of [408, 425, 0]) {
+		const auth = await appAuthThrowing(httpError(status));
+		await assert.rejects(
+			() => auth.mintToken({ kind: "github", repo: "o/r" }),
+			(e) => e.piDispatchRetry === true,
+			`status ${status} is indeterminate or transient, never a misconfiguration`,
+		);
+	}
+});
+
+test("app mint: an ordinary determinate 4xx is still a config error", async () => {
+	// The catch-all still exists and still has work to do; what changed is what reaches it.
+	const auth = await appAuthThrowing(httpError(422));
 	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
 });
 
