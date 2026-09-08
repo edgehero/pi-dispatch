@@ -135,6 +135,17 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		// supersede lease `wait:key:<dedupId>` -- and only after checking the lease is still ours, which is
 		// the same ownership check this key gets for free by being named after its only writer.
 		await bounded(redis.pexpire(key, ttlMs), timeoutMs);
+		// RE-CHECKED HERE, AND ONLY HERE (issue #302). `close`'s drain is bounded at one `timeoutMs` while
+		// this function can spend one per command, so a write that outlived the drain would SADD the name
+		// back AFTER `close`'s SREM had removed it: the ghost the `inFlight` drain exists to prevent,
+		// arriving by a different door. Measured: `hset@0, pexpire@74, del@104, srem@105, sadd@145`.
+		//
+		// NOT before the PEXPIRE, which is the tempting symmetry and is wrong. A close landing between the
+		// HSET and the PEXPIRE would then leave `host:h:<name>` with NO EXPIRY AT ALL, where today it dies in
+		// ninety seconds -- invisible, because every reader walks `host:live` and the SREM emptied it, so a
+		// keyspace leak rather than a ghost peer, and the reader's own prune does not reach it. The SADD is
+		// the index write `close` undoes; the PEXPIRE is the row's own fuse and is always worth attempting.
+		if (closed) return;
 		await bounded(redis.sadd(HOST_SET, name), timeoutMs);
 	};
 
@@ -149,12 +160,22 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		try {
 			inFlight = write({ ...facts, name, beatAt: now() });
 			await inFlight;
-			if (!reachable) {
+			// GATED ON `closed`, IN BOTH ARMS, and that is the whole of issue #302. `close` drains with ONE
+			// `bounded(inFlight, timeoutMs)` while `write` spends a fresh `timeoutMs` on each of its commands,
+			// so a write can outlive the drain -- and the continuation here then speaks through the boot`s own
+			// `log` closure, stamped with a host that has stopped. Measured against a stalled Valkey:
+			// `host_registry_unreachable` at +76ms and `host_registry_restored` at +108ms after `close()` had
+			// RESOLVED. The restored arm is not the afterthought it looks like: a drain that gave up can see the
+			// write SUCCEED late just as easily as fail, and #302 named only the catch.
+			//
+			// This is `makeWatchCloser`'s `reloadLog` posture reached from the other side: work already in
+			// flight cannot be recalled, so what a close gates is its VOICE.
+			if (!reachable && !closed) {
 				reachable = true;
 				log("host_registry_restored", { host: name });
 			}
 		} catch (err) {
-			if (reachable) {
+			if (reachable && !closed) {
 				reachable = false;
 				log("host_registry_unreachable", { host: name, reason: err?.message });
 			}
@@ -218,6 +239,12 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 			timer = null;
 			// Drain before deleting, bounded like everything else here: an unbounded wait on a beat that is
 			// itself hung would be the shutdown hang this module's timeout exists to prevent.
+			//
+			// So the drain is BEST-EFFORT, and it deliberately stays at one `timeoutMs` (issue #302): `write`
+			// can spend one per command, so this can return while a write is still running, and widening the
+			// wait to match would triple a shutdown bound whose entire point is to be short. What makes that
+			// safe is the `closed` FLAG rather than the wait -- it gates the SADD inside `write` and both log
+			// arms in `beat`, so a write that outlives this drain can neither re-index the row nor say a word.
 			await bounded(inFlight ?? Promise.resolve(), timeoutMs).catch(() => {});
 			try {
 				await bounded(redis.del(hostKey(name)), timeoutMs);

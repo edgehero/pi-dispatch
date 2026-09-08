@@ -65,6 +65,65 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 
 const NOW = Date.UTC(2026, 7, 30, 12, 0);
 
+/**
+ * A fake whose per-command latency the TEST sets, so the window issue #302 lives in is reached on purpose
+ * rather than by racing a real Valkey: `close` drains with ONE `bounded(inFlight, timeoutMs)` while
+ * `write` spends one bound PER COMMAND, so a write can still be running after `close` has returned.
+ *
+ * Separate from `fakeRedis` rather than a mode on it, because that fake's `guard()` applies one behaviour
+ * to every method at once -- which is exactly what cannot express "the hset answers and the pexpire does
+ * not". `delays` and `fail` are exposed so a test can change the profile between two beats of ONE
+ * registry, which is how the `restored` arm gets armed at all.
+ */
+function pacedRedis(delays = {}, fail = new Set()) {
+	const calls = [];
+	const hashes = new Map();
+	const sets = new Map();
+	const wait = async (method) => {
+		const d = delays[method] ?? 0;
+		// "never" is the real client's own failure mode, not an exotic one: `maxRetriesPerRequest: null`
+		// QUEUES a command against a dead server rather than rejecting it.
+		if (d === "never") await new Promise(() => {});
+		else await new Promise((resolve) => setTimeout(resolve, d));
+		if (fail.has(method)) throw new Error("ECONNREFUSED");
+	};
+	return {
+		calls,
+		hashes,
+		sets,
+		delays,
+		fail,
+		async hset(key, ...pairs) {
+			calls.push("hset");
+			await wait("hset");
+			const h = hashes.get(key) ?? {};
+			for (let i = 0; i < pairs.length; i += 2) h[pairs[i]] = pairs[i + 1];
+			hashes.set(key, h);
+		},
+		async pexpire(key, ms) {
+			calls.push("pexpire");
+			await wait("pexpire");
+		},
+		async sadd(key, member) {
+			calls.push("sadd");
+			await wait("sadd");
+			const s = sets.get(key) ?? new Set();
+			s.add(member);
+			sets.set(key, s);
+		},
+		async srem(key, member) {
+			calls.push("srem");
+			await wait("srem");
+			sets.get(key)?.delete(member);
+		},
+		async del(key) {
+			calls.push("del");
+			await wait("del");
+			hashes.delete(key);
+		},
+	};
+}
+
 // --- the name ------------------------------------------------------------------------------------------
 
 test("a hostname is reduced to something the charset accepts, and two spellings of one machine converge", () => {
@@ -273,4 +332,62 @@ test("a beat in flight cannot resurrect the row after close()", async () => {
 	await inFlight;
 	assert.equal(redis.hashes.has(hostKey("mini1")), false, "the DEL is final -- a late beat must not recreate the ghost close() exists to remove");
 	assert.deepEqual([...(redis.sets.get(HOST_SET) ?? [])], []);
+});
+
+test("a write that outlives the drain is SILENT, and cannot re-index the row it lost", async () => {
+	// ISSUE #302. `close` drains with ONE `bounded(inFlight, timeoutMs)` while `write` spends one bound per
+	// command, so the drain can give up while the write is still going. What landed afterwards was a log
+	// line through the closure of a boot that had already stopped -- reproduced at +76ms (`unreachable`)
+	// and +108ms (`restored`) past a RESOLVED close -- and a SADD that put this host's name back into
+	// `host:live` after close's own SREM had taken it out.
+	//
+	// The sibling test above, "a beat in flight cannot resurrect the row after close()", drives the
+	// non-delaying fake, so its write and the drain settle in the same tick and this window is never
+	// entered at all. That is why it stayed green while the defect was live.
+	const T = 150;
+
+	// (i) A write that FAILS late. The hset answers inside its own bound, the pexpire never answers, so the
+	// write rejects at roughly 2 x T while the drain gave up at T.
+	{
+		const redis = pacedRedis({ hset: 100, pexpire: "never" });
+		const logs = [];
+		const reg = makeHostRegistry({ redis, name: "mini1", now: () => NOW, timeoutMs: T, log: (e, f) => logs.push({ e, f }) });
+		let settled = false;
+		// NOT awaited: the whole point is that `close` lands while this write is still in flight.
+		const beating = reg.start({ version: "1.7.0" }).then(() => (settled = true));
+		await reg.close();
+		assert.equal(settled, false, "the test is VACUOUS unless the drain gave up first -- check T against the delays before believing a pass");
+		const after = logs.length;
+		await beating;
+		assert.deepEqual(logs.slice(after), [], "a registry that has CLOSED writes nothing: this line used to carry a host that had stopped");
+	}
+
+	// (ii) A write that SUCCEEDS late, against a registry whose last beat had already failed -- so the arm
+	// under test is `restored`, the one the issue does not name.
+	{
+		const redis = pacedRedis({}, new Set(["hset"]));
+		const logs = [];
+		const reg = makeHostRegistry({ redis, name: "mini1", now: () => NOW, timeoutMs: T, log: (e, f) => logs.push({ e, f }) });
+		await reg.start({ version: "1.7.0" });
+		assert.deepEqual(logs.map((l) => l.e), ["host_registry_unreachable"], "reachable is now false, which is what arms the restored arm");
+
+		redis.fail.delete("hset");
+		redis.delays.hset = 100;
+		redis.delays.pexpire = 100; // each inside its own bound; the SUM is what the single-bounded drain misses
+		let settled = false;
+		const late = reg.publish().then(() => (settled = true));
+		await reg.close();
+		assert.equal(settled, false, "vacuous otherwise, as above");
+		const after = logs.length;
+		await late;
+
+		assert.deepEqual(logs.slice(after), [], "the RESTORED arm is gated too: a drain that gave up can see the write SUCCEED late just as easily as fail");
+		assert.equal(redis.calls.filter((c) => c === "sadd").length, 0, "the late write must NOT re-index: a SADD after close's SREM is the ghost the drain exists to prevent");
+		assert.deepEqual([...(redis.sets.get(HOST_SET) ?? [])], [], "so host:live stays empty");
+		assert.equal(
+			redis.calls.filter((c) => c === "pexpire").length,
+			1,
+			"and the PEXPIRE still ran, though `closed` was already true when it was issued: guarding it too would leave the row with NO expiry at all, where today it dies in ninety seconds",
+		);
+	}
 });
