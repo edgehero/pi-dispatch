@@ -319,11 +319,21 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    picked, `GOOGLE_APPLICATION_CREDENTIALS` and `AWS_WEB_IDENTITY_TOKEN_FILE` point at credential files,
    and `AWS_BEDROCK_SKIP_AUTH` turns authentication off. These are refused **at load**, so the whole file
    is rejected and `doctor` says so, rather than per delivery.
-   The list is not maintained by hand: it is extracted from the pinned pi and from the provider SDKs it
-   builds clients with, and a test compares the two in both directions, so an upgrade that starts reading a
-   new variable fails the build. That means it also covers names that are harmless in themselves, such as
-   `AWS_REGION` and `OPENAI_LOG`. If your flow genuinely needs one, put it on `PI_FORWARD_ENV`: that is the
-   operator's list, not the trigger author's, which is the whole distinction.
+   The list is not maintained by hand: it is extracted from the pinned pi and from every package pi builds
+   a client with, and a test compares the two in both directions, so an upgrade that starts reading a new
+   variable fails the build. Seven names cannot be extracted, because the code builds the key at runtime
+   (`AWS_ENDPOINT_URL` and the lowercase proxy spellings); those are listed by hand and a test checks they
+   are still unfindable.
+   This list does **not** include another provider's API key. Binding `OPENAI_API_KEY` on an Anthropic
+   deployment is still fine, exactly as item 4 says: that is the previous rule and it is unchanged.
+   **What it will cost you is carrying AWS or Google cloud credentials on a trigger for a step that has
+   nothing to do with your model provider**, such as an S3 push or a `gcloud` call. `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` are read by the provider SDKs as provider
+   configuration, so they are refused on every deployment now, including one that uses neither Bedrock nor
+   Vertex. The set also covers names that are harmless in themselves, such as `AWS_REGION` and `OPENAI_LOG`.
+   Put what you need on `PI_FORWARD_ENV` instead: nothing there refuses these names. It is not a
+   like-for-like replacement, and the difference is the point of the refusal, `PI_FORWARD_ENV` is one host
+   value for the whole deployment and it is the operator's list rather than the trigger author's.
 6. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
    ships in `@edgehero/pi-dispatch` 1.3.0, `@edgehero/pi-dispatch-admin` 1.3.0 and
    `@edgehero/pi-dispatch-receiver` 1.2.0; that is the floor. The skew that matters is a stale receiver:

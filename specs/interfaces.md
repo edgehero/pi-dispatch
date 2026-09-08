@@ -2207,10 +2207,37 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   These are STATIC names, knowable without deployment state, so they belong at load beside
   `CONTAINER_ENV_NAMES` rather than in the pre-spend gate: the refusal is then free, `doctor` reports it
   for nothing, and it does not depend on which provider a given delivery resolves.
-  **The set is DERIVED FROM TWO SOURCES and bolted in both directions** (`worker/src/provider-steering.mjs`,
-  `worker/test/provider-steering.test.mjs`): every `getProviderEnvValue("NAME")` in the pinned pi's `dist`,
-  and every `readEnv("NAME")` in the provider SDKs pi constructs clients from. A pi bump that adds a
-  steering variable therefore fails the build instead of opening a hole. That is also why the set holds
+  **The set is DERIVED and bolted in both directions** (`worker/src/provider-steering.mjs`,
+  `worker/test/provider-steering.test.mjs`): the names are extracted from the pinned pi's `dist` and from
+  every package pi imports a client from, with the package list read off pi's OWN import statements rather
+  than written here, so a pi bump that adds an SDK fails the bolt too. Four accessor spellings are matched
+  because the SDKs do not agree on one -- `getProviderEnvValue`, `readEnv`, `getEnv` and
+  `process.env["NAME"]`, the last of which is the only way `AZURE_OPENAI_ENDPOINT` is read.
+  **The set deliberately EXCLUDES a provider's KEY variables**, and that is what keeps
+  `REQ-TRIGGER-SECRETS`' documented bound true: an `anthropic` job may still bind `OPENAI_API_KEY` for a
+  flow that talks to OpenAI, refused pre-spend only for the job's OWN provider. Including them would have
+  broken that bound arbitrarily, because only four of pi's thirty-one key variables happen to appear as
+  literals in a scanned artifact -- `OPENAI_API_KEY` would refuse while `GROQ_API_KEY` stayed bindable, for
+  a reason no operator could predict. The bolt subtracts them by asking `providerKeyCandidates`, so the two
+  gates stay one derivation rather than two lists. The AWS credential variables are NOT an exception to
+  this: pi's key table has no `amazon-bedrock` entry at all, so nothing else reserves them.
+  **Nine names cannot be reached by the scan and are listed by hand, which is stated rather than glossed.**
+  The AWS four are read inside `@smithy/core`, one dependency hop past the scan's boundary, two of them
+  through a key built at runtime; they matter because pi stops pinning the Bedrock endpoint as soon as
+  `AWS_REGION` or `AWS_PROFILE` is present, which is the ordinary way to configure Bedrock, and
+  `AWS_SHARED_CREDENTIALS_FILE` replaces the credential the request is signed with rather than only its
+  destination. The rest are the proxy spellings pi's own `getProxyEnv` lowercases and uppercases, of which
+  `EGRESS_ENV_VARS` holds only the uppercase three. A test asserts all nine are still unreachable, so the
+  day one becomes findable it moves into the derivation.
+  **Three limits are on the record rather than implied.** The scan is ONE dependency hop deep, so the rest
+  of the AWS and Google SDK closure (`AWS_EC2_METADATA_SERVICE_ENDPOINT`, `AWS_ROLE_ARN`,
+  `GCE_METADATA_HOST` and some forty more) is not covered; recursing it would reserve most of two SDKs'
+  surface and take a large bite out of what an operator may legitimately bind, so the boundary is a choice.
+  `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and `NODE_TLS_REJECT_UNAUTHORIZED` are excluded as
+  properties of the RUNTIME rather than of a provider, and they predate this gate. And a bound on the whole
+  family: a trigger author picks a NAME and a vault REFERENCE, never a value, so every one of these needs
+  the operator's own vault to hold a useful string at a reference the author may name -- equally true of
+  `AZURE_OPENAI_BASE_URL`, so it bounds the severity of the set rather than distinguishing parts of it. That is also why the set holds
   names nobody would have written down: `AWS_CONTAINER_CREDENTIALS_FULL_URI` makes the AWS SDK fetch
   credentials from a URL of the trigger's choosing, `AWS_WEB_IDENTITY_TOKEN_FILE` and
   `GOOGLE_APPLICATION_CREDENTIALS` are paths to credential files, and `AWS_BEDROCK_SKIP_AUTH` is an auth

@@ -1102,6 +1102,22 @@ test("an operator's own secret is still bindable -- the widening has a bound", (
 	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["DATABASE_URL", "NPM_TOKEN", "STRIPE_KEY"]);
 });
 
+test("ANOTHER provider's key variable is still bindable at LOAD, which is the bound #309 documented", () => {
+	// The one this file did not have, and its absence was nearly expensive. `secrets.test.mjs` pins this
+	// bound against `makeSecretsResolver` with a hand-built job, so it never passes through parseTriggers:
+	// an early draft of #314 put the provider KEY variables into the load-time set and that test stayed
+	// GREEN while the documented, spec'd rule was dead at the loader. A bound asserted only below the layer
+	// that can break it is not asserted.
+	//
+	// It is also why the key variables are subtracted from PROVIDER_STEERING_VARS rather than left in:
+	// only four of pi's thirty-one appear as literals in a scanned artifact, so keeping them would have
+	// refused OPENAI_API_KEY while GROQ_API_KEY stayed bindable, for reasons no operator could predict.
+	const [t] = parse([withRun(LABEL, { secrets: { OPENAI_API_KEY: "op://ci/openai/key", GROQ_API_KEY: "op://ci/groq/key", HF_TOKEN: "op://ci/hf/token" } })]);
+	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["GROQ_API_KEY", "HF_TOKEN", "OPENAI_API_KEY"]);
+	// And the pre-spend gate is where the job's OWN provider is refused, unchanged by any of this.
+	assert.equal(PROVIDER_STEERING_VARS.has("OPENAI_API_KEY"), false, "a key variable belongs to providerKeyCandidates, not to this set");
+});
+
 test("a run.secrets reference that is empty, whitespace-padded, or starts with a dash is refused", () => {
 	for (const [bad, needle] of [["", /non-empty string/], ["   ", /non-empty string/], [" op://a/b/c ", /whitespace/], ["--help", /start with/], ["-rf", /start with/]]) {
 		assert.throws(

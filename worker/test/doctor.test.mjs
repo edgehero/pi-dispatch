@@ -2325,28 +2325,37 @@ test("doctor: a trigger binding a variable pi reads for the provider FAILS at se
 	// notice was that public refusal on a real delivery. The question is answerable here only BECAUSE the
 	// gate stopped depending on host state: the presence-filtered version's answer changed with whichever
 	// machine doctor happened to run on.
+	//
+	// The fixture uses HF_TOKEN rather than GEMINI_API_KEY since issue #314, and the reason is worth
+	// keeping: GEMINI_API_KEY is now in PROVIDER_STEERING_VARS, so a file binding it refuses at LOAD and
+	// never reaches this check at all. 27 of the 31 provider key variables are NOT in that set -- it is
+	// derived from what pi and its SDKs READ, while the key table is data -- so this check still has work
+	// to do, and a fixture that is double-covered would have hidden that either way.
 	const env = {
-		PI_PROVIDER: "google",
-		GEMINI_API_KEY: "sk-x",
-		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["GEMINI_API_KEY"] }),
+		PI_PROVIDER: "huggingface",
+		HF_TOKEN: "hf-x",
+		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["HF_TOKEN"] }),
 		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
 	};
 	const checks = await collectChecks(env, secretsSeams());
 	const hit = checks.find((c) => /variable pi reads for/.test(c.label));
 	assert.ok(hit, "the finding must exist at all");
 	assert.equal(hit.ok, false);
-	assert.match(hit.label, /GEMINI_API_KEY/, "it names the variable the operator has to rename");
+	assert.match(hit.label, /HF_TOKEN/, "it names the variable the operator has to rename");
 	assert.match(hit.fix, /secret-name-reserved/, "and the refusal they would otherwise have met");
 });
 
 test("doctor: the provider clash check follows the PROVIDER, so another provider's variable passes", { skip: skipNoPi }, async () => {
-	// The same bound the gate keeps: an anthropic deployment may bind GEMINI_API_KEY for a flow that talks
-	// to Gemini itself. A check that refused it would be doctor inventing a namespace the project does not
-	// own, and would fail a deployment the worker runs happily.
+	// The same bound the gate keeps: an anthropic deployment may bind another provider's key for a flow
+	// that talks to that provider itself. A check that refused it would be doctor inventing a namespace the
+	// project does not own, and would fail a deployment the worker runs happily.
+	//
+	// MOONSHOT_API_KEY rather than GEMINI_API_KEY since issue #314: the latter is now reserved at load for
+	// every deployment, so it could no longer demonstrate a binding that PASSES.
 	const env = {
 		PI_PROVIDER: "anthropic",
 		ANTHROPIC_API_KEY: "sk-x",
-		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["GEMINI_API_KEY"] }),
+		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["MOONSHOT_API_KEY"] }),
 		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
 	};
 	const checks = await collectChecks(env, secretsSeams());

@@ -953,11 +953,16 @@ test("pi pins the Anthropic endpoint and auth token, so the environment cannot m
 
 test("the control: with no model baseUrl the environment DOES win, which is why the names are reserved", { skip }, async () => {
 	// Without this, the pin above would pass against a stub that never fired, or against a pi that had
-	// stopped reading the environment for unrelated reasons -- and it would also leave a real edge
-	// undocumented. `model.baseUrl` is what makes the anthropic path inert, and a model declared in the
-	// operator's global overlay (/opt/pi-global/models.json, which the runner PREFERS over the agent dir)
-	// need not carry one. So the anthropic pair is inert conditionally, not structurally, and that is
-	// exactly why `provider-steering.mjs` reserves it rather than leaving it to this pin.
+	// stopped reading the environment for unrelated reasons. `model.baseUrl` is what makes the anthropic
+	// path inert, and this shows what happens without one.
+	//
+	// AND THE HONEST BOUND ON WHAT THAT PROVES, because the first draft of this comment asserted a
+	// deployment that does not exist: a custom model in the operator's global overlay CANNOT reach `stream`
+	// without a baseUrl. `pi-coding-agent`'s ModelRegistry fills it from the provider config and then the
+	// built-in default (`model-registry.js:492`) and SKIPS the model entirely if all three are absent, and
+	// the schema forbids an empty string. So this is a property of `stream`, not a reachable path, and
+	// reserving `ANTHROPIC_BASE_URL` is defence in depth against a pi that stops passing `baseURL` rather
+	// than a hole that is open today. The azure and google cases are the ones that are open today.
 	const { ANTHROPIC_MODELS } = await import("@earendil-works/pi-ai/providers/anthropic.models");
 	const custom = { ...(ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0]), baseUrl: undefined };
 

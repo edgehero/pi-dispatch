@@ -976,14 +976,15 @@ function validateSecrets(run, at, path) {
 			throw configError(`${at}: run.secrets key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
 		}
 		if (RESERVED_ENV_NAMES.has(name)) {
-			// TWO reasons a name can be in here, opposite in direction, and the message names neither
-			// specifically because asserting the wrong one is worse than asserting neither (issue #309 made
-			// exactly that mistake in the pre-spend gate's message, and issue #314 widened the set again).
-			// Either the WORKER writes the name, so the trigger's value is silently overwritten and the
-			// trigger looks like it worked; or PI or its provider SDK READS the name, so the trigger's
-			// value silently steers the job's own provider call -- which endpoint it goes to, and with
-			// which credentials.
-			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is a variable this deployment already uses for the job's own configuration -- binding it here would either be silently overwritten or silently change where the job's provider request goes: ${path}`);
+			// TWO reasons a name can be in here, opposite in direction, and the message asserts NEITHER,
+			// because asserting the wrong one is worse than asserting neither: that is the mistake issue
+			// #309 corrected in the pre-spend gate's message, and #314 widened the set far enough that a
+			// disjunction would be false in both branches for some members. The worker writes some of
+			// these; pi or a provider SDK reads others; a few belong to a provider this deployment does not
+			// even use, and a few (`OPENAI_LOG`, `PI_CACHE_RETENTION`) steer nothing dangerous at all and
+			// are reserved only because the set is a derivation rather than a judgement. The one thing
+			// true of every member is that the runtime already owns the name.
+			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is reserved: this deployment's own runtime reads or writes it, so a value bound here would not do what the trigger intends: ${path}`);
 		}
 		const reference = secrets[name];
 		if (!isNonEmptyString(reference)) {
