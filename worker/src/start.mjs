@@ -909,7 +909,12 @@ export async function startWorker(
 			// because the settings file is read at each job start and an operator who declares a profile in
 			// the panel should not have to restart the worker to use it. A deployment that declares nothing
 			// spawns nothing at all: the gate only calls this when a trigger is armed.
-			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, log }),
+			// `hostEnv` is the env THIS worker was started with, not `process.env` by default (issue #309). It is
+			// the environment the resolver subprocess runs in, and makeRunContainer above is handed the same
+			// `env` for the container it builds. Identical on the real path, where both are process.env; under an
+			// injected env they were not, which is the divergence this file already calls out by name for
+			// sessionsDir. One deployment value, one place, same rule as the profiles below it.
+			resolveSecrets: makeSecretsResolverFn({ envProfiles: config.secretProfiles, roots: config.secretResolverRoots, timeoutMs: config.secretResolveTimeoutMs, forwardEnv: config.forwardEnv, hostEnv: env, log }),
 			// #227. What PI_BACKENDS blessed, so a trigger naming an unblessed venue refuses pre-spend. The
 			// panel's picker is bounded by the same list, and this is the half that binds: the overlay is
 			// not the reviewed artifact (DES-PER-TRIGGER-SECRET-PROFILE).

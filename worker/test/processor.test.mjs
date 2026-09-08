@@ -986,6 +986,31 @@ test("a job whose profile cannot be resolved refuses BEFORE the mint, the clone 
 	assert.equal(d.redis.incrCalls, 0, "must not reserve a budget slot");
 });
 
+test("a reserved credential variable refuses pre-spend, names the variable, and never the reference", async () => {
+	// The `resolved.reserved` branch had NO test at all before issue #309, which is how the gate behind it
+	// could reserve nothing on every auth.json deployment and stay green. Three properties, one path: the
+	// refusal is determinate (a return, so the queue does not retry it), it is free (nothing minted, cloned
+	// or reserved), and it publishes the operator's own variable NAME while publishing no reference.
+	let posted = "";
+	const { deps: d, calls } = deps({
+		resolveSecrets: async () => ({ reserved: "ANTHROPIC_API_KEY" }),
+		comment: async (_j, t) => {
+			posted = t;
+		},
+	});
+	const r = await runJob({ ...ghJob, secrets: { ANTHROPIC_API_KEY: "op://Engineering-Prod/anthropic/key" } }, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "secret-name-reserved");
+	assert.equal(r.budgetReserved, false);
+	assert.ok(!calls.includes("run-container"), "must not spend");
+	assert.ok(!calls.includes("prepare"), "must not clone");
+	assert.ok(!calls.some((c) => c.startsWith("mint:")), "must not mint");
+	assert.equal(d.redis.incrCalls, 0, "must not reserve a budget slot");
+	assert.match(posted, /ANTHROPIC_API_KEY/, "the operator's own variable name is the actionable half");
+	assert.equal(/op:\/\//.test(posted), false, "a reference must never be published");
+	assert.equal(/Engineering-Prod/.test(posted), false, "no part of a reference, either");
+});
+
 test("the refusal names the FIELD and the operator's own profile label, never a path or a reference", async () => {
 	// `comment` posts publicly on the issue. A resolver path there publishes the operator's filesystem
 	// layout; a reference publishes their vault topology. This is processor.mjs's oldest restraint,

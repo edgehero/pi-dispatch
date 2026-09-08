@@ -25,7 +25,7 @@
 
 import { spawn } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { providerKeyVars } from "./env-allowlist.mjs";
+import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
 import { mergeSecretProfiles, withinRoots } from "./secret-profiles.mjs";
 
@@ -276,8 +276,7 @@ export function makeSecretsResolver({
 		// STATICALLY knowable name (the mint's, each forge's host var, the worker-only secrets, the egress
 		// policy's, and the closed map's own PI_*/PLAYWRIGHT_*), but two more sets are DEPLOYMENT STATE:
 		//
-		//   - the provider credential's variable names, which come from `findEnvKeys(provider, hostEnv)` and so
-		//     depend on the job's resolved provider AND on what this host has set;
+		//   - the provider credential's variable names, which depend on the job's resolved provider;
 		//   - PI_FORWARD_ENV, which is an operator env list.
 		//
 		// Both are load-bearing rather than tidy. buildContainerEnv writes the provider credential BEFORE this
@@ -288,7 +287,24 @@ export function makeSecretsResolver({
 		//
 		// Refused rather than resolved by ordering, which is the division of labour the mint already keeps:
 		// ordering is the backstop, the refusal is the gate.
-		const reserved = new Set([...(providerKeyVars(job?.provider, hostEnv) ?? []), ...forwardEnv]);
+		//
+		// **`providerKeyCandidates`, not `providerKeyVars`** (issue #309). The question a reserved-name set
+		// asks is what a trigger may NOT NAME, which is a property of the provider. `providerKeyVars` answers
+		// a different one, what this host HOLDS, because it is presence-filtered -- and it returns `undefined`
+		// when the answer is none, which `?? []` made silent. Under PI_AUTH_FROM_PI, ON BY DEFAULT, the
+		// credential comes from pi's auth.json rather than the environment, so this set was EMPTY and the gate
+		// reserved nothing at all: a trigger could bind the provider's own credential variable and spend the
+		// trigger author's key, every job, which is the exact failure the paragraph above says this exists to
+		// prevent. Same conflated `undefined` as issue #286, one module over.
+		//
+		// It also closes a second hole that never needed auth.json. `ANTHROPIC_OAUTH_TOKEN` is not set on any
+		// ordinary host, so it was never in this set, and pi reads it BEFORE `ANTHROPIC_API_KEY` -- a trigger
+		// binding it outranked the operator's own key on the pure-env path too.
+		//
+		// The widening is bounded: it reserves the variables of THIS JOB'S provider and nothing else, so an
+		// anthropic job binding OPENAI_API_KEY for a flow that talks to OpenAI itself is still allowed. That
+		// is deliberate, and tested; refusing it would be this project inventing a namespace it does not own.
+		const reserved = new Set([...providerKeyCandidates(job?.provider), ...forwardEnv]);
 		for (const name of Object.keys(references)) {
 			if (reserved.has(name)) return { reserved: name };
 		}

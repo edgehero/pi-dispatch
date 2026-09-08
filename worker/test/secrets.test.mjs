@@ -295,12 +295,55 @@ test("a key matching a PI_FORWARD_ENV name is refused -- the second route to the
 	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://a/b/c" }))).reserved, "MY_CUSTOM_KEY");
 });
 
-test("a provider variable this host does NOT set is not reserved -- the check follows reality, not a list", async () => {
-	// findEnvKeys returns the names actually PRESENT, so an anthropic job on a host with no OpenAI key may
-	// legitimately bind OPENAI_API_KEY for a flow that talks to OpenAI itself. Refusing it would be this
-	// project inventing a namespace it does not own.
+test("ANOTHER provider's variable is not reserved -- the set is this job's provider, not a namespace grab", async () => {
+	// The bound on the widening in issue #309. The reserved set is the variables of THIS JOB'S provider, so
+	// an anthropic job may still bind OPENAI_API_KEY for a flow that talks to OpenAI itself. Refusing that
+	// would be this project inventing a namespace it does not own.
+	//
+	// The reason changed even though the assertion did not, which is worth saying: this used to pass because
+	// the gate asked what the HOST holds and this host holds no OpenAI key. It now passes because
+	// OPENAI_API_KEY is not a name pi reads for anthropic. The old reason would have let a trigger bind
+	// ANTHROPIC_API_KEY itself on any auth.json deployment.
 	const { fn } = resolver({}, { hostEnv: { ANTHROPIC_API_KEY: "sk-ant" } });
 	const r = await fn(job({ OPENAI_API_KEY: "op://ci/openai/key" }, { provider: "anthropic" }));
 	assert.equal(r.reserved, undefined);
 	assert.equal(r.secrets.OPENAI_API_KEY, "value-for-op://ci/openai/key");
+});
+
+test("the provider's credential variable is reserved when the credential comes from auth.json", async () => {
+	// The defect. PI_AUTH_FROM_PI is ON BY DEFAULT, so a deployment whose key lives in pi's auth.json has
+	// NOTHING in the host env for the provider. The gate used to build its set from the presence-filtered
+	// findEnvKeys, which returns undefined there, and `?? []` made the empty set silent: the trigger's value
+	// was written after the credential in buildContainerEnv and every job of that trigger spent the trigger
+	// author's key. hostEnv is empty here precisely to model that deployment.
+	const { fn, calls } = resolver({}, { hostEnv: {} });
+	const r = await fn(job({ ANTHROPIC_API_KEY: "op://ci/anthropic/key" }, { provider: "anthropic" }));
+	assert.equal(r.reserved, "ANTHROPIC_API_KEY");
+	assert.equal(calls.length, 0, "refused before any resolver spawn: the refusal is free");
+});
+
+test("the provider's OAuth variable is reserved too, which never needed auth.json to be a hole", async () => {
+	// ANTHROPIC_OAUTH_TOKEN is set on no ordinary host, so a presence-filtered set never contained it, and
+	// pi reads it BEFORE ANTHROPIC_API_KEY. A trigger binding it outranked the operator's own key on the
+	// pure-env path as well: the credential was written, and then shadowed by a name that wins in pi.
+	const { fn, calls } = resolver({}, { hostEnv: { ANTHROPIC_API_KEY: "sk-ant-operator" } });
+	const r = await fn(job({ ANTHROPIC_OAUTH_TOKEN: "op://ci/anthropic/token" }, { provider: "anthropic" }));
+	assert.equal(r.reserved, "ANTHROPIC_OAUTH_TOKEN");
+	assert.equal(calls.length, 0);
+});
+
+test("the reserved set follows the job's provider, not the worker's default", async () => {
+	// Every variable pi reads for the resolved provider, and only those. A google job may not bind
+	// GEMINI_API_KEY; an anthropic job may, because pi does not read it for anthropic.
+	const { fn } = resolver({}, { hostEnv: {} });
+	assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "google" }))).reserved, "GEMINI_API_KEY");
+	assert.equal((await fn(job({ GEMINI_API_KEY: "op://ci/g/key" }, { provider: "anthropic" }))).reserved, undefined);
+});
+
+test("a job with no provider reserves the PI_FORWARD_ENV half and refuses nothing else", async () => {
+	// providerKeyCandidates(undefined) is [], not a throw and not a default. There is no provider to protect
+	// a credential for, and inventing one here would refuse triggers on a shape the gate cannot reason about.
+	const { fn } = resolver({}, { hostEnv: {}, forwardEnv: ["MY_CUSTOM_KEY"] });
+	assert.equal((await fn(job({ ANTHROPIC_API_KEY: "op://ci/a/key" }, { provider: undefined }))).reserved, undefined);
+	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://ci/c/key" }, { provider: undefined }))).reserved, "MY_CUSTOM_KEY");
 });

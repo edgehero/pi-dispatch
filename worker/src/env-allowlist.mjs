@@ -20,28 +20,23 @@ function configError(message) {
  * silently outranks `ANTHROPIC_API_KEY`, so one stray host variable would redirect which
  * credential every job spends, with no error and no log line. So we forward a closed set.
  *
- * The provider key variable is DERIVED from pi's own table, not hardcoded. `findEnvKeys(provider,
- * env)` returns the provider's key variable names that are actually PRESENT in `env`, in
- * precedence order (OAuth before API key). Deriving it means:
- *   - any of pi's ~30 providers works with no code change here;
- *   - the list cannot drift when pi adds a provider (a hand-copied table would);
- *   - `undefined` return === "this provider is not configured on this host" === refuse the job
- *     BEFORE spending, rather than launch a container that will fail auth on the first call.
+ * The provider key variable is DERIVED from pi's own table, not hardcoded. Deriving it means any of
+ * pi's ~30 providers works with no code change here, and the list cannot drift when pi adds one, as a
+ * hand-copied table would. `getApiKeyEnvVars` (that table) is intentionally NOT exported by pi, which
+ * is why `providerKeyCandidates` below has to recover it a different way.
  *
- * `getApiKeyEnvVars` (the full candidate list) is intentionally NOT exported by pi, which is why
- * `providerKeyCandidates` below has to recover it a different way.
- *
- * **`env` is a preference here, not a boundary.** pi's `getProviderEnvValue` is
- * `env?.[name] || process.env[name]`, so this reports names the MACHINE carries as well as names the
- * given env does. That is pi's behaviour and this project does not depend on it in either direction:
- * `resolveProviderCredential` no longer calls this at all (it asks the hermetic
- * `providerKeyCandidates` and reads values from the env it was handed), and `doctor` makes its own
- * presence test for the same reason. What still consumes this is `secrets.mjs`'s reserved-name gate,
- * whose `undefined` conflates "no such provider" with "known provider, nothing set" -- issue #309.
+ * **There was a second wrapper here, `providerKeyVars`, and it is GONE (issue #309).** It was a
+ * one-line pass-through to `findEnvKeys(provider, hostEnv)`, which filters pi's list by PRESENCE and
+ * returns a single `undefined` for both "no such provider" and "known provider, nothing set". Every
+ * caller it ever had asked it the wrong question: `resolveProviderCredential` wanted the names and
+ * read the values elsewhere (issue #311), and `secrets.mjs`'s reserved-name gate wanted what a trigger
+ * may not NAME, which is a property of the provider and not of this host. The presence filter also
+ * leaks: pi's `getProviderEnvValue` is `env?.[name] || process.env[name]`, so it reports names the
+ * MACHINE carries as well. It is deleted rather than re-documented because an exported helper that
+ * answers a subtly wrong question does not stay uncalled; both defects in this cluster were somebody
+ * reaching for it. pi's own behaviour is still pinned, against `findEnvKeys` directly, in
+ * `worker/test/env-allowlist.test.mjs`.
  */
-export function providerKeyVars(provider, hostEnv) {
-	return findEnvKeys(provider, hostEnv);
-}
 
 /**
  * An environment in which EVERY variable is set, used only to interrogate pi.
@@ -71,10 +66,13 @@ const EVERY_VAR_SET = new Proxy({}, { get: (_target, name) => (typeof name === "
  * reads no API-key variable for this id -- either there is no such provider, or it authenticates some
  * other way. `piProviders` is what tells those two apart.
  *
- * Distinct from `providerKeyVars` on purpose. That one answers "what does this HOST have", and its
- * `undefined` conflates "unknown provider" with "known provider, nothing set" -- fine for the worker,
- * which only ever forwards keys it holds, useless for `doctor`, which has to NAME the variable an
- * operator should go and set (issue #286).
+ * This is the ONLY question this module asks pi about variable names, and that is the point (#286, #311,
+ * #309). Asking `findEnvKeys(provider, hostEnv)` instead answers "what does this HOST have", conflates
+ * "unknown provider" with "known provider, nothing set" in one `undefined`, and decides presence partly
+ * from the real `process.env`. Three callers wanted three different things from it and all three were
+ * better served by the candidate list plus a presence test of their own: `doctor` NAMES a variable an
+ * operator should set, `resolveProviderCredential` reads values out of the env it was handed, and
+ * `secrets.mjs` reserves what a trigger may not name.
  */
 export function providerKeyCandidates(provider) {
 	// The string filter is on the RESULT, not just on the trap. pi looks its provider up in a plain object

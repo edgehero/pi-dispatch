@@ -21,7 +21,24 @@ if (!mod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 	throw new Error(`env-allowlist tests are REQUIRED here but pi-ai could not import.\n${importError}`);
 }
 const skip = mod ? false : `pi-ai not installed (node ${process.version} < 22.19.0); CI runs these`;
-const { buildContainerEnv, piProviders, providerKeyCandidates, providerKeyVars } = mod ?? {};
+const { buildContainerEnv, piProviders, providerKeyCandidates } = mod ?? {};
+// pi itself, for the upstream pins below. Dynamic and guarded like the module above, for its reason: a
+// static import would ERROR the whole file on a below-floor box instead of skipping it.
+const findEnvKeys = mod ? (await import("@earendil-works/pi-ai/compat")).findEnvKeys : undefined;
+
+// Save, clear and restore a set of variables around a test, so a pin about presence cannot be decided by
+// the developer's shell. pi's getProviderEnvValue reads the real process.env for any name the given env
+// lacks, so this is the only way an absence assertion means anything here.
+function withoutEnv(names) {
+	const saved = Object.fromEntries(names.map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
+	for (const n of names) delete process.env[n];
+	return () => {
+		for (const [n, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[n];
+			else process.env[n] = v;
+		}
+	};
+}
 
 const HOST = {
 	ANTHROPIC_API_KEY: "sk-ant-real",
@@ -32,18 +49,29 @@ const HOST = {
 	PATH: "/usr/bin",
 };
 
-test("derives the provider key var from the host env, in precedence order", { skip }, () => {
-	assert.deepEqual(providerKeyVars("anthropic", HOST), ["ANTHROPIC_API_KEY"]);
-	assert.deepEqual(providerKeyVars("openai", HOST), ["OPENAI_API_KEY"]);
+// pi's own `findEnvKeys`, pinned DIRECTLY rather than through a wrapper of ours. It used to be reached
+// through an exported `providerKeyVars`, which issue #309 deleted: every caller it ever had was asking it
+// the wrong question, and an exported helper that answers a subtly wrong question does not stay uncalled.
+// The upstream facts it encoded are still worth pinning at the pin, so they moved here, and they are now
+// hermetic, which they were not: `HOST` carries no google key but this machine may export one, so the
+// google case read the developer's shell.
+test("pi's findEnvKeys filters its list by presence, in precedence order", { skip }, () => {
+	assert.deepEqual(findEnvKeys("anthropic", HOST), ["ANTHROPIC_API_KEY"]);
+	assert.deepEqual(findEnvKeys("openai", HOST), ["OPENAI_API_KEY"]);
 	// OAuth outranks API key -- the array order is the precedence.
-	assert.deepEqual(
-		providerKeyVars("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth" }),
-		["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-	);
+	assert.deepEqual(findEnvKeys("anthropic", { ...HOST, ANTHROPIC_OAUTH_TOKEN: "oauth" }), ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 });
 
-test("an unconfigured provider yields undefined (=> refuse before spend)", { skip }, () => {
-	assert.equal(providerKeyVars("google", HOST), undefined);
+test("pi's findEnvKeys returns ONE undefined for two different facts, which is why we do not use it", { skip }, () => {
+	// "no such provider" and "known provider, nothing set" arrive identically. providerKeyCandidates plus
+	// piProviders is what tells them apart, and the conflation is the shared root of issues #286 and #309.
+	const saved = withoutEnv(["GEMINI_API_KEY"]);
+	try {
+		assert.equal(findEnvKeys("google", HOST), undefined, "known provider, key not set here");
+		assert.equal(findEnvKeys("not-a-provider-pi-has", HOST), undefined, "no such provider");
+	} finally {
+		saved();
+	}
 });
 
 // ── providerKeyCandidates / piProviders: pi's own table, recovered (issue #286) ──────────────────
@@ -77,9 +105,9 @@ test("providerKeyCandidates is hermetic: the real process.env cannot reach it", 
 		delete process.env.ANTHROPIC_OAUTH_TOKEN;
 		process.env.ANTHROPIC_API_KEY = "leaked-from-the-shell";
 		assert.deepEqual(providerKeyCandidates("anthropic"), before, "the candidate list ignores the host");
-		// The other direction, asserted positively: providerKeyVars DOES see it, which is why doctor may
-		// not use it for the presence test.
-		assert.deepEqual(providerKeyVars("anthropic", {}), ["ANTHROPIC_API_KEY"]);
+		// The other direction, asserted positively: pi's own findEnvKeys DOES see it, through an env that
+		// carries nothing. That is why no presence test in this project may be pi's.
+		assert.deepEqual(findEnvKeys("anthropic", {}), ["ANTHROPIC_API_KEY"]);
 	} finally {
 		restore();
 	}

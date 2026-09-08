@@ -288,7 +288,7 @@ Because resolution happens before anything spends, a wrong reference costs nothi
 repository is cloned, no budget slot is reserved. You get a refusal on the issue naming the VARIABLE that
 failed, and never the reference, the resolver's path, or a byte of what it printed.
 
-### Four things worth knowing before you wire one
+### Five things worth knowing before you wire one
 
 1. **Your exit code decides whether the job retries.** This is the same question this page asks of every
    manager, and here it is load-bearing rather than advisory. Exit 2 means "that reference is wrong" and the
@@ -301,7 +301,16 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    An agent handed a credential often persists it to make its next command simpler, and on a local job that
    `.env` lands in your real repository. Nothing scans for it. `pi-dispatch doctor` warns when a local
    trigger binds secrets; keep those folders out of anything you push.
-4. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
+4. **You cannot bind your provider's own credential variable.** The container env is a closed set the
+   worker builds, and it writes the provider key before it writes your secrets, so a trigger naming
+   `ANTHROPIC_API_KEY` (or `GEMINI_API_KEY` for `google`, or whichever variable pi reads for the provider
+   the job runs on) would replace the operator's credential with the trigger's, on every job of that
+   trigger. It is refused before anything spends, as `secret-name-reserved`, and the refusal names the
+   variable. This covers every variable pi reads for that provider whether or not it is set on the host,
+   including the OAuth token variable, which pi reads first. The names on your `PI_FORWARD_ENV` list are
+   reserved the same way, for the same reason. Another provider's variable is fine: an `anthropic` job may
+   bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
+5. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
    ships in `@edgehero/pi-dispatch` 1.3.0, `@edgehero/pi-dispatch-admin` 1.3.0 and
    `@edgehero/pi-dispatch-receiver` 1.2.0; that is the floor. The skew that matters is a stale receiver:
    it matches the rule, enqueues the job WITHOUT the secrets, and the worker sees an unarmed job -- the
