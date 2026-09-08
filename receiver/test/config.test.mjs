@@ -358,6 +358,16 @@ test("malformed triggers JSON is a config error", () => {
 	assert.throws(withTriggers("{not json"), (e) => e.piDispatchConfig === true);
 });
 
+test("a run.secrets key that steers a provider refuses the receiver too", () => {
+	// Issue #314. The receiver matches the rule and enqueues the job, so a name it accepted and the worker
+	// refused would be a job created only to be thrown away -- and a name BOTH accepted would reach the
+	// container. One validator, asserted from this side as well.
+	const text = JSON.stringify({
+		triggers: [{ on: { type: "label", any: ["pi:go"] }, run: { kind: "github", flow: "f", secrets: { AZURE_OPENAI_BASE_URL: "op://ci/x/y" } } }],
+	});
+	assert.throws(withTriggers(text), (e) => e.piDispatchConfig === true && /AZURE_OPENAI_BASE_URL/.test(e.message));
+});
+
 test("a duplicate key refuses the receiver too, from the SAME validator the worker uses", () => {
 	// Issue #313. The receiver imports parseTriggers from @edgehero/pi-dispatch/triggers rather than
 	// re-deriving it, which is the doctrine this file's own header states, so one edit covers three

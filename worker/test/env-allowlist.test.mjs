@@ -881,3 +881,87 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 		assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is missing from reserved-env.mjs`);
 	}
 });
+
+// ── Issue #314: the endpoint pi's Anthropic client resolves, pinned against the artifact ─────────
+//
+// The other half of the fix. `provider-steering.mjs` reserves the names a trigger may not BIND; this pins
+// what happens if one ever reaches the runner anyway. It is the same shape as the `findEnvKeys` round trip
+// above and exists for the same reason: `CONST-PI-VERSION-PINNED` is what makes an upstream fact worth
+// pinning at the pin rather than trusting.
+
+/**
+ * Set env vars for the duration of `fn`, restoring exactly what was there (absent included).
+ *
+ * ASYNC, and it has to be: a synchronous version returns the promise and runs its `finally` immediately,
+ * so the environment is restored BEFORE the request it was set for is made. Written that way first, and
+ * the control below is what caught it -- the pin passed, because "the endpoint did not move" is also what
+ * you get when the variable was never set.
+ */
+async function withEnv(vars, fn) {
+	const saved = Object.fromEntries(Object.keys(vars).map((n) => [n, Object.hasOwn(process.env, n) ? process.env[n] : undefined]));
+	Object.assign(process.env, vars);
+	try {
+		return await fn();
+	} finally {
+		for (const [n, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[n];
+			else process.env[n] = v;
+		}
+	}
+}
+
+/** Drive pi's real Anthropic path with a stubbed fetch and report the request it would have made. */
+async function anthropicRequestFor(model) {
+	const captured = [];
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async (url, opts) => {
+		captured.push({ url: String(url), headers: Object.fromEntries(new Headers(opts?.headers ?? {})) });
+		// Nothing leaves this machine, and nothing is spent: the request is inspected and then refused.
+		throw new Error("pinned: the request was captured, not sent");
+	};
+	try {
+		const { stream } = await import("@earendil-works/pi-ai/api/anthropic-messages");
+		await stream(model, { messages: [{ role: "user", content: "hi" }] }, { apiKey: "sk-ant-not-a-real-key" }).result();
+	} catch {
+		// Expected: the stub refuses every request.
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+	return captured[0];
+}
+
+test("pi pins the Anthropic endpoint and auth token, so the environment cannot move them", { skip }, async () => {
+	// The issue's option 1. pi passes `baseURL: model.baseUrl` and an explicit `authToken` on all three
+	// client branches, which shadows the SDK's own `readEnv` defaults -- and a default parameter fires only
+	// on `undefined`, so an explicit `null` beats it for good. If a pi release ever stopped passing them,
+	// a trigger that got one of these names past the reserved set would choose the host this deployment's
+	// own credential is sent to. This is the build going red instead.
+	const { ANTHROPIC_MODELS } = await import("@earendil-works/pi-ai/providers/anthropic.models");
+	const model = ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0];
+	assert.equal(typeof model?.baseUrl, "string", "the pinned pi no longer ships anthropic models carrying a baseUrl -- find where the endpoint is resolved now and re-point this pin BEFORE bumping");
+	assert.notEqual(model.baseUrl, "", "an empty baseUrl would make the environment the primary source, which is the azure shape this pin exists to distinguish from");
+
+	const request = await withEnv(
+		{ ANTHROPIC_BASE_URL: "https://evil.example/v1", ANTHROPIC_AUTH_TOKEN: "sk-ant-oat-not-a-real-token" },
+		() => anthropicRequestFor(model),
+	);
+	assert.ok(request, "the stub captured no request at all, so this test asserted nothing");
+	assert.match(request.url, /^https:\/\/api\.anthropic\.com\//, "ANTHROPIC_BASE_URL must not move the endpoint");
+	assert.equal(request.headers.authorization, undefined, "ANTHROPIC_AUTH_TOKEN must not become an Authorization header");
+	assert.equal(request.headers["x-api-key"], "sk-ant-not-a-real-key", "the key pi was GIVEN is the one it sends");
+});
+
+test("the control: with no model baseUrl the environment DOES win, which is why the names are reserved", { skip }, async () => {
+	// Without this, the pin above would pass against a stub that never fired, or against a pi that had
+	// stopped reading the environment for unrelated reasons -- and it would also leave a real edge
+	// undocumented. `model.baseUrl` is what makes the anthropic path inert, and a model declared in the
+	// operator's global overlay (/opt/pi-global/models.json, which the runner PREFERS over the agent dir)
+	// need not carry one. So the anthropic pair is inert conditionally, not structurally, and that is
+	// exactly why `provider-steering.mjs` reserves it rather than leaving it to this pin.
+	const { ANTHROPIC_MODELS } = await import("@earendil-works/pi-ai/providers/anthropic.models");
+	const custom = { ...(ANTHROPIC_MODELS["claude-haiku-4-5"] ?? Object.values(ANTHROPIC_MODELS)[0]), baseUrl: undefined };
+
+	const request = await withEnv({ ANTHROPIC_BASE_URL: "https://evil.example/v1" }, () => anthropicRequestFor(custom));
+	assert.ok(request, "the stub captured no request, so the control proves nothing");
+	assert.match(request.url, /^https:\/\/evil\.example\//, "a model with no baseUrl lets ANTHROPIC_BASE_URL choose the host");
+});

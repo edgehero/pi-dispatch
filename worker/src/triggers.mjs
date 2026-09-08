@@ -31,6 +31,7 @@ import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
+import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
@@ -210,7 +211,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
  * forge added to the table later must not need a second edit here to stay covered.
  */
-const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES]);
+const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
@@ -975,7 +976,14 @@ function validateSecrets(run, at, path) {
 			throw configError(`${at}: run.secrets key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
 		}
 		if (RESERVED_ENV_NAMES.has(name)) {
-			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is a variable the worker sets itself -- the job container would receive the worker's value, not this trigger's, and the trigger would look like it worked: ${path}`);
+			// TWO reasons a name can be in here, opposite in direction, and the message names neither
+			// specifically because asserting the wrong one is worse than asserting neither (issue #309 made
+			// exactly that mistake in the pre-spend gate's message, and issue #314 widened the set again).
+			// Either the WORKER writes the name, so the trigger's value is silently overwritten and the
+			// trigger looks like it worked; or PI or its provider SDK READS the name, so the trigger's
+			// value silently steers the job's own provider call -- which endpoint it goes to, and with
+			// which credentials.
+			throw configError(`${at}: run.secrets key ${JSON.stringify(name)} is a variable this deployment already uses for the job's own configuration -- binding it here would either be silently overwritten or silently change where the job's provider request goes: ${path}`);
 		}
 		const reference = secrets[name];
 		if (!isNonEmptyString(reference)) {

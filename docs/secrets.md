@@ -288,7 +288,7 @@ Because resolution happens before anything spends, a wrong reference costs nothi
 repository is cloned, no budget slot is reserved. You get a refusal on the issue naming the VARIABLE that
 failed, and never the reference, the resolver's path, or a byte of what it printed.
 
-### Five things worth knowing before you wire one
+### Six things worth knowing before you wire one
 
 1. **Your exit code decides whether the job retries.** This is the same question this page asks of every
    manager, and here it is load-bearing rather than advisory. Exit 2 means "that reference is wrong" and the
@@ -309,9 +309,22 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    variable. This covers every variable pi reads for that provider whether or not it is set on the host. For
    `anthropic`, the only provider at the pinned pi with more than one, that includes
    `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your `PI_FORWARD_ENV` list are
-   reserved the same way, for the same reason. Another provider's variable is fine: an `anthropic` job may
-   bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
-5. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
+   reserved the same way, for the same reason. Another provider's *key* variable is fine: an `anthropic` job
+   may bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
+5. **You cannot bind a variable that steers a provider either, whichever provider it belongs to.** The
+   refusal above is about whose key pays; this one is about where the request goes. A trigger binding
+   `AZURE_OPENAI_BASE_URL` sends the job's provider request to a host of its choosing **with your
+   `AZURE_OPENAI_API_KEY` attached**, and `AZURE_OPENAI_RESOURCE_NAME` does the same thing by a different
+   route. `AWS_CONTAINER_CREDENTIALS_FULL_URI` makes the AWS SDK fetch credentials from a URL the trigger
+   picked, `GOOGLE_APPLICATION_CREDENTIALS` and `AWS_WEB_IDENTITY_TOKEN_FILE` point at credential files,
+   and `AWS_BEDROCK_SKIP_AUTH` turns authentication off. These are refused **at load**, so the whole file
+   is rejected and `doctor` says so, rather than per delivery.
+   The list is not maintained by hand: it is extracted from the pinned pi and from the provider SDKs it
+   builds clients with, and a test compares the two in both directions, so an upgrade that starts reading a
+   new variable fails the build. That means it also covers names that are harmless in themselves, such as
+   `AWS_REGION` and `OPENAI_LOG`. If your flow genuinely needs one, put it on `PI_FORWARD_ENV`: that is the
+   operator's list, not the trigger author's, which is the whole distinction.
+6. **All three packages must be new enough to carry the field, and they move together.** `run.secrets`
    ships in `@edgehero/pi-dispatch` 1.3.0, `@edgehero/pi-dispatch-admin` 1.3.0 and
    `@edgehero/pi-dispatch-receiver` 1.2.0; that is the floor. The skew that matters is a stale receiver:
    it matches the rule, enqueues the job WITHOUT the secrets, and the worker sees an unarmed job -- the

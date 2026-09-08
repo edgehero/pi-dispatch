@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { FORGE_HOST_VARS, MINTED_TOKEN_VARS } from "../src/forges.mjs";
+import { PROVIDER_STEERING_VARS } from "../src/provider-steering.mjs";
 import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
 
@@ -1063,6 +1064,42 @@ test("a run.secrets key the worker sets itself is refused, from every set and de
 			`${name} must be refused as a reserved name`,
 		);
 	}
+});
+
+test("a run.secrets key that STEERS a provider is refused, which is a different hazard entirely", () => {
+	// Issue #314. The set above is about whose key pays for the job; this one is about where the job's
+	// request goes and with which credentials attached, and only the first was gated. Measured at the pin:
+	// AZURE_OPENAI_BASE_URL sends the provider call to a host of the trigger's choosing, carrying api-key.
+	//
+	// The names are spelled out here rather than looped from PROVIDER_STEERING_VARS, because a test that
+	// iterates the same constant the code reads is correct at any value and therefore blind to a change IN
+	// that value. provider-steering.test.mjs pins the set against pi; this pins that the set is WIRED.
+	for (const name of [
+		"AZURE_OPENAI_BASE_URL",
+		"AZURE_OPENAI_RESOURCE_NAME",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_AUTH_TOKEN",
+		"OPENAI_BASE_URL",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_BEDROCK_SKIP_AUTH",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"AWS_WEB_IDENTITY_TOKEN_FILE",
+	]) {
+		assert.throws(
+			() => parse([withRun(LABEL, { secrets: { [name]: "op://a/b/c" } })]),
+			(e) => isConfigError(e) && e.message.includes(name),
+			`${name} steers a provider and must be refused at load`,
+		);
+	}
+	assert.ok(PROVIDER_STEERING_VARS.has("AZURE_OPENAI_BASE_URL"), "and the wiring reads THAT set, not a copy of these names");
+});
+
+test("an operator's own secret is still bindable -- the widening has a bound", () => {
+	// Reserving every name would make run.secrets useless, which is the feature this protects rather than
+	// replaces. These are the shapes docs/secrets.md uses as examples.
+	const [t] = parse([withRun(LABEL, { secrets: { STRIPE_KEY: "op://ci/stripe/api-key", NPM_TOKEN: "op://ci/npm/token", DATABASE_URL: "op://ci/db/url" } })]);
+	assert.deepEqual(Object.keys(t.run.secrets).sort(), ["DATABASE_URL", "NPM_TOKEN", "STRIPE_KEY"]);
 });
 
 test("a run.secrets reference that is empty, whitespace-padded, or starts with a dash is refused", () => {
