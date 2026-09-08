@@ -30,6 +30,7 @@ import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.
 // traversal guard cannot). flow-gate's module body is import-inert, so this keeps parseTriggers pure.
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind } from "./forges.mjs";
+import { findDuplicateKey } from "./json-duplicates.mjs";
 import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
@@ -226,6 +227,23 @@ export function parseTriggers(text, path) {
 		parsed = JSON.parse(text);
 	} catch (error) {
 		throw configError(`triggers file is not valid JSON: ${path} (${error.message})`);
+	}
+
+	// AFTER the parse, never before (issue #313). The scanner's whole safety argument is that it only ever
+	// sees text `JSON.parse` has already accepted, so it never has to decide whether malformed input is
+	// malformed; and this order keeps "not valid JSON" the first thing an operator is told, unchanged.
+	//
+	// REFUSED, not repaired, and the whole file rather than the entry. `JSON.parse` keeps the LAST value
+	// for a duplicated key, so the reviewed file and the running file differ with nothing to say so, and
+	// the reach is the whole schema rather than one field. This file's posture everywhere else is that
+	// something which does not say one thing is not something to run half of, and the closest precedent is
+	// its own refusal of an unknown key inside a CONDITION: elsewhere a dropped key is a field that does
+	// nothing, there and here it is a term of a gate that does nothing while the job still runs.
+	const duplicate = findDuplicateKey(text);
+	if (duplicate) {
+		throw configError(
+			`triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}: JSON keeps the LAST value, so the file that was reviewed and the file that runs are not the same file: ${path}`,
+		);
 	}
 
 	const entries = parsed?.triggers;

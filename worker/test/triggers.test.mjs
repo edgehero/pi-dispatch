@@ -36,6 +36,49 @@ const FORGE_ENTRIES = [
 	{ forge: "azure", type: "pull_request", entry: { on: { type: "pull_request", action: ["created"] }, run: { kind: "azure", flow: "review" } } },
 ];
 
+test("a duplicate key is refused, and the refusal names the key, the path and the reason", () => {
+	// Issue #313. Every other test in this file builds its input with JSON.stringify, which CANNOT express a
+	// duplicate, so this one has to feed raw text -- and that is also why no existing test caught it.
+	const text = '{"triggers":[{"on":{"type":"issue"},"run":{"kind":"github","flow":"safe","flow":"evil"}}]}';
+	assert.equal(JSON.parse(text).triggers[0].run.flow, "evil", "the premise: JSON.parse takes the LAST value");
+	assert.throws(
+		() => parseTriggers(text, PATH),
+		(e) => isConfigError(e) && /duplicate key "flow"/.test(e.message) && /triggers\.0\.run\.flow/.test(e.message) && e.message.includes(PATH),
+	);
+});
+
+test("the duplicate refusal reaches the whole schema, not one field", () => {
+	// The reach is the point: run.flow, run.command, on.type, a scoped limit, a run.secrets reference. Any
+	// of them can be written twice and the second one is what runs.
+	const cases = [
+		['{"triggers":[{"on":{"type":"issue","type":"label"},"run":{"kind":"github","flow":"f"}}]}', "type"],
+		['{"triggers":[{"on":{"type":"label","any":["a"]},"run":{"kind":"github","flow":"f","secrets":{"A":"op://x/1","A":"op://y/2"}}}]}', "A"],
+		['{"triggers":[{"on":{"type":"label","any":["a"]},"run":{"kind":"github","kind":"local","flow":"f"}}]}', "kind"],
+		['{"triggers":[],"triggers":[]}', "triggers"],
+	];
+	for (const [text, key] of cases) {
+		assert.throws(
+			() => parseTriggers(text, PATH),
+			(e) => isConfigError(e) && e.message.includes(`duplicate key ${JSON.stringify(key)}`),
+			`a duplicated ${key} must refuse the file`,
+		);
+	}
+});
+
+test("a file with no duplicates loads byte-identically to before", () => {
+	// The bound. A narrowing that also changed a valid file's meaning would be a much bigger change than
+	// the one being made, and the unknown-top-level-key case below is the one deploy/triggers.json relies on.
+	const text = '{"_note":"a comment by convention","triggers":[{"on":{"type":"label","any":["pi:go"]},"run":{"kind":"github","flow":"fix"}}]}';
+	const parsed = parseTriggers(text, PATH);
+	assert.equal(parsed.length, 1);
+	assert.equal(parsed[0].run.flow, "fix");
+});
+
+test("the parse refusal still comes FIRST, so a broken file is not reported as a duplicate one", () => {
+	// The scan runs only on text JSON.parse has already accepted, which is the whole of its safety argument.
+	assert.throws(() => parseTriggers("{ not json", PATH), (e) => isConfigError(e) && /not valid JSON/.test(e.message));
+});
+
 test("invalid JSON is a config error naming the path", () => {
 	assert.throws(() => parseTriggers("{ not json", PATH), (e) => isConfigError(e) && e.message.includes(PATH));
 });

@@ -42,6 +42,7 @@
 
 import nodeFs from "node:fs";
 import { parseTriggers } from "./triggers.mjs";
+import { findDuplicateKey } from "./json-duplicates.mjs";
 
 /**
  * A lock older than this is a crashed writer's, not a live one's: every write under it is a read,
@@ -197,11 +198,25 @@ export function writeTriggers({ triggersPath, mutate, fs = nodeFs, log = () => {
 	}
 	try {
 		let current = [];
+		let existingText = null;
 		try {
-			const raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+			existingText = fs.readFileSync(triggersPath, "utf8");
+			const raw = JSON.parse(existingText);
 			if (Array.isArray(raw?.triggers)) current = raw.triggers;
 		} catch {
 			// Missing/invalid file: start from empty; the validated atomic write below repairs it.
+		}
+		// The repair posture above cannot extend to a duplicate key (issue #313). A file that PARSES is not
+		// missing, so "start from empty" would not repair it, it would delete the operator's trigger set;
+		// and rebuilding from `current` writes back the winning value with the shadowed one silently gone,
+		// which turns a divergence a reviewer could still find into one nobody ever can. So this refuses,
+		// and `parseTriggers` below would refuse the same file anyway: this is the same answer arriving
+		// before the write rather than after it.
+		if (existingText !== null) {
+			const duplicate = findDuplicateKey(existingText);
+			if (duplicate) {
+				return { invalid: `triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}; refusing to rewrite a file whose reviewed value and running value differ: ${triggersPath}` };
+			}
 		}
 		const next = mutate(current.map((t) => ({ ...t })));
 		const text = serialize(next);
@@ -261,13 +276,23 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
 		}
 		try {
 			let raw;
+			let currentText;
 			try {
-				raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+				currentText = fs.readFileSync(triggersPath, "utf8");
+				raw = JSON.parse(currentText);
 			} catch (err) {
 				// NEVER repair-from-empty here: overwriting a file we could not read, to record one
 				// disarm, would destroy the operator's trigger set. writeTriggers' repair posture is for
 				// the operator CRUD path, where "missing" means "first trigger".
 				return { invalid: `triggers file unreadable (${err?.code ?? "parse-error"}), disarm not written: ${triggersPath}` };
+			}
+			// And a duplicate key is the destruction that comment thought it had closed (issue #313). This
+			// path parses, collapses the duplicate to its last value, and then rewrites the WHOLE file from
+			// the parsed array -- so the shadowed key is gone from disk, permanently, to record one disarm.
+			// A file that says two things is not a file to rewrite from one of them.
+			const duplicate = findDuplicateKey(currentText);
+			if (duplicate) {
+				return { invalid: `triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}, disarm not written: ${triggersPath}` };
 			}
 			const entries = Array.isArray(raw?.triggers) ? raw.triggers : null;
 			const entry = entries?.[index];

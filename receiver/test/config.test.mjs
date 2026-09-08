@@ -358,6 +358,19 @@ test("malformed triggers JSON is a config error", () => {
 	assert.throws(withTriggers("{not json"), (e) => e.piDispatchConfig === true);
 });
 
+test("a duplicate key refuses the receiver too, from the SAME validator the worker uses", () => {
+	// Issue #313. The receiver imports parseTriggers from @edgehero/pi-dispatch/triggers rather than
+	// re-deriving it, which is the doctrine this file's own header states, so one edit covers three
+	// loaders. Asserted here anyway: "they share it" is a claim about the import graph, and this is a
+	// claim about what the receiver actually does with a file.
+	const text = '{"triggers":[{"on":{"type":"label","any":["pi:go"]},"run":{"kind":"github","flow":"safe","flow":"evil"}}]}';
+	assert.throws(
+		withTriggers(text),
+		(e) => e.piDispatchConfig === true && /duplicate key "flow"/.test(e.message),
+		"the receiver must not boot on a file whose reviewed value and running value differ",
+	);
+});
+
 test("a none-only label rule is a config error -- no positive selector would widen the trigger surface", () => {
 	assert.throws(withTriggers(JSON.stringify({ triggers: [{ on: { type: "label", none: ["blocked"] }, run: { kind: "github", flow: "fix" } }] })), (e) => e.piDispatchConfig === true);
 });

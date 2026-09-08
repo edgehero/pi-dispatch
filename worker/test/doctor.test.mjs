@@ -2258,6 +2258,22 @@ test("doctor: a triggers file that does not parse FAILS, names the reason, and s
 	assert.ok(text().includes(path), "and the path to fix");
 });
 
+test("doctor: a duplicate key is reported through the SAME check, with no new one added", async () => {
+	// Issue #313. `readTriggerFacts` forwards any piDispatchConfig throw from the loader as `parseError`,
+	// and the fail-tier check prints it, so a new refusal in parseTriggers reaches doctor for nothing. The
+	// point of asserting it is that "for nothing" is a claim about a seam, and a seam that stopped working
+	// would leave the operator finding out from the first delivery instead.
+	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-dup-")), "triggers.json");
+	writeFileSync(path, '{"triggers":[{"on":{"type":"label","any":["pi:fix"]},"run":{"kind":"github","flow":"safe","flow":"evil"}}]}');
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
+
+	assert.equal(code, 1);
+	assert.match(text(), /triggers file does not parse/, "the existing check, not a new one");
+	assert.match(text(), /duplicate key "flow"/, "the loader's own message travels");
+	assert.match(text(), /triggers\.0\.run\.flow/, "including where in the file to look");
+});
+
 test("doctor: a VALID triggers file says nothing about parsing -- the check is silent when it passes", async () => {
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: replicaTriggersFile(2) }), imgDeps(out, green));

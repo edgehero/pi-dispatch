@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
+import { findDuplicateKey } from "../src/json-duplicates.mjs";
 
 // In-memory fs modelled on the admin read-model tests' fake (files + mtimes + openSync "wx"/EEXIST +
 // statSync mtimeMs) but defined HERE, not imported: worker tests do not reach into admin test helpers,
@@ -742,4 +743,55 @@ test("the injected clock is a SEAM, not a behaviour change: no production caller
 	assert.match(src, /function takeLock\(triggersPath, fs, log, now = \(\) => Date\.now\(\)\)/);
 	assert.equal((src.match(/now = \(\) => Date\.now\(\)/g) ?? []).length, 3, "takeLock + the two exported writers, each defaulted");
 	assert.ok(!/LOCK_STALE_MS = (?!10_000)/.test(src), "the threshold itself is untouched at 10s");
+});
+
+// ── Issue #313: the two RAW reads, which the shared validator never sees ─────────────────────────
+
+/** A file that parses, and whose reviewed value differs from its running value. */
+const shadowed = () =>
+	'{\n  "triggers": [\n    { "on": { "type": "issue", "action": ["closed"], "number": 40, "once": true }, "run": { "kind": "github", "flow": "safe", "flow": "evil" } }\n  ]\n}\n';
+
+test("writeTriggers refuses a file whose reviewed value and running value differ", () => {
+	// The repair posture cannot extend to this. A file that PARSES is not missing, so "start from empty"
+	// would not repair it, it would delete the operator's trigger set; and rebuilding from the parsed array
+	// writes back the winning value with the shadowed one gone, which turns a divergence a reviewer could
+	// still find into one nobody ever can.
+	const orig = shadowed();
+	const fs = triggerFs({ [T_PATH]: orig });
+	const res = writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] });
+	assert.match(res.invalid, /duplicate key "flow"/);
+	assert.match(res.invalid, /triggers\.0\.run\.flow/, "and where to find it");
+	assert.equal(fs.files[T_PATH], orig, "the file is untouched: nothing is repaired and nothing is lost");
+});
+
+test("disarmTrigger refuses it too, which is the destruction its own comment forbids", () => {
+	// This path parses, collapses the duplicate to its last value, and then rewrites the WHOLE file from the
+	// parsed array -- so the shadowed key would be gone from disk, permanently, to record one disarm.
+	const orig = shadowed();
+	const fs = triggerFs({ [T_PATH]: orig });
+	return disarmTrigger({ triggersPath: T_PATH, index: 0, number: 40, jobId: "j", at: AT, fs }).then((res) => {
+		assert.match(res.invalid, /duplicate key "flow"/);
+		assert.match(res.invalid, /disarm not written/);
+		assert.equal(fs.files[T_PATH], orig, "the operator's file survives a refusal to disarm");
+	});
+});
+
+test("a clean file still writes and still disarms -- the narrowing costs nothing else", () => {
+	const fs = triggerFs({ [T_PATH]: fileOf([onceTrigger(40)]) });
+	const written = writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] });
+	assert.deepEqual(written, { ok: true });
+	const fs2 = triggerFs({ [T_PATH]: fileOf([onceTrigger(40)]) });
+	return disarmTrigger({ triggersPath: T_PATH, index: 0, number: 40, jobId: "j", at: AT, fs: fs2 }).then((res) => {
+		assert.deepEqual(res, { ok: true });
+	});
+});
+
+test("the writer's own output can never trip the check", () => {
+	// serialize() is JSON.stringify, which cannot emit a duplicate key, so the validate-before-write call
+	// below it is unaffected. Stated as a test because "it cannot happen" is the kind of claim that stops
+	// being true when someone changes how the file is composed.
+	const fs = triggerFs({});
+	const res = writeTriggers({ triggersPath: T_PATH, fs, mutate: () => [labelTrigger(), onceTrigger(7)] });
+	assert.deepEqual(res, { ok: true });
+	assert.equal(findDuplicateKey(fs.files[T_PATH]), null);
 });
