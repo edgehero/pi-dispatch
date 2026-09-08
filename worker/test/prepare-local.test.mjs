@@ -161,7 +161,7 @@ test("a folder that cannot be STATTED is retryable, not 'does not exist'", async
 	//
 	// The `fs` seam exists because a chmod cannot express this: root ignores permissions, Windows differs,
 	// and EIO has no filesystem you can build in a test at all.
-	for (const code of ["EACCES", "EIO", "ETIMEDOUT", "ESTALE", "ELOOP", "EMFILE"]) {
+	for (const code of ["EACCES", "EIO", "ETIMEDOUT", "ESTALE", "EMFILE", "EAGAIN"]) {
 		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
 		await assert.rejects(
 			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),
@@ -174,7 +174,9 @@ test("a folder that cannot be STATTED is retryable, not 'does not exist'", async
 test("ENOENT and ENOTDIR still refuse determinately, and still name which check failed", async () => {
 	// The bound on the test above: absence is genuinely determinate, and the two messages must stay
 	// distinguishable or an operator cannot tell "wrong path" from "not a git repository".
-	for (const code of ["ENOENT", "ENOTDIR"]) {
+	// ELOOP and ENAMETOOLONG join absence: a symlink cycle and an over-long name resolve identically
+	// forever, so retrying either is paying to be told so twice.
+	for (const code of ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]) {
 		const fs = { ...realFs, statSync: () => { throw Object.assign(new Error(`${code}: simulated`), { code }); } };
 		await assert.rejects(
 			() => prepareLocalWorkspace({ folder: "/mnt/project", task: "x", jobDir: "/tmp/x", fs }),

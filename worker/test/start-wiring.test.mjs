@@ -74,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, now, authResolveTimeoutMs } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -175,6 +175,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
 			...(makeGitLabAuth ? { makeGitLabAuth } : {}),
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
+			...(now ? { now } : {}),
+			...(authResolveTimeoutMs ? { authResolveTimeoutMs } : {}),
 		});
 		booted = true;
 	} finally {
@@ -378,7 +380,13 @@ test("a re-resolve that fails DETERMINATELY stops re-resolving -- the second job
 		throw Object.assign(new Error("bad app credentials (401)"), { piDispatchConfig: true });
 	};
 	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });
-	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+	await assert.rejects(
+		() => deps.mintToken({ kind: "github", repo: "o/r" }),
+		// The REAL reason, not the generic "configure GITHUB_AUTH_SOURCE". `ensureAuth` used to turn a
+		// determinate failure into null, which sent every such job to the fallback message while the
+		// specific one was already in hand and went only to the log.
+		(e) => e.piDispatchConfig === true && /bad app credentials/.test(e.message),
+	);
 	assert.equal(attempt, 2, "boot, then one re-resolve");
 	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
 	assert.equal(attempt, 2, "the second job must not ask again -- the determinate answer retired the retry");
@@ -411,6 +419,105 @@ test("comment re-resolves a transiently-failed forge, and still falls back to st
 		after.some((l) => l.event === "comment" && l.text === "still needs saying"),
 		"the text falls through to stdout rather than being replaced by a comment_failed line that omits it",
 	);
+});
+
+test("a factory that throws SYNCHRONOUSLY does not leave the forge dead for the process lifetime", { skip }, async () => {
+	// An async function runs synchronously up to its first await, so a factory that throws before any await
+	// runs the whole re-resolve body -- cleanup included -- BEFORE the in-flight entry is stored. The
+	// cleanup then finds an empty map, the rejected promise is installed, and every later job awaits that
+	// same rejection: the forge is dead until someone restarts the worker, which is the exact defect #316
+	// exists to remove, reintroduced by its own fix. Found by a mutation check, not by reading.
+	let attempt = 0;
+	const makeAuth = (cfg) => {
+		attempt += 1;
+		if (attempt === 1) return Promise.reject(new Error("connect ETIMEDOUT")); // boot: transient
+		if (attempt === 2) throw new Error("sync boom"); // NOT a rejection: a synchronous throw
+		return Promise.resolve({ mintToken: async () => "tok", selfId: 3, source: "gh" });
+	};
+	let clock = 1_000_000;
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost(), now: () => clock });
+
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+	assert.equal(attempt, 2, "the sync throw was the re-resolve");
+
+	clock += 30_000; // past the cooldown
+	assert.equal(await deps.mintToken({ kind: "github", repo: "o/r" }), "tok", "the next job must be able to ask again");
+	assert.equal(attempt, 3);
+});
+
+test("a forge that accepts the connection and never answers does not wedge the queue", { skip }, async () => {
+	// The re-resolve put a live network call on the per-job path, and none of the four resolvers passes an
+	// AbortSignal while undici's default header timeout is five minutes. A load balancer draining, or a
+	// firewall that drops rather than rejects, would hold every job for that long with BullMQ renewing the
+	// lock the whole time, so nothing ever stalls out: at PI_CONCURRENCY=1 that is the queue stopped, with
+	// no error line anywhere.
+	let released;
+	const blackHole = new Promise((r) => {
+		released = r;
+	});
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		if (attempt === 1) throw new Error("connect ETIMEDOUT");
+		await blackHole; // accepts, and answers nothing
+		return { mintToken: async () => "tok", selfId: 4, source: "gh" };
+	};
+	// The production bound is ten seconds. Injected down to 50ms here because the property is that a bound
+	// EXISTS, and proving it by waiting ten real seconds would be paid for on every run for the life of
+	// this file.
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost(), authResolveTimeoutMs: 50 });
+
+	// The assertion is that the mint SETTLES, not that it succeeds.
+	const raced = await Promise.race([
+		deps.mintToken({ kind: "github", repo: "o/r" }).then(() => "resolved", (e) => (e?.piDispatchRetry === true ? "refused" : "other")),
+		new Promise((r) => setTimeout(() => r("still-pending"), 250)),
+	]);
+	released();
+	assert.notEqual(raced, "still-pending", "a job must not sit on an unanswered identity call");
+
+	// The comment adapter shares the bound, and it matters more there: it is how a refusal reaches the
+	// person who asked, and it promises never to throw.
+	const commented = await Promise.race([
+		assert.doesNotReject(() => deps.comment({ kind: "github", repo: "o/r", id: "j1" }, "text")).then(() => "done"),
+		new Promise((r) => setTimeout(() => r("still-pending"), 250)),
+	]);
+	assert.notEqual(commented, "still-pending", "the comment adapter must not hang either");
+});
+
+test("a SEQUENTIAL backlog against a forge that is still down is bounded by a cooldown", { skip }, async () => {
+	// The in-flight promise dedupes CONCURRENT callers. It does nothing for sequential ones, which is the
+	// shape a PI_CONCURRENCY=1 worker draining a backlog actually has: without a cooldown that is one live
+	// identity round-trip per job, forever, each able to sit on undici's 300-second header timeout with the
+	// queue waiting behind it.
+	let attempt = 0;
+	const makeAuth = async () => {
+		attempt += 1;
+		throw new Error("connect ETIMEDOUT");
+	};
+	let clock = 1_000_000;
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost(), now: () => clock });
+	assert.equal(attempt, 1, "boot tried once");
+
+	for (let i = 0; i < 5; i++) {
+		await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+	}
+	assert.equal(attempt, 2, "five sequential jobs, one re-resolve: the rest were answered from the cooldown");
+
+	// And the cooldown expires rather than latching: a forge that comes back is picked up within one job.
+	clock += 30_000;
+	await assert.rejects(() => deps.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+	assert.equal(attempt, 3, "past the window, exactly one more attempt");
+});
+
+test("the cooldown answers with the SAME verdict, not a vaguer one", { skip }, async () => {
+	// A cooldown that reported something generic would trade one defect for another: the operator would see
+	// a different message depending on which job in the backlog they looked at.
+	const makeAuth = async () => { throw new Error("connect ETIMEDOUT api.github.com:443"); };
+	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost(), now: () => 1_000_000 });
+	const first = await deps.mintToken({ kind: "github", repo: "o/r" }).catch((e) => e);
+	const second = await deps.mintToken({ kind: "github", repo: "o/r" }).catch((e) => e);
+	assert.equal(second.piDispatchRetry, true);
+	assert.equal(second.message, first.message, "the cached refusal reads exactly like the one that produced it");
 });
 
 test("concurrent jobs share ONE re-resolve, not one per job", { skip }, async () => {

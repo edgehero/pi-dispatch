@@ -16,7 +16,7 @@
  */
 
 import { configError } from "./config.mjs";
-import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
+import { isDeterminateFetchFailure, isJsonContentType, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 
 /** Resolve the acting identity's integer user id from `GET /user`. `fetchFn` is injected for tests. */
 export async function resolveGitLabSelfId({ apiUrl, token, fetchFn = fetch }) {
@@ -46,6 +46,14 @@ export async function resolveGitLabSelfId({ apiUrl, token, fetchFn = fetch }) {
 		body = await res.json();
 	} catch (err) {
 		// A truncated body or a proxy interstitial, not a deployment an operator can fix.
+		// A body that will not parse is ambiguous in the expensive direction, so the CONTENT TYPE
+		// decides it. A truncated JSON body is transient. An HTML page is not: it is a Cloudflare
+		// Access or OIDC portal answering instead of the forge, and no amount of restarting gets past
+		// one (issue #316).
+		const contentType = responseHeaderReader(res);
+		if (contentType("content-type") !== undefined && !isJsonContentType(contentType)) {
+			throw configError(`gitlab identity: GET /user answered ${String(contentType("content-type"))} instead of JSON, so something other than the GitLab API replied`);
+		}
 		throw transientError(`gitlab identity: GET /user returned unparseable JSON (${err?.message ?? "unknown"})`, err);
 	}
 	if (!Number.isInteger(body?.id)) {

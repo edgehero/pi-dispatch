@@ -15,7 +15,7 @@
  */
 
 import { configError } from "./config.mjs";
-import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
+import { isDeterminateFetchFailure, isJsonContentType, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 
 /**
@@ -34,7 +34,9 @@ export async function resolveAzureSelfId({ orgUrl, token, fetchFn = fetch }) {
 	try {
 		res = await fetchFn(url, { headers: { Authorization: auth, accept: "application/json" }, redirect: "error" });
 	} catch (err) {
-		// Transient, matching azure-host.mjs on the same condition (issue #316).
+		// Transient, EXCEPT for the trust and redirect faults below. azure-host.mjs retries every
+		// rejection unconditionally; that is right for a job and wrong for a boot, which is the whole
+		// distinction issue #316 turns on.
 		if (isDeterminateFetchFailure(err)) throw configError(`could not resolve the azure bot identity from ${url}: ${fetchFailureReason(err)}`);
 		throw transientError(`could not resolve the azure bot identity from ${url}: ${fetchFailureReason(err)}`, err);
 	}
@@ -49,6 +51,14 @@ export async function resolveAzureSelfId({ orgUrl, token, fetchFn = fetch }) {
 	try {
 		body = await res.json();
 	} catch (err) {
+		// A body that will not parse is ambiguous in the expensive direction, so the CONTENT TYPE
+		// decides it. A truncated JSON body is transient. An HTML page is not: it is a Cloudflare
+		// Access or OIDC portal answering instead of the forge, and no amount of restarting gets past
+		// one (issue #316).
+		const contentType = responseHeaderReader(res);
+		if (contentType("content-type") !== undefined && !isJsonContentType(contentType)) {
+			throw configError(`could not resolve the azure bot identity: connectionData answered ${String(contentType("content-type"))} instead of JSON. Azure answers an expired or invalid PAT with 203 and a sign-in page, which is what this usually is`);
+		}
 		throw transientError(`could not resolve the azure bot identity: unparseable JSON from connectionData (${err?.message ?? "unknown"})`, err);
 	}
 

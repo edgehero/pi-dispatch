@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { entryExitCode } from "../src/cli.mjs";
+import { resolveGitLabSelfId } from "@edgehero/pi-dispatch/gitlab-identity";
 import { startReceiver } from "../src/start.mjs";
 
 // The committed unified triggers file, addressed absolutely so loadReceiverConfig's real fs reads
@@ -351,6 +352,47 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 	const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
 	assert.equal(line.event, "receiver_start_failed");
 	assert.match(line.reason, /run\.replicas must be an integer/, "and the reason names the entry, not just the file");
+});
+
+test("a TRANSIENT identity failure at boot exits 1, so the supervisor brings the receiver back", async () => {
+	// Issue #316, and this is the consequence that made it urgent rather than latent. Identity resolution
+	// here is hard-fail by design, and every failure used to be tagged: a forge restarting, answering 502,
+	// or refusing a connection during the seconds the receiver booted therefore produced EXIT_POLICY, which
+	// deploy/receiver.service's RestartPreventExitStatus=2 deliberately leaves STOPPED. Nothing redelivers
+	// a webhook to a process that is not listening, so the first signal was a human noticing that nothing
+	// had run.
+	//
+	// Asserted through the pure resolver plus the pure mapping rather than a second subprocess: the two
+	// halves are what a real boot composes, and neither needs a socket to be true.
+	const transient = [
+		["the instance refused the connection", async () => { throw new Error("connect ECONNREFUSED 10.0.0.5:443"); }],
+		["the instance answered 502 mid-restart", async () => ({ ok: false, status: 502, headers: new Headers() })],
+		["a proxy returned something that is not JSON", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => { throw new Error("bad json"); } })],
+	];
+	for (const [name, fetchFn] of transient) {
+		const err = await resolveGitLabSelfId({ apiUrl: "https://gl.internal", token: "glpat-x", fetchFn }).then(
+			() => null,
+			(e) => e,
+		);
+		assert.ok(err, `${name} must still fail closed -- an unresolved id disarms the bot-loop guard`);
+		assert.equal(err.piDispatchConfig, undefined, `${name} is not a misconfiguration`);
+		assert.equal(entryExitCode(err), 1, `${name} must exit 1, which Restart=on-failure brings back`);
+	}
+
+	// And the bound, in the same shape: the cases an operator really does have to fix still stop the
+	// service, because restarting into an untrusted CA or a scope-less token only hides the message.
+	const determinate = [
+		["a private CA the host does not trust", async () => { throw new TypeError("fetch failed", { cause: new Error("unable to verify the first certificate") }); }],
+		["a token that is not authorized", async () => ({ ok: false, status: 401, headers: new Headers() })],
+	];
+	for (const [name, fetchFn] of determinate) {
+		const err = await resolveGitLabSelfId({ apiUrl: "https://gl.internal", token: "glpat-x", fetchFn }).then(
+			() => null,
+			(e) => e,
+		);
+		assert.equal(err?.piDispatchConfig, true, `${name} is the operator's to fix`);
+		assert.equal(entryExitCode(err), 2, `${name} must stay stopped rather than restart-loop`);
+	}
 });
 
 test("the INFRA half of the mapping is untouched -- only a tagged config refusal becomes 2", () => {

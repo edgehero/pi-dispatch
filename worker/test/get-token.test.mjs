@@ -299,9 +299,90 @@ test("app mint 403 + retry-after (secondary rate limit) is a retryable InfraRetr
 	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
 });
 
-test("app mint network fault (ENOTFOUND, no status) is a retryable InfraRetry", async () => {
-	const auth = await appAuthThrowing(Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }));
+test("app mint network fault (ENOTFOUND) is a retryable InfraRetry", async () => {
+	// The fixture carries status 500 because that is what octokit produces for a network fault: its fetch
+	// wrapper turns EVERY rejection into RequestError(message, 500) and keeps the original as `cause`.
+	// Measured against the pinned @octokit/request for both ENOTFOUND and ECONNREFUSED. The old fixture had
+	// no status at all, which octokit cannot emit, so it was exercising a branch this path never reaches
+	// (issue #316).
+	const enotfound = Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), {
+		status: 500,
+		cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }),
+	});
+	const auth = await appAuthThrowing(enotfound);
 	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+});
+
+test("app mint: a STATUS-LESS rejection is determinate, because it never reached the network", async () => {
+	// Octokit always sets a status, so a rejection without one came from local code. In practice that is
+	// @octokit/auth-app signing the JWT with a key it cannot import: an OpenSSH-format key, or one whose
+	// base64 was mangled by a copy-paste. Measured: that throws a plain Error with code ERR_OSSL_UNSUPPORTED
+	// and no status. Retrying it is paying to be told the same thing twice, and the operator needs the
+	// message, not a restart.
+	const badKey = Object.assign(new Error("error:1E08010C:DECODER routines::unsupported"), { code: "ERR_OSSL_UNSUPPORTED" });
+	const auth = await appAuthThrowing(badKey);
+	await assert.rejects(
+		() => auth.mintToken({ kind: "github", repo: "o/r" }),
+		(e) => e.piDispatchConfig === true && /before any request was made/.test(e.message) && /ERR_OSSL_UNSUPPORTED/.test(e.message),
+	);
+});
+
+test("app mint: a TLS trust fault is determinate even though octokit dresses it as a 500", async () => {
+	// The carve-out would not exist on this path without an explicit check: a private CA in front of a GHES
+	// instance, or a TLS-inspecting proxy re-signing api.github.com, arrives with status 500 and the real
+	// cause underneath. 500 is transient, so the status arm alone would retry it forever rather than naming
+	// NODE_EXTRA_CA_CERTS.
+	const tls = Object.assign(new Error("self-signed certificate"), {
+		status: 500,
+		cause: new TypeError("fetch failed", { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) }),
+	});
+	const auth = await appAuthThrowing(tls);
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+});
+
+test("app mint: a SECONDARY rate limit that carries neither header is still retryable", async () => {
+	// GitHub's guidance is a three-rung ladder ending in "otherwise wait at least a minute", because a
+	// secondary limit can arrive with no retry-after AND a non-zero quota. Octokit's own throttling plugin
+	// reads the BODY for exactly this reason. Without it, the busiest deployments get the public
+	// misconfiguration comment one row below the case #316 was filed for.
+	const secondary = Object.assign(new Error("You have exceeded a secondary rate limit. Please wait a few minutes before you try again."), {
+		status: 403,
+		response: { headers: { "x-ratelimit-remaining": "4998" } },
+	});
+	const auth = await appAuthThrowing(secondary);
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+});
+
+test("app mint: a 403 whose body is not JSON is a WAF interstitial, not a scope refusal", async () => {
+	// A Cloudflare or WAF challenge in front of a GHES instance answers 403 with HTML. The forge's API did
+	// not refuse anything; something in front of it did, and that is indeterminate.
+	const waf = Object.assign(new Error("<html>Attention Required</html>"), {
+		status: 403,
+		response: { headers: { "content-type": "text/html; charset=UTF-8" } },
+	});
+	const auth = await appAuthThrowing(waf);
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchRetry === true);
+});
+
+test("app mint: a 403 whose body IS JSON stays a determinate scope refusal", async () => {
+	// The bound on the arm above. A real GitHub permission refusal is JSON, and it must keep saying so.
+	const scope = Object.assign(new Error("Resource not accessible by integration"), {
+		status: 403,
+		response: { headers: { "content-type": "application/json; charset=utf-8", "x-ratelimit-remaining": "4998" } },
+	});
+	const auth = await appAuthThrowing(scope);
+	await assert.rejects(() => auth.mintToken({ kind: "github", repo: "o/r" }), (e) => e.piDispatchConfig === true);
+});
+
+test("gh killed by a signal is the host under pressure, not a misconfiguration", async () => {
+	// A child killed by a signal sets code to null and signal to the name, so the string-errno arm never
+	// sees it and it fell to the determinate side: an OOM-killed gh told the issue author their deployment
+	// was misconfigured.
+	const killed = Object.assign(new Error("Command failed: gh auth token"), { code: null, signal: "SIGKILL", stdout: "", stderr: "" });
+	await assert.rejects(
+		() => makeGitHubAuth({ source: "gh" }, { Octokit: FakeOctokit(USER_ROUTES), execFile: fakeExecFile({ error: killed }) }),
+		(e) => e.piDispatchRetry === true && /SIGKILL/.test(e.message),
+	);
 });
 
 test("app mint 401 (bad credentials) is a deterministic config error", async () => {

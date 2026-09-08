@@ -26,6 +26,7 @@
 import { configError } from "./config.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
+import { isDeterminateFetchFailure } from "./transient.mjs";
 
 const API_PREFIX = "/api/v4";
 
@@ -39,6 +40,15 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 		try {
 			res = await fetchFn(`${root}${path}`, { headers: { "PRIVATE-TOKEN": token }, redirect: "error" });
 		} catch (err) {
+			// The one condition where the identity modules and this one now agree, because the issue's
+			// acceptance asks for exactly that (#316): a TLS trust failure, a protocol mismatch and a URL
+			// that always redirects are the operator's, and retrying them twice before failing tells
+			// nobody anything. Everything else here stays unconditionally retryable, which is right for a
+			// per-job call behind the queue: a wrong retry costs one more attempt, a wrong refusal costs
+			// the delivery and posts publicly that the deployment is misconfigured.
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`gitlab-host: GET ${path} failed (${fetchFailureReason(err)})`);
+			}
 			throw new InfraRetry(`gitlab-host: GET ${path} failed (${fetchFailureReason(err)})`);
 		}
 		if (res.status === 404 && notFound !== undefined) return notFound;
@@ -122,6 +132,15 @@ export function makeGitLabHost({ apiUrl = "https://gitlab.com", fetchFn = fetch 
 				redirect: "error",
 			});
 		} catch (err) {
+			// The one condition where the identity modules and this one now agree, because the issue's
+			// acceptance asks for exactly that (#316): a TLS trust failure, a protocol mismatch and a URL
+			// that always redirects are the operator's, and retrying them twice before failing tells
+			// nobody anything. Everything else here stays unconditionally retryable, which is right for a
+			// per-job call behind the queue: a wrong retry costs one more attempt, a wrong refusal costs
+			// the delivery and posts publicly that the deployment is misconfigured.
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`gitlab-host: POST ${path} failed (${fetchFailureReason(err)})`);
+			}
 			throw new InfraRetry(`gitlab-host: POST ${path} failed (${fetchFailureReason(err)})`);
 		}
 		if (!res.ok) {

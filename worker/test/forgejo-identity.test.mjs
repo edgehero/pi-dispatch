@@ -91,6 +91,9 @@ test("every other failure refuses too, and the error carries the status but neve
 				fetchFn: async () => ({
 					ok: true,
 					status: 200,
+					// A JSON content type, so this is the TRUNCATED case rather than the portal case: the two
+					// are opposite verdicts and only the header tells them apart (issue #316).
+					headers: new Headers({ "content-type": "application/json" }),
 					json: async () => {
 						throw new Error("not json");
 					},

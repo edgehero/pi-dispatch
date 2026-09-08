@@ -24,6 +24,7 @@
 import { configError } from "./config.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
+import { isDeterminateFetchFailure } from "./transient.mjs";
 
 const API_VERSION = "7.1";
 
@@ -42,6 +43,15 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 		try {
 			res = await fetchFn(url, { headers: { Authorization: authHeader(token), accept: "application/json" }, redirect: "error" });
 		} catch (err) {
+			// The one condition where the identity modules and this one now agree, because the issue's
+			// acceptance asks for exactly that (#316): a TLS trust failure, a protocol mismatch and a URL
+			// that always redirects are the operator's, and retrying them twice before failing tells
+			// nobody anything. Everything else here stays unconditionally retryable, which is right for a
+			// per-job call behind the queue: a wrong retry costs one more attempt, a wrong refusal costs
+			// the delivery and posts publicly that the deployment is misconfigured.
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`azure-host: GET ${path} failed (${fetchFailureReason(err)})`);
+			}
 			throw new InfraRetry(`azure-host: GET ${path} failed (${fetchFailureReason(err)})`);
 		}
 		if (!res.ok) {
@@ -157,6 +167,15 @@ export function makeAzureHost({ orgUrl, fetchFn = fetch } = {}) {
 				redirect: "error",
 			});
 		} catch (err) {
+			// The one condition where the identity modules and this one now agree, because the issue's
+			// acceptance asks for exactly that (#316): a TLS trust failure, a protocol mismatch and a URL
+			// that always redirects are the operator's, and retrying them twice before failing tells
+			// nobody anything. Everything else here stays unconditionally retryable, which is right for a
+			// per-job call behind the queue: a wrong retry costs one more attempt, a wrong refusal costs
+			// the delivery and posts publicly that the deployment is misconfigured.
+			if (isDeterminateFetchFailure(err)) {
+				throw configError(`azure-host: POST ${path} failed (${fetchFailureReason(err)})`);
+			}
 			throw new InfraRetry(`azure-host: POST ${path} failed (${fetchFailureReason(err)})`);
 		}
 		if (!res.ok) {

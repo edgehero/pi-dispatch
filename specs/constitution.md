@@ -722,7 +722,15 @@ passing, on the record — issue #80.)
   public, that a deployment `doctor` reports as healthy is misconfigured. So a boot-path transient throws
   **untagged** (exit 1, which restarts) rather than `InfraRetry`, which is a processor concept the
   receiver must not import; and the worker keeps a re-resolver for a forge whose boot failure was
-  transient, so the next job asks again instead of inheriting a verdict from a moment that has passed.
+  transient, so the next job asks again instead of inheriting a verdict from a moment that has passed,
+  bounded by a cooldown so a backlog draining against a forge that is still down does not open one
+  identity round-trip per job.
+  **The exit-1 half is bounded by the unit, and the bound is stated rather than implied.**
+  `deploy/receiver.service` retries for about 25 seconds (`RestartSec=5` against `StartLimitBurst=5`) and
+  then leaves the unit `failed`. So a brief outage now recovers where nothing recovered before, and a long
+  one ends somewhere a monitor is already looking instead of silently stopped. It does not survive a forge
+  restart measured in minutes, and widening that would trade against the crash-loop bound the unit exists
+  for, so it is filed as issue #318 rather than decided here.
 - **Evidence (upstream)**: `taskforcesh/bullmq @ v5.80.4 → src/commands/moveStalledJobsToWait-9.lua:76-97`
   — `local jobSchedulerId = rcall("HGET", jobKey, "rjk")` … `if rcall("EXISTS", schedulerKey) == 1 then
   isRepeatableJob = true`; then `if stalledCount > maxStalledJobCount and not isRepeatableJob then` —

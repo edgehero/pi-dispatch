@@ -22,7 +22,7 @@
  */
 
 import { configError } from "./config.mjs";
-import { isDeterminateFetchFailure, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
+import { isDeterminateFetchFailure, isJsonContentType, isTransientStatus, responseHeaderReader, transientError } from "./transient.mjs";
 import { fetchFailureReason } from "./gitlab-identity.mjs";
 
 const API_PREFIX = "/api/v1";
@@ -48,7 +48,9 @@ export async function resolveForgejoSelfId({ apiUrl, token, botId = null, fetchF
 	try {
 		res = await fetchFn(url, { headers: { Authorization: `token ${token}` }, redirect: "error" });
 	} catch (err) {
-		// Transient, and forgejo-host.mjs already says so about the same condition (issue #316).
+		// Transient, EXCEPT for the trust and redirect faults below, which is where this deliberately
+		// diverges from forgejo-host.mjs: the host retries every rejection unconditionally, and being
+		// unconditional is correct there because a job retry is cheap. A boot refusal is not (issue #316).
 		if (isDeterminateFetchFailure(err)) throw configError(`could not resolve the forgejo bot identity from ${url}: ${fetchFailureReason(err)}`);
 		throw transientError(`could not resolve the forgejo bot identity from ${url}: ${fetchFailureReason(err)}`, err);
 	}
@@ -73,6 +75,14 @@ export async function resolveForgejoSelfId({ apiUrl, token, botId = null, fetchF
 	try {
 		body = await res.json();
 	} catch (err) {
+		// A body that will not parse is ambiguous in the expensive direction, so the CONTENT TYPE
+		// decides it. A truncated JSON body is transient. An HTML page is not: it is a Cloudflare
+		// Access or OIDC portal answering instead of the forge, and no amount of restarting gets past
+		// one (issue #316).
+		const contentType = responseHeaderReader(res);
+		if (contentType("content-type") !== undefined && !isJsonContentType(contentType)) {
+			throw configError(`could not resolve the forgejo bot identity: GET /user answered ${String(contentType("content-type"))} instead of JSON, so something other than the Forgejo API replied`);
+		}
 		throw transientError(`could not resolve the forgejo bot identity: unparseable JSON from GET /user (${err?.message ?? "unknown"})`, err);
 	}
 	const id = body?.id;

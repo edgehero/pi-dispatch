@@ -5,6 +5,7 @@ import { makeRedisClient, parseConnection } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
 import { InfraRetry } from "./processor.mjs";
+import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { makeGitLabAuth } from "./gitlab-auth.mjs";
 import { makeGitLabHost } from "./gitlab-host.mjs";
@@ -48,6 +49,33 @@ import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
 const BOOT_IMAGE_TIMEOUT_MS = 5_000;
+
+/**
+ * How long after a failed forge-auth re-resolve before another job is allowed to try again (issue #316).
+ *
+ * The in-flight promise dedupes concurrent callers; this bounds sequential ones. Thirty seconds is short
+ * enough that a forge coming back is picked up within one job of it, and long enough that a worker
+ * draining a thousand-job backlog against a forge that is still down opens tens of identity calls rather
+ * than a thousand -- each of which can otherwise sit on undici's 300-second header timeout with the queue
+ * waiting behind it.
+ */
+const AUTH_RETRY_COOLDOWN_MS = 30_000;
+
+/**
+ * How long a job will wait for a forge-auth re-resolve before giving up on it.
+ *
+ * This is the bound that keeps the re-resolve off the critical path, and without it the feature is a
+ * wedge rather than a repair. `mintToken` is awaited inside `runJob`, none of the four identity
+ * resolvers passes an `AbortSignal`, and undici's default `headersTimeout` is FIVE MINUTES -- so a forge
+ * that accepts the connection and then answers nothing (a load balancer draining, a firewall that drops
+ * rather than rejects) would hold every job for that long, with BullMQ renewing the lock the whole time
+ * so nothing ever stalls out. At `PI_CONCURRENCY=1` that is the queue stopped, with no error line.
+ *
+ * Ten seconds is far longer than a healthy `GET /user` and far shorter than anything an operator would
+ * call a hang. Losing the race does not cancel the underlying call: it is left to settle into the
+ * cooldown, so the next job still benefits from whatever it eventually learns.
+ */
+const AUTH_RESOLVE_TIMEOUT_MS = 10_000;
 
 /**
  * How long a fleet-wide scope claim lives. `JOB_TIMEOUT_MS` plus slack: a container cannot outlive that
@@ -321,6 +349,14 @@ export async function startWorker(
 		makeForgejoHost: makeForgejoHostFn = makeForgejoHost,
 		makeAzureAuth: makeAzureAuthFn = makeAzureAuth,
 		makeAzureHost: makeAzureHostFn = makeAzureHost,
+		// The clock the forge-auth re-resolve cooldown reads. Injected because a test that asserts a window
+		// beside a subject built on the default `Date.now` is a fuse: it passes until the wall clock drifts
+		// past that window, then fails in CI on a tree nobody touched (issue #284).
+		now = () => Date.now(),
+		// How long a job waits for a forge-auth re-resolve. A seam rather than a constant because the
+		// property under test is that the bound EXISTS, and a test that proved it by waiting ten real
+		// seconds would be paid for on every run for the life of the file.
+		authResolveTimeoutMs = AUTH_RESOLVE_TIMEOUT_MS,
 	} = {},
 ) {
 	const config = loadConfig(env);
@@ -370,11 +406,16 @@ export async function startWorker(
 	// the local-only case is (no `gh` on PATH is `ENOENT`); a TRANSIENT one now leaves a re-resolver
 	// behind instead of a permanent null.
 	const forges = { github: { auth: null, host: makeHost() } };
-	// Per forge kind, the closure that would resolve its auth again. Present only while the last attempt
-	// failed transiently: a determinate failure removes it, because retrying a wrong credential is how a
-	// deployment pays to be told the same thing twice.
+	// Per forge kind, what it would take to resolve its auth again: the closure, and the `idOf` its log
+	// line needs. Present only while the last attempt failed transiently -- a determinate failure removes
+	// it, because retrying a wrong credential is how a deployment pays to be told the same thing twice.
 	const authRetries = new Map();
 	const authInFlight = new Map();
+	// When the last transient attempt happened, so a backlog draining against a forge that is still down
+	// does not open one identity round-trip per job. The in-flight promise below dedupes CONCURRENT
+	// callers; this bounds SEQUENTIAL ones, which is the shape a PI_CONCURRENCY=1 worker actually has.
+	const authCooldownUntil = new Map();
+	const authLastError = new Map();
 
 	/**
 	 * Boot-time attempt for one forge, and the record of what to do if it failed.
@@ -390,7 +431,7 @@ export async function startWorker(
 			// The tag is the whole discriminator, and it is now trustworthy at these sites: the identity
 			// modules throw untagged for a fetch rejection, a transient status and an unparseable body.
 			const transient = err?.piDispatchConfig !== true;
-			if (transient) authRetries.set(kind, () => make(cfg));
+			if (transient) authRetries.set(kind, { resolve: () => make(cfg), idOf });
 			log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient });
 		}
 	};
@@ -398,38 +439,85 @@ export async function startWorker(
 	/**
 	 * The auth for a forge, resolving it now if boot could not and the reason was transient.
 	 *
-	 * ONE in-flight promise per forge, because a worker at PI_CONCURRENCY>1 draining a backlog after a
-	 * forge outage would otherwise open one identity call per job. A determinate failure DROPS the retry
-	 * closure, so the next job takes the null path immediately and gets the same refusal it always did.
-	 * A transient failure keeps it and rethrows, and the caller turns that into an `InfraRetry`.
+	 * THREE bounds, because "ask again" is a live network round-trip on the job path and each of them is a
+	 * different way of asking too often.
+	 *
+	 * ONE in-flight promise per forge dedupes CONCURRENT callers, which is what a worker at
+	 * PI_CONCURRENCY>1 draining a backlog produces. A COOLDOWN bounds sequential ones: without it a
+	 * PI_CONCURRENCY=1 worker chewing through a backlog against a forge that is still down opens one
+	 * identity call per job, forever, and each of them can sit on undici's 300-second header timeout with
+	 * the queue behind it. Inside the cooldown the last error is re-thrown immediately, which is the same
+	 * verdict at none of the cost. And a DETERMINATE answer retires the re-resolver entirely.
+	 *
+	 * The determinate error is RETHROWN rather than turned into `null`. Returning null sent every such job
+	 * to the generic "configure GITHUB_AUTH_SOURCE" message while the specific reason -- bad credentials,
+	 * a key that is not PKCS//8 -- was already in hand and went only to the log. The caller decides what to
+	 * do with it; the point is that it reaches the caller.
 	 */
 	const ensureAuth = async (kind) => {
 		if (forges[kind]?.auth) return forges[kind].auth;
 		const retry = authRetries.get(kind);
 		if (!retry) return null;
 		if (!authInFlight.has(kind)) {
-			authInFlight.set(
-				kind,
-				(async () => {
-					try {
-						const auth = await retry();
-						forges[kind].auth = auth;
-						log("self_identity", { kind, id: kind === "azure" ? (auth.selfId?.id ?? null) : auth.selfId, source: auth.source });
-						return auth;
-					} catch (err) {
-						if (err?.piDispatchConfig === true) {
-							authRetries.delete(kind);
-							log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient: false });
-							return null;
-						}
-						throw err;
-					} finally {
-						authInFlight.delete(kind);
+			const until = authCooldownUntil.get(kind) ?? 0;
+			if (now() < until) throw authLastError.get(kind) ?? transientError(`${kind} auth is still unavailable`);
+			const attempt = async () => {
+				try {
+					const auth = await retry.resolve();
+					forges[kind].auth = auth;
+					authCooldownUntil.delete(kind);
+					authLastError.delete(kind);
+					log("self_identity", { kind, id: retry.idOf(auth), source: auth.source });
+					return auth;
+				} catch (err) {
+					authLastError.set(kind, err);
+					if (err?.piDispatchConfig === true) {
+						authRetries.delete(kind);
+						log(`${kind}_auth_unavailable`, { kind, reason: err?.message, transient: false });
+					} else {
+						authCooldownUntil.set(kind, now() + AUTH_RETRY_COOLDOWN_MS);
 					}
-				})(),
-			);
+					throw err;
+				}
+			};
+			// The cleanup is chained OUTSIDE the async body rather than written as its `finally`, and that is
+			// not a style choice. An async function runs synchronously up to its first `await`, so a factory
+			// that throws SYNCHRONOUSLY runs the whole body -- catch and finally included -- before this
+			// `set` ever happens: the delete would find an empty map and the rejected promise would then be
+			// installed permanently, leaving that forge dead for the lifetime of the process. Which is the
+			// exact defect issue #316 exists to remove, reintroduced by its own fix. A `.finally` callback
+			// is always a microtask, so it cannot outrun the `set`, and the identity check makes it safe
+			// against a later attempt having already replaced the entry.
+			const inflight = attempt().finally(() => {
+				if (authInFlight.get(kind) === inflight) authInFlight.delete(kind);
+			});
+			// A handler, so that a caller losing the timeout race below cannot turn this into an unhandled
+			// rejection. Every awaiter still sees the rejection through its own `await`.
+			inflight.catch(() => {});
+			authInFlight.set(kind, inflight);
 		}
-		return await authInFlight.get(kind);
+		const inflight = authInFlight.get(kind);
+		let timer;
+		try {
+			return await Promise.race([
+				inflight,
+				new Promise((_resolve, reject) => {
+					timer = setTimeout(() => reject(transientError(`${kind} auth did not answer within ${authResolveTimeoutMs}ms`)), authResolveTimeoutMs);
+					timer.unref?.();
+				}),
+			]);
+		} catch (err) {
+			// A lost race is a forge that is not answering, which is exactly what the cooldown is for: the
+			// in-flight call is still out there and will set it when it settles, but the next job must not
+			// queue up behind it in the meantime.
+			if (!authLastError.has(kind)) {
+				authLastError.set(kind, err);
+				authCooldownUntil.set(kind, now() + AUTH_RETRY_COOLDOWN_MS);
+			}
+			throw err;
+		} finally {
+			clearTimeout(timer);
+		}
 	};
 
 	await attachAuth("github", makeAuth, config.github);
@@ -1078,6 +1166,9 @@ export async function startWorker(
 				try {
 					auth = await ensureAuth(kind);
 				} catch (err) {
+					// A determinate re-resolve failure carries the REAL reason (bad credentials, a key that
+					// is not PKCS//8), which is strictly better than the generic message below, so it is
+					// passed straight through rather than collapsed into it.
 					if (err?.piDispatchConfig === true) throw err;
 					throw new InfraRetry(`${kind} auth could not be resolved: ${err?.message ?? "unknown"}`);
 				}

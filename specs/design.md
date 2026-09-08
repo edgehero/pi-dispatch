@@ -3196,9 +3196,13 @@ a tunnel.
 ## DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE
 
 - **Decision** (issue #316): the question `CONST-RETRY-INFRA-ONLY` asks at every failure site is answered
-  in ONE place, `worker/src/transient.mjs`, and every site that classifies a fault imports it. The rule is
-  a pair of predicates over an HTTP status and an errno, plus a third for the one family of connection
-  failure that is determinate.
+  in ONE place, `worker/src/transient.mjs`, and every site that has to draw the **determinate** line
+  imports it. The rule is a set of predicates over an HTTP status, an errno and a rejection.
+  **The host modules deliberately do NOT import it, and that is not drift.** `gitlab-host.mjs`,
+  `forgejo-host.mjs` and `azure-host.mjs` classify every failure as `InfraRetry` unconditionally, and
+  being unconditional is *correct* there: they run per job, behind the queue, where a wrong retry costs
+  one more attempt and a wrong refusal costs the delivery plus a public accusation. They draw no line, so
+  they need no rule. The identity modules are the ones that had to, because a boot refusal is not cheap.
 - **Why a module rather than a convention**: because the convention already existed and had drifted into
   two incompatible halves one file apart. `gitlab-host.mjs` and `forgejo-host.mjs` classify a fetch
   rejection, a non-ok status and an unparseable body as `InfraRetry`; `gitlab-identity.mjs`,
@@ -3240,6 +3244,22 @@ a tunnel.
   is a hand-maintained table of another tool's prose, which is the shape this project keeps deleting. A
   non-zero exit therefore stays determinate and the residual is named at the call site; only the SPAWN
   errno, which Node supplies as a code, is classified.
+- **Three residuals, named rather than hidden.** `ENOTFOUND` and `ECONNREFUSED` stay transient even though
+  a typo'd hostname and a wrong port are permanent: they are indistinguishable from a DNS outage and a
+  forge that is down, and the allow-list rule puts the indistinguishable case on the retryable side.
+  `gh auth token` exiting non-zero stays determinate even though a locked keyring is not, because
+  separating them needs a table of another tool's stderr prose. And `config.mjs`'s `fileExists` still uses
+  `existsSync` on the App private-key path, so an `EACCES` there still reports as absence; it is boot-only
+  and pre-dates this entry, and it is recorded here rather than swept silently.
+- **What the exit-1 half actually buys, stated exactly, because the shipped unit bounds it.**
+  `deploy/receiver.service` pairs `Restart=on-failure` and `RestartSec=5` with `StartLimitBurst=5` inside
+  `StartLimitIntervalSec=60`, so the receiver retries for roughly **25 seconds** and is then left in
+  systemd's `failed` state. That is a real improvement on two counts and not on a third: an outage shorter
+  than the window now recovers by itself where nothing recovered before, and a longer one ends in `failed`,
+  which `systemctl --failed` and every monitor already watch, rather than the silent `inactive (dead)` an
+  exit 2 produced. What it does not do is survive a forge restart that takes minutes. Raising the burst
+  would trade that against the crash-loop bound the unit exists to impose, which is a separate decision:
+  filed as issue #318 rather than taken here.
 - **Consequence for boot, which is where this was worst.** The identity modules run only at boot, and the
   issue that found them called that harmless. It is the opposite: a transient fault there took the
   receiver down with the supervisor declining to restart it, and left the worker running with a forge

@@ -32,7 +32,8 @@ test("EVERY failure throws -- an unresolved id would disarm the bot-loop guard",
 		["no integer id", { fetchFn: async () => ok({ id: "4242" }) }, true],
 		["http 500", { fetchFn: async () => ok({}, 500) }, false],
 		["http 429", { fetchFn: async () => ok({}, 429) }, false],
-		["unparseable body", { fetchFn: async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad json"); } }) }, false],
+		["unparseable body, JSON content type (truncated)", { fetchFn: async () => ({ ok: true, status: 200, headers: new Headers({ "content-type": "application/json" }), json: async () => { throw new Error("bad json"); } }) }, false],
+		["unparseable body, HTML content type (an SSO portal answered)", { fetchFn: async () => ({ ok: true, status: 200, headers: new Headers({ "content-type": "text/html" }), json: async () => { throw new Error("bad json"); } }) }, true],
 		["network fault", { fetchFn: async () => { throw new Error("ECONNREFUSED"); } }, false],
 	];
 	for (const [name, over, determinate] of cases) {

@@ -28,7 +28,7 @@ import { Octokit as RealOctokit } from "@octokit/rest";
 import { configError } from "./config.mjs";
 import { resolveSelfId } from "./identity.mjs";
 import { InfraRetry } from "./processor.mjs";
-import { isDeterminateFsCode, isTransientStatus, octokitHeaderReader } from "./transient.mjs";
+import { isDeterminateFetchFailure, isDeterminateFsCode, isTransientStatus, octokitHeaderReader } from "./transient.mjs";
 
 /**
  * Build the auth surface for `cfg = { source, patVar?, appId?, installationId?, privateKeyPath? }`.
@@ -164,6 +164,11 @@ async function runGhAuthToken(execFileAsync) {
 		({ stdout } = await execFileAsync("gh", ["auth", "token"]));
 	} catch (error) {
 		const detail = error?.code ?? error?.message ?? "unknown";
+		// A child killed by a SIGNAL sets `code` to null and `signal` to the name. An OOM-killed `gh` is
+		// the host being under pressure, not a deployment that is wrong.
+		if (error?.signal) {
+			throw new InfraRetry(`\`gh auth token\` was killed by ${error.signal}; the host is under pressure`);
+		}
 		if (typeof error?.code === "string" && !isDeterminateFsCode(error.code)) {
 			throw new InfraRetry(`\`gh auth token\` could not be run (${detail}); the host is momentarily unable to spawn it`);
 		}
@@ -214,24 +219,37 @@ function repoNameOf(repo) {
  *
  * It also said status-less network faults reach the bottom branch. They do not:
  * `@octokit/request`'s fetch wrapper turns every network rejection into `RequestError(message, 500)`, so
- * that branch is unreachable through octokit and the 5xx arm has been doing the work all along. The
- * branch stays as a backstop for a rejection that never went through the wrapper, with its claim about
- * which errnos arrive there removed.
+ * that branch is unreachable through octokit, and the 5xx arm has been doing the work all along.
+ *
+ * TWO CONSEQUENCES OF THAT SAME FACT, and they run in opposite directions.
+ *
+ * A TRUST OR REDIRECT FAULT ARRIVES WEARING A 500. The wrapper keeps the original rejection as `cause`,
+ * so the chain is intact, but the status says 500 and 500 is transient. A private CA in front of a GHES
+ * instance, or a TLS-inspecting corporate proxy re-signing `api.github.com`, would otherwise be retried
+ * forever instead of naming `NODE_EXTRA_CA_CERTS`. So the determinate check runs FIRST.
+ *
+ * AND AN ABSENT STATUS MEANS THIS NEVER REACHED THE NETWORK. Octokit always sets one, so a status-less
+ * rejection came from local code: `@octokit/auth-app` signing the JWT with a key that is not PKCS//8, the
+ * commonest App setup mistake there is. That is determinate, and it used to be retried and then reported
+ * as an infrastructure failure with the real reason nowhere an operator would look.
  */
 function classifyAppMintError(error) {
 	const status = typeof error?.status === "number" ? error.status : undefined;
+	const detail = error?.message ?? "unknown";
 
+	if (isDeterminateFetchFailure(error)) return configError(`app token mint refused: ${detail}`);
 	if (status === 401) return configError("app token mint refused: bad app credentials (401)");
 	if (status === 404) return configError("app token mint refused: unknown installation (404)");
-	if (status !== undefined && isTransientStatus(status, octokitHeaderReader(error))) {
+	if (status === undefined) {
+		// Local, and therefore the operator's. `code` is worth carrying: a bad PEM surfaces as an OpenSSL
+		// DECODER error whose code says more than its message does.
+		const code = error?.code ? `${error.code}: ` : "";
+		return configError(`app token mint failed before any request was made (${code}${detail})`);
+	}
+	if (isTransientStatus(status, octokitHeaderReader(error), detail)) {
 		return new InfraRetry(`app token mint: transient upstream refusal (${status})`);
 	}
-	if (status !== undefined) {
-		return configError(`app token mint failed (${status}): ${error?.message ?? "unknown"}`);
-	}
-	// No HTTP status at all. Indeterminate, so retry (CONST-RETRY-INFRA-ONLY).
-	const detail = error?.code ? `${error.code}: ` : "";
-	return new InfraRetry(`app token mint: network fault: ${detail}${error?.message ?? "unknown"}`);
+	return configError(`app token mint failed (${status}): ${detail}`);
 }
 
 /**

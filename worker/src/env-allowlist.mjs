@@ -31,6 +31,7 @@ import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 function configError(message) {
 	const error = new Error(message);
@@ -160,9 +161,12 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
 		// Absent is determinate (there is no login), and so is unparseable (the file is there and wrong, and
 		// an operator has to fix it). Everything else propagates untagged, which is `CONST-RETRY-INFRA-ONLY`
 		// putting it back where it belongs: an infrastructure fault reported as itself, with its own message.
-		const absent = error?.code === "ENOENT" || error?.code === "ENOTDIR";
+		// The codes come from the shared rule rather than a second copy of them here (issue #316): this
+		// file's argument IS that rule, and restating it was how the identity modules came to disagree
+		// with the host modules about the same three conditions.
+		const absent = isDeterminateFsCode(error?.code);
 		if (!absent && !(error instanceof SyntaxError)) throw error;
-		const why = absent ? `no pi login at ${path}` : `the pi login at ${path} is not valid JSON`;
+		const why = absent ? `nothing readable at ${path}` : `the pi login at ${path} is not valid JSON`;
 		throw configError(`no credential for provider "${provider}": not in the worker environment, and ${why} — set the key in .env, or run \`pi login\``);
 	}
 	const cred = auth?.[provider];

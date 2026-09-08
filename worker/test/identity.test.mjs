@@ -81,7 +81,7 @@ test("a transient octokit rejection is NOT a config error -- it must not stop th
 		["primary rate limit (403 + x-ratelimit-remaining: 0)", httpError(403, { "x-ratelimit-remaining": "0" })],
 		["secondary rate limit (403 + retry-after)", httpError(403, { "retry-after": "60" })],
 		["an unparseable status, which octokit reports as 0", httpError(0)],
-		["a rejection with no status at all", new Error("socket hang up")],
+		["a network fault, which octokit reports as 500", Object.assign(httpError(500), { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), { code: "ENOTFOUND" }) })],
 	];
 	for (const [name, error] of cases) {
 		await assert.rejects(
@@ -90,6 +90,32 @@ test("a transient octokit rejection is NOT a config error -- it must not stop th
 			`${name} must throw untagged, so entryExitCode gives 1 and the supervisor restarts`,
 		);
 	}
+});
+
+test("a rejection with NO status never reached the network, and is determinate", async () => {
+	// Octokit always sets one: measured, a network fault arrives as 500 with the errno underneath, for both
+	// ENOTFOUND and ECONNREFUSED. So a status-less rejection came from local code, which on the app path
+	// means signing the JWT with a key @octokit/auth-app cannot import -- an OpenSSH-format key, or base64
+	// mangled by a paste. Retrying that is a restart loop against a fault no restart fixes.
+	const badKey = Object.assign(new Error("error:1E08010C:DECODER routines::unsupported"), { code: "ERR_OSSL_UNSUPPORTED" });
+	await assert.rejects(
+		() => resolveSelfId({ source: "pat", octokit: fakeOctokit({ "GET /user": badKey }) }),
+		(e) => e.piDispatchConfig === true,
+	);
+});
+
+test("a TLS trust fault is determinate even though octokit dresses it as a 500", async () => {
+	// The carve-out that does not exist unless it is checked BEFORE the status: octokit's fetch wrapper
+	// turns a self-signed-certificate rejection into RequestError(message, 500) and keeps the cause, so the
+	// status arm alone reads the commonest self-hosted misconfiguration as transient and restarts into it
+	// forever instead of naming NODE_EXTRA_CA_CERTS.
+	const tls = Object.assign(httpError(500), {
+		cause: new TypeError("fetch failed", { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) }),
+	});
+	await assert.rejects(
+		() => resolveSelfId({ source: "pat", octokit: fakeOctokit({ "GET /user": tls }) }),
+		(e) => e.piDispatchConfig === true,
+	);
 });
 
 test("a plain 403 stays determinate -- a scope problem is the operator's to fix", async () => {
