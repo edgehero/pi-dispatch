@@ -5,6 +5,7 @@ import { findEnvKeys } from "@earendil-works/pi-ai/compat";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { egressEnv } from "./egress.mjs";
 import { forgeSpec } from "./forges.mjs";
+import { apiKeyVariable } from "./provider-key.mjs";
 
 function configError(message) {
 	const error = new Error(message);
@@ -102,8 +103,15 @@ export function piProviders() {
  * refusal) when neither source yields a credential.
  */
 export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync }) {
-	const envNames = providerKeyVars(provider, hostEnv);
-	if (envNames && envNames.length > 0) {
+	// The NAMES come from pi. The VALUES, and therefore whether the env path applies at all, come from
+	// `hostEnv` and nowhere else. Both halves are needed: `providerKeyVars` is `findEnvKeys`, whose presence
+	// test falls back to the real `process.env` (deliberately, and doctor depends on it), so on a host that
+	// exports a key this asked-for env does not carry, the unfiltered version took the env path and returned
+	// `{ NAME: undefined }` -- a credential-shaped answer with no credential in it, and no fall through to
+	// the auth.json login that would have worked. Same truthiness as pi's own filter, so a name kept here is
+	// a name pi would have read.
+	const envNames = (providerKeyVars(provider, hostEnv) ?? []).filter((name) => hostEnv[name]);
+	if (envNames.length > 0) {
 		return Object.fromEntries(envNames.map((name) => [name, hostEnv[name]]));
 	}
 	if (authFromPi) {
@@ -134,7 +142,7 @@ function credentialFromPiAuth(provider, agentDir, readFile) {
 		);
 	}
 	if (cred.type !== "api_key" || !cred.key) throw configError(`unsupported pi credential for "${provider}" in ${path} — set an API key in .env`);
-	const name = resolveEnvName(provider, cred);
+	const name = resolveEnvName(provider);
 	if (!name) {
 		throw configError(`could not determine the environment variable pi expects for provider "${provider}" — set it in the worker environment manually`);
 	}
@@ -142,16 +150,29 @@ function credentialFromPiAuth(provider, agentDir, readFile) {
 }
 
 /**
- * The env var name pi reads this provider's key from. Discovered through pi's OWN `findEnvKeys` (the
- * oracle) rather than a hand-maintained provider→var table that would drift: try the credential's own
- * `env` hint plus the conventional `<PROVIDER>_API_KEY`/`_KEY`, and forward the one pi recognizes.
+ * The env var name to write this provider's `auth.json` api key under. `null` when pi reads no key
+ * variable for the provider at all, which `credentialFromPiAuth` turns into a refusal.
+ *
+ * The oracle instinct in the old version of this comment was right and its execution was not, which is
+ * worth recording rather than deleting (issue #311). It asked pi's own `findEnvKeys` rather than keeping a
+ * provider→var table, but the CANDIDATES it asked with were hand-generated: the credential's `env` field
+ * plus a conventional `<PROVIDER>_API_KEY`/`_KEY`. That convention is the part that drifts, and it was
+ * already wrong for most of pi's table -- `google` is `GEMINI_API_KEY`, `huggingface` is `HF_TOKEN`,
+ * `moonshotai` is `MOONSHOT_API_KEY`, `radius` is `PI_GATEWAY_API_KEY` -- so pi recognized nothing and a
+ * valid `pi login` refused every job.
+ *
+ * The `env` candidate was dead on arrival besides: at the pin `ApiKeyCredential.env` is a
+ * `Record<string, string>` of provider config (Cloudflare account and gateway ids), never a variable
+ * name, so the string filter dropped it on every call.
+ *
+ * `providerKeyCandidates` is pi's whole list, so there is nothing left to guess, and it asks against an
+ * environment where every name is present -- which also closes a hermeticity hole the synthetic object
+ * had: pi's `getProviderEnvValue` falls back to the real `process.env`, so on a host that exported
+ * `ANTHROPIC_OAUTH_TOKEN` the old code resolved to THAT name. `apiKeyVariable` then picks the same
+ * variable `doctor` names, from the same module, so the two cannot diverge again.
  */
-function resolveEnvName(provider, cred) {
-	const upper = provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
-	const candidates = [cred.env, `${upper}_API_KEY`, `${upper}_KEY`].filter((s) => typeof s === "string" && s.length > 0);
-	const synthetic = Object.fromEntries(candidates.map((name) => [name, cred.key]));
-	const recognized = findEnvKeys(provider, synthetic);
-	return recognized?.[0] ?? null;
+function resolveEnvName(provider) {
+	return apiKeyVariable(providerKeyCandidates(provider));
 }
 
 /**

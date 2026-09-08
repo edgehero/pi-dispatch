@@ -5,7 +5,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { OAUTH_KEY_RE, collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
+import { collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -24,7 +24,6 @@ if (!piMod && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
 	throw new Error(`the doctor provider-key tests are REQUIRED here but pi-ai could not import.\n${piImportError}`);
 }
 const skipNoPi = piMod ? false : `pi-ai not installed (node ${process.version} < 22.19.0); CI runs these`;
-const { piProviders, providerKeyCandidates } = piMod ?? {};
 
 // A fake `spawn`: plan keys are command-line prefixes ("docker info", "docker image", "docker run",
 // "gh auth status", "gh auth token") mapped to a canned exit code, a `{code, output}` pair (output is
@@ -546,15 +545,6 @@ test("doctor: an OAuth token in the ENV is reported, never silently blessed", { 
 	const second = capture();
 	await runDoctor(provEnv({ PI_PROVIDER: "anthropic", ANTHROPIC_OAUTH_TOKEN: "oauth", ANTHROPIC_API_KEY: "sk-x" }), provDeps(second.out));
 	assert.match(second.text(), /unset ANTHROPIC_OAUTH_TOKEN: pi reads it BEFORE ANTHROPIC_API_KEY/);
-});
-
-test("doctor: the OAuth suffix rule is pinned against pi, not against a table", { skip: skipNoPi }, async () => {
-	// Both directions, with pi as the oracle. The suffix rule is the ONE credential fact doctor holds
-	// itself, because it is a message about a credential that must NOT be used and so cannot come from a
-	// table of credentials that do.
-	assert.ok(OAUTH_KEY_RE.test(providerKeyCandidates("anthropic")[0]), "anthropic's first candidate IS the OAuth token");
-	const matching = [...piProviders(), "radius"].flatMap((id) => providerKeyCandidates(id).filter((name) => OAUTH_KEY_RE.test(name)));
-	assert.deepEqual(matching, ["ANTHROPIC_OAUTH_TOKEN"], "exactly one variable pi reads is an OAuth token today");
 });
 
 test("doctor: a whitespace value is refused against the variable pi will actually read", async () => {

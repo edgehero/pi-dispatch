@@ -4,6 +4,7 @@ import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 // Static, unlike env-allowlist itself below: forges.mjs imports nothing, so it is available even on a
 // box where pi-ai will not load and the rest of this file skips.
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
+import { apiKeyVariable } from "../src/provider-key.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai (for findEnvKeys). That needs node >=22.19.0 and
 // installed deps, so it skips on a below-floor dev box and runs in CI, where
@@ -301,6 +302,137 @@ test("without PI_AUTH_FROM_PI, a missing env key still refuses and auth.json is 
 		() => buildContainerEnv({ ...authBase, hostEnv: {}, authFromPi: false, readFile: () => assert.fail("must not read auth.json when PI_AUTH_FROM_PI is off") }),
 		(e) => e.piDispatchConfig === true,
 	);
+});
+
+// --- Issue #311: the variable an auth.json login is injected under is pi's, for every provider ---
+
+test("a key variable pi reports present but this env does not carry falls through to auth.json", { skip }, () => {
+	// `providerKeyVars` is pi's `findEnvKeys`, and pi's presence test falls back to the real process.env on
+	// purpose (the test above asserts that, and doctor needs it). Reading the VALUE from the same place is
+	// what would be wrong: the old code took the env path on such a name and returned { NAME: undefined },
+	// so a host that merely exported a variable defeated a working `pi login` and the job reached the
+	// provider with no credential.
+	const had = Object.hasOwn(process.env, "GEMINI_API_KEY");
+	const before = process.env.GEMINI_API_KEY;
+	process.env.GEMINI_API_KEY = "gemini-on-this-host";
+	try {
+		const env = buildContainerEnv({
+			...authBase,
+			provider: "google",
+			hostEnv: { HOME: "/root" }, // the env this deployment was actually handed
+			authFromPi: true,
+			readFile: authReader({ google: { type: "api_key", key: "sk-from-pi" } }),
+		});
+		assert.equal(env.GEMINI_API_KEY, "sk-from-pi", "the auth.json login is used, not the ambient name");
+	} finally {
+		if (had) process.env.GEMINI_API_KEY = before;
+		else delete process.env.GEMINI_API_KEY;
+	}
+});
+
+test("PI_AUTH_FROM_PI resolves a provider whose variable does not follow the convention", { skip }, () => {
+	// The whole defect in one case: `google` reads GEMINI_API_KEY, so the old hand-built candidates
+	// (GOOGLE_API_KEY, GOOGLE_KEY) matched nothing pi recognizes and a valid `pi login` threw
+	// "could not determine the environment variable pi expects".
+	const env = buildContainerEnv({
+		...authBase,
+		provider: "google",
+		hostEnv: { HOME: "/root" },
+		authFromPi: true,
+		readFile: authReader({ google: { type: "api_key", key: "sk-google" } }),
+	});
+	assert.equal(env.GEMINI_API_KEY, "sk-google");
+	assert.equal(env.GOOGLE_API_KEY, undefined, "the conventional name is not one pi reads for google");
+});
+
+test("PI_AUTH_FROM_PI resolves huggingface, whose variable shares no stem with its provider id", { skip }, () => {
+	const env = buildContainerEnv({
+		...authBase,
+		provider: "huggingface",
+		hostEnv: { HOME: "/root" },
+		authFromPi: true,
+		readFile: authReader({ huggingface: { type: "api_key", key: "hf-token" } }),
+	});
+	assert.equal(env.HF_TOKEN, "hf-token");
+});
+
+test("an auth.json api key is NEVER injected under the OAuth token variable, host env or not", { skip }, () => {
+	// Two properties in one test, because they are the same line of code.
+	// pi's precedence for anthropic is [ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY], so taking pi's first
+	// candidate would write an api_key credential under the subscription-login name -- the variable doctor
+	// refuses to name, for the same reason.
+	// And the old resolver's synthetic environment was a plain object, while pi's getProviderEnvValue falls
+	// back to the REAL process.env: with ANTHROPIC_OAUTH_TOKEN exported here, it resolved to that name. The
+	// candidate list is now asked against a proxy where every name is present, so the host cannot reach in.
+	const had = Object.hasOwn(process.env, "ANTHROPIC_OAUTH_TOKEN");
+	const before = process.env.ANTHROPIC_OAUTH_TOKEN;
+	process.env.ANTHROPIC_OAUTH_TOKEN = "oauth-on-this-host";
+	try {
+		const env = buildContainerEnv({
+			...authBase,
+			hostEnv: { HOME: "/root" },
+			authFromPi: true,
+			readFile: authReader({ anthropic: { type: "api_key", key: "sk-from-pi" } }),
+		});
+		assert.equal(env.ANTHROPIC_API_KEY, "sk-from-pi");
+		assert.equal(env.ANTHROPIC_OAUTH_TOKEN, undefined, "the api key must not ride the OAuth variable");
+	} finally {
+		if (had) process.env.ANTHROPIC_OAUTH_TOKEN = before;
+		else delete process.env.ANTHROPIC_OAUTH_TOKEN;
+	}
+});
+
+test("a provider pi reads no key variable for still refuses, rather than guessing a name", { skip }, () => {
+	// The refusal this change must NOT remove. `gemini` is not a provider pi has (that is #286's other
+	// half), so there is no variable to name and a guess would inject a key nothing reads.
+	assert.throws(
+		() =>
+			buildContainerEnv({
+				...authBase,
+				provider: "gemini",
+				hostEnv: {},
+				authFromPi: true,
+				readFile: authReader({ gemini: { type: "api_key", key: "sk-x" } }),
+			}),
+		(e) => e.piDispatchConfig === true && /could not determine the environment variable/.test(e.message),
+	);
+});
+
+test("a prototype-key provider id refuses instead of coercing a name out of pi's lookup", { skip }, () => {
+	// pi looks its provider up in a plain object literal, so `__proto__` resolves up the prototype chain
+	// and hands back a non-string. providerKeyCandidates filters those out, which leaves an empty list,
+	// which is a refusal. Without that filter this would build an env key named "[object Object]".
+	assert.throws(
+		() =>
+			buildContainerEnv({
+				...authBase,
+				provider: "__proto__",
+				hostEnv: {},
+				authFromPi: true,
+				readFile: authReader({ __proto__: { type: "api_key", key: "sk-x" } }),
+			}),
+		(e) => e.piDispatchConfig === true,
+	);
+});
+
+test("the variable the worker WRITES is the variable doctor NAMES, for every provider pi has", { skip }, () => {
+	// The anti-drift bolt (issue #286's lesson, applied to the write path). doctor's provider-key check and
+	// this module now share apiKeyVariable, and this asserts the shared answer against the injection that
+	// actually happens, provider by provider -- so a future edit to either side that changes the name has
+	// to change it in both, or fail here.
+	for (const id of [...piProviders(), "radius"]) {
+		const candidates = providerKeyCandidates(id);
+		if (candidates.length === 0) continue; // no key variable: doctor names none and the worker refuses
+		const expected = apiKeyVariable(candidates);
+		const env = buildContainerEnv({
+			...authBase,
+			provider: id,
+			hostEnv: { HOME: "/root" },
+			authFromPi: true,
+			readFile: authReader({ [id]: { type: "api_key", key: `sk-${id}` } }),
+		});
+		assert.equal(env[expected], `sk-${id}`, `${id}: injected under ${expected}`);
+	}
 });
 
 test("a gitlab job's token lands in GITLAB_TOKEN/GL_TOKEN and NEVER in the github names", () => {

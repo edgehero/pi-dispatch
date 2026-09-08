@@ -63,20 +63,12 @@ import { ABSENT, ASSERTED, PROPERTY_NAMES, declarationOf, floorShortfall, parseB
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
+// The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
+// can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
+import { OAUTH_KEY_RE, apiKeyVariable } from "./provider-key.mjs";
 import { parseTriggers } from "./triggers.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
-
-// The ONE credential fact doctor holds itself, and it has to hold one: this is a message ABOUT a
-// credential that must NOT be used, so it cannot come from pi's table of credentials that DO work --
-// that table says which variables pi reads, never which of them is a subscription login.
-// Checked and rejected: pi's provider descriptors carry an `auth.oauth` block, but it is per-PROVIDER,
-// not per-variable -- `github-copilot` has one and exactly ONE key variable, so "this provider supports
-// oauth" cannot name WHICH variable is the token.
-// A suffix rule rather than a one-name set, because the expensive direction is the false green: the day
-// pi adds a second provider's OAuth variable a set would silently bless it. Pinned against pi in
-// worker/test/doctor.test.mjs -- never against a second copy of a table.
-export const OAUTH_KEY_RE = /_OAUTH_TOKEN$/;
 
 // gh login scopes that reach well past what a job should ever hold — called out by name in the fix line.
 const BROAD_SCOPES = ["admin:org", "delete_repo", "workflow"];
@@ -1788,10 +1780,10 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk }) {
 	// still refused -- one step further down, against the variable pi actually reads, where it is a fact
 	// about THAT credential rather than a reason to pretend the variable is unset.
 	const set = candidates.filter((name) => (env[name] ?? "") !== "");
-	// The variable to TELL an operator to set is never the OAuth token, whatever pi's precedence says: pi
-	// returns ANTHROPIC_OAUTH_TOKEN first, and "set your subscription login" is wrong advice for an
-	// unattended service. Falls back only for a provider with no non-OAuth variable at all.
-	const apiKeyVar = candidates.find((name) => !OAUTH_KEY_RE.test(name)) ?? candidates[0];
+	// The variable to TELL an operator to set is never the OAuth token, and it is the SAME choice the
+	// worker makes when it writes an `auth.json` key into a container (issue #311). One function, one
+	// module, so a doctor line cannot name a variable the job path does not use.
+	const apiKeyVar = apiKeyVariable(candidates);
 
 	if (set.length > 0) {
 		// `set[0]`, not "one of these": pi reads the FIRST present name and ignores the rest, so this names
