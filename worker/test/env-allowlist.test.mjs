@@ -297,8 +297,22 @@ test("PI_FORWARD_ENV forwards ONLY the named vars that are present, never a pass
 const authBase = { provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", agentDir: "/home/u/.pi/agent" };
 const authReader = (json) => (p) => {
 	assert.match(p, /auth\.json$/, "reads auth.json under the agent dir");
-	if (json === null) throw new Error("ENOENT");
+	// A real ENOENT, with the CODE set and not just the word in the message. The resolver distinguishes
+	// absent (determinate) from a transient read fault (not), so a fixture that only looks absent would
+	// exercise the wrong branch (issue #310).
+	if (json === null) {
+		const error = new Error("ENOENT: no such file or directory");
+		error.code = "ENOENT";
+		throw error;
+	}
 	return typeof json === "string" ? json : JSON.stringify(json);
+};
+
+/** A readFile that fails the way a busy or broken filesystem does, rather than the way an absent file does. */
+const faultyReader = (code) => () => {
+	const error = new Error(`${code}: simulated`);
+	error.code = code;
+	throw error;
 };
 
 test("PI_AUTH_FROM_PI injects the api key from auth.json under pi's expected var name", { skip }, () => {
@@ -328,11 +342,35 @@ test("PI_AUTH_FROM_PI refuses an OAuth/subscription login (pre-spend)", { skip }
 	);
 });
 
-test("PI_AUTH_FROM_PI refuses when auth.json is missing/unreadable, with guidance", { skip }, () => {
+test("PI_AUTH_FROM_PI refuses when auth.json is ABSENT, with guidance", { skip }, () => {
 	assert.throws(
 		() => buildContainerEnv({ ...authBase, hostEnv: {}, authFromPi: true, readFile: authReader(null) }),
 		(e) => e.piDispatchConfig === true && /pi login|environment/i.test(e.message),
 	);
+});
+
+test("an unparseable auth.json is determinate too, and says which of the two it is", { skip }, () => {
+	// The file is there and wrong, so an operator has to fix it: determinate, and the message must not say
+	// "no pi login", which sends them to run a login they have already run.
+	assert.throws(
+		() => buildContainerEnv({ ...authBase, hostEnv: {}, authFromPi: true, readFile: authReader("{not json") }),
+		(e) => e.piDispatchConfig === true && /not valid JSON/.test(e.message),
+	);
+});
+
+test("a TRANSIENT read fault is NOT a config refusal -- it propagates as itself", { skip }, () => {
+	// Issue #310 made this expensive. A config-tagged error is now never retried, refunds the reserve, and
+	// tells the issue author publicly that the deployment is misconfigured. Under the old bare `catch {}`
+	// every one of these produced that verdict on a deployment that was correctly configured a microsecond
+	// earlier and later: fd exhaustion, a network-filesystem blip, a permission fault, a directory in the
+	// file's place, or a torn read while `pi login` rewrites the file.
+	for (const code of ["EMFILE", "EIO", "EACCES", "EAGAIN", "EISDIR", "ETIMEDOUT"]) {
+		assert.throws(
+			() => buildContainerEnv({ ...authBase, hostEnv: {}, authFromPi: true, readFile: faultyReader(code) }),
+			(e) => e.piDispatchConfig === undefined && e.code === code,
+			`${code} must propagate as itself, not as a determinate refusal`,
+		);
+	}
 });
 
 test("without PI_AUTH_FROM_PI, a missing env key still refuses and auth.json is never consulted", { skip }, () => {

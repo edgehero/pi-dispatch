@@ -148,8 +148,22 @@ function credentialFromPiAuth(provider, agentDir, readFile, { hostEnv = {}, forw
 	let auth;
 	try {
 		auth = JSON.parse(readFile(path, "utf8"));
-	} catch {
-		throw configError(`no credential for provider "${provider}": not in the worker environment, and no pi login at ${path} — set the key in .env, or run \`pi login\``);
+	} catch (error) {
+		// ONLY the determinate failures are tagged. This used to be a bare `catch {}` that relabelled every
+		// read failure as "no pi login", and issue #310 is what made that expensive: the processor now turns
+		// a `piDispatchConfig` error into a refusal that is never retried, refunds the reserve, and posts
+		// publicly that the deployment is misconfigured. Under the old catch an EMFILE from fd exhaustion, an
+		// EIO on a network filesystem, an EACCES, an EISDIR, or a torn read while `pi login` rewrites the file
+		// all produced that verdict, on a deployment that was correctly configured the microsecond before and
+		// after. A determinate refusal is one the same inputs reproduce; these are not.
+		//
+		// Absent is determinate (there is no login), and so is unparseable (the file is there and wrong, and
+		// an operator has to fix it). Everything else propagates untagged, which is `CONST-RETRY-INFRA-ONLY`
+		// putting it back where it belongs: an infrastructure fault reported as itself, with its own message.
+		const absent = error?.code === "ENOENT" || error?.code === "ENOTDIR";
+		if (!absent && !(error instanceof SyntaxError)) throw error;
+		const why = absent ? `no pi login at ${path}` : `the pi login at ${path} is not valid JSON`;
+		throw configError(`no credential for provider "${provider}": not in the worker environment, and ${why} — set the key in .env, or run \`pi login\``);
 	}
 	const cred = auth?.[provider];
 	if (!cred) throw configError(`no credential for provider "${provider}": not in the worker environment, and ${path} has no "${provider}" login — set the key in .env, or run \`pi login\``);

@@ -105,7 +105,9 @@ Logged into pi already? You don't have to restate the key in `.env`. When the pr
 the worker's environment, the worker reads it **host-side** from `~/.pi/agent/auth.json` and env-injects it
 under the variable pi expects — a host-side read of a host-held secret, injected via env exactly like `.env`,
 **never a file mounted into the container**. This is **on by default**; the environment still wins when
-present. Set `PI_AUTH_FROM_PI=0` to force env-only (fail loudly on a missing env key instead of falling back).
+present. Set `PI_AUTH_FROM_PI=0` to force env-only. A job then refuses before it starts a container, with the
+reason `provider-unconfigured` on the run record and a comment saying to run `pi-dispatch doctor`, rather
+than falling back to the login.
 
 **API-key logins only.** An OAuth/subscription login (`pi login`) is refused: those tokens expire and the
 container can't refresh them, and a subscription isn't the credential for an unattended paid service —

@@ -13,6 +13,10 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
  * The order is the contract, and every step before `runContainer` must be free of provider spend:
  *
  *   0. refuse a job image this host does not have  -- INT-CONTAINER-RUNTIME-CONTRACT
+ *   0b. REFUSE a deployment with no usable credential for the job's provider, which costs nothing to
+ *       ask and would otherwise be discovered with the budget already reserved -- CONST-BUDGET-BEFORE-TOKENS
+ *       (gates 0 and 0b are not the first two: a one-shot already spent, a skewed wait and an unblessed
+ *       backend are refused above them, and this ladder has never listed those)
  *   1. REFUSE an armed `run.resume` with no session store to persist into (the one fail-CLOSED case)
  *                                                 -- REQ-RESUMABLE-SESSION
  *   2. mint a scoped token (GitHub jobs, and local jobs opted in via `github: true`)
@@ -156,6 +160,18 @@ export async function runJob(job, deps) {
 	let prepared = null;
 	let reserved = false;
 	let scopedReserved = false;
+	// Set once `runContainer` has RESOLVED, which is the only moment a container is known to have run. The
+	// config classifier in the catch refunds both ledgers, and its whole justification is that nothing was
+	// spent; without a fact to test, that is a claim about where config throws happen to live today rather
+	// than a property of the code. A config-tagged throw raised after a paid run would otherwise refund a slot
+	// the container really spent AND tell the operator publicly that nothing was.
+	//
+	// AFTER the await and not before, deliberately: `runContainer` resolves the credential and assembles the
+	// env before it spawns anything, so its config throws (an unconfigured provider, an unknown forge kind)
+	// happen with no container started at all -- and those are exactly what the classifier exists to refund.
+	// A spawn fault that fails between is an InfraRetry carrying `container-never-started`, refunded by the
+	// arm below, which has a discriminator of its own.
+	let containerRan = false;
 
 	try {
 		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
@@ -218,28 +234,6 @@ export async function runJob(job, deps) {
 			// same class as the image ref below.
 			log("refused_backend_unblessed", { backend: job.backend, blessed: blessedBackends });
 			return { outcome: "policy", reason: "backend-unblessed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
-		}
-
-		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
-		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
-		// pi's auth.json. So it goes here, with the other free gates, which is further than issue #310 asked
-		// for: ahead of the image probe, the mint, the clone, the token-cap read and both reserves. That is
-		// CONST-BUDGET-BEFORE-TOKENS in its own words, "every gate that costs nothing runs before every gate
-		// that costs something".
-		//
-		// It used to be discovered inside runContainer, where buildContainerEnv resolves the credential for
-		// real -- AFTER both reserves -- and the throw fell through this function's catch to a bare rethrow.
-		// The catch now classifies that too (below), so this gate is the cheap path and that is the backstop;
-		// neither alone is enough, because the backstop cannot un-mint a token or un-clone a repository.
-		//
-		// The refusal names no path. `credentialFromPiAuth`'s messages carry auth.json's location, `comment`
-		// posts publicly on the issue, and the reason an operator needs is the same either way: their
-		// deployment has no usable provider credential and `doctor` will say exactly which variable.
-		const credential = await checkProviderCredential(job);
-		if (!credential.ok) {
-			await comment(job, "Refused: this deployment has no usable credential for the provider this job runs on, so no container was started and nothing was spent. Ask the operator to run `pi-dispatch doctor`. Not run.");
-			log("refused_provider_unconfigured", { provider: job.provider ?? null, message: credential.message });
-			return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
@@ -323,6 +317,43 @@ export async function runJob(job, deps) {
 			// provider/model attribute even this pre-container death; no usage -- nothing ran to emit one.
 			throw new InfraRetry("docker unavailable, image preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
+
+		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
+		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
+		// pi's auth.json. So it goes here, with the other free gates, which is further than issue #310 asked
+		// for: ahead of the image probe, the mint, the clone, the token-cap read and both reserves. That is
+		// CONST-BUDGET-BEFORE-TOKENS in its own words, "every gate that costs nothing runs before every gate
+		// that costs something".
+		//
+		// AFTER the image probe and not before, which is the one ordering choice here that costs something:
+		// a `docker inspect` runs before a `readFileSync`. This file says twice that a missing image blocks
+		// EVERY job of EVERY kind on this host, so it is the fault an operator must fix first either way, and
+		// a missing credential is in exactly that class -- on a host with both, the reported reason should be
+		// the one that was already the rule. Everything the gate is actually FOR is still below it: the egress
+		// probe, the secret resolvers, the mint, the clone, the token-cap read and both reserves.
+		//
+		// It used to be discovered inside runContainer, where buildContainerEnv resolves the credential for
+		// real -- AFTER both reserves -- and the throw fell through this function's catch to a bare rethrow.
+		// The catch now classifies that too (below), so this gate is the cheap path and that is the backstop;
+		// neither alone is enough, because the backstop cannot un-mint a token or un-clone a repository.
+		//
+		// The refusal names no path. `credentialFromPiAuth`'s messages carry auth.json's location, `comment`
+		// posts publicly on the issue, and the reason an operator needs is the same either way: their
+		// deployment has no usable provider credential and `doctor` will say exactly which variable.
+		const credential = await checkProviderCredential(job);
+		if (!credential.ok) {
+			// The PROVIDER is named and the message is not. The provider is operator-authored config, already
+			// on the record and the mirror, and named freely by the sibling refusals (`backend-unblessed` names
+			// the backend, `job-image-missing` names the image), so withholding it would tell the operator less
+			// than is safe. The message is withheld from BOTH surfaces: `credentialFromPiAuth`'s refusals carry
+			// `auth.json`'s absolute path, which is an OS account name, and the scoped-budget refusal below
+			// keeps a host path out of its own log line citing no-pii-in-logs. `doctor` prints the variable and
+			// the path, on the operator's terminal, which is where that belongs.
+			await comment(job, `Refused: this deployment has no usable credential for the "${job.provider}" provider, so no container was started and nothing was spent. Ask the operator to run \`pi-dispatch doctor\`. Not run.`);
+			log("refused_provider_unconfigured", { provider: job.provider ?? null });
+			return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+
 
 		// REQ-EGRESS-ALLOWLIST. The egress policy this deployment claims must be able to serve this job
 		// BEFORE the job costs anything. It is one `docker inspect` when the policy is armed and ZERO spawns
@@ -602,6 +633,12 @@ export async function runJob(job, deps) {
 			// never a refusal it did not issue.
 			if (scopedReserved && scopedCaps) {
 				await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+				// CLEARED, so the ledger's state and the flag agree. Nothing between here and the return can
+				// throw today (`comment` is non-throwing by construction and `log` is a write), but the catch
+				// below now releases on a whole CLASS of error rather than one reason, and a second release
+				// against this same key would take it to -1: `releaseBudget` is a floorless DECR. The invariant
+				// belongs where the release is, not in the guard of every future reader.
+				scopedReserved = false;
 			}
 			const w = budget.blockedWindow;
 			const win = budget.windows[w];
@@ -618,6 +655,7 @@ export async function runJob(job, deps) {
 		}
 
 		const { code, aborted, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets });
+		containerRan = true;
 		log("container_exit", { exitCode: code, aborted });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
@@ -715,15 +753,49 @@ export async function runJob(job, deps) {
 		// double-release. The gate above catches the provider case for free, before the mint and the clone;
 		// this is the backstop for every other config throw that can still land here (an unknown forge kind in
 		// `buildContainerEnv`, a prepare-time refusal), which would otherwise keep the same slot silently.
-		if (e?.piDispatchConfig === true) {
-			if (reserved) await releaseBudget(redis, { caps, now });
-			if (scopedReserved && scopedCaps) await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
-			// A FIXED sentence. The message can name a host path (`credentialFromPiAuth` puts `auth.json`'s
-			// location in three of its refusals), and `comment` posts publicly on the issue -- the restraint
-			// every other refusal in this function keeps. The message goes to the LOG, which is host-side.
-			await comment(job, "Refused: this deployment is misconfigured, so the job could not be started. Nothing was spent. Ask the operator to run `pi-dispatch doctor`. Not run.");
-			log("refused_config", { kind: job.kind ?? null, message: e.message });
-			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		// `!containerRan` is the discriminator, and it is what makes the refund and the sentence below TRUE
+		// rather than merely true today. Every config-tagged throw site in the worker is pre-container, so this
+		// changes nothing now; the day one is added after a paid run, that run keeps its slot and falls through
+		// to the untagged path instead of being refunded and publicly declared free.
+		if (e?.piDispatchConfig === true && !containerRan) {
+			// GUARDED, and the flags are the record of what actually happened. `releaseBudget` is a loop of
+			// DECRs over the active windows and can reject part-way (a read-only replica, a dropped
+			// connection), which would otherwise replace this determinate refusal with a Redis message: the
+			// operator would be told their queue is broken when their deployment is misconfigured, and the
+			// escaping error is untagged so it is not retried either. A refund that did not land must not be
+			// reported as one, so `budgetReserved` follows the ledger and not the intent.
+			let refunded = true;
+			try {
+				if (reserved) {
+					await releaseBudget(redis, { caps, now });
+					reserved = false;
+				}
+				if (scopedReserved && scopedCaps) {
+					await releaseBudget(redis, { caps: scopedCaps.caps, now, keyPrefix: scopeKeyPrefix(scopedCaps.scope) });
+					scopedReserved = false;
+				}
+			} catch (releaseError) {
+				refunded = false;
+				log("budget_release_failed", { at: "config-refused", code: releaseError?.code ?? null });
+			}
+			// A FIXED sentence, and NO message in the log either. Two different reasons, both load-bearing:
+			// `credentialFromPiAuth` puts `auth.json`'s location in its refusals and `prepare-local` puts the
+			// operator's folder in its own, which `buildRecord` reduces to a basename precisely because a host
+			// path carries an OS account name; and `branch.mjs`'s refusal interpolates a forge PAYLOAD field,
+			// which no-pii-in-logs forbids anywhere. The scoped-budget refusal above keeps a host path out of
+			// its log line for the first of those reasons, and this follows it. `doctor` is where the operator
+			// reads the specific variable and the specific path, which is what both sentences point at.
+			// SWALLOWED, and only here. Every other refusal in this function awaits `comment` bare, which is
+			// right: they are on the happy path of a determinate decision, and a forge that cannot be told is
+			// worth surfacing. This one is inside the catch, so a throw from `comment` would discard the
+			// classification that has ALREADY released the budget, and the job would escape as whatever the
+			// comment threw, with the ledger refunded and the record saying something else entirely. The
+			// shipped adapter never throws; this makes that a property of the arm rather than of the wiring.
+			await comment(job, "Refused: this deployment is misconfigured, so the job could not be started. Ask the operator to run `pi-dispatch doctor`. Not run.").catch(() => {});
+			log("refused_config", { kind: job.kind ?? null, refunded });
+			// budgetReserved reflects the LEDGER: false when the refund landed, true when it did not and the
+			// slot is still out there.
+			return { outcome: "policy", reason: "config-refused", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: !refunded }; // return => not retried
 		}
 
 		// A spawn fault (docker daemon down / binary missing) reserved a slot but never started a

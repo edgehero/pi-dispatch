@@ -633,18 +633,28 @@ test("the free credential gate resolves against the SAME inputs buildContainerEn
 	// gate would pass a job the container then refuses (with the budget reserved, which is the whole defect)
 	// or refuse one that would have run. Driven rather than read: the gate is invoked and its verdict flips
 	// with the env, against the SAME `hostEnv` object the container factory was handed.
+	// PI_AUTH_FROM_PI=0 on BOTH runs. Without it the verdicts are decided by whether the developer's own
+	// ~/.pi/agent/auth.json holds an anthropic login, which is exactly the "decided by the shell" failure
+	// this repo has already been bitten by once.
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
-	const withKey = await runStart({ env: { ANTHROPIC_API_KEY: "sk-ant-x" }, makeAuth, makeHost: () => fakeHost() });
+	const withKey = await runStart({ env: { PI_AUTH_FROM_PI: "0", ANTHROPIC_API_KEY: "sk-ant-x", PI_FORWARD_ENV: "MY_CUSTOM_KEY" }, makeAuth, makeHost: () => fakeHost() });
 	const gate = withKey.deps.checkProviderCredential;
 	assert.equal(typeof gate, "function", "the processor is wired with the gate at all");
 	assert.deepEqual(gate({ provider: "anthropic" }), { ok: true }, "a configured provider is admitted");
 	assert.equal(withKey.runContainerCalls[0].hostEnv.ANTHROPIC_API_KEY, "sk-ant-x", "and the builder reads the same env");
+	// authFromPi and forwardEnv reach the builder too, and the gate must be built from the same two or it
+	// answers a different question: forwardEnv is what decides the cred.env companion refusal on the
+	// auth.json path, and authFromPi decides whether that path is taken at all.
+	assert.equal(withKey.runContainerCalls[0].authFromPi, false, "PI_AUTH_FROM_PI=0 reaches the builder");
+	assert.deepEqual(withKey.runContainerCalls[0].forwardEnv, ["MY_CUSTOM_KEY"]);
 
-	// No credential anywhere: refused, and the message is carried for the LOG, never for the comment.
-	const without = await runStart({ env: { PI_AUTH_FROM_PI: "0" }, makeAuth, makeHost: () => fakeHost() });
-	const verdict = without.deps.checkProviderCredential({ provider: "anthropic" });
+	// No env key and no fallback: refused, and the message is carried for the caller, never for the comment.
+	const fallbackOff = await runStart({ env: { PI_AUTH_FROM_PI: "0" }, makeAuth, makeHost: () => fakeHost() });
+	const verdict = fallbackOff.deps.checkProviderCredential({ provider: "anthropic" });
 	assert.equal(verdict.ok, false);
 	assert.match(verdict.message, /no configured credential/);
+	// A different provider on the SAME wired gate: the verdict follows the job, not the boot.
+	assert.equal(gate({ provider: "openai" }).ok, false, "the gate reads job.provider, not a captured one");
 });
 
 test("the secrets resolver and the container builder are handed the SAME host env and forward list", { skip }, async () => {

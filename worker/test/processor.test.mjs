@@ -206,7 +206,7 @@ test("a local job WITHOUT the flag never mints; the container sees a null token 
 	assert.equal(tokens.container, null, "token stays null exactly as before the opt-in existed");
 });
 
-test("a flagged local job whose mint rejects (config-tagged) propagates BEFORE reserveBudget -- no cap slot burned", async () => {
+test("a flagged local job whose mint rejects (config-tagged) refuses BEFORE reserveBudget -- no cap slot burned", async () => {
 	const redis = fakeRedis();
 	const { deps: d, calls } = deps({
 		redis,
@@ -237,16 +237,53 @@ test("an unconfigured provider refuses BEFORE the mint, the clone and both reser
 	// of the image probe, the mint, the clone, the token-cap read and the reserve. Asserting the ABSENCE of
 	// each is what proves the placement; the outcome string alone would pass with the gate anywhere.
 	const redis = fakeRedis();
-	const { deps: d, calls } = deps({ redis, checkProviderCredential: () => ({ ok: false, message: 'provider anthropic has no configured credential in the worker environment' }) });
+	let tokenCapReads = 0;
+	const counting = { ...redis, async get(k) { tokenCapReads += 1; return redis.get(k); } };
+	const probes = [];
+	const { deps: d, calls } = deps({
+		redis: counting,
+		imagePreflight: async () => (probes.push("image"), { ok: true }),
+		egressPreflight: async () => (probes.push("egress"), { ok: true }),
+		checkProviderCredential: () => ({ ok: false, message: "provider anthropic has no configured credential in the worker environment" }),
+	});
 	const r = await runJob(ghJob, d);
 	assert.equal(r.outcome, "policy");
 	assert.equal(r.reason, "provider-unconfigured");
 	assert.equal(r.budgetReserved, false);
-	assert.equal(redis.incrCalls, 0, "no job-count slot burned");
-	assert.equal(redis.decrCalls, 0, "and nothing reserved means nothing to release");
+	assert.equal(counting.incrCalls, 0, "no job-count slot burned");
+	assert.equal(counting.decrCalls, 0, "and nothing reserved means nothing to release");
+	assert.equal(tokenCapReads, 0, "the token-cap read never happens either");
+	// The image probe DOES run first, and that is deliberate: this file says twice that a missing image
+	// blocks every job of every kind on the host, so it is the fault an operator must fix first either way.
+	// The credential gate sits immediately after it, and ahead of everything that spawns, mints or clones.
+	assert.deepEqual(probes, ["image"], "image first, then the credential gate, and no egress probe after it");
 	assert.ok(!calls.some((c) => c.startsWith("mint:")), "must not mint a credential it will not use");
 	assert.ok(!calls.includes("prepare"), "must not clone");
 	assert.ok(!calls.includes("run-container"), "must not spend");
+});
+
+test("the credential gate runs for a LOCAL job too -- a provider is a provider", async () => {
+	// The gate is a deployment-level question, not a forge one. A cron job against the operator's own
+	// folder still starts a paid container, so it is refused on the same terms.
+	const redis = fakeRedis();
+	const localJob = { kind: "local", folder: "/home/rob/proj", provider: "anthropic", model: "m", maxTurns: 5 };
+	const { deps: d, calls } = deps({ redis, checkProviderCredential: () => ({ ok: false, message: "nope" }) });
+	const r = await runJob(localJob, d);
+	assert.equal(r.reason, "provider-unconfigured");
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("run-container"), "a local job spends real money too");
+});
+
+test("a gate that throws something UNTAGGED propagates, rather than becoming a policy refusal", async () => {
+	// The seam's own guard, pinned in the processor and not only in the wiring. A bug in the gate, or an fs
+	// fault the credential module does not model, must not be reported to the issue author as "your
+	// deployment is misconfigured" and quietly completed.
+	const { deps: d } = deps({
+		checkProviderCredential: () => {
+			throw new Error("the gate itself is broken");
+		},
+	});
+	await assert.rejects(() => runJob(ghJob, d), /the gate itself is broken/);
 });
 
 test("the unconfigured-provider refusal publishes no filesystem path", async () => {
@@ -259,9 +296,19 @@ test("the unconfigured-provider refusal publishes no filesystem path", async () 
 			posted = t;
 		},
 	});
+	const logs = [];
+	d.log = (event, fields) => logs.push({ event, fields });
 	await runJob(ghJob, d);
 	assert.equal(/\/Users\/|auth\.json|\.pi\//.test(posted), false, "no host path may be published");
 	assert.match(posted, /doctor/, "it must point somewhere the operator can look");
+	assert.match(posted, /anthropic/, "the provider IS named: it is operator config, and the record carries it anyway");
+	// The LOG too, not only the comment. credentialFromPiAuth names auth.json's absolute path, prepare-local
+	// names the operator's folder, and branch.mjs interpolates a forge payload field: the message is not a
+	// string this project may put in a persistent log, and the scoped-budget refusal keeps a host path out of
+	// its own log line for the same reason. doctor is where the specific path is printed.
+	const line = logs.find((l) => l.event === "refused_provider_unconfigured");
+	assert.ok(line, "the refusal is logged at all");
+	assert.deepEqual(Object.keys(line.fields), ["provider"], "the provider, and nothing that carries a message");
 });
 
 test("a config throw that lands AFTER the reserve releases BOTH ledgers and returns policy, never retried", async () => {
@@ -287,6 +334,76 @@ test("a config throw that lands AFTER the reserve releases BOTH ledgers and retu
 	// The STORE, not `get`: keyedRedis's `get` is a stub for the token-cap read and always answers null.
 	assert.equal(redis.store.get(G_DAY), 0, "the global ledger is back where it started: INCR then DECR");
 	assert.equal(redis.store.get(S_DAY), 0, "and so is the scoped one: both or neither");
+});
+
+test("a config throw AFTER a container ran keeps its slot and is NOT declared free", async () => {
+	// The discriminator. Every config-tagged throw site today is pre-container, so this asserts a property
+	// rather than a bug: a config error raised after a paid run must not refund a slot the container really
+	// spent, and must not post "nothing was spent" to the issue. Without `containerRan` the classifier's own
+	// justification would be a claim about where those throws happen to live.
+	const redis = keyedRedis();
+	let posted = "";
+	const { deps: d } = deps({
+		redis,
+		scopedCaps: SCOPED,
+		collectChain: async () => {
+			const e = new Error("config fault raised after the container ran");
+			e.piDispatchConfig = true;
+			throw e;
+		},
+		comment: async (_j, t) => {
+			posted = t;
+		},
+	});
+	await assert.rejects(() => runJob(ghJob, d), /after the container ran/, "it falls through to the untagged path");
+	assert.equal(redis.store.get(G_DAY), 1, "the container spent, so its global slot stays spent");
+	assert.equal(redis.store.get(S_DAY), 1, "and so does the scoped one");
+	assert.equal(/nothing was spent|misconfigured/.test(posted), false, "and nothing claims the run was free");
+});
+
+test("a release that fails during a config refusal does not mask it, and the record says the slot is still out", async () => {
+	// releaseBudget is a loop of DECRs and can reject part way (a read-only replica, a dropped connection).
+	// Unguarded, the Redis error replaced the refusal: the operator was told their queue was broken when
+	// their deployment was misconfigured, and the escaping error was untagged so it was not retried either.
+	const redis = keyedRedis();
+	redis.decr = async () => {
+		const e = new Error("READONLY You can't write against a read only replica.");
+		e.code = "READONLY";
+		throw e;
+	};
+	const { deps: d } = deps({
+		redis,
+		runContainer: async () => {
+			const e = new Error("githubToken set for an unknown forge kind");
+			e.piDispatchConfig = true;
+			throw e;
+		},
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "config-refused", "the determinate refusal survives the failed refund");
+	assert.equal(r.budgetReserved, true, "and the record admits the slot was NOT given back");
+});
+
+test("a config throw from inside a refusal branch cannot double-release the scoped ledger", async () => {
+	// The over-budget arm releases the scoped slot and then returns, so the flag and the ledger have to be
+	// cleared together: the config classifier below releases on a whole CLASS of error rather than one
+	// reason, and releaseBudget is a floorless DECR. Unreachable in the shipped wiring, where `comment` is
+	// non-throwing by construction, which is exactly why the invariant lives at the release rather than in
+	// the guard of every future reader. Measured before the flag was cleared: the scoped key reached -1.
+	const redis = keyedRedis({ [G_DAY]: 10 }); // the global day cap is 10, so the next reserve is over
+	const { deps: d } = deps({
+		redis,
+		scopedCaps: SCOPED,
+		comment: async () => {
+			const e = new Error("config fault raised while refusing");
+			e.piDispatchConfig = true;
+			throw e;
+		},
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "config-refused");
+	assert.equal(redis.store.get(S_DAY), 0, "released exactly once: a second DECR would make this -1");
+	assert.ok(redis.store.get(S_DAY) >= 0, "no ledger may go negative");
 });
 
 test("a NON-config throw after the reserve still keeps its slot and still throws", async () => {
