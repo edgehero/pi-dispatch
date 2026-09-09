@@ -348,14 +348,13 @@ function chipWidth(label) {
 /**
  * Place the normalised model: one Node-RED group rect per folder, triggers at rank 0 inside it,
  * skills ranked by longest path over config/observed/potential edges, rows ordered by two median
- * sweeps with an alphabetical tiebreak (no randomness anywhere -- determinism is a test). Exported
- * so the layout invariants (left-to-right wires, group containment, no overlaps) are testable
- * without parsing SVG back out of the page.
+ * sweeps with an alphabetical tiebreak (no randomness anywhere -- determinism is a test). Reached
+ * through `buildGraphScene`, whose `layout` result is this function's, so the layout invariants
+ * (left-to-right wires, group containment, no overlaps) stay testable without parsing SVG back out
+ * of a page. The old model-taking wrapper around this function is gone with the standalone page
+ * builder (issue #279): neither had a production caller left, and an exported helper nothing calls
+ * does not stay uncalled -- the purity test bans both names from ever reappearing here.
  */
-export function layoutGraph(model) {
-  return layoutNormalized(normalizeModel(model));
-}
-
 function layoutNormalized(norm) {
   const empty = { nodes: [], wires: [], groups: [], skillGroups: [], viewBox: { x: 0, y: 0, w: 800, h: 600 } };
   if (!norm.ok && norm.nodes.length === 0) return empty;
@@ -1052,29 +1051,6 @@ export function bannersHtml(norm) {
 
 // ---- page assembly ----
 
-const PAGE_CSS = `
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:${PAGE_CANVAS};color:${PAGE_FG};font:14px/1.4 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-#hdr{position:fixed;top:0;left:0;right:0;height:46px;display:flex;align-items:center;gap:12px;padding:0 14px;background:${PAGE_PANEL};border-bottom:1px solid ${PAGE_BORDER};z-index:3}
-#hdr h1{font-size:14px;font-weight:600}
-#stamp{color:${PAGE_DIM};font-size:12px}
-#stamp.stale{color:${PAGE_AMBER}}
-#hdr button,#hdr select{background:#21262d;color:${PAGE_FG};border:1px solid ${PAGE_BORDER};border-radius:6px;padding:3px 10px;font-size:12px}
-#banners{position:fixed;top:52px;left:10px;z-index:3;max-width:46%}
-.banner{background:#2d1517;border:1px solid ${DANGER};color:${DANGER};border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:12px}
-#wrap{position:relative;height:100vh;padding-top:46px}
-svg.canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
-#tip{position:absolute;display:none;max-width:340px;background:${PAGE_PANEL};border:1px solid ${PAGE_BORDER};border-radius:6px;padding:8px 10px;font-size:12px;color:${PAGE_FG};white-space:pre-line;pointer-events:none;z-index:4}
-#legend{position:fixed;top:56px;right:10px;width:256px;background:${PAGE_PANEL};border:1px solid ${PAGE_BORDER};border-radius:6px;padding:10px 12px;font-size:11px;color:${PAGE_DIM};z-index:2}
-#legend h2{font-size:11px;color:${PAGE_FG};margin:6px 0 4px}
-#legend .row{display:flex;align-items:center;gap:6px;margin:2px 0}
-#legend .caps{margin-top:8px;color:${PAGE_FG}}
-#legend .honesty{margin-top:4px;color:${PAGE_AMBER}}
-.gnode{cursor:pointer}
-.dim .gnode,.dim .gwire{opacity:.15}
-.dim .hi{opacity:1}
-`;
-
 // The page's whole behaviour, ES5-flavoured on purpose (no template strings, so this literal can
 // sit inside one), and with three hard rules the tests pin: no fetching of any kind, no markup
 // assembly on the client (textContent only), and the clock read spelled without the static
@@ -1263,19 +1239,15 @@ export const PAGE_JS = `
 `;
 
 /**
- * Build the complete page. Total function: no arguments, a malformed model, an empty model -- all
- * yield a valid page (with an in-page banner saying what is wrong), never a throw, because this
- * runs at the end of an operator command and a stack trace where a file should be is the worst of
- * the available outcomes. `now` is the injected generation instant (ms epoch); the module never
- * reads a clock of its own, so the same model and the same now are byte-identical forever.
- */
-/**
- * The scene half of the page: normalize, lay out, and emit the SVG body plus the per-node data the
- * page script needs. Split from buildGraphHtml so a sibling artifact (insights-html.mjs) can place
- * the same topology inside a larger document without a second layout engine or a second escaping
- * discipline. The layout's placed nodes still hold their normalised node objects (original ids and
- * all) -- that is server-side composition state for the caller; only `svgBody`/`graphData` strings
- * belong in a page, and they carry minted ordinals alone.
+ * The scene: normalize, lay out, and emit the SVG body plus the per-node data the page script
+ * needs. Extracted (issue #175) so insights-html.mjs could place the same topology inside a larger
+ * document without a second layout engine or a second escaping discipline -- and since issue #279
+ * that page is the ONLY consumer: the standalone topology page this was split from lost its
+ * command in #181 and sat caller-less until it was deleted, total-function guarantees and all
+ * (they live on in `buildInsightsHtml`, which the same suites pin). The
+ * layout's placed nodes still hold their normalised node objects (original ids and all) -- that is
+ * server-side composition state for the caller; only `svgBody`/`graphData` strings belong in a
+ * page, and they carry minted ordinals alone.
  */
 export function buildGraphScene(model, { now, fullPaths } = {}) {
   let norm;
@@ -1334,34 +1306,6 @@ export function buildGraphScene(model, { now, fullPaths } = {}) {
     nodeParts.join(""),
   ].join("");
   return { norm, layout, svgBody, viewBox: layout.viewBox, graphData, nowMs };
-}
-
-export function buildGraphHtml(model, { now, fullPaths } = {}) {
-  const { norm, svgBody, viewBox: vb, graphData, nowMs } = buildGraphScene(model, { now, fullPaths });
-  const svgEl = [
-    `<svg id="graph" class="canvas" viewBox="${fmt(vb.x)} ${fmt(vb.y)} ${fmt(vb.w)} ${fmt(vb.h)}" role="img" aria-label="pi-dispatch trigger and flow graph" preserveAspectRatio="xMidYMid meet">`,
-    `<g id="root">${svgBody}</g>`,
-    `</svg>`,
-  ].join("");
-
-  return [
-    "<!doctype html>",
-    '<meta charset="utf-8">',
-    "<title>pi-dispatch graph</title>",
-    `<style>${PAGE_CSS}</style>`,
-    "<body>",
-    '<div id="hdr">',
-    "<h1>pi-dispatch graph</h1>",
-    '<span id="stamp"></span>',
-    '<button id="reload" type="button">Reload</button>',
-    '<select id="auto" aria-label="auto reload"><option value="0">off</option><option value="5">5s</option><option value="30">30s</option></select>',
-    "</div>",
-    bannersHtml(norm),
-    `<div id="wrap">${svgEl}<div id="tip"></div></div>`,
-    legendHtml(norm),
-    `<script>\n"use strict";\nvar GENERATED_AT = ${fmt(nowMs)};\nvar GRAPH = ${embedJson(graphData)};\n${PAGE_JS}</script>`,
-    "</body>",
-  ].join("\n");
 }
 
 // Flags were recorded against original node ids; the placed node still holds its normalised node,

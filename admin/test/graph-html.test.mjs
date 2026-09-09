@@ -2,12 +2,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildGraphHtml, layoutGraph, GRAPH_HTML_KINDS, GLYPH } from "../src/graph-html.mjs";
+import { buildGraphScene, GRAPH_HTML_KINDS, GLYPH, PAGE_JS } from "../src/graph-html.mjs";
+import { buildInsightsHtml } from "../src/insights-html.mjs";
 import { buildGraphModel, GRAPH_EDGE_KINDS, GRAPH_NODE_KINDS } from "../src/graph-model.mjs";
 
 const NOW = 1770000000000;
 
-// The same canned deployment graph-model.test.mjs uses, built THROUGH buildGraphModel: the HTML
+// Since issue #279 this suite pins graph-html.mjs's SHIPPING surface: the scene builder, the shared
+// escaping/theme/script pieces, and the layout invariants. `buildGraphHtml` (the standalone topology
+// page, command-less since #181) is deleted, so every page-level pin here drives the page that can
+// still emit these bytes -- `buildInsightsHtml`, whose lower half IS this scene. A fold-less payload
+// renders the topology whole (the degrade contract insights-html.test.mjs pins), which keeps these
+// tests about the topology and nothing else. Pins that duplicate an insights-html.test.mjs twin
+// byte-for-byte (permutation determinism, well-formedness, the redaction canary, the file:// needle
+// list, the reload contract) were dropped here rather than retargeted -- one pin per property, on
+// the surface that ships.
+
+// The same canned deployment graph-model.test.mjs uses, built THROUGH buildGraphModel: the scene
 // generator's contract is the assembler's output shape, so hand-rolled model literals would pin
 // this suite to a shape the assembler might stop producing.
 const CANNED = () => ({
@@ -47,7 +58,14 @@ const CANNED = () => ({
   nowMs: NOW,
 });
 
-const cannedHtml = () => buildGraphHtml(buildGraphModel(CANNED()), { now: NOW });
+// The scene's layout half, reached the way production reaches it. `layoutGraph` (a wrapper only
+// tests ever called) is deleted; the scene result's `layout` is the same layoutNormalized output.
+const layoutOf = (model) => buildGraphScene(model, { now: NOW }).layout;
+
+// The LIVE page around a topology model: a fold-less insights payload renders the whole scene, the
+// legend and the banners -- the exact composition the panel writes to disk minus the cost half.
+const pageOf = (model, opts = {}) => buildInsightsHtml({ graph: model, fold: null, costsUnreachable: null, window: "30d", costByTrigger: null }, { now: NOW, ...opts });
+const cannedPage = () => pageOf(buildGraphModel(CANNED()));
 
 // ---- 1. purity ----
 
@@ -59,8 +77,13 @@ test("graph-html.mjs is fully pure: no module loads, no clock, no randomness, no
   assert.ok(!src.includes("import"), "no module loads of any kind, not even node: builtins");
   assert.ok(!src.includes("require("), "no CJS loads either");
   assert.ok(!src.includes("Date.now"), "the generation instant is injected as `now`, never read");
-  assert.ok(!src.includes("Math.random"), "determinism is the test one block down");
+  assert.ok(!src.includes("Math.random"), "determinism is insights-html.test.mjs's byte-identity pin");
   assert.ok(!/process\./.test(src), "no environment access");
+  // The #279 deletion pins: an export nothing outside this module's own test calls must not creep
+  // back, and neither may a page assembly the insights page composes for itself.
+  assert.ok(!src.includes("buildGraphHtml"), "the caller-less page builder stays deleted");
+  assert.ok(!src.includes("layoutGraph"), "and so does the test-only layout wrapper");
+  assert.ok(!src.includes("<!doctype"), "graph-html emits scene pieces, never a whole document");
 });
 
 // ---- 2. kind parity ----
@@ -72,7 +95,7 @@ test("GRAPH_HTML_KINDS is the assembler's GRAPH_EDGE_KINDS, byte for byte, froze
   assert.ok(Object.isFrozen(GRAPH_HTML_KINDS));
 });
 
-// ---- 3. escaping / breakout ----
+// ---- 3. escaping / breakout (the trigger-side vectors; the cost-side twins live in the insights suite) ----
 
 test("hostile trigger and flow strings cannot break out of markup or the embedded json", () => {
   const inputs = CANNED();
@@ -80,7 +103,7 @@ test("hostile trigger and flow strings cannot break out of markup or the embedde
   // SKILL_NAME_RE so it travels the charset-invalid path into a node name and a flag detail.
   inputs.triggers.triggers.push({ type: "comment", index: 3, phrase: '"><script>alert(1)</script>', any: [], all: [], none: [], flow: "x", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" });
   inputs.triggers.triggers.push({ type: "cron", index: 4, id: "evil", pattern: "0 5 * * *", folder: "/srv/site", flow: "</script><script>evil()", model: null, packages: true, image: null, skillsDir: null, instructions: false, resume: false });
-  const out = buildGraphHtml(buildGraphModel(inputs), { now: NOW });
+  const out = pageOf(buildGraphModel(inputs));
 
   assert.equal(out.split("<script").length - 1, 1, "exactly ONE script open tag: the page's own");
   assert.equal(out.split("</script").length - 1, 1, "and exactly one close: nothing embedded can spell it");
@@ -89,44 +112,10 @@ test("hostile trigger and flow strings cannot break out of markup or the embedde
   assert.ok(out.includes("\\u003c"), "the embedded json carries < as an escape, never a literal");
 });
 
-// ---- 4. determinism ----
+// ---- 4. layout invariants ----
 
-test("same model + same now is byte-identical, and input array order is irrelevant", () => {
-  const model = buildGraphModel(CANNED());
-  assert.equal(buildGraphHtml(model, { now: NOW }), buildGraphHtml(model, { now: NOW }));
-
-  const permuted = buildGraphModel(CANNED());
-  permuted.nodes.reverse();
-  permuted.edges.reverse();
-  permuted.flags.reverse();
-  permuted.folders.reverse();
-  assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }), "normalisation sorts everything; a permuted model may not move a byte");
-});
-
-// ---- 5. well-formedness smoke ----
-
-test("the page is balanced, finite, and every path d stays inside the SVG path grammar", () => {
-  const out = cannedHtml();
-  assert.equal(out.split("<svg").length, out.split("</svg>").length, "balanced <svg>");
-  assert.equal((out.match(/<g[ >]/g) ?? []).length, (out.match(/<\/g>/g) ?? []).length, "balanced <g>");
-  for (const word of ["NaN", "undefined", "Infinity"]) {
-    assert.ok(!out.includes(word), `a non-finite value leaked into the page as ${word}`);
-  }
-  const vb = /viewBox="([^"]+)"/.exec(out);
-  assert.ok(vb, "the main svg carries a viewBox");
-  const nums = vb[1].split(" ").map(Number);
-  assert.equal(nums.length, 4);
-  assert.ok(nums.every(Number.isFinite), "viewBox is four finite numbers");
-  const ds = [...out.matchAll(/ d="([^"]*)"/g)];
-  assert.ok(ds.length > 0, "there are wires and dividers to check");
-  for (const [, d] of ds) assert.match(d, /^[MmCcLlHhVvZzAaQq0-9eE .,+-]+$/, `path grammar violated: ${d}`);
-  assert.ok(out.includes('role="img" aria-label="pi-dispatch trigger and flow graph"'));
-});
-
-// ---- 6. layout invariants ----
-
-test("layoutGraph: finite coords, left-to-right wires, group containment, no overlaps", () => {
-  const layout = layoutGraph(buildGraphModel(CANNED()));
+test("the scene layout: finite coords, left-to-right wires, group containment, no overlaps", () => {
+  const layout = layoutOf(buildGraphModel(CANNED()));
   assert.ok(layout.nodes.length > 0 && layout.wires.length > 0 && layout.groups.length > 0);
 
   const byId = new Map(layout.nodes.map((n) => [n.id, n]));
@@ -184,7 +173,7 @@ function assertUnderRoutesClearChips(layout) {
 test("parallel wires between one pair separate their curves and labels, and no label sits on a port", () => {
   // The regression: an observed edge and a potential mention both join build-report -> notify, and
   // both labels rendered at the same midpoint -- "(3×)" and "mention" garbled into one smear.
-  const layout = layoutGraph(buildGraphModel(CANNED()));
+  const layout = layoutOf(buildGraphModel(CANNED()));
   const byPair = new Map();
   for (const w of layout.wires) {
     const key = `${w.from} ${w.to}`;
@@ -218,7 +207,7 @@ test("a mention cycle marks one back edge and routes it under the rows without c
   const inputs = CANNED();
   // notify already receives a mention from build-report; mentioning back closes the cycle.
   inputs.folderSkills["/srv/site"].skills[1].mentions = [{ name: "build-report", strong: false }];
-  const layout = layoutGraph(buildGraphModel(inputs));
+  const layout = layoutOf(buildGraphModel(inputs));
   const byId = new Map(layout.nodes.map((n) => [n.id, n]));
   const potentials = layout.wires.filter((w) => w.kind === "potential" && !w.self);
   assert.equal(potentials.length, 2, "both sides of the cycle draw");
@@ -231,10 +220,10 @@ test("a mention cycle marks one back edge and routes it under the rows without c
   assertUnderRoutesClearChips(layout);
 });
 
-// ---- 6c. loop-in-skill groups ----
+// ---- 4c. loop-in-skill groups ----
 
 test("a skill with loops becomes a group: chip inside the box, marker with hint, ring inside, ports untouched", () => {
-  const layout = layoutGraph(buildGraphModel(CANNED()));
+  const layout = layoutOf(buildGraphModel(CANNED()));
   const sg = layout.skillGroups.find((s) => s.label === "build-report");
   assert.ok(sg, "a prose-loop hint promotes the skill to a group box");
   const chip = layout.nodes.find((n) => n.id === sg.nodeId);
@@ -261,7 +250,7 @@ test("a skill with loops becomes a group: chip inside the box, marker with hint,
 });
 
 test("sub-skills nest inside the parent's group box as small unwired chips", () => {
-  const layout = layoutGraph(buildGraphModel(CANNED()));
+  const layout = layoutOf(buildGraphModel(CANNED()));
   const sg = layout.skillGroups.find((s) => s.label === "group");
   assert.ok(sg, "owning a sub-skill promotes the parent to a group box even without loops");
   const sub = layout.nodes.find((n) => n.node.name === "group/sub");
@@ -275,7 +264,7 @@ test("sub-skills nest inside the parent's group box as small unwired chips", () 
 });
 
 test("the page carries the group visuals and the forge scope line", () => {
-  const out = cannedHtml();
+  const out = cannedPage();
   assert.ok(out.includes('class="sgroup"'), "skill group boxes render");
   assert.ok(out.includes(">⟳</text>"), "the loop marker glyph renders");
   assert.ok(out.includes("until the report renders…"), "the clipped hint text renders beside the marker");
@@ -287,47 +276,15 @@ test("the page carries the group visuals and the forge scope line", () => {
   // Empty repos leave the label exactly as before -- absence of history must not invent scope.
   const inputs = CANNED();
   delete inputs.forgeRepos;
-  const bare = buildGraphHtml(buildGraphModel(inputs), { now: NOW });
+  const bare = pageOf(buildGraphModel(inputs));
   assert.ok(bare.includes("github · forge · unverifiable from this host"));
   assert.ok(!bare.includes("ran against"));
 });
 
-// ---- 7. content canary ----
-
-test("an unexpected model field and a folder's absolute path never reach the page", () => {
-  const inputs = CANNED();
-  inputs.folderSkills["/Users/someone/private"] = {
-    head: "def456",
-    truncated: false,
-    unreachable: null,
-    skills: [{ name: "solo", isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false }],
-  };
-  const model = buildGraphModel(inputs);
-  model.nodes[0].secret = "CANARY-9f3"; // a field no allowlist names; a spread would leak it
-  const out = buildGraphHtml(model, { now: NOW });
-  assert.ok(!out.includes("CANARY-9f3"), "unknown fields must be structurally unreachable, not merely unused");
-  assert.ok(!out.includes("/Users/someone/private"), "groups render their label (basename) by DEFAULT, never group.path");
-  assert.ok(out.includes("private"), "the basename label itself still renders");
-
-  // The twin: fullPaths is the operator's explicit opt-in, and then the path DOES render.
-  const full = buildGraphHtml(model, { now: NOW, fullPaths: true });
-  assert.ok(full.includes("/Users/someone/private"), "fullPaths: true labels local groups with their path");
-  assert.ok(!full.includes("CANARY-9f3"), "the opt-in widens labels, not the allowlist");
-});
-
-// ---- 8. file:// posture ----
-
-test("nothing on the page can reach outside the file", () => {
-  const out = cannedHtml();
-  for (const needle of ["src=", "<link", "url(", "@import", "fetch", "XMLHttpRequest", "innerHTML"]) {
-    assert.ok(!out.includes(needle), `forbidden over file://: ${needle}`);
-  }
-});
-
-// ---- 9. state twins ----
+// ---- 5. state twins ----
 
 test("orphan dash, potential-vs-observed labels, the caps digits, and honesty counters", () => {
-  const out = cannedHtml();
+  const out = cannedPage();
   // CANNED holds exactly two orphans (old-import, and group: no trigger, no ai-trigger, no
   // mention): those two chips plus the one legend swatch carry the disabled treatment, and the
   // exact count is the negative claim -- no non-orphan chip may wear it.
@@ -342,7 +299,7 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
 
   const dropped = buildGraphModel(CANNED());
   dropped.meta.droppedObservedEdges = 4;
-  assert.ok(buildGraphHtml(dropped, { now: NOW }).includes("4 observed edges dropped"), "dropped-edge counter renders when set");
+  assert.ok(pageOf(dropped).includes("4 observed edges dropped"), "dropped-edge counter renders when set");
 
   // Schedule facts in the tips (issue #181): with the terminal views gone this page is the last
   // surface REQ-TOPOLOGY-GRAPH (h) has. The canned scheduler's next fire sits 191 days past NOW.
@@ -350,55 +307,40 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
   const overdue = buildGraphModel(CANNED());
   const cron = overdue.nodes.find((n) => n.id === "trigger:0");
   cron.overdueMs = 2 * 3600_000;
-  assert.ok(buildGraphHtml(overdue, { now: NOW }).includes("overdue 2h"), "overdue outranks the countdown");
+  assert.ok(pageOf(overdue).includes("overdue 2h"), "overdue outranks the countdown");
 
   // The two counters the text and TUI surfaces always stated and this page dropped (issue #175):
   // three surfaces of one model must not disagree about what was refused or unreadable.
   assert.ok(out.includes("1 chain requests refused (caps or gate)"), "the canned refusals reach the legend");
   const unreadable = buildGraphModel(CANNED());
   unreadable.meta.injectedUnreachable = ["/inj"];
-  assert.ok(buildGraphHtml(unreadable, { now: NOW }).includes("injected skills dir unreadable: /inj"), "the unreadable-dir counter renders when set");
+  assert.ok(pageOf(unreadable).includes("injected skills dir unreadable: /inj"), "the unreadable-dir counter renders when set");
 });
 
-// ---- 10. refresh features ----
+// ---- 6. page-script hardening, on the exported string itself (the insights suite pins the same
+// script IN SITU -- the parse check, the single guarded GRAPH read; these are the expressions whose
+// loss would not break a parse, asserted at the source the shipping page embeds verbatim) ----
 
-test("reload, auto-reload, staleness stamp, and hash view-state are wired without any fetching", () => {
-  const out = cannedHtml();
-  assert.ok(out.includes(">Reload</button>"));
-  for (const opt of [">off<", ">5s<", ">30s<"]) assert.ok(out.includes(opt), `auto-reload option ${opt}`);
-  assert.ok(out.includes("location.reload"));
-  assert.ok(out.includes("location.hash"), "view state survives a reload via the hash");
-  assert.ok(out.includes(`GENERATED_AT = ${NOW}`), "the staleness stamp compares against the baked-in generation instant");
-  assert.ok(out.includes("setInterval"));
-  assert.ok(!out.includes("fetch"), "refresh means reloading regenerated bytes, never fetching");
-});
-
-// ---- 10b. page-script hardening (the page cannot run under node:test, so these are the strongest
-// claims the emitted string supports: the exact guard/mapping expressions, plus a parse check) ----
-
-test("the page script letterbox-maps the cursor, survives a pan without wiping selection, and guards GRAPH.nodes", () => {
-  const out = cannedHtml();
-  const script = /<script>([\s\S]*?)<\/script>/.exec(out)[1];
-
+test("PAGE_JS letterbox-maps the cursor, survives a pan without wiping selection, and guards GRAPH.nodes", () => {
   // meet letterboxing: a uniform scale (min of the two ratios) plus centring offsets; the
   // per-axis ratios this replaced panned at the wrong speed whenever the aspects differed.
-  assert.ok(script.includes("Math.min(r.width / vb.width, r.height / vb.height)"), "uniform meet scale");
-  assert.ok(script.includes("(r.width - vb.width * s) / 2"), "letterbox x offset");
-  assert.ok(script.includes("(r.height - vb.height * s) / 2"), "letterbox y offset");
+  assert.ok(PAGE_JS.includes("Math.min(r.width / vb.width, r.height / vb.height)"), "uniform meet scale");
+  assert.ok(PAGE_JS.includes("(r.width - vb.width * s) / 2"), "letterbox x offset");
+  assert.ok(PAGE_JS.includes("(r.height - vb.height * s) / 2"), "letterbox y offset");
 
   // pan-then-click: pointer capture retargets the post-pan click at the svg, which reads as a
   // background click; a drag beyond the threshold must swallow it or every pan clears the selection.
-  assert.ok(script.includes("panning.moved > 3"), "drag threshold present");
-  assert.ok(script.includes("suppressClick"), "the following click is suppressed");
+  assert.ok(PAGE_JS.includes("panning.moved > 3"), "drag threshold present");
+  assert.ok(PAGE_JS.includes("suppressClick"), "the following click is suppressed");
 
   // prototype-chain ids: #sel=constructor must die at the guard, not at a .nb dereference.
-  assert.ok(script.includes("Object.prototype.hasOwnProperty.call(GRAPH.nodes, id)"), "own-property guard present");
-  assert.equal((script.match(/GRAPH\.nodes\[/g) ?? []).length, 1, "exactly one raw indexed read of GRAPH.nodes: the one inside the guard");
+  assert.ok(PAGE_JS.includes("Object.prototype.hasOwnProperty.call(GRAPH.nodes, id)"), "own-property guard present");
+  assert.equal((PAGE_JS.match(/GRAPH\.nodes\[/g) ?? []).length, 1, "exactly one raw indexed read of GRAPH.nodes: the one inside the guard");
 
-  new Function(script); // parse check: a syntax break in the emitted script goes red here, not in a browser
+  new Function(PAGE_JS); // parse check on the exported string the shipping page embeds verbatim
 });
 
-// ---- 10c. tier rendering (issue #188) ----
+// ---- 7. tier rendering (issue #188) ----
 
 // A tier-bearing deployment: the CANNED base plus one trigger resolving in each non-repo tier, and
 // the tier reads that let them resolve.
@@ -427,7 +369,7 @@ test("every GRAPH_NODE_KINDS entry except trigger has its own glyph -- the kind-
 });
 
 test("tier nodes render in their own groups, tips name the tier and stay never-AI-reachable", () => {
-  const out = buildGraphHtml(buildGraphModel(TIERED()), { now: NOW });
+  const out = pageOf(buildGraphModel(TIERED()));
   assert.ok(out.includes("overlay skills (global pi dir)"), "the overlay group renders");
   assert.ok(out.includes("staged package skills"), "the staged group renders");
   assert.ok(out.includes("deployment overlay skills/, trigger-reachable, never AI-reachable"), "the overlay tip keeps the reachability half");
@@ -439,7 +381,7 @@ test("tier nodes render in their own groups, tips name the tier and stay never-A
 });
 
 test("acceptance (i) end to end: an injected-resolved flow wires trigger to the injected node, unflagged", () => {
-  const layout = layoutGraph(buildGraphModel(TIERED()));
+  const layout = layoutOf(buildGraphModel(TIERED()));
   const trigger = layout.nodes.find((n) => n.node.id === "trigger:3");
   const injectedChip = layout.nodes.find((n) => n.node.id === "injected:/inj:tidy");
   assert.ok(trigger && injectedChip, "both endpoints place");
@@ -454,7 +396,7 @@ test("the softened not-at-head state renders amber-dashed with its tiers in the 
   // deployment-wide tiers read as unknown, so deleted-flow softens instead of flagging.
   delete blind.overlaySkills;
   delete blind.stagedSkills;
-  const out = buildGraphHtml(buildGraphModel(blind), { now: NOW });
+  const out = pageOf(buildGraphModel(blind));
   assert.ok(out.includes('stroke="#d29922" stroke-width="1" stroke-dasharray="10,4"'), "the amber chip treatment renders");
   assert.equal((out.match(/stroke="#f85149" stroke-width="1" stroke-dasharray="10,4"/g) ?? []).length, 0, "no chip wears the red missing claim");
   assert.ok(out.includes("not committed at HEAD"), "the tip states the one thing the session KNOWS");
@@ -462,20 +404,20 @@ test("the softened not-at-head state renders amber-dashed with its tiers in the 
   assert.ok(out.includes(">⋯</text>"), "the softened glyph renders");
 
   // The twin: with the tier reads wired and empty (CANNED), the same flow is a checked miss -- red.
-  const checked = cannedHtml();
+  const checked = cannedPage();
   assert.equal((checked.match(/stroke="#f85149" stroke-width="1" stroke-dasharray="10,4"/g) ?? []).length, 2, "deleted-flow's node and its trigger chip carry the red");
   assert.ok(!checked.includes("not committed at HEAD"), "no softened tip when every tier was checkable");
 });
 
 test("the legend states the tier-aware vocabulary and the tier honesty banners", () => {
-  const out = cannedHtml();
+  const out = cannedPage();
   assert.ok(out.includes("dangling: absent in every checkable tier or name invalid"), "the dangling row now claims the whole ladder");
   assert.ok(out.includes("not at HEAD: some skill tiers not checkable from this session"), "the softened state has its legend row");
 
   const troubled = buildGraphModel(TIERED());
   troubled.meta.overlayUnreachable = true;
   troubled.meta.stagedUnenumerable = ["@glob/pkg"];
-  const page = buildGraphHtml(troubled, { now: NOW });
+  const page = pageOf(troubled);
   assert.ok(page.includes("overlay skills dir unreadable (global pi dir)"), "an unreadable overlay banners");
   assert.ok(page.includes("staged packages not enumerable (manifest patterns): @glob/pkg"), "pattern manifests banner instead of being guessed at");
 });
@@ -483,27 +425,27 @@ test("the legend states the tier-aware vocabulary and the tier honesty banners",
 test("a command trigger's tip shows the slash command; junk tiersUnknown is filtered at the allowlist", () => {
   const inputs = CANNED();
   inputs.triggers.triggers.push({ type: "comment", index: 3, phrase: "@pi deploy", flow: null, command: "deploy prod", packages: true, image: null, skillsDir: null, instructions: false, resume: false, replicas: null, forge: "github" });
-  const out = buildGraphHtml(buildGraphModel(inputs), { now: NOW });
+  const out = pageOf(buildGraphModel(inputs));
   assert.ok(out.includes("command: /deploy prod"), "the tip is the detail surface, so the whole staged line shows");
 
   const soft = buildGraphModel((() => { const b = CANNED(); delete b.overlaySkills; delete b.stagedSkills; return b; })());
   const target = soft.nodes.find((n) => n.kind === "skill-not-at-head");
   target.tiersUnknown = [42, null, "CANARY-TIER-x9"];
-  const page = buildGraphHtml(soft, { now: NOW });
+  const page = pageOf(soft);
   assert.ok(page.includes("not checkable from this session: CANARY-TIER-x9"), "string entries survive the allowlist; the junk beside them does not");
 });
 
-test("a permuted tier-bearing model does not move a byte", () => {
+test("a permuted tier-bearing model does not move a byte of the live page", () => {
   const model = buildGraphModel(TIERED());
   const permuted = buildGraphModel(TIERED());
   permuted.nodes.reverse();
   permuted.edges.reverse();
   permuted.flags.reverse();
   permuted.folders.reverse();
-  assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }));
+  assert.equal(pageOf(permuted), pageOf(model));
 });
 
-// ---- 10d. one-shot rendering (#231) ----
+// ---- 8. one-shot rendering (#231) ----
 
 // The CANNED base plus the two states of a one-shot close rule: armed (once, no mark) and spent
 // (the worker's disarmed mark, whose jobId must never reach the page).
@@ -517,7 +459,7 @@ const SHOT = () => {
 };
 
 test("a spent one-shot fades like a disabled chip, both tips state the state, and the disarm jobId stays server-side", () => {
-  const out = buildGraphHtml(buildGraphModel(SHOT()), { now: NOW });
+  const out = pageOf(buildGraphModel(SHOT()));
   assert.ok(out.includes("one-shot (armed)"), "the armed tip says so in words");
   assert.ok(out.includes("one-shot, spent 2026-08-20T09:00:00Z"), "the spent tip carries the disarm instant");
   assert.ok(!out.includes("CANARY-JOB-77"), "the mark's jobId is not page material -- the allowlist carries `at` alone");
@@ -532,42 +474,33 @@ test("junk one-shot shapes die at the allowlist: an unusable disarm instant stil
   const model = buildGraphModel(SHOT());
   const node = model.nodes.find((n) => n.id === "trigger:4");
   node.disarmed = { at: { deep: "junk" }, jobId: "CANARY-J2" };
-  const page = buildGraphHtml(model, { now: NOW });
+  const page = pageOf(model);
   assert.ok(page.includes("one-shot, spent"), "the state survives even when the instant does not parse");
   assert.ok(!page.includes("CANARY-J2"), "no field beyond `at` gets through");
   assert.ok(!page.includes("[object Object]"), "a non-string instant degrades to absence, never to Object.prototype.toString");
 
   const armedJunk = buildGraphModel(SHOT());
   armedJunk.nodes.find((n) => n.id === "trigger:3").once = "yes";
-  assert.ok(!buildGraphHtml(armedJunk, { now: NOW }).includes("one-shot (armed)"), "once is a strict boolean at the allowlist");
+  assert.ok(!pageOf(armedJunk).includes("one-shot (armed)"), "once is a strict boolean at the allowlist");
 });
 
-test("a permuted one-shot model does not move a byte", () => {
+test("a permuted one-shot model does not move a byte of the live page", () => {
   const model = buildGraphModel(SHOT());
   const permuted = buildGraphModel(SHOT());
   permuted.nodes.reverse();
   permuted.edges.reverse();
   permuted.flags.reverse();
   permuted.folders.reverse();
-  assert.equal(buildGraphHtml(permuted, { now: NOW }), buildGraphHtml(model, { now: NOW }));
+  assert.equal(pageOf(permuted), pageOf(model));
 });
 
-// ---- 11. degrades ----
+// ---- 9. degraded-model banners (the shared bannersHtml, on the page that ships; the null/junk
+// payload degrades are insights-html.test.mjs's own section) ----
 
-test("no arguments and degraded models still produce a valid page that says what is wrong", () => {
-  const bare = buildGraphHtml();
-  assert.ok(bare.startsWith("<!doctype html>"));
-  assert.ok(bare.includes("<title>pi-dispatch graph</title>"));
-  assert.ok(bare.includes("no graph model supplied"));
-
-  const missing = buildGraphHtml(buildGraphModel({ triggers: { missing: true } }), { now: NOW });
+test("a missing or invalid triggers file banners on the live page", () => {
+  const missing = pageOf(buildGraphModel({ triggers: { missing: true } }));
   assert.ok(missing.includes("no triggers file found"));
 
-  const invalid = buildGraphHtml(buildGraphModel({ triggers: { invalid: "bad json" } }), { now: NOW });
+  const invalid = pageOf(buildGraphModel({ triggers: { invalid: "bad json" } }));
   assert.ok(invalid.includes("triggers file invalid: bad json"));
-
-  for (const junk of [null, 42, "x", { nodes: "no", edges: 7, folders: null, flags: false }]) {
-    const page = buildGraphHtml(junk, { now: NOW });
-    assert.ok(page.includes("<svg"), "malformed input still yields a page, never a throw");
-  }
 });
