@@ -46,7 +46,8 @@ const POLL_INTERVAL_DEFAULT_SECONDS = 60;
  * Parse the poller's config from `env`. Filesystem access is injected (`readFile`, `fileExists`) and
  * forwarded to the receiver loader, so the whole thing is hermetically testable.
  *
- * Returns `{ valkeyUrl, triggers, github, repos, intervalSeconds }` -- and deliberately nothing else.
+ * Returns `{ valkeyUrl, triggers, github, repos, intervalSeconds, identityRetryWindowMs }` -- and
+ * deliberately nothing else.
  * `webhookSecret`, `port`, `bind` and the other-forge blocks are receiver-only concerns: the poller
  * binds no port and speaks only GitHub (the other forges' producers stay webhook-armed).
  * `repos === null` means "discover from the App installation each boot" and is only reachable when
@@ -76,6 +77,10 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
 		github: base.github, // validated by the shared loadGitHubAuth, exactly as serve validates it
 		repos,
 		intervalSeconds: Math.max(POLL_INTERVAL_FLOOR_SECONDS, positiveInt(env, "POLL_INTERVAL_SECONDS", POLL_INTERVAL_DEFAULT_SECONDS)),
+		// Passed THROUGH the receiver loader rather than re-parsed: one parse, one floor (issue #318).
+		// The poller's boot identity gate is the same hard-fail gate serve has, so it retries under the
+		// same window -- a pure-polling deployment loses deliveries to a stopped process just as surely.
+		identityRetryWindowMs: base.identityRetryWindowMs,
 	};
 }
 

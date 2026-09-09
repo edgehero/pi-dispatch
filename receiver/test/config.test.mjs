@@ -300,6 +300,37 @@ test("a malformed RECEIVER_PORT is a config error, not a silent NaN", () => {
 	assert.throws(() => loadReceiverConfig({ WEBHOOK_SECRET: "shh", RECEIVER_PORT: "nope" }, validTriggers), (e) => e.piDispatchConfig === true);
 });
 
+// -- the transient-boot retry window (issue #318): one parse, one floor, default 600s ----------------
+
+test("the identity-retry window defaults to 600 seconds", () => {
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, validTriggers);
+	assert.equal(c.identityRetryWindowMs, 600_000, "long enough to outlast an ordinary self-hosted forge restart");
+});
+
+test("a below-floor window is raised to 60 seconds, never honored", () => {
+	// The floor is the systemd accounting: retrying boots exit at least window + RestartSec apart, so a
+	// window of at least StartLimitIntervalSec (60s) means every start opens a fresh interval and the
+	// crash-loop burst limit is unreachable for a transient failure. A 10s window would put fast exit-1s
+	// back inside one interval and re-open the ~25s bound this setting exists to remove.
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh", RECEIVER_IDENTITY_RETRY_SECONDS: "10" }, validTriggers);
+	assert.equal(c.identityRetryWindowMs, 60_000);
+});
+
+test("an above-floor window is honored as given", () => {
+	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh", RECEIVER_IDENTITY_RETRY_SECONDS: "1800" }, validTriggers);
+	assert.equal(c.identityRetryWindowMs, 1_800_000);
+});
+
+test("a garbled retry window is a config refusal naming the key -- a typo'd window is configuration", () => {
+	for (const bad of ["0", "-1", "1.5", "x"]) {
+		assert.throws(
+			() => loadReceiverConfig({ WEBHOOK_SECRET: "shh", RECEIVER_IDENTITY_RETRY_SECONDS: bad }, validTriggers),
+			(e) => e.piDispatchConfig === true && /RECEIVER_IDENTITY_RETRY_SECONDS/.test(e.message),
+			`${JSON.stringify(bad)} must refuse at boot, tagged, with the key in the message`,
+		);
+	}
+});
+
 // -- the triggers path default: ./triggers.json in the cwd, unified with `pi-dispatch init` (issue #80)
 
 test("the default triggers path is ./triggers.json -- the file init scaffolds, not the committed demo", () => {

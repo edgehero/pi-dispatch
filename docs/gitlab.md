@@ -110,9 +110,10 @@ those parentheses is the fetch's whole cause chain, joined with colons, so the c
 what you read. That message is the diagnosis; if you see it, this is what it means. A trust failure is
 treated as configuration, so the receiver exits 2 and your supervisor leaves it stopped: setting the CA is
 the only thing that changes the answer, and restarting into the same failure would only hide it. An
-instance that is merely unreachable exits 1 instead and is retried, for as long as the unit allows
-(`RestartSec=5` against `StartLimitBurst=5` in `deploy/receiver.service` is about 25 seconds, after which
-the unit is left `failed`).
+instance that is merely unreachable is retried in-process (5 seconds between attempts, backing off to 30,
+for `RECEIVER_IDENTITY_RETRY_SECONDS`, default 10 minutes); when a window ends the receiver exits 1 and
+the supervisor starts another, so an instance restart measured in minutes is ridden out rather than
+outlasting the recovery.
 
 The **job container** is a separate trust store: `git clone` and `glab` run inside it, so the CA has to be
 in the image. Add it to your own image (`docs/job-image.md`) — a `COPY` of the cert into

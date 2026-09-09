@@ -48,14 +48,15 @@ instance) is something you have to fix: the receiver exits 2, and a supervisor l
 than looping on a configuration that can never resolve. An instance that was merely unreachable —
 restarting, answering 502, refusing the connection — exits 1 instead, and the supervisor retries.
 
-**How long it retries is set by the unit, and it is not unlimited.** `deploy/receiver.service` pairs
-`RestartSec=5` with `StartLimitBurst=5`, so the receiver tries for roughly 25 seconds and is then left in
-systemd's `failed` state. A brief blip now recovers on its own, where before this split any blip that
-overlapped a receiver restart left it stopped until somebody noticed no webhook had arrived. A Forgejo
-restart that takes minutes still outlasts the window: the difference is that the unit ends up `failed`,
-where `systemctl --failed` and your monitoring will see it, rather than quietly stopped. Raise
-`StartLimitBurst` if your instance is slow to come back, remembering that the limit is what stops a real
-crash loop.
+**How long it retries is the receiver's own setting, the same under every supervisor.** A transient
+failure at boot is retried inside the process for `RECEIVER_IDENTITY_RETRY_SECONDS` (default 600 seconds,
+floored at 60; see `.env.example`), starting at 5 seconds between attempts and backing off to 30, and only
+then does the receiver exit 1 for the supervisor to start another window. A Forgejo restart that takes
+minutes is therefore ridden out inside one window, where the old unit-imposed bound (roughly 25 seconds of
+`RestartSec=5` against `StartLimitBurst=5`) outlasted nothing but a blip and then left the unit in
+systemd's `failed` state. Raise the variable if your instance takes longer than ten minutes to come back;
+leave `StartLimitBurst` alone, because that limit now bounds only real crash loops (a process dying in
+milliseconds), and widening it would just let a broken receiver spin longer.
 
 **3. Point the webhook at `/forgejo`.** Type "Gitea", content type `application/json`, secret as above,
 events: Issues, Issue Comment, Pull Request.

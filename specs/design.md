@@ -3356,15 +3356,15 @@ a tunnel.
   separating them needs a table of another tool's stderr prose. And `config.mjs`'s `fileExists` still uses
   `existsSync` on the App private-key path, so an `EACCES` there still reports as absence; it is boot-only
   and pre-dates this entry, and it is recorded here rather than swept silently.
-- **What the exit-1 half actually buys, stated exactly, because the shipped unit bounds it.**
-  `deploy/receiver.service` pairs `Restart=on-failure` and `RestartSec=5` with `StartLimitBurst=5` inside
-  `StartLimitIntervalSec=60`, so the receiver retries for roughly **25 seconds** and is then left in
-  systemd's `failed` state. That is a real improvement on two counts and not on a third: an outage shorter
-  than the window now recovers by itself where nothing recovered before, and a longer one ends in `failed`,
-  which `systemctl --failed` and every monitor already watch, rather than the silent `inactive (dead)` an
-  exit 2 produced. What it does not do is survive a forge restart that takes minutes. Raising the burst
-  would trade that against the crash-loop bound the unit exists to impose, which is a separate decision:
-  filed as issue #318 rather than taken here.
+- **What the exit-1 half actually buys is no longer the unit's to bound (issue #318).** This bullet used
+  to state the shipped bound exactly -- `RestartSec=5` against `StartLimitBurst=5` inside
+  `StartLimitIntervalSec=60`, roughly **25 seconds**, then systemd's `failed` state -- and to file the
+  widening decision as issue #318 rather than take it. That decision is now taken, the other way from
+  widening: the receiver retries a transient identity failure IN-PROCESS before its exit 1 ever reaches a
+  supervisor, so the recovery window is the service's own property and identical under systemd, launchd
+  and nssm. `DES-BOOT-IDENTITY-RETRY-IN-PROCESS` below owns the mechanism, the numbers and the rejected
+  alternatives; what this entry keeps is the classification half, unchanged: untagged means retryable,
+  at boot as everywhere else, and the tag alone decides.
 - **Consequence for boot, which is where this was worst.** The identity modules run only at boot, and the
   issue that found them called that harmless. It is the opposite: a transient fault there took the
   receiver down with the supervisor declining to restart it, and left the worker running with a forge
@@ -3373,6 +3373,66 @@ a tunnel.
   in-flight promise so a backlog draining after an outage opens one identity call and not one per job. A
   DETERMINATE boot failure keeps today's behaviour exactly, which is what preserves best-effort boot for
   the local-only deployment it was written for: no `gh` on PATH is `ENOENT`.
+
+## DES-BOOT-IDENTITY-RETRY-IN-PROCESS
+
+- **Decision** (issue #318): a TRANSIENT identity failure at receiver boot -- serve's four arms and the
+  poller's gate alike -- retries inside the process, through one helper (`receiver/src/boot-retry.mjs` ->
+  `retryIdentity`), for a wall-clock window read once from `RECEIVER_IDENTITY_RETRY_SECONDS`
+  (`receiver/src/config.mjs` -> `identityRetryWindowMs`: default 600 seconds, floored at 60, parsed in
+  one place for both loaders). Gaps run 5 seconds doubling to a 30-second cap; each attempt races a
+  10-second REF'D fuse cleared in a `finally`; a fused-out attempt throws untagged and counts as
+  transient. A `piDispatchConfig` throw rethrows same-tick -- no log line, no sleep -- and an exhausted
+  window rethrows the LAST untagged error, so `entryExitCode` still maps determinate to 2 and transient
+  to 1, and the supervisor restarts an exhausted window into a fresh one.
+- **Why in-process, which is the issue's acceptance verbatim**: the exit-1 recovery #316 bought was
+  bounded by whichever unit the operator happened to install -- systemd at ~25 seconds
+  (`RestartSec=5` against `StartLimitBurst=5`), launchd and nssm at nothing at all (`KeepAlive` with the
+  default throttle and `AppThrottle 5000` both restart forever) -- while a self-hosted forge restart
+  takes minutes, and nothing redelivers a webhook to a process that is not listening
+  (`CONST-RETRY-INFRA-ONLY`'s boot-consequences paragraph). One JS window is the same bound under all
+  three supervisors and the compose container, stated in `.env.example` where every deployment reads it.
+- **No delivery can arrive mid-window.** `server.listen` sits below all four arms in `startReceiver`, so
+  a retrying boot answers connection-refused exactly as the supervisor restart loop it replaces did; the
+  arm-last invariant (`closers.push(watchTriggers(...))` as the last fallible step, issue #301) is
+  untouched, and the exhausted-window refusal is pinned to arm nothing, same as every older refusal.
+- **The unit's values are deliberately untouched, and the floor is what makes that safe.** systemd's
+  start limit is a fixed window from the first counted start (`ratelimit_below` resets when the interval
+  has elapsed), so boots that retry for at least `StartLimitIntervalSec` exit at least window plus
+  `RestartSec` apart, every start opens a fresh interval, and `StartLimitBurst` is unreachable for a
+  transient failure by systemd's own accounting -- recovery is unbounded across windows. A genuine crash
+  loop, a process dying in milliseconds before the retry loop exists, still trips the limit in ~25
+  seconds exactly as before: the two bounds now cover disjoint failure classes. A sub-60s window would
+  put fast exit-1s back inside one interval and re-open the defect, which is why the floor is enforced in
+  the loader rather than stated in a doc.
+- **Per arm, never the whole boot.** The queue (`makeQueueFn`) and the forge router are built between
+  the github arm and the other three; a whole-body retry would rebuild both once per attempt and leak
+  their connections, and hoisting the four resolutions above the queue would reorder the operator-visible
+  first failure. Each arm passes its own thunk to the shared helper and shares one options bag, so the
+  window, clock and sleep are the same for every forge.
+- **Rejected**: raising `StartLimitBurst` (fixes one supervisor of three and trades away the crash-loop
+  bound the limit exists to impose); documenting the bound harder, which #316 already did and which
+  survives no forge restart; a whole-boot retry (the connection leak above); reusing
+  `waitBackoffMs` (`worker/src/wait-for.mjs` has no receiver-importable subpath, and its
+  derive-from-elapsed shape exists to survive restarts a boot loop does not have); an UNREF'D fuse --
+  the github arm runs before the queue, server or any watcher exists, so the fuse can be the only pending
+  handle, which is `settleWithin`'s documented bare-context boundary (the fuse never fires and node
+  abandons the await, exit 13); importing `worker/src/transient.mjs` (not in the export map, and
+  absence-of-tag is already the sanctioned discriminator `entryExitCode` reads).
+- **Residuals, named rather than hidden.** None of the four resolvers takes an `AbortSignal`, so a losing
+  attempt has no cancel: after a FINAL refusal a still-pending request can hold the `process.exitCode`
+  path open up to undici's five-minute header timeout -- strictly better than before this entry, when a
+  forge that accepted and never answered hung boot forever with no fuse at all. A mute forge accumulates
+  at most one abandoned in-flight call per attempt, each with its rejection pre-absorbed. And the boot
+  still registers SIGTERM/SIGINT only after it serves, so a stop landing mid-window kills via the default
+  disposition -- prompt, unchanged in kind from before, merely a wider window; the handlers cannot ride
+  the closers seam (`a process.once cannot be un-registered by a drain`, the #301 rule).
+- **Traces to**: `CONST-RETRY-INFRA-ONLY`, `DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE`,
+  `DES-WATCHERS-CLOSE-WITH-THE-WORKER` (the deadline-before-sleep discipline),
+  `DES-TRIGGER-OUTSIDE-PI`
+- **Acceptance**: a forge unreachable for the length of an ordinary restart leaves the receiver retrying
+  or freshly restarted, never `failed`; the bound is one setting, identical across supervisors; a
+  determinate refusal exits 2 with no added latency; no timer, watcher or closer outlives a refusal.
 
 ## Revision History
 
@@ -3474,3 +3534,4 @@ a tunnel.
 | 2026-09-09 | Issue #301, the receiver's unclosed triggers watch. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**: the receiver residual is closed, and the Rejected list's "arming only on the real entry point" entry is now marked historical, because that posture muted the defect under test rather than closing it and cost the receiver the only coverage that its watch arms at all. `makeWatchCloser` moved from `worker/src/start.mjs` to its own import-free `worker/src/watch-closer.mjs` (the `transient.mjs` precedent), re-exported from `start.mjs` so every importer keeps its address, and published as the `./watch-closer` subpath; the receiver arms the watch unconditionally, hands the factory an object-shaped `log` adapter, and drains a `closers` array in its shutdown before `process.exit(0)`. The signal handlers deliberately stay on the real-entry guard: a `process.once` cannot ride a closers array. A new bolt in `worker/test/publish.test.mjs` pins that every `@edgehero/pi-dispatch/<subpath>` imported by `receiver/src` or `admin/src` exists in the worker's exports map, because the symlinked workspaces make a missing entry invisible to every in-repo test while an npm-installed receiver throws at module load; the version-floor half of that hazard is undecidable offline and stays a release-PR obligation. `INT-TRIGGERS-FILE-CONTRACT`, `DES-HOST-REGISTRY`, `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked. **Code evidence**: worker/src/watch-closer.mjs · receiver/src/start.mjs -> watchTriggers, closers · receiver/test/start.test.mjs -> "the triggers watch ARMS under test, and a shut-down watch writes NOTHING" |
 | 2026-09-09 | Issue #300, the two handles `startWorker` never released. **NEW `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`**: the shutdown releases the shared ioredis client with a guarded `disconnect()` sequenced strictly AFTER the `extraClosers` drain, and the boot-image read's five-second fuse is cleared through a new exported `settleWithin` when the read wins. The entry records three measured facts so they cannot be re-derived wrongly: the raw client cannot ride `extraClosers` (no `.close`, and the natural wrapper is drained concurrently with `registry.close()` -- a recording server received NO commands where the sequenced order delivered the DEL and SREM); `quit()`'s hang is a server that accepts and never answers, independent of `maxRetriesPerRequest` and `enableOfflineQueue`, so the plausible offline-queue explanation is false; and `process.getActiveResourcesInfo()` is blind to unref'd timers, which is why the fuse is pinned through `async_hooks` on the helper rather than a census over a boot. A boot REFUSAL still releases nothing, deliberately: that is issue #299's own acceptance. The harness's `captured?.redis?.disconnect?.()` is re-documented as the backstop for a faked `createWorker` rather than the only closer anywhere. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `INT-HOST-REGISTRY-CONTRACT`, `DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked.** **Code evidence**: worker/src/index.mjs -> shutdown · worker/src/start.mjs -> settleWithin · worker/test/wiring.test.mjs -> "shutdown releases the shared redis client AFTER every closer, by disconnect, never quit" |
 | 2026-09-09 | Issue #299, the boot refusal that left a worker draining paid jobs. **NEW `DES-BOOT-REFUSAL-STOPS-THE-WORKER`**: `createWorker`'s shutdown splits into `stop()` (the teardown) and the signal handler (`stop()` then `process.exit(0)`, name unchanged for the source pin); `stop` rides the returned worker beside `hostWorker`; `startWorker`'s whole post-handoff region sits in a catch that stops what was built and RETHROWS, so `entryExitCode` still maps the refusal to 2 or 1 and never 0. `cli.mjs` is deliberately untouched: with the stop plus #300's release nothing holds the loop, measured to `beforeExit` with the code intact, while a `process.exit` in the shared catch would truncate pipes and mask leaks -- and that measured pairing is why #300 landed first. The `Promise.resolve` spelling of the stop call is mutation-checked in both directions against a synchronous test double. The refusal window is enumerated in the entry; the two regression tests refuse from opposite ends of the region. **No requirements row**: the boot-refusal acceptances in `requirements.md` each own a specific refusal, none owns the post-construction window, and minting one to mirror a design mechanism would restate rather than require -- checked, and recorded here instead. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked. **Code evidence**: worker/src/index.mjs -> stop, shutdown · worker/src/start.mjs -> the post-handoff catch · worker/test/start-wiring.test.mjs -> "a refusal from a DIFFERENT post-handoff point stops the worker too" |
+| 2026-09-09 | Issue #318, the receiver's ~25-second recovery window, found by an adversarial pass on #316. **NEW `DES-BOOT-IDENTITY-RETRY-IN-PROCESS`**: the transient-boot bound moves into the process -- `retryIdentity` wraps all five hard-fail identity resolutions (serve's four arms, the poller's gate) and retries untagged failures for `RECEIVER_IDENTITY_RETRY_SECONDS` (default 600s, floored at 60s; 5s gaps doubling to 30s; a 10s REF'D per-attempt fuse cleared in a finally, because before the queue exists an unref'd fuse can be the only pending handle and never fires), so the recovery window is one setting under systemd, launchd, nssm and compose, which is the issue's acceptance. The unit's values are untouched: the floor at `StartLimitIntervalSec` makes the burst limit unreachable by a retrying boot while a genuine crash loop still trips it in ~25s, so the two bounds now cover disjoint failure classes. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` AMENDED**: its exit-1-bound bullet stated the unit's 25 seconds and deferred to #318; it now points at the new entry and keeps only the classification half. **No requirements row**: no REQ owns the supervision window (checked -- `REQ-DEPLOYMENT-BOOTSTRAP` owns install/render and the exit-code contract, not restart pacing), and minting one to mirror a design mechanism would restate rather than require; recorded here instead, the #299 precedent. **No OQ row**: a residual that graduates into a fix is this log's job to record, the #301 precedent. `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-GH-POLLING-TRANSPORT`, `REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked. **Code evidence**: receiver/src/boot-retry.mjs -> retryIdentity · receiver/src/config.mjs -> identityRetryWindowMs · receiver/src/start.mjs -> the four wrapped arms · receiver/src/poller.mjs -> the wrapped gate · receiver/test/boot-retry.test.mjs · receiver/test/start.test.mjs -> "the retry wraps EACH arm: a gitlab retry re-resolves gitlab alone and rebuilds nothing" |

@@ -23,6 +23,12 @@ Wants=network-online.target
 # trying. The worker unit has carried this since it shipped; the receiver did not, and the gap is not
 # cosmetic -- the receiver is the process that dies on a triggers file it cannot parse, and it dies on
 # EVERY start. Pairs with Restart=on-failure below.
+#
+# This bounds CRASH loops (a process dying in milliseconds), not transient outages (issue #318): a
+# transient identity failure at boot retries INSIDE the process for RECEIVER_IDENTITY_RETRY_SECONDS
+# (default 600, floored at 60 -- see .env.example) before exiting 1, so a retrying boot exits at most
+# once per window and can never place StartLimitBurst starts inside this interval. Keep these values
+# and widen the env key instead: raising the burst here would only re-open the crash-loop hole.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

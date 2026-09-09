@@ -499,3 +499,168 @@ test("the real shutdown drains the closers before it exits (source pin)", () => 
 	// the retention is pinned here, where the mutation has nowhere to hide.
 	assert.match(src, /handles\.watcher = watch\(/, "the FSWatcher must be RETAINED on the handles bag the closer tears down");
 });
+
+// --- the transient-boot bound moves in-process (issue #318) ----------------------------------------
+//
+// #316 made a transient identity failure exit 1 so the supervisor restarts through a forge outage; the
+// shipped unit then bounded that recovery at ~25 seconds while launchd and nssm bounded it not at all.
+// These tests pin the replacement: the boot itself retries TRANSIENT identity failures inside
+// RECEIVER_IDENTITY_RETRY_SECONDS, per arm, with the determinate path exactly as fast as before.
+
+test("a TRANSIENT github identity failure at boot retries in-process, then serves (issue #318)", async () => {
+	const { captured, createServer } = capturingServer();
+	let calls = 0;
+	const flakyAuth = async () => {
+		calls++;
+		if (calls < 3) throw new Error(`connect ECONNREFUSED 10.0.0.5:443 (attempt ${calls})`);
+		return { selfId: 12345, source: "gh" };
+	};
+	let t = 0;
+	const sleeps = [];
+	const lines = await bootLogLines((write) =>
+		startReceiverClosed(baseEnv(), {
+			write,
+			makeAuth: flakyAuth,
+			makeQueueFn: stubQueue,
+			createServer,
+			now: () => t,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				t += ms;
+			},
+		}),
+	);
+	assert.equal(calls, 3, "two transient failures, then the forge came back");
+	assert.deepEqual(sleeps, [5_000, 10_000], "the documented gaps: RestartSec's 5s first, then doubling");
+	assert.ok(captured.listen, "and the boot SERVED -- before #318 this deployment was on its way to a failed unit");
+	const retries = lines.filter((l) => l.event === "identity_retry");
+	assert.equal(retries.length, 2);
+	assert.ok(retries.every((l) => l.forge === "github"), "the line names the arm that is retrying");
+});
+
+test("a tagged identity refusal never sleeps: the determinate path stays same-tick (issue #318)", async () => {
+	// The sibling of the HARD-FAIL test at the top of this file, with the retry seams armed to explode:
+	// retrying a misconfiguration only hides the message, and the subprocess exit-2 test in this file
+	// stays sub-second only while this property holds.
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	await assert.rejects(
+		startReceiver(baseEnv(), {
+			makeAuth: throwingAuth,
+			makeQueueFn: stubQueue,
+			createServer,
+			closers,
+			sleep: async () => assert.fail("a tagged refusal must never sleep"),
+		}),
+		(e) => e.piDispatchConfig === true,
+	);
+	assert.equal(captured.handler, undefined);
+	assert.equal(captured.listen, undefined);
+	assert.equal(closers.length, 0);
+});
+
+test("the retry wraps EACH arm: a gitlab retry re-resolves gitlab alone and rebuilds nothing (issue #318)", async () => {
+	// The whole-boot alternative was rejected because every attempt would rebuild the queue and the
+	// router (two live connections leaked per retry) and re-run arms that already answered. This pins the
+	// grain: one github resolution, one queue build, two gitlab attempts -- and the operator-visible
+	// order, where github's outcome still lands before gitlab's first failure.
+	const dir = mkdtempSync(join(tmpdir(), "receiver-retry-arms-"));
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(
+		triggersPath,
+		JSON.stringify({
+			triggers: [
+				{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "gh-f" } },
+				{ on: { type: "label", any: ["pi:y"] }, run: { kind: "gitlab", flow: "gl-f" } },
+			],
+		}),
+		"utf8",
+	);
+	const env = { WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath, GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x" };
+
+	const { captured, createServer } = capturingServer();
+	let authCalls = 0;
+	let queueBuilds = 0;
+	let gitlabCalls = 0;
+	let t = 0;
+	const sleeps = [];
+	const lines = await bootLogLines((write) =>
+		startReceiverClosed(env, {
+			write,
+			makeAuth: async () => (authCalls++, { selfId: 12345, source: "gh" }),
+			makeQueueFn: (...args) => (queueBuilds++, stubQueue(...args)),
+			createServer,
+			resolveGitLabSelfId: async () => {
+				gitlabCalls++;
+				if (gitlabCalls === 1) throw new Error("502 mid-restart");
+				return 4242;
+			},
+			makeResolveAuthority: () => async () => ({ authorized: true }),
+			now: () => t,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				t += ms;
+			},
+		}),
+	);
+	assert.equal(authCalls, 1, "the github arm resolved ONCE: a whole-boot retry would re-run it per attempt");
+	assert.equal(queueBuilds, 1, "the queue was built ONCE: a whole-boot retry would leak a connection per attempt");
+	assert.equal(gitlabCalls, 2);
+	assert.deepEqual(sleeps, [5_000]);
+	const githubIdentityAt = lines.findIndex((l) => l.event === "self_identity" && l.forge === undefined);
+	const gitlabRetryAt = lines.findIndex((l) => l.event === "identity_retry" && l.forge === "gitlab");
+	assert.ok(githubIdentityAt >= 0 && gitlabRetryAt >= 0, "both lines must exist for the order to mean anything");
+	assert.ok(githubIdentityAt < gitlabRetryAt, "arms resolve in declaration order: hoisting them above the queue would reorder the first failure an operator sees");
+	assert.ok(captured.listen, "and the boot served");
+});
+
+test("an exhausted window is still a refusal that arms NOTHING, and it maps to exit 1 (issue #318)", async () => {
+	// The HARD-FAIL test's arm-last pin (`closers.length === 0`), extended to the refusal path this
+	// change ADDED: a boot that spent its whole window must leave exactly as clean as one that refused
+	// on its first tick, and its throw must stay untagged so the supervisor restarts into a fresh window.
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	let t = 0;
+	const sleeps = [];
+	let err = null;
+	const lines = await bootLogLines((write) =>
+		startReceiver(baseEnv({ RECEIVER_IDENTITY_RETRY_SECONDS: "60" }), {
+			write,
+			makeAuth: async () => {
+				throw new Error("connect ECONNREFUSED 10.0.0.5:443");
+			},
+			makeQueueFn: stubQueue,
+			createServer,
+			closers,
+			now: () => t,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				t += ms;
+			},
+		}).then(
+			() => assert.fail("a forge that never answers must not produce a serving receiver"),
+			(e) => (err = e),
+		),
+	);
+	assert.ok(err);
+	assert.equal(err.piDispatchConfig, undefined, "an exhausted transient window is still not a misconfiguration");
+	assert.equal(entryExitCode(err), 1, "exit 1: the supervisor restarts into a FRESH window, so the default bounds one cycle, not recovery");
+	assert.deepEqual(sleeps, [5_000, 10_000, 20_000], "the floored 60s window admits exactly three gaps before the fourth would cross");
+	assert.equal(captured.handler, undefined);
+	assert.equal(captured.listen, undefined);
+	assert.equal(closers.length, 0, "the arm-last invariant covers the NEW refusal path too");
+	assert.equal(lines.at(-1)?.event, "identity_retry_exhausted", "the give-up is loud, with the window on the line");
+});
+
+test("every identity arm rides retryIdentity, and no bare identity await remains (source pin, issue #318)", () => {
+	// Cheaper than building forgejo/azure boot fixtures, and it kills the mutation the behavioural tests
+	// cannot see: ONE arm quietly unwrapped, its three siblings still green.
+	const startSrc = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	const pollerSrc = readFileSync(new URL("../src/poller.mjs", import.meta.url), "utf8");
+	assert.equal(startSrc.match(/await retryIdentity\(/g)?.length, 4, "all four serve arms retry: github, gitlab, forgejo, azure");
+	assert.ok(/await retryIdentity\(/.test(pollerSrc), "the poller's boot gate retries too -- a pure-polling deployment loses work to a stopped process just as surely");
+	assert.ok(!/await makeAuth\(/.test(startSrc), "the bare github await must stay gone");
+	assert.ok(!/await resolveSelfIdFn\(/.test(startSrc), "the bare gitlab await must stay gone");
+	assert.ok(!/await resolveForgejoSelfIdFn\(/.test(startSrc), "the bare forgejo await must stay gone");
+	assert.ok(!/await resolveAzureSelfIdFn\(/.test(startSrc), "the bare azure await must stay gone");
+});

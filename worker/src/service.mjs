@@ -558,8 +558,11 @@ function renderLinuxUnit(ctx) {
 /**
  * Render the launchd plist for this host. For --receiver the worker plist is DERIVED, not a second
  * template: same KeepAlive/ExitTimeOut shape, label and log names swapped, and the shared wrapper given
- * the receiver's exec argv instead of the worker's. The wrapper's exit-2 conversion is a no-op for the
- * receiver — it has no EXIT_POLICY — and harmless.
+ * the receiver's exec argv instead of the worker's. The wrapper's exit-2 conversion is LOAD-BEARING for
+ * the receiver too, not the no-op an earlier version of this comment claimed: since
+ * receiver/src/cli.mjs gained entryExitCode, a determinate receiver refusal exits EXIT_POLICY (2), and
+ * the wrapper's conversion to a clean 0 is exactly what KeepAlive/SuccessfulExit=false reads as
+ * "leave it stopped" -- launchd's only way to spell RestartPreventExitStatus=2.
  */
 function renderPlist(ctx) {
 	// Substituted before anything composed goes in (subDeployDir): the two anchors below are therefore

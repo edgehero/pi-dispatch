@@ -941,3 +941,111 @@ test("cli: `poll` dispatches to startPoller with the bin's env, and --help names
 	assert.match(out, /pi-dispatch-receiver poll/);
 	assert.match(out, /POLL_REPOS/, "usage names where poll's config comes from, so help is actionable");
 });
+
+// ---------------------------------------------------------------------------------------------------
+// The transient-boot retry (issue #318): the poller's identity gate is the same hard-fail gate serve
+// has, so it retries under the same window -- a pure-polling deployment loses work to a stopped
+// process just as surely as a webhook one.
+// ---------------------------------------------------------------------------------------------------
+
+const EMPTY_POLL_ROUTES = () => [
+	{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [])] },
+	{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+	{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+];
+
+test("the poller's boot gate retries a transient identity failure, then the loop starts (issue #318)", async () => {
+	const out = [];
+	const sleeps = [];
+	const clock = { ms: NOW };
+	let idCalls = 0;
+	let poller;
+	poller = await startPoller({ POLL_REPOS: "o/r" }, {
+		fetchFn: fakeFetch(EMPTY_POLL_ROUTES()),
+		redis: fakeRedis(),
+		queueFn: async () => {},
+		out: (obj) => out.push(obj),
+		now: () => clock.ms,
+		random: () => 0.5,
+		selfIdFn: async () => {
+			idCalls++;
+			if (idCalls === 1) throw new Error("connect ECONNREFUSED 10.0.0.5:443");
+			return SELF;
+		},
+		tokenFn: async () => "poll-token",
+		fsDeps: FS,
+		// The retry's sleep arrives while `poller` is still unassigned (boot has not returned), so the
+		// optional stop() below is a no-op for it; the first CYCLE sleep then stops the loop.
+		sleep: async (ms) => {
+			sleeps.push(ms);
+			clock.ms += ms;
+			poller?.stop();
+		},
+	});
+	await poller.done;
+	assert.equal(idCalls, 2, "the transient failure was retried, once, and the second answer stood");
+	assert.equal(sleeps[0], 5_000, "the first recorded sleep is the retry gap -- it ran BEFORE any cycle");
+	assert.ok(out.some((l) => l.event === "identity_retry" && l.forge === "github"), "the retry says so on the wire");
+	assert.ok(out.some((l) => l.event === "self_identity" && l.id === SELF));
+	assert.ok(out.some((l) => l.event === "poll_cycle"), "and the loop really started afterwards");
+});
+
+test("the poller's getAuth re-invokes makeAuth on retry: the cache memoizes SUCCESS, never failure (issue #318)", async () => {
+	// `auth ??= await makeAuth(...)` assigns only when the mint RESOLVES. Caching the PROMISE instead
+	// would memoize the first failure and turn the retry loop into a rethrow spinner -- this is the test
+	// the source comment in poller.mjs points at.
+	let mints = 0;
+	const out = [];
+	const clock = { ms: NOW };
+	let poller;
+	poller = await startPoller({ POLL_REPOS: "o/r" }, {
+		fetchFn: fakeFetch(EMPTY_POLL_ROUTES()),
+		redis: fakeRedis(),
+		queueFn: async () => {},
+		out: (obj) => out.push(obj),
+		now: () => clock.ms,
+		random: () => 0.5,
+		makeAuth: async () => {
+			mints++;
+			if (mints === 1) throw new Error("gh answered 502 mid-restart");
+			return { selfId: SELF, source: "gh", mintToken: async () => "poll-token" };
+		},
+		tokenFn: async () => "poll-token",
+		fsDeps: FS,
+		sleep: async (ms) => {
+			clock.ms += ms;
+			poller?.stop();
+		},
+	});
+	await poller.done;
+	assert.equal(mints, 2, "the retry re-invoked makeAuth instead of rethrowing a cached failure");
+	assert.ok(out.some((l) => l.event === "self_identity" && l.id === SELF));
+});
+
+test("a tagged identity refusal stops the poller boot same-tick: no sleep, no loop (issue #318)", async () => {
+	const sleeps = [];
+	await assert.rejects(
+		startPoller({ POLL_REPOS: "o/r" }, {
+			fetchFn: async () => assert.fail("the loop must never start on a determinate refusal"),
+			redis: fakeRedis(),
+			queueFn: async () => {},
+			out: () => {},
+			now: () => NOW,
+			random: () => 0.5,
+			selfIdFn: async () => {
+				throw Object.assign(new Error("bad credential"), { piDispatchConfig: true });
+			},
+			tokenFn: async () => "t",
+			fsDeps: FS,
+			sleep: async (ms) => sleeps.push(ms),
+		}),
+		(e) => e.piDispatchConfig === true,
+	);
+	assert.deepEqual(sleeps, [], "retrying a misconfiguration only hides the message");
+});
+
+test("loadPollerConfig passes the retry window THROUGH the receiver loader: one parse, one floor (issue #318)", () => {
+	assert.equal(loadPollerConfig({ POLL_REPOS: "o/r" }, FS).identityRetryWindowMs, 600_000);
+	assert.equal(loadPollerConfig({ POLL_REPOS: "o/r", RECEIVER_IDENTITY_RETRY_SECONDS: "10" }, FS).identityRetryWindowMs, 60_000, "the floor holds on the poll path too");
+	assert.throws(() => loadPollerConfig({ POLL_REPOS: "o/r", RECEIVER_IDENTITY_RETRY_SECONDS: "x" }, FS), (e) => e.piDispatchConfig === true);
+});

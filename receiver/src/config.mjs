@@ -38,6 +38,29 @@ import { FORGE_KINDS, PR_CLOSE_ACTIONS, parseTriggers } from "@edgehero/pi-dispa
 // default must be the file init just told the operator it created, not a demo buried in the repo.
 const DEFAULT_TRIGGERS_PATH = "./triggers.json";
 
+// The transient-boot retry window (issue #318). The FLOOR is load-bearing, not a courtesy: systemd's
+// start limit is a fixed window from the first counted start (`ratelimit_below`: elapsed past the
+// interval resets the counter), so boots that retry for at least StartLimitIntervalSec (60s in
+// deploy/receiver.service) exit at least window + RestartSec apart, every start opens a fresh
+// interval, and `StartLimitBurst=5` becomes unreachable for a transient failure by systemd's own
+// accounting. A sub-60s window would put fast exit-1s back inside one interval and re-open the ~25s
+// bound this setting exists to remove. The default outlasts an ordinary self-hosted forge restart,
+// and since an exhausted window exits 1 and the supervisor starts another, it bounds one CYCLE, not
+// recovery -- while a misclassified determinate fault resurfaces in the journal every window rather
+// than hiding.
+export const IDENTITY_RETRY_FLOOR_SECONDS = 60;
+export const IDENTITY_RETRY_DEFAULT_SECONDS = 600;
+
+/**
+ * The boot identity-retry window in milliseconds, from `RECEIVER_IDENTITY_RETRY_SECONDS`. Parsed in
+ * ONE place for both loaders (serve and poll), so the floor cannot drift between them. `positiveInt`
+ * refuses 0, negatives, fractions and junk with the config tag (a typo'd window is configuration,
+ * exit 2); a positive value below the floor is raised to it, the POLL_INTERVAL_SECONDS house pattern.
+ */
+export function identityRetryWindowMs(env = process.env) {
+	return 1000 * Math.max(IDENTITY_RETRY_FLOOR_SECONDS, positiveInt(env, "RECEIVER_IDENTITY_RETRY_SECONDS", IDENTITY_RETRY_DEFAULT_SECONDS));
+}
+
 /**
  * Parse the receiver's config from `env` (default process.env). Filesystem access is injected
  * (`readFile`, `fileExists`) so the loader is hermetically testable and never touches disk in tests.
@@ -68,6 +91,7 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", // mirrors worker config: producer and consumer share one queue
 		port: positiveInt(env, "RECEIVER_PORT", 3000),
 		bind: env.RECEIVER_BIND ?? "0.0.0.0",
+		identityRetryWindowMs: identityRetryWindowMs(env),
 		triggers,
 		github,
 		gitlab: loadGitLabConfig(env),

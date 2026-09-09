@@ -47,6 +47,7 @@ import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeForgeRouter } from "./route.mjs";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeWatchCloser } from "@edgehero/pi-dispatch/watch-closer";
+import { retryIdentity } from "./boot-retry.mjs";
 
 /**
  * Boot the receiver. Collaborators are injected (defaulting to the real ones) so the whole wiring is
@@ -70,6 +71,12 @@ export async function startReceiver(
 		resolveAzureSelfId: resolveAzureSelfIdFn = resolveAzureSelfId,
 		makeResolveAzureAuthority: makeResolveAzureAuthorityFn = makeResolveAzureAuthority,
 		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
+		// The boot retry's clock and sleep (issue #318). `now` is injected for the reason the worker gives
+		// (issue #284): a window read off the default `Date.now` beside a fixed test instant is a fuse that
+		// fails in CI on a tree nobody touched. `sleep` is left undefined on the real path so
+		// `retryIdentity`'s own default runs; a test injects a recorder and never waits real time.
+		now = Date.now,
+		sleep,
 		// The worker's `extraClosers` shape (issue #301): the triggers watch pushes its stop handle here, the
 		// real shutdown below drains it, and a test injects its own array so the watch it armed dies with the
 		// boot that armed it instead of leaking an FSWatcher across tests.
@@ -80,6 +87,10 @@ export async function startReceiver(
 	const log = (obj) => write(`${JSON.stringify(obj)}\n`);
 
 	const cfg = loadReceiverConfig(env);
+
+	// One options bag for the four identity arms below (issue #318): the SAME window, clock and sleep for
+	// every forge, so the bound the operator configured is the bound every arm obeys.
+	const retryOpts = { windowMs: cfg.identityRetryWindowMs, log, now, sleep };
 
 	// The GitHub arm, when the deployment actually serves GitHub -- now conditional, exactly like the three
 	// sibling arms below (issue #99). It was unconditional, and since GITHUB_AUTH_SOURCE defaults to `gh` and
@@ -95,16 +106,23 @@ export async function startReceiver(
 	let selfId;
 	let resolveAuthority;
 	if (cfg.servesGithub) {
-		// HARD-FAIL identity resolution -- NO try/catch. A throw here (absent/bad github auth, unresolvable
-		// id) propagates and the server below is never created: without selfId the bot-loop guard cannot
-		// run, so refusing to boot is the only safe outcome.
+		// HARD-FAIL identity resolution -- still NO try/catch here. A DETERMINATE throw (absent/bad github
+		// auth, an unresolvable id, anything tagged piDispatchConfig) propagates same-tick and the server
+		// below is never created: without selfId the bot-loop guard cannot run, so refusing to boot is the
+		// only safe outcome. What changed (issue #318) is the TRANSIENT case: retryIdentity keeps
+		// re-resolving inside cfg.identityRetryWindowMs before letting the throw propagate, so a forge that
+		// is merely restarting no longer costs the deployment its receiver (the ~25 seconds the systemd
+		// unit's start limit used to bound recovery at, and the nothing launchd and nssm bounded it at).
+		// The retry wraps EACH arm, never the whole boot: a whole-body retry would rebuild the queue and
+		// router below once per attempt and leak their connections, and hoisting the four resolutions above
+		// the queue would reorder the first failure an operator sees.
 		//
 		// The WHOLE auth object is kept, not just selfId: the closer resolver below mints its per-delivery
 		// metadata-read token through this same object (issue #231), so identity and mint capability stay
 		// one credential decision -- an arm that resolved its identity is exactly the arm that can answer
 		// a permission question. This is also why the github handler's missing-resolver 503 is unreachable
 		// in a wired receiver: a boot that fails here mounts no `/` at all.
-		const auth = await makeAuth(cfg.github);
+		const auth = await retryIdentity(() => makeAuth(cfg.github), { forge: "github", ...retryOpts });
 		selfId = auth.selfId;
 		log({ event: "self_identity", id: selfId, source: cfg.github.source });
 		// The lookup token asks the mint to narrow to metadata:read -- the App path honors it GitHub-side,
@@ -136,7 +154,7 @@ export async function startReceiver(
 	// harness's own status comment into another paid job.
 	let gitlab = null;
 	if (cfg.gitlab) {
-		const gitlabSelfId = await resolveSelfIdFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token });
+		const gitlabSelfId = await retryIdentity(() => resolveSelfIdFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token }), { forge: "gitlab", ...retryOpts });
 		log({ event: "self_identity", forge: "gitlab", id: gitlabSelfId, mode: cfg.gitlab.mode });
 		gitlab = {
 			mode: cfg.gitlab.mode,
@@ -153,7 +171,7 @@ export async function startReceiver(
 	// harness's own comments into more paid jobs.
 	let forgejo = null;
 	if (cfg.forgejo) {
-		const forgejoSelfId = await resolveForgejoSelfIdFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token, botId: cfg.forgejo.botId });
+		const forgejoSelfId = await retryIdentity(() => resolveForgejoSelfIdFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token, botId: cfg.forgejo.botId }), { forge: "forgejo", ...retryOpts });
 		log({ event: "self_identity", forge: "forgejo", id: forgejoSelfId, source: cfg.forgejo.botId ? "FORGEJO_BOT_ID" : "api" });
 		forgejo = {
 			secret: cfg.forgejo.secret,
@@ -167,7 +185,7 @@ export async function startReceiver(
 	// names them only by email address, so a guard that knew one form would be blind on half the events.
 	let azure = null;
 	if (cfg.azure) {
-		const azureSelfId = await resolveAzureSelfIdFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token });
+		const azureSelfId = await retryIdentity(() => resolveAzureSelfIdFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token }), { forge: "azure", ...retryOpts });
 		log({ event: "self_identity", forge: "azure", id: azureSelfId.id, hasAccountName: azureSelfId.email !== null, mode: cfg.azure.mode });
 		azure = {
 			mode: cfg.azure.mode,

@@ -115,6 +115,7 @@ import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
 import { loadPollerConfig } from "./poller-config.mjs";
+import { retryIdentity } from "./boot-retry.mjs";
 
 const API_URL = "https://api.github.com";
 // 35 days: strictly outlives the 31-day gh-* job retention -- see the header's cursor/TTL section.
@@ -181,9 +182,21 @@ export async function startPoller(env = process.env, deps = {}) {
 	// the bot-loop guard's sole input, and a poller running without it would read the harness's own
 	// completion comment next cycle and enqueue it -- an unbounded paid recursion, only slower than the
 	// webhook version. No try/catch: an unresolvable identity must prevent the loop from ever starting.
+	// A TRANSIENT failure retries in-process under the same window serve uses (issue #318): a
+	// pure-polling deployment loses work to a stopped process just as surely as a webhook one.
+	//
+	// The default sleep is hoisted above the gate because the gate sleeps now too. The signal-handler
+	// guard below still reads the INJECTED `sleep`, whose undefined-ness is what marks a real run.
+	const sleepFn = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	let auth = null;
+	// `auth ??= await ...` assigns only when the mint RESOLVES, so a retried getAuth re-invokes
+	// makeAuth. Caching the PROMISE instead would memoize the first failure and turn the retry loop
+	// into a rethrow spinner -- pinned by the poller's retry test.
 	const getAuth = async () => (auth ??= await makeAuth(cfg.github));
-	const selfId = selfIdFn ? await selfIdFn(cfg.github) : (await getAuth()).selfId;
+	const selfId = await retryIdentity(
+		() => (selfIdFn ? selfIdFn(cfg.github) : getAuth().then((a) => a.selfId)),
+		{ forge: "github", windowMs: cfg.identityRetryWindowMs, log: out, now, sleep: sleepFn },
+	);
 	out({ event: "self_identity", id: selfId, source: cfg.github.source });
 
 	// The polling credential comes from the same auth config the worker validates. pat/gh hand back
@@ -263,7 +276,6 @@ export async function startPoller(env = process.env, deps = {}) {
 		stopped = true;
 		wake();
 	};
-	const sleepFn = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 
 	const done = (async () => {
 		let cycleNo = 0;
