@@ -154,9 +154,10 @@ class RateLimited extends Error {
  * Boot the poller: config, HARD-FAIL identity, repo set, then the cycle loop. Collaborators are
  * injected with real defaults (start.mjs's convention), so the whole producer is testable offline
  * with no GitHub, no Valkey, and no timers:
- *   { fetchFn, redis, queueFn, out, now, random, sleep, selfIdFn, tokenFn, fsDeps }
+ *   { fetchFn, redis, queueFn, out, now, random, sleep, signals, selfIdFn, tokenFn, fsDeps }
  * Returns `{ stop, done }`: `stop()` ends the loop after the in-flight work; `done` resolves once
- * owned connections are closed.
+ * owned connections are closed, with the inter-cycle default-sleep timer cleared by then (issue
+ * #325) -- after `done`, no timer armed by the poller remains.
  */
 export async function startPoller(env = process.env, deps = {}) {
 	const {
@@ -165,6 +166,12 @@ export async function startPoller(env = process.env, deps = {}) {
 		now = Date.now,
 		random = Math.random,
 		sleep,
+		// The signal gate, decoupled from the sleep default (issue #325): `sleep === undefined` used to
+		// double as the "real run" flag, which made the REAL default timer unarmable under test without
+		// also registering process-wide SIGTERM/SIGINT handlers -- the exact leak the gate exists to
+		// prevent. A test that arms the real sleep passes `signals: false`; the one production caller
+		// (cli.mjs, no deps) keeps handlers exactly as before through this default.
+		signals = sleep === undefined,
 		redis,
 		queueFn,
 		selfIdFn,
@@ -185,9 +192,9 @@ export async function startPoller(env = process.env, deps = {}) {
 	// A TRANSIENT failure retries in-process under the same window serve uses (issue #318): a
 	// pure-polling deployment loses work to a stopped process just as surely as a webhook one.
 	//
-	// The default sleep is hoisted above the gate because the gate sleeps now too. The signal-handler
-	// guard below still reads the INJECTED `sleep`, whose undefined-ness is what marks a real run.
-	const sleepFn = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+	// The default sleep sits above the gate because the gate sleeps too (issue #318); the boot retry
+	// simply awaits its cancellable promise to completion, so `cancel` is the LOOP's concern alone.
+	const sleepFn = sleep ?? cancellableSleep;
 	let auth = null;
 	// `auth ??= await ...` assigns only when the mint RESOLVES, so a retried getAuth re-invokes
 	// makeAuth. Caching the PROMISE instead would memoize the first failure and turn the retry loop
@@ -340,14 +347,27 @@ export async function startPoller(env = process.env, deps = {}) {
 			// in one synchronized stampede).
 			let delayMs = Math.max(cfg.intervalSeconds, stats.minDelaySeconds) * 1000;
 			if (rateResetMs !== null) delayMs = Math.max(delayMs, rateResetMs - now() + jitterMs(random));
-			await Promise.race([sleepFn(delayMs), stopWaker]);
+			// Hold the sleep so the LOSER can be cleared: when stop() wins this race, an uncancelled
+			// default timer stays armed for up to a full poll interval after `done` resolves (issue
+			// #325) -- masked in production by the signal handler's process.exit(0) below, and real for
+			// every caller that stops the poller without exiting. Optional-chained because injected
+			// test sleeps are plain promises carrying no cancel; their call count and arguments are
+			// untouched, and a rejecting one still propagates through the finally.
+			const nap = sleepFn(delayMs);
+			try {
+				await Promise.race([nap, stopWaker]);
+			} finally {
+				nap.cancel?.();
+			}
 		}
 		await closeOwned();
 	})();
 
-	// Signal handlers only on a real run (no injected sleep) -- start.mjs's rule, same reason: under
-	// test injection the fakes are per-test, and a process-wide handler would leak across tests.
-	if (sleep === undefined) {
+	// Signal handlers only on a real run (`signals`, defaulting from the sleep seam) -- start.mjs's
+	// rule, same reason: under test injection the fakes are per-test, and a process-wide handler would
+	// leak across tests. Its own seam since issue #325, so a test can arm the REAL default sleep
+	// without inheriting the handlers.
+	if (signals) {
 		const shutdown = async (signal) => {
 			out({ event: "poller_stopping", signal });
 			stop();
@@ -368,6 +388,27 @@ function emptyStats() {
 /** 1-30s of jitter for the post-rate-limit wake, spread by the injected `random`. */
 function jitterMs(random) {
 	return 1_000 + Math.floor(random() * 29_000);
+}
+
+/**
+ * The default inter-cycle sleep: a REF'D setTimeout whose promise carries its own `cancel` (issue
+ * #325). Ref'd deliberately -- the poller IS its process's main loop and holding the loop through the
+ * delay is the point (`DES-RETENTION-SWEEPS-ON-A-TIMER`'s rejected list records the contrast; between
+ * cycles this timer is the only thing keeping a pure-poll process alive, cli.mjs's "awaiting done").
+ * The defect was never the ref, only survival past stop(): "unref'd is not cleaned up" has a ref'd
+ * twin, a cleared-nothing timer that holds the loop for up to a full interval after `done` resolved.
+ * A cancelled sleep never resolves, which is safe here because its only awaiter is a race `stopWaker`
+ * has already settled, and cancel on an already-fired timer is a no-op, so the winning side's clear
+ * costs nothing. EXPORTED for `settleWithin`'s reason (worker/src/start.mjs): the cleared-timer
+ * guarantee deserves a deterministic async_hooks pin on the helper, not a census of a full boot.
+ */
+export function cancellableSleep(ms) {
+	let timer;
+	const p = new Promise((resolve) => {
+		timer = setTimeout(resolve, ms);
+	});
+	p.cancel = () => clearTimeout(timer);
+	return p;
 }
 
 /** The redis key family for one repo -- see the schema table in the module header. */

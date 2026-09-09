@@ -5,7 +5,8 @@ import { filter } from "../src/filter.mjs";
 import { parseSubset } from "../src/receiver.mjs";
 import { loadReceiverConfig } from "../src/config.mjs";
 import { loadPollerConfig } from "../src/poller-config.mjs";
-import { startPoller } from "../src/poller.mjs";
+import { cancellableSleep, startPoller } from "../src/poller.mjs";
+import { readFileSync } from "node:fs";
 import { main } from "../src/cli.mjs";
 
 // Every collaborator is injected -- fetch, redis, queue, clock, sleep, identity, token -- so this
@@ -1048,4 +1049,135 @@ test("loadPollerConfig passes the retry window THROUGH the receiver loader: one 
 	assert.equal(loadPollerConfig({ POLL_REPOS: "o/r" }, FS).identityRetryWindowMs, 600_000);
 	assert.equal(loadPollerConfig({ POLL_REPOS: "o/r", RECEIVER_IDENTITY_RETRY_SECONDS: "10" }, FS).identityRetryWindowMs, 60_000, "the floor holds on the poll path too");
 	assert.throws(() => loadPollerConfig({ POLL_REPOS: "o/r", RECEIVER_IDENTITY_RETRY_SECONDS: "x" }, FS), (e) => e.piDispatchConfig === true);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Shutdown hygiene (issue #325): the poller's contract is "after `done`, the poller is gone", and an
+// inter-cycle sleep that survives stop() is a ref'd timer holding the event loop for up to a full poll
+// interval in any caller that stops the poller without exiting the process. Production's
+// process.exit(0) masked it; these are the pins that close it.
+// ---------------------------------------------------------------------------------------------------
+
+test("cancellableSleep: cancel DESTROYS the armed timer, and an uncancelled one still sleeps", async () => {
+	// async_hooks is the honest meter (the settleWithin pin's pattern): destroy fires for a cleared
+	// timer a tick late, so the census settles across two setImmediates. The cancelled sleep is 1s so
+	// a broken cancel cannot mask itself by firing between those ticks, and a mutant run lingers one
+	// second, not thirty.
+	const { createHook } = await import("node:async_hooks");
+	const live = new Set();
+	const hook = createHook({
+		init(id, type) {
+			if (type === "Timeout") live.add(id);
+		},
+		destroy(id) {
+			live.delete(id);
+		},
+	});
+	hook.enable();
+	try {
+		const before = new Set(live);
+		const nap = cancellableSleep(1_000);
+		nap.then(() => assert.fail("a cancelled sleep must never resolve"));
+		nap.cancel();
+		await new Promise((r) => setImmediate(r));
+		await new Promise((r) => setImmediate(r));
+		assert.deepEqual([...live].filter((id) => !before.has(id)), [], "the cancelled timer must be DESTROYED, not merely orphaned");
+
+		// The control, and the winning-side path in one: it really sleeps, and cancel on an
+		// already-fired timer is a safe no-op (every normal cycle now clears a fired timer).
+		const slept = cancellableSleep(5);
+		await slept;
+		slept.cancel();
+	} finally {
+		hook.disable();
+	}
+});
+
+test("stop() while parked on the REAL default sleep: the race is won, the timer is cleared, nothing leaks (issue #325)", async () => {
+	// The first test ever to exercise the stopWaker-wins path: runPoller's injected sleep resolves (the
+	// SLEEP side wins its race), and the park-forever test above leaves through the loop's own
+	// `if (stopped) break`, so neither could see a timer surviving stop() -- and neither could kill a
+	// stop() that no longer wakes the race, which is what the 2s sentinel below is for (a no-wake
+	// mutant waits out the real >=30s interval floor and loses to it).
+	const { createHook } = await import("node:async_hooks");
+	const live = new Set();
+	const hook = createHook({
+		init(id, type) {
+			if (type === "Timeout") live.add(id);
+		},
+		destroy(id) {
+			live.delete(id);
+		},
+	});
+	const sigListeners = () => process.listenerCount("SIGTERM") + process.listenerCount("SIGINT");
+	const sigBefore = sigListeners();
+	hook.enable();
+	// Declared OUTSIDE the try so the finally can always stop it: an assertion failing between boot
+	// and stop() would otherwise leave a REAL-timer poller looping for the life of the test process.
+	let poller;
+	try {
+		const before = new Set(live);
+		const liveDelta = () => [...live].filter((id) => !before.has(id));
+		let parked;
+		const cycleSeen = new Promise((resolve) => (parked = resolve));
+		poller = await startPoller({ POLL_REPOS: "o/r" }, {
+			fetchFn: fakeFetch(EMPTY_POLL_ROUTES()),
+			redis: fakeRedis(),
+			queueFn: async () => {},
+			out: (obj) => {
+				if (obj.event === "poll_cycle") parked();
+			},
+			now: () => NOW,
+			random: () => 0.5,
+			selfIdFn: async () => SELF,
+			tokenFn: async () => "poll-token",
+			fsDeps: FS,
+			// NO sleep key: the REAL cancellableSleep default arms a real ref'd timer (the interval is
+			// the real floored >=30s; this test never waits it out). signals: false is what makes that
+			// armable under test at all -- without the seam, the real default came bundled with real
+			// process-wide SIGTERM/SIGINT handlers.
+			signals: false,
+		});
+		await cycleSeen;
+		// Drain the destroy queue BEFORE counting: with every fake resolving on the microtask queue,
+		// the whole boot-to-park burst runs inside one macrotask, and a cleared timer's destroy (the
+		// boot gate's identity fuse here) is only processed on an event-loop turn -- "destroy fires a
+		// tick late" means a MACROTASK, measured: sampled without this, the long-cleared fuse still
+		// counted as live and this assertion read 2.
+		await new Promise((r) => setImmediate(r));
+		await new Promise((r) => setImmediate(r));
+		// The stretch from the poll_cycle line to sleepFn(delayMs) is SYNCHRONOUS, so the timer was
+		// armed before the first microtask above ran. Exactly one: the anti-vacancy guard -- a
+		// refactor that reaches `break` instead of the race would make the leak assertions below
+		// vacuously green.
+		assert.equal(liveDelta().length, 1, "the loop is PARKED on one armed real timer");
+
+		poller.stop();
+		const sentinel = cancellableSleep(2_000);
+		const winner = await Promise.race([poller.done.then(() => "done"), sentinel.then(() => "stuck")]);
+		sentinel.cancel();
+		assert.equal(winner, "done", "stop() must win the race promptly -- a stop that no longer wakes waits out the full interval");
+
+		await new Promise((r) => setImmediate(r));
+		await new Promise((r) => setImmediate(r));
+		assert.deepEqual(liveDelta(), [], "after `done`, no timer armed by the poller remains (the acceptance, verbatim)");
+		assert.equal(sigListeners(), sigBefore, "the real default armed WITHOUT process-wide handlers leaking across tests");
+	} finally {
+		poller?.stop();
+		await poller?.done.catch(() => {});
+		hook.disable();
+	}
+});
+
+test("the inter-cycle race rides the cancellable sleep, and the signal gate is its own seam (source pin)", () => {
+	const src = readFileSync(new URL("../src/poller.mjs", import.meta.url), "utf8");
+	assert.match(src, /const nap = sleepFn\(delayMs\);/, "the race must HOLD its sleep, or there is nothing to clear");
+	assert.match(src, /nap\.cancel\?\.\(\);/, "the loser is cancelled whichever side settles");
+	assert.match(src, /signals = sleep === undefined,/, "the production default keeps handlers on real runs -- cli.mjs passes no deps");
+	assert.ok(!/await Promise\.race\(\[sleepFn\(delayMs\), stopWaker\]\);/.test(src), "the bare leaking race must stay gone");
+	assert.ok(!src.includes("if (sleep === undefined) {"), "the gate reads the seam, not the sleep's undefined-ness");
+	// The ref stays: between cycles this timer is the only thing holding a pure-poll process open
+	// (cli.mjs awaits `done`), so an unref here is a poller that can exit mid-wait. Load-bearing, not
+	// style.
+	assert.ok(!/\.unref\(/.test(src), "the inter-cycle timer must stay REF'D");
 });
