@@ -155,7 +155,8 @@ test("every worker subpath the receiver and the console import EXISTS in the wor
 	const importRe = /@edgehero\/pi-dispatch\/([A-Za-z0-9-]+)/g;
 	const used = new Map(); // subpath -> first file seen importing it
 	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src")]) {
-		for (const name of readdirSync(dir)) {
+		// Recursive, so the scan keeps protecting the day either src/ grows a subdirectory.
+		for (const name of readdirSync(dir, { recursive: true })) {
 			if (!/\.(mjs|ts)$/.test(name)) continue;
 			const src = readFileSync(join(dir, name), "utf8");
 			for (const m of src.matchAll(importRe)) if (!used.has(m[1])) used.set(m[1], join(dir, name));

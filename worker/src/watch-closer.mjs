@@ -2,8 +2,10 @@
  * The stop handle every live-edit directory watch hands back. Its own IMPORT-FREE module (issue #301),
  * because BOTH composition roots register one: `startWorker` in the `extraClosers` list that already
  * closes the queues and the host registry (`index.mjs` -> shutdown), and the receiver in the `closers`
- * array its own shutdown drains. `transient.mjs` is the precedent: one rule, exported to the receiver
- * through the package's exports map, never copied into it. The two roots' `log` shapes differ -- the
+ * array its own shutdown drains. `transient.mjs` set the shape (one import-free rule module in
+ * `worker/src`, never copied into the receiver) but reaches the receiver indirectly, re-exported by the
+ * identity modules; this one rides the exports map itself as `./watch-closer`, because its consumer is
+ * the receiver's composition root and no re-exporting module sits between. The two roots' `log` shapes differ -- the
  * worker's takes `(event, fields)`, the receiver's one object -- so the receiver hands this factory an
  * adapter at its call site rather than this module growing a second signature.
  *

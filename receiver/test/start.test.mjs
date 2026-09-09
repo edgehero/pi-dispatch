@@ -166,13 +166,19 @@ function headersFor(event, delivery, raw) {
 
 test("HARD-FAIL: an unresolvable identity rejects and NO server is ever created", async () => {
 	const { captured, createServer } = capturingServer();
+	const closers = [];
 	await assert.rejects(
-		startReceiverClosed(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer }),
+		startReceiver(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer, closers }),
 		(e) => e.piDispatchConfig === true,
 	);
 	// The guard did not boot disarmed: without selfId neither the handler nor the listen happened.
 	assert.equal(captured.handler, undefined, "the handler must never be built without selfId");
 	assert.equal(captured.listen, undefined, "the receiver must never listen without the bot-loop guard");
+	// And the watch never armed (issue #301): `closers.push(watchTriggers(...))` is deliberately the LAST
+	// fallible step in the boot, so a refusal can never leave a closer with no one to drain it. This call
+	// bypasses the draining helper on purpose -- an empty array is the assertion, and a helper that
+	// drains would make it true by cleanup instead of by placement.
+	assert.equal(closers.length, 0, "a refused boot must arm NOTHING: whatever sat here would be an FSWatcher no teardown reaches");
 });
 
 test("happy path binds the configured host and port (defaults) and returns the server", async () => {
@@ -457,7 +463,13 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// write on the same wire, first observed loud, then observed quiet.
 	const beforeEdit = chunks.length;
 	writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
-	await new Promise((resolve) => setTimeout(resolve, 600));
+	// POLLED, not slept: the reload's arrival depends on fs.watch delivery latency plus the 150ms
+	// debounce, and a fixed wait is a fuse on a loaded runner. The silence half below keeps its fixed
+	// window, because "nothing arrives" has no event to poll for.
+	const deadline = Date.now() + 5000;
+	while (!parse(beforeEdit).some((l) => l.event === "triggers_reloaded") && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
 	assert.ok(parse(beforeEdit).some((l) => l.event === "triggers_reloaded"), "a live watch reloads, or this test is asserting silence from a watch that never worked");
 
 	for (const c of closers) c.close();

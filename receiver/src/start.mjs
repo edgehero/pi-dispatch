@@ -188,6 +188,12 @@ export async function startReceiver(
 	// was muted under test rather than closed, and this file had no coverage that the watch arms at all --
 	// `DES-WATCHERS-CLOSE-WITH-THE-WORKER` rejected exactly that posture for the worker. The closer rides
 	// the injected `closers` array, so a test drains what its boot armed and the real shutdown closes it.
+	//
+	// LAST FALLIBLE STEP, deliberately, and it must stay last: every refusal this boot can produce -- the
+	// config load, each hard-fail identity resolution, the router build, even a throwing `listen` -- sits
+	// ABOVE this line, so a refused boot has armed nothing and there is never a closer with no one left to
+	// drain it. The worker states the same invariant where its watchers arm. A step added BELOW that can
+	// throw reopens issue #301 on the refusal path; the HARD-FAIL test pins the refusals that exist today.
 	closers.push(watchTriggers(env, cfg, log));
 
 	// Graceful shutdown only on the real entry (default createServer). Under test injection the fakes are
