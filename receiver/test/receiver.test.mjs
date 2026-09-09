@@ -745,3 +745,23 @@ test("a mixed replica fanout logs each swallow, counts `replicas` as jobs CREATE
 	assert.equal(enq?.replicas, 1, "replicas now means jobs that exist because of this delivery");
 	assert.equal(logs.filter((l) => l.event === "deduplicated").length, 1, "and the swallow is its own line");
 });
+
+test("a fanout whose EVERY replica is swallowed answers deduplicated with one line per swallow (review finding)", async () => {
+	const delivery = "d-all-swallowed";
+	const payload = {
+		action: "labeled",
+		sender: { id: 1 },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] },
+	};
+	const raw = JSON.stringify(payload);
+	const logs = [];
+	const queue = { add: async () => ({ id: "gh-the-survivor" }) };
+	const replicated = { ...cfg, triggers: { ...cfg.triggers, github: { ...cfg.triggers.github, label: [{ index: 0, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", replicas: 2 }] } } };
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicated, log: (entry) => logs.push(entry) });
+	const res = mockRes();
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+	assert.deepEqual(JSON.parse(res.body), { status: "deduplicated" }, "two replicas, zero creations");
+	assert.equal(logs.filter((l) => l.event === "deduplicated").length, 2, "one line per swallow");
+	assert.ok(!logs.some((l) => l.event === "enqueued"));
+});

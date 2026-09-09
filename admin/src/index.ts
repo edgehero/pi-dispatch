@@ -1259,12 +1259,13 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
 
   switch (sub) {
     case "status": {
-      // The held read degrades to undefined (issue #289): an unreadable wait index costs the status
-      // line one named clause, never the whole answer, and renderStatus never invents the number.
+      // An unreadable wait index costs the status line one named clause, never the whole answer
+      // (issue #289): readHeldJobs never rejects -- it resolves rows or { unreachable } -- and the
+      // heldCount ternary below is the degrade, reading undefined off the unreachable shape.
       const [queue, budget, held] = await Promise.all([
         readQueueState({ url: paths.valkeyUrl }),
         readBudget({ url: paths.valkeyUrl }),
-        readHeldJobs({ url: paths.valkeyUrl }).catch(() => undefined),
+        readHeldJobs({ url: paths.valkeyUrl }),
       ]);
       const settings = readSettingsView({ settingsFile: paths.settingsFile });
       const heldCount = Array.isArray((held as any)?.rows) ? (held as any).rows.length + (Number((held as any).more) || 0) : undefined;

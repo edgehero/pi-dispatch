@@ -1887,7 +1887,10 @@ function fakePanelValkey({ hosts = [], existing = [] } = {}) {
                 finishedOn: 1000,
                 data: { kind: "github", target: { title: "SECRET TITLE", body: "SECRET BODY" }, trigger: { sender: { login: "secret-login" } } },
                 stacktrace: ["at secretFrame (/Users/someone/private.mjs:1:1)"],
-              }]
+              },
+              // A row whose reason never arrived (a worker died pre-message): the scrub's non-string
+              // guard must answer "-", end to end through the projection (review finding).
+              { id: "gh-dead-null", attemptsMade: 1, failedReason: null, finishedOn: 900, data: {} }]
             : [];
         },
         async close() {},
@@ -2131,4 +2134,25 @@ test("the deps layer projects a failed Job to five host-chosen fields -- .data n
   assert.ok(!line.includes("SECRET TITLE") && !line.includes("SECRET BODY") && !line.includes("secret-login") && !line.includes("secretFrame"), "payload and stacktrace stay out of the snapshot");
   assert.ok(!row.failedReason.includes("\u001b") && !row.failedReason.includes("\u0007"), "control bytes (ANSI included) are scrubbed");
   assert.ok(row.failedReason.length <= 120, "capped at the job_failed line's own 120");
+  assert.equal(snap.failed.rows[1].jobId, "gh-dead-null");
+  assert.equal(snap.failed.rows[1].failedReason, "-", "a reason that never arrived reads '-', never undefined or a crash");
+});
+
+test("the NARROW panel carries the breakdown too -- the acceptance is about the panel, not its wide rendering (review finding)", async () => {
+  const snap = { ...SNAPSHOT, queue: { ...SNAPSHOT.queue, counts: { ...SNAPSHOT.queue.counts, delayed: 4 } }, held: { rows: [HELD_ROWS[0], HELD_ROWS[1]], more: 0 } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  const narrow = comp.render(0).join("\n"); // below MIN_WIDTH (8): the degraded unframed plain path
+  await comp.dispose();
+  assert.match(narrow, /delayed: 1 cron-next, 2 held on waitFor, 1 other/, "renderStatus receives the same parts the framed line reads");
+});
+
+test("an unreachable held read folds its jobs honestly into `other` on the breakdown line (review finding)", async () => {
+  const snap = { ...SNAPSHOT, queue: { ...SNAPSHOT.queue, counts: { ...SNAPSHOT.queue.counts, delayed: 4 } }, held: { unreachable: "timed out" } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(text, /└ delayed: 1 cron-next · 3 other/, "an unreadable part is not NAMED -- its jobs stay in the undifferentiated remainder");
+  assert.doesNotMatch(text, /held on waitFor/, "never an invented held count");
 });

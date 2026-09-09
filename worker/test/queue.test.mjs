@@ -401,7 +401,10 @@ const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test 
 test("enqueue + dedup against a real Valkey", { skip }, async () => {
 	const { parseConnection } = await import("../src/connection.mjs");
 	const { makeQueue, enqueueLocalJob } = await import("../src/queue.mjs");
-	const q = makeQueue(parseConnection(url));
+	// A THROWAWAY name, never the literal shared queue (review finding, issue #289's gate): this test
+	// used to obliterate `pi-jobs` itself, which destroys whatever a LIVE deployment held the moment
+	// someone points VALKEY_TEST_URL at one -- and its enqueued job outlived the run as residue.
+	const q = makeQueue(parseConnection(url), { name: `qtest-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` });
 	try {
 		await q.obliterate({ force: true }).catch(() => {});
 		const now = new Date("2026-07-16T12:00:00Z");
@@ -415,6 +418,7 @@ test("enqueue + dedup against a real Valkey", { skip }, async () => {
 		assert.equal(job.data.kind, "local");
 		assert.equal(job.data.folder, "/proj");
 	} finally {
+		await q.obliterate({ force: true }).catch(() => {});
 		await q.close();
 	}
 });

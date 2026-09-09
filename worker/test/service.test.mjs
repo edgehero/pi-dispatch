@@ -812,9 +812,8 @@ test("restart --drain names the delayed population it cannot drain, and stays si
 	// issue #289: scope/host deferrals sit in the same set.
 	const noisy = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], [], { delayed: 3 }), events: [] });
 	await noisy.run();
-	if (noisy.text().includes("delayed set")) {
-		assert.ok(noisy.text().includes("scope/host deferrals"), "the note names every population, or it is the undercount it replaced");
-	}
+	assert.ok(noisy.text().includes("delayed set"), "3 delayed jobs must produce the note (a silent guard here would let the real assertion never run -- review finding)");
+	assert.ok(noisy.text().includes("scope/host deferrals"), "the note names every population, or it is the undercount it replaced");
 });
 
 test("restart --drain timeout: stops WITHOUT restarting, and resume is NOT called — a timed-out drain must not un-pause a queue that still has an active job", async () => {

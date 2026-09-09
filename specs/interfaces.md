@@ -3331,7 +3331,8 @@ validator rather than a second copy of it.
   PII decision before it is a convenience: a delayed forge job's `.data` holds the issue title, body and
   username, so hydrating one to build a row would pull into the panel exactly what the snapshot refuses
   to carry. It also removes a PER-JOB classifier that could only ever be a guess, since the delayed set
-  mixes five populations and records which for none of them -- and issue #289's breakdown line keeps
+  mixes five populations (scope and host deferrals counted as one, though the worker defers them at
+  two distinct sites) and records which for none of them -- and issue #289's breakdown line keeps
   that refusal intact while naming what CAN be counted: the status area says how many are cron
   next-occurrences (the scheduler list's own count) and how many are held (this index's own count),
   with the remainder stated as undifferentiated, still never enumerating or hydrating a delayed job.

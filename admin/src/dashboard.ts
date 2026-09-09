@@ -87,6 +87,8 @@ const FAILED_ON_DASHBOARD = 3;
  */
 function scrubReason(reason: any): string {
   if (typeof reason !== "string" || reason === "") return "-";
+  // C0 + DEL only, matching the project's one control-byte class (triggers.mjs's validator): the C1
+  // range is left alone there too, a convention shared rather than widened in one renderer.
   return reason.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
 }
 
@@ -1060,7 +1062,17 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
 
   // Degraded (too-narrow) plain path — reuse the shared, plain renderers unframed.
   const sections = [
-    { title: "STATUS", lines: toLines(renderStatus(snapshot.queue)) },
+    {
+      title: "STATUS",
+      // The degraded path carries the breakdown too (review finding): the acceptance is about the
+      // PANEL, not about its wide rendering, and both parts are already on the snapshot.
+      lines: toLines(
+        renderStatus(snapshot.queue, {
+          heldCount: Array.isArray(snapshot.held?.rows) ? snapshot.held.rows.length + (Number(snapshot.held.more) || 0) : undefined,
+          cronNext: Array.isArray(snapshot.schedulers) ? snapshot.schedulers.length : undefined,
+        }),
+      ),
+    },
     {
       title: "SPEND",
       lines: [
@@ -1352,7 +1364,7 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): s
   const sep = styler.fg("dim", " · ");
   // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
   // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,
-  // quiet-hours, scope deferrals and -- since issue #230 -- jobs held on `run.waitFor`. The count
+  // quiet-hours, scope and host deferrals, and -- since issue #230 -- jobs held on `run.waitFor`. The count
   // itself stays an undifferentiated, unambered number; since issue #289 the parts the panel can
   // COUNT FROM THEIR OWN SOURCES (cron next-occurrences from the scheduler list, holds from the
   // wait:held index) are named on `delayedBreakdownLine` below, without the per-job classifier the

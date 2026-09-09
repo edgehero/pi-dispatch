@@ -312,7 +312,7 @@ metered API, that cap is your bill's only ceiling.
 ### 4. The delayed count is still one number, and it will not be split per job
 
 The panel's `delayed` figure mixes cron next-occurrences, retry backoff, quiet-hours deferrals, scope
-deferrals and waits, and nothing records which population a given job is in -- classifying one would be a
+and host deferrals, and waits, and nothing records which population a given job is in -- classifying one would be a
 guess, and the spec refuses guesses. What the panel does since issue #289 is name the parts it can COUNT
 from their own sources: a dim line under the status header says how many are cron next-occurrences (from
 the scheduler list) and how many are held on `waitFor` (from the worker's own index), and calls the
