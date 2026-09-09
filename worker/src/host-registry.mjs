@@ -162,7 +162,7 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 			await inFlight;
 			// GATED ON `closed`, IN BOTH ARMS, and that is the whole of issue #302. `close` drains with ONE
 			// `bounded(inFlight, timeoutMs)` while `write` spends a fresh `timeoutMs` on each of its commands,
-			// so a write can outlive the drain -- and the continuation here then speaks through the boot`s own
+			// so a write can outlive the drain -- and the continuation here then speaks through the boot's own
 			// `log` closure, stamped with a host that has stopped. Measured against a stalled Valkey:
 			// `host_registry_unreachable` at +76ms and `host_registry_restored` at +108ms after `close()` had
 			// RESOLVED. The restored arm is not the afterthought it looks like: a drain that gave up can see the

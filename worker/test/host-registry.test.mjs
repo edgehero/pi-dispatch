@@ -84,7 +84,12 @@ function pacedRedis(delays = {}, fail = new Set()) {
 		// "never" is the real client's own failure mode, not an exotic one: `maxRetriesPerRequest: null`
 		// QUEUES a command against a dead server rather than rejecting it.
 		if (d === "never") await new Promise(() => {});
-		else await new Promise((resolve) => setTimeout(resolve, d));
+		// A ZERO delay resolves on the MICROTASK queue, never through `setTimeout(0)`, and that is what makes
+		// this fake usable on a busy runner rather than only on an idle laptop. `close`'s own DEL and SREM
+		// take this path: give them a timer and a BLOCKED event loop pushes close's RETURN past the write it
+		// is racing, which turns the window inside out and trips the vacuity guard below. Measured under an
+		// 80ms-every-25ms blocker: red with a timer here, green without one.
+		else if (d > 0) await new Promise((resolve) => setTimeout(resolve, d));
 		if (fail.has(method)) throw new Error("ECONNREFUSED");
 	};
 	return {
