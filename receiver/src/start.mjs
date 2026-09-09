@@ -46,6 +46,7 @@ import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeForgeRouter } from "./route.mjs";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
+import { makeWatchCloser } from "@edgehero/pi-dispatch/watch-closer";
 
 /**
  * Boot the receiver. Collaborators are injected (defaulting to the real ones) so the whole wiring is
@@ -69,6 +70,10 @@ export async function startReceiver(
 		resolveAzureSelfId: resolveAzureSelfIdFn = resolveAzureSelfId,
 		makeResolveAzureAuthority: makeResolveAzureAuthorityFn = makeResolveAzureAuthority,
 		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
+		// The worker's `extraClosers` shape (issue #301): the triggers watch pushes its stop handle here, the
+		// real shutdown below drains it, and a test injects its own array so the watch it armed dies with the
+		// boot that armed it instead of leaking an FSWatcher across tests.
+		closers = [],
 	} = {},
 ) {
 	// Single-object log line: `makeReceiver` calls `log?.({ event, ... })`, so the sink takes ONE object.
@@ -179,16 +184,32 @@ export async function startReceiver(
 		log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),
 	);
 
-	// Graceful shutdown AND the live-trigger watcher only on the real entry (default createServer). Under
-	// test injection the fakes are per-test, so a process-wide signal handler or an fs watcher would leak
-	// across tests; the reload LOGIC (`reloadTriggers`) is unit-tested directly instead.
+	// The watch arms UNCONDITIONALLY now (issue #301). Armed only on the real entry, the lifecycle defect
+	// was muted under test rather than closed, and this file had no coverage that the watch arms at all --
+	// `DES-WATCHERS-CLOSE-WITH-THE-WORKER` rejected exactly that posture for the worker. The closer rides
+	// the injected `closers` array, so a test drains what its boot armed and the real shutdown closes it.
+	closers.push(watchTriggers(env, cfg, log));
+
+	// Graceful shutdown only on the real entry (default createServer). Under test injection the fakes are
+	// per-test, so a process-wide SIGNAL HANDLER would still leak across tests -- and unlike the watch it
+	// has no seam to ride: the closers array cannot un-register a `process.once`. The shutdown's own steps
+	// are one call per handle, each covered through its seam.
 	if (createServer === http.createServer) {
-		watchTriggers(env, cfg, log);
 		const shutdown = async (signal) => {
 			log({ event: "receiver_stopping", signal });
 			await new Promise((resolve) => server.close(resolve));
 			await queue.close();
 			await router.close();
+			// The watch closer, and whatever joins it later. Per-item try, because a throw here would strand
+			// the `process.exit(0)` that the unit's stop depends on -- `index.mjs`'s closer loop states the
+			// same rule for the worker.
+			for (const c of closers) {
+				try {
+					c?.close?.();
+				} catch {
+					// A closer that failed has already stopped mattering.
+				}
+			}
 			process.exit(0);
 		};
 		process.once("SIGTERM", () => void shutdown("SIGTERM"));
@@ -203,26 +224,39 @@ export async function startReceiver(
  * admin writes with, which swaps the inode a file-watch would lose), debounce, and re-read on change. A bad
  * edit keeps the running triggers (reloadTriggers never throws) and logs a kept-old notice. Best-effort: a
  * platform without `fs.watch` logs and the receiver simply keeps its boot-time triggers.
+ *
+ * Returns the worker's stop handle (issue #301), registered in `closers` so the shutdown -- or the test
+ * that injected the array -- closes the FSWatcher and cancels the debounce it armed. A closer is returned
+ * even when the watch could not arm: closing a never-armed handle is a no-op by construction, and a
+ * caller that has to ask "did I get one" is how a handle goes unregistered.
  */
 function watchTriggers(env, cfg, log) {
 	const path = triggersFilePath(env);
 	const dir = dirname(path) || ".";
 	const file = basename(path);
-	let timer = null;
+	const handles = { watcher: null, timer: null, closed: false };
+	// The worker's closer, reused rather than re-derived (issue #301). Its `log` takes `(event, fields)`
+	// where this file's takes one object, so it is handed an adapter here instead of the module growing a
+	// second signature. The reload lines go through `closer.reloadLog` -- the reload's VOICE, gated once
+	// the handle closes; the arming lines keep the real `log`, because they run before any close exists.
+	const closer = makeWatchCloser(handles, (event, fields) => log({ event, ...fields }));
 	try {
-		watch(dir, (_event, changed) => {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (null changed name -> reload to be safe)
-			clearTimeout(timer);
-			timer = setTimeout(() => {
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => {
 				const res = reloadTriggers(env, cfg);
-				if (res.ok) log({ event: "triggers_reloaded" });
-				else log({ event: "triggers_reload_invalid", reason: res.invalid, kept: true });
+				if (res.ok) closer.reloadLog("triggers_reloaded");
+				else closer.reloadLog("triggers_reload_invalid", { reason: res.invalid, kept: true });
 			}, 150);
-		}).unref?.();
+		});
+		handles.watcher.unref?.();
 		log({ event: "triggers_watching", path });
 	} catch (err) {
 		log({ event: "triggers_watch_unavailable", reason: err?.message });
 	}
+	return closer;
 }
 
 // Entry point when run directly (main: src/start.mjs, no bin). Kept out of startReceiver so tests call

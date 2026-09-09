@@ -144,6 +144,29 @@ test("receiver's caret worker range actually SATISFIES the in-repo worker versio
 	}
 });
 
+test("every worker subpath the receiver and the console import EXISTS in the worker's exports map", () => {
+	// The workspaces are symlinked, so in this repo a subpath import resolves against the on-disk worker
+	// and a missing exports entry can never fail a test here: it fails on the first REAL npm install of a
+	// published receiver, at module load, on the operator's machine. The map is hand-kept and the imports
+	// are scattered, which is the shape the derived-or-pinned rule exists for. The version FLOOR half of
+	// the same hazard (a range admitting a published worker too old to carry the subpath) is undecidable
+	// offline and stays a release-PR obligation, stated where the range moves.
+	const exportsMap = JSON.parse(readFileSync(join(WORKER_DIR, "package.json"), "utf8")).exports;
+	const importRe = /@edgehero\/pi-dispatch\/([A-Za-z0-9-]+)/g;
+	const used = new Map(); // subpath -> first file seen importing it
+	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src")]) {
+		for (const name of readdirSync(dir)) {
+			if (!/\.(mjs|ts)$/.test(name)) continue;
+			const src = readFileSync(join(dir, name), "utf8");
+			for (const m of src.matchAll(importRe)) if (!used.has(m[1])) used.set(m[1], join(dir, name));
+		}
+	}
+	assert.ok(used.size >= 5, `the scan must find the known imports (triggers, queue, connection, ...); it found ${used.size} -- an empty scan is a broken scan, not a clean bill`);
+	for (const [sub, file] of used) {
+		assert.ok(exportsMap[`./${sub}`], `${file} imports @edgehero/pi-dispatch/${sub} but the worker exports map has no "./${sub}" -- an npm-installed receiver throws at module load`);
+	}
+});
+
 // ---------------------------------------------------------------------------------------------------
 // tarball: npm pack --dry-run --json, the file list npm would actually publish
 // ---------------------------------------------------------------------------------------------------

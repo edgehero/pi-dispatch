@@ -79,7 +79,8 @@
     "./subscriptions": "./src/subscriptions.mjs",
     "./budget": "./src/budget.mjs",
     "./pricing": "./src/pricing.mjs",
-    "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs"
+    "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
+    "./watch-closer": "./src/watch-closer.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

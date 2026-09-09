@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -77,6 +77,23 @@ async function bootLogLines(fn) {
 		.map((line) => JSON.parse(line));
 }
 
+/**
+ * `startReceiver` with the watch closer drained before returning. Since issue #301 EVERY boot arms the
+ * triggers watch -- including here, where `baseEnv` points `PI_TRIGGERS_FILE` at the repo's own
+ * `deploy/triggers.json` -- so a call that does not drain leaves a real FSWatcher on a repo directory for
+ * the life of the test process. Draining immediately is safe for everything this file asserts: the
+ * handler and the server outlive the closer, only the watch dies. The tests that assert on the watch
+ * itself pass their own `closers` and close by hand.
+ */
+async function startReceiverClosed(env, deps) {
+	const closers = [];
+	try {
+		return await startReceiver(env, { ...deps, closers });
+	} finally {
+		for (const c of closers) c.close();
+	}
+}
+
 /** A createServer fake that records the handler and the listen args and never opens a socket. */
 function capturingServer() {
 	const captured = {};
@@ -150,7 +167,7 @@ function headersFor(event, delivery, raw) {
 test("HARD-FAIL: an unresolvable identity rejects and NO server is ever created", async () => {
 	const { captured, createServer } = capturingServer();
 	await assert.rejects(
-		startReceiver(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer }),
+		startReceiverClosed(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer }),
 		(e) => e.piDispatchConfig === true,
 	);
 	// The guard did not boot disarmed: without selfId neither the handler nor the listen happened.
@@ -160,7 +177,7 @@ test("HARD-FAIL: an unresolvable identity rejects and NO server is ever created"
 
 test("happy path binds the configured host and port (defaults) and returns the server", async () => {
 	const { captured, createServer } = capturingServer();
-	const server = await startReceiver(baseEnv(), { makeAuth: okAuth, makeQueueFn: stubQueue, createServer });
+	const server = await startReceiverClosed(baseEnv(), { makeAuth: okAuth, makeQueueFn: stubQueue, createServer });
 	assert.equal(captured.listen.bind, "0.0.0.0");
 	assert.equal(captured.listen.port, 3000);
 	assert.ok(server, "startReceiver returns the server for tests and keep-alive");
@@ -168,7 +185,7 @@ test("happy path binds the configured host and port (defaults) and returns the s
 
 test("RECEIVER_PORT/RECEIVER_BIND overrides reach listen", async () => {
 	const { captured, createServer } = capturingServer();
-	await startReceiver(baseEnv({ RECEIVER_PORT: "8080", RECEIVER_BIND: "127.0.0.1" }), {
+	await startReceiverClosed(baseEnv({ RECEIVER_PORT: "8080", RECEIVER_BIND: "127.0.0.1" }), {
 		makeAuth: okAuth,
 		makeQueueFn: stubQueue,
 		createServer,
@@ -187,7 +204,7 @@ test("the makeReceiver handler is wired to createServer and a signed delivery en
 		},
 		close: async () => {},
 	};
-	await startReceiver(baseEnv(), { makeAuth: okAuth, makeQueueFn: () => queue, createServer });
+	await startReceiverClosed(baseEnv(), { makeAuth: okAuth, makeQueueFn: () => queue, createServer });
 	assert.equal(typeof captured.handler, "function", "the makeReceiver handler was passed to createServer");
 
 	// Drive a real signed issues.labeled through the wired handler; the triggers file maps pi:frontend.
@@ -223,7 +240,7 @@ test("a gitlab-only deployment boots without ever calling makeAuth, and says so 
 	const forbiddenAuth = async () => assert.fail("makeAuth must not be called on a deployment that serves no github");
 
 	const lines = await bootLogLines(async (write) => {
-		const server = await startReceiver(gitlabOnlyEnv(), { write, makeAuth: forbiddenAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes });
+		const server = await startReceiverClosed(gitlabOnlyEnv(), { write, makeAuth: forbiddenAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes });
 		assert.ok(server, "the receiver boots and returns its server -- this deployment could not start at all before");
 	});
 
@@ -247,7 +264,7 @@ test("a github-serving deployment still HARD-FAILS when makeAuth throws -- no se
 	// asserts the same for the default env; this one states the coupling in servesGithub's terms).
 	const { captured, createServer } = capturingServer();
 	await assert.rejects(
-		startReceiver(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer }),
+		startReceiverClosed(baseEnv(), { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer }),
 		(e) => e.piDispatchConfig === true,
 	);
 	assert.equal(captured.handler, undefined, "the handler must never be built without selfId");
@@ -260,7 +277,7 @@ test("an explicit GITHUB_AUTH_SOURCE re-arms the boot gate even with no github t
 	const { captured, createServer } = capturingServer();
 	const env = gitlabOnlyEnv({ WEBHOOK_SECRET: SECRET, GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_x" });
 	await assert.rejects(
-		startReceiver(env, { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
+		startReceiverClosed(env, { makeAuth: throwingAuth, makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
 		(e) => e.piDispatchConfig === true,
 	);
 	assert.equal(captured.listen, undefined, "an armed github endpoint with no identity must not listen");
@@ -272,7 +289,7 @@ test("a github-free deployment 404s `/` -- the skipped identity resolution and t
 	// this asserts it through the handler startReceiver actually built rather than through makeReceiver alone.
 	const { captured, createServer } = capturingServer();
 	await bootLogLines((write) =>
-		startReceiver(gitlabOnlyEnv(), { write, makeAuth: async () => assert.fail("no github arm here"), makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
+		startReceiverClosed(gitlabOnlyEnv(), { write, makeAuth: async () => assert.fail("no github arm here"), makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
 	);
 
 	const payload = JSON.stringify({ action: "labeled", sender: { id: 1 }, repository: { full_name: "octo/repo" }, issue: { number: 42, labels: [{ name: "pi:frontend" }] } });
@@ -310,7 +327,7 @@ test("the github closer resolver is built over the boot auth object's OWN mintTo
 		};
 
 	await bootLogLines((write) =>
-		startReceiver({ WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath }, { write, makeAuth: async () => auth, makeQueueFn: () => queue, createServer, makeResolveGitHubAuthority }),
+		startReceiverClosed({ WEBHOOK_SECRET: SECRET, PI_TRIGGERS_FILE: triggersPath }, { write, makeAuth: async () => auth, makeQueueFn: () => queue, createServer, makeResolveGitHubAuthority }),
 	);
 
 	const payload = JSON.stringify({
@@ -405,4 +422,68 @@ test("the INFRA half of the mapping is untouched -- only a tagged config refusal
 	assert.equal(entryExitCode(config), 2);
 	assert.equal(entryExitCode(new Error("ECONNREFUSED")), 1);
 	assert.equal(entryExitCode(undefined), 1);
+});
+
+test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (issue #301)", async () => {
+	// The pre-#301 shape muted this defect instead of closing it: the watch was armed only when
+	// `createServer === http.createServer`, so under injection it never existed, nothing could leak, and
+	// nothing could prove the arming line fires either. This is the receiver's copy of the worker's
+	// "the live-edit watchers are CLOSED with the worker that armed them", with one difference worth
+	// knowing when reading the assertions: `reloadTriggers` is SYNCHRONOUS, so the receiver has no
+	// in-flight-reload window -- the closer's silence here comes from the closed FSWatcher and the
+	// cancelled debounce, and `reloadLog`'s own gate is pinned by the worker's unit test.
+	const dir = mkdtempSync(join(tmpdir(), "receiver-watch-close-"));
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "gitlab", flow: "gl-f" } }] }));
+
+	// ONE chunks array for the whole test, sliced rather than re-captured: the receiver holds the `write`
+	// it booted with, so a second collector would prove silence vacuously by listening on the wrong wire.
+	const chunks = [];
+	const write = (chunk) => (chunks.push(String(chunk)), true);
+	const parse = (from) => chunks.slice(from).join("").split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	await startReceiver(
+		{ PI_TRIGGERS_FILE: triggersPath, GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x" },
+		{ write, makeQueueFn: stubQueue, createServer, closers, ...gitlabFakes },
+	);
+	assert.ok(captured.handler, "booted");
+	assert.ok(parse(0).some((l) => l.event === "triggers_watching"), "the canary must ARM the watch it claims to close");
+	assert.equal(closers.length, 1, "the watch closer rides the injected closers array, the worker's extraClosers shape");
+
+	// Before the close, the watch is REAL: an edit lands as a reload. This is the arming coverage the old
+	// entry-point guard deleted, and it is also what keeps the silence assertion below honest -- the same
+	// write on the same wire, first observed loud, then observed quiet.
+	const beforeEdit = chunks.length;
+	writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
+	await new Promise((resolve) => setTimeout(resolve, 600));
+	assert.ok(parse(beforeEdit).some((l) => l.event === "triggers_reloaded"), "a live watch reloads, or this test is asserting silence from a watch that never worked");
+
+	for (const c of closers) c.close();
+
+	const afterClose = chunks.length;
+	writeFileSync(triggersPath, `${JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:y"] }, run: { kind: "gitlab", flow: "gl-g" } }] })}\n`);
+	await new Promise((resolve) => setTimeout(resolve, 600));
+	assert.deepEqual(parse(afterClose), [], "a shut-down receiver's watch must write NOTHING: whatever lands here would land in a later test's capture");
+});
+
+test("the real shutdown drains the closers before it exits (source pin)", () => {
+	// The shutdown lives behind `createServer === http.createServer` and ends in `process.exit(0)`, so no
+	// in-process test can drive it without registering process-wide signal handlers -- the exact leak the
+	// guard exists to prevent. Pinned against the source instead, the `wiring.test.mjs` SIGBREAK
+	// precedent: the drain must sit between the router close and the exit, or a real stop leaks the watch
+	// the boot armed.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	const routerClose = src.indexOf("await router.close();");
+	const drain = src.indexOf("for (const c of closers)");
+	const exit = src.indexOf("process.exit(0);");
+	assert.ok(routerClose > 0 && drain > 0 && exit > 0, "the three anchors must exist");
+	assert.ok(routerClose < drain && drain < exit, "the closer drain runs after the handles close and before the exit");
+	assert.match(src, /closers\.push\(watchTriggers\(/, "the watch closer must be REGISTERED, not merely returned");
+	// The RETAINED handle is the whole of issue #301: `watch(dir, cb).unref?.()` kept nothing, so nothing
+	// could ever close it. The behavioural test above cannot see this -- with the handle discarded, the
+	// `closed` flag still delivers silence and every assertion stays green while the FSWatcher leaks -- so
+	// the retention is pinned here, where the mutation has nowhere to hide.
+	assert.match(src, /handles\.watcher = watch\(/, "the FSWatcher must be RETAINED on the handles bag the closer tears down");
 });
