@@ -132,10 +132,13 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, secrets, name, signal }) => { code, aborted, turns, tokens, session, usage, context }.
+		// runContainer({ job, token, prepared, secrets, name, signal }) => { code, aborted, abortReason, turns, tokens, session, usage, context }.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
-		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal.
+		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal, and
+		// on an aborted result it also maps `signal.reason` onto `abortReason` (issue #287) so the
+		// classification below can tell an operator's cancel from the kill timer's; a bare wiring that
+		// never sets it classifies every abort as worker-abort, exactly as before.
 		runContainer,
 		cleanup, // (dirs) => void
 		comment, // (job, text) => void   (issue status; no-op for local jobs)
@@ -672,7 +675,7 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 		}
 
-		const { code, aborted, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted });
 
@@ -687,13 +690,17 @@ export async function runJob(job, deps) {
 			await recordSpend(redis, tokensSpent, { now }).catch((err) => log("token_spend_error", { reason: err?.message }));
 		}
 
-		// A WORKER-initiated stop (30-min timeout via cancelJob, or graceful-shutdown docker stop) kills
-		// the container -> exit 143/137. That is our decision, not an infra fault: it is POLICY and must
-		// NOT retry, or a wedged job re-runs into a second PR / double spend. Keyed on the abort FLAG,
-		// not the code -- an unbidden 137 (kernel OOM) carries `aborted: false`, falls to the switch, and
-		// stays infra-retryable.
+		// A WORKER-initiated stop (30-min timeout via cancelJob, graceful-shutdown docker stop, or an
+		// operator's cancel, issue #287) kills the container -> exit 143/137. That is our decision, not an
+		// infra fault: it is POLICY and must NOT retry, or a wedged job re-runs into a second PR / double
+		// spend. Keyed on the abort FLAG, not the code -- an unbidden 137 (kernel OOM) carries
+		// `aborted: false`, falls to the switch, and stays infra-retryable.
+		// WHO aborted is an exact-match on `abortReason` (the wiring maps it off `signal.reason`), and the
+		// match is deliberately closed: "job-timeout-30m", "shutdown", undefined and any future garbage all
+		// classify as worker-abort, so a pin bump that changes what rides the signal can widen nothing.
+		// `abortReason` itself never reaches the record -- buildRecord copies named fields only.
 		// exitCode/turns/tokens carry the container's own exit, turn count, and usage totals; budgetReserved true post-reserve.
-		if (aborted) return { outcome: "policy", reason: "worker-abort", exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+		if (aborted) return { outcome: "policy", reason: abortReason === "operator-cancel" ? "operator-cancel" : "worker-abort", exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
 
 		switch (code) {
 			case EXIT_COMPLETED: {

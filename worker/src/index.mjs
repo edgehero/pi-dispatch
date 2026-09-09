@@ -1,5 +1,6 @@
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { jobContainerName } from "./backend-local.mjs";
+import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
 import { targetFor } from "./run-history.mjs";
 import { budgetCapsFor, canonicalScope, concurrencyFor, makeInFlight, scopeKeyPrefix } from "./scoped-limits.mjs";
@@ -106,7 +107,7 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS) {
  * The overlay changes which values the spend caps take, never when they are checked -- reserveBudget still
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  */
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, deps, recordRun = () => {}, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, hostName = "", now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random }) {
 	return async function processor(job, token, signal) {
 		// Scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): if this job's folder/repo is inside an active pause
 		// window, DEFER it to the window end via BullMQ's delayed set -- the job keeps its identity/dedup and
@@ -533,14 +534,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let startedAt;
 		let name;
 		let timer;
+		let cancelPoll;
+		let cancelPolling = false;
 		let onAbort;
 		let venue;
 		try {
 			// Nothing between the acquire above and the main `try` below may throw unguarded: the releasing
 			// finally belongs to THAT try, so an unguarded throw here would leak the hold and wedge the
-			// scope until a worker restart. Nothing in this block CAN throw today (setTimeout and
-			// addEventListener on the bullmq-allocated controller are total at processor arity 3); the
-			// guard is structural, not observational.
+			// scope until a worker restart. Nothing in this block CAN throw today (setTimeout, setInterval
+			// and addEventListener on the bullmq-allocated controller are total at processor arity 3, and
+			// the cancel poll's redis reads happen inside its own guarded ticks, never here); the guard is
+			// structural, not observational.
 			startedAt = new Date().toISOString();
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
@@ -586,6 +590,42 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
+
+			// The operator-cancel poll (issue #287). `cancelJob` is reachable only from THIS process, so the
+			// CLI and the panel leave a `cancel:req:<jobId>` key instead, and the worker that holds the job
+			// answers. Polled beside the kill timer rather than subscribed, for the reasons cancel-state.mjs
+			// records; one GET per 2s per active job is invisible against the 30s abort grace. Guarded on
+			// `redis.get` because bare test wirings pass a redis with only `incr`/`expire` -- they arm
+			// nothing and stay byte-identical. Each tick is re-entrancy-guarded and swallows redis faults:
+			// a blip may cost the ack, never the job.
+			if (typeof redis?.get === "function") {
+				cancelPoll = setInterval(() => {
+					if (cancelPolling) return;
+					cancelPolling = true;
+					void (async () => {
+						try {
+							const req = await redis.get(cancelReqKey(job.id));
+							if (req === null || req === undefined) return;
+							// Bound to this worker (the injection comment in createWorker): `false` means the job
+							// left the tracked map in this same instant, in which case the finally below clears
+							// this interval anyway and the request's TTL reaps the key.
+							const took = await Promise.resolve(cancelJob(job.id, "operator-cancel")).catch(() => false);
+							if (took === false) return;
+							// Ack first, then consume the request: losing the DEL to a blip costs one redundant
+							// re-read, losing the ack costs the operator a false "nobody answered".
+							await redis.set(cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS).catch(() => {});
+							await redis.del(cancelReqKey(job.id)).catch(() => {});
+							clearInterval(cancelPoll);
+						} catch {
+							// Fail open: the next tick re-asks.
+						} finally {
+							cancelPolling = false;
+						}
+					})();
+				}, cancelPollMs);
+				// Like the abort-grace timer: this must never keep an otherwise-finished worker alive.
+				cancelPoll.unref?.();
+			}
 		} catch (error) {
 			// Release and CLEAR the flag: this throw never reaches the main finally below, but a shared
 			// scope must never be releasable twice -- a double release frees another holder's slot.
@@ -600,6 +640,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			void scopeSlot?.release?.();
 			scopeSlot = null;
 			clearTimeout(timer);
+			clearInterval(cancelPoll);
 			throw error;
 		}
 
@@ -669,7 +710,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// next boot reaper sweeps; what is NOT leaked is the slot, the lease and the reservation.
 				// The `stop_did_not_take` line is the loud half, because a host whose daemon ignores a stop
 				// is a fact an operator has to learn from somewhere.
-				runContainer: (ctx) => boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})),
+				// Issue #287: WHO aborted rides the result, read off the signal at the one seam both abort
+				// paths flow through (a real stop resolves through here, and boundAfterAbort's synthesised
+				// `{ code: 137, aborted: true }` does too). `cancelJob(id, reason)` becomes `signal.reason`,
+				// so the processor can classify an operator's cancel apart from the kill timer's without
+				// this file growing a second channel. Mapped only when `aborted` -- an unaborted result
+				// stays byte-identical -- and only a STRING rides: a non-string reason (AbortError objects,
+				// future bullmq surprises) collapses to null, which classifies as worker-abort, the
+				// conservative direction.
+				runContainer: (ctx) => boundAfterAbort(deps.runContainer({ ...ctx, name, signal }), signal, job, deps.log ?? (() => {})).then((r) => (r?.aborted ? { ...r, abortReason: typeof signal.reason === "string" ? signal.reason : null } : r)),
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
 				// to be abortable for the same reason runContainer does: a resolver blocking on an unreachable
 				// vault would otherwise hold its slot until its own timeout, and an abort landing mid-resolution
@@ -731,6 +780,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// an async function, and `release` never throws.
 			await scopeSlot?.release?.();
 			clearTimeout(timer);
+			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
 		}
 	};
@@ -768,6 +818,10 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// Bound to THIS worker: a job on the host queue is cancelled by the worker draining that queue,
 			// and the shared handle could not reach it.
 			cancelJob: (id, reason) => worker.cancelJob(id, reason),
+			// Issue #287: the name the cancel poll writes into its ack, so the operator's terminal can say
+			// WHICH host took the cancel. `name` is already the registry/client identity; "" for a
+			// deployment that never declared one, and the ack's reader prints it as such.
+			hostName: name ?? "",
 			// #227. INJECTED, not built here. This was a one-line `docker stop` literal, which meant the abort
 			// path -- the only thing that can end a runaway job -- was the one backend function unreachable
 			// from `startWorker`. The wiring now passes the registry's per-job stop, so the container is

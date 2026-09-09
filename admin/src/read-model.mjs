@@ -27,6 +27,7 @@ import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
 import { parseScopedLimits, SCOPED_LIMITS_VERSION, scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { removeHeldJob } from "@edgehero/pi-dispatch/cancel-state";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -755,10 +756,10 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
 /**
  * Cancel a job that is waiting on a `run.waitFor` condition (issue #230).
  *
- * The ONLY way to stop a held job short of editing redis by hand, and it needs to exist because every other
- * lever misses: a held job has spent nothing, so no budget cap will ever refuse it; deleting the trigger
- * does not reach a job already enqueued, since `job.data.trigger` is a frozen snapshot; and the queue's own
- * retention prunes completed and failed jobs, never delayed ones.
+ * One of the two doors that stop a held job (the CLI's `pi-dispatch cancel` is the other, issue #287), and
+ * it needs to exist because every other lever misses: a held job has spent nothing, so no budget cap will
+ * ever refuse it; deleting the trigger does not reach a job already enqueued, since `job.data.trigger` is a
+ * frozen snapshot; and the queue's own retention prunes completed and failed jobs, never delayed ones.
  *
  * Refuses a job that is not HELD, checked against the worker's own `wait:job:` hash rather than against the
  * queue. Removing an arbitrary delayed job would reach cron next-occurrences and retry backoff too, and a
@@ -775,34 +776,10 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
     parseConnection(url, { failFast: true });
     redis = redisFn(url);
     queue = queueFn(parseConnection(url, { failFast: true }));
-    const settled = (async () => {
-      const hash = await redis.hgetall(jobKey(jobId));
-      // A hold is a hash with a CLOCK, not merely a non-empty hash: the worker's own counters create this
-      // key before anything is held, so "non-empty" would let this tool reach a job that is not waiting.
-      if (!hash || !hash.since) return { invalid: `job ${jobId} is not waiting on a condition` };
-      const job = await queue.getJob(jobId);
-      if (!job) return { invalid: `job ${jobId} is no longer in the queue` };
-      // STATE, not existence. `release` is fail-open by design, so a redis blip can leave the hash behind
-      // while the job wakes, runs and completes -- and bullmq will happily `remove()` a completed job. That
-      // would answer `applied: true` to an operator who approved a dialog reading "It will never run", for
-      // a job whose run record is already on disk.
-      const state = await job.getState().catch(() => null);
-      if (state !== "delayed" && state !== "waiting" && state !== "prioritized") {
-        return { invalid: `job ${jobId} is ${state ?? "in an unknown state"}, not waiting -- it has already left the hold` };
-      }
-      // The hold goes FIRST. If `remove` throws (an active job is locked) or the timeout fires mid-sequence,
-      // an orphaned hash would keep a row on the panel for a job that no longer exists; an orphaned JOB is
-      // merely a job that still runs, which is the state the operator was already in.
-      await redis.del(jobKey(jobId));
-      await redis.srem(HELD_SET, jobId).catch(() => {});
-      if (hash.dedupId) {
-        const holder = await redis.get(`wait:key:${hash.dedupId}`);
-        if (holder === jobId) await redis.del(`wait:key:${hash.dedupId}`);
-      }
-      await job.remove();
-      return { ok: true, jobId };
-    })();
-    return await withTimeout(settled, timeoutMs, { invalid: "timed out reaching the queue" });
+    // The sequence itself (hash-with-a-clock check, state check, hold keys before the job) lives in the
+    // worker's cancel-state.mjs since issue #287 gave it a second caller: one body, imported rather than
+    // re-implemented, which is this module's own rule for everything it shares with the worker.
+    return await withTimeout(removeHeldJob({ redis, queue, jobId }), timeoutMs, { invalid: "timed out reaching the queue" });
   } catch (err) {
     return { invalid: err?.message ?? String(err) };
   } finally {

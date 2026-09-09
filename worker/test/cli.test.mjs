@@ -80,6 +80,22 @@ test("run --image enqueues against a real Valkey (the operator-at-the-terminal p
 	assert.equal(blank, 0, "a blank --image resolves the deployment default rather than failing mid-job");
 });
 
+test("cancel removes a queued job against a real Valkey (VALKEY_TEST_URL) -- the acceptance's queued half", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
+	// Enqueue a real local job (no worker is draining, so it sits waiting), then cancel it by id and
+	// verify the second cancel finds nothing: the first one really removed it, neighbours untouched.
+	const dir = gitRepo({ dirty: false });
+	const env2 = { VALKEY_URL: process.env.VALKEY_TEST_URL };
+	let out = "";
+	const write = (chunk) => ((out += chunk), true);
+	assert.equal(await main(["run", dir, "--task", "sit there", "--force"], env2, { write }), 0);
+	const jobId = /queued (\S+)/.exec(out)?.[1];
+	assert.ok(jobId, `the run output must name the job id (got: ${out})`);
+	out = "";
+	assert.equal(await main(["cancel", jobId], env2, { write }), 0, "a waiting job cancels clean");
+	assert.match(out, /never ran; no record written/);
+	assert.equal(await main(["cancel", jobId], env2, { write }), 1, "the job is really gone; a second cancel refuses");
+});
+
 test("run fails FAST (does not hang) when Valkey is unreachable", { skip: needsDeps }, async () => {
 	// The whole point of failFast: a one-shot enqueue against a down Valkey must error in seconds,
 	// not hang forever on ioredis's null retry policy. Port 1 is closed.

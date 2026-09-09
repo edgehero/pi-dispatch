@@ -113,6 +113,138 @@ test("an abort stops the container", { skip }, async () => {
 	await running;
 });
 
+/** The cancel poll's deps (issue #287): a redis WITH get/set/del, and a runContainer that dies on abort. */
+function cancelPollProcessor({ store, gets, mod: m, cancelled, records, hostName = "hostA", getSettings }) {
+	let ac;
+	const processor = m.makeProcessor({
+		// The production binding aborts THIS worker's tracked entry; the fake mirrors that by aborting the
+		// controller the test hands the processor, reason and all, and answering true the way bullmq does.
+		cancelJob: (id, reason) => {
+			cancelled.push({ id, reason });
+			ac.abort(reason);
+			return true;
+		},
+		stopContainer: () => {},
+		redis: {
+			async incr() {
+				return 1;
+			},
+			async expire() {},
+			async get(key) {
+				gets.push(key);
+				return store.has(key) ? store.get(key) : null;
+			},
+			async set(key, value) {
+				store.set(key, value);
+			},
+			async del(key) {
+				store.delete(key);
+				return 1;
+			},
+		},
+		getSettings: getSettings ?? (() => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 })),
+		timeoutMs: 100000,
+		cancelPollMs: 5,
+		hostName,
+		recordRun: (r) => records.push(r),
+		deps: {
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({}),
+			// A cancelled container RESOLVES the way a real docker stop does -- { code: 137, aborted: true } --
+			// so the wiring's abortReason mapping is exercised, not bypassed by a rejection.
+			runContainer: ({ signal }) =>
+				new Promise((resolve) => {
+					if (signal.aborted) return resolve({ code: 137, aborted: true });
+					signal.addEventListener("abort", () => resolve({ code: 137, aborted: true }), { once: true });
+				}),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+	});
+	return { run: (job, signal) => processor(job, "tok", signal), bind: (controller) => (ac = controller) };
+}
+
+test("a pending cancel:req fires cancelJob(id, operator-cancel), acks the host, consumes the request, and the record says operator-cancel", { skip }, async () => {
+	const store = new Map([["cancel:req:j9", "operator-cancel"]]);
+	const gets = [];
+	const cancelled = [];
+	const records = [];
+	const { run, bind } = cancelPollProcessor({ store, gets, mod, cancelled, records });
+	const ac = new AbortController();
+	bind(ac);
+	const result = await run({ id: "j9", data: { kind: "github", repo: "o/r" } }, ac.signal);
+	assert.deepEqual(cancelled, [{ id: "j9", reason: "operator-cancel" }]);
+	assert.equal(result.outcome, "policy");
+	assert.equal(result.reason, "operator-cancel", "the record's whole point: it says an operator did it, not the timer");
+	assert.equal(store.get("cancel:ack:j9"), "hostA", "the ack names the host so the operator's terminal can");
+	assert.ok(!store.has("cancel:req:j9"), "the request is consumed, not left to fire again");
+	assert.equal(records.at(-1)?.result?.reason, "operator-cancel");
+	// The interval must die with the job: the GET count plateaus once the processor has returned.
+	await new Promise((r) => setTimeout(r, 25));
+	const after = gets.length;
+	await new Promise((r) => setTimeout(r, 25));
+	assert.equal(gets.length, after, "a poll outliving its job would read redis forever");
+});
+
+test("the cancel poll with no pending request never cancels, and a redis without .get arms no poll at all", { skip }, async () => {
+	const store = new Map();
+	const gets = [];
+	const cancelled = [];
+	const records = [];
+	const { run, bind } = cancelPollProcessor({ store, gets, mod, cancelled, records });
+	const ac = new AbortController();
+	bind(ac);
+	// A short real run: resolve the container after a few poll ticks.
+	const running = run({ id: "j10", data: { kind: "github", repo: "o/r" } }, ac.signal);
+	await new Promise((r) => setTimeout(r, 20));
+	ac.abort("shutdown");
+	const result = await running;
+	assert.ok(gets.length > 0, "the poll was armed (this test would be vacuous otherwise)");
+	assert.deepEqual(cancelled, [], "a null GET must never raise the abort");
+	assert.equal(result.reason, "worker-abort", "a shutdown abort stays worker-abort -- the match is closed");
+	// The finally's clearInterval, pinned on the path where the tick never cleared itself: the other
+	// test's plateau is satisfied by the tick's OWN clearInterval, so only this one would catch a
+	// finally that forgot the poll.
+	await new Promise((r) => setTimeout(r, 15));
+	const after = gets.length;
+	await new Promise((r) => setTimeout(r, 15));
+	assert.equal(gets.length, after, "the poll dies with the job even when it never fired");
+	// The existing timeout/abort tests pass a redis with only incr/expire; reaching here without a
+	// TypeError from redis.get is itself the pin that the poll is guarded. Assert it explicitly anyway:
+	const bare = mod.makeProcessor({
+		cancelJob: () => {},
+		stopContainer: () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs: 100000,
+		cancelPollMs: 5,
+		deps: {
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({}),
+			runContainer: async () => ({ code: 0, aborted: false }),
+			cleanup: async () => {},
+			comment: async () => {},
+		},
+	});
+	const ac2 = new AbortController();
+	const r2 = await bare({ id: "j11", data: { kind: "github", repo: "o/r" } }, "tok", ac2.signal);
+	assert.equal(r2.outcome, "completed", "a bare wiring runs byte-identically with no poll");
+});
+
+test("buildRecord never copies abortReason -- the discrimination is classification input, not record output", () => {
+	const rec = buildRecord({
+		job: { id: "j1", attemptsMade: 0, data: { kind: "github", repo: "o/r", target: { type: "issue", number: 5 } } },
+		result: { outcome: "policy", reason: "operator-cancel", abortReason: "operator-cancel", exitCode: 137 },
+		startedAt: "2026-09-09T10:00:00Z",
+		endedAt: "2026-09-09T10:05:00Z",
+		host: "hostA",
+	});
+	assert.equal(rec.reason, "operator-cancel");
+	assert.ok(!("abortReason" in rec), "the record is an explicit literal; the signal's reason string must not ride into it");
+});
+
 test("shutdown closes each extraCloser after the worker drains", { skip }, async () => {
 	// A cron scheduler (or any auxiliary resource) is handed to createWorker as an extraCloser so it
 	// is torn down on SIGTERM/SIGINT alongside the worker. This proves close() runs during shutdown.

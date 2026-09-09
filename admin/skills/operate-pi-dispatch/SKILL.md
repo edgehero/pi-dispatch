@@ -44,9 +44,11 @@ dialog before it takes effect**:
 - `dispatch_waits` — list the jobs the worker is HOLDING on a trigger's `run.waitFor` condition: job id,
   an id-only target, the operator's own words for what it waits on, and how long it has waited. Different
   from the queue's `delayed` count, which also mixes cron next-occurrences, retry backoff and quiet hours.
-- `dispatch_wait_cancel` — remove a held job so it never runs (confirm-gated). It is the only lever that
-  reaches one: a held job has spent nothing, so no budget cap will ever refuse it, and deleting the trigger
-  does not reach a job already enqueued.
+- `dispatch_wait_cancel` — remove a held job so it never runs (confirm-gated). The caps cannot do this: a
+  held job has spent nothing, so no budget cap will ever refuse it, and deleting the trigger does not
+  reach a job already enqueued. The operator has the same lever without you: `pi-dispatch cancel <jobId>`
+  at a terminal, or `h` then `x` in the panel — that CLI verb also removes a plain queued job and stops a
+  RUNNING one (its record then says `operator-cancel`), both beyond this tool's reach.
 - `dispatch_limit_add` / `dispatch_limit_edit` / `dispatch_limit_delete` — manage scoped limits (per
   repo/folder budget caps and concurrency: `day`/`week`/`month` job-count caps refuse a job pre-spend with
   reason `scope-cap`, never retried; `concurrent` defers the excess, never drops it; `dispatch_limits`

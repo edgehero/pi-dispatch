@@ -20,12 +20,13 @@
  * never a message.
  */
 import { dayKey, weekKey, monthKey, tokenDayKey, windowState } from "@edgehero/pi-dispatch/budget";
+import { requestCancel } from "@edgehero/pi-dispatch/cancel-state";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, fleetQueueNames, discoverHostQueues, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
+import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers, readTriggers, readPauseWindows, readScopedLimits, readStagedPackages } from "./read-model.mjs";
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
@@ -281,6 +282,17 @@ export function createDashboardDeps(
       await fleetQueues();
       for (const q of await killSwitchQueues()) await q.resume();
     },
+    async cancelActive({ jobId }: any) {
+      // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the
+      // owning worker answers, carried on the panel's own held client -- `cancelJob` lives in the worker
+      // process and nothing here can raise it directly.
+      return requestCancel({ redis, jobId });
+    },
+    async cancelHeld({ jobId }: any) {
+      // The read-model one-shot owns its own connections and 2.5s timeout envelope; the panel's held
+      // clients stay out of it so a slow cancel cannot sit in front of the refresh tick's reads.
+      return cancelHeldJob({ url: paths.valkeyUrl, jobId });
+    },
     async dispose() {
       for (const q of pool.values()) {
         try {
@@ -360,6 +372,14 @@ export function makeDashboard({
   // keystroke rather than a dispose/reopen cycle of the whole overlay. Only the `y` closes the overlay,
   // carrying `confirmed: true` so the command loop does not ask the same question twice.
   let pendingDelete = false;
+  // LIST/HELD_LIST cancel confirm (issue #287), the pendingDelete pattern with one addition: the armed
+  // TARGET is stored at arm time -- jobId plus which door answers it -- so a snapshot refresh between the
+  // question and the `y` cannot retarget the confirm onto a different job. `actionNote` carries the
+  // cancel's outcome; unlike `copiedNote` it must SURVIVE refresh() (the active ack can take 10s of
+  // polling, several ticks), so it clears on the next input instead. `heldSelected` is HELD_LIST's cursor.
+  let pendingCancel: any = null; // { jobId, kind: "active" | "held", target? } | null
+  let actionNote: any = null;
+  let heldSelected = 0;
   const refresh = async () => {
     if (fetching || disposed) return;
     fetching = true;
@@ -443,6 +463,9 @@ export function makeDashboard({
         detailSandbox,
         sandboxAvailable: typeof deps?.launchSandbox === "function",
         pendingDelete,
+        pendingCancel,
+        actionNote,
+        heldSelected,
         runSort,
         copiedNote,
         copyAvailable: typeof deps?.copyText === "function",
@@ -456,8 +479,36 @@ export function makeDashboard({
     },
     handleInput(data: string): void {
       // Whatever key arrives next outdates the copy acknowledgment; y/Y below set a fresh one AFTER this
-      // line, so the note lives for exactly the renders between two inputs.
+      // line, so the note lives for exactly the renders between two inputs. The cancel note follows the
+      // same rule from the input side (refresh deliberately leaves it alone).
       copiedNote = null;
+      actionNote = null;
+      // The armed cancel confirm eats every key first (the pendingDelete discipline: y confirms, n/Esc
+      // stand down, anything buffered is inert). It can only be armed in LIST or HELD_LIST -- every key
+      // that would leave either view is inert while the question is up -- and the guard keeps a stale
+      // flag from ever eating a detail view's keys.
+      if (pendingCancel && (view === "LIST" || view === "HELD_LIST")) {
+        if (data === "y" || data === "Y") {
+          const target = pendingCancel;
+          pendingCancel = null;
+          void act(async () => {
+            try {
+              const res = target.kind === "held" ? await deps.cancelHeld?.({ jobId: target.jobId }) : await deps.cancelActive?.({ jobId: target.jobId });
+              actionNote = cancelNote(res);
+            } catch (err: any) {
+              // act() swallows to protect the overlay; the note is how the operator still learns.
+              actionNote = `cancel failed: ${err?.message ?? String(err)}`;
+            }
+          });
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "n" || data === "N" || matchesKey(data, "escape")) {
+          pendingCancel = null;
+          tui?.requestRender?.();
+        }
+        return;
+      }
       if (view === "RUN_DETAIL") {
         // Escape backs out to the list only; it never closes the overlay or disposes the held clients.
         if (matchesKey(data, "escape")) {
@@ -552,6 +603,37 @@ export function makeDashboard({
         }
         if (data === "x" || data === "X") {
           pendingDelete = true;
+          tui?.requestRender?.();
+          return;
+        }
+        return;
+      }
+      if (view === "HELD_LIST") {
+        // The held drill-in (issue #287): rows are the snapshot's own PII-free projections (target,
+        // label, waited), a cursor, and `x` arming the shared cancel confirm on the CURSOR row's stored
+        // id. Esc backs out to the list; everything else is inert.
+        const rows = Array.isArray(snapshot?.held?.rows) ? snapshot.held.rows : [];
+        if (heldSelected > rows.length - 1) heldSelected = Math.max(0, rows.length - 1);
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          heldSelected = 0;
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "up")) {
+          heldSelected = Math.max(0, heldSelected - 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (matchesKey(data, "down")) {
+          heldSelected = Math.min(Math.max(0, rows.length - 1), heldSelected + 1);
+          tui?.requestRender?.();
+          return;
+        }
+        if (data === "x" || data === "X") {
+          const row = rows[heldSelected];
+          if (!row?.jobId) return;
+          pendingCancel = { jobId: row.jobId, kind: "held", target: row.target ?? row.jobId };
           tui?.requestRender?.();
           return;
         }
@@ -736,6 +818,25 @@ export function makeDashboard({
         void dispose().finally(() => done({ action: "manageLimits" }));
         return;
       }
+      // `h` opens the HELD drill-in (issue #287) -- the section's divider names it. Inert when nothing is
+      // held, exactly as `l` is inert with no active job: a view of an empty list answers no question.
+      if (data === "h" || data === "H") {
+        const rows = Array.isArray(snapshot?.held?.rows) ? snapshot.held.rows : [];
+        if (rows.length === 0) return;
+        heldSelected = 0;
+        view = "HELD_LIST";
+        tui?.requestRender?.();
+        return;
+      }
+      // `x` on the ACTIVE row arms the cancel confirm (issue #287). Only there: a run row is history and
+      // a trigger row already has its own delete behind Enter. The armed jobId is captured HERE.
+      if (data === "x" || data === "X") {
+        const row = buildRows(snapshot, runSort)[selected];
+        if (row?.kind !== "active" || !row.jobId) return;
+        pendingCancel = { jobId: row.jobId, kind: "active" };
+        tui?.requestRender?.();
+        return;
+      }
       if (matchesKey(data, "up")) {
         selected = Math.max(0, selected - 1);
         tui?.requestRender?.();
@@ -797,7 +898,7 @@ function budgetMeters(budget: any, settings: any, width: number): string[] {
  * the same content with `box`, its inner column count driving every meter and clip.
  */
 function renderPanel(snapshot: any, width: number, state: any, styler: any): string[] {
-  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, runSort, copiedNote, copyAvailable, terminalRows } = state;
+  const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
   const framed = Number.isFinite(width) && Math.trunc(width) >= MIN_WIDTH;
   const inner = Math.trunc(width) - 4;
   const title = "pi-dispatch";
@@ -835,6 +936,25 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     return renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, styler });
   }
 
+  if (view === "HELD_LIST") {
+    // The held drill-in (issue #287): the section's rows with a cursor and the shared in-frame confirm.
+    // Same PII posture as the section -- every cell is the worker's own projection, never a queue job.
+    const held = snapshot?.held ?? {};
+    const rows: any[] = Array.isArray(held.rows) ? held.rows : [];
+    const total = rows.length + (Number(held.more) || 0);
+    const detailTitle = `held · ${total}${held.truncated ? "+" : ""} waiting`;
+    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    const lines = rows.length === 0 ? [styler.cell("(nothing held)", iw)] : rows.map((r: any, i: number) => heldListRow(r, i === heldSelected, iw, styler));
+    if (Number(held.more) > 0) lines.push(styler.cell(styler.fg("dim", `↓ ${held.more} more`), iw));
+    if (!framed) {
+      const q = pendingCancel ? `cancel held job ${pendingCancel.target ?? pendingCancel.jobId}? it will never run · y/n` : (actionNote ? `${actionNote} · ` : "") + "↑↓ select · x cancel job · esc back";
+      return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", q];
+    }
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: heldListHints(iw, styler, pendingCancel, actionNote) });
+    return centerBlock(boxed, Math.trunc(width), dw);
+  }
+
   if (snapshot === null) {
     if (!framed) return [`${title} -- loading`, "", KEY_HINTS];
     return box({ title, sections: [{ lines: ["loading"] }], footer: KEY_HINTS, width });
@@ -851,7 +971,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   // stays uncollapsed -- it is already the everything-else-failed rendering.
   if (framed) {
     const lines = buildListLines(snapshot, selected, inner, styler, runSort, terminalRows);
-    return frame(styler, { title, width, lines, footer: keyHints(inner, styler) });
+    return frame(styler, { title, width, lines, footer: listFooter(inner, styler, pendingCancel, actionNote) });
   }
 
   // Degraded (too-narrow) plain path — reuse the shared, plain renderers unframed.
@@ -882,7 +1002,9 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   if (heldText) sections.push({ title: "HELD", lines: toLines(heldText) });
   const plain = [title];
   for (const section of sections) plain.push(section.title, ...section.lines);
-  plain.push(KEY_HINTS);
+  // The degraded path carries the same armed question / outcome note the framed footer does -- a narrow
+  // terminal must not hide that a y is about to stop a paid job. Unarmed and noteless stays byte-identical.
+  plain.push(pendingCancel ? `cancel active job ${pendingCancel.jobId}? y/n` : actionNote ? `${actionNote}\n${KEY_HINTS}` : KEY_HINTS);
   return plain.join("\n\n").split("\n");
 }
 
@@ -976,8 +1098,9 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     if (i > 0) lines.push(RULE);
     if (collapsed.has(s.key)) {
       // The divider line alone, its meta now saying what folded away and which key gets it back.
-      // Only name a key when there IS one. A section can be foldable without being openable -- held jobs
-      // have no view to bind -- and "(N hidden — undefined to view)" is worse than saying nothing.
+      // Only name a key when there IS one. A section can be foldable without being openable -- the held
+      // section's unreachable degrade carries none -- and "(N hidden — undefined to view)" is worse than
+      // saying nothing.
       lines.push(styler.divider(s.head[0], s.viewKey ? `(${s.body.length} hidden — ${s.viewKey} to view)` : `(${s.body.length} hidden)`, inner));
       return;
     }
@@ -998,14 +1121,16 @@ const HELD_ON_DASHBOARD = 3;
  * unconditional section moves the floor on every deployment -- including those that never wait -- and the
  * byte-identity assertion this panel keeps would be false for a feature nobody enabled.
  *
- * SELF-BOUNDING like `runs`, rather than collapsible like the config sections. It carries no `priority` and
- * no `viewKey` on purpose: a priority without a keybinding renders "(N hidden — undefined to view)", and
- * there is no view to bind, because a held row has nothing to drill into. It bounds itself instead, the way
- * the runs viewport does, so it can never blow the frame however many jobs are waiting.
+ * SELF-BOUNDING like `runs`, rather than collapsible like the config sections, so it can never blow the
+ * frame however many jobs are waiting. Since issue #287 it also carries `viewKey: "h"`: a held row finally
+ * HAS a drill-in (the HELD_LIST view, where `x` cancels one hold), which retires the older "nothing to
+ * drill into" reasoning this comment used to carry -- the collapsed divider now names the key instead of
+ * needing the no-key carve-out below.
  */
 function heldSection(held: any, inner: number, styler: any): any[] {
   if (!held) return [];
   if (held.unreachable) {
+    // No viewKey on the degraded row: the view would render an empty list over an unreadable index.
     return [{ key: "held", priority: 5, head: ["held", "waiting on conditions"], body: [styler.cell(`unreadable (${held.unreachable})`, inner, { color: "error" })] }];
   }
   const rows: any[] = Array.isArray(held.rows) ? held.rows : [];
@@ -1018,7 +1143,53 @@ function heldSection(held: any, inner: number, styler: any): any[] {
   // `truncated` means the index was longer than the reader would hydrate, so the count is a FLOOR. Said as
   // "200+" rather than stated flat: a header that names a number it cannot stand behind is the invented
   // figure this panel refuses everywhere else.
-  return [{ key: "held", priority: 5, head: ["held", `${total}${held.truncated ? "+" : ""} waiting on conditions`], body }];
+  return [{ key: "held", priority: 5, viewKey: "h", head: ["held", `${total}${held.truncated ? "+" : ""} waiting · h view`], body }];
+}
+
+/** One HELD_LIST row: the section's cells plus a cursor and the id-only jobId the cancel would take. */
+function heldListRow(r: any, sel: boolean, inner: number, styler: any): string {
+  const cursor = sel ? styler.fg("accent", "›") : " ";
+  const bits = [
+    `${cursor} ${styler.fg("accent", r.target ?? r.jobId ?? "-")}`,
+    styler.fg("text", r.label ?? "-"),
+    styler.fg("dim", `waited ${fmtDuration(r.waitedMs)}`),
+    styler.fg("dim", r.jobId ?? "-"),
+  ];
+  return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
+}
+
+/** The HELD_LIST footer; with a cancel armed, the footer IS the question (the triggerDetailHints shape). */
+function heldListHints(inner: number, styler: any, pendingCancel: any, actionNote: any): string {
+  const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+  if (pendingCancel) {
+    // The dialog wording dispatch_wait_cancel already uses: what stops, and that it will never run.
+    return fitLine(
+      styler.fg("warning", `cancel held job ${pendingCancel.target ?? pendingCancel.jobId}? it will never run`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")),
+      inner,
+      styler,
+    );
+  }
+  const note = actionNote ? styler.fg("warning", actionNote) + styler.fg("dim", " · ") : "";
+  return fitLine(note + [k("↑↓", "select"), k("x", "cancel job"), k("esc", "back")].join(styler.fg("dim", "  ·  ")), inner, styler);
+}
+
+/** The LIST footer: the armed cancel question, else the outcome note, else the standing key hints. */
+function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: any): string {
+  const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
+  if (pendingCancel) {
+    return fitLine(styler.fg("warning", `cancel active job ${pendingCancel.jobId}?`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), inner, styler);
+  }
+  if (actionNote) return fitLine(styler.fg("warning", actionNote), inner, styler);
+  return keyHints(inner, styler);
+}
+
+/** One sentence for the footer from a cancel's result shape -- every branch names what actually happened. */
+function cancelNote(res: any): string {
+  if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : res.ack} — stopping the container (~30s)`;
+  if (res?.timeout) return "no worker acknowledged — the job may be on an unreachable host; nothing was changed";
+  if (res?.ok) return `cancelled ${res.jobId} — it never ran, no record written`;
+  if (res?.invalid) return `rejected: ${res.invalid}`;
+  return "cancel failed — check the worker log";
 }
 
 /** One held row: `○ owner/repo#7  after 2026-09-01T09:00Z + jira  waited 2h14m`. */
@@ -1359,7 +1530,10 @@ export function targetUrl(record: any): string | null {
 function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   const cursor = sel ? styler.fg("accent", "›") : " ";
   if (row.kind === "active") {
-    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", row.jobId)} ${styler.fg("dim", "running")}`, inner, styler);
+    // The cancel hint rides the SELECTED row, not the footer -- the footer's width arithmetic has no
+    // headroom for another hint (its own comment), and the key only means anything on this row anyway.
+    const hint = sel ? ` ${styler.fg("dim", "· x cancel")}` : "";
+    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", row.jobId)} ${styler.fg("dim", "running")}${hint}`, inner, styler);
   }
   const r = row.record ?? {};
   const tree = r.chainDepth > 0 ? styler.fg("dim", "└ ") : "";
@@ -1734,7 +1908,9 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     const row = rows[i];
     const cursor = i === selected ? "›" : " ";
     if (row.kind === "active") {
-      out.push(clip(`${cursor} * ACTIVE ${row.jobId} running`, w));
+      // The plain twin of runRow's selected-row cancel hint: the monochrome panel must not hide a key
+      // the colored one advertises.
+      out.push(clip(`${cursor} * ACTIVE ${row.jobId} running${i === selected ? " · x cancel" : ""}`, w));
       continue;
     }
     const run = row.record;

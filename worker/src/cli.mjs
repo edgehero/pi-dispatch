@@ -38,6 +38,8 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
+  pi-dispatch cancel <jobId>  stop one job: a queued or held job is removed (it never ran), a running
+                           one is aborted on whichever host owns it (its record says operator-cancel)
 
 Config comes from the environment (see .env.example); flags override it per run.
 Prefer being walked through all of this? The operator panel's /dispatch setup does every step
@@ -238,6 +240,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			for (const q of queues) await q.close().catch(() => {});
 		}
 		return 0;
+	}
+
+	if (cmd === "cancel") {
+		// The kill switch's doctrine (issue #287): VALKEY_URL only, never loadConfig, so one misbehaving
+		// job can be stopped even when everything else about the deployment is misconfigured.
+		const url = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
+		const { runCancel } = await import("./cancel-cli.mjs");
+		return runCancel(argv[1], url, { write });
 	}
 
 	write(`${USAGE}\n`);

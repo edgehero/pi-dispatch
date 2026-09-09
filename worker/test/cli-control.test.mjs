@@ -27,7 +27,7 @@ async function captureStdout(fn) {
 	return out;
 }
 
-test("usage lists the pause/resume/status control commands", async () => {
+test("usage lists the pause/resume/status/cancel control commands", async () => {
 	let code;
 	const out = await captureStdout(async (write) => {
 		code = await main([], {}, { write });
@@ -36,6 +36,7 @@ test("usage lists the pause/resume/status control commands", async () => {
 	assert.match(out, /\bpause\b/);
 	assert.match(out, /\bresume\b/);
 	assert.match(out, /\bstatus\b/);
+	assert.match(out, /\bcancel <jobId>/);
 });
 
 test("entryExitCode maps a tagged config error to EXIT_POLICY (2), everything else to 1", () => {
@@ -68,4 +69,11 @@ test("status fails fast (does not hang) when Valkey is unreachable", { skip: nee
 	const code = await main(["status"], { VALKEY_URL: "redis://127.0.0.1:1" });
 	assert.equal(code, 1);
 	assert.ok(Date.now() - start < 15000, "must fail fast");
+});
+
+test("cancel fails fast (does not hang) when Valkey is unreachable", { skip: needsDeps }, async () => {
+	const start = Date.now();
+	const code = await main(["cancel", "j1"], { VALKEY_URL: "redis://127.0.0.1:1" });
+	assert.equal(code, 1, "an unreachable Valkey is a clean error, not a hang");
+	assert.ok(Date.now() - start < 15000, "must fail fast, well under any CI timeout");
 });

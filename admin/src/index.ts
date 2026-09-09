@@ -773,9 +773,10 @@ function registerTools(pi: ExtensionAPI): void {
     description:
       "Removes a job that is waiting on a run.waitFor condition, so it never runs. The operator MUST approve " +
       "a confirm dialog naming the job and what it was waiting on; refused with no interactive operator. " +
-      "Use dispatch_waits for the job id. This is the ONLY way to stop a held job short of editing redis: a " +
-      "held job has spent nothing, so no budget cap will ever stop it, and deleting the trigger does not " +
-      "reach a job already enqueued. Cancelling writes no run record, because the job never ran.",
+      "Use dispatch_waits for the job id. The operator can also do this without a model: `pi-dispatch cancel " +
+      "<jobId>` at a terminal, or the panel's held view (h, then x). A held job has spent nothing, so no " +
+      "budget cap will ever stop it, and deleting the trigger does not reach a job already enqueued. " +
+      "Cancelling writes no run record, because the job never ran.",
     executionMode: "sequential",
     parameters: Type.Object({ jobId: Type.String({ minLength: 1 }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {

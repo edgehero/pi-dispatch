@@ -118,6 +118,22 @@ test("a graceful-shutdown SIGTERM (143, aborted) => policy worker-abort, not ret
 	assert.equal(r.reason, "worker-abort");
 });
 
+test("an abort carrying abortReason operator-cancel classifies as operator-cancel (issue #287)", async () => {
+	const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: true, abortReason: "operator-cancel" }) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "operator-cancel", "the record must say an operator did it, not the timer");
+	assert.equal(r.budgetReserved, true, "the container ran; the slot stays counted exactly as worker-abort's does");
+});
+
+test("the abortReason match is CLOSED: shutdown, the timer's reason, and garbage all stay worker-abort", async () => {
+	for (const abortReason of ["shutdown", "job-timeout-30m", "operator-cancel-2", "", undefined]) {
+		const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: true, abortReason }) });
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, "worker-abort", `${JSON.stringify(abortReason)} must classify conservatively -- a pin bump changing what rides the signal can widen nothing`);
+	}
+});
+
 test("an unbidden 137 (aborted:false, kernel OOM) throws InfraRetry -- infra stays retryable", async () => {
 	const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: false }) });
 	await assert.rejects(() => runJob(ghJob, d), InfraRetry);

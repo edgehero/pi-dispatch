@@ -765,8 +765,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 - **Decision**: The workspace CLI (`pi-dispatch`, bin of the worker package) is the deployment's
   operator surface, and its subcommands sit on an explicit gate ladder. **Read-only / always safe**:
-  `doctor`, `status`. **Operator-typed, ungated**: `run`, `pause`, `resume`, `sandbox`, `import-pi`
-  (each is its own gate — typing it is the approval, `REQ-ADMIN-VIA-PI-EXTENSION`'s ladder top).
+  `doctor`, `status`. **Operator-typed, ungated**: `run`, `pause`, `resume`, `cancel`, `sandbox`,
+  `import-pi` (each is its own gate — typing it is the approval, `REQ-ADMIN-VIA-PI-EXTENSION`'s ladder
+  top; `cancel` names one job id and stops exactly that job, `DES-CANCEL-VIA-REDIS-REQUEST-KEY`).
   **Create-only, contractually non-destructive**: `init` (idempotent scaffolds; an existing file is
   never touched). **Consented host mutations**: `up` and `doctor --fix` — each concrete action (a
   docker pull of the deployment's *own default* image, a loopback Valkey start, an overlay
@@ -3543,6 +3544,47 @@ a tunnel.
   or freshly restarted, never `failed`; the bound is one setting, identical across supervisors; a
   determinate refusal exits 2 with no added latency; no timer, watcher or closer outlives a refusal.
 
+## DES-CANCEL-VIA-REDIS-REQUEST-KEY
+
+- **Decision**: the operator's stop for one job (issue #287) is state-dispatched at the requester and,
+  for the ACTIVE case, carried over a durable redis request/ack key pair
+  (`INT-CANCEL-CHANNEL-CONTRACT`) that each worker polls beside its own kill timer, 2s cadence per
+  active job. The abort's WHO rides `cancelJob`'s reason string onto `signal.reason`, mapped onto the
+  aborted result and classified by a CLOSED exact match, so the record says `operator-cancel` while the
+  timer's and shutdown's aborts keep saying `worker-abort`. Held cancels run the ONE extracted sequence
+  (`cancel-state.mjs -> removeHeldJob`) that the admin's `cancelHeldJob` now delegates to; plain queued
+  cancels are `job.remove()`; both write no record because the job never ran. The panel's doors are `x`
+  on the ACTIVE row and a HELD drill-in view on `h`, both behind the trigger-delete's in-frame y/n, with
+  the armed jobId STORED at arm time so a refresh cannot retarget the question.
+- **Why**: the abort machinery was complete with exactly two triggers, both automatic, and the only
+  human-shaped door (`dispatch_wait_cancel`) reached held jobs only and was model-callable only -- an
+  operator had to ask a model to stop a job the panel was showing them, or type `docker stop` by hand.
+  `cancelJob` is process-local and nothing maps a jobId to a host, so a cross-process ask had to exist;
+  a durable key is inspectable, survives the asking process, and fails REPORTED (the requester watches
+  the ack and names a timeout), which is the posture every silent no-op in this repo's history argues
+  for.
+- **Rejected**: **redis pub/sub** (a connection type with zero repo precedent; fire-and-forget loses a
+  cancel across a restart or blip with no error anywhere, and the ack needs a readable key regardless);
+  **polling BullMQ's `lockManager.getTrackedJobIds()` at the worker level** (couples to an internal for
+  no gain -- the per-job interval is the kill timer's own shape and dies in the same finally);
+  **treating queue-state polling as the ack** (the job leaving `active` conflates completion, failure
+  and cancel, and can take the whole abort grace); **a `dispatch_cancel` model tool** (a model-emittable
+  abort of a paid job is a new consent surface the issue does not ask for, and the acceptance --
+  `dispatch_wait_cancel` stops being the only door -- is met twice over without it; deferred, not
+  refused forever); **folding held rows into the LIST cursor** (perturbs the trigger-index/Tab
+  arithmetic for no gain over a dedicated view); **a footer hint for `x`** (the footer's width
+  arithmetic has no headroom; the hint rides the selected ACTIVE row and the held divider instead).
+- **Residuals**: the one-tick ack race, the unreachable-owner timeout and the record latency are named
+  in `INT-CANCEL-CHANNEL-CONTRACT`; a worker predating the contract acks nothing (release-ordering skew,
+  `design.md`'s widening class, honest at the requester); the held partial failure keeps
+  `cancelHeldJob`'s pre-existing direction (hold keys gone, job survives, panel row honest).
+- **Traces to**: `REQ-OPERATOR-JOB-CANCEL`, `REQ-JOB-TIMEOUT-30M` (the abort machinery it rides),
+  `CONST-RETRY-INFRA-ONLY` (policy, returned, never retried), `DES-CLI-SURFACE` (operator-typed tier),
+  `INT-CANCEL-CHANNEL-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT`
+- **Acceptance**: one job stops without touching its neighbours; the record says an operator did it; a
+  cancel of a job no reachable worker owns says so instead of doing nothing; `dispatch_wait_cancel` is
+  no longer the only door to a held job.
+
 ## Revision History
 
 | Date | Change |
@@ -3647,3 +3689,4 @@ a tunnel.
 | 2026-09-09 | Issue #325, the poller's inter-cycle sleep survived stop(). **`DES-GH-POLLING-TRANSPORT` AMENDED**: the loop owns its timer's whole life -- the race holds its sleep and cancels the loser whichever side settles, via an exported `cancellableSleep`; the timer stays REF'D (the poller is its process's main loop, and between cycles that timer is the only thing keeping a pure-poll process alive); the SIGTERM/SIGINT gate is its own `signals` dep defaulting from the sleep seam, so the real default is armable under test without process-wide handlers. The stopWaker-wins path had NO test before this: every prior stop() either resolved the injected sleep (the sleep side won) or landed mid-cycle and left through the loop's own break, so the behavioral pin arms the real floored >=30s timer, bounds `done` with a 2s cancellable sentinel (which is what kills a stop() that no longer wakes), and counts Timeouts through async_hooks -- with the destroy queue drained on a MACROTASK first, because with immediate-resolving fakes the whole boot-to-park burst is one macrotask and a long-cleared timer still counts as live (measured: the boot gate's identity fuse read as a leak until the drain). `signals` is a deps seam, not env: cli.mjs passes no deps and every existing test injects `sleep`, so both are byte-identical in behavior. `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-RETENTION-SWEEPS-ON-A-TIMER`, `DES-BOOT-IDENTITY-RETRY-IN-PROCESS` UNCHANGED, checked. **Code evidence**: receiver/src/poller.mjs -> cancellableSleep, startPoller · receiver/test/poller.test.mjs -> "stop() while parked on the REAL default sleep: the race is won, the timer is cleared, nothing leaks" |
 | 2026-09-09 | Issue #291. **NEW `DES-PER-TRIGGER-TOOL-EXCLUSIONS`**: the denylist decision and its layered enforcement -- a hand-written `EXCLUDABLE_TOOL_NAMES` bolted twice to the pinned artifact (the shared validator is pure and pi-free so it cannot derive; the runner derives its own set from the seven root-exported factories because `allToolNames` is unexported and the exports map is closed); the `excludeTools` capability token closing the stale-image fail-open; outbox inheritance with the destructive direction INVERTED (dropping it widens the child, so it is mandatory where secrets' absence is). The Rejected list records `run.tools` (an allowlist inverts to "which tools exist" and silently widens on a pin bump), `run.noTools` (the near-miss sweep can never catch it, so it is refused by name), free-string exclusions (they re-open the silent no-op), any panel key or model-callable setter, a general unknown-key sweep, and a command-style chain refusal for the request-file key (one read-and-refused exception stays one). Residuals name the old-parser release skew honestly and the tools-not-capabilities honesty boundary (excluding `bash` removes pi's tool, not the shell; a genuinely read-only trigger also wants `run.packages: false`). **`DES-PER-TRIGGER-JOB-IMAGE` UNCHANGED, checked** (its no-model-callable-path clause is this field's template); **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked** (its near-miss sweep and load/pre-spend split are copied, never moved); **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked** (its general-sweep rejection is cited and held); **`DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked** (the inheritance rides the existing explicit-property-reads mechanism, adding no read of `req`). |
 | 2026-09-09 | Issue #279. `buildGraphHtml`, `layoutGraph` and the page-only CSS are DELETED from graph-html.mjs: no production caller since #181 removed the `/dispatch graph html` command, and the 2026-08-12 row below describing `buildGraphScene` as "the normalize+layout+SVG-emission half of `buildGraphHtml`" now names a function that no longer exists -- the history stays as written, this row is the forward pointer (the scene's only consumer is `insights-html.mjs`, and its docblock now says so). The suite that drove the dead builder was rewritten around the shipping surface: layout invariants through `buildGraphScene(...).layout`, page-level pins through `buildInsightsHtml` on a fold-less payload (its documented degrade renders the topology whole), `PAGE_JS` hardening on the exported string itself, and the graph-html purity test now BANS the two deleted names from reappearing. Duplicated pins (determinism, well-formedness, redaction, file:// posture, the reload contract) were dropped in favour of the insights suite's own -- one pin per property, on the surface that ships. **`DES-GRAPH-EDGE-DERIVATION` UNCHANGED, checked** (the fold and the model are untouched); **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked** (no command, tool or view changes); **`DES-COST-FOLD-BY-SCAN` UNCHANGED, checked**. interfaces.md, constitution.md and open-questions.md carry no affected entry (OQ-024 already records the #181 rescope and stays true) -- UNCHANGED, checked. |
+| 2026-09-09 | Issue #287, the operator cancel. **NEW `DES-CANCEL-VIA-REDIS-REQUEST-KEY`** (decision, the rejected quintet -- pub/sub, `getTrackedJobIds` coupling, state-polling-as-ack, a `dispatch_cancel` model tool, cursor-folded held rows -- and the named residuals). **`DES-CLI-SURFACE` AMENDED**: `cancel` joins the operator-typed ungated tier, one job id, one job stopped. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added or removed, so the enumeration its Decision carries -- and the two-directional pin `admin/test/wiring.test.mjs` keeps on it -- stands untouched; `dispatch_wait_cancel` changes only its description string (it stops claiming to be the only door). **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked**: hold semantics, keyspace and refusal ladder are untouched; the cancel sequence merely moved from the admin into `cancel-state.mjs` with the admin delegating, byte-identical behaviour under the existing held tests. |

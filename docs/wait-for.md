@@ -227,24 +227,31 @@ A held job is not a mystery entry in the delayed count. The `/dispatch` panel gr
 anything is waiting and hides it entirely when nothing is:
 
 ```
-held · 4 waiting on conditions
+held · 4 waiting · h view
   ○ acme/web#7 · after 2026-09-01T09:00:00Z + jira · waited 2h14m
   ○ acme/web#31 · jira · waited 41m
   ○ acme/api#5 · ci · waited 8m
   ↓ 1 more
 ```
 
-Three rows and a count of the rest, always. (`/dispatch waits`, the plain text renderer, prints the same
-rows with `... and N more` instead of the arrow.)
+Three rows and a count of the rest, always. (The `dispatch_waits` tool lists the same rows as data, with
+the job ids.)
 
 Every cell is chosen by the worker: an id-only target, the operator-authored condition label, and an honest
 duration. No issue title and no issue body reaches the panel, which is why the reader takes the worker's own
 records rather than the delayed jobs.
 
-- `dispatch_waits` lists what is held, with the job ids.
-- `dispatch_wait_cancel` stops one, behind the same operator confirm dialog as every other write. It is the
-  only way to stop a held job short of editing redis by hand: nothing else prunes the delayed set, and a
-  cancelled job is gone rather than deferred.
+Stopping one held job has three doors, all running the same sequence and all recording nothing, because a
+held job never ran:
+
+- `h` in the panel opens the held view; `x` on a row asks an in-frame y/n and cancels that hold.
+- `pi-dispatch cancel <jobId>` at a terminal, reading only `VALKEY_URL` (the kill switch's own rule, so a
+  misconfigured forge cannot stand between you and the stop). The same verb also removes a plain queued
+  job and aborts a running one, whose record then says `operator-cancel`.
+- `dispatch_wait_cancel`, the model-callable tool, behind the same operator confirm dialog as every other
+  write.
+
+Whichever door: nothing else prunes the delayed set, and a cancelled job is gone rather than deferred.
 
 `pi-dispatch doctor` reports the rest: a garbled `PI_WAIT_PROFILES` (a worker that will not **boot**, so
 this one is asked even when nothing waits), a profile a trigger names that is not declared, a declared path

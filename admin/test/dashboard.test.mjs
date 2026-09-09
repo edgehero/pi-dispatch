@@ -1659,20 +1659,20 @@ test("the HELD section is absent when nothing is held -- byte-identical to befor
 });
 
 test("the HELD section bounds itself and counts the rest, rather than growing with the queue", async () => {
-  // Self-bounding like `runs`, not collapsible like the config sections: it carries no priority and no
-  // viewKey, because a held row has nothing to drill into and a priority without a keybinding would render
-  // "(N hidden — undefined to view)".
+  // Self-bounding like `runs`, not collapsible like the config sections. Since issue #287 the divider also
+  // names `h view`: a held row finally has a drill-in, so the old no-viewKey carve-out no longer applies
+  // to this section (the unreachable degrade still carries none).
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: HELD_ROWS, more: 6 } }) }) });
   await flush();
   const text = stripAnsi(comp.render(80).join("\n"));
   await comp.dispose();
 
-  assert.match(text, /10 waiting on conditions/, "the divider counts everything, including what the read truncated");
+  assert.match(text, /10 waiting · h view/, "the divider counts everything, including what the read truncated, and names the drill-in key");
   assert.match(text, /acme\/web#7/);
   assert.match(text, /waited 2h0m/, "a duration a human reads");
   assert.doesNotMatch(text, /acme\/api#4/, "the fourth row is past the section's own bound");
   assert.match(text, /↓ 7 more/, "and the remainder is counted, not lost");
-  assert.doesNotMatch(text, /undefined to view/, "no keybinding is claimed for a section that has no view");
+  assert.doesNotMatch(text, /undefined to view/, "no keybinding is claimed by a section entry that has no view");
 });
 
 test("an unreadable held view degrades that section alone", async () => {
@@ -1695,6 +1695,118 @@ test("a held row carries no job data, whatever the reader hands it", async () =>
   assert.doesNotMatch(text, /SECRET TITLE/);
   assert.doesNotMatch(text, /SECRET BODY/);
   assert.match(text, /acme\/web#7/, "only the fields the row names");
+});
+
+// --- the operator cancel (issue #287) -----------------------------------------------------------------
+
+test("x on the ACTIVE row arms the footer question; y cancels the ARMED id even after the snapshot moved; Esc stands down without quitting", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A" };
+  const cancelled = [];
+  const doneCalls = [];
+  const comp = makeDashboard({
+    paths: {},
+    done: (v) => doneCalls.push(v),
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => snap, cancelActive: async ({ jobId }) => (cancelled.push(jobId), { ack: "mini" }) }),
+  });
+  await flush();
+  // No triggers in SNAPSHOT, so the ACTIVE row is row 0 and already selected: its own line carries the hint.
+  assert.match(stripAnsi(comp.render(80).join("\n")), /● ACTIVE gh-A running · x cancel/, "the hint rides the selected row, not the footer");
+  comp.handleInput("x");
+  await flush();
+  assert.deepEqual(cancelled, [], "x alone cancels nothing -- it only arms the question");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /cancel active job gh-A\?/, "the footer becomes the y/n question");
+  // Buffered keys are inert while the question is up -- q must NOT quit, l must NOT change view.
+  comp.handleInput("q");
+  comp.handleInput("l");
+  await flush();
+  assert.deepEqual(doneCalls, [], "q while armed is inert; the overlay stays open");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /cancel active job gh-A\?/, "still the question");
+  // Esc stands down (does not quit); x re-arms; the snapshot then MOVES under the armed question.
+  comp.handleInput("\x1b");
+  await flush();
+  assert.deepEqual(doneCalls, [], "Esc while armed stands down instead of quitting the overlay");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /q quit/, "the ordinary footer is back");
+  comp.handleInput("x");
+  await flush();
+  snap.activeJobId = "gh-B"; // a refresh retargeted the row between the question and the answer
+  comp.handleInput("y");
+  await flush();
+  await flush();
+  assert.deepEqual(cancelled, ["gh-A"], "y answers the question that was ASKED -- the armed id, never the row's current one");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /cancel accepted by mini/, "the outcome note reaches the footer");
+  comp.handleInput("j");
+  await flush();
+  assert.doesNotMatch(stripAnsi(comp.render(80).join("\n")), /cancel accepted/, "the note clears on the next input");
+  await comp.dispose();
+});
+
+test("x anywhere but the ACTIVE row is inert, and n declines without cancelling", async () => {
+  const snap = { ...SNAPSHOT, activeJobId: "gh-A" };
+  const cancelled = [];
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap, cancelActive: async ({ jobId }) => (cancelled.push(jobId), { ack: "" }) }) });
+  await flush();
+  comp.handleInput("\x1b[B"); // down: onto the run row
+  comp.handleInput("x");
+  await flush();
+  assert.doesNotMatch(stripAnsi(comp.render(80).join("\n")), /cancel active job/, "a run row is history; x asks nothing there");
+  comp.handleInput("\x1b[A"); // back up to the ACTIVE row
+  comp.handleInput("x");
+  comp.handleInput("n");
+  await flush();
+  assert.deepEqual(cancelled, [], "a declined cancel cancels nothing");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /q quit/, "the ordinary footer is back");
+  await comp.dispose();
+});
+
+test("h opens the HELD drill-in when something is held, and is inert when nothing is", async () => {
+  const withHeld = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: HELD_ROWS, more: 0 } }) }) });
+  await flush();
+  withHeld.handleInput("h");
+  await flush();
+  const view = stripAnsi(withHeld.render(80).join("\n"));
+  await withHeld.dispose();
+  assert.match(view, /held · 4 waiting/, "the drill-in titles itself with the honest total");
+  assert.match(view, /acme\/api#4/, "the drill-in shows every hydrated row, past the section's 3-row bound");
+  assert.match(view, /gh-4/, "each row names the id-only jobId the cancel would take");
+  assert.match(view, /x cancel job/, "the footer names the door");
+
+  const without = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  without.handleInput("h");
+  await flush();
+  const still = stripAnsi(without.render(80).join("\n"));
+  await without.dispose();
+  assert.match(still, /SPEND & LIMITS/, "still the LIST");
+  assert.doesNotMatch(still, /x cancel job/, "a view of an empty list answers no question");
+});
+
+test("in HELD_LIST, x arms on the CURSOR row and y cancels that hold through the held door", async () => {
+  const cancelled = [];
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: HELD_ROWS, more: 0 } }), cancelHeld: async ({ jobId }) => (cancelled.push(jobId), { ok: true, jobId }) }),
+  });
+  await flush();
+  comp.handleInput("h");
+  comp.handleInput("\x1b[B"); // cursor to the second row (gh-2)
+  comp.handleInput("x");
+  await flush();
+  const armed = stripAnsi(comp.render(80).join("\n"));
+  assert.match(armed, /cancel held job acme\/web#9\? it will never run/, "the question names the target and the consequence, the dispatch_wait_cancel wording");
+  comp.handleInput("y");
+  await flush();
+  await flush();
+  assert.deepEqual(cancelled, ["gh-2"], "the cursor row's stored id, through deps.cancelHeld");
+  assert.match(stripAnsi(comp.render(80).join("\n")), /cancelled gh-2/, "the outcome note says what happened");
+  comp.handleInput("\x1b");
+  await flush();
+  assert.match(stripAnsi(comp.render(80).join("\n")), /SPEND & LIMITS/, "Esc backs out to the LIST");
+  await comp.dispose();
 });
 
 test("RUN_DETAIL names the host when a record carries one, and is unchanged when it does not", async () => {

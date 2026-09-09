@@ -63,6 +63,13 @@ host stops writing, while that host's queue, and its paused flag, are permanent.
 is what stops a resume from silently leaving a queue paused forever because its host happened to be down
 when you ran it.
 
+`pi-dispatch cancel <jobId>` spans the same union to *find* the job, because a host-affine job sits on
+`pi-jobs@<name>` rather than the shared queue. Stopping an *active* job is then a request to whichever
+worker owns it (a `cancel:req:` key that worker polls and acknowledges by name), since a running job's
+abort can only be raised inside the process that holds its lock. No acknowledgment within the window is
+reported as exactly that: the job may be on a host that is down, or on a worker predating the verb, and
+nothing was changed.
+
 ### Not shared, on purpose
 
 A job's raw log (`PI_CAPTURE_JOB_LOGS`) stays on the host that wrote it. It is the one artifact here that

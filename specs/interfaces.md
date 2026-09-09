@@ -478,10 +478,15 @@ refactor apart.
   | `2` | Budget or policy refusal (cap exhausted, turn budget hit, token budget hit) | Not retried |
 
   **A worker-initiated termination overrides the numeric code.** When the worker itself stops the
-  container — `docker stop` on the 30-minute timeout (`cancelJob`) or on graceful shutdown, delivering
-  SIGTERM (`143`) then SIGKILL (`137`) — the outcome is classified **POLICY, not retried**, keyed on the
-  worker's own abort signal rather than the exit code, because a worker SIGKILL and a kernel OOM both
-  surface as `137`. Retrying a worker-aborted job re-runs a wedged run into a second PR. This is distinct
+  container — `docker stop` on the 30-minute timeout (`cancelJob`), on graceful shutdown, or on an
+  operator's cancel (issue #287, `INT-CANCEL-CHANNEL-CONTRACT`), delivering SIGTERM (`143`) then SIGKILL
+  (`137`) — the outcome is classified **POLICY, not retried**, keyed on the worker's own abort signal
+  rather than the exit code, because a worker SIGKILL and a kernel OOM both surface as `137`. Retrying a
+  worker-aborted job re-runs a wedged run into a second PR. WHO aborted is a second, closed
+  discrimination on the same signal: the abort reason string rides the aborted result as `abortReason`,
+  and exactly the value `operator-cancel` records `reason: "operator-cancel"` — the timer's
+  `job-timeout-30m`, shutdown's `shutdown`, an absent reason and any future value all stay
+  `worker-abort`, so a pin bump changing what rides the signal can widen nothing. This is distinct
   from the runner's clean in-process abort (turn budget / timeout observed inside the container, exit
   `2`) and from an **unbidden** OOM-`137` with no worker abort, which stays infra-retryable (`1` class).
 
@@ -2639,7 +2644,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|...>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -3318,22 +3323,28 @@ validator rather than a second copy of it.
   it waits, so bounding it by the polling budget would refuse "hold this until the maintenance window next
   month" for a reason about subprocesses it never runs. It gets its own far larger ceiling and its own
   refusal token, and an instant beyond it is refused at FIRST pickup rather than held uselessly toward it.
-- **The operator surface** (issue #230's panel slice): a HELD section in the `/dispatch` panel and two
-  tools, `dispatch_waits` (read) and `dispatch_wait_cancel` (confirm-gated write). All three read the
-  worker's own `wait:job:*` hashes rather than enumerating the delayed set, and that is a PII decision
-  before it is a convenience: a delayed forge job's `.data` holds the issue title, body and username, so
-  hydrating one to build a row would pull into the panel exactly what the snapshot refuses to carry. It
-  also removes a classifier that could only ever be a guess, since the delayed set mixes five populations
-  and records which for none of them. The section is CONDITIONAL and SELF-BOUNDING: absent when nothing is
-  held, so a deployment that never waits renders byte-identically to one before this existed; capped, with
-  the remainder counted from the whole index rather than from whatever the reader happened to see; and
-  foldable under the frame budget while naming no keybinding, because a held row has nothing to drill into
-  and a fold that claimed a key it did not have would be worse than one that says only how many it hid. `dispatch_wait_cancel` refuses any job that is not held — a hash with a hold CLOCK, since the worker's
-  own counters create that hash before anything is held, so non-emptiness is a different question — and
-  refuses one whose queue state is no longer waiting, because `release` is fail-open by design and a stale
-  hash can outlive a job that already woke and ran. Its blast radius therefore cannot reach a cron
-  occurrence, a retry backoff, or a completed run — writes no run
-  record (the job never ran), and cannot be undone, which is why it is confirm-gated like every other write.
+- **The operator surface** (issue #230's panel slice, widened by issue #287): a HELD section in the
+  `/dispatch` panel, two tools — `dispatch_waits` (read) and `dispatch_wait_cancel` (confirm-gated
+  write) — and, since #287, two human doors that need no model: the CLI's `pi-dispatch cancel <jobId>`
+  and the panel's HELD drill-in (`h` opens the view, `x` arms an in-frame y/n on the cursor row). All of
+  them read the worker's own `wait:job:*` hashes rather than enumerating the delayed set, and that is a
+  PII decision before it is a convenience: a delayed forge job's `.data` holds the issue title, body and
+  username, so hydrating one to build a row would pull into the panel exactly what the snapshot refuses
+  to carry. It also removes a classifier that could only ever be a guess, since the delayed set mixes
+  five populations and records which for none of them. The section is CONDITIONAL and SELF-BOUNDING:
+  absent when nothing is held, so a deployment that never waits renders byte-identically to one before
+  this existed; capped, with the remainder counted from the whole index rather than from whatever the
+  reader happened to see; and foldable under the frame budget with its divider naming `h` — issue #287
+  retired the older no-keybinding clause here, because a held row finally HAS a drill-in (only the
+  unreachable degrade still folds keyless, a view over an unreadable index answering nothing). Every
+  cancel door runs ONE shared sequence (`cancel-state.mjs -> removeHeldJob`, which the admin's
+  `cancelHeldJob` delegates to): it refuses any job that is not held — a hash with a hold CLOCK, since
+  the worker's own counters create that hash before anything is held, so non-emptiness is a different
+  question — and refuses one whose queue state is no longer waiting, because `release` is fail-open by
+  design and a stale hash can outlive a job that already woke and ran. Its blast radius therefore cannot
+  reach a cron occurrence, a retry backoff, or a completed run — writes no run record (the job never
+  ran), and cannot be undone, which is why the model tool is confirm-gated like every other write and the
+  panel's `x` sits behind the same in-frame y/n the trigger delete uses.
 - **The 30s floor is load-bearing twice**, and lowering it would break the second silently: it is also what
   distinguishes a wait deferral from a scope deferral by wake instant, since `SCOPE_BUSY_RECHECK_MS` is 5s
   and nothing else records WHY a job sits in the delayed set.
@@ -3657,6 +3668,58 @@ absence is read as "no peers", which is the single-host behaviour. A Redis-side 
 deleting it loses the operator's edit -- which is precisely why `OQ-008` refuses one, and why this
 keyspace is not that.
 
+## INT-CANCEL-CHANNEL-CONTRACT
+
+**Producer of a request**: the CLI's `cancel` verb or the panel's `x` confirm. **Consumer**: the ONE
+worker process holding the job -- BullMQ's `cancelJob` aborts an in-process map entry, returns `false`
+silently for a job the process does not hold, and nothing anywhere maps a jobId to a host, so an active
+job can only be stopped by asking whichever worker owns it to raise its own abort (issue #287).
+
+```
+  cancel:req:<jobId>   STRING "operator-cancel", TTL 60s -- the ask. Written by the requester; consumed
+                       (DEL) by the owning worker after it raised the abort; DEL'd by the requester itself
+                       on its own ack timeout, so a cancel the operator was told failed cannot fire a
+                       minute later. The TTL reaps a requester that died mid-poll.
+  cancel:ack:<jobId>   STRING <workerName> ("" on an undeclared host; a NAME, never a path, the
+                       INT-HOST-REGISTRY-CONTRACT content rule), TTL 5m -- the answer the requester polls
+                       for. No ack within the window is a NAMED refusal at the requester ("no worker
+                       acknowledged ... nothing was changed"), never a silent no-op.
+```
+
+- **The worker side is a per-active-job poll beside the kill timer** (2s cadence, unref'd, cleared in the
+  same finally that clears the timer), NOT a subscription: pub/sub is a connection type this repo has
+  zero of, its fire-and-forget loses a cancel across a restart with no error anywhere, and the ack needs
+  a readable key regardless. The poll is armed only when the injected redis has `get` -- a bare test
+  wiring passes `{ incr, expire }` and arms nothing, byte-identically. Each tick swallows redis faults: a
+  blip may cost the ack, never the job.
+- **The reason string rides the abort**: `cancelJob(id, "operator-cancel")` becomes `signal.reason`,
+  mapped onto the aborted runContainer result as `abortReason` at the one seam both abort paths flow
+  through, and classified by the CLOSED exact-match `INT-RUNNER-EXIT-CODE-PROTOCOL` records. The record
+  gains `reason: "operator-cancel"` and nothing else: `abortReason` itself never reaches `buildRecord`'s
+  explicit literal (pinned).
+- **State dispatch at the requester** (`cancel-cli.mjs`, seams throughout): held (a `wait:job:` hash with
+  a `since` clock) goes through the shared `removeHeldJob` FIRST, because a held job IS delayed and the
+  plain path would strand its hold keys as a lying panel row; plain delayed/waiting/prioritized gets
+  `job.remove()` (a mid-dispatch pickup re-reads the state and falls through to the channel, since
+  `remove()` throws on a locked job); active gets the request/ack poll above; completed/failed refuse.
+  Queued and held cancels write NO run record -- the job never ran, the `dispatch_wait_cancel` rule --
+  and the CLI says so in its output.
+- **Why this is not the Redis state `OQ-008` refuses**: that refusal is about durable CONFIG whose
+  deletion silently loses an operator's edit. These keys are transient, attended, TTL-bounded one-shots
+  whose loss is REPORTED to an operator watching the ack poll. The falsification test: delete the whole
+  `cancel:*` keyspace while the fleet runs, and every job behaves exactly as before the feature existed;
+  the only casualty is a pending cancel, whose requester reports the timeout honestly.
+- **Residuals, named**: the requester's timeout DEL can lose to a worker GET by one poll tick, so "no
+  worker acknowledged" can precede a stop by up to a tick (the message says to re-check `status`); a host
+  that is down, a stalled owner, or a worker predating this contract acks nothing and the CLI exits 1
+  naming the cause; the record lands up to `ABORT_GRACE_MS` after the ack, because the CLI does not wait
+  for the container to die.
+
+**Code evidence**: worker/src/cancel-state.mjs -> requestCancel, removeHeldJob; worker/src/index.mjs ->
+the cancel poll beside the kill timer, the abortReason mapping; worker/src/processor.mjs -> the
+classification; worker/src/cancel-cli.mjs -> runCancel; admin/src/read-model.mjs -> cancelHeldJob
+(delegating); admin/src/dashboard.ts -> cancelActive/cancelHeld deps, the HELD_LIST view.
+
 ## Revision History
 
 | Date | Change |
@@ -3742,3 +3805,4 @@ keyspace is not that.
 | 2026-09-08 | Issue #314, the provider-steering variables. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a third family of `run.secrets` name is refused at load, and it is about WHERE the request goes rather than whose key pays for it. Measured at the pin with a stubbed fetch and no key: `AZURE_OPENAI_BASE_URL` and `AZURE_OPENAI_RESOURCE_NAME` each redirect the provider call carrying `api-key`, and neither is a shadowed default, because every azure model ships `baseUrl: ""` so the environment is the primary source there. The set is derived from TWO sources and bolted in both directions -- every `getProviderEnvValue("NAME")` in the pinned pi's dist, and every `readEnv("NAME")` in the provider SDKs it builds clients from -- which is what makes it hold names nobody would have written down: `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_BEDROCK_SKIP_AUTH`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one clause: its "one credential fact is written down here rather than derived, and only one" now says why `PROVIDER_STEERING_VARS` is not a second one (a literal list in the source only so `triggers.mjs` stays import-free, derived by its own bolt). **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no reason token moves; the existing `secret-name-reserved` covers the pre-spend half and this refuses earlier than that. **Code evidence**: worker/src/provider-steering.mjs -> PROVIDER_STEERING_VARS; worker/src/triggers.mjs -> RESERVED_ENV_NAMES, validateSecrets; worker/test/provider-steering.test.mjs; worker/test/env-allowlist.test.mjs. |
 | 2026-09-08 | Issue #302, the registry logging after its own `close()` resolved. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: once `close()` has been entered the module writes no line and adds nothing back to `host:live`, and the `closed` FLAG rather than the drain is what delivers it. `close` drains with one `bounded(inFlight, timeoutMs)` while `write` spends one bound per command, so a write outlives the drain by design; measured, `host_registry_unreachable` landed 76ms and `host_registry_restored` 108ms after a RESOLVED close, and a late `SADD` re-indexed the host 40ms after the same close's `SREM`. **The `restored` arm matters as much as the `unreachable` one the issue named**: a drain that gave up can see the write SUCCEED late just as easily as fail. **The `PEXPIRE` is deliberately left ungated beside the `SADD`**, because the tempting symmetry is wrong: the `SADD` is an index write `close`'s `SREM` undoes, while the `PEXPIRE` is the row's own fuse, and skipping it on a close landing between the `HSET` and the `PEXPIRE` leaves the hash with NO expiry at all -- invisible, since every reader walks `host:live`, so a keyspace leak the reader's prune never reaches. A residual is measured and recorded rather than closed: a first beat whose `HSET` reply is lost past its own bound never reaches the `PEXPIRE`, so a `DEL` lost at shutdown leaves a TTL-less row on the pre-#302 code and the fixed code alike, with or without any gate. The drain stays at one `timeoutMs`: widening it to `write`'s worst case would triple a shutdown bound whose point is to be short. Also **corrected, not added**: the entry's consumer list claimed the cron gate read this keyspace "and nothing else" and that the admin extension and `doctor` read none of it, which had been false since the console began calling the shared `readLiveHosts`. `DES-HOST-REGISTRY`, `REQ-MULTI-HOST-COORDINATION`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER` UNCHANGED, checked. **Code evidence**: worker/src/host-registry.mjs -> beat, write, close · worker/test/host-registry.test.mjs -> "a write that outlives the drain is SILENT, and cannot re-index the row it lost" |
 | 2026-09-09 | Issue #291. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.excludeTools` on ALL five kinds, in `run.backend`'s bullet shape -- the grammar, the pinned-set membership refusal printing the whole known set (pi ignores unknown exclusion names silently, the destructive-absence class), the near-miss sweep with its three targets and the homoglyph branch, `run.tools`/`run.noTools` refused BY NAME, the pre-spend capability split, file-only with the outbox inheritance, and absent-carries-no-key. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `PI_EXCLUDE_TOOLS` joins the worker-passed env -- comma-joined (safe by the loader's membership guarantee, deliberately not re-checked), omit-when-absent, shape-only parse in-container with the membership assert pre-spend and the `tools_excluded` read-back line. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the capability token set is `replicas`, `commands`, `excludeTools`; `verify-image.sh` fails on unknown tokens and greps the baked runner for each claimed one. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-exclude-tools-unsupported` (checked against the nested `session.reason` enum for the collision rule). **`INT-SDK-SESSION-OPTIONS` AMENDED**: `excludeTools` becomes load-bearing, and the hand-written complete-option-set sentence gains the bolt it has owed since CLAUDE.md's rule was written (pinned-api deepEquals the extracted member names against it). **`INT-OUTBOX-CONTRACT` AMENDED**: `excludeTools` deliberately STAYS under unknown-keys-ignored while the child inherits off validated `job.data` -- `chain-command-refused` keeps its one-exception sharpness, and the acceptance gains the inheritance clause. **Code evidence**: worker/src/triggers.mjs -> validateExcludeTools; worker/src/env-allowlist.mjs -> PI_EXCLUDE_TOOLS; worker/src/image-preflight.mjs; worker/src/processor.mjs; worker/src/outbox.mjs; receiver/src/config.mjs + the four filters; image/runner/src/config.mjs -> parseExcludeTools; image/runner/src/tools.mjs; image/runner/run-job.mjs; image/Dockerfile + image/verify-image.sh. |
+| 2026-09-09 | Issue #287, the operator cancel. **NEW `INT-CANCEL-CHANNEL-CONTRACT`**: the `cancel:req:`/`cancel:ack:` key pair, the per-active-job worker poll beside the kill timer, the closed abort-reason discrimination, the requester's state dispatch (held through the shared `removeHeldJob` FIRST, plain delayed via `job.remove()`, active via the channel), the OQ-008 distinction (transient attended one-shot, loss REPORTED) and its falsification test, and the named residuals (one-tick ack race, unreachable-owner honesty, record latency up to the abort grace). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: operator cancel joins the worker-initiated terminators, with the closed exact-match rule -- only the literal `operator-cancel` riding the abort signal reclassifies; timer, shutdown, absence and garbage all stay `worker-abort`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `operator-cancel` beside `worker-abort`; queued and held cancels write NO record (the #230 rule restated, not changed), and `abortReason` never enters the record (buildRecord's explicit literal, pinned). **`INT-WAIT-PROFILES-CONTRACT` AMENDED**, the operator-surface bullet: `dispatch_wait_cancel` stops being the only door -- the CLI verb and the panel's `h`-then-`x` drill-in are model-free doors through the SAME extracted sequence (`removeHeldJob`, admin delegating) -- and the held section's no-keybinding clause is retired because the fold's divider now names `h` (the unreachable degrade alone stays keyless). **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: the ack reuses its content rule (names, never paths) but the registry itself gains no field and no reader. **Code evidence**: worker/src/cancel-state.mjs; worker/src/index.mjs -> the poll + abortReason mapping; worker/src/processor.mjs -> the classification; worker/src/cancel-cli.mjs; worker/src/cli.mjs; admin/src/read-model.mjs -> cancelHeldJob delegation; admin/src/dashboard.ts; worker/test/cancel-state.test.mjs; worker/test/cancel-cli.test.mjs; worker/test/wiring.test.mjs; worker/test/processor.test.mjs; admin/test/dashboard.test.mjs. |

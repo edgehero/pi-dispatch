@@ -65,6 +65,7 @@
     "./scoped-limits": "./src/scoped-limits.mjs",
     "./wait-for": "./src/wait-for.mjs",
     "./wait-state": "./src/wait-state.mjs",
+    "./cancel-state": "./src/cancel-state.mjs",
     "./host-registry": "./src/host-registry.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",
