@@ -645,11 +645,70 @@ test("an exhausted window is still a refusal that arms NOTHING, and it maps to e
 	assert.ok(err);
 	assert.equal(err.piDispatchConfig, undefined, "an exhausted transient window is still not a misconfiguration");
 	assert.equal(entryExitCode(err), 1, "exit 1: the supervisor restarts into a FRESH window, so the default bounds one cycle, not recovery");
-	assert.deepEqual(sleeps, [5_000, 10_000, 20_000], "the floored 60s window admits exactly three gaps before the fourth would cross");
+	assert.deepEqual(sleeps, [5_000, 10_000, 20_000, 25_000], "three doubling gaps, then a final gap CLAMPED so the last attempt lands at the 60s window's edge");
 	assert.equal(captured.handler, undefined);
 	assert.equal(captured.listen, undefined);
 	assert.equal(closers.length, 0, "the arm-last invariant covers the NEW refusal path too");
 	assert.equal(lines.at(-1)?.event, "identity_retry_exhausted", "the give-up is loud, with the window on the line");
+});
+
+test("a refusal AFTER the queue exists closes what the boot built, so the exit code is actually delivered (issue #318)", async () => {
+	// Measured on main AND this branch, against a live Valkey: a gitlab 401 assigned process.exitCode 2
+	// and the process was still alive 12 seconds later -- the queue's client held the loop, systemd
+	// read "active (running)", and RestartPreventExitStatus was never consulted. issue #299's rule,
+	// the receiver's copy: a boot that refuses stops what it built. Both refusal shapes this change
+	// can produce below the queue must release the connections that would otherwise outlive them.
+	// The queue fake records the 'error' swallow too: on a real BullMQ, a client error forwarded to a
+	// listenerless Queue while the refusal path holds it is an uncaught crash that stomps the exit
+	// code (measured), and only this wiring pin can go red in-process when the swallow is dropped --
+	// the crash itself needs a real client and lives in the integration file.
+	const makeCloseRecorders = () => {
+		const closes = [];
+		return {
+			closes,
+			makeQueueFn: () => ({ add: async () => {}, on: (ev) => closes.push(`listen:${ev}`), connection: { _client: { disconnect: () => closes.push("queue") } } }),
+			makeForgeRouterFn: () => ({ close: async () => closes.push("router") }),
+		};
+	};
+
+	// The tagged shape: a determinate gitlab refusal, same-tick.
+	const tagged = makeCloseRecorders();
+	await assert.rejects(
+		startReceiver(gitlabOnlyEnv(), {
+			write: () => true,
+			makeQueueFn: tagged.makeQueueFn,
+			makeForgeRouterFn: tagged.makeForgeRouterFn,
+			createServer: capturingServer().createServer,
+			resolveGitLabSelfId: async () => {
+				throw Object.assign(new Error("GET /user returned 401"), { piDispatchConfig: true });
+			},
+			makeResolveAuthority: () => async () => ({ authorized: true }),
+		}),
+		(e) => e.piDispatchConfig === true,
+	);
+	assert.deepEqual(tagged.closes, ["listen:error", "queue", "router"], "a tagged refusal swallows the queue's error surface, then releases both handles in construction order");
+
+	// The exhausted-transient shape: the window this change added, spent in full.
+	const spent = makeCloseRecorders();
+	let t = 0;
+	await assert.rejects(
+		startReceiver(gitlabOnlyEnv({ RECEIVER_IDENTITY_RETRY_SECONDS: "60" }), {
+			write: () => true,
+			makeQueueFn: spent.makeQueueFn,
+			makeForgeRouterFn: spent.makeForgeRouterFn,
+			createServer: capturingServer().createServer,
+			resolveGitLabSelfId: async () => {
+				throw new Error("connect ECONNREFUSED 10.0.0.5:443");
+			},
+			makeResolveAuthority: () => async () => ({ authorized: true }),
+			now: () => t,
+			sleep: async (ms) => {
+				t += ms;
+			},
+		}),
+		(e) => e.piDispatchConfig === undefined,
+	);
+	assert.deepEqual(spent.closes, ["listen:error", "queue", "router"], "an exhausted window releases both handles too -- exit 1 must actually REACH the supervisor for the fresh-window story to exist");
 });
 
 test("every identity arm rides retryIdentity, and no bare identity await remains (source pin, issue #318)", () => {

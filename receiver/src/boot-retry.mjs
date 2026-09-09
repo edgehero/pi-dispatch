@@ -30,14 +30,17 @@
  *  - A fused-out attempt throws a plain UNTAGGED Error, by decision: a resolver that does not answer
  *    within the fuse is indistinguishable from a forge that is down, which is the transient case.
  *    None of the resolvers takes an AbortSignal, so the losing attempt itself has no cancel; its
- *    late settlement is absorbed by the pre-attached catch below, and the residual (a pending socket
+ *    late settlement is absorbed by the race's own subscription, and the residual (a pending socket
  *    that can outlive a FINAL refusal by up to undici's header timeout) is recorded in
  *    `DES-BOOT-IDENTITY-RETRY-IN-PROCESS` -- strictly better than the unbounded hang a mute forge
  *    produced before this module existed.
- *  - The deadline is checked BEFORE sleeping, so no sleep timer can outlive the final attempt (the
- *    issue #300/#325 discipline: a component that stops must have released what it armed). That is
- *    also what makes the injected `sleep` seam safe without a cancel: every sleep awaited here runs
- *    to completion.
+ *  - The remaining window is checked BEFORE sleeping and the gap is CLAMPED to it, so no sleep timer
+ *    can outlive the final attempt (issue #300's discipline: a component that stops has released what
+ *    it armed) and the final attempt lands at the window's EDGE. The clamp is measured, not neatness:
+ *    without it a 60s window exhausted at 35s, because the un-clamped 30s gap would have crossed the
+ *    deadline and was skipped -- a forge that came back at t=50 was missed, and "retries for the
+ *    whole window" was false in the letter. The clamp is also what makes an uncancellable injected
+ *    `sleep` safe: every sleep awaited here runs to completion, always followed by one more attempt.
  *  - Log lines carry `err?.message` only, never a value -- the `receiver_start_failed` posture.
  *
  * Total wall clock: the helper settles within `windowMs + attemptTimeoutMs`.
@@ -79,6 +82,13 @@ export async function retryIdentity(
 		delayCapMs = IDENTITY_RETRY_DELAY_CAP_MS,
 	} = {},
 ) {
+	// Fail loud on a windowless caller. A NaN or missing window would make the remaining-time test
+	// below never exhaust, and an unbounded boot retry is the silent no-op this project refuses. The
+	// loaders floor and validate the real value; this guard is for the caller no loader sits in front
+	// of.
+	if (!Number.isFinite(windowMs) || windowMs <= 0) {
+		throw new Error(`retryIdentity: windowMs must be a positive finite number, got ${windowMs}`);
+	}
 	const deadline = now() + windowMs;
 	let delay = delayMs;
 	let attempt = 0;
@@ -90,11 +100,15 @@ export async function retryIdentity(
 				// A SYNCHRONOUS throw from the resolver lands in the outer catch with no fuse armed
 				// (`fuse` is still null, and clearTimeout(null) is a no-op), which is why the fuse is
 				// armed only after `resolve()` has returned.
+				//
+				// No explicit `.catch` rides the attempt, and its absence is measured, not an oversight:
+				// `Promise.race` subscribes a reject handler to EVERY contestant, so when the fuse wins,
+				// the abandoned attempt's late rejection lands in the race's own subscription and can
+				// never surface as an unhandledRejection (pinned by this module's test). The worker's
+				// `ensureAuth` DOES need one, because it stores its promise in a map beyond the race and
+				// a cooldown-path caller can throw without ever racing it; nothing here outlives the
+				// race expression.
 				const inflight = resolve();
-				// Attached BEFORE the race (the worker's ensureAuth rule): when the fuse wins, the
-				// abandoned attempt's late rejection must land in a handler, never as an
-				// unhandledRejection. `Promise.resolve` tolerates a resolver that returned a bare value.
-				Promise.resolve(inflight).catch(() => {});
 				return await Promise.race([
 					inflight,
 					new Promise((_, reject) => {
@@ -111,12 +125,16 @@ export async function retryIdentity(
 			// Determinate refusals pass through untouched and unslowed: the tag is the decision, and
 			// re-wrapping would cost the entry the piDispatchConfig mapping to EXIT_POLICY.
 			if (err?.piDispatchConfig === true) throw err;
-			if (now() + delay > deadline) {
+			const remainingMs = deadline - now();
+			if (remainingMs <= 0) {
 				log({ event: "identity_retry_exhausted", forge, attempts: attempt, windowMs, reason: err?.message });
 				throw err;
 			}
-			log({ event: "identity_retry", forge, attempt, reason: err?.message, delayMs: delay });
-			await sleep(delay);
+			// Clamped, so the last gap ends exactly at the deadline and the final attempt runs at the
+			// window's edge -- see the header for the measured 35s-of-60s failure the clamp removes.
+			const gapMs = Math.min(delay, remainingMs);
+			log({ event: "identity_retry", forge, attempt, reason: err?.message, delayMs: gapMs });
+			await sleep(gapMs);
 			delay = Math.min(delay * 2, delayCapMs);
 		}
 	}

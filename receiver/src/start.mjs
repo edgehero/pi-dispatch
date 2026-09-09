@@ -149,98 +149,140 @@ export async function startReceiver(
 	// or whose deployment has no named hosts, behaves exactly as it did before this existed.
 	const router = makeForgeRouterFn({ valkeyUrl: cfg.valkeyUrl, shared: queue, log });
 
-	// The GitLab arm, when configured. Its identity resolution is HARD-FAIL for the same reason github's
-	// is: without a selfId the bot-loop guard cannot run, and a receiver that listens without it turns the
-	// harness's own status comment into another paid job.
-	let gitlab = null;
-	if (cfg.gitlab) {
-		const gitlabSelfId = await retryIdentity(() => resolveSelfIdFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token }), { forge: "gitlab", ...retryOpts });
-		log({ event: "self_identity", forge: "gitlab", id: gitlabSelfId, mode: cfg.gitlab.mode });
-		gitlab = {
-			mode: cfg.gitlab.mode,
-			secret: cfg.gitlab.secret,
-			selfId: gitlabSelfId,
-			resolveAuthority: makeResolveAuthorityFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token }),
-		};
-	}
+	// EVERY refusal below this line lands after the queue and the router exist, so it must stop
+	// what the boot built (issue #299's rule, the receiver's copy; measured for #318 on main AND
+	// this branch, against a live Valkey): with the shared clients left open, the entry assigns
+	// process.exitCode and the loop never drains -- the failure line printed at 0.4s and the
+	// process was still alive at 90s. Under Type=simple that reads as "active (running)" with
+	// nothing listening, Restart= never fires, RestartPreventExitStatus=2 is never consulted, and
+	// the retry window's exit-1-into-a-fresh-window contract above never engages. The github arm
+	// and the config load sit ABOVE the queue and always exited cleanly; these three arms did not.
+	try {
+		// The GitLab arm, when configured. Its identity resolution is HARD-FAIL for the same reason github's
+		// is: without a selfId the bot-loop guard cannot run, and a receiver that listens without it turns the
+		// harness's own status comment into another paid job.
+		let gitlab = null;
+		if (cfg.gitlab) {
+			const gitlabSelfId = await retryIdentity(() => resolveSelfIdFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token }), { forge: "gitlab", ...retryOpts });
+			log({ event: "self_identity", forge: "gitlab", id: gitlabSelfId, mode: cfg.gitlab.mode });
+			gitlab = {
+				mode: cfg.gitlab.mode,
+				secret: cfg.gitlab.secret,
+				selfId: gitlabSelfId,
+				resolveAuthority: makeResolveAuthorityFn({ apiUrl: cfg.gitlab.apiUrl, token: cfg.gitlab.token }),
+			};
+		}
 
-	// The Forgejo arm, when configured. Identity resolution is HARD-FAIL here too, and it is the arm where
-	// that matters most: a repo-scoped Forgejo token cannot call GET /user, so an operator who follows the
-	// scoping advice without setting FORGEJO_BOT_ID lands exactly here -- and a receiver that shrugged and
-	// continued would run with selfId undefined, which never equals a sender id and silently turns the
-	// harness's own comments into more paid jobs.
-	let forgejo = null;
-	if (cfg.forgejo) {
-		const forgejoSelfId = await retryIdentity(() => resolveForgejoSelfIdFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token, botId: cfg.forgejo.botId }), { forge: "forgejo", ...retryOpts });
-		log({ event: "self_identity", forge: "forgejo", id: forgejoSelfId, source: cfg.forgejo.botId ? "FORGEJO_BOT_ID" : "api" });
-		forgejo = {
-			secret: cfg.forgejo.secret,
-			selfId: forgejoSelfId,
-			resolveAuthority: makeResolveForgejoAuthorityFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token }),
-		};
-	}
+		// The Forgejo arm, when configured. Identity resolution is HARD-FAIL here too, and it is the arm where
+		// that matters most: a repo-scoped Forgejo token cannot call GET /user, so an operator who follows the
+		// scoping advice without setting FORGEJO_BOT_ID lands exactly here -- and a receiver that shrugged and
+		// continued would run with selfId undefined, which never equals a sender id and silently turns the
+		// harness's own comments into more paid jobs.
+		let forgejo = null;
+		if (cfg.forgejo) {
+			const forgejoSelfId = await retryIdentity(() => resolveForgejoSelfIdFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token, botId: cfg.forgejo.botId }), { forge: "forgejo", ...retryOpts });
+			log({ event: "self_identity", forge: "forgejo", id: forgejoSelfId, source: cfg.forgejo.botId ? "FORGEJO_BOT_ID" : "api" });
+			forgejo = {
+				secret: cfg.forgejo.secret,
+				selfId: forgejoSelfId,
+				resolveAuthority: makeResolveForgejoAuthorityFn({ apiUrl: cfg.forgejo.apiUrl, token: cfg.forgejo.token }),
+			};
+		}
 
-	// The Azure arm, when configured. Identity resolution is HARD-FAIL here too, and it resolves BOTH forms
-	// of the harness's identity in one call: a pull-request delivery names an actor by GUID and a work item
-	// names them only by email address, so a guard that knew one form would be blind on half the events.
-	let azure = null;
-	if (cfg.azure) {
-		const azureSelfId = await retryIdentity(() => resolveAzureSelfIdFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token }), { forge: "azure", ...retryOpts });
-		log({ event: "self_identity", forge: "azure", id: azureSelfId.id, hasAccountName: azureSelfId.email !== null, mode: cfg.azure.mode });
-		azure = {
-			mode: cfg.azure.mode,
-			secret: cfg.azure.secret,
-			headerName: cfg.azure.headerName,
-			selfId: azureSelfId,
-			resolveAuthority: makeResolveAzureAuthorityFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token }),
-		};
-	}
+		// The Azure arm, when configured. Identity resolution is HARD-FAIL here too, and it resolves BOTH forms
+		// of the harness's identity in one call: a pull-request delivery names an actor by GUID and a work item
+		// names them only by email address, so a guard that knew one form would be blind on half the events.
+		let azure = null;
+		if (cfg.azure) {
+			const azureSelfId = await retryIdentity(() => resolveAzureSelfIdFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token }), { forge: "azure", ...retryOpts });
+			log({ event: "self_identity", forge: "azure", id: azureSelfId.id, hasAccountName: azureSelfId.email !== null, mode: cfg.azure.mode });
+			azure = {
+				mode: cfg.azure.mode,
+				secret: cfg.azure.secret,
+				headerName: cfg.azure.headerName,
+				selfId: azureSelfId,
+				resolveAuthority: makeResolveAzureAuthorityFn({ orgUrl: cfg.azure.orgUrl, token: cfg.azure.token }),
+			};
+		}
 
-	const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
-	const server = createServer(handler);
-	server.listen(cfg.port, cfg.bind, () =>
-		log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),
-	);
+		const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority });
+		const server = createServer(handler);
+		server.listen(cfg.port, cfg.bind, () =>
+			log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),
+		);
 
-	// The watch arms UNCONDITIONALLY now (issue #301). Armed only on the real entry, the lifecycle defect
-	// was muted under test rather than closed, and this file had no coverage that the watch arms at all --
-	// `DES-WATCHERS-CLOSE-WITH-THE-WORKER` rejected exactly that posture for the worker. The closer rides
-	// the injected `closers` array, so a test drains what its boot armed and the real shutdown closes it.
-	//
-	// LAST FALLIBLE STEP, deliberately, and it must stay last: every refusal this boot can produce -- the
-	// config load, each hard-fail identity resolution, the router build, even a throwing `listen` -- sits
-	// ABOVE this line, so a refused boot has armed nothing and there is never a closer with no one left to
-	// drain it. The worker states the same invariant where its watchers arm. A step added BELOW that can
-	// throw reopens issue #301 on the refusal path; the HARD-FAIL test pins the refusals that exist today.
-	closers.push(watchTriggers(env, cfg, log));
+		// The watch arms UNCONDITIONALLY now (issue #301). Armed only on the real entry, the lifecycle defect
+		// was muted under test rather than closed, and this file had no coverage that the watch arms at all --
+		// `DES-WATCHERS-CLOSE-WITH-THE-WORKER` rejected exactly that posture for the worker. The closer rides
+		// the injected `closers` array, so a test drains what its boot armed and the real shutdown closes it.
+		//
+		// LAST FALLIBLE STEP, deliberately, and it must stay last: every refusal this boot can produce -- the
+		// config load, each hard-fail identity resolution, the router build, even a throwing `listen` -- sits
+		// ABOVE this line, so a refused boot has armed nothing and there is never a closer with no one left to
+		// drain it. The worker states the same invariant where its watchers arm. A step added BELOW that can
+		// throw reopens issue #301 on the refusal path; the HARD-FAIL test pins the refusals that exist today.
+		closers.push(watchTriggers(env, cfg, log));
 
-	// Graceful shutdown only on the real entry (default createServer). Under test injection the fakes are
-	// per-test, so a process-wide SIGNAL HANDLER would still leak across tests -- and unlike the watch it
-	// has no seam to ride: the closers array cannot un-register a `process.once`. The shutdown's own steps
-	// are one call per handle, each covered through its seam.
-	if (createServer === http.createServer) {
-		const shutdown = async (signal) => {
-			log({ event: "receiver_stopping", signal });
-			await new Promise((resolve) => server.close(resolve));
-			await queue.close();
-			await router.close();
-			// The watch closer, and whatever joins it later. Per-item try, because a throw here would strand
-			// the `process.exit(0)` that the unit's stop depends on -- `index.mjs`'s closer loop states the
-			// same rule for the worker.
-			for (const c of closers) {
-				try {
-					c?.close?.();
-				} catch {
-					// A closer that failed has already stopped mattering.
+		// Graceful shutdown only on the real entry (default createServer). Under test injection the fakes are
+		// per-test, so a process-wide SIGNAL HANDLER would still leak across tests -- and unlike the watch it
+		// has no seam to ride: the closers array cannot un-register a `process.once`. The shutdown's own steps
+		// are one call per handle, each covered through its seam.
+		if (createServer === http.createServer) {
+			const shutdown = async (signal) => {
+				log({ event: "receiver_stopping", signal });
+				await new Promise((resolve) => server.close(resolve));
+				await queue.close();
+				await router.close();
+				// The watch closer, and whatever joins it later. Per-item try, because a throw here would strand
+				// the `process.exit(0)` that the unit's stop depends on -- `index.mjs`'s closer loop states the
+				// same rule for the worker.
+				for (const c of closers) {
+					try {
+						c?.close?.();
+					} catch {
+						// A closer that failed has already stopped mattering.
+					}
 				}
-			}
-			process.exit(0);
-		};
-		process.once("SIGTERM", () => void shutdown("SIGTERM"));
-		process.once("SIGINT", () => void shutdown("SIGINT"));
-	}
+				process.exit(0);
+			};
+			process.once("SIGTERM", () => void shutdown("SIGTERM"));
+			process.once("SIGINT", () => void shutdown("SIGINT"));
+		}
 
-	return server;
+		return server;
+	} catch (err) {
+		// Best-effort, per handle, and the refusal rethrows unchanged: the cleanup must never
+		// replace the story. BullMQ's close() is idempotent and the router closes its own pool.
+		//
+		// The error swallow first, and it is measured, not defensive: a queue built moments ago can
+		// still be mid-handshake, and every client error in that window is forwarded to the Queue
+		// object, where makeQueue attaches no listener -- unlistened, one such event crashed the
+		// process at exit 1 and stomped the exit 2 this catch exists to deliver. Scoped to the
+		// refusal path: the serving path's error surface is unchanged.
+		queue.on?.("error", () => {});
+		try {
+			// The RAW client, deliberately NOT queue.close(): close() on a maybe-still-connecting
+			// client strips every listener in RedisConnection.close()'s finally (removeAllListeners),
+			// and the constructor's `initializing.catch` then re-emits the flushed handshake as an
+			// 'error' on a LISTENERLESS emitter -- an uncaught crash whose exit 1 stomped this exit
+			// code on 3 of 5 measured refusals, and a settle-first close() variant still crashed
+			// against a DEAD Valkey. A direct disconnect() leaves the connection's listeners alone,
+			// so the same late rejection flows connection -> queue -> the swallow above, and ioredis
+			// disconnect() releases the socket AND stops the ride-out reconnects, in every client
+			// state (the #300 measurement). `_client` is a BullMQ private, reached on the host-pi
+			// precedent for pinned internals: the real-BullMQ integration test is the pin, so a bump
+			// that moves it goes red there instead of sliding silently back to the wedge.
+			queue.connection?._client?.disconnect?.();
+		} catch {
+			// A handle that failed to close has stopped mattering to a process about to exit.
+		}
+		try {
+			await router.close();
+		} catch {
+			// Same.
+		}
+		throw err;
+	}
 }
 
 /**

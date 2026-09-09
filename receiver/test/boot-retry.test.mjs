@@ -78,8 +78,8 @@ test("transient failures retry with the documented gaps, then the answer comes b
 });
 
 test("the backoff doubles to the cap and stays there", async () => {
-	// Window sized so the sixth sleep lands EXACTLY on the deadline (not past it -- the check is a strict
-	// `>`), and the seventh gap crosses: the schedule and the cap are both visible in one array.
+	// Window sized so the sixth sleep ends EXACTLY at the deadline: the schedule, the cap and the
+	// exhaustion edge are all visible in one array, and no gap needed clamping to get there.
 	const { opts, sleeps } = makeRun({ windowMs: 125_000 });
 	const err = await retryIdentity(async () => {
 		throw new Error("still down");
@@ -119,10 +119,12 @@ test("a tagged refusal AFTER transient attempts still wins immediately", async (
 	assert.deepEqual(sleeps, [5_000, 10_000], "the transient attempts slept; the tagged one did not add a third");
 });
 
-test("exhaustion rethrows the LAST transient error, exits 1, and never sleeps into the closed window", async () => {
-	// windowMs 12000: attempt 1 sleeps 5s; before the second gap 5000+10000 crosses the deadline, so the
-	// loop must throw WITHOUT arming that sleep -- a sleep after the last attempt is a timer that outlives
-	// the refusal, the exact defect class issues #300/#325 exist for.
+test("exhaustion rethrows the LAST transient error, exits 1, and the final attempt lands at the window's edge", async () => {
+	// windowMs 12000: gap one is the full 5s, gap two is CLAMPED from 10s to the 7s that remain, and
+	// the third attempt runs exactly at the deadline -- the whole window is spent retrying (measured
+	// before the clamp: a 60s window gave up at 35s and missed a forge that came back late). After the
+	// edge attempt fails there is NO further sleep: a timer armed past the last attempt would outlive
+	// the refusal, the defect class issue #300 exists for.
 	const errors = [];
 	const { opts, sleeps, logs } = makeRun({ windowMs: 12_000 });
 	const err = await retryIdentity(async () => {
@@ -133,20 +135,35 @@ test("exhaustion rethrows the LAST transient error, exits 1, and never sleeps in
 	assert.equal(err, errors.at(-1), "the last real failure, not a synthetic wrapper: its message is the operator's evidence");
 	assert.equal(err.piDispatchConfig, undefined);
 	assert.equal(entryExitCode(err), 1, "exit 1: the supervisor restarts into a fresh window");
-	assert.deepEqual(sleeps, [5_000], "NO trailing sleep for the gap that would have crossed the deadline");
+	assert.deepEqual(sleeps, [5_000, 7_000], "the second gap is clamped to the remaining window, and nothing sleeps after the edge attempt");
 	const exhausted = logs.at(-1);
 	assert.deepEqual(Object.keys(exhausted), ["event", "forge", "attempts", "windowMs", "reason"]);
 	assert.equal(exhausted.event, "identity_retry_exhausted");
-	assert.equal(exhausted.attempts, 2);
+	assert.equal(exhausted.attempts, 3);
 	assert.equal(exhausted.windowMs, 12_000);
-	assert.equal(exhausted.reason, "down 2");
+	assert.equal(exhausted.reason, "down 3");
+});
+
+test("a windowless caller fails loud, never retrying unbounded", async () => {
+	// NaN or a missing window would make the remaining-time test never exhaust: an unbounded boot
+	// retry is the silent no-op this project refuses, so the helper refuses the caller instead. The
+	// guard runs before the first attempt on purpose -- a bad window is a bug at the seam, not a
+	// property of whether the forge happened to answer.
+	for (const bad of [undefined, Number.NaN, 0, -5, Number.POSITIVE_INFINITY]) {
+		await assert.rejects(
+			retryIdentity(async () => 1, { forge: "github", windowMs: bad, log: () => {} }),
+			/windowMs must be a positive finite number/,
+			`windowMs=${bad} must refuse instead of retrying unbounded`,
+		);
+	}
 });
 
 test("the fuse bounds an attempt that never answers, and a fused-out attempt is transient", async () => {
 	// A forge that ACCEPTS and never answers is the case the fuse exists for: the resolvers pass no
 	// AbortSignal and undici's header timeout is five minutes, so without the fuse one mute attempt
-	// spends the whole window. windowMs 6000: fuse loss one sleeps 5s, fuse loss two crosses.
-	const { opts, sleeps, timers } = makeRun({ windowMs: 6_000 });
+	// spends the whole window. windowMs 5000: fuse loss one sleeps the full remaining 5s, and fuse
+	// loss two lands exactly at the deadline, so the second failure exhausts.
+	const { opts, sleeps, timers } = makeRun({ windowMs: 5_000 });
 	const p = retryIdentity(() => new Promise(() => {}), opts);
 	assert.equal(timers.handles.length, 1, "the fuse armed with the attempt");
 	assert.equal(timers.handles[0].ms, 10_000, "at the documented per-attempt bound");
@@ -174,9 +191,14 @@ test("every armed fuse is cleared, on every exit, and none is ever unref'd", asy
 		throw Object.assign(new Error("nope"), { piDispatchConfig: true });
 	}, tagged.opts).catch(() => {});
 
-	const lost = makeRun({ windowMs: 4_000 }); // first gap 5000 > 4000: one fused attempt, then exhaustion
+	// The clamp guarantees at least two attempts (the first failure always has window left), so the
+	// lost scenario fires BOTH fuses: gap one is clamped to the whole 4s window, and the second
+	// failure lands at the deadline and exhausts.
+	const lost = makeRun({ windowMs: 4_000 });
 	const p = retryIdentity(() => new Promise(() => {}), lost.opts);
 	lost.timers.handles[0].cb();
+	for (let i = 0; i < 50 && lost.timers.handles.length < 2; i++) await new Promise((r) => setImmediate(r));
+	lost.timers.handles[1].cb();
 	await p.catch(() => {});
 
 	const all = [...win.timers.handles, ...tagged.timers.handles, ...lost.timers.handles];
@@ -211,23 +233,30 @@ test("with the REAL timers, a resolved attempt leaves no live Timeout behind (as
 	}
 });
 
-test("an abandoned attempt's late rejection lands in the pre-attached catch, never as an unhandledRejection", async () => {
-	// The ensureAuth rule (worker/src/start.mjs): the fuse can win the race while the real attempt is
-	// still pending, and when that attempt finally rejects there must already be a handler on it.
+test("an abandoned attempt's late rejection never surfaces as an unhandledRejection", async () => {
+	// The fuse can win the race while the real attempt is still pending, and when that attempt finally
+	// rejects there must already be a handler on it. Today that handler is Promise.race's OWN
+	// subscription (measured: it subscribes a reject handler to every contestant, which is why the
+	// helper carries no explicit catch, unlike the worker's ensureAuth whose promise outlives its race
+	// in a map). This test pins the PROPERTY, so any refactor that stops racing the raw attempt --
+	// wrapping it first, racing conditionally -- has to bring its own handler or go red here.
 	const trapped = [];
 	const onUR = (err) => trapped.push(err);
 	process.on("unhandledRejection", onUR);
 	try {
 		const { opts, timers } = makeRun({ windowMs: 4_000 });
-		let rejectLate;
-		const p = retryIdentity(() => new Promise((_, rej) => (rejectLate = rej)), opts);
+		const rejecters = [];
+		const p = retryIdentity(() => new Promise((_, rej) => rejecters.push(rej)), opts);
 		timers.handles[0].cb();
+		for (let i = 0; i < 50 && timers.handles.length < 2; i++) await new Promise((r) => setImmediate(r));
+		timers.handles[1].cb();
 		const err = await p.then(() => null, (e) => e);
 		assert.match(err.message, /did not answer/);
-		rejectLate(new Error("the mute forge finally answered, with a failure, after everyone left"));
+		assert.equal(rejecters.length, 2, "both attempts were abandoned by their fuses");
+		for (const rej of rejecters) rej(new Error("the mute forge finally answered, with a failure, after everyone left"));
 		await new Promise((r) => setImmediate(r));
 		await new Promise((r) => setImmediate(r));
-		assert.deepEqual(trapped, [], "removing the pre-race catch makes this an unhandledRejection");
+		assert.deepEqual(trapped, [], "an abandoned attempt with no handler would land here");
 	} finally {
 		process.off("unhandledRejection", onUR);
 	}

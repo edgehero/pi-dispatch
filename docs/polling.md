@@ -158,6 +158,7 @@ Comments self heal, because their cursor advances and the next cycle collects th
 |---|---|---|
 | `POLL_REPOS` | unset | comma separated `owner/name`, deduplicated. Unset means discover from the App installation, and is a boot refusal under any auth source but `app` |
 | `POLL_INTERVAL_SECONDS` | 60 | seconds between cycles, floored at 30 (a positive value below it is raised; 0, a negative, a fraction or junk refuses at boot), raised further by GitHub's own `x-poll-interval` |
+| `RECEIVER_IDENTITY_RETRY_SECONDS` | 600 | how long the boot's identity lookup retries a transient failure (a 502, a refused connection, GitHub mid-restart) before exiting 1 for the supervisor, floored at 60 with the same raise-or-refuse rules; the poller's gate and `serve`'s arms share the one window |
 
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
 them, but it does load them, because it reuses the receiver's loader rather than forking it. A

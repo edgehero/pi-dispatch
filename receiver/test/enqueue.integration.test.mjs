@@ -136,3 +136,67 @@ test("verify->filter->enqueue lands a github job in a real Valkey under the GUID
 		await queue.close();
 	}
 });
+
+test("a post-queue identity refusal EXITS, code intact: the queue's live connection is released (issue #318)", { skip }, async () => {
+	// Measured before the fix, against a live Valkey: a gitlab 401 assigned process.exitCode = 2 and
+	// the process stayed alive indefinitely -- the queue's client held the loop, so under Type=simple
+	// the unit read "active (running)" and RestartPreventExitStatus=2 was never consulted. And the
+	// first fix attempt crashed instead of exiting: close() on a still-connecting client makes BullMQ
+	// re-emit the aborted init as an unlistened 'error' event, an uncaught exception whose exit 1
+	// stomped the 2. Only a REAL BullMQ against a real Valkey can regress either half -- the fake
+	// queues in start.test.mjs cannot -- which is why this pin lives in the integration file.
+	const { createServer } = await import("node:http");
+	const { mkdtempSync, writeFileSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { spawn } = await import("node:child_process");
+	const { fileURLToPath } = await import("node:url");
+
+	const gl = createServer((req, res) => {
+		res.writeHead(401, { "content-type": "application/json" });
+		res.end("{}");
+	});
+	await new Promise((resolve) => gl.listen(0, "127.0.0.1", resolve));
+	try {
+		const dir = mkdtempSync(join(tmpdir(), "postqueue-exit-"));
+		const triggers = join(dir, "triggers.json");
+		writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "gitlab", flow: "f" } }] }));
+		// Async spawn, NOT spawnSync: spawnSync blocks this process's event loop, and the 401 server
+		// above lives in this process -- a blocked loop can never answer, so the child's identity call
+		// fuses out as transient and retries until the harness reaps it, proving only that the harness
+		// wedged itself (measured; the first draft of this test did exactly that).
+		const child = spawn(process.execPath, [fileURLToPath(new URL("../src/start.mjs", import.meta.url))], {
+			env: {
+				PATH: process.env.PATH,
+				PI_TRIGGERS_FILE: triggers,
+				GITLAB_WEBHOOK_MODE: "token",
+				GITLAB_WEBHOOK_SECRET: "s",
+				GITLAB_TOKEN: "glpat-x",
+				GITLAB_URL: `http://127.0.0.1:${gl.address().port}`,
+				VALKEY_URL: url,
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stderr = "";
+		child.stderr.on("data", (d) => (stderr += d));
+		let reaper = null;
+		const r = await Promise.race([
+			new Promise((resolve) => child.on("exit", (status, signal) => resolve({ status, signal }))),
+			new Promise((resolve) => {
+				reaper = setTimeout(() => {
+					child.kill("SIGKILL");
+					resolve({ status: null, signal: "harness-timeout" });
+				}, 15_000);
+			}),
+		]);
+		clearTimeout(reaper);
+		assert.equal(r.signal, null, `the boot must EXIT on its own, never be reaped (stderr tail: ${stderr.slice(-300)})`);
+		assert.equal(r.status, 2, "the determinate refusal's exit code must actually REACH the supervisor");
+		const failLine = stderr.split("\n").filter((l) => l.includes("receiver_start_failed")).at(-1);
+		const line = JSON.parse(failLine);
+		assert.equal(line.event, "receiver_start_failed");
+		assert.match(line.reason, /401/);
+	} finally {
+		gl.close();
+	}
+});
