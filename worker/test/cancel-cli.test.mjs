@@ -149,6 +149,33 @@ test("an unacknowledged active cancel says so, deletes its request, and exits 1 
 	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "cancel:req:j5"), "the abandoned request must not fire after the operator walked away");
 });
 
+test("a paused-queue job removes like any other never-ran job", { skip: needsDeps }, async () => {
+	// Jobs enqueued while the kill switch is on land in the paused list; they never ran either.
+	const { out, seams } = world({ hash: {}, state: "paused" });
+	assert.equal(await runCancel("j9", "redis://x", seams), 0);
+	assert.match(out.join(""), /removed j9 \(paused\)/);
+});
+
+test("Valkey dying MID-active-cancel still deletes the placed request, promptly (review finding)", { skip: needsDeps }, async () => {
+	// The ack poll throws after the request was SET: the catch must delete the request it placed (an
+	// abandoned cancel must not fire after the operator read an error) without the bounded race's timer
+	// holding the process open past the del.
+	const { ops, err, seams } = world({ hash: {}, state: "active" });
+	const probeGet = seams.redisFn();
+	probeGet.get = async (key) => {
+		ops.push(["get", key]);
+		throw new Error("boom mid-poll");
+	};
+	const start = Date.now();
+	const code = await runCancel("j8", "redis://x", seams);
+	assert.equal(code, 1);
+	assert.match(err.join(""), /could not reach Valkey/);
+	assert.match(err.join(""), /boom mid-poll/);
+	assert.ok(ops.some((op) => op[0] === "set" && op[1] === "cancel:req:j8"), "the request was really placed (this test would be vacuous otherwise)");
+	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "cancel:req:j8"), "the placed request is deleted on the error path");
+	assert.ok(Date.now() - start < 500, "the cleanup race's timer must not hold the verb open");
+});
+
 test("a finished job refuses: there is nothing to cancel", { skip: needsDeps }, async () => {
 	const { err, seams } = world({ hash: {}, state: "completed" });
 	assert.equal(await runCancel("j6", "redis://x", seams), 1);

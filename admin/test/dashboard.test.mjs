@@ -1782,6 +1782,32 @@ test("h opens the HELD drill-in when something is held, and is inert when nothin
   assert.doesNotMatch(still, /x cancel job/, "a view of an empty list answers no question");
 });
 
+test("a HELD_LIST cursor past the end of a SHRUNKEN list clamps rather than arming on nothing (review finding)", async () => {
+  const held = { rows: [...HELD_ROWS], more: 0 };
+  const cancelled = [];
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held }), cancelHeld: async ({ jobId }) => (cancelled.push(jobId), { ok: true, jobId }) }),
+  });
+  await flush();
+  comp.handleInput("h");
+  comp.handleInput("\x1b[B");
+  comp.handleInput("\x1b[B");
+  comp.handleInput("\x1b[B"); // cursor on the fourth row
+  held.rows = [HELD_ROWS[0]]; // a refresh shrank the list under the cursor
+  comp.handleInput("x");
+  await flush();
+  assert.match(stripAnsi(comp.render(80).join("\n")), /cancel held job acme\/web#7\?/, "the arm lands on the clamped row, not past the end");
+  comp.handleInput("y");
+  await flush();
+  await flush();
+  assert.deepEqual(cancelled, ["gh-1"], "and cancels the row that exists");
+  await comp.dispose();
+});
+
 test("in HELD_LIST, x arms on the CURSOR row and y cancels that hold through the held door", async () => {
   const cancelled = [];
   const comp = makeDashboard({

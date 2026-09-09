@@ -102,7 +102,10 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 				// on a locked job, so re-read and fall through to the active path rather than failing an
 				// operator whose job is now exactly the case the active path exists for.
 				state = await job.getState().catch(() => "unknown");
-				if (state !== "active") return fail(`could not remove ${jobId} (${state}): ${error.message}`);
+				// The re-read state and the throw's own words together, labelled apart: the error came from
+				// the remove attempt, the state from after it, and gluing them unlabelled read as one
+				// mismatched diagnosis (review finding).
+				if (state !== "active") return fail(`could not remove ${jobId} — it is now ${state}; the remove failed with: ${error.message}`);
 			}
 		}
 
@@ -121,7 +124,16 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// Best-effort, and ONLY when a request was actually placed: an abandoned request must not fire
 		// after the operator read an error and walked away -- but against a Valkey that is DOWN, a bare
 		// del would sit in ioredis's retry queue and hold this process open long past the error message.
-		if (requested) await Promise.race([Promise.resolve(probe.del?.(cancelReqKey(jobId))).catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
+		// The bound timer is CLEARED when the del wins the race (discoverHostQueues' own rule): cli.mjs
+		// sets exitCode rather than exiting, so a stray pending timer is a second of pure hang.
+		if (requested) {
+			let bound;
+			await Promise.race([
+				Promise.resolve(probe.del?.(cancelReqKey(jobId))).catch(() => {}),
+				new Promise((r) => (bound = setTimeout(r, 1000))),
+			]);
+			clearTimeout(bound);
+		}
 		return fail(`could not reach Valkey at ${url} — is it running? (docker compose up)\n  ${error.message}`);
 	} finally {
 		probe.disconnect?.();

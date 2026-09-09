@@ -340,6 +340,6 @@ sha at enqueue for held jobs specifically is an open question (`OQ-029`), not a 
 | Check contract | argv[1] is the id-only target; exit `0` go, `3` not yet, `2` never (terminal), `1` could not tell (counted); stdout and stderr counted, never read; 10s timeout, SIGTERM then SIGKILL |
 | Refusal reasons | `wait-refused`, `wait-expired`, `wait-unanswerable`, `wait-profile-unknown`, `wait-superseded`, `wait-skew`, `wait-unreadable`, `wait-after-beyond-max` (all pre-spend, never retried) |
 | Refused at load | `exclusive`, unknown or misspelled keys, a zone-less `after`, two `after`s, a repeated profile, `on.once`, `run.replicas`, `cron` triggers |
-| Panel | the `held` section (appears only when something waits), `dispatch_waits`, `dispatch_wait_cancel` |
+| Panel | the `held` section (appears only when something waits) with its `h` drill-in (`x` cancels a hold), `dispatch_waits`, `dispatch_wait_cancel`, and `pi-dispatch cancel <jobId>` at a terminal |
 | Version floor | worker 1.6.0, admin 1.6.0, receiver 1.4.0 |
 | Related | [quiet hours](pause-windows.md), [scoped limits](scoped-limits.md), [secrets](secrets.md), [workflows](workflows.md) |

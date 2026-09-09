@@ -1186,7 +1186,7 @@ function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: 
 /** One sentence for the footer from a cancel's result shape -- every branch names what actually happened. */
 function cancelNote(res: any): string {
   if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : res.ack} — stopping the container (~30s)`;
-  if (res?.timeout) return "no worker acknowledged — the job may be on an unreachable host; nothing was changed";
+  if (res?.timeout) return "no worker acknowledged — the job may have just finished, or its host is unreachable; nothing was changed";
   if (res?.ok) return `cancelled ${res.jobId} — it never ran, no record written`;
   if (res?.invalid) return `rejected: ${res.invalid}`;
   return "cancel failed — check the worker log";
