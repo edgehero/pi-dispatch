@@ -31,6 +31,7 @@ import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./trigger
 import { makeWatchCloser } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
+import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
@@ -895,6 +896,62 @@ export async function startWorker(
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
 
+	// HOISTED out of the deps literal (issue #288): the terminal failed listener below needs the same
+	// adapter the processor gets, and two bodies would drift exactly where drift costs a public comment.
+	const comment = async (job, text) => {
+		// Best-effort: the processor awaits comment() inside its try, so a rejection here would
+		// corrupt the job outcome and could drive a wrong retry / second PR (CONST-RETRY-INFRA-ONLY).
+		// This adapter NEVER throws.
+		const forge = forgeFor(job);
+		// Same re-resolve as the mint path, and it matters more here: a comment is how a refusal
+		// reaches the person who asked for the job, so a forge whose auth was merely unreachable at
+		// boot must not degrade every later comment to a stdout line nobody is watching.
+		//
+		// A THROWING re-resolve is treated as no auth rather than as a failed comment, which is what
+		// keeps the fallthrough below reachable: the text still lands on stdout instead of being
+		// replaced by a `comment_failed` line that does not carry it. This adapter never throws.
+		let auth = forge?.auth ?? null;
+		if (forge && !auth) {
+			try {
+				auth = await ensureAuth(job.kind);
+			} catch {
+				auth = null;
+			}
+		}
+		if (auth) {
+			try {
+				const token = await auth.mintToken(job);
+				await forge.host.postStatusComment(job, job.target, text, token);
+			} catch (err) {
+				log("comment_failed", { jobId: job?.id, reason: err?.message });
+			}
+			return;
+		}
+		// A local job, or a forge-backed one whose auth never came up. Either way there is nowhere to
+		// post, so the line on stdout IS the completion signal (REQ-LOCAL-JOB-VISIBILITY).
+		log("comment", { jobId: job?.id, text });
+	};
+
+	// The operator's failure hook (issue #288, INT-ON-FAILURE-HOOK-CONTRACT). Constructed ONLY when the
+	// knob is set: an unset PI_ON_FAILURE builds nothing, spawns nothing, and logs nothing -- the
+	// byte-identical guarantee. Fired from the two terminal listeners below, never from the processor:
+	// a hook fault must not be able to flip an outcome, and the listeners sit outside every try that
+	// decides one.
+	const onFailure = config.onFailure
+		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", log })
+		: null;
+	// Which POLICY reasons page the operator. Paid terminals only: worker-abort and runner-policy cost a
+	// container and ended wrong. Excluded on purpose: `completed` and every pre-spend refusal (free, and
+	// each already comments -- a delivery storm against a spent cap must not page anyone), and
+	// `operator-cancel`, because the operator initiated it and a push telling them what they just did is
+	// noise with a pager attached.
+	const HOOK_POLICY_REASONS = new Set(["worker-abort", "runner-policy"]);
+	// The infra-terminal sentence (issue #288). FIXED, never err.message: the message classes that reach
+	// a failedReason carry host paths and library words (the #310 record), and for a local job this text
+	// lands verbatim in the service log through the adapter's stdout fallthrough. The worker log already
+	// holds the truncated reason on the job_failed line beside it.
+	const FAILED_COMMENT = "Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.";
+
 	const worker = createWorkerFn({
 		connection: parseConnection(config.valkeyUrl),
 		// #227. The abort path's stop, resolved per job rather than hard-wired to docker. A container NAME is
@@ -1069,39 +1126,7 @@ export async function startWorker(
 			// REQ-RESURRECTABLE-SANDBOX. With the window at 0 this IS the old bare `cleanup`, by the same
 			// `rm` on the same path -- a deployment that wants no retention keeps today's behaviour exactly.
 			cleanup: makeCleanup({ sandboxDir: config.sandboxDir, retentionHours: config.sandboxRetentionHours, log }),
-			comment: async (job, text) => {
-				// Best-effort: the processor awaits comment() inside its try, so a rejection here would
-				// corrupt the job outcome and could drive a wrong retry / second PR (CONST-RETRY-INFRA-ONLY).
-				// This adapter NEVER throws.
-				const forge = forgeFor(job);
-				// Same re-resolve as the mint path, and it matters more here: a comment is how a refusal
-				// reaches the person who asked for the job, so a forge whose auth was merely unreachable at
-				// boot must not degrade every later comment to a stdout line nobody is watching.
-				//
-				// A THROWING re-resolve is treated as no auth rather than as a failed comment, which is what
-				// keeps the fallthrough below reachable: the text still lands on stdout instead of being
-				// replaced by a `comment_failed` line that does not carry it. This adapter never throws.
-				let auth = forge?.auth ?? null;
-				if (forge && !auth) {
-					try {
-						auth = await ensureAuth(job.kind);
-					} catch {
-						auth = null;
-					}
-				}
-				if (auth) {
-					try {
-						const token = await auth.mintToken(job);
-						await forge.host.postStatusComment(job, job.target, text, token);
-					} catch (err) {
-						log("comment_failed", { jobId: job?.id, reason: err?.message });
-					}
-					return;
-				}
-				// A local job, or a forge-backed one whose auth never came up. Either way there is nowhere to
-				// post, so the line on stdout IS the completion signal (REQ-LOCAL-JOB-VISIBILITY).
-				log("comment", { jobId: job?.id, text });
-			},
+			comment,
 			log,
 			// Resolved per job so the credential always comes from the job's OWN forge. A job whose forge has
 			// no working auth refuses here, at mint time, rather than running anonymously -- and the refusal
@@ -1164,12 +1189,30 @@ export async function startWorker(
 		// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
 		// REQ-LOCAL-JOB-VISIBILITY's whole point is that a missing line is what tells a human a run did nothing.
 		const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
-		for (const w of allWorkers) w.on("completed", (job, result) =>
-			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) }),
-		);
-		for (const w of allWorkers) w.on("failed", (job, err) =>
-			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) }),
-		);
+		for (const w of allWorkers) w.on("completed", (job, result) => {
+			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) });
+			// The hook's POLICY half (issue #288): worker-abort and runner-policy RETURN, so they land here
+			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
+			// the feature exists for. Folded into the existing listener body, never a second w.on: the
+			// start-wiring harness records ONE handler per event, and two would race the log line's pin.
+			if (onFailure && result?.outcome === "policy" && HOOK_POLICY_REASONS.has(result.reason)) {
+				onFailure({ jobId: job?.id, outcome: "policy", reason: result.reason });
+			}
+		});
+		for (const w of allWorkers) w.on("failed", (job, err) => {
+			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
+			// The TERMINAL failed attempt only (issue #288): `finishedOn` is set by BullMQ's own move on the
+			// non-retry branch alone, and the emit follows it, so this guard reads the queue's decision
+			// instead of re-deriving attempts arithmetic that could drift from shouldRetry. A retried
+			// attempt comments nothing (a flaky daemon must not post three comments for one recovery) and
+			// pages nobody; a recovery comments nothing at all. This seam also catches what the processor
+			// never sees: the stall-kill (maxStalledCount 0 fails a crashed worker's job at next pickup)
+			// and the wait-gate rethrow that escapes above the processor's catch.
+			if (job?.finishedOn) {
+				void comment({ ...job.data, id: job.id }, FAILED_COMMENT);
+				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
+			}
+		});
 
 		// CONST-RETRY-INFRA-ONLY money backstop: BullMQ's maxStalledCount does not bound scheduler jobs, so a
 		// wedged scheduled run is re-paid on every stall. The guard counts stalls per scheduler and tears the

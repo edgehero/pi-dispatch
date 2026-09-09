@@ -134,6 +134,32 @@ test("the abortReason match is CLOSED: shutdown, the timer's reason, and garbage
 	}
 });
 
+// --- the post-spend terminal comments (issue #288) ----------------------------------------------------
+
+test("worker-abort, operator-cancel and runner-policy each comment their own fixed sentence -- the paid failures stop being the silent ones", async () => {
+	for (const [runContainer, needle] of [
+		[async () => ({ code: 137, aborted: true }), /the worker ended this run/],
+		[async () => ({ code: 137, aborted: true, abortReason: "operator-cancel" }), /the operator cancelled this run/],
+		[async () => ({ code: 2, aborted: false }), /ended inside the container/],
+	]) {
+		const posted = [];
+		const { deps: d } = deps({ runContainer, comment: async (_j, t) => posted.push(t) });
+		await runJob(ghJob, d);
+		assert.equal(posted.length, 1, "exactly one comment per terminal");
+		assert.match(posted[0], needle, "each reason gets its own sentence, so the requester learns WHICH stop this was");
+		assert.match(posted[0], /Not retried\./);
+		assert.ok(!posted[0].includes("/"), "fixed and path-free: for a local job this text lands verbatim in a persistent service log");
+	}
+});
+
+test("an InfraRetry throw comments NOTHING from runJob -- once-ness for the infra class lives at the terminal seam", async () => {
+	for (const code of [1, 99, 125]) {
+		const { deps: d, calls } = deps({ runContainer: async () => ({ code, aborted: false }) });
+		await runJob(ghJob, d).catch(() => {});
+		assert.ok(!calls.some((c) => c.startsWith("comment:")), `exit ${code}: a retried attempt must not post -- a flaky daemon would post three comments for one recovery`);
+	}
+});
+
 test("an unbidden 137 (aborted:false, kernel OOM) throws InfraRetry -- infra stays retryable", async () => {
 	const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: false }) });
 	await assert.rejects(() => runJob(ghJob, d), InfraRetry);

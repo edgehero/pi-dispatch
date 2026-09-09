@@ -1315,6 +1315,22 @@ adversarial passes did.
 - **Raised by**: issue #57. **Closed by**: issue #267.
 
 
+## OQ-034 — The failure hook's exit code and delivery are conventions we cannot enforce
+
+- **Status**: ACCEPTED -- the same residual `OQ-027` (a check's exit codes) and `OQ-030` (a resolver's)
+  carry, arriving at the third operator-command seam (issue #288, `PI_ON_FAILURE`).
+- **Position**: the hook's exit code is logged (`on_failure`, key set `{ jobId, code, detail }`) and
+  otherwise unread: there is nothing to map it TO, because nothing flows back -- a hook fault must not be
+  able to flip a job's outcome (`CONST-RETRY-INFRA-ONLY`). Consequently a broken script loses
+  notifications silently except for that one log line, and delivery is at-most-once best effort: a
+  whole-deployment death in the instant between the terminal transition and the listener loses the
+  notification (a single crashed worker does not -- the stall path fails its job at the next pickup and
+  the observing worker's listener fires). Persisting pending notifications was rejected in
+  `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`: a store to dedup a lost push costs more than the loss.
+- **What would reopen it**: an operator asking for delivery guarantees or for the hook's exit code to
+  mean something -- either is the moment this stops being a convention and becomes a transport, which is
+  the thing `REQ-OPERATOR-FAILURE-NOTIFICATION` promises never to grow in-tree.
+
 ## Revision History
 
 | Date | Change |
@@ -1367,3 +1383,4 @@ adversarial passes did.
 | 2026-09-09 | Issue #301. **`OQ-008` UNCHANGED, checked**: closing the receiver's watch moves no coordination into Redis and adds no toggle, so the question's boundary is untouched. The 2026-09-07 row on this table named two residuals recorded as decisions in `DES-WATCHERS-CLOSE-WITH-THE-WORKER`; the second, that the receiver's own watch is never closed because its shutdown exits the process, is now closed by that entry's own mechanism, and the first, one reload during the worker's drain, stands unchanged. No new question is minted: a residual that graduates into a fix is the decision log's job to record, and it has. |
 | 2026-09-09 | Issue #291. **`OQ-005` AMENDED (Action on bump)**: `createAgentSession`'s option surface is now load-bearing beyond the auth pair -- on a bump, re-verify `excludeTools` (with its `string[]` type), `core/tools`' `allToolNames` against the hand-written `EXCLUDABLE_TOOL_NAMES`, and the fact that pi still IGNORES unknown exclusion names silently, all in the NEW tarball; if a bump makes pi throw on unknown names, the belt-and-braces validation split is re-argued rather than merely re-pinned. The firing bolts are named in the row (`pinned-api.test.mjs`'s sdk.d.ts pins, `worker/test/exclude-tools.pinned.test.mjs`) so a bump failure reads as a checklist. Every other row UNCHANGED, checked -- in particular `OQ-022` (nothing model-callable gains a parameter here) and `OQ-012` (operator-built images without the new token refuse only jobs that carry exclusions, which is the inclusion-list polarity that row already accepts). |
 | 2026-09-09 | Issue #281. **`OQ-015` RATIFIED** -- Status moves from `ACCEPTED RISK -- wants explicit ratification` to `ACCEPTED RISK -- RATIFIED 2026-09-09`, on the `OQ-014` precedent end to end: the verdict's why is a new field (deciding down was the row's own offered alternative and lost on the record -- a shipped, bounded, documented arm is not deleted to settle a paperwork debt; the accretion evidence is #187 widening replicas onto Azure while the row asked), the existing bounds are named as the ratification's TERMS, and the `Needs` field is REPLACED by what would REOPEN it (an HMAC option shipping on Service Hooks; the author gate weakening on Azure; dedup leaving the body-carried id). The ratifying act is `requirements.md`'s Scope sentence, whose revision row of the same date records it, and the acceptance discipline is generalized by the Scope pin test: a new forge cannot ship without the sentence naming it. Every other row UNCHANGED, checked -- `OQ-013` in particular is untouched, and one attribution is stated precisely because the review caught it loose: the Azure two-call-lookup detail rides `OQ-015`'s OWN Related-risks bullet, not `OQ-013`'s body, whose 2026-07-31 "now true of three forges" amendment never reached its Position text -- a pre-existing gap this ratification neither widens nor quietly fixes. |
+| 2026-09-09 | Issue #288. **NEW `OQ-034`**: the failure hook's exit code and delivery are conventions we cannot enforce -- OQ-027/OQ-030's residual at the third operator-command seam, with the at-most-once boundary stated and the reopen condition being any ask for delivery guarantees (the moment a convention becomes a transport). **`OQ-023` UNCHANGED, checked, and the boundary is the point**: #288 comments the POST-SPEND terminals only; the prepare-policy passthrough (`sha-gone`, the `.pi/` caps) stays silent exactly as that row ratified, because its own hazard -- a repo whose `.pi/` breaches a cap commenting on EVERY delivery -- wants the dedup the spend refusals have and this slice does not build. **`OQ-027`/`OQ-030` UNCHANGED, checked**: the new row is a sibling, not a replacement. |

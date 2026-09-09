@@ -3585,6 +3585,43 @@ a tunnel.
   cancel of a job no reachable worker owns says so instead of doing nothing; `dispatch_wait_cancel` is
   no longer the only door to a held job.
 
+## DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK
+
+- **Decision** (issue #288): the post-spend terminals comment through the EXISTING adapter -- worker-abort,
+  operator-cancel and runner-policy at their processor return sites via a `TERMINAL_COMMENTS` map keyed by
+  the reason token (a new classification adds a row, never a re-plumb), and the final infra failure at
+  start.mjs's failed listener, guarded on BullMQ's own `finishedOn` so a retried attempt can never
+  comment. The runner-policy comment is UNCONDITIONAL because the "did the agent already comment"
+  discriminator already exists at the exit-code boundary: exit 0 is where the agent's own status lives
+  (the prompt contract instructs it), so exit 2 means it was cut off before that step. The hook
+  (`PI_ON_FAILURE`, `INT-ON-FAILURE-HOOK-CONTRACT`) is wait-check.mjs reduced further -- all stdio
+  ignored, no verdict, no fault count, the reason shape-guarded at the spawn -- fired from the two
+  existing listener bodies for outcome `failed` (terminal) and policy `worker-abort`/`runner-policy`
+  (which RETURN, so a failed-only mount would miss exactly the paid terminals the feature exists for).
+- **Rejected**, each with its why: an in-project transport (webhook/ntfy/Slack/mail: a dependency, a
+  queue and a retry policy this layer has no business growing -- the argv IS the feature);
+  comment-on-every-attempt (a flaky daemon posts three comments for one recovery); the hook receiving
+  payload text or job-data argv (CONST-ISSUE-TEXT-IS-DATA; id-only is the whole contract); mounting the
+  hook in the container (it would ride the job's own blast radius and die with it); a knob gating the
+  comments (they discharge REQ-JOB-STATUS-COMMENTS' existing acceptance -- a default deployment must not
+  violate the row); recordRun as the hook mount (fires on retried attempts and re-implements finality);
+  the processor catch as the infra-comment site (misses the stall-kill and the wait-gate rethrow that
+  escapes above it); parsing the runner's exit-line reason vocabulary (a real contract change buying a
+  distinction the exit codes already draw); persisted crash-dedup state (comment is best-effort by
+  contract, and a store to dedup a lost notification costs more than the loss).
+- **Residuals**: an agent that posts its own status and THEN blows its turn budget yields one extra
+  comment, bounded at one; a whole-deployment death between the terminal transition and the listener
+  loses both channels (a single crashed worker does NOT -- the stall path fails its job at next pickup
+  and the observing worker's listener fires); a graceful drain's exit can orphan an in-flight POST or
+  hook child. `OQ-023`'s prepare-policy silence stands untouched -- #288 is post-spend only, and that
+  row's own hazard (a `.pi/` cap breach commenting on every delivery) is exactly why.
+- **Traces to**: `REQ-JOB-STATUS-COMMENTS`, `REQ-OPERATOR-FAILURE-NOTIFICATION`,
+  `CONST-RETRY-INFRA-ONLY`, `INT-ON-FAILURE-HOOK-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT` (the
+  operator-command model)
+- **Acceptance**: the issue's own -- a 30-minute kill comments; a final infra failure comments once; a
+  one-line script gets the push; no payload text crosses either channel; neither knob set is
+  byte-identical.
+
 ## Revision History
 
 | Date | Change |
@@ -3690,3 +3727,4 @@ a tunnel.
 | 2026-09-09 | Issue #291. **NEW `DES-PER-TRIGGER-TOOL-EXCLUSIONS`**: the denylist decision and its layered enforcement -- a hand-written `EXCLUDABLE_TOOL_NAMES` bolted twice to the pinned artifact (the shared validator is pure and pi-free so it cannot derive; the runner derives its own set from the seven root-exported factories because `allToolNames` is unexported and the exports map is closed); the `excludeTools` capability token closing the stale-image fail-open; outbox inheritance with the destructive direction INVERTED (dropping it widens the child, so it is mandatory where secrets' absence is). The Rejected list records `run.tools` (an allowlist inverts to "which tools exist" and silently widens on a pin bump), `run.noTools` (the near-miss sweep can never catch it, so it is refused by name), free-string exclusions (they re-open the silent no-op), any panel key or model-callable setter, a general unknown-key sweep, and a command-style chain refusal for the request-file key (one read-and-refused exception stays one). Residuals name the old-parser release skew honestly and the tools-not-capabilities honesty boundary (excluding `bash` removes pi's tool, not the shell; a genuinely read-only trigger also wants `run.packages: false`). **`DES-PER-TRIGGER-JOB-IMAGE` UNCHANGED, checked** (its no-model-callable-path clause is this field's template); **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked** (its near-miss sweep and load/pre-spend split are copied, never moved); **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked** (its general-sweep rejection is cited and held); **`DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked** (the inheritance rides the existing explicit-property-reads mechanism, adding no read of `req`). |
 | 2026-09-09 | Issue #279. `buildGraphHtml`, `layoutGraph` and the page-only CSS are DELETED from graph-html.mjs: no production caller since #181 removed the `/dispatch graph html` command, and the 2026-08-12 row below describing `buildGraphScene` as "the normalize+layout+SVG-emission half of `buildGraphHtml`" now names a function that no longer exists -- the history stays as written, this row is the forward pointer (the scene's only consumer is `insights-html.mjs`, and its docblock now says so). The suite that drove the dead builder was rewritten around the shipping surface: layout invariants through `buildGraphScene(...).layout`, page-level pins through `buildInsightsHtml` on a fold-less payload (its documented degrade renders the topology whole), `PAGE_JS` hardening on the exported string itself, and the graph-html purity test now BANS the two deleted names from reappearing. Duplicated pins (determinism, well-formedness, redaction, file:// posture, the reload contract) were dropped in favour of the insights suite's own -- one pin per property, on the surface that ships. **`DES-GRAPH-EDGE-DERIVATION` UNCHANGED, checked** (the fold and the model are untouched); **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked** (no command, tool or view changes); **`DES-COST-FOLD-BY-SCAN` UNCHANGED, checked**. interfaces.md, constitution.md and open-questions.md carry no affected entry (OQ-024 already records the #181 rescope and stays true) -- UNCHANGED, checked. |
 | 2026-09-09 | Issue #287, the operator cancel. **NEW `DES-CANCEL-VIA-REDIS-REQUEST-KEY`** (decision, the rejected quintet -- pub/sub, `getTrackedJobIds` coupling, state-polling-as-ack, a `dispatch_cancel` model tool, cursor-folded held rows -- and the named residuals). **`DES-CLI-SURFACE` AMENDED**: `cancel` joins the operator-typed ungated tier, one job id, one job stopped. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added or removed, so the enumeration its Decision carries -- and the two-directional pin `admin/test/wiring.test.mjs` keeps on it -- stands untouched; `dispatch_wait_cancel` changes only its description string (it stops claiming to be the only door). **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked**: hold semantics, keyspace and refusal ladder are untouched; the cancel sequence merely moved from the admin into `cancel-state.mjs` with the admin delegating, byte-identical behaviour under the existing held tests. |
+| 2026-09-09 | Issue #288. **NEW `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`**: the post-spend terminals comment through the existing adapter (a reason-token map at the processor's return sites; the infra terminal at the failed listener on BullMQ's own `finishedOn`), and `PI_ON_FAILURE` is wait-check.mjs reduced further, fired from the two existing listener bodies for the paid terminals only. The Rejected list carries the nine alternatives with their reasons -- most load-bearing: no in-project transport ever (the id-only argv IS the feature), no knob over the comments (they discharge `REQ-JOB-STATUS-COMMENTS`' standing acceptance), recordRun refused as mount (fires on retried attempts), the processor catch refused as the infra site (misses the stall-kill and the wait-gate escape), and the runner's exit-line reason vocabulary stays unread (the exit codes already draw the needed distinction). **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: no retry classification moves; the comments and the hook observe outcomes, never decide them. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: operator-cancel gains its comment ROW here and is excluded from the hook (the operator initiated it), both anticipated by that entry's map shape. |

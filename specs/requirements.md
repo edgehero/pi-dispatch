@@ -322,9 +322,40 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `CONST-PI-VERSION-PINNED`'s silent-no-op failure mode: if an upstream break makes every job a no-op,
   the queue still reports success — a missing completion comment is what a human would actually notice.
 - **Traces to**: `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`
+- **Who authors which comment** (issue #288, closing the acceptance's paid half): the AGENT authors the
+  exit-0 status comment (the prompt contract instructs it, including for "I looked and cannot fix
+  this"); the WORKER authors every other terminal comment -- each pre-spend refusal (the ladder), the
+  worker-abort/operator-cancel/runner-policy stops (fixed sentences keyed by the reason token), and the
+  final infrastructure failure. Once-ness for the infra class is BullMQ's own terminal decision
+  (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
+  daemon cannot post three comments for one recovery, and the seam that reads it also covers the
+  stall-killed job the processor never ran on. Every worker-authored sentence is fixed and path-free,
+  because a local job's comment lands verbatim in a persistent service log.
 - **Acceptance**: Given any forge-backed job reaching a terminal state, exactly one completion or failure
   comment exists on the issue — posted through that forge's own endpoint, which on GitLab means the merge
   request notes path for a merge-request target and the issue notes path for an issue.
+
+## REQ-OPERATOR-FAILURE-NOTIFICATION
+
+- **Statement**: The operator may name ONE command (`PI_ON_FAILURE`, absolute path, refused at boot
+  otherwise) which the worker executes with id-only argv -- `<jobId> <outcome> <reason> <host>` -- when a
+  paid job reaches a terminal failure: the final infrastructure failure, a worker abort, or an
+  in-container policy stop. Fire and forget: at most once per job, fault-isolated so a hook failure can
+  never change a job's outcome, all stdio ignored, exit code logged and unread. Unset, the deployment is
+  byte-identical to one where the feature does not exist. This project ships NO transport, ever; the
+  operator wires ntfy, Slack or mail themselves in one line.
+- **Why**: the cheap failures announce themselves (every pre-spend refusal comments) while the expensive
+  ones -- the only ones that already cost a container and tokens -- were the silent ones, visible only in
+  a worker log nothing tails. A hook with id-only argv is the entire notification feature; a transport
+  would be a dependency, a queue and a retry policy this operational layer has no business growing.
+- **Excluded on purpose**: completions; every free pre-spend refusal (a delivery storm against a spent
+  cap must not page anyone); retried attempts that may yet recover; and `operator-cancel`, because the
+  operator initiated it.
+- **Traces to**: `REQ-JOB-STATUS-COMMENTS`, `CONST-RETRY-INFRA-ONLY` (a hook fault flips no outcome),
+  `CONST-ISSUE-TEXT-IS-DATA` (id-only argv), `INT-ON-FAILURE-HOOK-CONTRACT`
+- **Acceptance**: a 30-minute kill comments on its issue; a final infra failure comments once; an
+  operator with a one-line script gets a push when a job fails; no payload text crosses either channel; a
+  deployment setting neither knob behaves byte-identically to today.
 
 ## REQ-BRANCH-PROTECTION-PRECONDITION
 
@@ -1940,6 +1971,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-09 | Issue #288, telling someone when a paid job dies. **NEW `REQ-OPERATOR-FAILURE-NOTIFICATION`**: one operator command, id-only argv, fired on the paid terminals only (final infra failure, worker abort, in-container policy stop), at most once per job, fault-isolated, byte-identical when unset, and the project ships no transport ever. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the acceptance's paid half is now discharged -- a who-authors-which clause records that the agent owns the exit-0 status comment (the prompt contract) and the worker owns every other terminal comment, with once-ness for the infra class read off BullMQ's own `finishedOn` rather than re-derived attempts math, which also covers the stall-killed job the processor never ran on. The prepare-stage silence (`sha-gone`, the `.pi/` caps) stays OUTSIDE: that is `OQ-023`'s ratified accepted risk, boundary restated there, not here. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the stdout line stays the local terminal signal; the new fixed sentences ride the same adapter fallthrough, which is why they are path-free. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/start.mjs -> the hoisted comment adapter, the two listener bodies, makeOnFailure wiring; worker/src/on-failure.mjs; worker/src/config.mjs -> parseOnFailure. |
 | 2026-09-09 | Issue #287, the operator cancel. **NEW `REQ-OPERATOR-JOB-CANCEL`**: one job stops from a model-free surface -- the CLI's `cancel` verb (VALKEY_URL-only, the kill switch's own doctrine) and the panel's `x`/held drill-in -- with the active case recorded as `operator-cancel` beside `worker-abort` and the never-ran cases recording nothing (the #230 rule). The unowned case is a NAMED refusal: `cancelJob` is process-local and nothing maps a jobId to a host, so the active path is a request/ack keyspace (`INT-CANCEL-CHANNEL-CONTRACT`) whose timeout the operator watches, never a silent no-op. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: the timer, its bound and its classification stand; the cancel RIDES the same abort machinery and the discrimination is a closed exact-match on the signal's reason, so the timer's abort cannot reclassify. **`REQ-WAIT-FOR` UNCHANGED, checked**: hold semantics untouched; the held cancel is the existing sequence extracted to one shared body. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool added or removed (the wiring pin stands untouched); `dispatch_wait_cancel`'s description alone stops claiming to be the only door. **Code evidence**: worker/src/cancel-state.mjs; worker/src/cancel-cli.mjs; worker/src/index.mjs; worker/src/processor.mjs; admin/src/dashboard.ts; admin/src/read-model.mjs. |
 | 2026-09-09 | Issue #281. **Scope AMENDED, third de-GitHub-ification, and the last of its kind**: the Targets bullet named two forges while four shipped end to end (the 2026-07-29 row opened the closed list and closed it again at two members; docs/forgejo.md and docs/azure-devops.md had shipped since). It now names all four, TIERED honestly rather than flattened -- GitHub/GitLab designed-for, Forgejo admitted as GitHub-shaped needing no accommodation (`CONST-HMAC-OVER-RAW-BODY`'s own sentence), Azure DevOps serviced with the one property it cannot have, pointing at the constraint's named exception and at `OQ-015` rather than restating either -- and the credential clause extends in `CONST-TOKEN-SCOPED-PER-JOB`'s mechanism-neutral terms (Forgejo: a repository-scoped token; Azure: a PAT for a dedicated identity). **This row is the ratifying act `OQ-015` cited**: a scope statement that names the forge with its missing property IS the explicit acceptance the register was waiting for; the row's own status moves in the same commit. The invariant the issue was after is PINNED, not promised: `worker/test/forges.test.mjs` derives the forge list from `FORGE_KINDS` and greps this file's Scope region for each display name, with an unmapped kind a loud failure rather than a silent skip -- a new forge cannot ship without touching the sentence. **`REQ-DEDUP-BY-DELIVERY-GUID` UNCHANGED, checked** (OQ-015's clause (b) still describes its Azure arm); **`REQ-REPLICA-RUNS` UNCHANGED, checked** (#187's Azure widening is cited as the accretion evidence, not amended). **Code evidence**: worker/src/forges.mjs -> FORGE_KINDS; worker/test/forges.test.mjs -> the Scope pin. |
 | 2026-09-09 | Issue #279, the code catching up with `REQ-GRAPH-HTML-EXPORT`'s own SUPERSEDED text. The entry needed no change -- it already said the topology-only artifact and its command were removed and that the discipline lives on in `REQ-INSIGHTS-HTML-EXPORT` -- but the page BUILDER outlived the page by four issues: `buildGraphHtml` had no caller outside its own test file since #181, and 573 test lines pinned byte-determinism, escaping and redaction on an artifact nothing could emit. Deleted now, with its test-only layout wrapper and its orphaned page CSS, on the #309 `providerKeyVars` precedent: an exported helper with no caller left does not stay uncalled. Every pin that guarded a property the LIVE page still has was retargeted onto `buildInsightsHtml` (where it was not already an exact duplicate of that suite's own pin), so the escaping, redaction, tier, one-shot and honesty-counter guarantees are now asserted on the surface that ships. **`REQ-INSIGHTS-HTML-EXPORT` UNCHANGED, checked**: the artifact, its clauses and its suite are the beneficiaries, not the subject. **Code evidence**: admin/src/graph-html.mjs; admin/test/graph-html.test.mjs (rewritten around buildGraphScene and the live page); admin/test/insights-html.test.mjs -> the reload-contract test's two folded-in clauses. |

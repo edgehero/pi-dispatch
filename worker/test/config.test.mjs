@@ -79,6 +79,21 @@ test("chaining / dispatch knobs reject negatives and non-integers as config erro
 	}
 });
 
+test("PI_ON_FAILURE: unset is off, an absolute path is stored verbatim, a relative one refuses at boot (issue #288)", () => {
+	assert.equal(loadConfig({}).onFailure, null, "unset means the hook is never constructed");
+	assert.equal(loadConfig({ PI_ON_FAILURE: "" }).onFailure, null, "blank is unset, not an empty command");
+	assert.equal(loadConfig({ PI_ON_FAILURE: "/opt/pi/notify.sh" }).onFailure, "/opt/pi/notify.sh");
+	// Relative refuses LOUDLY: resolving it against a service manager's working directory would make the
+	// hook fire or vanish depending on who started the worker, and a silently dropped hook is a
+	// notification the operator believes is wired.
+	assert.throws(() => loadConfig({ PI_ON_FAILURE: "notify.sh" }), (e) => e.piDispatchConfig === true && /PI_ON_FAILURE/.test(e.message));
+	assert.throws(() => loadConfig({ PI_ON_FAILURE: "./notify.sh" }), (e) => e.piDispatchConfig === true);
+	assert.equal(loadConfig({}).onFailureTimeoutMs, 10000);
+	assert.equal(loadConfig({ PI_ON_FAILURE_TIMEOUT_MS: "5000" }).onFailureTimeoutMs, 5000);
+	assert.throws(() => loadConfig({ PI_ON_FAILURE_TIMEOUT_MS: "junk" }), (e) => e.piDispatchConfig === true);
+	assert.throws(() => loadConfig({ PI_ON_FAILURE_TIMEOUT_MS: "0" }), (e) => e.piDispatchConfig === true);
+});
+
 test("dispatchRunRoots splits on path.delimiter, trims, drops empties", () => {
 	assert.deepEqual(loadConfig({ PI_DISPATCH_RUN_ROOTS: ["/srv/a", "/srv/b"].join(delimiter) }).dispatchRunRoots, ["/srv/a", "/srv/b"]);
 	assert.deepEqual(

@@ -37,6 +37,22 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
  * retries per `attempts`. The caller (the BullMQ processor) turns the thrown/returned distinction
  * into the queue's retry behaviour -- that is INT-RUNNER-EXIT-CODE-PROTOCOL.
  */
+
+// The post-spend terminal comments (issue #288). Every FREE refusal above the container already comments;
+// these are the paths where money was spent and the run still ended without the agent's own status step,
+// which used to tell the issue nothing (REQ-JOB-STATUS-COMMENTS' acceptance -- "exactly one completion or
+// failure comment" -- held only below the spend line). Keyed by the reason token so a new abort
+// classification adds a ROW here, never a re-plumb; sentences are FIXED and path-free, because for a
+// local job the adapter logs the full text into a persistent service log (the "this folder" discipline
+// at the scope-cap refusal). The completed path stays silent on purpose: exit 0 is where the AGENT'S own
+// status comment lives (the prompt contract instructs it, including for "I cannot fix this"), and exit 2
+// by construction means the agent was cut off before that step.
+const TERMINAL_COMMENTS = {
+	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
+	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
+	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
+};
+
 export async function runJob(job, deps) {
 	const {
 		redis,
@@ -700,7 +716,13 @@ export async function runJob(job, deps) {
 		// classify as worker-abort, so a pin bump that changes what rides the signal can widen nothing.
 		// `abortReason` itself never reaches the record -- buildRecord copies named fields only.
 		// exitCode/turns/tokens carry the container's own exit, turn count, and usage totals; budgetReserved true post-reserve.
-		if (aborted) return { outcome: "policy", reason: abortReason === "operator-cancel" ? "operator-cancel" : "worker-abort", exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+		if (aborted) {
+			const reason = abortReason === "operator-cancel" ? "operator-cancel" : "worker-abort";
+			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
+			// the one swallowed comment in this file (the catch's) justifies itself by its position.
+			await comment(job, TERMINAL_COMMENTS[reason]);
+			return { outcome: "policy", reason, exitCode: code, turns, tokens, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
+		}
 
 		switch (code) {
 			case EXIT_COMPLETED: {
@@ -738,8 +760,21 @@ export async function runJob(job, deps) {
 			case EXIT_POLICY:
 				// A policy exit still ran a paid container, so it carries the ledger like the completed
 				// branch does -- the spend is real whichever way the runner classified itself.
+				// The comment is UNCONDITIONAL (issue #288 asked for "when the agent did not already comment
+				// its own refusal", and the discriminator already exists at the exit-code boundary): an agent
+				// that composed its own refusal exits 0 -- github-prompt.mjs instructs the status comment,
+				// including for "I cannot fix this" -- so exit 2 means it was cut off before that step. The
+				// runner's exit-line reason vocabulary stays unread; parsing it would be a real contract
+				// change buying a distinction the codes already draw. Residual: an agent that posted a status
+				// and THEN blew its turn budget yields one extra comment, bounded at one.
+				await comment(job, TERMINAL_COMMENTS["runner-policy"]);
 				return { outcome: "policy", reason: "runner-policy", exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true };
 			case EXIT_INFRA:
+				// NO comment on any infra throw, here or in the catch: an InfraRetry may be retried and
+				// recover, and a flaky daemon must not post three comments for one recovery. Once-ness for
+				// the whole infra class lives at the terminal seam -- start.mjs's failed listener, guarded on
+				// BullMQ's own finishedOn -- which also catches the stall-kill and wait-gate paths this
+				// function never sees (issue #288).
 				throw new InfraRetry(`infra failure, container exit ${code}`, { exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 			default:
 				// THE RUNTIME NEVER HANDED CONTROL TO THE RUNNER, in whatever integers this venue spells that

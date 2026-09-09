@@ -7,7 +7,7 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { delimiter, posix } from "node:path";
+import { delimiter, isAbsolute, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
@@ -27,6 +27,17 @@ export function configError(message) {
 // OVERRIDES stay right here in loadConfig; only the defaults are shared.
 export const CHAIN_DEPTH_MAX_DEFAULT = 1; // DES-JOB-OUTBOX-CHAINING; 0 = chaining kill-switch (fail-closed)
 export const CHAIN_MAX_PER_JOB_DEFAULT = 2; // INT-OUTBOX-CONTRACT: max request-<n>.json collected per parent
+
+// The failure hook's command (issue #288). Unset/blank -> null (the feature is off). Set -> one
+// ABSOLUTE path, verbatim; a relative path refuses at boot, because resolving it against a service
+// manager's working directory would make the hook fire or vanish depending on who started the worker.
+function parseOnFailure(raw) {
+	if (raw === undefined || raw === "") return null;
+	if (typeof raw !== "string" || !isAbsolute(raw)) {
+		throw configError(`invalid PI_ON_FAILURE: ${JSON.stringify(raw)} (want an absolute path to one executable)`);
+	}
+	return raw;
+}
 
 // `max` is optional and defaults to no upper bound, which is the convention `optionalBoundedInt` below
 // already documents -- so every existing caller is unchanged by its arrival.
@@ -406,6 +417,16 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// broken check loud in minutes instead of silent for a day (OQ-027: most CLIs exit 1 for everything).
 		waitMaxChecks: positiveInt(env, "PI_WAIT_MAX_CHECKS", 96),
 		waitMaxFaults: positiveInt(env, "PI_WAIT_MAX_FAULTS", 5),
+		// Issue #288, the operator's failure hook: ONE command, exec'd with id-only argv when a paid job
+		// reaches a terminal failure. Unset = off, byte-identically. Set = must be an ABSOLUTE path,
+		// refused at boot otherwise (parseWaitProfiles' fail-loud posture, and sharper here: a silently
+		// dropped hook is a notification the operator believes is wired, discovered at the failure it was
+		// wired for). Existence/executability are probed at FIRE time, not boot, so a script installed
+		// mid-day works and one deleted mid-day logs `unresolvable` rather than pretending.
+		onFailure: parseOnFailure(env.PI_ON_FAILURE),
+		// Bounds a LEAKED CHILD after the job, not a pre-spend wait -- which is why this differs from its
+		// two 10s twins in what it protects: nothing here holds a slot or delays a container.
+		onFailureTimeoutMs: positiveInt(env, "PI_ON_FAILURE_TIMEOUT_MS", 10000),
 		github: { ...loadGitHubAuth(env, fileExists), allowGhResume: env.PI_SESSIONS_ALLOW_GH_SOURCE === "1" },
 		gitlab: loadGitLabAuth(env),
 		forgejo: loadForgejoAuth(env),

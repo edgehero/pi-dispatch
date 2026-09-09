@@ -1746,3 +1746,76 @@ test("the boot-image read goes THROUGH settleWithin (source pin)", () => {
 	assert.match(src, /const bootImage = await settleWithin\(imagePreflight/, "the boot-image read must ride the fuse-clearing helper");
 	assert.ok(!/setTimeout\(\(\) => resolve\({}\), BOOT_IMAGE_TIMEOUT_MS\)/.test(src), "the inline race that leaked its timer must stay gone");
 });
+
+// --- the paid terminals announce themselves (issue #288) ------------------------------------------------
+
+/** Settle the void-fired comment/hook chains a listener starts (auth re-resolve + mint + post). */
+async function settleListeners() {
+	for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+}
+
+test("a TERMINAL failed attempt comments ONCE through the real adapter; a retried one comments nothing and job_failed stays byte-identical", { skip }, async () => {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ makeAuth, makeHost: () => host });
+
+	// finishedOn is BullMQ's own terminal decision: set on the non-retry branch alone, visible here
+	// because the emit follows moveToFailed. The guard reads it rather than re-deriving attempts math.
+	const from = bootLines.length;
+	handlers.failed({ id: "j1", data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 2, finishedOn: 123 }, new Error("boom"));
+	await settleListeners();
+	assert.deepEqual(posted, ["Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log."], "one fixed sentence, never err.message");
+	const terminal = parseLines(bootLines.slice(from));
+	assert.deepEqual(Object.keys(terminal.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"], "the existing line's key set is untouched");
+
+	// A RETRIED attempt (no finishedOn): the log line exactly as before, and no comment of any kind --
+	// a flaky daemon must not post three comments for one recovery.
+	posted.length = 0;
+	const from2 = bootLines.length;
+	handlers.failed({ id: "j2", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, new Error("flake"));
+	await settleListeners();
+	assert.deepEqual(posted, [], "a retried attempt must not comment");
+	const retried = parseLines(bootLines.slice(from2));
+	assert.deepEqual(Object.keys(retried.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
+	assert.ok(!retried.some((l) => l.event === "comment" || l.event === "comment_failed"), "no adapter activity at all on a retried attempt");
+});
+
+test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and policy worker-abort/runner-policy, nothing else", { skip }, async () => {
+	// An unresolvable command still proves the THREADING (the on_failure line is the hook's own), while
+	// spawning nothing on a test machine.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ env: { PI_ON_FAILURE: "/nope/pi-notify-does-not-exist" }, makeAuth, makeHost: () => fakeHost() });
+
+	const fired = async (drive) => {
+		const from = bootLines.length;
+		drive();
+		await settleListeners();
+		return parseLines(bootLines.slice(from)).filter((l) => l.event === "on_failure");
+	};
+
+	const terminal = await fired(() => handlers.failed({ id: "j1", data: { kind: "github", repo: "o/r" }, attemptsMade: 2, finishedOn: 9 }, new Error("x")));
+	assert.equal(terminal.length, 1, "the final infra failure pages");
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "code", "detail", "host"], "the pinned key set, host stamped by the closure");
+	assert.equal(terminal[0].detail, "unresolvable");
+
+	assert.equal((await fired(() => handlers.completed({ id: "j2" }, { outcome: "policy", reason: "worker-abort" }))).length, 1, "the 30-minute kill pages");
+	assert.equal((await fired(() => handlers.completed({ id: "j3" }, { outcome: "policy", reason: "runner-policy" }))).length, 1, "an in-container stop pages");
+	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");
+	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
+	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");
+	assert.equal((await fired(() => handlers.failed({ id: "j7", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, new Error("x")))).length, 0, "a retried attempt pages nobody");
+});
+
+test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line and the existing lines are unchanged", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	const from = bootLines.length;
+	handlers.failed({ id: "j1", data: { kind: "github", repo: "o/r" }, attemptsMade: 2, finishedOn: 9 }, new Error("x"));
+	handlers.completed({ id: "j2" }, { outcome: "policy", reason: "worker-abort" });
+	await settleListeners();
+	const lines = parseLines(bootLines.slice(from));
+	assert.ok(!lines.some((l) => l.event === "on_failure"), "unset means not constructed: no spawn, no line, byte-identical");
+	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
+	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host"]);
+});
