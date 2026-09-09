@@ -3315,6 +3315,74 @@ a tunnel.
   · `worker/src/container-spec.mjs` -> `containerSpec`
   · `worker/src/docker-run.mjs` -> `dockerArgsFromSpec`, `DOCKER_EXTRA_FORBIDDEN`
 
+## DES-PER-TRIGGER-TOOL-EXCLUSIONS
+
+- **Decision**: A trigger may name built-in pi tools its jobs' sessions must not have
+  (`run.excludeTools`, issue #291), and the runner passes the list to `createAgentSession` as
+  `excludeTools` -- the first enforced in-container permission this project has. The loader validates
+  members against a hand-written `EXCLUDABLE_TOOL_NAMES` set (the seven built-ins at pi 0.80.7) that is
+  BOLTED twice to the pinned artifact; a near-miss key sweep in `validateBackend`'s shape refuses
+  misspellings of the field itself; the job image declares an `excludeTools` capability token that the
+  worker's preflight checks pre-spend (`job-image-exclude-tools-unsupported`); the runner re-asserts
+  membership in-container pre-spend against a set DERIVED from the seven root-exported
+  `create*ToolDefinition` factories, and logs `tools_excluded` with the session's active tool list read
+  back; a chained child inherits the parent's exclusions off validated job data.
+- **Why**: pi scopes tools per session and this project never used it, so a "read-only triage" flow's
+  read-onlyness was `HARD_RULES.md` prompt text -- and the README's own disclosure prices that: prompt
+  text, not enforcement. The enforcement is STRUCTURAL at the pin: `excludeTools` filters the tool
+  registry itself, so neither an extension's `setActiveTools` nor a later refresh can re-enable an
+  excluded tool (verified on a real offline session; `loader.test.mjs` pins it with a control).
+  **Every layer exists to kill one silent fail-open.** pi consults the list only through a set filter,
+  so an unknown name excludes NOTHING, with no error and no diagnostic -- `run.backend`'s
+  destructive-absence class, which is why membership is refused at load and again in-container, why the
+  near-miss sweep covers the key, and why the capability token exists at all: an older baked runner
+  reads no `PI_EXCLUDE_TOOLS`, so without the pre-spend gate a "read-only" trigger's job would run with
+  a working editor and shell and record a clean exit.
+  **The constant is hand-written where it lives and derived where it can be.** `triggers.mjs` is pure
+  and pi-free (the receiver loads it; `admin/build.mjs` inlines it), so it cannot derive the set;
+  `worker/test/exclude-tools.pinned.test.mjs` pins it against pi's own `allToolNames` (file-URL
+  reach-in -- the exports map is closed) and `image/runner/test/pinned-api.test.mjs` pins the runner's
+  factory derivation against the same, so the loader's set, the runner's set and pi's set move together
+  or fail loudly.
+  **Chained children inherit, and the destructive direction is inverted** from every other inherited
+  field: dropping `image` or `skillsDir` starves a child of a toolchain, dropping THIS widens it -- a
+  read-only triage parent chaining a child that can edit and run bash. The request file can neither set
+  nor drop it (explicit property reads only), so the agent holds no widening lever.
+- **Rejected**:
+  - **`run.tools` (the allowlist form)** -- refused BY NAME at load, not merely unimplemented: an
+    allowlist inverts the question to "which tools exist", which is the pinned package's answer and
+    drifts with it, so a pin bump that added a tool would silently grant it to every allowlisted
+    trigger. Narrowing cannot widen on a bump.
+  - **`run.noTools` passthrough** -- also refused by name: it is pi's other tool switch, "notools"
+    shares no subsequence with "excludetools" so the near-miss sweep can never catch it, and a silently
+    dropped tool switch is this field's whole refusal class.
+  - **Free-string exclusions (extension/custom tool names)** -- they register at container start, so
+    the loader cannot know them, and admitting them re-opens the exact silent no-op the validation
+    closes. The bound is stated in the docs instead: extension and custom tools are not excludable.
+  - **A panel key or model-callable setter** -- `run.image`'s question ("is it a capability the model
+    would GAIN?") at its sharpest: an exclusion list a model can write is a permission surface whose
+    widening direction (a name quietly dropped) reads as harmless in any confirm prompt. Pinned
+    structurally by the admin wiring sweep.
+  - **A general unknown-key sweep** -- `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`'s rejection stands;
+    the sweep here grows three targets and the negative test (an unrelated unknown key still drops)
+    keeps it a near-miss guard, not a schema.
+  - **A `chain-command-refused`-style refusal for a request-file `excludeTools` key** -- the `command`
+    exception exists because ignoring that key would enqueue work the agent did not request; an ignored
+    `excludeTools` key misleads nobody (the child inherits the operator's narrowing regardless), and
+    `INT-OUTBOX-CONTRACT`'s one-exception sharpness is worth more than a second.
+- **Residuals**: The release-ordering skew `DES-TRIGGERS-UNIFIED-FILE` documents for every widening: an
+  OLD worker or OLD receiver parsing a NEW file drops the key under the unknown-key posture, and the
+  capability gate cannot see that (the gate IS worker code) -- the label closes worker-new/image-old
+  only, so worker and receiver ship together as usual. An already-published admin's frozen inlined
+  validator tolerates the key and round-trips it unstripped: forward-safe. And the honesty boundary:
+  exclusion removes pi TOOLS, not container capabilities -- `bash`'s removal does not remove the shell
+  from the image, and a genuinely read-only trigger also wants `run.packages: false` and a repo without
+  its own `.pi/extensions`; `docs/exclude-tools.md` says so plainly.
+- **Traces to**: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`,
+  `INT-OUTBOX-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-PER-TRIGGER-JOB-IMAGE`,
+  `DES-CONTAINER-BACKEND-REGISTRY`, `CONST-PI-VERSION-PINNED`, `OQ-005`
+
 ## DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE
 
 - **Decision** (issue #316): the question `CONST-RETRY-INFRA-ONLY` asks at every failure site is answered
@@ -3577,3 +3645,4 @@ a tunnel.
 | 2026-09-09 | Issue #299, the boot refusal that left a worker draining paid jobs. **NEW `DES-BOOT-REFUSAL-STOPS-THE-WORKER`**: `createWorker`'s shutdown splits into `stop()` (the teardown) and the signal handler (`stop()` then `process.exit(0)`, name unchanged for the source pin); `stop` rides the returned worker beside `hostWorker`; `startWorker`'s whole post-handoff region sits in a catch that stops what was built and RETHROWS, so `entryExitCode` still maps the refusal to 2 or 1 and never 0. `cli.mjs` is deliberately untouched: with the stop plus #300's release nothing holds the loop, measured to `beforeExit` with the code intact, while a `process.exit` in the shared catch would truncate pipes and mask leaks -- and that measured pairing is why #300 landed first. The `Promise.resolve` spelling of the stop call is mutation-checked in both directions against a synchronous test double. The refusal window is enumerated in the entry; the two regression tests refuse from opposite ends of the region. **No requirements row**: the boot-refusal acceptances in `requirements.md` each own a specific refusal, none owns the post-construction window, and minting one to mirror a design mechanism would restate rather than require -- checked, and recorded here instead. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked. **Code evidence**: worker/src/index.mjs -> stop, shutdown · worker/src/start.mjs -> the post-handoff catch · worker/test/start-wiring.test.mjs -> "a refusal from a DIFFERENT post-handoff point stops the worker too" |
 | 2026-09-09 | Issue #318, the receiver's ~25-second recovery window, found by an adversarial pass on #316. **NEW `DES-BOOT-IDENTITY-RETRY-IN-PROCESS`**: the transient-boot bound moves into the process -- `retryIdentity` wraps all five hard-fail identity resolutions (serve's four arms, the poller's gate) and retries untagged failures for `RECEIVER_IDENTITY_RETRY_SECONDS` (default 600s, floored at 60s; 5s gaps doubling to 30s; a 10s REF'D per-attempt fuse cleared in a finally, because before the queue exists an unref'd fuse can be the only pending handle and never fires), so the recovery window is one setting under systemd, launchd, nssm and compose, which is the issue's acceptance. The final gap is CLAMPED to the remaining window (the executing review measured a 60s window giving up at 35s and missing a late-recovering forge; the clamp also makes the at-least-a-window spacing arithmetic literally true). The unit's values are untouched: the floor at `StartLimitIntervalSec` makes the burst limit unreachable by a retrying boot while a genuine crash loop still trips it in ~25s, so the two bounds now cover disjoint failure classes. **The gate's larger find, fixed here because the acceptance is unreachable without it**: a refusal from the three post-queue arms never actually EXITED, on main or on this branch -- the queue's live client held the loop with `process.exitCode` assigned and undelivered, `Type=simple` reading `active (running)` forever -- so the post-queue region now releases the queue's raw client, closes the router, and rethrows (issue #299's rule, the receiver's copy). `queue.close()` is deliberately not the mechanism: its listener strip races the constructor's `initializing.catch` re-emit and crashed 3 of 5 refusals (a settle-first variant still crashed on a dead Valkey); the raw `_client.disconnect()` keeps the forward chain alive into the catch's swallow and measured 12 of 12 correct exits, live and dead. Pinned by a real-BullMQ real-Valkey subprocess boot in the integration file. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` AMENDED**: its exit-1-bound bullet stated the unit's 25 seconds and deferred to #318; it now points at the new entry and keeps only the classification half. **No requirements row**: no REQ owns the supervision window (checked -- `REQ-DEPLOYMENT-BOOTSTRAP` owns install/render and the exit-code contract, not restart pacing), and minting one to mirror a design mechanism would restate rather than require; recorded here instead, the #299 precedent. **No OQ row**: a residual that graduates into a fix is this log's job to record, the #301 precedent. `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-GH-POLLING-TRANSPORT`, `REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked. **Code evidence**: receiver/src/boot-retry.mjs -> retryIdentity · receiver/src/config.mjs -> identityRetryWindowMs · receiver/src/start.mjs -> the four wrapped arms and the post-queue catch · receiver/src/poller.mjs -> the wrapped gate · receiver/test/boot-retry.test.mjs · receiver/test/start.test.mjs -> "a refusal AFTER the queue exists closes what the boot built, so the exit code is actually delivered" · receiver/test/enqueue.integration.test.mjs -> "a post-queue identity refusal EXITS, code intact" |
 | 2026-09-09 | Issue #325, the poller's inter-cycle sleep survived stop(). **`DES-GH-POLLING-TRANSPORT` AMENDED**: the loop owns its timer's whole life -- the race holds its sleep and cancels the loser whichever side settles, via an exported `cancellableSleep`; the timer stays REF'D (the poller is its process's main loop, and between cycles that timer is the only thing keeping a pure-poll process alive); the SIGTERM/SIGINT gate is its own `signals` dep defaulting from the sleep seam, so the real default is armable under test without process-wide handlers. The stopWaker-wins path had NO test before this: every prior stop() either resolved the injected sleep (the sleep side won) or landed mid-cycle and left through the loop's own break, so the behavioral pin arms the real floored >=30s timer, bounds `done` with a 2s cancellable sentinel (which is what kills a stop() that no longer wakes), and counts Timeouts through async_hooks -- with the destroy queue drained on a MACROTASK first, because with immediate-resolving fakes the whole boot-to-park burst is one macrotask and a long-cleared timer still counts as live (measured: the boot gate's identity fuse read as a leak until the drain). `signals` is a deps seam, not env: cli.mjs passes no deps and every existing test injects `sleep`, so both are byte-identical in behavior. `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-RETENTION-SWEEPS-ON-A-TIMER`, `DES-BOOT-IDENTITY-RETRY-IN-PROCESS` UNCHANGED, checked. **Code evidence**: receiver/src/poller.mjs -> cancellableSleep, startPoller · receiver/test/poller.test.mjs -> "stop() while parked on the REAL default sleep: the race is won, the timer is cleared, nothing leaks" |
+| 2026-09-09 | Issue #291. **NEW `DES-PER-TRIGGER-TOOL-EXCLUSIONS`**: the denylist decision and its layered enforcement -- a hand-written `EXCLUDABLE_TOOL_NAMES` bolted twice to the pinned artifact (the shared validator is pure and pi-free so it cannot derive; the runner derives its own set from the seven root-exported factories because `allToolNames` is unexported and the exports map is closed); the `excludeTools` capability token closing the stale-image fail-open; outbox inheritance with the destructive direction INVERTED (dropping it widens the child, so it is mandatory where secrets' absence is). The Rejected list records `run.tools` (an allowlist inverts to "which tools exist" and silently widens on a pin bump), `run.noTools` (the near-miss sweep can never catch it, so it is refused by name), free-string exclusions (they re-open the silent no-op), any panel key or model-callable setter, a general unknown-key sweep, and a command-style chain refusal for the request-file key (one read-and-refused exception stays one). Residuals name the old-parser release skew honestly and the tools-not-capabilities honesty boundary (excluding `bash` removes pi's tool, not the shell; a genuinely read-only trigger also wants `run.packages: false`). **`DES-PER-TRIGGER-JOB-IMAGE` UNCHANGED, checked** (its no-model-callable-path clause is this field's template); **`DES-CONTAINER-BACKEND-REGISTRY` UNCHANGED, checked** (its near-miss sweep and load/pre-spend split are copied, never moved); **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked** (its general-sweep rejection is cited and held); **`DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked** (the inheritance rides the existing explicit-property-reads mechanism, adding no read of `req`). |

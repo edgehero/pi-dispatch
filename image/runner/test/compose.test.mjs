@@ -195,3 +195,28 @@ test("run-job.mjs counts all four package resource kinds, and commands after the
 	);
 	assert.match(src, /getRegisteredCommands\(\)/, "the count must come from the runner's registry, not the manifest");
 });
+
+test("run-job wires run.excludeTools: membership pre-spend, a conditional spread, and the read-back log", () => {
+	// Issue #291, the run.command block's tactic: run-job self-runs on import, so the wiring is pinned
+	// against the source. Five facts, each a mutation this catches: the membership assert exists, sits
+	// before any session machinery (pre-spend), the option rides a CONDITIONAL spread (an unflagged
+	// job's options object stays byte-identical), and every flagged job logs what the session actually
+	// holds, read back via getActiveToolNames.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /assertExcludeToolsKnown\(cfg\.excludeTools\)/, "the membership assert is gone -- an unknown exclusion would be silently ignored in-container");
+	assert.ok(
+		src.indexOf("assertExcludeToolsKnown(") < src.indexOf("openSessionManager("),
+		"the membership assert must run pre-spend, before any session machinery",
+	);
+	assert.ok(
+		// The CALL, not the bare name: readPrompt's definition sits above main() and would win indexOf.
+		src.indexOf("assertExcludeToolsKnown(") < src.indexOf("readPrompt(PROMPT_PATH)"),
+		"and before the job inputs are even read, beside the mount asserts",
+	);
+	assert.match(src, /\.\.\.\(cfg\.excludeTools\.length > 0 && \{ excludeTools: cfg\.excludeTools \}\)/, "the option must ride a conditional spread -- unconditional would hand pi an empty-but-present denylist");
+	assert.match(src, /log\("tools_excluded", \{ excludeTools: cfg\.excludeTools, active: session\.getActiveToolNames\(\) \}\)/, "the read-back log line is gone -- the exclusion would be unobservable in the job log");
+	assert.ok(
+		src.indexOf("createAgentSession(") < src.indexOf('log("tools_excluded"'),
+		"the read-back can only be logged post-session",
+	);
+});

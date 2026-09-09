@@ -251,3 +251,18 @@ test("commandName reads the string exactly as pi's dispatch will: text to the fi
 	assert.equal(commandName("wf"), "wf");
 	assert.equal(commandName("wf run nightly"), "wf");
 });
+
+test("PI_EXCLUDE_TOOLS parses shape-only: unset is [], entries ride verbatim, empty segments drop", () => {
+	// Issue #291. Membership deliberately does NOT live here: parseRunnerEnv promises purity and
+	// pi-freedom, and the one check that needs the pinned artifact runs in run-job's pre-spend assert
+	// (tools.mjs), where a bad entry is reported verbatim. One validator owns the grammar.
+	assert.deepEqual(parseRunnerEnv(base).excludeTools, []);
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: "" }).excludeTools, []);
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: "bash,edit" }).excludeTools, ["bash", "edit"]);
+	// The shell-shape tolerance parsePackagePaths keeps: "a,,b" and a trailing comma are what a
+	// template interpolation leaves behind, not an error.
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: "bash,,edit," }).excludeTools, ["bash", "edit"]);
+	// VERBATIM, no trim: a padded entry must reach the membership assert as itself, so its refusal
+	// names what the operator actually wrote.
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: " bash" }).excludeTools, [" bash"]);
+});

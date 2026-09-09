@@ -165,6 +165,19 @@ export const REVIEW_STATES = new Set(["approved", "changes_requested", "commente
 /** The one action `on.reviewState` can narrow. Spelled once, read by the validator and named in its error. */
 const REVIEW_ACTION = "review_submitted";
 
+/**
+ * The pi tool names a trigger may exclude (issue #291) -- the built-in set of the PINNED pi, 0.80.7.
+ * Hand-written because this validator is pure and pi-free (the worker does not depend on the agent
+ * package), and therefore BOLTED twice to the artifact it restates: `worker/test/exclude-tools.pinned.test.mjs`
+ * and `image/runner/test/pinned-api.test.mjs` both derive the set from the pinned package and fail with a
+ * grow-these-together message when a pin bump moves it. Extension and custom tool names are deliberately
+ * NOT here: they register at container start (a staged package, a serviced repo's own `.pi/extensions`),
+ * so the loader cannot know them, and admitting free strings would re-open the silent no-op this field's
+ * validation exists to close -- pi ignores unknown names in `excludeTools` without a diagnostic.
+ */
+// EXPORTED for the two pinned-set bolts and for the admin, which states the vocabulary to an operator.
+export const EXCLUDABLE_TOOL_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+
 // A cron id flows into BullMQ's deterministic `repeat:<id>:<nextMillis>` jobId, so a `:` corrupts that
 // parse; the charset also excludes `:` and the dedicated check names the reason.
 const ID_CHARSET = /^[A-Za-z0-9._-]+$/;
@@ -381,6 +394,9 @@ function normalizeCron(on, run, index, path, state) {
 	// Called for its refusal only: the returned `run` below deliberately grows no `waitFor` key, exactly as
 	// it grows no `replicas` one, because a cron entry can never carry either (issue #230).
 	validateWaitFor(on, run, `cron trigger "${id}"`, path, { onType: "cron" });
+	// A cron job's session narrows like any other: the field selects what the container's agent can do,
+	// which is orthogonal to what triggered it (issue #291).
+	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
 
 	// provider/model/maxTurns stay absent when omitted so the value resolves at job start against the
 	// settings overlay/env, not a default frozen here (INT-CONFIG-OVERLAY-CONTRACT). github/packages/image stay
@@ -389,7 +405,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 
@@ -1149,6 +1165,93 @@ function validateBackend(on, run, at, path, { localWorkspace }) {
 }
 
 /**
+ * `run.excludeTools` -- pi tool names this trigger's session must NOT have (issue #291).
+ *
+ * The first field here that changes what the agent CAN DO inside the container rather than what the
+ * container holds: the runner passes it to `createAgentSession`, which filters the tool registry itself,
+ * so a "read-only" trigger stops being prompt text. NARROWING ONLY, by decision: the allowlist form
+ * (`run.tools`) inverts the question to "which tools exist", which is the pinned package's answer and
+ * drifts with every pin bump -- a bump that adds a tool would silently grant it to every allowlisted
+ * trigger, while naming what to take away cannot widen on a bump.
+ *
+ * MEMBERSHIP IS VALIDATED against `EXCLUDABLE_TOOL_NAMES` because pi ignores unknown names in
+ * `excludeTools` silently (verified at the pin: the set is only ever consulted by a filter), which puts
+ * a misspelled exclusion in `run.backend`'s destructive-absence class -- the job runs WITH the tool
+ * while the file reads as though it was off. The near-miss sweep covers the KEY for the same reason.
+ * No charset check: membership subsumes it, and no known name carries the comma the container env
+ * encoding uses. No cap: membership plus the duplicate refusal bound any accepted array at the set's
+ * own size. Excluding every builtin is legal -- extension and custom tools still load, which is a
+ * documented bound of the field, not a gap.
+ */
+function validateExcludeTools(on, run, at, path) {
+	// The near-miss sweep, validateBackend's shape (its comment carries the homoglyph rationale): on
+	// `run` the exact spelling is the field, on `on` every spelling is wrong including the correct one,
+	// because what the session can do is a property of the run.
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && key === "excludeTools") continue;
+			// Three targets. The first catches every case and separator variant (exclude_tools,
+			// exclude-tools, EXCLUDETOOLS). The SINGULAR is the likeliest miss of all: an operator
+			// removing one tool writes `excludeTool` the way English does, and unlike `backend` there is
+			// no env-var mnemonic anchoring the right form. The past participle is how the field reads
+			// back in prose ("the excluded tools"), one grammatical step with no other plausible meaning.
+			// Deliberately NOT a synonym hunt (denyTools, toolsOff): that is the general unknown-key
+			// sweep this file's forward-compatibility posture rejects.
+			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+			const targets = ["excludetools", "excludetool", "excludedtools"];
+			const isSubsequence = (needle, hay) => {
+				let i = 0;
+				for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+				return i === needle.length;
+			};
+			const suspicious = /^[\x20-\x7E]*$/.test(key)
+				? targets.includes(normalized)
+				: normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+			if (!suspicious) continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.excludeTools? An exclusion the loader drops runs the job WITH the tool while the file reads as though it was off, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+
+	// pi's OWN option names are refused by name, before the absent-field return, so a file carrying only
+	// the wrong field still hears why. `tools` because the allowlist inversion above is a decision, not
+	// an oversight; `noTools` because it is the other tool switch on the same options object and
+	// "notools" shares no subsequence with "excludetools", so the sweep above can never catch it -- and
+	// a dropped tool switch is the exact destructive absence this validator refuses.
+	if ("tools" in (run ?? {})) {
+		throw configError(`${at}: run.tools is not a field -- pi-dispatch narrows only. An allowlist inverts the question to "which tools exist", which is the pinned pi's answer, not this file's: a pin bump that adds a tool would silently grant it to every allowlisted trigger. Name what to take away in run.excludeTools: ${path}`);
+	}
+	if ("noTools" in (run ?? {})) {
+		throw configError(`${at}: run.noTools is not a field -- it is pi's own session option, and here it would be dropped silently, which for a tool switch is the destructive absence this validator refuses; spell the removal in run.excludeTools: ${path}`);
+	}
+
+	const excludeTools = run?.excludeTools;
+	if (excludeTools === undefined) return undefined;
+
+	if (!Array.isArray(excludeTools) || excludeTools.length === 0) {
+		throw configError(`${at}: run.excludeTools must be a non-empty array of tool names when present (got ${JSON.stringify(excludeTools)}) -- an empty exclusion is a field that does nothing, and accepted-and-ignored is how an operator comes to trust one that does: ${path}`);
+	}
+	const seen = new Set();
+	for (let i = 0; i < excludeTools.length; i++) {
+		const name = excludeTools[i];
+		if (!isNonEmptyString(name)) {
+			throw configError(`${at}: run.excludeTools[${i}] must be a non-empty string naming a pi tool (got ${JSON.stringify(name)}): ${path}`);
+		}
+		if (!EXCLUDABLE_TOOL_NAMES.has(name)) {
+			throw configError(`${at}: run.excludeTools[${i}] ${JSON.stringify(name)} is not a tool the pinned pi knows (known: ${[...EXCLUDABLE_TOOL_NAMES].join(", ")}) -- pi ignores unknown names silently, so a misspelled exclusion would exclude nothing while the file reads as though it did: ${path}`);
+		}
+		if (seen.has(name)) {
+			throw configError(`${at}: run.excludeTools names ${JSON.stringify(name)} twice -- the entries are a removal set, so the second can never change the answer: ${path}`);
+		}
+		seen.add(name);
+	}
+	// A freshly built array, validateWaitFor's rule: nothing unvalidated rides through.
+	return [...excludeTools];
+}
+
+/**
  * `run.waitFor` -- the conditions that must all clear before this trigger's job starts (issue #230).
  *
  * A CONJUNCTION of one-key objects: `{ "after": "<ISO instant>" }` is answered from the clock, and
@@ -1305,9 +1408,10 @@ function normalizeLabel(on, run, index, path) {
 	const secretsProfile = validateSecretsProfile(run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
+	const excludeTools = validateExcludeTools(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 
@@ -1345,9 +1449,10 @@ function normalizeComment(on, run, index, path, state) {
 	const secretsProfile = validateSecretsProfile(run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
+	const excludeTools = validateExcludeTools(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 
@@ -1412,6 +1517,7 @@ function normalizeIssue(on, run, index, path) {
 	const secretsProfile = validateSecretsProfile(run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
+	const excludeTools = validateExcludeTools(on, run, at, path);
 	return {
 		on: {
 			type: "issue",
@@ -1421,7 +1527,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 
@@ -1497,6 +1603,7 @@ function normalizePullRequest(on, run, index, path) {
 	const secretsProfile = validateSecretsProfile(run, at, path);
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
+	const excludeTools = validateExcludeTools(on, run, at, path);
 	return {
 		on: {
 			type: "pull_request",
@@ -1511,7 +1618,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }) },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }) },
 	};
 }
 

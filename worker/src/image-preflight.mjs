@@ -34,6 +34,8 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { replicaUnsupported }-- present, but does not declare replica support for a replica job => POLICY
  *   { commandUnsupported }-- present, but does not declare command support for a command job => POLICY
+ *   { excludeToolsUnsupported } -- present, but does not declare exclude-tools support for a job that
+ *                            carries exclusions => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
  * so the failure path disambiguates POSITIVELY with `docker info` rather than by matching docker's stderr.
@@ -95,6 +97,14 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			// existing fleet pays nothing for it.
 			if (job?.command !== undefined && !(capabilities ?? []).includes("commands")) {
 				return { commandUnsupported: wanted, declared: capabilities ?? [] };
+			}
+			// Same inclusion-list polarity again, and here the stale-image failure is a PERMISSION quietly
+			// not enforced (issue #291): a runner that predates run.excludeTools reads no PI_EXCLUDE_TOOLS,
+			// so a "read-only" trigger's job would run with every tool the file says to remove and record a
+			// clean exit -- the silent fail-open this field exists to close. Unreachable for a job without
+			// exclusions, so the existing fleet pays nothing for it.
+			if (job?.excludeTools !== undefined && !(capabilities ?? []).includes("excludeTools")) {
+				return { excludeToolsUnsupported: wanted, declared: capabilities ?? [] };
 			}
 			return { ok: true, image: wanted, piVersion, imageDigest };
 		}

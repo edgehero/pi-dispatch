@@ -345,3 +345,12 @@ test("secrets and secretsProfile ride the JOB from the matched rule, never insid
 	assert.equal("secrets" in r.job.trigger, false);
 	assert.equal("secretsProfile" in r.job.trigger, false);
 });
+
+test("a label rule's excludeTools reach the job, and an unflagged rule adds no key (#291)", () => {
+	const rules = { ...triggers, label: [{ ...triggers.label[0], excludeTools: ["write"] }] };
+	const r = filterAzure(parseAzureSubset(workItem()), rules, knownFlows, SELF, true, "az-xt");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.excludeTools, ["write"]);
+	const plain = run(workItem());
+	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
+});

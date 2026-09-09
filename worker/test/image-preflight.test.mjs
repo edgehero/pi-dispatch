@@ -227,6 +227,26 @@ test("a command job on an unlabelled image refuses with declared: [] -- no claim
 	assert.deepEqual(await preflight({ kind: "local", command: "wf run" }), { commandUnsupported: "pi-job:latest", declared: [] });
 });
 
+// --- the capabilities label again: the stale-image gate for excludeTools (issue #291) ---
+
+test("a job carrying exclusions on an image that does not declare `excludeTools` is REFUSED pre-spend", async () => {
+	// The command gate's twin, and the quietest failure of the three: a runner that predates the field
+	// reads no PI_EXCLUDE_TOOLS, so a "read-only" trigger's job runs with a working editor and shell and
+	// records a clean exit -- a permission quietly not enforced.
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas,commands\n`) });
+	assert.deepEqual(await preflight({ kind: "local", excludeTools: ["bash"] }), { excludeToolsUnsupported: "pi-job:latest", declared: ["replicas", "commands"] });
+});
+
+test("a job carrying exclusions on an image declaring `excludeTools` runs", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas,commands,excludeTools\n`) });
+	assert.deepEqual(await preflight({ kind: "local", excludeTools: ["bash", "edit"] }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+});
+
+test("a job WITHOUT exclusions on an unlabelled image is untouched -- the branch is unreachable for the existing fleet", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, "sha256:abc\n") });
+	assert.deepEqual(await preflight({ kind: "local" }), { ok: true, image: "pi-job:latest", piVersion: null, imageDigest: "sha256:abc" });
+});
+
 test("the forge refusal still outranks the replica one -- a job that cannot run at all is the first thing to say", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}gitlab${FIELD_SEP}replicas\n`) });
 	const r = await preflight({ kind: "github", replica: 2, replicas: 2 });

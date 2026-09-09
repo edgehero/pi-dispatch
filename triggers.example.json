@@ -16,7 +16,7 @@
     { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "gitlab", "flow": "fix" } },
     { "on": { "type": "pull_request", "action": ["open", "update"] }, "run": { "kind": "gitlab", "flow": "review" } },
     { "on": { "type": "label", "any": ["pi:fix"] }, "run": { "kind": "forgejo", "flow": "fix" } },
-    { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "forgejo", "flow": "triage" } },
+    { "on": { "type": "comment", "phrase": "@pi" }, "run": { "kind": "forgejo", "flow": "triage", "excludeTools": ["bash", "edit", "write"] } },
     { "on": { "type": "pull_request", "action": ["label_updated"], "any": ["pi:review"] }, "run": { "kind": "forgejo", "flow": "review" } },
 
     { "on": { "type": "label", "any": ["pi:fix"] }, "run": { "kind": "azure", "flow": "fix", "repository": "widgets", "image": "pi-job:azure" } },

@@ -1843,3 +1843,24 @@ test("the header clock comes from the SNAPSHOT, so one snapshot always renders o
 	assert.match(later, /12:34:57/);
 	assert.notEqual(a, later);
 });
+
+// --- the per-trigger tool denylist (issue #291): what the box cannot do is not left implicit ---
+
+const xtSnap = (excludeTools) => ({
+  ...SNAPSHOT,
+  runs: [],
+  activeJobId: null,
+  triggers: { triggers: [{ type: "label", any: ["bug"], all: [], none: [], flow: "fix", packages: false, image: null, excludeTools }] },
+  stagedPackages: { stagedAt: null, packages: [] },
+});
+
+test("TRIGGER_DETAIL states the tool exclusions on BOTH branches -- the image row's 'I checked' doctrine (#291)", async () => {
+  const narrowed = await openTrigger(xtSnap(["bash", "edit"]));
+  assert.match(narrowed.detail, /excludeTools\s+bash, edit removed/, "an armed exclusion names every removed tool");
+
+  // The dim default is deliberate rather than an omitted row: a missing row would read as "I don't
+  // know" on the one pane whose subject is what the box can do.
+  const plain = await openTrigger(xtSnap(null));
+  assert.match(plain.detail, /excludeTools\s+full pinned tool set/, "an omitted row would read as unknown; this reads as checked");
+  assert.doesNotMatch(plain.detail, /removed/);
+});

@@ -47,6 +47,15 @@ const REQUIRED_VALUE_EXPORTS = [
 	"SessionManager",
 	"SettingsManager",
 	"DefaultResourceLoader",
+	// The seven tool factories tools.mjs derives the excludable set from (issue #291). The :112 import
+	// scan below reads run-job.mjs only, so these earn their guard here.
+	"createReadToolDefinition",
+	"createBashToolDefinition",
+	"createEditToolDefinition",
+	"createWriteToolDefinition",
+	"createGrepToolDefinition",
+	"createFindToolDefinition",
+	"createLsToolDefinition",
 ];
 
 test("the pinned package exports everything the runner imports", { skip }, () => {
@@ -515,4 +524,55 @@ test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy",
 		/"@earendil-works\/pi-coding-agent":\s*_bundledPiCodingAgent/,
 		"the virtual-module mapping for pi-coding-agent is gone",
 	);
+});
+
+// ── Issue #291: run.excludeTools' pin surface ─────────────────────────────────────────────────────
+//
+// The feature rests on three textual pin facts (the behavioural half -- structural removal and the
+// silent ignore of unknown names -- runs on a real session in loader.test.mjs): the option trio is
+// declared with its exact types; the built-in tool set is what the loader's hand-written constant and
+// the runner's factory derivation say; and the set stays unreachable through the package root, which
+// is the whole reason tools.mjs derives it from the factories at all.
+
+test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPTIONS' option table is exact", { skip }, () => {
+	const src = agentDistFile("core", "sdk.d.ts");
+	const iface = src.match(/export interface CreateAgentSessionOptions \{([\s\S]*?)\n\}/);
+	assert.ok(iface, "CreateAgentSessionOptions must exist in the pinned package -- if this is the modelRuntime migration, see OQ-005");
+	// The TYPE is in the pattern, not just the name (the Usage.cost lesson at the top of this file): a
+	// rename-with-substitute or a widened type must fail before a bump ships, not after.
+	assert.match(iface[1], /\n {4}excludeTools\?: string\[\];/, "excludeTools?: string[] moved -- run-job passes it and the loader validates its members; re-verify the trio in the NEW tarball before bumping (OQ-005's rule)");
+	assert.match(iface[1], /\n {4}tools\?: string\[\];/, "tools?: string[] moved -- the loader refuses run.tools on the claim this option exists upstream");
+	assert.match(iface[1], /\n {4}noTools\?: "all" \| "builtin";/, "noTools's union moved -- the loader refuses run.noTools on this shape");
+	// The bolt INT-SDK-SESSION-OPTIONS' hand-written "complete option set at 0.80.7" sentence has owed
+	// since it was written (CLAUDE.md: a table restating a derivable source is derived or pinned, never
+	// trusted). Top-level members only -- the 4-space indent excludes scopedModels' nested fields.
+	const names = [...iface[1].matchAll(/^ {4}(\w+)\?:/gm)].map((m) => m[1]);
+	assert.deepEqual(
+		names,
+		["cwd", "agentDir", "authStorage", "modelRegistry", "model", "thinkingLevel", "scopedModels", "noTools", "tools", "excludeTools", "customTools", "resourceLoader", "sessionManager", "settingsManager", "sessionStartEvent"],
+		"the option set moved: update INT-SDK-SESSION-OPTIONS' 'complete option set' sentence in the same commit as the pin bump",
+	);
+});
+
+test("the pinned built-in tool set matches the loader's constant and the runner's factory derivation", { skip }, async () => {
+	// The exports map constrains bare specifiers only, so a file URL reaches the canonical set the root
+	// does not export -- the meter's own resolver trick. Three spellings must agree: pi's allToolNames,
+	// tools.mjs's factory derivation (what the runner enforces with), and worker/src/triggers.mjs's
+	// EXCLUDABLE_TOOL_NAMES (what the loader refuses with; its own bolt is exclude-tools.pinned.test.mjs).
+	const distDir = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	const canonical = await import(`file://${join(distDir, "core", "tools", "index.js")}`);
+	const { excludableToolNames } = await import("../src/tools.mjs");
+	assert.deepEqual(
+		[...excludableToolNames()].sort(),
+		[...canonical.allToolNames].sort(),
+		"the pinned pi's built-in tool set moved: grow tools.mjs's factory list, EXCLUDABLE_TOOL_NAMES, docs/exclude-tools.md and triggers.example.json together, then re-verify unknown names are still ignored silently",
+	);
+});
+
+test("allToolNames stays UN-exported from the package root -- the day pi exports it, retire the reach-around", { skip }, () => {
+	// A negative pin in the :310 section's spirit: when either symbol appears on the root, tools.mjs's
+	// factory derivation and the file-URL imports here and in worker/test/exclude-tools.pinned.test.mjs
+	// should collapse onto the public export -- loudly, via this message, not by someone noticing.
+	assert.equal(typeof mod.allToolNames, "undefined", "pi now exports allToolNames from the root: prefer it over the factory derivation and the file-URL reach-in");
+	assert.equal(typeof mod.createToolDefinition, "undefined", "pi now exports createToolDefinition from the root: same retirement applies");
 });

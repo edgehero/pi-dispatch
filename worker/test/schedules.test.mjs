@@ -174,3 +174,12 @@ test("multiple valid cron entries with distinct ids all normalize in order", () 
 test("the diagonal is enforced at load: a cron -> github trigger throws", () => {
 	assert.throws(() => load([{ ...CRON, run: { ...CRON.run, kind: "github" } }]), isConfigError);
 });
+
+test("a cron trigger's excludeTools reaches the scheduler data, and an unflagged one carries no key (#291)", () => {
+	const [s] = load([{ ...CRON, run: { ...CRON.run, excludeTools: ["bash", "edit"] } }]);
+	assert.deepEqual(s.data.excludeTools, ["bash", "edit"]);
+	// Absent must DROP OUT at JSON serialization: a stored repeatable that grew a key would claim a
+	// narrowing the operator never wrote, the packages/github rule one block up.
+	const [plain] = load([CRON]);
+	assert.equal("excludeTools" in plain.data, false);
+});

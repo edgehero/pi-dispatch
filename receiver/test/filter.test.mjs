@@ -1191,3 +1191,24 @@ test("a rule naming BOTH carries both (#227)", () => {
 	assert.equal(r.job.image, "pi-job:2");
 	assert.equal(r.job.backend, "local");
 });
+
+test("a rule naming EXCLUSIONS and no image or venue still carries them to the job (#291)", () => {
+	// The #227 backend pin one field over: the spread must be SEPARATE, because folded into a
+	// neighbour's conditional a trigger that named only exclusions would have them silently dropped
+	// here -- and a dropped exclusion runs the job WITH the tool, the loader's own destructive-absence
+	// class arriving through the plumbing.
+	const withXt = forgeCfg({
+		triggers: { label: [{ index: 2, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", excludeTools: ["bash", "edit"] }], comment: undefined, pullRequest: [], knownFlows: new Set(["frontend-fix"]) },
+	});
+	const r = filter("issues", issuesSubset(), withXt, SELF_ID, "d-xt");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.excludeTools, ["bash", "edit"], "the exclusions must survive with no run.image and no run.backend set");
+	assert.equal("image" in r.job, false);
+	assert.equal("backend" in r.job, false);
+});
+
+test("a rule naming no exclusions adds no key -- an unflagged job's literal is byte-identical (#291)", () => {
+	const r = filter("issues", issuesSubset(), cfg, SELF_ID, "d-noxt");
+	assert.equal(r.enqueue, true);
+	assert.equal("excludeTools" in r.job, false);
+});

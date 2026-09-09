@@ -1493,6 +1493,11 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // -- and without this row an operator has no surface anywhere (panel, run record, success log) on which
   // to confirm a venue their trigger named.
   out.push(kv("backend", t.backend ?? "deployment default", t.backend ? "accent" : "dim"));
+  // #291, beside the image row by the issue's own instruction: what the box CANNOT DO is not a fact to
+  // leave implicit, and the dim "full pinned tool set" is the image row's "I checked", not an omission.
+  // `accent` rather than `warning` when armed: this row is a NARROWING, and warning on this pane is
+  // reserved for spend and for what leaves the job (the resume/replicas rows directly below).
+  out.push(kv("excludeTools", Array.isArray(t.excludeTools) && t.excludeTools.length > 0 ? `${t.excludeTools.join(", ")} removed` : "full pinned tool set", Array.isArray(t.excludeTools) && t.excludeTools.length > 0 ? "accent" : "dim"));
   // Rendered on BOTH branches and on every kind, with the same "I checked" dim default the image row uses.
   // `warning` when armed, because this is the one row on this pane that describes something LEAVING the
   // job: everything above says what the job runs, this says what it writes down and hands to the next one.

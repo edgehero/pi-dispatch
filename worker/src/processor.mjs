@@ -310,6 +310,24 @@ export async function runJob(job, deps) {
 			log("refused_image_commands_unsupported", { image: img.commandUnsupported, declared: img.declared });
 			return { outcome: "policy", reason: "job-image-commands-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
+		if (img.excludeToolsUnsupported) {
+			// The image is present and does not declare exclude-tools support (issue #291), so its runner
+			// predates run.excludeTools: it reads no PI_EXCLUDE_TOOLS, and the job would run with every
+			// tool the trigger says to remove -- a "read-only" trigger with a working editor and shell,
+			// recording a clean exit. That is a PERMISSION quietly not enforced, the silent fail-open this
+			// repo brands the worst outcome available, which is exactly why the host refuses before spend
+			// rather than letting the container fail open.
+			//
+			// Determinate, so a refusal rather than a retry, and pre-spend, because no version of this
+			// gets better by running. Like the command branch above, the message names the FIX rather
+			// than the label that noticed it.
+			await comment(
+				job,
+				`Refused: the job image "${img.excludeToolsUnsupported}" does not declare exclude-tools support (\`dev.pi-dispatch.capabilities\` ${img.declared.length > 0 ? `declares: ${img.declared.join(", ")}` : "is absent"}), so its runner would ignore \`run.excludeTools\` and run this trigger with every tool it says to remove. Rebuild the image from a version that has this feature. Not run.`,
+			);
+			log("refused_image_exclude_tools_unsupported", { image: img.excludeToolsUnsupported, declared: img.declared });
+			return { outcome: "policy", reason: "job-image-exclude-tools-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
 		if (img.unavailable) {
 			// docker itself did not answer -- transient infra, NOT a determinate refusal. THROWN so BullMQ
 			// retries (CONST-RETRY-INFRA-ONLY). `container-never-started` is literally true here, and it reuses

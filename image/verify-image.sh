@@ -122,6 +122,13 @@ else
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "command-completed" /app/image/runner/src/outcome.mjs 2>/dev/null \
 					|| fail "the image declares 'commands' but its baked runner does not classify a headless command run -- a run.command job would be retried as infra forever"
 				;;
+			excludeTools)
+				# Same evidence style as 'commands': the baked runner config must actually read the variable.
+				# A runner that does not would run a "read-only" trigger's job with every tool it says to
+				# remove and record a clean exit -- a permission quietly not enforced.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q "PI_EXCLUDE_TOOLS" /app/image/runner/src/config.mjs 2>/dev/null \
+					|| fail "the image declares 'excludeTools' but its baked runner never reads PI_EXCLUDE_TOOLS -- a read-only trigger would run with every tool the file says to remove"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

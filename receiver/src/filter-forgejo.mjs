@@ -129,6 +129,8 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 		// exactly the destructive absence `validateBackend`'s near-miss sweep refuses a misspelling for,
 		// arriving through the plumbing instead of the spelling, one file downstream of the guard.
 		...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
+		// #291. A separate spread, filter.mjs's backend rule: a dropped exclusion runs the job WITH the tool.
+		...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
 		// The trigger's injected skills dir (REQ-PER-TRIGGER-SKILLS), at JOB level beside image/packages and
 		// NEVER inside `trigger`. That placement is sharpest here of all: `trigger` is carried into
 		// /job/event.json, and a worker-host path in an agent-readable file is the leak prepare-local's
@@ -171,7 +173,7 @@ function routeIssueLabel(subset, triggers) {
 		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -220,7 +222,7 @@ function routeComment(subset, triggers, knownFlows) {
 		enqueue: true,
 		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
-		image: triggers.comment.image, backend: triggers.comment.backend,
+		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -251,7 +253,7 @@ function routePullRequest(subset, triggers, action) {
 			// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages,
-			image: rule.image, backend: rule.backend,
+			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
@@ -306,7 +308,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -342,7 +344,7 @@ function routePullRequestClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
-		image: rule.image, backend: rule.backend,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,

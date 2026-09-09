@@ -712,6 +712,20 @@ test("PI_COMMAND is emitted only when the job carries a command, and never as an
 	assert.equal(buildContainerEnv({ ...args, command: "wf run nightly" }).PI_COMMAND, "wf run nightly");
 });
 
+test("PI_EXCLUDE_TOOLS is emitted only when the job carries exclusions, and never as an empty string", { skip }, () => {
+	const args = { provider: "anthropic", model: "m", maxTurns: 10, jobId: "j", hostEnv: HOST };
+	// Mirrors PI_COMMAND directly above: absent means the full pinned default set, and the variable is
+	// omitted entirely rather than emitted empty -- an empty value is a third state the two sides of the
+	// mount need not agree on.
+	for (const excludeTools of [undefined, []]) {
+		assert.equal(buildContainerEnv({ ...args, excludeTools }).PI_EXCLUDE_TOOLS, undefined, `excludeTools ${JSON.stringify(excludeTools)} must not become a value`);
+	}
+	// Comma-joined, and the join is safe by a LOAD-time guarantee this map deliberately does not
+	// re-check (the second-validator rule): the loader admits only names from its pinned set, none of
+	// which carries a comma.
+	assert.equal(buildContainerEnv({ ...args, excludeTools: ["bash", "edit"] }).PI_EXCLUDE_TOOLS, "bash,edit");
+});
+
 test("a job kind with no table entry refuses, rather than inheriting the github token names", { skip }, () => {
 	// This was an `if gitlab / else github`, and the `else` was the hazard: any kind the table did not name
 	// -- a forge wired up everywhere but here, a typo that survived validation -- got its credential
@@ -868,7 +882,7 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", allowGlobalExtensions: false });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false });
 	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead
 	for (const name of Object.keys(env)) {
 		if (dynamic.has(name)) continue;

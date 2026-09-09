@@ -214,6 +214,20 @@ test("the trigger's command reaches the container env, and a commandless job emi
 	assert.ok(!blank.some((a) => String(a).startsWith("PI_COMMAND")));
 });
 
+test("the trigger's excludeTools reach the container env, and an unflagged job emits no PI_EXCLUDE_TOOLS", { skip }, async () => {
+	// Issue #291: run.excludeTools rides env like PI_COMMAND (a permission boundary is not a fact about
+	// the delivery), so the runner can withhold the tools structurally at createAgentSession.
+	const withXt = await argvFor({ ...JOB, excludeTools: ["bash", "edit"] });
+	assert.ok(withXt.includes("PI_EXCLUDE_TOOLS=bash,edit"), "run.excludeTools must reach the runner structurally, comma-joined");
+	const without = await argvFor(JOB);
+	assert.ok(!without.some((a) => String(a).startsWith("PI_EXCLUDE_TOOLS")), "an unflagged job emits no PI_EXCLUDE_TOOLS at all");
+	// Junk shapes are treated as absent, the same defensive guard the flow/command lines keep: the
+	// loader guarantees a non-empty array, so anything else is a hand-built job, and an empty variable
+	// is worse than none.
+	const junk = await argvFor({ ...JOB, excludeTools: [] });
+	assert.ok(!junk.some((a) => String(a).startsWith("PI_EXCLUDE_TOOLS")));
+});
+
 test("overlay extensions: the factory default emits nothing, and only an explicit false emits the opt-out", { skip }, async () => {
 	const on = await argvFor(JOB);
 	assert.ok(!on.some((a) => String(a).startsWith("PI_GLOBAL_ALLOW_EXTENSIONS")), "loading is the absence of the variable, on both sides");

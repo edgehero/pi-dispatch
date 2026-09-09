@@ -90,6 +90,10 @@ export function makeRunContainer({
 			// before any spend (command-unregistered). Same guard shape as `flow` directly above, and
 			// mutually exclusive with it by parse -- a job carries one or the other, never both.
 			command: typeof job.command === "string" && job.command.trim() !== "" ? job.command : undefined,
+			// Issue #291: the trigger's tool denylist, off `job` like command/flow. The loader guarantees a
+			// non-empty validated array; the guard is the same defensive shape `flow` above wears, so a
+			// hand-built job with junk in the field emits no variable rather than an empty one.
+			excludeTools: Array.isArray(job.excludeTools) && job.excludeTools.length > 0 ? job.excludeTools : undefined,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the

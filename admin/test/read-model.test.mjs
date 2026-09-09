@@ -557,10 +557,10 @@ test("readTriggers normalizes each on.type into its discriminated display record
   // Every entry omits `run.packages`, and packages is an OPT-OUT -- so all four normalize to `true`.
   // `index` is the RAW file position (issue #54), attached by readTriggers, not the normalizer.
   assert.deepEqual(res.triggers, [
-    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", command: null, model: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, index: 0 },
-    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", command: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 1 },
-    { type: "comment", phrase: "@pi", flow: "fix", command: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 2 },
-    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", command: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 3 },
+    { type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv/p", flow: "tidy", command: null, model: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, index: 0 },
+    { type: "label", any: ["pi:frontend"], all: [], none: ["wontfix"], flow: "frontend-fix", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 1 },
+    { type: "comment", phrase: "@pi", flow: "fix", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 2 },
+    { type: "pull_request", action: ["labeled"], any: ["pi:review"], all: [], none: [], flow: "review", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 3 },
   ]);
 });
 
@@ -572,7 +572,7 @@ test("normalizeTriggerForDisplay renders an issue trigger: action + number + the
     run: { kind: "github", flow: "deploy" },
   });
   assert.deepEqual(armed, {
-    type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", command: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github",
+    type: "issue", action: ["closed"], number: 40, once: true, flow: "deploy", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github",
   });
 
   // An unnarrowed standing rule: `null` is the every-item sentinel, and `once` takes resume's opt-IN
@@ -728,7 +728,7 @@ test("readTriggers skips an entry that is not a usable { on, run } object (viewe
     }),
   };
   const res = readTriggers({ triggersPath: "/x/triggers.json", fs: fakeFs(files) });
-  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", command: null, packages: true, image: null, backend: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 0 }]);
+  assert.deepEqual(res.triggers, [{ type: "label", any: ["pi:frontend"], all: [], none: [], flow: "frontend-fix", command: null, packages: true, image: null, backend: null, excludeTools: null, skillsDir: null, instructions: false, resume: false, secrets: 0, secretsProfile: null, replicas: null, forge: "github", index: 0 }]);
 });
 
 test("readTriggers returns { invalid } when there is no triggers array", () => {
@@ -2234,4 +2234,25 @@ test("a foreign run's log is NAMED rather than reported as absent", async () => 
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini2", self: "mini1" }), { missing: true, elsewhere: "mini2" });
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini1", self: "mini1" }), { missing: true }, "our own missing log is still just missing");
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1" }), { missing: true }, "and a single-host deployment is unchanged");
+});
+
+test("excludeTools reaches the display record on ALL FIVE arms -- the backend-missed-two-arms lesson (#291)", () => {
+  // wiring.test.mjs:860 exists because `backend` was added to the shared record and the
+  // pull_request/issue arms were missed; this loop makes the same miss fail by arm name.
+  const entries = [
+    { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "f", task: "t", excludeTools: ["bash", "edit"] } },
+    { on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "f", excludeTools: ["bash", "edit"] } },
+    { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f", excludeTools: ["bash", "edit"] } },
+    { on: { type: "pull_request", action: ["labeled"], any: ["pi:x"] }, run: { kind: "github", flow: "f", excludeTools: ["bash", "edit"] } },
+    { on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "f", excludeTools: ["bash", "edit"] } },
+  ];
+  for (const entry of entries) {
+    const rec = normalizeTriggerForDisplay(entry);
+    assert.deepEqual(rec.excludeTools, ["bash", "edit"], entry.on.type);
+    assert.notEqual(rec.excludeTools, entry.run.excludeTools, `${entry.on.type}: a fresh copy, never the raw entry's array`);
+  }
+  // Junk degrades to the null full-set sentinel -- the display mirrors the loader (which refused it
+  // fail-loud) rather than inventing a narrowing the job will not have.
+  assert.equal(normalizeTriggerForDisplay({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "f", excludeTools: "bash" } }).excludeTools, null);
+  assert.equal(normalizeTriggerForDisplay({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "f", excludeTools: [] } }).excludeTools, null);
 });

@@ -273,7 +273,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -326,6 +326,13 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 		// exclusive by parse (command XOR flow); that is deliberately NOT re-enforced here -- a second
 		// validator is a second place to disagree with the first.
 		PI_COMMAND: command || undefined,
+		// The trigger's run.excludeTools, STRUCTURALLY (issue #291): the pi tool names the runner must
+		// withhold from createAgentSession, so a "read-only" trigger stops being prompt text. Comma is a
+		// safe delimiter because the loader admits only names from its pinned built-in set, none of which
+		// carries one -- that is a load-time guarantee, deliberately NOT re-enforced here (PI_COMMAND's
+		// second-validator rule directly above). Absent means the full pinned default set, never an empty
+		// string, for PI_PACKAGES' reason.
+		PI_EXCLUDE_TOOLS: excludeTools.length > 0 ? excludeTools.join(",") : undefined,
 		// Kill switch for job-time package installation, UNCONDITIONAL for every job. pi's resolver shells out
 		// to a REAL `npm install` for any npm:/git: source unless offline mode is on, and `~/.pi/agent` IS
 		// writable in the container. We emit only local paths, so nothing should reach that branch -- this

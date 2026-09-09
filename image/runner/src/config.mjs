@@ -48,6 +48,10 @@ export function parseRunnerEnv(env) {
 		// command this job dispatches instead of a prompt. `null` (the overwhelmingly common state)
 		// means a prompt job, byte-identical to every job before the feature.
 		command: parseCommand(env, "PI_COMMAND"),
+		// INT-CONTAINER-JOB-INPUTS (issue #291): the trigger's run.excludeTools -- the pi tool names to
+		// withhold from createAgentSession. `[]` (the overwhelmingly common state) means the full pinned
+		// default set, byte-identical to every job before the feature.
+		excludeTools: parseExcludeTools(env, "PI_EXCLUDE_TOOLS"),
 		retry: {
 			maxRetries: parsePositiveInt(env, "PI_RETRY_MAX", 2),
 			baseDelayMs: parsePositiveInt(env, "PI_RETRY_BASE_MS", 2000),
@@ -195,6 +199,25 @@ function parseCommand(env, name) {
 		throw configError(`invalid ${name}: contains a control character (a newline or tab would change what dispatches)`);
 	}
 	return raw;
+}
+
+/**
+ * Parse the tool denylist a run.excludeTools trigger carries (issue #291). Unset or empty is `[]` --
+ * the full pinned default set, the default for every job.
+ *
+ * Shape only, deliberately: entries are returned VERBATIM (no trim, no membership check), because this
+ * function promises purity and pi-freedom, and membership is the one check that needs the pinned
+ * artifact -- it runs in run-job's pre-spend assert (tools.mjs), where a padded or misspelled entry
+ * fails with the entry shown verbatim. One validator owns the grammar; a second normalizing pass here
+ * would be a second place to disagree with the first (PI_COMMAND's own rule, one parser up).
+ * Empty segments are skipped for parsePackagePaths' reason: they are the shape a shell leaves behind.
+ */
+// env-internal PI_EXCLUDE_TOOLS: the worker's own per-job input (INT-CONTAINER-JOB-INPUTS). The container
+// env is BUILT, never inherited, and a trigger naming it in `run.secrets` is refused at load.
+function parseExcludeTools(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return [];
+	return raw.split(",").filter((entry) => entry !== "");
 }
 
 /**

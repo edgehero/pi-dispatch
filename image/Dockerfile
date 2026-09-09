@@ -231,7 +231,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # retried as infra -- paid retries of a job that can never classify. The label is how the worker
 # refuses that pairing pre-spend (image-preflight.mjs), which is what makes shipping the runner ahead
 # of the trigger field safe in both directions.
-LABEL dev.pi-dispatch.capabilities="replicas,commands"
+# `excludeTools` (issue #291) tells the worker this runner reads PI_EXCLUDE_TOOLS and withholds those
+# tools from createAgentSession. An older runner handed the variable would ignore it and run the job
+# with every tool the trigger says to remove -- a "read-only" trigger with a working editor and shell,
+# recording a clean exit: a PERMISSION quietly not enforced, the worst-outcome class. The label is how
+# the worker refuses that pairing pre-spend instead of letting the container fail open.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools"
 
 USER pi
 WORKDIR /workspace

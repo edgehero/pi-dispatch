@@ -255,6 +255,14 @@ or what it costs):
   ([`docs/job-image.md`](docs/job-image.md)).
 - `"packages": false` opts one trigger out of the staged third-party pi packages, which is also how a
   workflow extension is withheld from one flow ([`docs/workflows.md`](docs/workflows.md)).
+- `"excludeTools": ["bash", "edit", "write"]` removes named built-in pi tools from that trigger's
+  sessions, enforced by the session itself rather than asked for in prompt text: the excluded tools are
+  gone from the tool registry, so nothing running inside the job can switch them back on. Narrowing
+  only, and only the pinned pi's built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`); a
+  misspelled name is refused when the file loads, because pi would otherwise ignore it silently. The
+  job image must declare the `excludeTools` capability (the shipped image does); a job carrying
+  exclusions on an older image is refused before it costs anything, since that image's runner would run
+  the job with every tool you removed ([`docs/exclude-tools.md`](docs/exclude-tools.md)).
 - `"skillsDir"` points at a directory of skills on the worker host, in the same `<name>/SKILL.md` layout
   as your own `~/.pi/agent/skills`. They are copied into that trigger's jobs and layered under the repo's
   own `.pi/skills` and over the global overlay, so a repo skill of the same name still wins. Use it to run

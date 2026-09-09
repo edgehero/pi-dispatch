@@ -184,6 +184,13 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// same operator's flows and, without them, would look up a skill that is not there, write a
 					// plausible report and exit 0. It is NOT part of chainedJobId, for the reason stated below.
 					skillsDir: job.data?.skillsDir,
+					// #291, INHERITED -- and here the destructive direction is INVERTED from every line above.
+					// For image/skillsDir the hazard of dropping the inheritance is a child MISSING a toolchain;
+					// here it is the child GAINING tools the parent's trigger took away: a read-only triage
+					// parent would chain a child that can edit and run bash, a widening no operator wrote.
+					// Off `job.data`, never off `req` -- the request file can neither set nor drop it (explicit
+					// property reads only, above), so the agent cannot widen its child by omitting a key.
+					excludeTools: job.data?.excludeTools,
 					// `secrets`/`secretsProfile` are deliberately ABSENT, and the two lines above are exactly why
 					// this comment exists: their reasoning reads as though it should apply here too, and it must
 					// not. An image and a skills directory are toolchain; a resolved credential is a capability.

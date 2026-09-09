@@ -438,3 +438,30 @@ test("a chained child inherits NO secrets, from the parent or from the request f
 	assert.equal(JSON.stringify(args).includes("STOLEN"), false);
 	assert.equal(JSON.stringify(args).includes("op://"), false);
 });
+
+test("a chained child inherits the PARENT'S excludeTools, and the request file can neither set nor drop them (#291)", async () => {
+	// The image inheritance argument with its destructive direction INVERTED: dropping THIS inheritance
+	// does not starve the child of a toolchain, it WIDENS it -- a read-only triage parent would chain a
+	// child that can edit and run bash, a widening no operator wrote. And `req` is agent-authored, so a
+	// request naming its own excludeTools must be inert either way: honoring an addition would let the
+	// agent narrow a sibling's identity-shared child, honoring an omission would be its widening lever.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", excludeTools: ["MARKER-read"] }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+
+	const parent = localJob();
+	parent.data = { ...parent.data, excludeTools: ["bash", "edit"] };
+	await collect({ job: parent, prepared: PREPARED });
+
+	const { args } = cap.enqueued[0];
+	assert.deepEqual(args.excludeTools, ["bash", "edit"], "the parent's narrowing follows the child");
+	assert.equal(JSON.stringify(args).includes("MARKER-read"), false, "the request file's key is never read");
+});
+
+test("a parent with no excludeTools chains a child whose data carries none either (#291)", async () => {
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	await collect({ job: localJob(), prepared: PREPARED });
+	assert.equal(cap.enqueued[0].args.excludeTools, undefined, "byte-identical to a pre-issue chain");
+});

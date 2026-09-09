@@ -110,6 +110,19 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   project `access_level >= 30` (Developer). Group-inherited membership counts; a lookup that cannot
   complete answers 503 and is redelivered rather than silently dropped. `OQ-013` records the residual:
   this gate depends on a network call, and on a role table that varies by version and edition.
+- **What a trigger's agent can do, structurally (`run.excludeTools`).** A trigger may remove named
+  built-in pi tools from its jobs' sessions, and unlike every behavioural line in the guardrails this
+  one is **enforced by the session**: the excluded tools are filtered out of pi's tool registry at
+  construction, so no extension call and no refresh inside the job can restore them, and every flagged
+  job logs the active tool list read back so the fact is observable rather than assumed. The boundary
+  is stated as plainly as the grant: this removes pi **tools**, never container capabilities (excluding
+  `bash` does not remove the shell from the image; the isolation flags were always the worker's own
+  `docker run` argv), and extension or custom tools are not excludable, so a genuinely read-only
+  trigger also declines the staged packages (`"packages": false`). It is file-only like every
+  capability field, no panel key and no AI tool, a chained child inherits its parent's exclusions, and
+  a job carrying exclusions is refused pre-spend on an image too old to honour them
+  (`job-image-exclude-tools-unsupported`) rather than allowed to fail open
+  ([`docs/exclude-tools.md`](docs/exclude-tools.md)).
 - **Webhook authenticity, and what "authenticity" means per arm.** What holds **universally is the
   ordering**: the body is read as **raw** bytes, the delivery's credential is checked timing-safe, and only
   then is anything parsed. Without that ordering every other gate collapses, because the label and author

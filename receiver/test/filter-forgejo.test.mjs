@@ -368,3 +368,12 @@ test("arming close rules changes label and PR routing not at all -- byte-identic
 		assert.equal(JSON.stringify(armed.job), JSON.stringify(plain.job));
 	}
 });
+
+test("a label rule's excludeTools reach the job, and an unflagged rule adds no key (#291)", () => {
+	const rules = { ...triggersRaw, label: [{ ...triggersRaw.label[0], excludeTools: ["bash"] }] };
+	const r = filterForgejo("issues", parseForgejoSubset(issuePayload()), rules, knownFlows, SELF_ID, true, "fj-xt");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.excludeTools, ["bash"]);
+	const plain = filterForgejo("issues", parseForgejoSubset(issuePayload()), triggersRaw, knownFlows, SELF_ID, true, "fj-noxt");
+	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
+});

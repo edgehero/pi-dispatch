@@ -18,6 +18,7 @@ import {
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { openSessionManager } from "./src/session.mjs";
 import { attachTokenBudget } from "./src/token-budget.mjs";
+import { assertExcludeToolsKnown } from "./src/tools.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 // NOTE: usage-meter.mjs reaches pi-ai's module-level api-provider registry through a RUNTIME-probed
 // dynamic import, never a static one. Never add a pi-ai package specifier to this file's imports: two
@@ -70,6 +71,11 @@ async function main() {
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
 	// can influence. Idempotent and only ever tightening. INT-SDK-SESSION-OPTIONS.
 	enforceOfflineMode(process.env);
+	// Same moment as the mount asserts above, same exit code, and the same silent-skip hazard behind it
+	// (issue #291): pi consults excludeTools only through a Set filter, so an unknown name is a no-op
+	// with no diagnostic -- the job would run WITH the tool the trigger says to remove. Free, pre-spend,
+	// and before the prompt is even read; the entry is reported verbatim so a padded name reads as itself.
+	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools);
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
 	// authority, so a worker bug that wrote a prompt.md disagreeing with the env var cannot make the
@@ -239,7 +245,20 @@ async function main() {
 		settingsManager,
 		sessionManager,
 		resourceLoader,
+		// The trigger's tool denylist (issue #291), enforced by pi structurally: the excluded names are
+		// filtered out of the tool REGISTRY, not merely the active list, so neither an extension's
+		// setActiveTools nor a later refresh can re-enable one. Spread conditionally so an unflagged
+		// job's options object is byte-identical to today's -- at the pin `excludeTools: []` happens to
+		// behave the same, but it stores an empty Set on the session, and a future pi may distinguish.
+		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
 	}));
+
+	// The in-container read-back (issue #291): what was asked for and what the session actually holds,
+	// on every flagged job's log. Names only, from a set the loader validated -- no payload text, no
+	// values -- so the line is PII-free by construction.
+	if (cfg.excludeTools.length > 0) {
+		log("tools_excluded", { excludeTools: cfg.excludeTools, active: session.getActiveToolNames() });
+	}
 
 	// Deterministic re-arm. Extensions register their providers during createAgentSession, so any api
 	// id that did not exist at install time is unwrapped until now. The unref'd interval inside the

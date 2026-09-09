@@ -843,6 +843,51 @@ test("run.command's dispatch contract at the pin: headless commands, swallowed t
 	}
 });
 
+test("run.excludeTools' enforcement contract at the pin: structural removal, read back off a REAL session", { skip }, async () => {
+	// THE ACCEPTANCE of issue #291, on the dispatch test's terms directly above: a real offline
+	// createAgentSession built through the runner's own loader, no provider key -- the exclusion is a
+	// construction-time fact, not a prompt-time one. The CONTROL session exists because without it a
+	// pin bump that stopped registering bash at all would green-light three dead assertions.
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const f = fixture();
+	const loader = await loaderModule.buildLoadedResourceLoader({
+		cwd: f.workspace,
+		jobPiDir: f.jobPi,
+		guardrailsPath: f.guardrailsPath,
+		outboxProtocolPath: f.outboxProtocolPath,
+	});
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
+	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const settingsManager = pi.SettingsManager.inMemory({});
+	const common = { cwd: f.workspace, agentDir, authStorage, modelRegistry, settingsManager, resourceLoader: loader };
+	// The unknown name rides along DELIBERATELY: pi ignoring it without a throw or a diagnostic is the
+	// pin fact the loader's and the runner's membership validation exist for. If a bump makes this
+	// construction throw, re-read the belt-and-braces split before relaxing anything.
+	const { session: narrowed } = await pi.createAgentSession({ ...common, excludeTools: ["edit", "bash", "definitely-not-a-tool"] });
+	const { session: control } = await pi.createAgentSession(common);
+	try {
+		// Acceptance clause 1: the active tool list, read back from the session, lacks the excluded pair.
+		const active = narrowed.getActiveToolNames();
+		assert.ok(!active.includes("edit") && !active.includes("bash"), `active tools read back: ${JSON.stringify(active)}`);
+		assert.ok(active.includes("read"), "the narrowing must not have collapsed to no tools at all");
+		// Structural, not cosmetic: the exclusion filters the tool REGISTRY (agent-session's
+		// _refreshToolRegistry), so a by-name re-enable is a silent no-op -- neither an extension's
+		// setActiveTools nor a later refresh can restore an excluded tool.
+		const all = narrowed.getAllTools().map((t) => t.name);
+		assert.ok(!all.includes("edit") && !all.includes("bash"), `the registry itself must lack them: ${JSON.stringify(all)}`);
+		narrowed.setActiveToolsByName(["read", "bash", "edit", "write"]);
+		const after = narrowed.getActiveToolNames();
+		assert.ok(!after.includes("edit") && !after.includes("bash"), `a by-name re-enable must not restore an excluded tool: ${JSON.stringify(after)}`);
+		// The control: the same construction WITHOUT the option carries both, so nothing above is vacuous.
+		const controlActive = control.getActiveToolNames();
+		assert.ok(controlActive.includes("edit") && controlActive.includes("bash"), `the control session must carry the defaults: ${JSON.stringify(controlActive)}`);
+	} finally {
+		narrowed.dispose();
+		control.dispose();
+	}
+});
+
 // --- enforceProtectedSkillPrecedence, decided on injected input (no skills tree, no collisions) ---
 
 /** A Skill-shaped record; only name and filePath are load-bearing for the precedence decision. */

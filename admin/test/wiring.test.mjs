@@ -1054,3 +1054,24 @@ test("the dispatch_trigger_add description states each forge's vocabulary exactl
   assert.ok(kindClause, "the description must state the kinds as a `kind` = a|b|c clause for this pin to read");
   assert.deepEqual(kindClause[1].split("|").sort(), [...ON_TYPES].sort(), "the model is told exactly the kinds the loader accepts");
 });
+
+test("NO tool exposes a tool-scoping parameter -- excludeTools stays a reviewed file edit (#291)", async () => {
+  // run.image's question ("is it a capability the model would GAIN?") on its sharpest instance yet: a
+  // model-writable exclusion list is a permission surface, and its widening direction -- a name
+  // quietly dropped from the array -- would read as harmless in any confirm prompt. Structural, like
+  // the secrets sweep above; the near-miss spellings and pi's own option names ride along so a future
+  // parameter cannot dodge the sweep by one letter or by borrowing the upstream vocabulary.
+  const { calls } = await loadRegistered();
+  for (const tool of calls.registerTool) {
+    const keys = Object.keys(tool.parameters?.properties ?? {});
+    for (const forbidden of ["excludeTools", "excludeTool", "excludedTools", "tools", "noTools"]) {
+      assert.equal(keys.includes(forbidden), false, `${tool.name} must expose no ${forbidden} parameter (got ${keys.join(", ")})`);
+    }
+  }
+  // And the write tools' descriptions must not advertise the field either: the description is what
+  // the model reads, and an advertised-but-absent parameter is an invitation to improvise one.
+  for (const name of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    const tool = toolByName(calls, name);
+    assert.equal(/excludeTools/.test(tool.description ?? ""), false, `${name} must not advertise excludeTools`);
+  }
+});

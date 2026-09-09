@@ -420,6 +420,46 @@ jobs:
             || { echo "::error::control run did not fail on the prompt -- the ordering claim is unproven."; exit 1; }
           echo "OK: staged-package refusal precedes the job-input read"
 
+      # --- INT-TRIGGERS-FILE-CONTRACT (run.excludeTools, issue #291) ---
+      # A name the pinned pi would silently ignore must be refused BEFORE any spend, in-container too:
+      # pi consults excludeTools only through a Set filter, so an unknown name is a no-op with no
+      # diagnostic -- the job would run WITH the tool the trigger says to remove and record a clean
+      # exit. The worker's loader makes this branch unreachable for worker-built containers; this step
+      # is the end-to-end proof that the ENTRYPOINT wires the env var to the refusal for the skew and
+      # hand-run cases. The exit code alone would be vacuous (the packages step above says why), so
+      # the message is asserted too -- and the valid-exclusion run is the differential proving a legal
+      # denylist parses clean and the run proceeds to the NEXT gate (the missing prompt), i.e. the
+      # refusal is the membership check and it sits pre-spend. The inspect at the end is the one place
+      # in CI that binds the Dockerfile's capability token: without it, dropping `excludeTools` from
+      # the label is caught only by every flagged job refusing in production -- loudly, but paid-for.
+      - name: "RUNNER: an exclusion the pinned pi does not know is refused pre-spend (exit 2)"
+        run: |
+          run_runner() {
+            docker run --rm --network none \
+              -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 "$@" \
+              "$IMAGE_REF" 2>&1
+          }
+          set +e
+          out=$(run_runner -e PI_EXCLUDE_TOOLS=not-a-tool)
+          code=$?
+          set -e
+          echo "$out"
+          [ "$code" = "2" ] || { echo "::error::PI_EXCLUDE_TOOLS=not-a-tool exited $code, want 2 (policy, not retried)."; exit 1; }
+          echo "$out" | grep -q "is not a tool the pinned pi knows" \
+            || { echo "::error::exit 2 came from something other than the exclusion membership check -- the assertion is vacuous."; exit 1; }
+          # Differential: a VALID exclusion dies later, on the missing prompt -- the membership check
+          # passed it and the run reached the next gate, which is the pre-spend ordering claim.
+          set +e
+          out2=$(run_runner -e PI_EXCLUDE_TOOLS=bash,edit)
+          code2=$?
+          set -e
+          [ "$code2" = "2" ] || { echo "::error::valid-exclusion control exited $code2, want 2"; exit 1; }
+          echo "$out2" | grep -q "missing job input" \
+            || { echo "::error::a valid exclusion did not reach the job-input read -- over-validation, or the ordering claim is unproven."; exit 1; }
+          docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" | grep -q "excludeTools" \
+            || { echo "::error::the built image's capabilities label does not declare excludeTools -- the worker would refuse every flagged job on this image."; exit 1; }
+          echo "OK: unknown exclusions refuse pre-spend, valid ones pass, the label declares the capability"
+
       # --- INT-CONTAINER-RUNTIME-CONTRACT (PI_OFFLINE=1) ---
       # pi's resolver shells out to a REAL `npm install` for any npm:/git: source unless offline mode
       # is on, and ~/.pi/agent IS writable in the container -- so without this flag an unresolved

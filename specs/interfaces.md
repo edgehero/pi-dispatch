@@ -335,7 +335,14 @@ Evidence convention as in `constitution.md`.
   The complete option set **at 0.80.7** is `cwd`, `agentDir`, `authStorage`, `modelRegistry`, `model`,
   `thinkingLevel`, `scopedModels`, `noTools`, `tools`, `excludeTools`, `customTools`, `resourceLoader`,
   `sessionManager`, `settingsManager`, `sessionStartEvent`. `OQ-005`'s migration replaces the first two
-  with an async `modelRuntime` and **has not shipped** — it exists only on `main`.
+  with an async `modelRuntime` and **has not shipped** — it exists only on `main`. This sentence is a
+  hand-written table restating a derivable source and carries its bolt (CLAUDE.md's rule):
+  `image/runner/test/pinned-api.test.mjs` extracts the interface's top-level member names from the
+  pinned `sdk.d.ts` and deepEquals them against this exact list. `excludeTools` became LOAD-BEARING
+  with issue #291: the runner passes it (conditionally -- an unflagged job's options object stays
+  byte-identical), pi filters the tool registry with it, and the same test pins the trio's declared
+  types plus the fact that `allToolNames` stays un-exported from the package root (the reason
+  `tools.mjs` derives the set from the seven root-exported `create*ToolDefinition` factories).
 - **Evidence (pinned artifact — authoritative)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
   dist/core/sdk.d.ts → CreateAgentSessionOptions` — `authStorage?: AuthStorage` ("Default:
   AuthStorage.create(agentDir/auth.json)"), `modelRegistry?: ModelRegistry` ("Default:
@@ -906,7 +913,13 @@ refactor apart.
     reason `job-image-replicas-unsupported`. One rule underlies both — an image that declares nothing gets
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
-    any more than `forges` can.
+    any more than `forges` can. The token set at this version is `replicas`, `commands` and
+    `excludeTools` -- the last (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
+    a job carrying exclusions on an image without it is refused pre-spend
+    (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a
+    "read-only" trigger with every tool the file says to remove: a permission quietly not enforced.
+    `verify-image.sh` fails on any UNKNOWN token and greps the baked runner for each claimed one, so a
+    new capability cannot ship its label without shipping its evidence.
   - User: non-root
   - **`--pull=never`.** `docker run` defaults to `--pull=missing`, which makes an unrecognised image name a
     **registry fetch**: a typo in the operator's image config would pull and execute a stranger's image under
@@ -1010,7 +1023,15 @@ refactor apart.
     validates it strictly — no leading slash, no surrounding whitespace, no control characters — because
     pi's dispatch grammar reads the name to the first space and passes everything after verbatim as
     handler args, so a malformed value would silently change what runs rather than fail. Verification,
-    dispatch and classification are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s command rows); and each name in `PI_FORWARD_ENV` (an explicit operator
+    dispatch and classification are `INT-RUNNER-EXIT-CODE-PROTOCOL`'s command rows); `PI_EXCLUDE_TOOLS` (a
+    `run.excludeTools` trigger's tool denylist, comma-joined -- forwarded ONLY when the job carries
+    exclusions, omitted otherwise, never an empty string. The comma is safe by a LOAD-time guarantee the
+    env builder deliberately does not re-check: the loader admits only names from its pinned built-in
+    set, none of which carries one. The runner splits it shape-only (entries verbatim, no trim) and
+    asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
+    ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
+    `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
     the allowlist at config load — derived from the forge table rather than enumerated here, currently
@@ -2160,6 +2181,52 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   pre-spend if unblessed, and not routed on. The dispatch arrives with `stopContainer` and `reap`, which
   need the same per-backend lookup and should grow it once rather than twice.
 
+- **`run.excludeTools` (ALL trigger kinds, optional non-empty array of pi tool names)**: the built-in pi
+  tools this trigger's sessions must NOT have (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`,
+  `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, issue #291). The runner passes the list to `createAgentSession` as
+  `excludeTools`, which filters the tool REGISTRY itself -- not merely the active list -- so neither an
+  extension's `setActiveTools` nor a later refresh can re-enable an excluded tool, and a "read-only
+  triage" trigger stops being prompt text. **NARROWING ONLY**: the allowlist forms are refused by name
+  (`run.tools` inverts the question to "which tools exist", the pinned package's answer, so a pin bump
+  that adds a tool would silently grant it to every allowlisted trigger; `run.noTools` is pi's other
+  session option and would otherwise be dropped in exactly the silence this field's validation refuses).
+
+  **Refused at load** for a non-array, an empty array, a non-string or empty member, a duplicate member,
+  and -- the load-bearing one -- **any name outside the pinned built-in set** (`read`, `bash`, `edit`,
+  `write`, `grep`, `find`, `ls` at pi 0.80.7): pi consults `excludeTools` only through a set filter, so
+  an unknown name excludes nothing, silently, which puts a misspelled member in `run.backend`'s
+  destructive-absence class. The set is `EXCLUDABLE_TOOL_NAMES` in `triggers.mjs`, hand-written because
+  the shared validator is pure and pi-free, and BOLTED twice against the pinned artifact
+  (`worker/test/exclude-tools.pinned.test.mjs` via a file-URL read of pi's own `allToolNames`;
+  `image/runner/test/pinned-api.test.mjs` via the factory derivation the runner enforces with).
+  Extension and custom tool names are deliberately NOT excludable: they register at container start, so
+  the loader cannot know them, and admitting free strings would re-open the silent no-op.
+
+  **A NEAR-MISS SPELLING IS REFUSED** on `run.backend`'s exact sweep (homoglyph subsequence branch
+  included), with targets `excludetools`/`excludetool`/`excludedtools` -- the singular is the likeliest
+  miss, since an operator removing one tool writes `excludeTool` the way English does. On `on` every
+  spelling is refused including the correct one; an unrelated unknown key still drops silently, because
+  the sweep is a near-miss guard and not the general schema `DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES`
+  rejects.
+
+  **A second refusal is pre-spend, not at load**, and it closes the stale-image fail-open: the job image
+  declares the `excludeTools` capability token (`INT-CONTAINER-RUNTIME-CONTRACT`), and a job carrying
+  exclusions on an image that does not declare it returns `job-image-exclude-tools-unsupported` before
+  the mint, the clone and the reservation -- an older baked runner reads no `PI_EXCLUDE_TOOLS` and would
+  run the job with every tool the file says to remove, recording a clean exit. A third, in-container
+  membership assert (the runner's `tools.mjs`, exit 2 pre-spend) covers skew and hand-run containers,
+  and every flagged job logs `tools_excluded` with the session's active tool list READ BACK.
+
+  **File only**: no panel key, no model-callable setter (`dispatch_trigger_add`/`_edit` carry no such
+  parameter, pinned structurally beside the `secrets` sweep), and a chained job's request file cannot
+  set OR drop it -- the child inherits the parent's exclusions off validated job data
+  (`INT-OUTBOX-CONTRACT`), because here the destructive direction is inverted: dropping the inheritance
+  would WIDEN the child.
+
+  **Absent carries no `excludeTools` key at all**, so a trigger without the field normalizes and
+  enqueues job data byte-identical to one written before this field existed, and the unflagged fleet
+  (old images included) pays nothing.
+
 - **`run.secrets` (ALL FOUR trigger kinds, optional map of env-var name to opaque reference) and
   `run.secretsProfile` (optional name)**: the environment variables this trigger's jobs receive, and which
   operator-declared resolver reads them. **The reference grammar is the resolver's, never this project's**
@@ -2572,7 +2639,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|...>" | null,
+    "reason":    "<fixed enum: worker-abort|over-budget|unprotected-branch|runner-policy|container-never-started|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|once-already-spent|scope-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|sha-gone|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|provider-unconfigured|config-refused|...>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -2811,7 +2878,15 @@ validator rather than a second copy of it.
   from any committed artifact, so there is nothing a default-deny gate could consult
   (`DES-AI-TRIGGER-FLOW-GATE` reads frontmatter, and a command has none), and silently ignoring the key
   under the unknown-keys rule would enqueue a flow the agent did not request — the believed-on-while-off
-  shape. Commands may chain OUT — a local command job keeps its `/outbox`, its requests naming flows
+  shape. **`excludeTools` (issue #291) deliberately STAYS under unknown-keys-ignored** rather than
+  becoming a second exception: the child INHERITS the parent's exclusions off validated `job.data`,
+  beside its image, backend and skills, so a request-file key can neither set nor drop what the child
+  runs with by construction. An ignored addition misleads nobody the contract protects (the child is
+  already exactly as narrow as the operator's reviewed trigger), while the `command` refusal exists
+  because ignoring THAT key would enqueue the wrong work. The inheritance itself is mandatory and its
+  destructive direction is INVERTED from image/skillsDir's: dropping it would not starve the child of a
+  toolchain, it would WIDEN it -- a read-only triage parent chaining a child that can edit and run bash.
+  Commands may chain OUT — a local command job keeps its `/outbox`, its requests naming flows
   under the same gate — but nothing chains INTO a command. `task` is agent-authored **DATA**
   (`CONST-ISSUE-TEXT-IS-DATA`, one layer down): it becomes the child's `/job/prompt.md` user prompt and
   **never** enters the run-history `.json` record.
@@ -2844,7 +2919,9 @@ validator rather than a second copy of it.
   given a **github** parent, when it exits, then no `/outbox`
   exists to collect; given a symlink or an oversize `request-<n>.json`, when validated, then it is
   rejected; given a **retried** parent, when its outbox is re-collected, then the idempotent child id
-  dedups and no second child is enqueued.
+  dedups and no second child is enqueued; given a parent whose data carries `excludeTools`, when a valid
+  request is collected, then the child's data carries the parent's exclusions verbatim and no value from
+  the request file's own `excludeTools` key appears anywhere in it.
 
 ## INT-SESSION-STORE-CONTRACT
 
@@ -3664,3 +3741,4 @@ keyspace is not that.
 | 2026-09-08 | Issue #313, a duplicate key in `triggers.json` silently taking the last value, found by an adversarial pass on #309. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a duplicate key refuses the whole file, anywhere in it, extending the entry that already abandons this file's drop-silently posture for a term of a gate. The mechanism is a scan of the raw TEXT, and the two reasons it has to be are worth keeping: `JSON.parse`'s reviver is called ONCE for a duplicated key with the winning value already resolved, and Node 22's `context.source` gives only that value's own text, so NEITHER can see the duplicate (measured both ways). The scan runs only on text the parse already accepted, which is what keeps it small enough to hand-write safely after issue #282, and keys are compared DECODED because a plainly-written key and the same key written as a `u00`-style escape are one key to `JSON.parse` and two to a byte comparison. The refusal also guards the raw reads on the two WRITE paths in `triggers-file.mjs`, which never reach the validator; the disarm path is the sharp one, since it rebuilds the whole file from the parsed array and would delete the shadowed key from disk to record one disarm. On both, the scan runs strictly after the parse succeeded, so an unparseable file is still repaired from empty rather than being misreported as a shadowed one. The two read-only raw readers and the console's fail-soft display loader are named as residuals rather than swept. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: this refuses at load, before any job exists, so no record shape and no reason token moves. **`INT-PI-PACKAGES-FILE-CONTRACT` UNCHANGED, checked**: it has the same parse shape and the same hazard, and is deliberately not swept here (it is not the reviewed artifact the authorisation story rests on). **Code evidence**: worker/src/json-duplicates.mjs -> findDuplicateKey; worker/src/triggers.mjs -> parseTriggers; worker/src/triggers-file.mjs -> writeTriggers, disarmTrigger; worker/test/json-duplicates.test.mjs. |
 | 2026-09-08 | Issue #314, the provider-steering variables. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a third family of `run.secrets` name is refused at load, and it is about WHERE the request goes rather than whose key pays for it. Measured at the pin with a stubbed fetch and no key: `AZURE_OPENAI_BASE_URL` and `AZURE_OPENAI_RESOURCE_NAME` each redirect the provider call carrying `api-key`, and neither is a shadowed default, because every azure model ships `baseUrl: ""` so the environment is the primary source there. The set is derived from TWO sources and bolted in both directions -- every `getProviderEnvValue("NAME")` in the pinned pi's dist, and every `readEnv("NAME")` in the provider SDKs it builds clients from -- which is what makes it hold names nobody would have written down: `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_BEDROCK_SKIP_AUTH`. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, one clause: its "one credential fact is written down here rather than derived, and only one" now says why `PROVIDER_STEERING_VARS` is not a second one (a literal list in the source only so `triggers.mjs` stays import-free, derived by its own bolt). **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no reason token moves; the existing `secret-name-reserved` covers the pre-spend half and this refuses earlier than that. **Code evidence**: worker/src/provider-steering.mjs -> PROVIDER_STEERING_VARS; worker/src/triggers.mjs -> RESERVED_ENV_NAMES, validateSecrets; worker/test/provider-steering.test.mjs; worker/test/env-allowlist.test.mjs. |
 | 2026-09-08 | Issue #302, the registry logging after its own `close()` resolved. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: once `close()` has been entered the module writes no line and adds nothing back to `host:live`, and the `closed` FLAG rather than the drain is what delivers it. `close` drains with one `bounded(inFlight, timeoutMs)` while `write` spends one bound per command, so a write outlives the drain by design; measured, `host_registry_unreachable` landed 76ms and `host_registry_restored` 108ms after a RESOLVED close, and a late `SADD` re-indexed the host 40ms after the same close's `SREM`. **The `restored` arm matters as much as the `unreachable` one the issue named**: a drain that gave up can see the write SUCCEED late just as easily as fail. **The `PEXPIRE` is deliberately left ungated beside the `SADD`**, because the tempting symmetry is wrong: the `SADD` is an index write `close`'s `SREM` undoes, while the `PEXPIRE` is the row's own fuse, and skipping it on a close landing between the `HSET` and the `PEXPIRE` leaves the hash with NO expiry at all -- invisible, since every reader walks `host:live`, so a keyspace leak the reader's prune never reaches. A residual is measured and recorded rather than closed: a first beat whose `HSET` reply is lost past its own bound never reaches the `PEXPIRE`, so a `DEL` lost at shutdown leaves a TTL-less row on the pre-#302 code and the fixed code alike, with or without any gate. The drain stays at one `timeoutMs`: widening it to `write`'s worst case would triple a shutdown bound whose point is to be short. Also **corrected, not added**: the entry's consumer list claimed the cron gate read this keyspace "and nothing else" and that the admin extension and `doctor` read none of it, which had been false since the console began calling the shared `readLiveHosts`. `DES-HOST-REGISTRY`, `REQ-MULTI-HOST-COORDINATION`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER` UNCHANGED, checked. **Code evidence**: worker/src/host-registry.mjs -> beat, write, close · worker/test/host-registry.test.mjs -> "a write that outlives the drain is SILENT, and cannot re-index the row it lost" |
+| 2026-09-09 | Issue #291. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: `run.excludeTools` on ALL five kinds, in `run.backend`'s bullet shape -- the grammar, the pinned-set membership refusal printing the whole known set (pi ignores unknown exclusion names silently, the destructive-absence class), the near-miss sweep with its three targets and the homoglyph branch, `run.tools`/`run.noTools` refused BY NAME, the pre-spend capability split, file-only with the outbox inheritance, and absent-carries-no-key. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `PI_EXCLUDE_TOOLS` joins the worker-passed env -- comma-joined (safe by the loader's membership guarantee, deliberately not re-checked), omit-when-absent, shape-only parse in-container with the membership assert pre-spend and the `tools_excluded` read-back line. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: the capability token set is `replicas`, `commands`, `excludeTools`; `verify-image.sh` fails on unknown tokens and greps the baked runner for each claimed one. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `job-image-exclude-tools-unsupported` (checked against the nested `session.reason` enum for the collision rule). **`INT-SDK-SESSION-OPTIONS` AMENDED**: `excludeTools` becomes load-bearing, and the hand-written complete-option-set sentence gains the bolt it has owed since CLAUDE.md's rule was written (pinned-api deepEquals the extracted member names against it). **`INT-OUTBOX-CONTRACT` AMENDED**: `excludeTools` deliberately STAYS under unknown-keys-ignored while the child inherits off validated `job.data` -- `chain-command-refused` keeps its one-exception sharpness, and the acceptance gains the inheritance clause. **Code evidence**: worker/src/triggers.mjs -> validateExcludeTools; worker/src/env-allowlist.mjs -> PI_EXCLUDE_TOOLS; worker/src/image-preflight.mjs; worker/src/processor.mjs; worker/src/outbox.mjs; receiver/src/config.mjs + the four filters; image/runner/src/config.mjs -> parseExcludeTools; image/runner/src/tools.mjs; image/runner/run-job.mjs; image/Dockerfile + image/verify-image.sh. |

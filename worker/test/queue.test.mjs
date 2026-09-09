@@ -656,3 +656,35 @@ test("a local (cron) job may carry secrets too -- unlike replicas, which a local
 	assert.deepEqual(captured.data.secrets, { DEPLOY_KEY: "op://ci/deploy/key" });
 	assert.equal(captured.data.secretsProfile, "prod");
 });
+
+test("excludeTools rides local and forge job data only when supplied, and never moves a dedup key (#291)", async () => {
+	const { enqueueLocalJob, enqueueGitHubJob } = await import("../src/queue.mjs");
+	let captured;
+	const fakeQueue = { add: (name, data, opts) => ((captured = { name, data, opts }), { id: opts.jobId }) };
+
+	const localBase = { folder: "/proj", flow: "tidy", task: "t", provider: "anthropic", model: "m", maxTurns: 5, now: new Date("2026-07-16T12:00:00Z") };
+	await enqueueLocalJob(fakeQueue, { ...localBase, excludeTools: ["bash"] });
+	assert.deepEqual(captured.data.excludeTools, ["bash"]);
+	const flaggedLocalId = captured.opts.jobId;
+	await enqueueLocalJob(fakeQueue, localBase);
+	assert.equal("excludeTools" in captured.data, false, "an unflagged job's data keeps exactly the keys it has today");
+	// The exclusion is NOT identity: chainedJobId's own rule, applied here -- a triggers.json edit must
+	// coalesce against the unflagged twin, never fan out a duplicate paid job.
+	assert.equal(captured.opts.jobId, flaggedLocalId);
+
+	const forgeBase = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-xt", sender: { id: 42 }, matched: { index: 0, type: "label", label: "bug" } },
+		provider: "anthropic",
+		model: "m",
+		maxTurns: 5,
+	};
+	await enqueueGitHubJob(fakeQueue, { ...forgeBase, excludeTools: ["bash", "edit"] });
+	assert.deepEqual(captured.data.excludeTools, ["bash", "edit"]);
+	const dedupFlagged = captured.opts.deduplication.id;
+	await enqueueGitHubJob(fakeQueue, forgeBase);
+	assert.equal("excludeTools" in captured.data, false);
+	assert.equal(captured.opts.deduplication.id, dedupFlagged, "the semantic window coalesces flagged and unflagged alike");
+});

@@ -472,3 +472,12 @@ test("an `update` still walks routeLabel byte-identically with close rules armed
 	assert.equal(plain.enqueue, true);
 	assert.equal(JSON.stringify(armed.job), JSON.stringify(plain.job));
 });
+
+test("a label rule's excludeTools reach the job, and an unflagged rule adds no key (#291)", () => {
+	const rules = { ...triggers, label: [{ ...triggers.label[0], excludeTools: ["bash", "edit"] }] };
+	const r = filterGitLab(parseGitLabSubset(issuePayload()), rules, knownFlows, SELF_ID, true, "gl-xt");
+	assert.equal(r.enqueue, true);
+	assert.deepEqual(r.job.excludeTools, ["bash", "edit"]);
+	const plain = filterGitLab(parseGitLabSubset(issuePayload()), triggers, knownFlows, SELF_ID, true, "gl-noxt");
+	assert.equal("excludeTools" in plain.job, false, "an unflagged rule's job literal is byte-identical");
+});
