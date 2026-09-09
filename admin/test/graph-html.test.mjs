@@ -317,6 +317,55 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
   assert.ok(pageOf(unreadable).includes("injected skills dir unreadable: /inj"), "the unreadable-dir counter renders when set");
 });
 
+test("graphData neighbour and wire lists are canonically sorted -- the embedded json is byte contract, not just behaviour", () => {
+  // The gate's executing review measured this one: dropping the nb sort changes the shipped page's
+  // bytes on the canned fixture (n1 emits ["n8","n5"]) while every behavioural test stays green,
+  // because PAGE_JS consumes the lists by membership alone. "Same model, same now, byte-identical
+  // forever" is the module's own promise, so canonical order is pinned directly rather than left to
+  // luck. The fan-out hub exists for the `w` half of the pin: wire ids are minted w0, w1, ... and
+  // sorted LEXICOGRAPHICALLY, so insertion order and sorted order only diverge once ids cross the
+  // two-digit boundary -- on the bare canned model they never do, and the w pin would be vacuous.
+  const inputs = CANNED();
+  inputs.folderSkills["/srv/site"].skills.push(
+    { name: "hub", isSub: false, group: null, aiTrigger: false, meta: null, mentions: Array.from({ length: 11 }, (_, i) => ({ name: `spoke-${i}`, strong: false })), unread: false },
+    ...Array.from({ length: 11 }, (_, i) => ({ name: `spoke-${i}`, isSub: false, group: null, aiTrigger: false, meta: null, mentions: [], unread: false })),
+  );
+  const { graphData } = buildGraphScene(buildGraphModel(inputs), { now: NOW });
+  let multi = 0;
+  for (const [id, n] of Object.entries(graphData.nodes)) {
+    if (n.nb.length > 1) multi += 1;
+    assert.deepEqual(n.nb, [...n.nb].sort(), `nb of ${id} must be in sorted order`);
+    assert.deepEqual(n.w, [...n.w].sort(), `w of ${id} must be in sorted order`);
+  }
+  assert.ok(multi >= 2, "the fixture must exercise multi-neighbour nodes, or the nb pin is vacuous");
+  assert.ok(
+    Object.values(graphData.nodes).some((n) => n.w.some((w) => w.length >= 3) && n.w.some((w) => w.length === 2)),
+    "the fixture must cross the two-digit wire-id boundary, or the w pin is vacuous",
+  );
+});
+
+test("normalization sorts the honesty-counter arrays even when the model's own order does not", () => {
+  // The same review's second find: every fixture carried ONE refusal and ONE unreadable dir, so the
+  // canonicalization sorts were pinned by nothing -- an object-key-order change upstream would move
+  // page bytes with the whole suite green. Two entries, inserted in reverse, pin the sort itself.
+  const model = buildGraphModel(CANNED());
+  model.meta.chainRefusals = { "zzz-flow": 1, "aaa-flow": 2 };
+  model.meta.injectedUnreachable = ["/z-dir", "/a-dir"];
+  const { norm } = buildGraphScene(model, { now: NOW });
+  assert.deepEqual(norm.meta.chainRefusals.map((r) => r.scope), ["aaa-flow", "zzz-flow"], "chainRefusals sort by scope, never by the model's key order");
+  assert.deepEqual(norm.meta.injectedUnreachable, ["/a-dir", "/z-dir"], "unreadable dirs sort, never arrival order");
+});
+
+test("an unknown field on a graph NODE never reaches the live page", () => {
+  // The deleted suite planted this canary on a node; the insights twin plants its own on fold rows
+  // only, so the node-level half of the redaction claim needs its pin back on the page that ships.
+  const model = buildGraphModel(CANNED());
+  model.nodes[0].secret = "CANARY-9f3";
+  const out = pageOf(model);
+  assert.ok(!out.includes("CANARY-9f3"), "node fields must be structurally unreachable, not merely unused");
+  assert.ok(!pageOf(model, { fullPaths: true }).includes("CANARY-9f3"), "the fullPaths opt-in widens labels, not the allowlist");
+});
+
 // ---- 6. page-script hardening, on the exported string itself (the insights suite pins the same
 // script IN SITU -- the parse check, the single guarded GRAPH read; these are the expressions whose
 // loss would not break a parse, asserted at the source the shipping page embeds verbatim) ----
