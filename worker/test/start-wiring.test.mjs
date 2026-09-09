@@ -1370,25 +1370,36 @@ test("a refusal from a DIFFERENT post-handoff point stops the worker too -- the 
 	// The reconcile refusal above is the reachable one issue #299 reproduced; this one throws from the
 	// retention sweep's arming at the far end of the region, so the pair pins the WRAP rather than one
 	// call site. A guard that only covered the reconcile would go green above and red here.
+	//
+	// A pause-windows file rides along so a live-edit WATCHER is armed inside the region before the
+	// refusal: armed-then-refused is the interaction neither test exercised, and this file's own
+	// silence canaries watch what a leaked watch would write. The harness drains the closers either way.
+	const dir = mkdtempSync(join(tmpdir(), "pi-sweep-refuse-"));
+	const pausePath = join(dir, "pause-windows.json");
+	writeFileSync(pausePath, `${JSON.stringify({ windows: [] })}\n`);
 	const stops = [];
-	await assert.rejects(
-		() =>
-			runStart({
-				env: { VALKEY_URL },
-				stops,
-				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
-				makeHost: () => fakeHost(),
-				makeRetentionSweep: () => ({
-					start: () => {
-						throw new Error("sweep arm blew up");
-					},
-					close: () => {},
+	try {
+		await assert.rejects(
+			() =>
+				runStart({
+					env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath },
+					stops,
+					makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+					makeHost: () => fakeHost(),
+					makeRetentionSweep: () => ({
+						start: () => {
+							throw new Error("sweep arm blew up");
+						},
+						close: () => {},
+					}),
 				}),
-			}),
-		/sweep arm blew up/,
-		"the region's own error must surface -- entryExitCode reads it, and a swallow would exit 0 on a refusal",
-	);
-	assert.deepEqual(stops, ["stop"], "stopped from this refusal point too");
+			/sweep arm blew up/,
+			"the region's own error must surface -- entryExitCode reads it, and a swallow would exit 0 on a refusal",
+		);
+		assert.deepEqual(stops, ["stop"], "stopped from this refusal point too");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 // --- host identity (issue #57) --------------------------------------------------------------------------
