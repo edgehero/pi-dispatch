@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { FORGES, FORGE_KINDS, MINTED_TOKEN_VARS, RUN_KINDS, forgeSpec, isForgeKind, targetSeparator } from "../src/forges.mjs";
 import { forgeDeliveryJobId, deliveryJobId, gitlabDeliveryJobId } from "../src/job-id.mjs";
@@ -103,4 +105,28 @@ test("an unknown forge names the table it is missing from, because that is the a
 		(e) => e.piDispatchConfig === true && /forges\.mjs/.test(e.message),
 		"reaching here means a forge was added to the trigger schema and not to the table",
 	);
+});
+
+test("requirements.md's Scope names every forge this build ships -- the sentence and the table cannot disagree silently again", () => {
+	// INT-TRIGGERS-FILE-CONTRACT's vocabulary bolt records this exact defect class one file over: an
+	// enumeration that "named github and gitlab and stopped, while four forges shipped". The Scope
+	// paragraph is the project's statement of what it services -- issue #281 ratified OQ-015 through
+	// it -- so it gets the same derive-and-grep bolt: FORGE_KINDS is the source, the sentence is the
+	// restatement, and a new forge cannot ship without touching it. The region bound fails LOUDLY when
+	// the heading moves; scanning an empty slice and passing is the vacancy that bolt's doc comment
+	// warns about.
+	const spec = readFileSync(fileURLToPath(new URL("../../specs/requirements.md", import.meta.url)), "utf8");
+	const start = spec.indexOf("## Scope");
+	assert.notEqual(start, -1, "the Scope heading is gone from requirements.md");
+	const end = spec.indexOf("\n## ", start + 1);
+	const region = spec.slice(start, end === -1 ? undefined : end);
+	assert.ok(region.length > 200, "the Scope region must be the real paragraph, not an empty slice");
+	// The display names are a hand-written map, so an UNMAPPED kind fails loudly rather than skipping
+	// silently -- a new forge must add its display name HERE and to the Scope sentence, in one commit.
+	const DISPLAY = { github: "GitHub", gitlab: "GitLab", forgejo: "Forgejo", azure: "Azure DevOps" };
+	for (const kind of FORGE_KINDS) {
+		const name = DISPLAY[kind];
+		assert.ok(name, `no display name mapped for forge kind ${JSON.stringify(kind)} -- add it here AND to requirements.md's Scope`);
+		assert.ok(region.includes(name), `requirements.md's Scope does not name ${name} -- the tree services what the sentence does not say`);
+	}
 });
