@@ -552,6 +552,13 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 		["cwd", "agentDir", "authStorage", "modelRegistry", "model", "thinkingLevel", "scopedModels", "noTools", "tools", "excludeTools", "customTools", "resourceLoader", "sessionManager", "settingsManager", "sessionStartEvent"],
 		"the option set moved: update INT-SDK-SESSION-OPTIONS' 'complete option set' sentence in the same commit as the pin bump",
 	);
+	// The read-back half of the same contract: run-job's tools_excluded line and the loader acceptance
+	// read these three off the session, so a rename must fail here with a name rather than as a
+	// post-session TypeError in a paid container's log.
+	const sessionDts = agentDistFile("core", "agent-session.d.ts");
+	assert.match(sessionDts, /getActiveToolNames\(\): string\[\];/, "AgentSession.getActiveToolNames moved -- run-job's tools_excluded read-back and the loader acceptance call it");
+	assert.match(sessionDts, /getAllTools\(\): ToolInfo\[\];/, "AgentSession.getAllTools moved -- the loader acceptance reads the registry through it");
+	assert.match(sessionDts, /setActiveToolsByName\(toolNames: string\[\]\): void;/, "AgentSession.setActiveToolsByName moved -- the loader acceptance proves exclusion survives it");
 });
 
 test("the pinned built-in tool set matches the loader's constant and the runner's factory derivation", { skip }, async () => {

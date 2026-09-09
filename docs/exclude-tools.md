@@ -25,6 +25,12 @@ strictness is not pedantry: pi silently ignores unknown names in its exclusion l
 `"Bash"` would exclude nothing while your file reads as though it did. A field that can be quietly
 wrong about a permission is worse than no field, so the loader refuses what pi would ignore.
 
+One nuance worth knowing: at the pinned version only `read`, `bash`, `edit` and `write` are ACTIVE by
+default; `grep`, `find` and `ls` are registered but inactive until something activates them.
+Excluding an inactive tool still matters, because the exclusion removes it from the registry, so
+nothing in the job can activate it later. Excluding all seven is legal and yields an agent with no
+built-in tools at all (extension tools, where loaded, still work).
+
 Narrowing only. There is no `run.tools` allowlist, deliberately: an allowlist answers "which tools
 exist", which is the pinned pi's answer and moves with every version bump, so a bump that added a
 tool would silently grant it to every allowlisted trigger. Naming what to take away cannot widen on a

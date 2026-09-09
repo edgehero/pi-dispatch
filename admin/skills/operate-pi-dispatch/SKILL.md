@@ -132,6 +132,26 @@ cannot, and that it is an edit they make to `triggers.json` themselves.** Do not
 built or pulled on the worker's own host, because jobs run with `--pull=never` and nothing is fetched at
 job time; and `pi-dispatch doctor` lists every image their triggers name and flags one that is missing.
 
+## Tool exclusion — `run.excludeTools`, and why you cannot set it
+
+A trigger may carry `run.excludeTools`: built-in pi tools its jobs' sessions do NOT have. It exists so a
+read-only flow (a triage that must not edit, a report that must not run a shell) is read-only by
+construction rather than by request: the excluded tools are removed from the session's tool registry, so
+nothing inside the job can switch them back on, and every such job logs the active tool list read back.
+The drill-in states it beside the image row either way (`full pinned tool set` when absent).
+
+**You cannot change it, in either direction.** `dispatch_trigger_add` and `dispatch_trigger_edit` have no
+such parameter, and a chained job's request file can neither set nor drop it (the child inherits the
+parent's exclusions). This is a permission surface, and the widening direction (a name quietly dropped
+from the array) would read as harmless in any confirm dialog, which is exactly why no model-callable
+route exists.
+
+So if a user asks you to exclude a tool from a trigger, or to restore one: **say plainly that you cannot,
+and that it is an edit they make to `triggers.json` themselves.** Two useful things you *can* say: only
+the built-in names are legal (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`; a misspelling
+refuses at load rather than silently excluding nothing), and a genuinely read-only trigger usually also
+wants `"packages": false`, because extension tools are not excludable.
+
 ## Vault secrets — `run.secrets`, and why you cannot set it
 
 A trigger may carry `run.secrets`: a map of environment variable name to an opaque **reference**, plus

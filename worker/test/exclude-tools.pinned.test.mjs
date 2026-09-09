@@ -23,6 +23,11 @@ const piRoot = new URL("../../node_modules/@earendil-works/pi-coding-agent/", im
 // A skip rather than a silent pass when pi is not installed (a bare worker/ checkout). A skip is NOT a
 // pass: CI runs with PI_DISPATCH_REQUIRE_WORKER_TESTS=1 and the dependency present.
 const skip = existsSync(fileURLToPath(new URL("package.json", piRoot))) ? false : "pi is not installed (run npm install at the repo root)";
+// pinned-api.test.mjs's escalation, applied here because this bolt guards the same class: in the CI
+// posture a missing pi must FAIL, or an install regression would green-light a drifted constant.
+if (skip && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") {
+	throw new Error("pi must be importable here in CI; a skip would hide EXCLUDABLE_TOOL_NAMES drifting from the pin.");
+}
 
 const PROTOCOL =
 	"the pinned pi's built-in tool set moved. Do NOT relax this assertion. Grow (or shrink) these together, in one commit: " +

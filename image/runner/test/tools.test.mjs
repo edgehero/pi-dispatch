@@ -9,6 +9,11 @@ import { EXIT_POLICY } from "../src/outcome.mjs";
 // and a skip is not a pass -- CI runs with the dependency present.
 const piInstalled = existsSync(fileURLToPath(new URL("../../../node_modules/@earendil-works/pi-coding-agent/package.json", import.meta.url)));
 const skip = piInstalled ? false : "pi is not installed (run npm install at the repo root); CI runs these";
+// pinned-api.test.mjs's escalation: in the CI posture a missing pi must FAIL, not skip -- a skipped
+// membership assert is a runner that would ship refusing nothing.
+if (skip && process.env.PI_DISPATCH_REQUIRE_LOADER_TESTS === "1") {
+	throw new Error("pi must be importable here in CI; a skip would hide the factory derivation breaking at the pin.");
+}
 
 test("excludableToolNames derives the pinned built-in set off the root-exported factories", { skip }, async () => {
 	// A DERIVATION, never a hand-written list: pi does not export `allToolNames` from the package root
