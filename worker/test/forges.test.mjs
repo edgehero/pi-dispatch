@@ -107,14 +107,16 @@ test("an unknown forge names the table it is missing from, because that is the a
 	);
 });
 
+/**
+ * INT-TRIGGERS-FILE-CONTRACT's vocabulary bolt records this exact defect class one file over: an
+ * enumeration that "named github and gitlab and stopped, while four forges shipped". The Scope
+ * paragraph is the project's statement of what it services -- issue #281 ratified OQ-015 through
+ * it -- so it gets the same derive-and-grep bolt: FORGE_KINDS is the source, the sentence is the
+ * restatement, and a new forge cannot ship without touching it. The region bound fails LOUDLY when
+ * the heading moves; scanning an empty slice and passing is the vacancy that bolt's doc comment
+ * warns about.
+ */
 test("requirements.md's Scope names every forge this build ships -- the sentence and the table cannot disagree silently again", () => {
-	// INT-TRIGGERS-FILE-CONTRACT's vocabulary bolt records this exact defect class one file over: an
-	// enumeration that "named github and gitlab and stopped, while four forges shipped". The Scope
-	// paragraph is the project's statement of what it services -- issue #281 ratified OQ-015 through
-	// it -- so it gets the same derive-and-grep bolt: FORGE_KINDS is the source, the sentence is the
-	// restatement, and a new forge cannot ship without touching it. The region bound fails LOUDLY when
-	// the heading moves; scanning an empty slice and passing is the vacancy that bolt's doc comment
-	// warns about.
 	const spec = readFileSync(fileURLToPath(new URL("../../specs/requirements.md", import.meta.url)), "utf8");
 	const start = spec.indexOf("## Scope");
 	assert.notEqual(start, -1, "the Scope heading is gone from requirements.md");
