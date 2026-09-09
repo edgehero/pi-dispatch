@@ -829,7 +829,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// returned as a pair so every existing caller keeps receiving exactly what it received before.
 	primary.hostWorker = workers[1] ?? null;
 
-	const shutdown = async () => {
+	const stop = async () => {
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,
 		// worker.close() would wait up to 30 minutes for the container. ONE shutdown for every queue: two
 		// registrations would mean two `process.exit(0)` racing, and the second worker's containers would
@@ -884,8 +884,17 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		try {
 			redis?.disconnect?.();
 		} catch {
-			// A release that failed has already stopped mattering; the exit below is what the stop owes.
+			// A release that failed has already stopped mattering; the exit that follows is what a stop owes.
 		}
+	};
+	// The signal path is `stop()` then exit, and the split is issue #299's: a boot that refuses AFTER the
+	// Worker exists must be able to undo what it built WITHOUT exiting, because the refusal's own error --
+	// not a 0 -- has to reach `cli.mjs`'s entryExitCode, and with every handle released above the process
+	// drains to that code on its own. The closure keeps the name `shutdown` because the source pin in
+	// `wiring.test.mjs` reads the registration lines below, deliberately, rather than constructing a
+	// Worker to observe them.
+	const shutdown = async () => {
+		await stop();
 		process.exit(0);
 	};
 	process.once("SIGTERM", shutdown);
@@ -894,6 +903,13 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// (handled above); SIGBREAK covers console-close. Route it to the same shutdown so a stopped
 	// worker still aborts in-flight jobs and docker-stops their containers rather than orphaning them.
 	if (process.platform === "win32") process.once("SIGBREAK", shutdown);
+
+	// Beside `hostWorker` and for the same reason it rides the return value rather than changing it:
+	// every existing caller keeps receiving exactly what it received before, and the one new caller --
+	// `startWorker`'s post-handoff catch (issue #299) -- reaches the teardown through the worker it was
+	// handed. `stop` is the shutdown minus the exit; it is safe to call more than once, because every
+	// step it takes is idempotent by that step's own contract.
+	primary.stop = stop;
 
 	return primary;
 }

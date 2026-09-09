@@ -1100,6 +1100,50 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   never comes.
 - **Traces to**: `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `INT-HOST-REGISTRY-CONTRACT`, `DES-CONCURRENCY-3`
 
+## DES-BOOT-REFUSAL-STOPS-THE-WORKER
+
+- **Decision** (issue #299): a `startWorker` refusal that lands AFTER `createWorkerFn` has constructed
+  the Worker stops what it built before the rejection surfaces. `createWorker`'s shutdown splits into
+  `stop()` -- the cancel, the per-worker close, the `extraClosers` drain, the shared-client release --
+  and the signal handler, which is `stop()` followed by `process.exit(0)` under its unchanged name.
+  `stop` rides the returned worker the way `hostWorker` does, so no caller's contract moves, and the
+  whole post-handoff region of `startWorker` sits in a catch that runs
+  `await Promise.resolve(worker?.stop?.()).catch(() => {})` and RETHROWS.
+- **Why this was the bad one of the four**: the Worker starts consuming at construction, so everything
+  after the handoff runs beside a live, paid drain. `cli.mjs` sets `process.exitCode` and never exits,
+  so a refusal printed its error while the worker kept taking jobs against a paid provider -- fail loud,
+  then silently continue, with a spend consequence.
+- **The rethrow is half the fix**: `entryExitCode` turns a tagged configError into `EXIT_POLICY` 2 and
+  anything else into the retryable 1, and a catch that swallowed would hand a supervisor a clean 0 for
+  a boot that refused.
+- **Why `cli.mjs` is untouched, measured rather than argued**: the issue's acceptance offered "or the
+  entry point exits", and a `process.exit` in the shared `.catch` would fire for every subcommand, can
+  truncate a pipe's pending stdout, and would MASK a leaked handle instead of closing it. With the stop
+  above plus `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`'s release, nothing holds the loop: measured with
+  a real Worker and a real client against a dead port, `worker.close()` plus `redis.disconnect()`
+  reached `beforeExit` at ~2.7s (the reconnect backoff's tail; prompt against a reachable Valkey) with
+  the exit code intact, while every other combination was still alive at 8s. That pairing is also the
+  ordering argument: #300 had to land first, because the wrap alone stops the draining and still hangs
+  the process.
+- **The refusal window, enumerated so the next reader does not re-derive it small**: the `worker.on`
+  registrations, `makeStallGuard`, `servedSchedules`, the failFast `makeQueue`, `reconcileGated` (the
+  reachable one the issue reproduced), the three watcher pushes, and the retention sweep's construction
+  and `start()`. The catch covers the REGION, not a list of calls, so a step added tomorrow is covered
+  the day it is added -- and the two regression tests refuse from OPPOSITE ends of the region for
+  exactly that reason.
+- **The `Promise.resolve` spelling is load-bearing**: a test double whose recording `stop` is
+  synchronous makes `worker?.stop?.().catch(...)` a TypeError that REPLACES the boot's real error, so
+  the exit-code assertion meant to go red under mutation goes green for the wrong reason. Both
+  directions are mutation-checked: a synchronous double stays green under the shipped spelling and goes
+  red under the optional-chained one. A synchronous throw from `stop` itself still escapes, exactly as
+  the closer loop documents for `extraClosers` -- a known bound, not a new one.
+- **Rejected**: *`process.exit` in `cli.mjs`* (above -- and it would mask, not close). *Swallowing the
+  boot error after a successful stop*: exit 0 on a refusal. *Registering the signal handlers only after
+  the boot completes*: narrows the mid-boot-signal story but orphans the containers a mid-boot SIGTERM
+  should stop; a different trade for a different issue.
+- **Traces to**: `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+
 ## DES-RETENTION-SWEEPS-ON-A-TIMER
 
 - **Decision** (issue #292, resolving `OQ-007`): the three host-side retention reapers — the run history
@@ -3429,3 +3473,4 @@ a tunnel.
 | 2026-09-08 | Issue #313, the duplicate-key refusal. **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: the refusal joins `run.flow`'s charset check as the file's third true NARROWING, and is the safest of the three, because the only files it rejects are ones whose reviewed value and running value already differ. It carries the same release-ordering constraint as the other two, and the reason it is enforced on the WRITER's raw read as well as in the validator is that an old console cannot produce a duplicate but can rewrite a shadowed file, silently discarding the evidence. **`DES-PER-TRIGGER-SECRET-PROFILE` UNCHANGED, checked, and motivating**: its whole argument is that a trigger names a NAME and the file is the reviewed artifact, which a shadowed key defeats. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: a duplicate key is determinate by any reading and refuses at load, so nothing about classification moves. **Code evidence**: worker/src/json-duplicates.mjs -> findDuplicateKey; worker/src/triggers.mjs -> parseTriggers; worker/src/triggers-file.mjs -> writeTriggers, disarmTrigger. |
 | 2026-09-09 | Issue #301, the receiver's unclosed triggers watch. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**: the receiver residual is closed, and the Rejected list's "arming only on the real entry point" entry is now marked historical, because that posture muted the defect under test rather than closing it and cost the receiver the only coverage that its watch arms at all. `makeWatchCloser` moved from `worker/src/start.mjs` to its own import-free `worker/src/watch-closer.mjs` (the `transient.mjs` precedent), re-exported from `start.mjs` so every importer keeps its address, and published as the `./watch-closer` subpath; the receiver arms the watch unconditionally, hands the factory an object-shaped `log` adapter, and drains a `closers` array in its shutdown before `process.exit(0)`. The signal handlers deliberately stay on the real-entry guard: a `process.once` cannot ride a closers array. A new bolt in `worker/test/publish.test.mjs` pins that every `@edgehero/pi-dispatch/<subpath>` imported by `receiver/src` or `admin/src` exists in the worker's exports map, because the symlinked workspaces make a missing entry invisible to every in-repo test while an npm-installed receiver throws at module load; the version-floor half of that hazard is undecidable offline and stays a release-PR obligation. `INT-TRIGGERS-FILE-CONTRACT`, `DES-HOST-REGISTRY`, `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked. **Code evidence**: worker/src/watch-closer.mjs · receiver/src/start.mjs -> watchTriggers, closers · receiver/test/start.test.mjs -> "the triggers watch ARMS under test, and a shut-down watch writes NOTHING" |
 | 2026-09-09 | Issue #300, the two handles `startWorker` never released. **NEW `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`**: the shutdown releases the shared ioredis client with a guarded `disconnect()` sequenced strictly AFTER the `extraClosers` drain, and the boot-image read's five-second fuse is cleared through a new exported `settleWithin` when the read wins. The entry records three measured facts so they cannot be re-derived wrongly: the raw client cannot ride `extraClosers` (no `.close`, and the natural wrapper is drained concurrently with `registry.close()` -- a recording server received NO commands where the sequenced order delivered the DEL and SREM); `quit()`'s hang is a server that accepts and never answers, independent of `maxRetriesPerRequest` and `enableOfflineQueue`, so the plausible offline-queue explanation is false; and `process.getActiveResourcesInfo()` is blind to unref'd timers, which is why the fuse is pinned through `async_hooks` on the helper rather than a census over a boot. A boot REFUSAL still releases nothing, deliberately: that is issue #299's own acceptance. The harness's `captured?.redis?.disconnect?.()` is re-documented as the backstop for a faked `createWorker` rather than the only closer anywhere. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `INT-HOST-REGISTRY-CONTRACT`, `DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked.** **Code evidence**: worker/src/index.mjs -> shutdown · worker/src/start.mjs -> settleWithin · worker/test/wiring.test.mjs -> "shutdown releases the shared redis client AFTER every closer, by disconnect, never quit" |
+| 2026-09-09 | Issue #299, the boot refusal that left a worker draining paid jobs. **NEW `DES-BOOT-REFUSAL-STOPS-THE-WORKER`**: `createWorker`'s shutdown splits into `stop()` (the teardown) and the signal handler (`stop()` then `process.exit(0)`, name unchanged for the source pin); `stop` rides the returned worker beside `hostWorker`; `startWorker`'s whole post-handoff region sits in a catch that stops what was built and RETHROWS, so `entryExitCode` still maps the refusal to 2 or 1 and never 0. `cli.mjs` is deliberately untouched: with the stop plus #300's release nothing holds the loop, measured to `beforeExit` with the code intact, while a `process.exit` in the shared catch would truncate pipes and mask leaks -- and that measured pairing is why #300 landed first. The `Promise.resolve` spelling of the stop call is mutation-checked in both directions against a synchronous test double. The refusal window is enumerated in the entry; the two regression tests refuse from opposite ends of the region. **No requirements row**: the boot-refusal acceptances in `requirements.md` each own a specific refusal, none owns the post-construction window, and minting one to mirror a design mechanism would restate rather than require -- checked, and recorded here instead. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked. **Code evidence**: worker/src/index.mjs -> stop, shutdown · worker/src/start.mjs -> the post-handoff catch · worker/test/start-wiring.test.mjs -> "a refusal from a DIFFERENT post-handoff point stops the worker too" |

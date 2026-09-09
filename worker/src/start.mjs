@@ -1143,131 +1143,153 @@ export async function startWorker(
 		},
 	});
 
-	// REQ-LOCAL-JOB-VISIBILITY: exactly one terminal line per job, carrying the job id and outcome,
-	// where the operator is already looking. This is the local counterpart of the GitHub issue
-	// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
-	// what tells a human a run did nothing. The container's own output already streams via
-	// runContainer's onOutput during the run.
-	// `reason` is a fixed enum (worker-abort | over-budget | unprotected-branch | runner-policy |
-	// job-image-missing), never
-	// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
-	// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
-	// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
-	// REQ-LOCAL-JOB-VISIBILITY's whole point is that a missing line is what tells a human a run did nothing.
-	const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
-	for (const w of allWorkers) w.on("completed", (job, result) =>
-		log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) }),
-	);
-	for (const w of allWorkers) w.on("failed", (job, err) =>
-		log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) }),
-	);
+	// FROM HERE TO THE RETURN, THE WORKER IS LIVE AND THE BOOT CAN STILL REFUSE (issue #299). The
+	// Worker starts consuming at construction, so everything below runs beside a paid drain --
+	// registrations, the stall guard, the boot reconcile (the reachable refusal, reproduced), the
+	// watcher pushes, the retention sweep's construction and start. A refusal that merely threw left
+	// the process printing an error while taking jobs, because `cli.mjs` sets `process.exitCode` and
+	// the live Worker held the loop forever. The catch below covers the REGION, not a list of calls,
+	// so a step added tomorrow is covered the day it is added.
+	try {
 
-	// CONST-RETRY-INFRA-ONLY money backstop: BullMQ's maxStalledCount does not bound scheduler jobs, so a
-	// wedged scheduled run is re-paid on every stall. The guard counts stalls per scheduler and tears the
-	// scheduler down past the threshold. Keyed on "stalled", not "failed" -- only a stall is the unbounded re-run.
-	const onStalled = makeStallGuard({
-		redis,
-		threshold: config.schedulerStallMax,
-		// The queue the schedulers were actually INSTALLED on. Torn down from `runtimeQueue` on a named
-		// host, this money backstop -- a wedged scheduled run is re-paid on every stall -- silently no-ops.
-		removeJobScheduler: (id) => cronQueue.removeJobScheduler(id),
-		log,
-	});
-	// `makeStallGuard` returns the LISTENER, not an object holding one -- hence the name of the local. It was
-	// called as `guard.onStalled(jobId)` here for the whole life of the feature, which is `undefined(jobId)`,
-	// so every stall threw a TypeError and the money backstop never counted one (issue #267).
-	for (const w of allWorkers) w.on("stalled", (jobId) => void onStalled(jobId));
+		// REQ-LOCAL-JOB-VISIBILITY: exactly one terminal line per job, carrying the job id and outcome,
+		// where the operator is already looking. This is the local counterpart of the GitHub issue
+		// comment and the signal for CONST-PI-VERSION-PINNED's silent-no-op mode -- a missing line is
+		// what tells a human a run did nothing. The container's own output already streams via
+		// runContainer's onOutput during the run.
+		// `reason` is a fixed enum (worker-abort | over-budget | unprotected-branch | runner-policy |
+		// job-image-missing), never
+		// user content. Included only when present so success lines stay clean; a shutdown-aborted job logs
+		// { outcome: "policy", reason: "worker-abort" }, making a restart-dropped job visible.
+		// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
+		// REQ-LOCAL-JOB-VISIBILITY's whole point is that a missing line is what tells a human a run did nothing.
+		const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
+		for (const w of allWorkers) w.on("completed", (job, result) =>
+			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) }),
+		);
+		for (const w of allWorkers) w.on("failed", (job, err) =>
+			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) }),
+		);
 
-	// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
-	// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
-	// queue entirely -- no getJobSchedulers Redis hit -- but still logs {0,0} so the operator sees cron is off.
-	// What this host will NOT be running, said once at boot and per trigger. A folder that belongs to
-	// another machine is ordinary on a fleet; a folder that belongs to NO machine is a trigger that will
-	// silently never fire, which is the silent no-op this project refuses -- and which `doctor` is the
-	// right place to catch, because it can ask the registry and this cannot.
-	const { served, unserved } = servedSchedules(schedules.current);
-	for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
-
-	if (served.length > 0) {
-		// Onto the HOST queue when one is armed. That makes Gap 1 structural rather than merely gated: a
-		// host queue's resident schedulers are only ever that host's, so `reconcile`'s "resident minus my
-		// config" is correct again by construction and two hosts can no longer prune each other at all. The
-		// fingerprint gate stays, because it still catches the divergence itself -- including a timezone
-		// disagreement, which no queue split can detect.
-		const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
-		try {
-			const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: authoredCron(config) });
-			log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
-		} finally {
-			await rq.close().catch(() => {});
-		}
-	} else {
-		log("schedules_installed", { installed: 0, removed: 0, ...(unserved.length > 0 && { unserved: unserved.length }) });
-	}
-
-	// DES-CRON-VIA-BULLMQ-SCHEDULER live edit (OQ-008): watch the triggers file and re-reconcile schedulers
-	// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
-	// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
-	// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
-	if (config.triggersFile) {
-		extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared));
-	}
-
-	// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
-	// an operator's add/delete of a pause window takes effect without a worker restart. A bad edit is kept out.
-	if (config.pauseWindowsFile) {
-		extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log));
-	}
-
-	// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
-	if (config.scopedLimitsFile) {
-		extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log));
-	}
-
-	// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment
-	// is a service that restarts only on failure, so the healthy worker was the one that never re-swept.
-	// Armed HERE, at the end of boot beside the watches: all three closures exist, boot's own sweeps have
-	// long finished, and the first tick lands one full interval later rather than during the schedules
-	// reconcile, which is Redis-destructive work a small test interval would otherwise land inside.
-	//
-	// NOT CONSTRUCTED AT ALL when the knob is 0. That is how "0 is byte-identical to before" is a fact
-	// rather than a claim: with no object there is no timer, no closer and no reachable second call to any
-	// reaper. It is registered in `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
-	// this handle holds an `rmSync`, and a tick landing mid-drain could delete a retained workspace behind a
-	// worker that already reported a clean shutdown.
-	if (config.sweepIntervalHours > 0) {
-		const sweep = makeRetentionSweepFn({
-			reapers: [
-				{ name: "log", reap: reapLogs },
-				{ name: "sandbox", reap: reapSandboxes },
-				{ name: "session", reap: () => sessionStore.reapSessions() },
-			],
-			intervalMs: config.sweepIntervalHours * 3600000,
+		// CONST-RETRY-INFRA-ONLY money backstop: BullMQ's maxStalledCount does not bound scheduler jobs, so a
+		// wedged scheduled run is re-paid on every stall. The guard counts stalls per scheduler and tears the
+		// scheduler down past the threshold. Keyed on "stalled", not "failed" -- only a stall is the unbounded re-run.
+		const onStalled = makeStallGuard({
+			redis,
+			threshold: config.schedulerStallMax,
+			// The queue the schedulers were actually INSTALLED on. Torn down from `runtimeQueue` on a named
+			// host, this money backstop -- a wedged scheduled run is re-paid on every stall -- silently no-ops.
+			removeJobScheduler: (id) => cronQueue.removeJobScheduler(id),
 			log,
 		});
-		sweep.start();
-		extraClosers.push(sweep);
-	}
+		// `makeStallGuard` returns the LISTENER, not an object holding one -- hence the name of the local. It was
+		// called as `guard.onStalled(jobId)` here for the whole life of the feature, which is `undefined(jobId)`,
+		// so every stall threw a TypeError and the money backstop never counted one (issue #267).
+		for (const w of allWorkers) w.on("stalled", (jobId) => void onStalled(jobId));
 
-	log("worker_started", {
-		queue: "pi-jobs",
-		host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
-		imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
-		concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
-		sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, this version's pre-#292 behaviour
-		dailyCap: config.dailyCap,
-		weeklyCap: config.weeklyCap, // null when the weekly window is disabled
-		monthlyCap: config.monthlyCap, // null when the monthly window is disabled
-		softHoldPct: config.softHoldPct, // null when the soft-hold band is disabled
-		scopedLimitsFile: config.scopedLimitsFile, // null = no scoped caps/concurrency (the folder mutex holds regardless)
-		scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
-		image: config.jobImage,
-		valkey: config.valkeyUrl,
-		logsDir: config.logsDir,
-		settingsFile: config.settingsFile,
-		captureJobLogs: config.captureJobLogs,
-		logRetentionDays: config.logRetentionDays,
-		sandboxRetentionHours: config.sandboxRetentionHours, // 0 = retention off; a run's directory is deleted as before
-	});
-	return worker;
+		// DES-CRON-VIA-BULLMQ-SCHEDULER: install the schedule set (and prune orphans) before announcing the
+		// worker is up, so schedules_installed always precedes worker_started. An empty set skips the reconcile
+		// queue entirely -- no getJobSchedulers Redis hit -- but still logs {0,0} so the operator sees cron is off.
+		// What this host will NOT be running, said once at boot and per trigger. A folder that belongs to
+		// another machine is ordinary on a fleet; a folder that belongs to NO machine is a trigger that will
+		// silently never fire, which is the silent no-op this project refuses -- and which `doctor` is the
+		// right place to catch, because it can ask the registry and this cannot.
+		const { served, unserved } = servedSchedules(schedules.current);
+		for (const s of unserved) log("schedule_unserved", { schedulerId: s.schedulerId, reason: s.unserved });
+
+		if (served.length > 0) {
+			// Onto the HOST queue when one is armed. That makes Gap 1 structural rather than merely gated: a
+			// host queue's resident schedulers are only ever that host's, so `reconcile`'s "resident minus my
+			// config" is correct again by construction and two hosts can no longer prune each other at all. The
+			// fingerprint gate stays, because it still catches the divergence itself -- including a timezone
+			// disagreement, which no queue split can detect.
+			const rq = makeQueue(parseConnection(config.valkeyUrl, { failFast: true }), { ...(hostQueue ? { name: hostQueue } : {}) });
+			try {
+				const r = await reconcileGated(rq, served, { registry, log, tz: hostTz, authored: authoredCron(config) });
+				log("schedules_installed", { installed: r.installed, removed: r.removed, ...(unserved.length > 0 && { unserved: unserved.length }) });
+			} finally {
+				await rq.close().catch(() => {});
+			}
+		} else {
+			log("schedules_installed", { installed: 0, removed: 0, ...(unserved.length > 0 && { unserved: unserved.length }) });
+		}
+
+		// DES-CRON-VIA-BULLMQ-SCHEDULER live edit (OQ-008): watch the triggers file and re-reconcile schedulers
+		// on change, so an operator's add/edit/delete of a cron trigger takes effect without a worker restart.
+		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
+		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
+		if (config.triggersFile) {
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared));
+		}
+
+		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
+		// an operator's add/delete of a pause window takes effect without a worker restart. A bad edit is kept out.
+		if (config.pauseWindowsFile) {
+			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log));
+		}
+
+		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
+		if (config.scopedLimitsFile) {
+			extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log));
+		}
+
+		// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment
+		// is a service that restarts only on failure, so the healthy worker was the one that never re-swept.
+		// Armed HERE, at the end of boot beside the watches: all three closures exist, boot's own sweeps have
+		// long finished, and the first tick lands one full interval later rather than during the schedules
+		// reconcile, which is Redis-destructive work a small test interval would otherwise land inside.
+		//
+		// NOT CONSTRUCTED AT ALL when the knob is 0. That is how "0 is byte-identical to before" is a fact
+		// rather than a claim: with no object there is no timer, no closer and no reachable second call to any
+		// reaper. It is registered in `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
+		// this handle holds an `rmSync`, and a tick landing mid-drain could delete a retained workspace behind a
+		// worker that already reported a clean shutdown.
+		if (config.sweepIntervalHours > 0) {
+			const sweep = makeRetentionSweepFn({
+				reapers: [
+					{ name: "log", reap: reapLogs },
+					{ name: "sandbox", reap: reapSandboxes },
+					{ name: "session", reap: () => sessionStore.reapSessions() },
+				],
+				intervalMs: config.sweepIntervalHours * 3600000,
+				log,
+			});
+			sweep.start();
+			extraClosers.push(sweep);
+		}
+
+		log("worker_started", {
+			queue: "pi-jobs",
+			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
+			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
+			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
+			sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, this version's pre-#292 behaviour
+			dailyCap: config.dailyCap,
+			weeklyCap: config.weeklyCap, // null when the weekly window is disabled
+			monthlyCap: config.monthlyCap, // null when the monthly window is disabled
+			softHoldPct: config.softHoldPct, // null when the soft-hold band is disabled
+			scopedLimitsFile: config.scopedLimitsFile, // null = no scoped caps/concurrency (the folder mutex holds regardless)
+			scopedLimits: scopedLimits.current.length, // row count -- money config deserves boot visibility; the watcher logs only changes
+			image: config.jobImage,
+			valkey: config.valkeyUrl,
+			logsDir: config.logsDir,
+			settingsFile: config.settingsFile,
+			captureJobLogs: config.captureJobLogs,
+			logRetentionDays: config.logRetentionDays,
+			sandboxRetentionHours: config.sandboxRetentionHours, // 0 = retention off; a run's directory is deleted as before
+		});
+		return worker;
+	} catch (err) {
+		// STOP WHAT WAS BUILT, THEN RETHROW, and both halves carry weight. The stop is the shutdown
+		// minus the exit -- the cancel, the close, the closer drain, the client release -- so nothing is
+		// left holding the loop and the process drains to the refusal's OWN exit code: entryExitCode
+		// turns a tagged configError into EXIT_POLICY 2 and infra into the retryable 1, and a swallow
+		// here would hand a supervisor a clean 0 for a boot that refused. `Promise.resolve`, not an
+		// optional-chained `.catch`: a test double whose recording `stop` is synchronous would otherwise
+		// raise a TypeError OVER the boot's real error, and the exit-code assertion meant to go red
+		// under mutation would go green for the wrong reason. A synchronous throw from `stop` itself
+		// still escapes, exactly as the closer loop documents for `extraClosers` -- a known bound.
+		await Promise.resolve(worker?.stop?.()).catch(() => {});
+		throw err;
+	}
 }

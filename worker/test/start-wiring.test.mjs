@@ -74,18 +74,30 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, now, authResolveTimeoutMs } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
+	const stopCalls = [];
 	const createWorkerFn = (arg) => {
 		if (order) order.push("createWorker");
 		calls.push(arg);
 		// Record every worker.on(...) registration so tests can drive the completed/failed handlers
 		// (inspecting the emitted log line) and assert the scheduler stall guard's "stalled" listener.
+		// `stop` records too (issue #299): a boot that refuses after this handoff must stop what it was
+		// handed, and the recording is how a test tells the PRODUCT did it rather than this harness's own
+		// teardown, which drains closers and disconnects but never calls stop. ASYNC deliberately -- the
+		// wrap spells `Promise.resolve(worker?.stop?.())` precisely so a synchronous double cannot
+		// TypeError over the boot's real error, and this double must not hide that spelling's job.
 		return {
 			on(evt, fn) {
 				registered[evt] = fn;
+			},
+			stop: async () => {
+				stopCalls.push("stop");
+				// Into the CALLER'S array too, like `order`: a refusing boot rejects, so its caller never
+				// sees runStart's return value and this is the only wire out.
+				stops?.push("stop");
 			},
 		};
 	};
@@ -243,7 +255,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 	const logs = parseLines(bootLines.slice(from));
 	// Expose the registration map under both names: `handlers` for the completed/failed handler tests,
 	// `registered` for the scheduler stall-guard test. Same object, one capture path.
-	return { captured, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls };
+	return { captured, stopCalls, deps: captured?.deps, logs, handlers: registered, registered, logSinkCalls, recordWriterCalls, logReaperCalls, sandboxReaperCalls, runContainerCalls, imagePreflightCalls, secretsResolverCalls };
 }
 
 // Capture the JSON log lines a synchronous fn emits through the injected writer.
@@ -1318,10 +1330,12 @@ test("a boot that refuses AFTER the handoff still drains what it opened", { skip
 			JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder, flow: "tidy", task: "t" } }] }),
 		);
 		let registryClosed = false;
+		const stops = [];
 		await assert.rejects(
 			() =>
 				runStart({
 					env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath },
+					stops,
 					makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 					makeHost: () => fakeHost(),
 					makeHostRegistry: (args) => {
@@ -1342,10 +1356,39 @@ test("a boot that refuses AFTER the handoff still drains what it opened", { skip
 			"the boot refusal must still reach the caller -- the teardown may not replace it",
 		);
 		assert.equal(registryClosed, true, "what the refused boot had already opened is drained anyway");
+		// The PRODUCT half (issue #299). The drain above is this harness's own finally; this is
+		// `startWorker`'s catch calling stop() on the worker it built, which is what a real deployment
+		// gets -- the harness never calls stop, so a recording here can only have come from the product.
+		assert.deepEqual(stops, ["stop"], "the refusing boot must STOP the worker it built before the rejection surfaces: a live Worker keeps taking paid jobs behind a printed error");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 		rmSync(folder, { recursive: true, force: true });
 	}
+});
+
+test("a refusal from a DIFFERENT post-handoff point stops the worker too -- the catch covers the region", { skip }, async () => {
+	// The reconcile refusal above is the reachable one issue #299 reproduced; this one throws from the
+	// retention sweep's arming at the far end of the region, so the pair pins the WRAP rather than one
+	// call site. A guard that only covered the reconcile would go green above and red here.
+	const stops = [];
+	await assert.rejects(
+		() =>
+			runStart({
+				env: { VALKEY_URL },
+				stops,
+				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+				makeHost: () => fakeHost(),
+				makeRetentionSweep: () => ({
+					start: () => {
+						throw new Error("sweep arm blew up");
+					},
+					close: () => {},
+				}),
+			}),
+		/sweep arm blew up/,
+		"the region's own error must surface -- entryExitCode reads it, and a swallow would exit 0 on a refusal",
+	);
+	assert.deepEqual(stops, ["stop"], "stopped from this refusal point too");
 });
 
 // --- host identity (issue #57) --------------------------------------------------------------------------

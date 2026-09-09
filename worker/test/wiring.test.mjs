@@ -194,6 +194,47 @@ test("shutdown releases the shared redis client AFTER every closer, by disconnec
 	}
 });
 
+test("createWorker exposes stop(): the shutdown minus the exit, for a boot that must undo itself", { skip }, async () => {
+	// ISSUE #299. A refusal landing after the Worker exists has to stop a live, paid drain WITHOUT
+	// exiting: the refusal's own error must reach the entry point's entryExitCode, and with every handle
+	// released the process drains to that code on its own -- measured, worker.close() plus
+	// redis.disconnect() reaches beforeExit where every other combination still holds the loop at 8s.
+	const origExit = process.exit;
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	const order = [];
+	let exits = 0;
+	let worker;
+	try {
+		process.exit = () => {
+			exits += 1;
+		};
+		worker = mod.createWorker({
+			connection: { host: "127.0.0.1", port: 1 },
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: { disconnect: () => order.push("redis") },
+			deps: {},
+			stopContainer: async () => {},
+			extraClosers: [{ close: async () => order.push("closer") }],
+		});
+		worker.on("error", () => {});
+		assert.equal(typeof worker.stop, "function", "stop rides the returned worker the way hostWorker does -- no caller's contract moves");
+		await worker.stop();
+		assert.deepEqual(order, ["closer", "redis"], "stop is the WHOLE teardown in the shutdown's own order: drain, then release");
+		assert.equal(exits, 0, "and it does NOT exit -- an exit here would hand a supervisor 0 for a refused boot");
+
+		const shutdown = process.listeners("SIGTERM").find((l) => !beforeTerm.has(l));
+		await shutdown();
+		assert.equal(exits, 1, "the signal path is stop() then exit, and a stop that already ran does not disarm it");
+	} finally {
+		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});
+
 test("a closer pushed AFTER createWorker returns is still closed by the shutdown", { skip }, async () => {
 	// `start.mjs` hands this array over BEFORE its three live-edit watches exist, then pushes their closers in
 	// once they are armed -- which it may only do because this shutdown reads the array LATE, at signal time,
