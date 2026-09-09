@@ -1181,3 +1181,28 @@ test("the inter-cycle race rides the cancellable sleep, and the signal gate is i
 	// style.
 	assert.ok(!/\.unref\(/.test(src), "the inter-cycle timer must stay REF'D");
 });
+
+test("a rejecting sleep still propagates through the cancel finally (issue #325)", async () => {
+	// The review pass measured this and left it unpinned; pinned here so it stays true: the
+	// `finally { nap.cancel?.(); }` around the race must never swallow or replace a rejecting
+	// sleep -- a broken sleep is a loud loop death surfacing through `done`, not a silent wedge.
+	let calls = 0;
+	const boom = new Error("sleep exploded");
+	const poller = await startPoller({ POLL_REPOS: "o/r" }, {
+		fetchFn: fakeFetch(EMPTY_POLL_ROUTES()),
+		redis: fakeRedis(),
+		queueFn: async () => {},
+		out: () => {},
+		now: () => NOW,
+		random: () => 0.5,
+		selfIdFn: async () => SELF,
+		tokenFn: async () => "poll-token",
+		fsDeps: FS,
+		sleep: async () => {
+			calls++;
+			throw boom;
+		},
+	});
+	await assert.rejects(poller.done, (e) => e === boom, "the SAME error object, not a wrapper and not a swallow");
+	assert.equal(calls, 1, "the first inter-cycle sleep is what exploded");
+});
