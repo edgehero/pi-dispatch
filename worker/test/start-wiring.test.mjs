@@ -188,7 +188,11 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 		// up as the whole test FILE hanging rather than as a failure anyone can read.
 		captured = calls[0];
 		try {
-			captured?.redis?.disconnect?.(); // release the background reconnect handle
+			// The BACKSTOP for a faked createWorker, no longer the only closer anywhere (issue #300): the
+			// real shutdown releases this client itself, sequenced after the closer drain, but that shutdown
+			// lives inside the real createWorker and this file fakes createWorkerFn -- so the product's
+			// release is unreachable here by construction and `wiring.test.mjs` is where it is pinned.
+			captured?.redis?.disconnect?.();
 			// EVERY extraCloser, not just the first: since issue #57 a deployment that declares a worker name
 			// also opens a host-queue handle, and since issue #295 the three live-edit file watchers ride the
 			// same list -- so this loop is what proves, on every test in this file, that a watch does not
@@ -1636,4 +1640,48 @@ test("the sweep re-runs the SAME closures boot already built, so one config read
 	const before = logReaperCalls.length + sandboxReaperCalls.length;
 	for (const r of handed.reapers) await r.reap();
 	assert.equal(logReaperCalls.length + sandboxReaperCalls.length, before, "a sweep constructs nothing");
+});
+
+test("settleWithin clears its fuse when the read wins, and still answers when it does not", async () => {
+	// ISSUE #300, the timer half. The boot-image read races a five-second unref'd fuse, and when the read
+	// won, the inline race left that fuse armed for its full term -- invisible to every census, because
+	// `process.getActiveResourcesInfo()` does not report unref'd timers at all (measured), which is why
+	// this pin counts through async_hooks, where `destroy` fires for a cleared timer and not for a merely
+	// unref'd one. Ungated: no Valkey, no boot, one helper.
+	const { createHook } = await import("node:async_hooks");
+	const live = new Set();
+	const hook = createHook({
+		init(asyncId, type) {
+			if (type === "Timeout") live.add(asyncId);
+		},
+		destroy(asyncId) {
+			live.delete(asyncId);
+		},
+	});
+	hook.enable();
+	try {
+		const before = new Set(live);
+		const won = await mod.settleWithin(Promise.resolve({ imageDigest: "sha" }), 5000, {});
+		assert.deepEqual(won, { imageDigest: "sha" }, "the read's own answer wins");
+		// A cleared timer's destroy hook fires on a later tick; give it two.
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+		const leaked = [...live].filter((id) => !before.has(id));
+		assert.deepEqual(leaked, [], "the losing fuse is CLEARED, not left armed: unref'd is not cleaned up");
+
+		const fell = await mod.settleWithin(new Promise(() => {}), 5, { fellBack: true });
+		assert.deepEqual(fell, { fellBack: true }, "a read that never answers still yields the fallback");
+	} finally {
+		hook.disable();
+	}
+});
+
+test("the boot-image read goes THROUGH settleWithin (source pin)", () => {
+	// The helper's guarantee only reaches production if the call site uses it. The property is not
+	// observable through a full boot without racing every other timer the boot arms, so the call site is
+	// pinned against the source, the `wiring.test.mjs` SIGBREAK precedent. NEGATIVE half included: the
+	// inline race must not come back beside the helper.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.match(src, /const bootImage = await settleWithin\(imagePreflight/, "the boot-image read must ride the fuse-clearing helper");
+	assert.ok(!/setTimeout\(\(\) => resolve\({}\), BOOT_IMAGE_TIMEOUT_MS\)/.test(src), "the inline race that leaked its timer must stay gone");
 });

@@ -1056,6 +1056,50 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `DES-WRAPPER-STOPS-WHAT-IT-STARTED`,
   `INT-HOST-REGISTRY-CONTRACT`
 
+## DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT
+
+- **Decision** (issue #300): the shutdown releases the one raw ioredis client `startWorker` builds --
+  shared by the budget, the wait state, the two fleet leases, the run mirror, the host registry, the
+  scheduler stall guard and the boot scope-claim sweep -- with a guarded `redis?.disconnect?.()`
+  SEQUENCED AFTER the `extraClosers` drain and before `process.exit(0)`. And the boot-image read's
+  five-second fuse is cleared when the read wins, through `settleWithin`, which races a promise against
+  an unref'd timer and clears the timer whichever side settles.
+- **Why the client is not an `extraCloser`, in two steps that must both be stated or the sequencing gets
+  refactored away**: the raw client has no `.close`, so pushing it into the list is a silent no-op the
+  drain's `c?.close?.()` never notices -- and the natural repair, wrapping it as
+  `{ close: () => redis.disconnect() }`, is worse than nothing, because the list is drained with
+  `Promise.all` and the wrapper takes the connection down CONCURRENTLY with `registry.close()`. Measured
+  against a recording server: the concurrent shape delivered NO commands at all, the sequenced shape
+  delivered the registry's DEL and SREM. The DEL is what keeps a stopped host from lingering as a ghost
+  peer for its full TTL (`INT-HOST-REGISTRY-CONTRACT`).
+- **Why `disconnect()` and not `quit()`, measured rather than reasoned**: `quit()` answers OK in 0ms
+  against a REFUSED port; the hang it can suffer is a server that accepts the TCP connection and never
+  answers, where the client sits in status "connect" awaiting its ready check -- independent of
+  `maxRetriesPerRequest` and of `enableOfflineQueue`, both measured. `disconnect()` returns immediately
+  in every case, and by this point everything whose replies matter has already drained. The plausible
+  explanation, that `maxRetriesPerRequest: null` queues commands forever so `quit()` waits on the offline
+  queue, is FALSE and is recorded here so it does not get written into a comment later.
+- **The fuse, and why it gets a helper**: `unref'd is not cleaned up` is `DES-WATCHERS-CLOSE-WITH-THE-WORKER`'s
+  lesson restated for a timer, and the old inline race left its five-second fuse armed for the full term
+  whenever the read won. The property is not observable from outside a boot -- `process.getActiveResourcesInfo()`
+  does not report unref'd timers at all (measured), and a census over a whole boot races every other timer
+  the boot arms -- so the race lives in an exported `settleWithin` a unit test pins through `async_hooks`,
+  with the call site pinned against the source. The losing READ stays pending; a wedged `docker inspect`
+  has no cancel, which is the read-is-a-nicety posture the call site already documents.
+- **What this deliberately does not do**: close the client on a boot REFUSAL. A refusal path that stops
+  what the boot built is issue #299's whole subject and lands with its own acceptance; this entry only
+  makes the signal-driven shutdown release what it owns. The test harness's own
+  `captured?.redis?.disconnect?.()` survives as the BACKSTOP for a faked `createWorker` -- the real
+  release lives inside the real one, which `start-wiring.test.mjs` never constructs -- and stops being
+  the only closer anywhere, which was the tell #300 named.
+- **Rejected**: *widening `extraClosers` into an ordered, phased list* so the client could ride it last:
+  a second ordering contract on a list whose only rule today is append-only with pinned heads, for one
+  member that is not a closer at all. *`quit()` with a timeout wrapper*: a bound around a graceful close
+  is a slower spelling of `disconnect()` with a new timer to leak. *Counting on process exit to reap the
+  socket*: true and useless, since the harness case -- many boots, one process -- is exactly where reaping
+  never comes.
+- **Traces to**: `DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `INT-HOST-REGISTRY-CONTRACT`, `DES-CONCURRENCY-3`
+
 ## DES-RETENTION-SWEEPS-ON-A-TIMER
 
 - **Decision** (issue #292, resolving `OQ-007`): the three host-side retention reapers — the run history
@@ -3384,3 +3428,4 @@ a tunnel.
 | 2026-09-08 | Issue #316, transient faults tagged as configuration. **NEW `DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE`**: the transient/determinate question is answered once, in an import-free module every classifying site shares, because the convention had drifted into two incompatible halves one file apart and #310 had just made the wrong answer cost a refund, an unretried delivery and a public comment naming the operator. The rule is an allow-list in the determinate direction, with one deliberate exception: a TLS trust failure IS determinate, which the identity modules' own tests caught before a reviewer did. Each caller pairs the rule with the throw its layer can afford, `InfraRetry` per job and an untagged `Error` at boot, because tagged at boot means EXIT_POLICY 2 and a supervisor that leaves the service stopped. **`DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked**: the chain refusals classify nothing and were not touched. **Code evidence**: worker/src/transient.mjs -> isTransientStatus, isDeterminateFsCode, isDeterminateFetchFailure, transientError; worker/src/get-token.mjs -> classifyAppMintError, runGhAuthToken; worker/src/prepare-local.mjs -> requirePath; worker/src/identity.mjs -> resolveSelfId; worker/src/gitlab-identity.mjs -> resolveGitLabSelfId; worker/src/forgejo-identity.mjs -> resolveForgejoSelfId; worker/src/azure-identity.mjs -> resolveAzureSelfId; worker/src/start.mjs -> startWorker (attachAuth, ensureAuth); worker/test/transient.test.mjs |
 | 2026-09-08 | Issue #313, the duplicate-key refusal. **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: the refusal joins `run.flow`'s charset check as the file's third true NARROWING, and is the safest of the three, because the only files it rejects are ones whose reviewed value and running value already differ. It carries the same release-ordering constraint as the other two, and the reason it is enforced on the WRITER's raw read as well as in the validator is that an old console cannot produce a duplicate but can rewrite a shadowed file, silently discarding the evidence. **`DES-PER-TRIGGER-SECRET-PROFILE` UNCHANGED, checked, and motivating**: its whole argument is that a trigger names a NAME and the file is the reviewed artifact, which a shadowed key defeats. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: a duplicate key is determinate by any reading and refuses at load, so nothing about classification moves. **Code evidence**: worker/src/json-duplicates.mjs -> findDuplicateKey; worker/src/triggers.mjs -> parseTriggers; worker/src/triggers-file.mjs -> writeTriggers, disarmTrigger. |
 | 2026-09-09 | Issue #301, the receiver's unclosed triggers watch. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED**: the receiver residual is closed, and the Rejected list's "arming only on the real entry point" entry is now marked historical, because that posture muted the defect under test rather than closing it and cost the receiver the only coverage that its watch arms at all. `makeWatchCloser` moved from `worker/src/start.mjs` to its own import-free `worker/src/watch-closer.mjs` (the `transient.mjs` precedent), re-exported from `start.mjs` so every importer keeps its address, and published as the `./watch-closer` subpath; the receiver arms the watch unconditionally, hands the factory an object-shaped `log` adapter, and drains a `closers` array in its shutdown before `process.exit(0)`. The signal handlers deliberately stay on the real-entry guard: a `process.once` cannot ride a closers array. A new bolt in `worker/test/publish.test.mjs` pins that every `@edgehero/pi-dispatch/<subpath>` imported by `receiver/src` or `admin/src` exists in the worker's exports map, because the symlinked workspaces make a missing entry invisible to every in-repo test while an npm-installed receiver throws at module load; the version-floor half of that hazard is undecidable offline and stays a release-PR obligation. `INT-TRIGGERS-FILE-CONTRACT`, `DES-HOST-REGISTRY`, `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked. **Code evidence**: worker/src/watch-closer.mjs · receiver/src/start.mjs -> watchTriggers, closers · receiver/test/start.test.mjs -> "the triggers watch ARMS under test, and a shut-down watch writes NOTHING" |
+| 2026-09-09 | Issue #300, the two handles `startWorker` never released. **NEW `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`**: the shutdown releases the shared ioredis client with a guarded `disconnect()` sequenced strictly AFTER the `extraClosers` drain, and the boot-image read's five-second fuse is cleared through a new exported `settleWithin` when the read wins. The entry records three measured facts so they cannot be re-derived wrongly: the raw client cannot ride `extraClosers` (no `.close`, and the natural wrapper is drained concurrently with `registry.close()` -- a recording server received NO commands where the sequenced order delivered the DEL and SREM); `quit()`'s hang is a server that accepts and never answers, independent of `maxRetriesPerRequest` and `enableOfflineQueue`, so the plausible offline-queue explanation is false; and `process.getActiveResourcesInfo()` is blind to unref'd timers, which is why the fuse is pinned through `async_hooks` on the helper rather than a census over a boot. A boot REFUSAL still releases nothing, deliberately: that is issue #299's own acceptance. The harness's `captured?.redis?.disconnect?.()` is re-documented as the backstop for a faked `createWorker` rather than the only closer anywhere. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER`, `INT-HOST-REGISTRY-CONTRACT`, `DES-CRON-VIA-BULLMQ-SCHEDULER` UNCHANGED, checked.** **Code evidence**: worker/src/index.mjs -> shutdown · worker/src/start.mjs -> settleWithin · worker/test/wiring.test.mjs -> "shutdown releases the shared redis client AFTER every closer, by disconnect, never quit" |

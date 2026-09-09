@@ -121,6 +121,33 @@ const WORKER_VERSION = (() => {
 export { makeWatchCloser } from "./watch-closer.mjs";
 
 /**
+ * Race a read against a fuse, and CLEAN THE FUSE UP whichever side wins (issue #300). The fuse is
+ * unref'd, deliberately: it exists so a wedged docker daemon cannot hold boot, and it must never itself
+ * hold the process. But unref'd is not cleaned up (#295's lesson, both halves): when the read won, the
+ * old inline race left its five-second timer armed for the full term. The LOSING read stays pending --
+ * a wedged `docker inspect` has no cancel -- which is the read-is-a-nicety posture the call site
+ * documents, unchanged here.
+ *
+ * EXPORTED for the reason `makeWatchCloser` is: the cleared-fuse property is not observable through a
+ * full boot without racing every other timer the boot arms, and a guarantee the shutdown story rests on
+ * deserves a deterministic pin rather than a census.
+ */
+export async function settleWithin(promise, ms, fallback) {
+	let timer = null;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((resolve) => {
+				timer = setTimeout(() => resolve(fallback), ms);
+				timer.unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Watch the DIRECTORY holding the triggers file (robust to the admin's atomic tmp+rename, which swaps the
  * inode a file-watch would lose), debounce, and re-reconcile the cron schedulers on change via
  * `reloadSchedules`. Best-effort: a platform without `fs.watch` logs and the worker keeps its boot-time
@@ -738,10 +765,7 @@ export async function startWorker(
 	// here. This read is a nicety -- a digest for the boot line and the registry -- and a nicety may
 	// never be able to stop a worker starting. The per-JOB preflight keeps its unbounded wait, where a
 	// wedged daemon is the job's problem and the 30-minute job timeout already covers it.
-	const bootImage = await Promise.race([
-		imagePreflight({}).catch(() => ({})),
-		new Promise((resolve) => setTimeout(() => resolve({}), BOOT_IMAGE_TIMEOUT_MS).unref?.()),
-	]);
+	const bootImage = await settleWithin(imagePreflight({}).catch(() => ({})), BOOT_IMAGE_TIMEOUT_MS, {});
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });

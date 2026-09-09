@@ -860,6 +860,25 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 				}
 			}),
 		);
+		// Release the shared ioredis client LAST (issue #300). Eight consumers ride it -- the budget, the
+		// wait state, the leases, the run mirror, the host registry, the stall guard, the scope-claim sweep
+		// -- and until here nothing in the product ever closed it; only the test harness did, reaching into
+		// the captured wiring, which was the tell.
+		//
+		// SEQUENCED AFTER the drain above, never inside it. The raw client has no `.close`, so pushing it
+		// into `extraClosers` is a silent no-op -- and the natural wrapper, `{ close: () => redis.disconnect() }`,
+		// is worse than nothing: drained CONCURRENTLY by the Promise.all, it takes the connection down beside
+		// `registry.close()`, and a recording server then received NO commands at all where this ordering
+		// delivers the registry's DEL and SREM -- the DEL being what keeps a stopped host from lingering as
+		// a ghost peer for its full TTL.
+		//
+		// `disconnect()`, not `quit()`, for a MEASURED reason rather than the plausible one. `quit()` answers
+		// OK in 0ms against a REFUSED port; the hang it can suffer is a server that accepts the TCP
+		// connection and never answers, where the client sits in status "connect" awaiting its ready check --
+		// independent of `maxRetriesPerRequest` and of `enableOfflineQueue`, both measured. `disconnect()`
+		// returns immediately in every case, and everything whose replies matter has already drained above.
+		// Guarded, because the wiring tests hand createWorker a bare `redis: {}`.
+		redis?.disconnect?.();
 		process.exit(0);
 	};
 	process.once("SIGTERM", shutdown);

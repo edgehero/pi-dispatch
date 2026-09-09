@@ -149,6 +149,51 @@ test("shutdown closes each extraCloser after the worker drains", { skip }, async
 	}
 });
 
+test("shutdown releases the shared redis client AFTER every closer, by disconnect, never quit", { skip }, async () => {
+	// ISSUE #300. The raw client createWorker receives is what the budget, the wait state, the leases,
+	// the run mirror, the host registry, the stall guard and the scope-claim sweep all share, and nothing
+	// in the product ever released it -- the test harness reached into the captured wiring instead, which
+	// was the tell. The ORDER is the contract here: the client has no `.close`, so it cannot ride
+	// `extraClosers` at all, and the natural wrapper would be drained CONCURRENTLY with
+	// `registry.close()`, losing the DEL that keeps a stopped host from lingering as a ghost peer.
+	const origExit = process.exit;
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	const order = [];
+	let worker;
+	try {
+		process.exit = () => {};
+		worker = mod.createWorker({
+			connection: { host: "127.0.0.1", port: 1 },
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: {
+				disconnect: () => order.push("redis.disconnect"),
+				quit: () => order.push("redis.quit"),
+			},
+			deps: {},
+			stopContainer: async () => {},
+			extraClosers: [
+				// One SLOW closer, so a disconnect that merely comes later in source order still fails this:
+				// it must come after the drain has RESOLVED, not after it was started.
+				{ close: async () => { await new Promise((resolve) => setTimeout(resolve, 30)); order.push("closer.slow"); } },
+				{ close: async () => order.push("closer.fast") },
+			],
+		});
+		worker.on("error", () => {});
+		const shutdown = process.listeners("SIGTERM").find((l) => !beforeTerm.has(l));
+		await shutdown();
+		assert.deepEqual(order.filter((o) => o.startsWith("redis")), ["redis.disconnect"], "disconnect, exactly once, and never quit: quit hangs on a server that accepts and goes mute");
+		assert.equal(order.at(-1), "redis.disconnect", "the client is released LAST -- after the slow closer resolved, or the registry's DEL rides a dead connection");
+		assert.ok(order.includes("closer.slow") && order.includes("closer.fast"), "both closers ran");
+	} finally {
+		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});
+
 test("a closer pushed AFTER createWorker returns is still closed by the shutdown", { skip }, async () => {
 	// `start.mjs` hands this array over BEFORE its three live-edit watches exist, then pushes their closers in
 	// once they are armed -- which it may only do because this shutdown reads the array LATE, at signal time,
