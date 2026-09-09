@@ -58,8 +58,17 @@ function cell(value) {
   return String(value);
 }
 
-/** Render the queue slice of `status`: paused state, the five job counts, and the worker count. */
-export function renderStatus(queue) {
+/**
+ * Render the queue slice of `status`: paused state, the five job counts, and the worker count.
+ *
+ * The optional second argument (issue #289) names the delayed parts the caller could count from their
+ * own sources -- held from the wait index, cron-next from the scheduler list. ABSENT, the output is
+ * byte-identical to before the argument existed; a part the caller could not read arrives undefined and
+ * is simply not named, so an unreachable source degrades to today's line rather than an invented
+ * number. The remainder stays undifferentiated on purpose: the per-job classifier is the thing
+ * INT-WAIT-PROFILES-CONTRACT refuses.
+ */
+export function renderStatus(queue, { heldCount, cronNext } = {}) {
   if (!queue || queue.unreachable) {
     return `Queue: unreachable (${queue?.unreachable ?? "unknown"})`;
   }
@@ -67,6 +76,13 @@ export function renderStatus(queue) {
   const line = ["waiting", "active", "paused", "delayed", "failed"]
     .map((k) => `${k} ${counts[k] ?? 0}`)
     .join("  ");
+  const delayed = Number(counts.delayed ?? 0);
+  const held = Number.isFinite(heldCount) ? heldCount : 0;
+  const cron = Number.isFinite(cronNext) ? cronNext : 0;
+  const breakdown =
+    delayed > 0 && held + cron > 0
+      ? `\n  delayed: ${[...(cron > 0 ? [`${cron} cron-next`] : []), ...(held > 0 ? [`${held} held on waitFor`] : []), ...(delayed - cron - held > 0 ? [`${delayed - cron - held} other`] : [])].join(", ")}`
+      : "";
   const workers = queue.workers === undefined ? "unknown" : queue.workers;
   // Issue #57: name them when the registry can. `getWorkers()` counts CLIENT LIST rows and reports
   // "unknown" where CLIENT SETNAME is unsupported, so a fleet that has declared its names deserves to see
@@ -76,7 +92,7 @@ export function renderStatus(queue) {
   // can leave one behind if it fails partway through the fleet, and an operator told "running" would
   // walk away from a host that is stopped.
   const state = queue.pausedPartial ? "PARTIALLY paused" : queue.pausedState ? "paused" : "running";
-  return [`Queue: ${state}`, `  ${line}`, `  workers: ${workers}${named}`].join("\n");
+  return [`Queue: ${state}`, `  ${line}${breakdown}`, `  workers: ${workers}${named}`].join("\n");
 }
 
 /** Render the run history as aligned columns; a null field is "-", an unreachable/empty set degrades. */

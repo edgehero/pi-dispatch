@@ -131,11 +131,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `REQ-QUEUE-BURST-NO-DROP` survive a reboot; an in-memory queue would lose the wait-list on the first
   restart.
 - **Evidence (upstream)**: BullMQ is MIT (`taskforcesh/bullmq → LICENSE`, © BullForce Labs AB)
+- **Dedup visibility** (issue #289): which of the two dedup layers spoke is read off `queue.add`'s own
+  return -- the semantic window hands back the EXISTING job's different id, the GUID collision the same
+  id -- so `enqueueForgeJob` compares and returns `{ jobId, deduplicated, survivingJobId? }`, and the
+  receiver stops logging `enqueued` and answering "queued" for a delivery that created nothing
+  (`REQ-DEDUP-BY-DELIVERY-GUID` carries the surface contract).
 - **Rejected**:
   - *Hand-rolled Redis list* — reimplements the five mechanisms above, badly, forever.
   - *GitHub Actions `concurrency:` groups* — claude-code-action's own docs concede the action has no
     queue either; concurrency groups cancel or serialise, they do not hold a wait-list.
   - *The existing tool's depth-3 FIFO* — see `DES-BUILD-NOT-EXTEND-PI-ROUTINES`.
+  - *A QueueEvents subscriber for the `deduplicated` event* (issue #289) — a dedicated blocking
+    connection and a lifecycle to close, for a fact the add's return already carries; it also covers
+    only the semantic layer, so it buys nothing the comparison does not.
+  - *Surfacing GUID replays* (issue #289) — bullmq's jobId collision returns the SAME id, structurally
+    invisible to the comparison, and correctly so: a forge retry of a delivery that IS queued deserves
+    the answer "queued". The shield stays silent by design.
+  - *A non-2xx answer for a swallowed delivery* (issue #289) — the forge would redeliver a handled
+    delivery, a storm bought for a status code; the 202 body says `deduplicated` instead.
 - **Deployment note**: default the compose file to **Valkey** (BSD-3, Linux Foundation) rather than
   Redis. Redis ≥8.0 is tri-licensed AGPLv3 / SSPLv1 / RSALv2; the AGPL does not reach this project —
   we speak RESP over a socket and do not link Redis — but Valkey means the conversation never happens
@@ -1652,6 +1665,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `examples/extensions/` (doom-overlay, an interactive TUI overlay; the with-deps example resolves its own
   `node_modules` via jiti). The load-time capability probe exists precisely because these are asserted
   against the pin, not against a moving HEAD.
+- **The FAILED surface** (issue #289): a conditional, self-bounding panel section plus an `f` drill
+  view over `getFailed()` -- the first display code in the tree to hydrate queue Jobs, admissible
+  because each Job lives one statement and the projection is CLOSED to five host-chosen fields
+  (`{ jobId, attemptsMade, failedReason, queue, endedAt }`, key-set pinned; `.data` never crosses).
+  `failedReason` is the worker's OWN throw message, de-payloaded at its sources in the same slice
+  (branch.mjs answers with a type, prepare-local basenames its path) and belt-scrubbed in the deps
+  layer (control bytes stripped, 120-char cap, the `job_failed` line's own bound); `OQ-035` records
+  that the belt is a bound, not a classification. The view states the retention split (31d forge, 7d
+  local/cron) because a uniform claim would be false for half the rows. REJECTED here: a
+  `dispatch_failed` model tool and a `failed` subcommand (both enumeration-pinned surfaces bought for
+  a keypress the panel already answers -- "one keypress away" is the acceptance, and the panel is the
+  keypress); a per-job delayed classifier (the breakdown line names parts counted from their own
+  sources, `INT-WAIT-PROFILES-CONTRACT`'s refusal of a guessing classifier stands).
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-ISSUE-TEXT-IS-DATA`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-AI-TRIGGER-FLOW-GATE`,
   `DES-JOB-OUTBOX-CHAINING`, `REQ-DURABLE-RUN-HISTORY`
@@ -2686,6 +2712,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   using the feature forever, which is the always-on amber the panel's own design rejects. So the worker
   compares the AUTHORED entry against the job it was handed, fail-open on anything it cannot answer.
 
+- **The delayed count's naming** (issue #289): the status area now names the parts of `delayed` it can
+  count from their OWN sources -- cron-next from the scheduler list, holds from the `wait:held` index --
+  with the remainder called undifferentiated. This is compatible with, not a reversal of, the rejected
+  per-job classifier below: nothing enumerates or hydrates the delayed set, nothing guesses which
+  population a given job is in, and the wake-instant floors stay evidence for the WORKER's own
+  discrimination, never a display heuristic.
 - **Rejected**:
   - ***Widening the queue's dedup window for a held job*** — the obvious way to coalesce repeat deliveries,
     and wrong three times over: the key carries no trigger identity (so it would suppress an unflagged
@@ -3734,3 +3766,4 @@ a tunnel.
 | 2026-09-09 | Issue #279. `buildGraphHtml`, `layoutGraph` and the page-only CSS are DELETED from graph-html.mjs: no production caller since #181 removed the `/dispatch graph html` command, and the 2026-08-12 row below describing `buildGraphScene` as "the normalize+layout+SVG-emission half of `buildGraphHtml`" now names a function that no longer exists -- the history stays as written, this row is the forward pointer (the scene's only consumer is `insights-html.mjs`, and its docblock now says so). The suite that drove the dead builder was rewritten around the shipping surface: layout invariants through `buildGraphScene(...).layout`, page-level pins through `buildInsightsHtml` on a fold-less payload (its documented degrade renders the topology whole), `PAGE_JS` hardening on the exported string itself, and the graph-html purity test now BANS the two deleted names from reappearing. Duplicated pins (determinism, well-formedness, redaction, file:// posture, the reload contract) were dropped in favour of the insights suite's own -- one pin per property, on the surface that ships. **`DES-GRAPH-EDGE-DERIVATION` UNCHANGED, checked** (the fold and the model are untouched); **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked** (no command, tool or view changes); **`DES-COST-FOLD-BY-SCAN` UNCHANGED, checked**. interfaces.md, constitution.md and open-questions.md carry no affected entry (OQ-024 already records the #181 rescope and stays true) -- UNCHANGED, checked. |
 | 2026-09-09 | Issue #287, the operator cancel. **NEW `DES-CANCEL-VIA-REDIS-REQUEST-KEY`** (decision, the rejected quintet -- pub/sub, `getTrackedJobIds` coupling, state-polling-as-ack, a `dispatch_cancel` model tool, cursor-folded held rows -- and the named residuals). **`DES-CLI-SURFACE` AMENDED**: `cancel` joins the operator-typed ungated tier, one job id, one job stopped. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added or removed, so the enumeration its Decision carries -- and the two-directional pin `admin/test/wiring.test.mjs` keeps on it -- stands untouched; `dispatch_wait_cancel` changes only its description string (it stops claiming to be the only door). **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked**: hold semantics, keyspace and refusal ladder are untouched; the cancel sequence merely moved from the admin into `cancel-state.mjs` with the admin delegating, byte-identical behaviour under the existing held tests. |
 | 2026-09-09 | Issue #288. **NEW `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`**: the post-spend terminals comment through the existing adapter (a reason-token map at the processor's return sites; the infra terminal at the failed listener on BullMQ's own `finishedOn`), and `PI_ON_FAILURE` is wait-check.mjs reduced further, fired from the two existing listener bodies for the paid terminals only. The Rejected list carries the nine alternatives with their reasons -- most load-bearing: no in-project transport ever (the id-only argv IS the feature), no knob over the comments (they discharge `REQ-JOB-STATUS-COMMENTS`' standing acceptance), recordRun refused as mount (fires on retried attempts), the processor catch refused as the infra site (misses the stall-kill and the wait-gate escape), and the runner's exit-line reason vocabulary stays unread (the exit codes already draw the needed distinction). **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: no retry classification moves; the comments and the hook observe outcomes, never decide them. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: operator-cancel gains its comment ROW here and is excluded from the hook (the operator initiated it), both anticipated by that entry's map shape. |
+| 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: the dedup-visibility bullet (the two layers' asymmetric returns at the pin's Lua; the receiver's honesty rule), with three new Rejected entries -- a QueueEvents subscriber (a blocking connection and a lifecycle for a fact the add's return carries), surfacing GUID replays (the shield's silence is its correctness), a non-2xx swallow answer (a redelivery storm bought for a status code). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the FAILED surface bullet -- the first queue-Job hydration for display, admissible by the one-statement/closed-projection rule, the source-plus-belt posture on failedReason (`OQ-035`), the stated retention split; REJECTED a `dispatch_failed` tool and a `failed` subcommand (the tool enumerations and their two-directional pins stand UNTOUCHED -- verified against `admin/test/wiring.test.mjs`) and a per-job delayed classifier. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: the delayed-count naming bullet, stating compatibility with (not reversal of) its own rejected classifier -- parts counted from their own sources, nothing enumerated, nothing guessed. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: the failure hook and the FAILED section answer different questions (being told vs going looking) and share no code. |

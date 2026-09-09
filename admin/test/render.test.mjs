@@ -46,6 +46,23 @@ test("renderStatus reports paused and unreachable", () => {
   assert.match(renderStatus({ unreachable: "down" }), /unreachable \(down\)/);
 });
 
+test("renderStatus names the delayed parts only when handed them -- absent stays byte-identical (issue #289)", () => {
+  const queue = { pausedState: false, counts: { waiting: 2, active: 1, paused: 0, delayed: 4, failed: 3 }, workers: 1 };
+  // The EXACT pre-#289 output, pinned: the second argument absent must change nothing.
+  assert.equal(renderStatus(queue), "Queue: running\n  waiting 2  active 1  paused 0  delayed 4  failed 3\n  workers: 1");
+  const explained = renderStatus(queue, { heldCount: 2, cronNext: 1 });
+  assert.match(explained, /delayed: 1 cron-next, 2 held on waitFor, 1 other/, "each part from its own source, the remainder called what it is");
+  // A part the caller could not read arrives undefined and is not named -- never an invented number.
+  const partial = renderStatus(queue, { heldCount: 2, cronNext: undefined });
+  assert.match(partial, /delayed: 2 held on waitFor, 2 other/);
+  assert.doesNotMatch(partial, /cron-next/);
+  // No delayed jobs, or no explainable part: no breakdown line at all.
+  assert.doesNotMatch(renderStatus({ ...queue, counts: { ...queue.counts, delayed: 0 } }, { heldCount: 2, cronNext: 1 }), /delayed:/);
+  assert.doesNotMatch(renderStatus(queue, { heldCount: 0, cronNext: 0 }), /delayed:/);
+  // The clamp: parts exceeding the count never print a negative remainder.
+  assert.doesNotMatch(renderStatus({ ...queue, counts: { ...queue.counts, delayed: 1 } }, { heldCount: 4, cronNext: 1 }), /-\d+ other|0 other/);
+});
+
 test("renderRuns aligns columns with a header and a data row, including the chain marker", () => {
   const out = renderRuns([
     {

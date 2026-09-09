@@ -70,6 +70,26 @@ function centerBlock(lines: string[], overlayWidth: number, blockWidth: number):
 /** How many held rows the panel will hold at once. The section shows fewer; the rest are counted, not lost. */
 const HELD_LIMIT = 20;
 
+// The FAILED surface's bounds (issue #289): how many failed jobs each queue is asked for, how many the
+// drill view shows fleet-wide, and how many rows the section spends before counting the rest -- the
+// held section's own posture, one surface over.
+const FAILED_PER_QUEUE = 20;
+const FAILED_LIMIT = 20;
+const FAILED_ON_DASHBOARD = 3;
+
+/**
+ * The belt over a failedReason before it may enter the snapshot (issue #289). The reason is the error
+ * message the WORKER itself threw -- the sources were de-payloaded at their sites (branch.mjs answers
+ * with a type, prepare-local basenames its path) -- but this renderer must hold the property locally
+ * rather than by trusting every future throw site: control bytes (ANSI included) become spaces, and the
+ * length is capped at the `job_failed` line's own 120 (start.mjs's precedent). Applied in the deps
+ * layer, so the raw string never reaches the component.
+ */
+function scrubReason(reason: any): string {
+  if (typeof reason !== "string" || reason === "") return "-";
+  return reason.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
+}
+
 /** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
 const HELD_HYDRATE_MAX = 200;
 
@@ -242,8 +262,33 @@ export function createDashboardDeps(
       // title and body, which is why the only queue-job read in this function takes an id and nothing else.
       const held = await heldJobs(redis).catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
 
+      // The failed set's first surface (issue #289). This is the FIRST display code in the tree to
+      // hydrate queue Jobs, and the admissibility argument is `getActive(0,0)`'s one paragraph down:
+      // each Job lives for one statement and ONLY host-chosen fields enter the snapshot -- id, attempt
+      // count, the worker's own scrubbed throw message, the queue name and the finish instant. `.data`
+      // (issue title/body/username) never crosses; a key-set pin holds the projection closed. Caught as
+      // a unit like `held` above, so an unreadable failed set degrades one section, never the snapshot.
+      const failed = await (async () => {
+        const lists = await Promise.all(queues.map((q: any) => q.getFailed(0, FAILED_PER_QUEUE - 1)));
+        const rows = lists
+          .flatMap((list: any[], qi: number) =>
+            (Array.isArray(list) ? list : []).map((j: any) => ({
+              jobId: j?.id ?? "-",
+              attemptsMade: Number(j?.attemptsMade ?? 0),
+              failedReason: scrubReason(j?.failedReason),
+              queue: queues[qi]?.name ?? "-",
+              endedAt: Number(j?.finishedOn ?? 0),
+            })),
+          )
+          .sort((a: any, b: any) => b.endedAt - a.endedAt)
+          .slice(0, FAILED_LIMIT);
+        const total = counts.failed ?? 0;
+        return { rows, more: Math.max(0, Number(total) - rows.length) };
+      })().catch((err: any) => ({ unreachable: err?.message ?? String(err) }));
+
       return {
         held,
+        failed,
         scopedLimits,
         scopedBudget,
         queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
@@ -608,6 +653,15 @@ export function makeDashboard({
         }
         return;
       }
+      if (view === "FAILED") {
+        // A static read-only list (issue #289): Esc backs out; everything else is inert. No scroll --
+        // FAILED_LIMIT rows is the same floor the held section takes, and redis-cli holds the rest.
+        if (matchesKey(data, "escape")) {
+          view = "LIST";
+          tui?.requestRender?.();
+        }
+        return;
+      }
       if (view === "HELD_LIST") {
         // The held drill-in (issue #287): rows are the snapshot's own PII-free projections (target,
         // label, waited), a cursor, and `x` arming the shared cancel confirm on the CURSOR row's stored
@@ -818,6 +872,15 @@ export function makeDashboard({
         void dispose().finally(() => done({ action: "manageLimits" }));
         return;
       }
+      // `f` opens the FAILED drill-in (issue #289) -- the section's divider names it; inert when the
+      // failed set is empty or unreadable, the `h` rule below.
+      if (data === "f" || data === "F") {
+        const rows = Array.isArray(snapshot?.failed?.rows) ? snapshot.failed.rows : [];
+        if (rows.length === 0) return;
+        view = "FAILED";
+        tui?.requestRender?.();
+        return;
+      }
       // `h` opens the HELD drill-in (issue #287) -- the section's divider names it. Inert when nothing is
       // held, exactly as `l` is inert with no active job: a view of an empty list answers no question.
       if (data === "h" || data === "H") {
@@ -934,6 +997,27 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
 
   if (view === "LIVE_TAIL") {
     return renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, styler });
+  }
+
+  if (view === "FAILED") {
+    // The failed drill-in (issue #289): the snapshot's own projected rows, whole. Same PII posture as
+    // the section -- the projection's key-set pin is what keeps `.data` structurally out of reach.
+    const failed = snapshot?.failed ?? {};
+    const rows: any[] = Array.isArray(failed.rows) ? failed.rows : [];
+    const total = rows.length + (Number(failed.more) || 0);
+    const detailTitle = `failed · ${total} in the queue`;
+    const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
+    const iw = framed ? dw - 4 : 24;
+    // Retention honesty in the header: the two job classes age out differently (31d forge, 7d
+    // local/cron), so a uniform claim would be false for half the rows.
+    const lines = [
+      styler.cell(styler.fg("dim", "reasons kept 31d (forge) / 7d (local & cron)"), iw),
+      ...(rows.length === 0 ? [styler.cell("(nothing failed)", iw)] : rows.map((r: any) => failedRow(r, iw, styler))),
+    ];
+    if (Number(failed.more) > 0) lines.push(styler.cell(styler.fg("dim", `↓ ${failed.more} more (redis-cli holds the rest)`), iw));
+    if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "esc back"];
+    const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: fitLine(styler.fg("accent", "esc") + " " + styler.fg("dim", "back"), iw, styler) });
+    return centerBlock(boxed, Math.trunc(width), dw);
   }
 
   if (view === "HELD_LIST") {
@@ -1072,7 +1156,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // the collapsed divider names. Status and runs carry no priority: the header is the panel's one
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
-    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt)] },
+    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
     { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler), priority: 4, viewKey: "s" },
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
@@ -1081,6 +1165,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     // arithmetic has no headroom for another hint (its own comment), the s/o/Tab precedent.
     { key: "limits", head: ["scoped limits", `${sl.count} · m manage`], body: sl.lines, priority: 0, viewKey: "m" },
     ...heldSection(snapshot.held, inner, styler),
+    ...failedSection(snapshot.failed, inner, styler),
     { key: "runs", head: ["runs", `last ${runCount} · o ${runSort}`], body: runLines(runRows, selected - trg.count, inner, styler) },
     { key: "settings", head: ["settings", "s edit"], body: settingsLines(snapshot.settings, inner, styler), priority: 2, viewKey: "s" },
   ];
@@ -1192,6 +1277,41 @@ function cancelNote(res: any): string {
   return "cancel failed — check the worker log";
 }
 
+/**
+ * The failed-jobs section, or NOTHING when nothing has failed (issue #289; the held section's rules,
+ * one surface over). CONDITIONAL, so a deployment with a clean failed set renders byte-identically;
+ * SELF-BOUNDING at FAILED_ON_DASHBOARD with the remainder counted from the queue's own `failed` count
+ * rather than from what the reader hydrated; and -- unlike held before #287 -- born WITH a `viewKey`,
+ * because `f` opens the drill view, so a fold's divider names its key.
+ */
+function failedSection(failed: any, inner: number, styler: any): any[] {
+  if (!failed) return [];
+  if (failed.unreachable) {
+    // No viewKey on the degrade: a view over an unreadable set answers nothing (the held rule).
+    return [{ key: "failed", priority: 6, head: ["failed", "queue failures"], body: [styler.cell(`unreadable (${failed.unreachable})`, inner, { color: "error" })] }];
+  }
+  const rows: any[] = Array.isArray(failed.rows) ? failed.rows : [];
+  if (rows.length === 0) return [];
+  const shown = rows.slice(0, FAILED_ON_DASHBOARD);
+  const hidden = rows.length - shown.length + (Number(failed.more) || 0);
+  const body = shown.map((r: any) => failedRow(r, inner, styler));
+  if (hidden > 0) body.push(styler.cell(styler.fg("dim", `↓ ${hidden} more`), inner));
+  const total = rows.length + (Number(failed.more) || 0);
+  return [{ key: "failed", priority: 6, viewKey: "f", head: ["failed", `${total} in the queue · f view`], body }];
+}
+
+/** One failed row: id, attempt count, queue, and the worker's own scrubbed throw message. */
+function failedRow(r: any, inner: number, styler: any): string {
+  // Every cell is host-chosen (the projection's key-set pin holds it closed): no `.data`, no payload.
+  const bits = [
+    `${styler.fg("error", "✗")} ${styler.fg("text", r.jobId ?? "-")}`,
+    styler.fg("dim", `a${r.attemptsMade ?? 0}`),
+    styler.fg("muted", r.queue ?? "-"),
+    styler.fg("dim", r.failedReason ?? "-"),
+  ];
+  return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
+}
+
 /** One held row: `○ owner/repo#7  after 2026-09-01T09:00Z + jira  waited 2h14m`. */
 function heldRow(r: any, inner: number, styler: any): string {
   // Every cell is host-chosen: an id-only target the worker derived, an operator-authored condition label,
@@ -1232,11 +1352,12 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): s
   const sep = styler.fg("dim", " · ");
   // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
   // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,
-  // quiet-hours, scope deferrals and -- since issue #230 -- jobs held on `run.waitFor`. That fifth
-  // population is the only one with a section of its own, which is the point: the count stays an
-  // undifferentiated number, and the operator reads the HELD section to learn what is actually waiting.
-  // An always-on amber here would teach them to ignore it. Absent at zero, the header is byte-identical
-  // to before the count existed.
+  // quiet-hours, scope deferrals and -- since issue #230 -- jobs held on `run.waitFor`. The count
+  // itself stays an undifferentiated, unambered number; since issue #289 the parts the panel can
+  // COUNT FROM THEIR OWN SOURCES (cron next-occurrences from the scheduler list, holds from the
+  // wait:held index) are named on `delayedBreakdownLine` below, without the per-job classifier the
+  // spec refuses. An always-on amber here would still teach an operator to ignore it. Absent at
+  // zero, the header is byte-identical to before the count existed.
   const delayed = Number(c.delayed ?? 0);
   const vitals =
     `${c.waiting ?? 0} waiting` + sep + `${c.active ?? 0} active` + sep +
@@ -1250,6 +1371,33 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): s
   const gap = inner - styler.visibleLen(left) - clock.length;
   if (gap < 1) return styler.cell(styler.stripAnsi(left), inner);
   return left + " ".repeat(gap) + styler.fg("dim", clock);
+}
+
+/**
+ * The delayed count's honest breakdown (issue #289), one conditional dim line under the vitals, or
+ * NOTHING. Each named part comes from ITS OWN SOURCE, already in the snapshot at zero added reads --
+ * cron-next from the scheduler list, holds from the `wait:held` index -- and the remainder is called
+ * what it is: undifferentiated. Deliberately NOT a decomposition by wake instant: the 5s/11s floors
+ * are floors, not signatures, and `INT-WAIT-PROFILES-CONTRACT` already refused a classifier that
+ * could only ever be a guess. Rendered only when `delayed` is nonzero AND some part is explainable,
+ * so a deployment with nothing to explain renders byte-identically to before the line existed; the
+ * `other`'s own `> 0` filter absorbs the one-tick races between the three reads (a cron job
+ * promoted between them, a stale held hash) rather than ever printing a negative or a zero.
+ */
+function delayedBreakdownLine(snapshot: any, inner: number, styler: any): string[] {
+  const delayed = Number(snapshot?.queue?.counts?.delayed ?? 0);
+  if (delayed <= 0) return [];
+  const held = snapshot?.held;
+  const heldCount = Array.isArray(held?.rows) ? held.rows.length + (Number(held.more) || 0) : 0;
+  const cronNext = Array.isArray(snapshot?.schedulers) ? snapshot.schedulers.length : 0;
+  if (heldCount + cronNext <= 0) return [];
+  const other = delayed - cronNext - heldCount;
+  const parts = [
+    ...(cronNext > 0 ? [`${cronNext} cron-next`] : []),
+    ...(heldCount > 0 ? [`${heldCount} held on waitFor`] : []),
+    ...(other > 0 ? [`${other} other`] : []),
+  ];
+  return [fitLine(styler.fg("dim", `└ delayed: ${parts.join(" · ")}`), inner, styler)];
 }
 
 /** Colored spend meters (day/week/month) with reset countdown + soft-hold marker. */

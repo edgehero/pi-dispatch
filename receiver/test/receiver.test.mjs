@@ -687,3 +687,61 @@ test("an armed close rule with NO resolver wired answers 503, never an unbacked 
 	assert.deepEqual(JSON.parse(res.body), { error: "permission-lookup-failed" });
 	assert.equal(calls.length, 0);
 });
+
+// --- the semantic swallow is visible (issue #289) -------------------------------------------------------
+
+test("a delivery the semantic window swallowed logs `deduplicated` with the survivor, answers 202 deduplicated, and never says enqueued", async () => {
+	const delivery = "d-swallowed";
+	const payload = {
+		action: "labeled",
+		sender: { id: 1, login: "octocat-the-login" },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 42, title: "TITLE-MARKER", body: "BODY-MARKER", labels: [{ name: "pi:frontend" }] },
+	};
+	const raw = JSON.stringify(payload);
+	const logs = [];
+	// bullmq's semantic-window collision hands back the EXISTING job's different id (verified at the pin
+	// in worker/test/queue.test.mjs); this fake answers exactly that.
+	const queue = { add: async () => ({ id: "gh-the-survivor" }) };
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (entry) => logs.push(entry) });
+	const req = mockReq({ headers: headersFor("issues", delivery, raw) });
+	const res = mockRes();
+	await drive(handler, req, res, raw);
+
+	assert.equal(res.statusCode, 202, "still a 2xx: a non-2xx would trigger a redelivery storm for a handled delivery");
+	assert.deepEqual(JSON.parse(res.body), { status: "deduplicated" }, "but no longer 'queued' -- nothing was created");
+	assert.ok(!logs.some((l) => l.event === "enqueued"), "enqueued means created, and nothing was");
+	const dedup = logs.filter((l) => l.event === "deduplicated");
+	assert.equal(dedup.length, 1, "one line per swallow");
+	assert.equal(dedup[0].delivery, delivery);
+	assert.equal(dedup[0].jobId, `gh-${delivery}`, "the id this delivery computed");
+	assert.equal(dedup[0].survivingJobId, "gh-the-survivor", "the job that answered instead -- the acceptance's own clause");
+	const line = JSON.stringify(dedup[0]);
+	assert.ok(!line.includes("TITLE-MARKER") && !line.includes("BODY-MARKER") && !line.includes("octocat-the-login"), "ids only, never payload text");
+});
+
+test("a mixed replica fanout logs each swallow, counts `replicas` as jobs CREATED, and still answers queued", async () => {
+	const delivery = "d-mixed";
+	const payload = {
+		action: "labeled",
+		sender: { id: 1 },
+		repository: { full_name: "octo/repo" },
+		issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] },
+	};
+	const raw = JSON.stringify(payload);
+	const logs = [];
+	// Replica 1 is created (same-id answer), replica 2 is swallowed (foreign id) -- the partial shape.
+	let call = 0;
+	const queue = { add: async (_name, _data, opts) => (call++ === 0 ? { id: opts.jobId } : { id: "gh-the-survivor" }) };
+	const replicated = { ...cfg, triggers: { ...cfg.triggers, github: { ...cfg.triggers.github, label: [{ index: 0, predicate: { any: ["pi:frontend"] }, flow: "frontend-fix", replicas: 2 }] } } };
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicated, log: (entry) => logs.push(entry) });
+	const req = mockReq({ headers: headersFor("issues", delivery, raw) });
+	const res = mockRes();
+	await drive(handler, req, res, raw);
+
+	assert.equal(res.statusCode, 202);
+	assert.deepEqual(JSON.parse(res.body), { status: "queued" }, "something WAS created, so queued is the true answer");
+	const enq = logs.find((l) => l.event === "enqueued");
+	assert.equal(enq?.replicas, 1, "replicas now means jobs that exist because of this delivery");
+	assert.equal(logs.filter((l) => l.event === "deduplicated").length, 1, "and the swallow is its own line");
+});

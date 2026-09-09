@@ -264,3 +264,20 @@ test("azure: an unflagged trigger still enqueues EXACTLY once, with no replica k
 	assert.equal("replicas" in calls[0].data, false);
 	assert.equal(calls[0].opts.jobId, "az-delivery-guid-1");
 });
+
+test("azure: a semantic-window swallow logs deduplicated with the survivor and answers 202 deduplicated (issue #289)", async () => {
+	// The window's collision answers with the EXISTING job's different id (pinned against real bullmq in
+	// worker/test/queue.test.mjs); nothing was created, and this arm must say so on both surfaces.
+	const logs = [];
+	const { handler } = build({ logs, queue: { add: async () => ({ id: "the-survivor" }) } });
+	const res = mockRes();
+	await drive(handler, mockReq(), res, LABELLED);
+
+	assert.equal(res.statusCode, 202);
+	assert.deepEqual(JSON.parse(res.body), { status: "deduplicated" });
+	assert.ok(!logs.some((l) => l.event === "enqueued"), "enqueued means created");
+	const dedup = logs.filter((l) => l.event === "deduplicated");
+	assert.equal(dedup.length, 1);
+	assert.equal(dedup[0].survivingJobId, "the-survivor");
+	assert.ok(typeof dedup[0].jobId === "string" && dedup[0].jobId !== "the-survivor", "the computed id rides beside the survivor");
+});

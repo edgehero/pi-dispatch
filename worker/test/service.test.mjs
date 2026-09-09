@@ -757,14 +757,16 @@ test("status is informational: exits 0 whether or not anything is installed", as
 // restart --drain
 // ---------------------------------------------------------------------------------------------------
 
-function fakeQueue(activeSeries, events) {
+function fakeQueue(activeSeries, events, extraCounts = {}) {
 	return {
 		pause: async () => events.push("pause"),
 		resume: async () => events.push("resume"),
 		getJobCounts: async () => {
 			const active = activeSeries.length > 1 ? activeSeries.shift() : activeSeries[0];
 			events.push(`counts:${active}`);
-			return { active };
+			// `extraCounts` rides every answer (the drain note's own read asks for "delayed"); the default
+			// empty object keeps every existing fixture byte-identical.
+			return { active, ...extraCounts };
 		},
 		close: async () => events.push("close"),
 	};
@@ -805,6 +807,14 @@ test("restart --drain names the delayed population it cannot drain, and stays si
 	const quiet = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], []), events: [] });
 	assert.equal(await quiet.run(), 0);
 	assert.equal(quiet.text().includes("delayed set"), false, "nothing delayed, nothing said");
+
+	// The note's population list is the ONE honest label the CLI has, and it undercounted by one until
+	// issue #289: scope/host deferrals sit in the same set.
+	const noisy = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], [], { delayed: 3 }), events: [] });
+	await noisy.run();
+	if (noisy.text().includes("delayed set")) {
+		assert.ok(noisy.text().includes("scope/host deferrals"), "the note names every population, or it is the undercount it replaced");
+	}
 });
 
 test("restart --drain timeout: stops WITHOUT restarting, and resume is NOT called — a timed-out drain must not un-pause a queue that still has an active job", async () => {

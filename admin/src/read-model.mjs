@@ -162,7 +162,19 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // rather than allowed to fail the whole status read: a fleet this panel cannot see is a fleet it says
     // nothing about, never a status line that vanishes.
     const resolved = resolveWorkerCount({ hosts: fleet.hosts ?? [], workerCount: typeof workerCount === "number" ? workerCount : 0 });
-    return { pausedState, ...(pausedPartial && { pausedPartial }), counts, workers: resolved.count, workerNames: resolved.names };
+    // Issue #289: how many of the delayed count are cron next-occurrences, from the schedulers' OWN
+    // source (one permanent delayed entry per scheduler) across every queue. Additive and degradable:
+    // an unreadable list yields null, and renderStatus simply does not name the part -- never an
+    // invented number. The shared queue's read could be strict like the panel's, but a status LINE
+    // degrading one clause beats a status read that throws.
+    // typeof-guarded like the worker's cancel poll: an injected fake without the method degrades the
+    // part to null SYNCHRONOUSLY-safely -- a bare `.catch` cannot absorb the TypeError a missing
+    // method throws before the promise exists.
+    const schedulerLists = await Promise.all(
+      queues.map((q) => (typeof q.getJobSchedulers === "function" ? q.getJobSchedulers(0, -1, true).catch(() => null) : Promise.resolve(null))),
+    );
+    const cronNext = schedulerLists.some((l) => !Array.isArray(l)) ? null : schedulerLists.reduce((n, l) => n + l.length, 0);
+    return { pausedState, ...(pausedPartial && { pausedPartial }), counts, workers: resolved.count, workerNames: resolved.names, cronNext };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {

@@ -138,7 +138,11 @@ test("enqueueGitHubJob builds the github data shape and dedup opts (fake queue c
 		maxTurns: 5,
 	});
 
-	assert.equal(jobId, "gh-guid-123");
+	// The full return-object pin (issue #289): the computed id plus the dedup verdict, closed by
+	// deepEqual so a grown key cannot ride in unpinned. The fake answers `{ id: opts.jobId }` -- the
+	// same-id case -- which must read as NOT deduplicated (the GUID shield's replays are invisible to
+	// the comparison by design).
+	assert.deepEqual(jobId, { jobId: "gh-guid-123", deduplicated: false });
 	assert.equal(captured.name, "github");
 
 	// Data shape: kind:"github", NO sha, target discriminator + trigger passed through verbatim.
@@ -423,6 +427,22 @@ async function freshGitHubQueue() {
 	return new Queue(name, { connection: parseConnection(url) });
 }
 
+test("a queue.add answering a FOREIGN id reads as a semantic swallow; undefined reads as created (the defensive edge)", async () => {
+	const { enqueueGitHubJob } = await import("../src/queue.mjs");
+	const base = {
+		repo: "owner/repo",
+		target: { type: "issue", number: 7, title: "t", body: "b" },
+		flow: "frontend-fix",
+		trigger: { event: "issues", action: "labeled", deliveryId: "guid-z", sender: { id: 1 } },
+	};
+	const swallowed = await enqueueGitHubJob({ add: async () => ({ id: "gh-the-survivor" }) }, base);
+	assert.deepEqual(swallowed, { jobId: "gh-guid-z", deduplicated: true, survivingJobId: "gh-the-survivor" });
+	// A fake (or a future queue wrapper) answering nothing must read as created: not-deduplicated is
+	// today's behaviour, and inventing a swallow would 202-deduplicate a delivery that made a job.
+	const bare = await enqueueGitHubJob({ add: async () => undefined }, base);
+	assert.deepEqual(bare, { jobId: "gh-guid-z", deduplicated: false });
+});
+
 test("same delivery GUID twice -> one job (exact redelivery dedup)", { skip }, async () => {
 	const { enqueueGitHubJob } = await import("../src/queue.mjs");
 	const q = await freshGitHubQueue();
@@ -431,10 +451,14 @@ test("same delivery GUID twice -> one job (exact redelivery dedup)", { skip }, a
 		const trigger = { event: "issues", action: "labeled", deliveryId: "guid-same", sender: { id: 1 } };
 		const id1 = await enqueueGitHubJob(q, { ...base, trigger });
 		const id2 = await enqueueGitHubJob(q, { ...base, trigger }); // redelivery -> same jobId
-		assert.equal(id1, id2);
+		assert.equal(id1.jobId, id2.jobId);
+		// The GUID layer's silence is a FEATURE, pinned (issue #289): a forge retry of a delivery that IS
+		// queued deserves the answer "queued", and bullmq's jobId collision hands back the SAME id, so the
+		// return comparison cannot and must not flag it.
+		assert.equal(id2.deduplicated, false, "a GUID replay is the shield working, never a swallow");
 		const counts = await q.getJobCounts("waiting");
 		assert.equal(counts.waiting, 1, "the redelivery must be ignored");
-		const job = await q.getJob(id1);
+		const job = await q.getJob(id1.jobId);
 		assert.equal(job.data.kind, "github");
 		assert.equal("sha" in job.data, false);
 	} finally {
@@ -450,7 +474,9 @@ test("two different GUIDs on distinct issues -> two jobs", { skip }, async () =>
 		const base = { repo: "owner/repo", flow: "frontend-fix", provider: "anthropic", model: "m", maxTurns: 5 };
 		const id1 = await enqueueGitHubJob(q, { ...base, target: { type: "issue", number: 1, title: "t", body: "b" }, trigger: { event: "issues", action: "labeled", deliveryId: "guid-a", sender: { id: 1 } } });
 		const id2 = await enqueueGitHubJob(q, { ...base, target: { type: "issue", number: 2, title: "t", body: "b" }, trigger: { event: "issues", action: "labeled", deliveryId: "guid-b", sender: { id: 1 } } });
-		assert.notEqual(id1, id2);
+		assert.notEqual(id1.jobId, id2.jobId);
+		assert.equal(id1.deduplicated, false);
+		assert.equal(id2.deduplicated, false);
 		const counts = await q.getJobCounts("waiting");
 		assert.equal(counts.waiting, 2, "distinct deliveries on distinct issues are distinct jobs");
 	} finally {
@@ -466,7 +492,12 @@ test("two different GUIDs, same repo#issue:flow within the window -> one active 
 		const base = { repo: "owner/repo", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "frontend-fix", provider: "anthropic", model: "m", maxTurns: 5 };
 		const id1 = await enqueueGitHubJob(q, { ...base, trigger: { event: "issues", action: "labeled", deliveryId: "guid-x", sender: { id: 1 } } });
 		const id2 = await enqueueGitHubJob(q, { ...base, trigger: { event: "issues", action: "labeled", deliveryId: "guid-y", sender: { id: 1 } } });
-		assert.notEqual(id1, id2, "distinct GUIDs -> distinct jobIds");
+		assert.notEqual(id1.jobId, id2.jobId, "distinct GUIDs -> distinct jobIds");
+		// THE detection this whole slice exists for (issue #289), against real bullmq: the semantic
+		// window hands back the SURVIVOR's id, and the return says so with it.
+		assert.equal(id1.deduplicated, false, "the first delivery created the job");
+		assert.equal(id2.deduplicated, true, "the second was swallowed by the window and created nothing");
+		assert.equal(id2.survivingJobId, id1.jobId, "the swallow names the job that answered instead");
 		const counts = await q.getJobCounts("waiting");
 		assert.equal(counts.waiting, 1, "a rapid re-label coalesces within the semantic window");
 	} finally {

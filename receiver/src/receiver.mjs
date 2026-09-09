@@ -205,14 +205,43 @@ function pathOf(url) {
  * `enqueue` is a callback because the four arms spell their enqueue differently (a named github/gitlab
  * wrapper, or `enqueueForgeJob` with an explicit kind); the fanout itself is forge-blind.
  *
- * @returns {Promise<number>} how many jobs were enqueued, for the caller's `enqueued` log line.
+ * @returns {Promise<{replicas: number, created: number, deduplicated: Array<{jobId, survivingJobId}>}>}
+ *   what actually happened, per replica (issue #289): `created` counts jobs that now EXIST because of
+ *   this delivery, and `deduplicated` carries each swallow the semantic window made, with the id that
+ *   survived. A bare-id return from an enqueue that predates the shape counts as created -- the old
+ *   behaviour exactly.
  */
 async function fanout(job, enqueue) {
 	const replicas = job.replicas ?? 1;
+	let created = 0;
+	const deduplicated = [];
 	for (let i = 1; i <= replicas; i++) {
-		await enqueue(replicas > 1 ? { ...job, replica: i } : job);
+		const r = await enqueue(replicas > 1 ? { ...job, replica: i } : job);
+		if (r && typeof r === "object" && r.deduplicated === true) deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId });
+		else created += 1;
 	}
-	return replicas;
+	return { replicas, created, deduplicated };
+}
+
+/**
+ * One log-and-answer for a fanout outcome, shared by all four arms so a weakened copy cannot hide (the
+ * four-copies doctrine above). Issue #289's honesty rule: `enqueued` is logged only when something was
+ * CREATED, with `replicas` meaning jobs that now exist; every semantic-window swallow gets its own
+ * `deduplicated` line naming the surviving job's id (every field forge- or worker-minted, no payload
+ * text); and a delivery that created NOTHING answers `202 {status:"deduplicated"}` -- still a 2xx,
+ * because a non-2xx would trigger a redelivery storm for a delivery that was handled, but no longer
+ * "queued", because a receiver that logs the swallow while answering success on the wire would be the
+ * honest-log/lying-wire split this project refuses. Each arm passes its own target grammar.
+ */
+function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome }) {
+	for (const d of outcome.deduplicated) {
+		log?.({ event: "deduplicated", delivery, repo, target, flow, jobId: d.jobId, survivingJobId: d.survivingJobId });
+	}
+	if (outcome.created > 0) {
+		log?.({ event: "enqueued", delivery, repo, target, flow, replicas: outcome.created });
+		return respond(res, 202, { status: "queued" });
+	}
+	return respond(res, 202, { status: "deduplicated" });
 }
 
 /**
@@ -266,17 +295,16 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority 
 		}
 
 		// Fanout (REQ-REPLICA-RUNS) lives in `fanout` above; the 202/503 decision stays here, where it always was.
-		let replicas;
+		let outcome;
 		try {
-			replicas = await fanout(result.job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
+			outcome = await fanout(result.job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
 		} catch (err) {
 			// Own try/catch so a Valkey-down enqueue is a 503 (retryable), not verify's outer 500.
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitHub redelivers; dedup by GUID coalesces
 		}
 
-		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas });
-		return respond(res, 202, { status: "queued" });
+		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, outcome });
 	});
 }
 
@@ -316,9 +344,9 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			return respond(res, 204);
 		}
 
-		let replicas;
+		let outcome;
 		try {
-			replicas = await fanout(result.job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
+			outcome = await fanout(result.job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // GitLab redelivers; dedup by webhook-id coalesces
@@ -327,8 +355,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 		// `!` for a merge request, `#` for an issue -- GitLab's own notation, and the same discrimination
 		// the semantic dedup key makes, because the two are separate number sequences.
 		const sep = result.job.target.type === "pull_request" ? "!" : "#";
-		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, replicas });
-		return respond(res, 202, { status: "queued" });
+		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, outcome });
 	});
 }
 
@@ -368,16 +395,15 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			return respond(res, 204);
 		}
 
-		let replicas;
+		let outcome;
 		try {
-			replicas = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
+			outcome = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" }); // Forgejo redelivers; dedup by GUID coalesces
 		}
 
-		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas });
-		return respond(res, 202, { status: "queued" });
+		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, outcome });
 	});
 }
 
@@ -426,9 +452,9 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			return respond(res, 204);
 		}
 
-		let replicas;
+		let outcome;
 		try {
-			replicas = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
+			outcome = await fanout(result.job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
 		} catch (err) {
 			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
 			return respond(res, 503, { error: "enqueue-failed" });
@@ -437,7 +463,6 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 		// `!` for a pull request, `#` for a work item -- Azure numbers them separately, and this is the same
 		// discrimination the semantic dedup key makes.
 		const sep = result.job.target.type === "pull_request" ? "!" : "#";
-		log?.({ event: "enqueued", delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, replicas });
-		return respond(res, 202, { status: "queued" });
+		return respondEnqueueOutcome({ log, res, delivery, repo: result.job.repo, target: `${result.job.repo}${sep}${result.job.target.number}`, flow: result.job.flow, outcome });
 	});
 }

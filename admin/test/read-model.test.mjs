@@ -421,6 +421,24 @@ test("readQueueState degrades workers to 'unknown' when getWorkers is empty (no 
   assert.equal(res.workers, "unknown");
 });
 
+test("readQueueState counts cron next-occurrences from their own source, and degrades the part to null, never a guess (issue #289)", async () => {
+  const withSchedulers = () => ({
+    async isPaused() { return false; },
+    async getJobCounts() { return { delayed: 3 }; },
+    async getWorkers() { return []; },
+    async getJobSchedulers() { return [{ key: "s1" }, { key: "s2" }]; },
+    async close() {},
+  });
+  assert.equal((await readQueueState({ url: "redis://x", makeQueueFn: withSchedulers, parseConnectionFn: () => ({}) })).cronNext, 2);
+  const without = () => ({
+    async isPaused() { return false; },
+    async getJobCounts() { return { delayed: 3 }; },
+    async getWorkers() { return []; },
+    async close() {},
+  });
+  assert.equal((await readQueueState({ url: "redis://x", makeQueueFn: without, parseConnectionFn: () => ({}) })).cronNext, null, "an unreadable part is null, and renderStatus then does not name it");
+});
+
 test("readQueueState returns { unreachable } and still closes when the queue is down", async () => {
   let closed = false;
   const makeQueueFn = () => ({

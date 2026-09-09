@@ -92,7 +92,12 @@ function requirePath(fs, path, absentMessage, what) {
 		}
 		// Not absent, just unreachable right now. Throw the retryable class so the queue tries again
 		// instead of spending the delivery on a verdict that is wrong by the time it is posted.
-		throw new InfraRetry(`could not read ${what} (${error?.code ?? error?.message ?? "unknown"}): ${path}`);
+		// BASENAME, not the path (issue #289): an InfraRetry survives retries and its message becomes the
+		// queue's failedReason and the job_failed line -- a full host path there carries an OS account
+		// name, which is buildRecord's own reason for reducing folders to basenames. The config refusals
+		// above keep their full paths: they surface on CLI stderr and through the #310 classifier's fixed
+		// sentence, where the path is the repair.
+		throw new InfraRetry(`could not read ${what} (${error?.code ?? error?.message ?? "unknown"}): ${basename(path)}`);
 	}
 }
 

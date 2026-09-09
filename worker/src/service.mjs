@@ -984,7 +984,7 @@ async function doRestart(ctx, values) {
 		// this command would otherwise be doing: reporting a drained queue it cannot see all of.
 		const delayed = await queue.getJobCounts("delayed").then((c) => Number(c?.delayed ?? 0), () => 0);
 		if (delayed > 0) {
-			ctx.out(`note: ${delayed} job(s) sit in the delayed set (cron next-occurrences, retry backoff, quiet hours, or jobs held on run.waitFor). None is active, so none blocked this drain; they will wake against the new version.\n`);
+			ctx.out(`note: ${delayed} job(s) sit in the delayed set (cron next-occurrences, retry backoff, quiet hours, scope/host deferrals, or jobs held on run.waitFor). None is active, so none blocked this drain; they will wake against the new version.\n`);
 		}
 		const stopped = await doStop(ctx);
 		if (stopped !== 0) {

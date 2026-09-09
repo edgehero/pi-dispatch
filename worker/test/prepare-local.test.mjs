@@ -202,6 +202,23 @@ test("a transient fault on .git alone is retryable, and does not read as 'not a 
 	);
 });
 
+test("the transient-fault message carries the BASENAME, never the absolute path (issue #289)", async () => {
+	// An InfraRetry survives retries and its message becomes the queue's failedReason and the job_failed
+	// line -- and a full host path there carries an OS account name, buildRecord's own reason for
+	// reducing folders to basenames. The FAILED panel section renders exactly this string.
+	const fs = {
+		...realFs,
+		statSync: () => {
+			throw Object.assign(new Error("EIO: simulated"), { code: "EIO" });
+		},
+	};
+	await assert.rejects(
+		() => prepareLocalWorkspace({ folder: "/Users/some-account/secret-client-project", task: "x", jobDir: "/tmp/x", fs }),
+		(e) => e.piDispatchRetry === true && e.message.includes("secret-client-project") && !e.message.includes("/Users/") && !e.message.includes("some-account"),
+		"the basename is diagnostic; the account name above it is not the queue's to keep for 7 days",
+	);
+});
+
 test("a worktree's .git is a FILE, and statSync accepts it exactly as existsSync did", async () => {
 	// The reason this check uses `statSync` rather than a directory test: `.git` is a FILE in a worktree
 	// and in a submodule, and both are ordinary things to point a local job at.

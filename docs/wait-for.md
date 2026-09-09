@@ -309,12 +309,15 @@ every measure the money system takes. `PI_WAIT_MAX_CHECKS` (96 per job) exists b
 all bounds the count — the other knobs bound duration, cadence and concurrency. If your check calls a
 metered API, that cap is your bill's only ceiling.
 
-### 4. The delayed count still lies, and always will
+### 4. The delayed count is still one number, and it will not be split per job
 
 The panel's `delayed` figure mixes cron next-occurrences, retry backoff, quiet-hours deferrals, scope
-deferrals and waits. It is not a defect and it will not be split: read the **held** section for what is
-actually waiting on a condition, and treat the number in the status line as the undifferentiated total it
-has always been.
+deferrals and waits, and nothing records which population a given job is in -- classifying one would be a
+guess, and the spec refuses guesses. What the panel does since issue #289 is name the parts it can COUNT
+from their own sources: a dim line under the status header says how many are cron next-occurrences (from
+the scheduler list) and how many are held on `waitFor` (from the worker's own index), and calls the
+remainder what it is, undifferentiated. Read the **held** section for what is actually waiting on a
+condition; the count itself stays the total it has always been.
 
 ### 5. Whoever clears the condition chooses the commit
 

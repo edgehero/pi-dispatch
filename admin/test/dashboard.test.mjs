@@ -1876,6 +1876,20 @@ function fakePanelValkey({ hosts = [], existing = [] } = {}) {
         async getWorkers() { return []; },
         async getJobSchedulers() { return name === "pi-jobs" ? [] : [{ key: `s-${name}`, pattern: "0 3 * * *", next: Date.now() + 1000 }]; },
         async getActive() { return []; },
+        // Failed Jobs arrive WITH `.data` (issue title/body/username) the way real hydration would hand
+        // them -- the projection test reads what survives into the snapshot, so the poison is the point.
+        async getFailed() {
+          return name === "pi-jobs"
+            ? [{
+                id: "gh-dead-1",
+                attemptsMade: 2,
+                failedReason: `infra failure, container exit 1 \u001b[31mANSI\u0007${"x".repeat(200)}`,
+                finishedOn: 1000,
+                data: { kind: "github", target: { title: "SECRET TITLE", body: "SECRET BODY" }, trigger: { sender: { login: "secret-login" } } },
+                stacktrace: ["at secretFrame (/Users/someone/private.mjs:1:1)"],
+              }]
+            : [];
+        },
         async close() {},
       });
     }
@@ -2001,4 +2015,120 @@ test("TRIGGER_DETAIL states the tool exclusions on BOTH branches -- the image ro
   const plain = await openTrigger(xtSnap(null));
   assert.match(plain.detail, /excludeTools\s+full pinned tool set/, "an omitted row would read as unknown; this reads as checked");
   assert.doesNotMatch(plain.detail, /removed/);
+});
+
+// --- the delayed breakdown and the FAILED surface (issue #289) ------------------------------------------
+
+test("the delayed count's explainable parts get one dim line, from their own sources, clamped, and NOTHING when nothing is explainable", async () => {
+  const base = { ...SNAPSHOT, queue: { ...SNAPSHOT.queue, counts: { ...SNAPSHOT.queue.counts, delayed: 4 } } };
+  // 1 scheduler (SNAPSHOT's own) + 2 held -> 1 other.
+  const withParts = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...base, held: { rows: [HELD_ROWS[0], HELD_ROWS[1]], more: 0 } }) }) });
+  await flush();
+  const text = stripAnsi(withParts.render(80).join("\n"));
+  await withParts.dispose();
+  assert.match(text, /└ delayed: 1 cron-next · 2 held on waitFor · 1 other/, "each part from its own source, the remainder called what it is");
+
+  // Parts exceeding the count clamp to zero rather than printing a negative (the one-tick races).
+  const overParts = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...base, queue: { ...base.queue, counts: { ...base.queue.counts, delayed: 1 } }, held: { rows: [...HELD_ROWS], more: 0 } }) }) });
+  await flush();
+  const clamped = stripAnsi(overParts.render(80).join("\n"));
+  await overParts.dispose();
+  assert.match(clamped, /└ delayed: 1 cron-next · 4 held on waitFor/, "the explainable parts still print");
+  assert.doesNotMatch(clamped, /-\d+ other|0 other/, "never a negative or a zero remainder");
+
+  // delayed > 0 with NO explainable part: byte-identical to a panel before the line existed.
+  const unexplainable = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...base, schedulers: [] }) }) });
+  await flush();
+  const bare = stripAnsi(unexplainable.render(80).join("\n"));
+  await unexplainable.dispose();
+  assert.doesNotMatch(bare, /└ delayed:/, "a count with no countable part explains nothing rather than inventing");
+
+  // delayed 0: no line, whatever the parts say (SNAPSHOT has 1 scheduler).
+  const zero = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  const none = stripAnsi(zero.render(80).join("\n"));
+  await zero.dispose();
+  assert.doesNotMatch(none, /└ delayed:/);
+});
+
+const FAILED_ROWS = [
+  { jobId: "gh-dead-1", attemptsMade: 2, failedReason: "infra failure, container exit 1", queue: "pi-jobs", endedAt: 3000 },
+  { jobId: "gh-dead-2", attemptsMade: 1, failedReason: "boom", queue: "pi-jobs", endedAt: 2000 },
+  { jobId: "local-dead", attemptsMade: 2, failedReason: "could not read the job folder (EIO): proj", queue: "pi-jobs@mini", endedAt: 1000 },
+  { jobId: "gh-dead-4", attemptsMade: 2, failedReason: "x", queue: "pi-jobs", endedAt: 500 },
+];
+
+test("the FAILED section is absent when nothing has failed -- byte-identical to before the feature", async () => {
+  const without = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  const withEmpty = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, failed: { rows: [], more: 0 } }) }) });
+  await flush();
+  const scrub = (lines) => lines.map((l) => l.replace(/\d\d:\d\d:\d\d/, "HH:MM:SS"));
+  const a = scrub(without.render(80));
+  const b = scrub(withEmpty.render(80));
+  await without.dispose();
+  await withEmpty.dispose();
+  assert.deepEqual(b, a, "an empty failed read renders exactly nothing");
+  assert.doesNotMatch(a.join("\n"), /FAILED ─/, "no FAILED divider (the vitals' own lowercase count stays)");
+});
+
+test("the FAILED section bounds itself, counts the rest from the queue's own number, and its divider names f", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, failed: { rows: FAILED_ROWS, more: 6 } }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(text, /10 in the queue · f view/, "the divider counts everything and names the drill-in key");
+  assert.match(text, /✗ gh-dead-1 · a2 · pi-jobs · infra failure, container exit 1/, "id, attempts, queue, and the worker's own reason");
+  assert.doesNotMatch(text, /gh-dead-4/, "the fourth row is past the section's own bound");
+  assert.match(text, /↓ 7 more/, "and the remainder is counted, not lost");
+});
+
+test("an unreadable failed set degrades that section alone, with no view claimed", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, failed: { unreachable: "timed out reaching the queue" } }) }) });
+  await flush();
+  const text = stripAnsi(comp.render(80).join("\n"));
+  comp.handleInput("f");
+  await flush();
+  const still = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.match(text, /unreadable \(timed out reaching the queue\)/);
+  assert.match(text, /SPEND & LIMITS/, "and the rest of the panel still renders");
+  assert.match(still, /SPEND & LIMITS/, "f over an unreadable set is inert -- a view of nothing answers nothing");
+});
+
+test("f opens the FAILED view with every hydrated row and the retention split; Esc returns; f is inert when clean", async () => {
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, failed: { rows: FAILED_ROWS, more: 2 } }) }) });
+  await flush();
+  comp.handleInput("f");
+  await flush();
+  const view = stripAnsi(comp.render(80).join("\n"));
+  assert.match(view, /failed · 6 in the queue/, "the view titles itself with the honest total");
+  assert.match(view, /gh-dead-4/, "the view shows every hydrated row, past the section's 3-row bound");
+  assert.match(view, /reasons kept 31d \(forge\) \/ 7d \(local & cron\)/, "the retention split is stated -- a uniform 31d claim would be false for half the rows");
+  assert.match(view, /↓ 2 more \(redis-cli holds the rest\)/);
+  comp.handleInput("\x1b");
+  await flush();
+  assert.match(stripAnsi(comp.render(80).join("\n")), /SPEND & LIMITS/, "Esc backs out to the LIST");
+  await comp.dispose();
+
+  const clean = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
+  await flush();
+  clean.handleInput("f");
+  await flush();
+  assert.match(stripAnsi(clean.render(80).join("\n")), /SPEND & LIMITS/, "still the LIST: a clean deployment has nothing to view");
+  await clean.dispose();
+});
+
+test("the deps layer projects a failed Job to five host-chosen fields -- .data never enters the snapshot (key-set pin)", async () => {
+  const v = fakePanelValkey({ hosts: [] });
+  const deps = createDashboardDeps(panelPaths, v.deps);
+  const snap = await deps.fetchSnapshot();
+  await deps.dispose();
+  const row = snap.failed.rows[0];
+  assert.deepEqual(Object.keys(row).sort(), ["attemptsMade", "endedAt", "failedReason", "jobId", "queue"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  assert.equal(row.jobId, "gh-dead-1");
+  assert.equal(row.attemptsMade, 2);
+  const line = JSON.stringify(snap.failed);
+  assert.ok(!line.includes("SECRET TITLE") && !line.includes("SECRET BODY") && !line.includes("secret-login") && !line.includes("secretFrame"), "payload and stacktrace stay out of the snapshot");
+  assert.ok(!row.failedReason.includes("\u001b") && !row.failedReason.includes("\u0007"), "control bytes (ANSI included) are scrubbed");
+  assert.ok(row.failedReason.length <= 120, "capped at the job_failed line's own 120");
 });

@@ -969,11 +969,20 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		return;
 	}
 	const replicas = result.job.replicas ?? 1;
+	let created = 0;
 	for (let i = 1; i <= replicas; i++) {
-		await ctx.enqueue(replicas > 1 ? { ...result.job, replica: i } : result.job);
+		const r = await ctx.enqueue(replicas > 1 ? { ...result.job, replica: i } : result.job);
+		// Issue #289, the receiver arms' honesty rule at the poller's own seam: a semantic-window swallow
+		// gets its own line with the surviving id, `enqueued` counts only what was CREATED, and a bare-id
+		// return from an enqueue seam predating the shape counts as created -- the old behaviour exactly.
+		if (r && typeof r === "object" && r.deduplicated === true) {
+			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId });
+		} else {
+			created += 1;
+		}
 	}
-	stats.enqueued += replicas;
-	ctx.out({ event: "enqueued", delivery: deliveryId, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas });
+	stats.enqueued += created;
+	if (created > 0) ctx.out({ event: "enqueued", delivery: deliveryId, repo: result.job.repo, target: `${result.job.target.type}#${result.job.target.number}`, flow: result.job.flow, replicas: created });
 }
 
 /**

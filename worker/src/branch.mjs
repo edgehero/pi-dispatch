@@ -29,7 +29,11 @@
 export function normalizeNumber(number) {
 	const n = Number(number);
 	if (!Number.isInteger(n) || n <= 0) {
-		const error = new Error(`invalid target number (must be a positive integer): ${String(number)}`);
+		// The TYPE, never the value: `number` is a forge-payload field, and this message's history is
+		// exactly the leak class -- since #310 the piDispatchConfig classifier contains it, but a message
+		// that would carry attacker text if the classifier ever missed is a property held by luck, not
+		// locally (issue #289 made it local; failedReason and the job_failed line are where it would land).
+		const error = new Error(`invalid target number (must be a positive integer; got ${typeof number})`);
 		error.piDispatchConfig = true;
 		throw error;
 	}
@@ -47,7 +51,8 @@ export function normalizeNumber(number) {
  */
 function positiveReplica(replica) {
 	if (!Number.isInteger(replica) || replica <= 0) {
-		const error = new Error(`invalid replica index (must be a positive integer): ${String(replica)}`);
+		// Type-only for normalizeNumber's reason -- a caller bug's value adds nothing a type does not.
+		const error = new Error(`invalid replica index (must be a positive integer; got ${typeof replica})`);
 		error.piDispatchConfig = true;
 		throw error;
 	}

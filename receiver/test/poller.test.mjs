@@ -151,7 +151,7 @@ function fakeRedis() {
  * Boot the poller with everything faked and run exactly `cycles` cycles: the injected sleep counts
  * cycle boundaries, advances the fake clock, and calls stop() after the last one.
  */
-async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], redis = fakeRedis(), selfId = SELF, fsDeps = FS } = {}) {
+async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], redis = fakeRedis(), selfId = SELF, fsDeps = FS, queueFn: queueFnOver } = {}) {
 	const queued = [];
 	const out = [];
 	const sleeps = [];
@@ -162,9 +162,13 @@ async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [],
 	poller = await startPoller(env, {
 		fetchFn,
 		redis,
-		queueFn: async (job) => {
-			queued.push(job);
-		},
+		// Overridable (issue #289) so a test can answer with the dedup shape; the default returns
+		// undefined, which the poller must read as created -- the pre-#289 seam contract exactly.
+		queueFn:
+			queueFnOver ??
+			(async (job) => {
+				queued.push(job);
+			}),
 		out: (obj) => out.push(obj),
 		now: () => clock.ms,
 		random: () => 0.5,
@@ -1205,4 +1209,24 @@ test("a rejecting sleep still propagates through the cancel finally (issue #325)
 	});
 	await assert.rejects(poller.done, (e) => e === boom, "the SAME error object, not a wrapper and not a swallow");
 	assert.equal(calls, 1, "the first inter-cycle sleep is what exploded");
+});
+
+test("poller: a semantic-window swallow is its own out-line with the survivor, and `enqueued` counts only created (issue #289)", async () => {
+	// Every enqueue answers the dedup shape: nothing is created, so no `enqueued` line may claim
+	// otherwise, and each swallow names the job that answered instead.
+	const queued = [];
+	const { out } = await runPoller({
+		cycles: 3,
+		routes: scenarioRoutes(),
+		queueFn: async (job) => {
+			queued.push(job);
+			return { jobId: `computed-${queued.length}`, deduplicated: true, survivingJobId: "the-survivor" };
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.ok(queued.length > 0, "the scenario really enqueued (this test would be vacuous otherwise)");
+	assert.ok(!out.some((l) => l.event === "enqueued"), "enqueued means created, and nothing was");
+	const dedup = out.filter((l) => l.event === "deduplicated");
+	assert.equal(dedup.length, queued.length, "one line per swallow");
+	assert.ok(dedup.every((l) => l.survivingJobId === "the-survivor" && typeof l.jobId === "string"));
 });

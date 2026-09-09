@@ -200,3 +200,54 @@ test("a post-queue identity refusal EXITS, code intact: the queue's live connect
 		gl.close();
 	}
 });
+
+test("a re-label inside the semantic window answers 202 deduplicated on a REAL Valkey, with the swallow in the log (issue #289)", { skip }, async () => {
+	const { Queue } = await import("bullmq");
+	const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+	const connection = parseConnection(url);
+	const queue = new Queue(`recv-it-${crypto.randomUUID()}`, { connection });
+	try {
+		await queue.obliterate({ force: true }).catch(() => {});
+		const payload = {
+			action: "labeled",
+			sender: { id: 1 },
+			repository: { full_name: "octo/repo" },
+			issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] },
+		};
+		const raw = JSON.stringify(payload);
+		const logs = [];
+		const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, log: (l) => logs.push(l) });
+		const post = async (delivery) => {
+			const req = mockReq({
+				headers: {
+					"content-type": "application/json",
+					"x-hub-signature-256": sign(SECRET, raw),
+					"x-github-event": "issues",
+					"x-github-delivery": delivery,
+				},
+			});
+			const res = mockRes();
+			await drive(handler, req, res, raw);
+			return res;
+		};
+
+		const d1 = crypto.randomUUID();
+		const d2 = crypto.randomUUID(); // a DISTINCT GUID on the same repo#issue:flow, inside the 10m window
+		const first = await post(d1);
+		const second = await post(d2);
+
+		assert.equal(first.statusCode, 202);
+		assert.deepEqual(JSON.parse(first.body), { status: "queued" });
+		assert.equal(second.statusCode, 202, "still 2xx -- a non-2xx would trigger a redelivery storm");
+		assert.deepEqual(JSON.parse(second.body), { status: "deduplicated" }, "the re-label created nothing, and the wire now says so");
+		const dedup = logs.filter((l) => l.event === "deduplicated");
+		assert.equal(dedup.length, 1);
+		assert.equal(dedup[0].jobId, "gh-" + d2, "the swallowed delivery's computed id");
+		assert.equal(dedup[0].survivingJobId, "gh-" + d1, "the surviving job's id -- the acceptance clause, against real bullmq");
+		const counts = await queue.getJobCounts("waiting");
+		assert.equal(counts.waiting, 1, "one job for one intent");
+	} finally {
+		await queue.obliterate({ force: true }).catch(() => {});
+		await queue.close();
+	}
+});

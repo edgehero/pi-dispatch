@@ -23,6 +23,19 @@ test("a number that is not a positive integer refuses rather than minting a garb
 	}
 });
 
+test("the refusal never echoes the value -- a forge-payload field must not ride a throw message (issue #289)", () => {
+	// The message classes that reach a failedReason and the job_failed line are exactly where this would
+	// land; since #310 the piDispatchConfig classifier contains it, but the property must hold LOCALLY,
+	// not by every downstream classifier staying perfect forever.
+	const poison = "--><script>alert(1)</script>9999";
+	assert.throws(
+		() => normalizeNumber(poison),
+		(e) => e.piDispatchConfig === true && !e.message.includes(poison) && !e.message.includes("script"),
+		"the type is diagnostic enough; the value is attacker-chosen",
+	);
+	assert.throws(() => normalizeNumber(poison), (e) => /got string/.test(e.message), "the TYPE is what the message carries instead");
+});
+
 test("normalizeNumber is the same function at both addresses, so gitlab-prompt's import did not fork", async () => {
 	const { normalizeNumber: viaPrompt } = await import("../src/github-prompt.mjs");
 	assert.equal(viaPrompt, normalizeNumber, "github-prompt re-exports branch.mjs's function; a copy would drift");

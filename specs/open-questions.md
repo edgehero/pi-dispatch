@@ -1331,6 +1331,24 @@ adversarial passes did.
   mean something -- either is the moment this stops being a convention and becomes a transport, which is
   the thing `REQ-OPERATOR-FAILURE-NOTIFICATION` promises never to grow in-tree.
 
+## OQ-035 — failedReason is a bounded string channel, not a classified one
+
+- **Status**: ACCEPTED (issue #289, which gave the failed set its first surface).
+- **Position**: the FAILED panel section renders `failedReason` -- the message of the error the WORKER
+  itself threw. The known payload-bearing sources were fixed at their sites in the same slice
+  (`branch.mjs` answers with a type instead of the forge-payload value; `prepare-local.mjs` basenames
+  its path), and the display path wears a belt (control bytes stripped, 120-char cap, the `job_failed`
+  line's own bound). But the channel itself stays free-form: `InfraRetry` messages and any future
+  untagged throw's `error.message` become `failedReason` verbatim, so the no-payload property is held by
+  the current inventory of throw sites plus the belt, not by a type. A future throw site that
+  interpolates payload or a path regresses the property silently until a review catches it.
+- **What bounds it meanwhile**: the belt caps what any regression can display; the run record
+  (`buildRecord`) never carries the message at all (its `reason` is a fixed enum); and the `job_failed`
+  log line already truncates to 120, so the panel adds no wider surface than the log has had.
+- **What would close it**: a typed error channel where every worker throw carries a fixed token and the
+  message is operator-log-only -- #310's classifier generalized. Worth it the day a regression is
+  actually caught, not before.
+
 ## Revision History
 
 | Date | Change |
@@ -1384,3 +1402,4 @@ adversarial passes did.
 | 2026-09-09 | Issue #291. **`OQ-005` AMENDED (Action on bump)**: `createAgentSession`'s option surface is now load-bearing beyond the auth pair -- on a bump, re-verify `excludeTools` (with its `string[]` type), `core/tools`' `allToolNames` against the hand-written `EXCLUDABLE_TOOL_NAMES`, and the fact that pi still IGNORES unknown exclusion names silently, all in the NEW tarball; if a bump makes pi throw on unknown names, the belt-and-braces validation split is re-argued rather than merely re-pinned. The firing bolts are named in the row (`pinned-api.test.mjs`'s sdk.d.ts pins, `worker/test/exclude-tools.pinned.test.mjs`) so a bump failure reads as a checklist. Every other row UNCHANGED, checked -- in particular `OQ-022` (nothing model-callable gains a parameter here) and `OQ-012` (operator-built images without the new token refuse only jobs that carry exclusions, which is the inclusion-list polarity that row already accepts). |
 | 2026-09-09 | Issue #281. **`OQ-015` RATIFIED** -- Status moves from `ACCEPTED RISK -- wants explicit ratification` to `ACCEPTED RISK -- RATIFIED 2026-09-09`, on the `OQ-014` precedent end to end: the verdict's why is a new field (deciding down was the row's own offered alternative and lost on the record -- a shipped, bounded, documented arm is not deleted to settle a paperwork debt; the accretion evidence is #187 widening replicas onto Azure while the row asked), the existing bounds are named as the ratification's TERMS, and the `Needs` field is REPLACED by what would REOPEN it (an HMAC option shipping on Service Hooks; the author gate weakening on Azure; dedup leaving the body-carried id). The ratifying act is `requirements.md`'s Scope sentence, whose revision row of the same date records it, and the acceptance discipline is generalized by the Scope pin test: a new forge cannot ship without the sentence naming it. Every other row UNCHANGED, checked -- `OQ-013` in particular is untouched, and one attribution is stated precisely because the review caught it loose: the Azure two-call-lookup detail rides `OQ-015`'s OWN Related-risks bullet, not `OQ-013`'s body, whose 2026-07-31 "now true of three forges" amendment never reached its Position text -- a pre-existing gap this ratification neither widens nor quietly fixes. |
 | 2026-09-09 | Issue #288. **NEW `OQ-034`**: the failure hook's exit code and delivery are conventions we cannot enforce -- OQ-027/OQ-030's residual at the third operator-command seam, with the at-most-once boundary stated and the reopen condition being any ask for delivery guarantees (the moment a convention becomes a transport). **`OQ-023` UNCHANGED, checked, and the boundary is the point**: #288 comments the POST-SPEND terminals only; the prepare-policy passthrough (`sha-gone`, the `.pi/` caps) stays silent exactly as that row ratified, because its own hazard -- a repo whose `.pi/` breaches a cap commenting on EVERY delivery -- wants the dedup the spend refusals have and this slice does not build. **`OQ-027`/`OQ-030` UNCHANGED, checked**: the new row is a sibling, not a replacement. |
+| 2026-09-09 | Issue #289. **NEW `OQ-035`**: failedReason is a bounded string channel, not a classified one -- the panel's belt (control-byte strip, 120 cap) and the same-slice source fixes (branch.mjs de-payloaded to a type, prepare-local basenamed) hold the no-payload property by inventory plus bound, not by type; the close is #310's classifier generalized, deferred until a regression is actually caught. **`OQ-024` UNCHANGED, checked** (the insights page's surface is untouched). |

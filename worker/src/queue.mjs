@@ -142,9 +142,13 @@ export async function enqueueLocalJob(queue, { folder, flow, task, command, prov
 const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
 
 /**
- * Enqueue a GitHub-triggered job. Returns the jobId. The data shape is what prepare/runJob consumes
- * for the github kind. No `sha` field: the commit is resolved fresh in prepare (C1), so baking a
- * possibly-stale sha here would only race the branch head.
+ * Enqueue a GitHub-triggered job. Returns `{ jobId, deduplicated, survivingJobId? }` -- the computed
+ * per-delivery id, plus whether the SEMANTIC window swallowed this delivery (issue #289; the GUID
+ * layer's replays are deliberately invisible, see the comparison below). `enqueueLocalJob` keeps its
+ * plain string return: it carries no `deduplication` option, so there is nothing the comparison could
+ * see, and its return is consumed as a bare id by the CLI and the outbox. The data shape is what
+ * prepare/runJob consumes for the github kind. No `sha` field: the commit is resolved fresh in prepare
+ * (C1), so baking a possibly-stale sha here would only race the branch head.
  *
  * `target` is the discriminated subject of the job -- `{ type:"issue"|"pull_request", number, title,
  * body, ... }` -- built by the receiver's filter from the INT-WEBHOOK-PAYLOAD-SUBSET fields. Its `number`
@@ -287,7 +291,7 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 	// narrow to the matched action word, like the PR half already does.
 	const isCloseJob = matched?.type === "issue" || (matched?.type === "pull_request" && PR_CLOSE_WORDS.has(matched?.action));
 	const flowSlot = `${isCloseJob ? "closed:" : ""}${command !== undefined ? `cmd:${command}` : flow}`;
-	await queue.add(kind, data, {
+	const added = await queue.add(kind, data, {
 		jobId,
 		// A command job (issue #189) fills the semantic key's flow slot with `cmd:<command>`: a command
 		// trigger carries no flow, so the slot would otherwise read `undefined` for every command and one
@@ -301,7 +305,16 @@ export async function enqueueForgeJob(queue, kind, { repo, projectId, azure, tar
 		removeOnComplete: { age: 31 * 24 * 3600 }, // age in seconds -- do not cross units with the ms ttl above
 		removeOnFail: { age: 31 * 24 * 3600 },
 	});
-	return jobId;
+	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
+	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,
+	// REQ-DEDUP-BY-DELIVERY-GUID) returns THE SAME id -- structurally invisible here, and correctly so,
+	// because a forge retry of a delivery that IS queued deserves the answer "queued" -- while the
+	// `deduplication` option (the 10-minute semantic window) returns the EXISTING job's DIFFERENT id.
+	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
+	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
+	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.
+	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id };
+	return { jobId, deduplicated: false };
 }
 
 /**

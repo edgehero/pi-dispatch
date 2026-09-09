@@ -1259,12 +1259,16 @@ async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void>
 
   switch (sub) {
     case "status": {
-      const [queue, budget] = await Promise.all([
+      // The held read degrades to undefined (issue #289): an unreadable wait index costs the status
+      // line one named clause, never the whole answer, and renderStatus never invents the number.
+      const [queue, budget, held] = await Promise.all([
         readQueueState({ url: paths.valkeyUrl }),
         readBudget({ url: paths.valkeyUrl }),
+        readHeldJobs({ url: paths.valkeyUrl }).catch(() => undefined),
       ]);
       const settings = readSettingsView({ settingsFile: paths.settingsFile });
-      send(pi, `${renderStatus(queue)}\n${renderBudget({ budget, settings })}`);
+      const heldCount = Array.isArray((held as any)?.rows) ? (held as any).rows.length + (Number((held as any).more) || 0) : undefined;
+      send(pi, `${renderStatus(queue, { heldCount, cronNext: (queue as any)?.cronNext ?? undefined })}\n${renderBudget({ budget, settings })}`);
       return;
     }
     case "runs": {
