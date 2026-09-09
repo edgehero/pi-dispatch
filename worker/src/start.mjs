@@ -937,8 +937,11 @@ export async function startWorker(
 	// byte-identical guarantee. Fired from the two terminal listeners below, never from the processor:
 	// a hook fault must not be able to flip an outcome, and the listeners sit outside every try that
 	// decides one.
+	// `hostEnv: env`, not the default process.env -- the #309 rule every spawner in this file follows
+	// (runContainer, resolveSecrets): a subprocess runs with THIS worker's env, identical on the real
+	// path and divergent only under an injected one, which is exactly where the difference would hide.
 	const onFailure = config.onFailure
-		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", log })
+		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", hostEnv: env, log })
 		: null;
 	// Which POLICY reasons page the operator. Paid terminals only: worker-abort and runner-policy cost a
 	// container and ended wrong. Excluded on purpose: `completed` and every pre-spend refusal (free, and

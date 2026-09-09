@@ -31,6 +31,9 @@ export const CHAIN_MAX_PER_JOB_DEFAULT = 2; // INT-OUTBOX-CONTRACT: max request-
 // The failure hook's command (issue #288). Unset/blank -> null (the feature is off). Set -> one
 // ABSOLUTE path, verbatim; a relative path refuses at boot, because resolving it against a service
 // manager's working directory would make the hook fire or vanish depending on who started the worker.
+// `isAbsolute` is the PLATFORM's: on Windows it accepts `C:\...` where the posix one would refuse it,
+// and that half is only testable on Windows itself -- the same only-runnable-there caveat this file
+// already records for the drive-letter split below.
 function parseOnFailure(raw) {
 	if (raw === undefined || raw === "") return null;
 	if (typeof raw !== "string" || !isAbsolute(raw)) {

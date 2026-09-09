@@ -354,8 +354,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `REQ-JOB-STATUS-COMMENTS`, `CONST-RETRY-INFRA-ONLY` (a hook fault flips no outcome),
   `CONST-ISSUE-TEXT-IS-DATA` (id-only argv), `INT-ON-FAILURE-HOOK-CONTRACT`
 - **Acceptance**: a 30-minute kill comments on its issue; a final infra failure comments once; an
-  operator with a one-line script gets a push when a job fails; no payload text crosses either channel; a
-  deployment setting neither knob behaves byte-identically to today.
+  operator with a one-line script gets a push when a job fails; no payload text crosses either channel;
+  with `PI_ON_FAILURE` unset the HOOK is absent byte-identically (the comments have no knob on purpose --
+  they discharge `REQ-JOB-STATUS-COMMENTS`' standing acceptance, so upgrading visibly adds them).
 
 ## REQ-BRANCH-PROTECTION-PRECONDITION
 

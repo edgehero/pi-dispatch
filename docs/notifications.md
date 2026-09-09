@@ -4,7 +4,10 @@ Every free refusal already announces itself: the pre-spend ladder posts a commen
 asked for the job, saying why nothing ran. This page is the other half, added by issue #288, and it
 covers exactly the failures that used to be silent: the ones that already cost a container and tokens.
 
-Two independent pieces, and a deployment that configures neither behaves byte-identically to before.
+Two independent pieces. The comments are always on (they discharge a promise the spec already made);
+only the hook has a knob, and a deployment that leaves `PI_ON_FAILURE` unset gets no hook,
+byte-identically. So the one visible change on upgrading, with nothing configured, is that these
+previously-silent failures now comment.
 
 ## The worker's own terminal comments
 
@@ -49,9 +52,10 @@ arguments:
 
 - `outcome` is `failed` (final infrastructure failure) or `policy` (a worker abort or an in-container
   policy stop).
-- `reason` is a fixed token: `worker-abort`, `runner-policy`, `container-never-started`, or `infra` when
-  the failure carried no token. Anything message-shaped is flattened to `infra` before it can reach your
-  argv.
+- `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`,
+  `container-never-started`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
+  carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
+  reach your argv.
 - `host` is the worker's declared name, possibly empty.
 
 It fires for: the 30-minute kill, an in-container policy stop (exit 2), and the final infrastructure

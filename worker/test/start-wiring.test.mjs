@@ -1819,3 +1819,46 @@ test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line a
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host"]);
 });
+
+test("a terminal LOCAL failure comments into the log fallthrough with the fixed sentence, and posts nothing to any forge (review finding)", { skip }, async () => {
+	const forgeCalls = [];
+	const host = fakeHost({ postStatusComment: async () => void forgeCalls.push(1) });
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ makeAuth, makeHost: () => host });
+	const from = bootLines.length;
+	handlers.failed({ id: "L-1", data: { kind: "local", folder: "/Users/op/private-project" }, attemptsMade: 2, finishedOn: 9 }, new Error("x"));
+	await settleListeners();
+	const lines = parseLines(bootLines.slice(from));
+	const line = lines.find((l) => l.event === "comment");
+	assert.ok(line, "the local terminal comment is the stdout line -- the only signal a cron deployment has");
+	assert.equal(line.text, "Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log.");
+	assert.ok(!line.text.includes("/Users"), "fixed and path-free: this text sits verbatim in a persistent service log");
+	assert.deepEqual(forgeCalls, [], "a local job has no forge to post to");
+});
+
+test("a real err.reason token rides the hook's argv end to end, through a REAL script (review finding)", { skip }, async () => {
+	// The unit suite pins the shape guard; this drives the whole seam -- listener -> fire -> spawn -- with
+	// a real executable, so the token's verbatim passage is proven where it actually travels.
+	const { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "on-failure-"));
+	const script = join(dir, "notify.sh");
+	const out = join(dir, "args.txt");
+	// The script also echoes an env marker: the hook must inherit the WORKER'S injected env, not the
+	// ambient process.env (the #309 rule every spawner in start.mjs follows -- review finding).
+	writeFileSync(script, `#!/bin/sh\necho "$@ marker=$INJECTED_ENV_MARKER" >> "${out}"\n`);
+	chmodSync(script, 0o755);
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ env: { PI_ON_FAILURE: script, INJECTED_ENV_MARKER: "threaded" }, makeAuth, makeHost: () => fakeHost() });
+	handlers.failed({ id: "gh-9", data: { kind: "github", repo: "o/r" }, attemptsMade: 2, finishedOn: 9 }, Object.assign(new Error("the runtime could not start the container, exit 125"), { reason: "container-never-started" }));
+	// A real child: poll for its write rather than guessing its scheduling.
+	for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 20));
+	assert.ok(existsSync(out), "the hook really spawned");
+	// The host cell is this machine's derived worker name, which varies -- pin the id-only trio exactly
+	// and only the SHAPE of the fourth.
+	const argv = readFileSync(out, "utf8").trim().split(" ");
+	assert.deepEqual(argv.slice(0, 3), ["gh-9", "failed", "container-never-started"], "a VALID token passes the guard verbatim; the message never rides");
+	assert.equal(argv.length, 5, "host rides fourth, whatever this machine calls itself, then the marker cell");
+	assert.equal(argv[4], "marker=threaded", "the hook runs with the worker's injected env, never the ambient one");
+});

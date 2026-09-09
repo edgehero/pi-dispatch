@@ -3613,14 +3613,20 @@ a tunnel.
   comment, bounded at one; a whole-deployment death between the terminal transition and the listener
   loses both channels (a single crashed worker does NOT -- the stall path fails its job at next pickup
   and the observing worker's listener fires); a graceful drain's exit can orphan an in-flight POST or
-  hook child. `OQ-023`'s prepare-policy silence stands untouched -- #288 is post-spend only, and that
-  row's own hazard (a `.pi/` cap breach commenting on every delivery) is exactly why.
+  hook child. The DUPLICATION direction exists too, narrow and named (review finding): a worker that
+  comments a policy stop and then loses its job LOCK before BullMQ commits the return (crash, or a
+  partition outliving lock renewal) has its job stall-swept back to wait, and the re-pickup's
+  UnrecoverableError lands a second, `finishedOn`-guarded FAILED comment on the same issue -- a
+  pre-existing crash-consistency property of the queue that these comments make externally visible,
+  bounded at one duplicate, and not worth the idempotence store this entry already rejects. `OQ-023`'s
+  prepare-policy silence stands untouched -- #288 is post-spend only, and that row's own hazard (a
+  `.pi/` cap breach commenting on every delivery) is exactly why.
 - **Traces to**: `REQ-JOB-STATUS-COMMENTS`, `REQ-OPERATOR-FAILURE-NOTIFICATION`,
   `CONST-RETRY-INFRA-ONLY`, `INT-ON-FAILURE-HOOK-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT` (the
   operator-command model)
 - **Acceptance**: the issue's own -- a 30-minute kill comments; a final infra failure comments once; a
-  one-line script gets the push; no payload text crosses either channel; neither knob set is
-  byte-identical.
+  one-line script gets the push; no payload text crosses either channel; with the knob unset the HOOK is
+  absent byte-identically (the comments are knobless by design, per the Rejected list).
 
 ## Revision History
 

@@ -56,7 +56,7 @@ export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, re
 		} catch {
 			path = null;
 		}
-		if (!path) return note(jobId, null, "unresolvable");
+		if (!path) return note(typeof jobId === "string" ? jobId : null, null, "unresolvable");
 
 		const safeReason = typeof reason === "string" && REASON_SHAPE.test(reason) ? reason : "infra";
 		// Argv must be non-empty id-only strings, and none may start with a dash -- this is argv where a
