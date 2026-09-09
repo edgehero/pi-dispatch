@@ -1649,6 +1649,12 @@ test("settleWithin clears its fuse when the read wins, and still answers when it
 	// this pin counts through async_hooks, where `destroy` fires for a cleared timer and not for a merely
 	// unref'd one. Ungated: no Valkey, no boot, one helper.
 	const { createHook } = await import("node:async_hooks");
+	// SELF-CONTAINED, deliberately: the second settleWithin call below awaits an unref'd fuse, and a
+	// process running ONLY this test (a --test-name-pattern debug run) has nothing else holding the
+	// loop -- node then abandons the pending await ("Promise resolution is still pending but the event
+	// loop has already resolved"), which is the helper's own documented bare-context boundary biting the
+	// test that pins it. This ref'd interval is the ambient loop the real boot provides.
+	const keepAlive = setInterval(() => {}, 1000);
 	const live = new Set();
 	const hook = createHook({
 		init(asyncId, type) {
@@ -1672,6 +1678,7 @@ test("settleWithin clears its fuse when the read wins, and still answers when it
 		const fell = await mod.settleWithin(new Promise(() => {}), 5, { fellBack: true });
 		assert.deepEqual(fell, { fellBack: true }, "a read that never answers still yields the fallback");
 	} finally {
+		clearInterval(keepAlive);
 		hook.disable();
 	}
 });

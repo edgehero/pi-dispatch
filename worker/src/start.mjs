@@ -128,6 +128,11 @@ export { makeWatchCloser } from "./watch-closer.mjs";
  * a wedged `docker inspect` has no cancel -- which is the read-is-a-nicety posture the call site
  * documents, unchanged here.
  *
+ * NOT FOR BARE CONTEXTS, and the boundary is the fuse's own unref: awaited when nothing else holds the
+ * event loop, the fuse never fires and node exits mid-await (measured, exit 13). In this boot the shared
+ * redis client and the workers hold the loop, so the fallback always arrives; a caller with an empty
+ * loop needs a ref'd timer and a different trade.
+ *
  * EXPORTED for the reason `makeWatchCloser` is: the cleared-fuse property is not observable through a
  * full boot without racing every other timer the boot arms, and a guarantee the shutdown story rests on
  * deserves a deterministic pin rather than a census.

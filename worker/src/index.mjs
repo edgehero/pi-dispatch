@@ -877,8 +877,15 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		// connection and never answers, where the client sits in status "connect" awaiting its ready check --
 		// independent of `maxRetriesPerRequest` and of `enableOfflineQueue`, both measured. `disconnect()`
 		// returns immediately in every case, and everything whose replies matter has already drained above.
-		// Guarded, because the wiring tests hand createWorker a bare `redis: {}`.
-		redis?.disconnect?.();
+		// Guarded, because the wiring tests hand createWorker a bare `redis: {}`. And wrapped, on the loop's
+		// own rule stated above: a SYNCHRONOUS throw from this line would skip the `process.exit(0)` below
+		// and hang the stop. The real client's disconnect does not throw; a test-injected one is one edit
+		// away from doing so.
+		try {
+			redis?.disconnect?.();
+		} catch {
+			// A release that failed has already stopped mattering; the exit below is what the stop owes.
+		}
 		process.exit(0);
 	};
 	process.once("SIGTERM", shutdown);
