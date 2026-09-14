@@ -127,7 +127,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   - a repo skill resolves **once**, from `/job/pi/skills` — `noSkills` staying `true` is what keeps the
     pinned-SHA read-only mount the copy in force, and a regression there is a silent swap to the writable
     working tree, not an error;
-  - Chromium launches as the non-root runtime user (the `PLAYWRIGHT_BROWSERS_PATH` collision);
+  - Chromium launches as the non-root runtime user (the `PLAYWRIGHT_BROWSERS_PATH` collision), and, for an
+    image declaring `anyUid`, as an arbitrary non-root uid given `HOME=/home/pi` (issue #341);
   - `pi -p` exits 0 (catches a flag rename);
   - the runner's turn budget fires at N **and exits 2** — not 0;
   - **a simulated provider error exits 1 — not 0.** Inside the agent loop pi does **not** throw: an
@@ -1998,6 +1999,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #341, part 1. **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the Chromium assertion gains its arbitrary-uid half for an image declaring `anyUid` -- measured in a native-Linux lab, today's image renders as `pi` and fails as uid 4242 with or without `HOME`, so a label claiming the capability without the render would lie about the one tool that fails loudest. `image/verify-image.sh` runs both, and CI's image job runs the script. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: nothing doctor or `up` does moves in this part. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED, in the Statement**: `doctor [--fix] [--live]`, and the "never perform an unshown host mutation" clause now names what `--live` adds -- a probe container and a fixture, shown before they exist and removed when the read ends, approved by typing the flag, beside the egress canary's existing unprompted network and probes -- rather than leaving a live read-back to contradict it. Acceptance gains the `--live` case and the case that nothing else starts a probe. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: the probe shares the builder, not the sandbox's launcher, names or reaper. |
 | 2026-09-14 | Issue #277, part 4. **`REQ-EGRESS-ALLOWLIST` AMENDED**, a correction of scope rather than of intent: its Scope said a resurrected sandbox joins the same kind of network, and that was true only of the CLI. A sandbox opened from the admin panel's RUN_DETAIL passed no network and ran on docker's default bridge with the policy armed. Both entry points now share one launcher, and the Scope says both. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: no credential, mount or retention rule moved. **Code evidence**: worker/src/sandbox.mjs -> openSandbox, sandboxEgress; worker/src/egress.mjs -> egressProxyName; worker/src/sandbox-cli.mjs -> runSandbox; admin/src/index.ts -> openSandboxSession. |
 | 2026-09-14 | Issue #277, part 3: the sandbox refuses by the venue a run was in. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**: its scope now says both entry points serve only a run whose venue this host holds, and its acceptance gains the refusal for both, the `--list` marking, and a pre-venue run opening as before. **Code evidence**: worker/src/sandbox.mjs -> sandboxVenueRefusal, resolveSandbox; worker/src/sandbox-store.mjs -> retainJobDir; worker/src/prepare.mjs -> makePrepareWorkspace; worker/src/sandbox-cli.mjs -> runSandbox, renderList; admin/src/index.ts -> readSandboxInfo. |

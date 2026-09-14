@@ -692,6 +692,13 @@ build does not.
   loader posture are untouched, and `image/verify-image.sh` remains that definition); or a read of a remote
   venue, which reads back only through the conformance harness's `readBack` probe, supplied by its adapter.
   **The status stays ACCEPTED RISK.**
+- **AMENDED (issue #341, part 1): an image's USER is no longer the whole story of who runs it.** On a daemon
+  that enforces bind-mount ownership a job can only use its mounts as the uid that owns them, so the image
+  gains a declared `anyUid` capability (a home writable by any non-root uid, Chromium rendering as one) and
+  `image/verify-image.sh` proves it with two uid-4242 runs. For an operator-built image that is one more
+  thing it can silently lack: without the label it is fit only for the uid it was built for. The detection
+  is the same kind as `replicas` -- a label checked pre-spend, backed by a verify arm -- and **the status
+  stays ACCEPTED RISK**.
 - **What would close it**: a worker-side gate at job start. Half the ingredients exist — `image/verify-image.sh`
   is the CORE checklist as one runnable definition, shared by CI and by the operator, and it runs **on the
   host that holds the image**, which is the only place it can (`--pull=never` means the runnable images are
@@ -1415,3 +1422,4 @@ adversarial passes did.
 | 2026-09-09 | Issue #288. **NEW `OQ-034`**: the failure hook's exit code and delivery are conventions we cannot enforce -- OQ-027/OQ-030's residual at the third operator-command seam, with the at-most-once boundary stated and the reopen condition being any ask for delivery guarantees (the moment a convention becomes a transport). **`OQ-023` UNCHANGED, checked, and the boundary is the point**: #288 comments the POST-SPEND terminals only; the prepare-policy passthrough (`sha-gone`, the `.pi/` caps) stays silent exactly as that row ratified, because its own hazard -- a repo whose `.pi/` breaches a cap commenting on EVERY delivery -- wants the dedup the spend refusals have and this slice does not build. **`OQ-027`/`OQ-030` UNCHANGED, checked**: the new row is a sibling, not a replacement. |
 | 2026-09-09 | Issue #289. **NEW `OQ-035`**: failedReason is a bounded string channel, not a classified one -- the panel's belt (control-byte strip, 120 cap) and the same-slice source fixes (branch.mjs de-payloaded to a type, prepare-local basenamed) hold the no-payload property by inventory plus bound, not by type; the close is #310's classifier generalized, deferred until a regression is actually caught. **`OQ-024` UNCHANGED, checked** (the insights page's surface is untouched). |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`OQ-012` AMENDED**: a bullet recording that the argv-not-image bound can now be read back off a container of `PI_JOB_IMAGE` (`INT-LIVE-PROBE-CONTRACT`), and precisely what that is not -- a gate, a check of trigger-named images, a check of an image's contents, or a read of a remote venue; the detection paragraph gains a pointer to it. **Status UNCHANGED: ACCEPTED RISK**, checked: nothing here runs at job start or reaches a trigger-named image. |
+| 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **`OQ-012` AMENDED**: an `anyUid` bullet -- the image's USER stops being the whole story of who runs it on a daemon that enforces bind-mount ownership, so an operator-built image can now also silently lack the capability to run as the worker's uid; the detection is a label plus a verify arm, the `replicas` shape, and the status stays ACCEPTED RISK. **`OQ-004` UNCHANGED, checked**: no network surface moved. |

@@ -209,7 +209,7 @@ test("run-job wires run.excludeTools: membership pre-spend, a conditional spread
 		"the membership assert must run pre-spend, before any session machinery",
 	);
 	assert.ok(
-		// The CALL, not the bare name: readPrompt's definition sits above main() and would win indexOf.
+		// The CALL, not the bare name: readPrompt is imported by name, and the import line would win indexOf.
 		src.indexOf("assertExcludeToolsKnown(") < src.indexOf("readPrompt(PROMPT_PATH)"),
 		"and before the job inputs are even read, beside the mount asserts",
 	);
@@ -219,4 +219,21 @@ test("run-job wires run.excludeTools: membership pre-spend, a conditional spread
 		src.indexOf("createAgentSession(") < src.indexOf('log("tools_excluded"'),
 		"the read-back can only be logged post-session",
 	);
+});
+
+test("run-job checks /job for every job and logs the mount advisories before any credential work (issue #341)", () => {
+	// Source-guard tactic again, three facts: (1) the /job access check runs beside the mount asserts, BEFORE the
+	// prompt ternary, so a command job (which never reads prompt.md) is covered; (2) the advisories are logged
+	// before getAgentDir/AuthStorage, because pi swallows the auth-lock failure and the line is the only record;
+	// (3) they are logged, never thrown, so nothing that runs today gains an exit.
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	assert.match(src, /assertJobInputsReadable\(JOB_DIR\);/);
+	assert.ok(src.indexOf("assertSessionMountReady(cfg.sessionFile)") < src.indexOf("assertJobInputsReadable(JOB_DIR)"));
+	assert.ok(
+		src.indexOf("assertJobInputsReadable(JOB_DIR)") < src.indexOf("const prompt = cfg.command"),
+		"the check must precede the command/prompt split, or command jobs skip it",
+	);
+	assert.match(src, /for \(const \[event, fields\] of mountAdvisories\(\)\) log\(event, fields\);/);
+	assert.ok(src.indexOf("mountAdvisories()") < src.indexOf("getAgentDir()"), "advisories must be logged before pi touches HOME");
+	assert.doesNotMatch(src, /function readPrompt/, "readPrompt lives in src/config.mjs, where its EACCES split is tested");
 });

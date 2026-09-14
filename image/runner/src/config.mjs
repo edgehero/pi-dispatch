@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { configError } from "./outcome.mjs";
 
@@ -277,8 +277,14 @@ function parseSessionFile(env, name) {
  * which classifyThrow files as exit 1, retryable, for a fault no retry can fix. Probing here turns that
  * into a readable pre-spend exit 2 naming the path.
  */
-export function assertSessionMountReady(sessionFile, { fileExists = existsSync, checkWritable = defaultCheckWritable } = {}) {
+export function assertSessionMountReady(sessionFile, { fileExists = existsSync, checkWritable = defaultCheckWritable, accessCode = defaultAccessCode, uid = process.getuid?.() } = {}) {
 	if (!sessionFile) return;
+	// `existsSync` answers false for a file it may not LOOK at, so a 0700 /session owned by another uid would
+	// read as "did not land" and send the operator hunting for a mount that is there (issue #341). Asked first,
+	// by the directory's own access code, so the two faults name themselves.
+	if (DENIED.has(accessCode(dirname(sessionFile), constants.X_OK))) {
+		throw configError(`session mount is not accessible to the job user (uid ${uid}): ${dirname(sessionFile)} (PI_SESSION_FILE)`);
+	}
 	if (!fileExists(sessionFile)) {
 		throw configError(`session mount did not land: ${sessionFile} (PI_SESSION_FILE)`);
 	}
@@ -291,6 +297,98 @@ export function assertSessionMountReady(sessionFile, { fileExists = existsSync, 
 
 function defaultCheckWritable(dir) {
 	accessSync(dir, constants.W_OK);
+}
+
+/** The error code `access(2)` answers for `path` and `mode`, or null when allowed. Never throws. */
+function defaultAccessCode(path, mode) {
+	try {
+		accessSync(path, mode);
+		return null;
+	} catch (err) {
+		return err?.code ?? "UNKNOWN";
+	}
+}
+
+// The two codes that mean "this uid may not", as opposed to "not there". Nothing else refuses: an ENOENT is the
+// caller's own concern, and an unexpected code is left to the read that follows, which fails loudly on its own.
+const DENIED = new Set(["EACCES", "EPERM"]);
+
+/**
+ * Assert the job user can read its own inputs, before any spend (issue #341, INT-RUNNER-EXIT-CODE-PROTOCOL).
+ *
+ * On a daemon that enforces bind-mount ownership, the host's per-job dir is a 0700 `mkdtemp` owned by the
+ * worker, so a job user with any other uid cannot even traverse `/job`. Without this check that surfaces three
+ * different ways, none of them honest: a prompt job reports "missing job input" (existsSync answers false for a
+ * file it may not look at), a COMMAND job never reads prompt.md at all, and the loader existsSync-gates
+ * `/job/trigger-skills`, so the job's own skills silently vanish and the job spends anyway.
+ *
+ * Every job runs it, prompt or command. An absent `/job` is not this check's business (the prompt read names that
+ * fault), which also keeps the image's own "missing job input" contract steps meaningful.
+ */
+export function assertJobInputsReadable(dir, { accessCode = defaultAccessCode, uid = process.getuid?.() } = {}) {
+	if (DENIED.has(accessCode(dir, constants.R_OK | constants.X_OK))) {
+		throw configError(`job inputs are not readable by the job user (uid ${uid}): ${dir}`, "job-inputs-unreadable");
+	}
+}
+
+/**
+ * Read the prompt, naming WHY it could not be read.
+ *
+ * A missing prompt file is a worker bug (it failed to write /job inputs), not infra -- the same job would fail
+ * identically on retry, so it is config, exit 2. An unreadable one is the uid fault `assertJobInputsReadable`
+ * exists for, reached here when the directory is traversable but the file is not; it carries the same reason.
+ */
+export function readPrompt(path, { readFile = (p) => readFileSync(p, "utf8"), uid = process.getuid?.() } = {}) {
+	try {
+		return readFile(path);
+	} catch (err) {
+		if (err?.code === "ENOENT") throw configError(`missing job input: ${path}`);
+		if (DENIED.has(err?.code)) {
+			throw configError(`job inputs are not readable by the job user (uid ${uid}): ${path}`, "job-inputs-unreadable");
+		}
+		throw err;
+	}
+}
+
+// Mount roots a HOME must never sit under: pi writes auth.json and every CLI writes its caches into HOME, and a
+// HOME inside a mount lands them in the operator's folder, the job inputs or the transcript store.
+export const HOME_FORBIDDEN_ROOTS = Object.freeze(["/workspace", "/job", "/outbox", "/session"]);
+
+/**
+ * The advisory lines a job's mounts earn, as `[event, fields]` pairs for the caller to log (issue #341).
+ *
+ * ADVISORY, never an exit: each describes a job that runs today and may be doing exactly what its trigger wants
+ * (a read-only review of a folder the job user cannot write is a legitimate job). What they buy is that the
+ * reason a write later fails is already in the log, instead of an EACCES from deep inside a tool.
+ *
+ *   - `workspace_not_writable` / `outbox_not_writable`: the mount exists and this uid may not write it.
+ *   - `home_not_writable`: pi swallows the auth-lock failure (measured: a job with HOME=/ still reaches "no
+ *     configured auth"), so an unwritable HOME otherwise shows up only as a playwright, npm or gh failure later.
+ *   - `home_under_mount`: HOME inside a mount root. Podman gives a `--user` with no passwd entry HOME=/workspace
+ *     (measured), which would put auth.json into the operator's repository as an untracked file.
+ *
+ * Fields carry paths and the uid only, never content.
+ */
+export function mountAdvisories({ env = process.env, uid = process.getuid?.(), accessCode = defaultAccessCode } = {}) {
+	// The env, not a `home` default: a default parameter cannot express "HOME is unset", which is a case this names.
+	// env-internal HOME: the container's own home, set by the image's passwd entry or by the worker beside `--user`;
+	// read here only to report whether it is usable, never chosen.
+	const home = env.HOME;
+	const out = [];
+	for (const [path, event] of [["/workspace", "workspace_not_writable"], ["/outbox", "outbox_not_writable"]]) {
+		const code = accessCode(path, constants.W_OK);
+		if (code !== null && code !== "ENOENT") out.push([event, { path, uid, code }]);
+	}
+	if (typeof home === "string" && home !== "") {
+		if (HOME_FORBIDDEN_ROOTS.some((root) => home === root || home.startsWith(`${root}/`))) {
+			out.push(["home_under_mount", { home, uid }]);
+		}
+		const code = accessCode(home, constants.W_OK);
+		if (code !== null) out.push(["home_not_writable", { home, uid, code }]);
+	} else {
+		out.push(["home_not_writable", { home: home ?? null, uid, code: "UNSET" }]);
+	}
+	return out;
 }
 
 /**

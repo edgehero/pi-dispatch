@@ -12,6 +12,9 @@
 #
 # Tags: `latest`, the git `sha`, and the PRODUCT version from the root package.json (so a release cuts a
 # tag that never moves, and a deployment can pin `ghcr.io/edgehero/pi-job:<version>` instead of tracking latest).
+# The version tag is published only by a push that CHANGED the root version (or a dispatch that asks for it)
+# and only while that tag is not on the registry yet: .github/scripts/image-version-tag.mjs, issue #341. Every
+# other image push moves `latest` and the sha tag and leaves a released version tag where the release put it.
 
 name: image
 
@@ -22,8 +25,14 @@ on:
       - "image/**"
       - "package.json" # the ROOT one: a product version bump republishes under its own tag
       - ".github/workflows/image.yml"
-  # Manual re-run (available once this file is on the default branch).
-  workflow_dispatch: {}
+      - ".github/scripts/image-version-tag.mjs"
+  # Manual re-run (available once this file is on the default branch). The version tag moves only if asked.
+  workflow_dispatch:
+    inputs:
+      push_version_tag:
+        description: "Also publish the product version tag (only if it is not on the registry yet)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,6 +64,15 @@ jobs:
         id: v
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Should this run publish the version tag?
+        id: vtag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          DISPATCH_PUSH_VERSION_TAG: ${{ inputs.push_version_tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: node .github/scripts/image-version-tag.mjs
+
       - name: Tags + labels
         id: meta
         uses: docker/metadata-action@v5
@@ -62,7 +80,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ steps.v.outputs.version }}
+            type=raw,value=${{ steps.v.outputs.version }},enable=${{ steps.vtag.outputs.push == 'true' }}
             type=sha
 
       - name: Build + push (amd64 + arm64)

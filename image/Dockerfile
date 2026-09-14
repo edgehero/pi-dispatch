@@ -147,21 +147,35 @@ ENV PLAYWRIGHT_MCP_BROWSER=chromium \
 # Non-root. CONST-ISOLATION-CONTAINER-PER-JOB.
 RUN useradd --create-home --shell /bin/bash --uid 1001 pi
 
-# ONLY these two are chowned to pi, because they are the only things the runtime user must
-# WRITE. Everything else it merely reads or executes, and code the agent can rewrite is not a
-# boundary -- see the guardrails/runner COPYs below.
+# The home is the ONLY thing the runtime user must WRITE. Everything else it merely reads or
+# executes, and code the agent can rewrite is not a boundary -- see the guardrails/runner COPYs below.
 #
-# ~/.pi/agent is the ONLY thing chowned to pi here: pi lazily creates it (0700) and writes
-# auth.json (0600) on the FIRST credential operation (ensureParentDir/ensureFileExists inside
-# withLock). Root-owned means the job dies EACCES at runtime, on a path nothing here hints at.
-# `COPY --chown` would not fix this anyway: it does not apply to parent dirs COPY auto-creates,
-# so /home/pi/.pi would still be root:root.
+# pi lazily creates ~/.pi/agent (0700) and writes auth.json (0600) on the first credential operation
+# (ensureParentDir/ensureFileExists inside withLock), and playwright, npm and gh write their caches
+# and config under the same home. A home the runtime user cannot write does NOT stop the job: pi's
+# AuthStorage swallows the lock failure and an env-keyed job carries on (measured), so the breakage
+# lands later, inside whichever tool wrote first, on a path nothing here hints at. The runner logs
+# `home_not_writable` for exactly that reason. `COPY --chown` would not fix a root-owned home anyway:
+# it does not apply to parent dirs COPY auto-creates.
+#
+# 1777 (sticky, world-writable) on the home and the agent dir, so the runtime user does not have to
+# be `pi` (issue #341). On a daemon that enforces bind-mount ownership, a job can only read its 0700
+# job dir, and leave files the host can clean up, when it runs as the uid that owns them: that is a
+# `--user` with no passwd entry here, whose home must therefore be writable by an arbitrary non-root
+# uid. The sticky bit keeps one uid from deleting another's files. uid 1001 still owns the tree and
+# sees no change.
+#
+# There is deliberately NO `ENV HOME` here. Images built FROM this one (image/Dockerfile.azure,
+# docs/job-image.md) run root build steps, and with HOME pointed at /home/pi those steps would
+# leave root-owned .cache/.npm/.azure dirs in it that no runtime user could write. A container
+# started with `--user` is given HOME=/home/pi on its own command line instead.
 #
 # /ms-playwright is deliberately NOT chowned. The browsers install root-owned and 0755
 # (world-readable/executable), which is all the non-root runtime user needs -- and root ownership
 # means the agent cannot tamper with its own browser binary. Chowning ~1GB of browser in a
 # separate layer also cost 687MB of overlay2 copy-up for a metadata-only change.
-RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi/.pi
+RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
+    && chmod 1777 /home/pi /home/pi/.pi /home/pi/.pi/agent
 
 # The safety floor and the runner are ROOT-OWNED and NOT writable by pi. The agent runs AS pi;
 # if it could overwrite /opt/pi-dispatch/HARD_RULES.md it would own its own constraints, and if
@@ -236,7 +250,12 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # with every tool the trigger says to remove -- a "read-only" trigger with a working editor and shell,
 # recording a clean exit: a PERMISSION quietly not enforced, the worst-outcome class. The label is how
 # the worker refuses that pairing pre-spend instead of letting the container fail open.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools"
+# `anyUid` (issue #341) tells the worker this image runs correctly under an ARBITRARY non-root uid with
+# HOME=/home/pi: the home above is writable by any uid, and Chromium renders under one (verify-image.sh
+# runs both as uid 4242). An older image run with `--user` gets HOME=/ (Docker) or HOME=/workspace
+# (Podman, measured), so auth.json lands nowhere or in the operator's repository, and Chromium does not
+# start. The label is how the worker can tell the two apart before it spends anything.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid"
 
 USER pi
 WORKDIR /workspace

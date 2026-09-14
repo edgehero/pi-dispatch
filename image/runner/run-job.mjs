@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -6,7 +6,16 @@ import {
 	ModelRegistry,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { assertPackagePathsExist, assertSessionMountReady, commandName, enforceOfflineMode, parseRunnerEnv } from "./src/config.mjs";
+import {
+	assertJobInputsReadable,
+	assertPackagePathsExist,
+	assertSessionMountReady,
+	commandName,
+	enforceOfflineMode,
+	mountAdvisories,
+	parseRunnerEnv,
+	readPrompt,
+} from "./src/config.mjs";
 import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import {
 	captureTerminal,
@@ -27,7 +36,8 @@ import { attachTurnBudget } from "./src/turn-budget.mjs";
 // file against exactly that string.
 import { createUsageMeter, installProcessUsageMeter } from "./src/usage-meter.mjs";
 
-const PROMPT_PATH = "/job/prompt.md";
+const JOB_DIR = "/job";
+const PROMPT_PATH = `${JOB_DIR}/prompt.md`;
 
 /** Log a stable identifier, never task content. Issue bodies are user-authored personal data.
  *  Newline-DELIMITED, not merely newline-terminated: the leading \n closes whatever un-newlined
@@ -45,13 +55,6 @@ function pickTotals({ input, output, total, cost }) {
 	return { input, output, total, cost };
 }
 
-function readPrompt(path) {
-	// A missing prompt file is a worker bug (it failed to write /job inputs), not infra -- the
-	// same job would fail identically on retry. Classify it as config, exit 2.
-	if (!existsSync(path)) throw configError(`missing job input: ${path}`);
-	return readFileSync(path, "utf8");
-}
-
 async function main() {
 	const cfg = parseRunnerEnv(process.env);
 
@@ -66,6 +69,9 @@ async function main() {
 	// armed run.resume -- as a 0-byte file even on a cold start -- so an absent one means the /session
 	// bind mount did not land, not that there is nothing to resume. INT-SESSION-STORE-CONTRACT.
 	assertSessionMountReady(cfg.sessionFile);
+	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
+	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
+	assertJobInputsReadable(JOB_DIR);
 	// Offline is a property of the RUNNER, not of whoever started it. Set before the loader is built,
 	// because the loader is what resolves package sources: with offline off, an unresolved source is a
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
@@ -85,6 +91,9 @@ async function main() {
 	// thing as a command line "at the top of" a larger prompt. prompt.md still carries the same bytes
 	// as the human record of what ran (INT-CONTAINER-JOB-INPUTS).
 	const prompt = cfg.command ? `/${cfg.command}` : readPrompt(PROMPT_PATH);
+
+	// Advisory only (issue #341): the reason a later write fails, logged before pi or any tool tries one.
+	for (const [event, fields] of mountAdvisories()) log(event, fields);
 
 	const agentDir = getAgentDir();
 

@@ -105,6 +105,7 @@ fi
 #
 # Its polarity is the opposite of `forges` above: declaring nothing means "no claim", and the worker then
 # refuses replica jobs on this image rather than admitting them.
+any_uid=0
 capabilities=$(docker image inspect --format '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}' "$IMAGE_REF" 2>/dev/null)
 if [ -z "$capabilities" ] || [ "$capabilities" = "<no value>" ]; then
 	ok "no dev.pi-dispatch.capabilities label -- the image claims no optional feature, and the worker refuses replica jobs on it"
@@ -122,6 +123,16 @@ else
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "command-completed" /app/image/runner/src/outcome.mjs 2>/dev/null \
 					|| fail "the image declares 'commands' but its baked runner does not classify a headless command run -- a run.command job would be retried as infra forever"
 				;;
+			anyUid)
+				# Issue #341. The claim is that a job run as an ARBITRARY non-root uid with HOME=/home/pi works: the id
+				# took, the home is writable, and pi's agent dir and the tool caches can be created there. uid 4242 has
+				# no passwd entry in any image, which is what a worker's own uid is inside one. The Chromium half of the
+				# claim is checked with the render below.
+				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --user 4242:4242 -e HOME=/home/pi \
+					--entrypoint sh "$IMAGE_REF" -c '[ "$(id -u):$(id -g)" = 4242:4242 ] && mkdir -p "$HOME/.pi/agent" "$HOME/.cache" "$HOME/.config" && : > "$HOME/.pi/agent/auth.json"' >/dev/null 2>&1 \
+					|| fail "the image declares 'anyUid' but /home/pi is not writable by an arbitrary uid -- a job run as the worker's own uid would lose auth.json and every tool cache"
+				any_uid=1
+				;;
 			excludeTools)
 				# Same evidence style as 'commands': the baked runner config must actually read the variable.
 				# A runner that does not would run a "read-only" trigger's job with every tool it says to
@@ -133,6 +144,12 @@ else
 		esac
 	done
 	ok "dev.pi-dispatch.capabilities ($capabilities) matches what the image actually bakes"
+fi
+if [ "$any_uid" != 1 ]; then
+	# Said out loud for the same reason as the playwright skip below: a check that silently does not apply reads
+	# like one that passed.
+	echo "  note no 'anyUid' capability -- on a daemon that enforces bind-mount ownership (native Linux Docker, rootful"
+	echo "       Podman), a job on this image can only run as uid 1001 (issue #341)."
 fi
 
 # --cap-drop=ALL is CONST-ISOLATION-CONTAINER-PER-JOB's enforcement surface. Read the effective capability
@@ -148,16 +165,29 @@ ok "runs as a non-root user (uid $uid)"
 
 # /job:ro is what makes CONST-ISSUE-TEXT-IS-DATA enforceable by filesystem permission rather than by asking
 # nicely, so assert the kernel enforces it rather than trusting the flag.
+#
+# The fixture is opened to every uid first, and a control write WITHOUT :ro must succeed. Without both, a host
+# whose uid is not the image's (native Linux, issue #341) refuses the write with EACCES before :ro is ever
+# consulted, and the check passes having tested nothing.
 fixture=$(mktemp -d)
 mkdir -p "$fixture/pi"
 echo "x" >"$fixture/pi/APPEND_SYSTEM.md"
+chmod 0777 "$fixture" "$fixture/pi"
+chmod 0666 "$fixture/pi/APPEND_SYSTEM.md"
+if ! docker run --rm --cap-drop=ALL -v "$fixture:/job" --entrypoint sh "$IMAGE_REF" \
+	-c 'echo control >> /job/pi/APPEND_SYSTEM.md' 2>/dev/null; then
+	rm -rf "$fixture"
+	fail "the control write to a writable /job failed, so the :ro check below would prove nothing -- check that this host can bind-mount $fixture"
+fi
+docker run --rm --cap-drop=ALL -v "$fixture:/job:ro" --entrypoint sh "$IMAGE_REF" -c 'cat /job/pi/APPEND_SYSTEM.md' >/dev/null 2>&1 \
+	|| { rm -rf "$fixture"; fail "/job:ro could not even be read, so the write refusal below would prove nothing"; }
 if docker run --rm --cap-drop=ALL -v "$fixture:/job:ro" --entrypoint sh "$IMAGE_REF" \
 	-c 'echo pwned > /job/pi/APPEND_SYSTEM.md' 2>/dev/null; then
 	rm -rf "$fixture"
 	fail "/job is writable from inside. The agent can rewrite its own instructions."
 fi
 rm -rf "$fixture"
-ok "/job:ro is enforced by the kernel"
+ok "/job:ro is enforced by the kernel (a writable control mount accepted the same write)"
 
 # pi lazily creates ~/.pi/agent and writes auth.json on the FIRST credential operation. A root-owned dir
 # kills the job with EACCES at run time, on a path nothing in a Dockerfile hints at.
@@ -179,16 +209,26 @@ ok "guardrails are not writable by the runtime user"
 # The frontend half. Both are only meaningful for flows that do visual work, but neither failure announces
 # itself: a fontless Chromium renders tofu, and screenshots look plausible while containing no legible text.
 if docker run --rm --entrypoint sh "$IMAGE_REF" -c 'command -v playwright-cli' >/dev/null 2>&1; then
-	docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --shm-size=1g \
-		-e PAGE='<html><body style="background:#f00"><h1 style="color:#fff">RENDER-CHECK-MARKER</h1></body></html>' \
-		--entrypoint sh "$IMAGE_REF" -c \
-		'node -e "require(\"http\").createServer((_,r)=>{r.writeHead(200,{\"content-type\":\"text/html\"});r.end(process.env.PAGE)}).listen(8099)" & sleep 1;
-		 playwright-cli open http://localhost:8099 >/dev/null 2>&1;
-		 playwright-cli snapshot 2>&1 | grep -q RENDER-CHECK-MARKER || exit 1;
-		 playwright-cli screenshot --filename /tmp/s.png >/dev/null 2>&1;
-		 test -s /tmp/s.png' >/dev/null 2>&1 \
+	# $@ are extra `docker run` flags: none for the image's own user, a uid and HOME for the anyUid claim.
+	render_check() {
+		docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --shm-size=1g "$@" \
+			-e PAGE='<html><body style="background:#f00"><h1 style="color:#fff">RENDER-CHECK-MARKER</h1></body></html>' \
+			--entrypoint sh "$IMAGE_REF" -c \
+			'node -e "require(\"http\").createServer((_,r)=>{r.writeHead(200,{\"content-type\":\"text/html\"});r.end(process.env.PAGE)}).listen(8099)" & sleep 1;
+			 playwright-cli open http://localhost:8099 >/dev/null 2>&1;
+			 playwright-cli snapshot 2>&1 | grep -q RENDER-CHECK-MARKER || exit 1;
+			 playwright-cli screenshot --filename /tmp/s.png >/dev/null 2>&1;
+			 test -s /tmp/s.png' >/dev/null 2>&1
+	}
+	render_check \
 		|| fail "Chromium did not render a real page. Check PLAYWRIGHT_BROWSERS_PATH (set at BOTH build and run), PLAYWRIGHT_MCP_BROWSER, PLAYWRIGHT_MCP_SANDBOX, and fonts."
 	ok "Chromium renders a real page as non-root"
+	if [ "$any_uid" = 1 ]; then
+		# Measured (issue #341): today's image renders as pi and fails under --user 4242:4242, with or without HOME.
+		render_check --user 4242:4242 -e HOME=/home/pi \
+			|| fail "the image declares 'anyUid' but Chromium does not render as an arbitrary uid with HOME=/home/pi"
+		ok "Chromium renders a real page as an arbitrary non-root uid (anyUid)"
+	fi
 
 	n=$(docker run --rm --entrypoint sh "$IMAGE_REF" -c 'fc-list | wc -l')
 	[ "$n" -gt 0 ] || fail "no fonts installed. Chromium renders tofu boxes: screenshots look plausible and contain no legible text."
