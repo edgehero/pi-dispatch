@@ -121,11 +121,11 @@ test("dockerExtra cannot carry a flag that would supersede the isolation boundar
 	// What the sandbox actually passes stays allowed, or this guard would break the one caller there is.
 	const ok = buildDockerRunArgs({ ...base, extraFlags: ["-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000"] });
 	assert.ok(ok.includes("--entrypoint") && ok.includes("-p"));
-	// And `--user` stays allowed on purpose: it is the documented Linux-only uid:gid for a bind-mounted
-	// local folder, it changes which uid runs rather than what that uid may do, and the property it bears
-	// on -- nonRoot -- is declared `asserted` already. Denying it would break local-folder jobs to make a
-	// word honest that is already honest. docker-run.test.mjs pins the feature itself.
-	assert.ok(buildDockerRunArgs({ ...base, extraFlags: ["--user", "1000:1000"] }).includes("--user"));
+	// `--user` is REFUSED here since issue #341: the job user is the spec's `user` field, validated non-root, and a
+	// repeat in dockerExtra would win last and could name uid 0. (An earlier comment here called `--user` "the
+	// documented Linux-only uid:gid"; nothing documented or passed it.) docker-run.test.mjs pins the field.
+	for (const flag of ["--user", "-u"]) assert.ok(DOCKER_EXTRA_FORBIDDEN.includes(flag), `${flag} must stay denied`);
+	assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: ["--user", "1000:1000"] }), /supersede the isolation boundary/);
 });
 
 // --- which daemon the docker CLI resolves (issue #278) ---------------------------------------------------------

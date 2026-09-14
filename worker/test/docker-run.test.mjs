@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "../src/container-spec.mjs";
 import { buildDockerRunArgs, containerSpec, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
@@ -88,9 +90,53 @@ test("an undefined env value is skipped, not passed as empty", () => {
 	assert.ok(!args.some((a) => a.startsWith("GITHUB_TOKEN")), "absent token must not appear at all");
 });
 
-test("a local-folder job can add a Linux-only --user via extraFlags", () => {
-	const args = buildDockerRunArgs({ ...base, extraFlags: ["--user", "1000:1000"] });
-	assert.ok(args.includes("--user") && args.includes("1000:1000"));
+test("the job user is a spec field: --user=<uid>:<gid> after --network and before dockerExtra (issue #341)", () => {
+	const args = buildDockerRunArgs({ ...base, network: "pi-job-abc-net", user: "1234:1234", extraFlags: ["--entrypoint", "sh"] });
+	const at = args.indexOf("--user=1234:1234");
+	assert.ok(at > args.indexOf("--network=pi-job-abc-net"), "after the network flag");
+	assert.ok(at < args.indexOf("--entrypoint"), "before dockerExtra, where a repeat could otherwise supersede it");
+	assert.equal(args.filter((a) => a.startsWith("--user")).length, 1);
+	assert.equal(containerSpec({ ...base, user: "1234:1234" }).user, "1234:1234");
+});
+
+test("no user means NO --user at all: the argv is byte-identical to one built before issue #341", () => {
+	const before = buildDockerRunArgs(base);
+	assert.deepEqual(buildDockerRunArgs({ ...base, user: null }), before);
+	assert.deepEqual(buildDockerRunArgs({ ...base, user: undefined }), before);
+	assert.ok(!before.some((a) => a.startsWith("--user") || a === "-u"));
+});
+
+test("the job user must be a non-root <uid>:<gid>: uid 0, gid 0, a bare uid, a name and root are refused", () => {
+	for (const bad of ["0:0", "0:1000", "1000:0", "1000", "root", "pi:pi", "root:root", "1000:1000 ", " 1000:1000", "01000:1000", "1000:-1", "1000:1000:1", "", 1000, { toString: () => "1000:1000" }]) {
+		assert.throws(() => containerSpec({ ...base, user: bad }), /refusing a job user/, JSON.stringify(String(bad)));
+		assert.throws(() => dockerArgsFromSpec({ ...containerSpec(base), user: bad }), /refusing a job user/, `hand-built ${String(bad)}`);
+	}
+	assert.doesNotThrow(() => containerSpec({ ...base, user: "4294967294:4294967294" }));
+});
+
+test("fused short flags are refused: -u0, -iu0, -v/:/h, -m1g all reach docker as the flags they hide", () => {
+	for (const bad of ["-u0", "-iu0", "-v/:/host", "-m1g", "-it", "-p8080:80"]) {
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [bad] }), /supersede the isolation boundary/, bad);
+	}
+	// What callers really pass stays allowed: separate tokens, long flags, their values.
+	assert.doesNotThrow(() => buildDockerRunArgs({ ...base, extraFlags: ["-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-d", "--", "x"] }));
+});
+
+test("SHIPPED_IMAGE_UID and CONTAINER_HOME are the image's own useradd uid and home", () => {
+	const dockerfile = readFileSync(new URL("../../image/Dockerfile", import.meta.url), "utf8");
+	const m = dockerfile.match(/useradd --create-home --shell \/bin\/bash --uid (\d+) pi/);
+	assert.ok(m, "image/Dockerfile must still create the pi user with an explicit uid");
+	assert.equal(Number(m[1]), SHIPPED_IMAGE_UID);
+	assert.equal(CONTAINER_HOME, "/home/pi");
+	assert.equal(SHIPPED_IMAGE_UID, 1001, "a literal pin: a constant-derived test is blind to a change IN the value");
+});
+
+test("nothing in worker/src but the builder spells a docker --user flag", () => {
+	// systemctl --user in service.mjs is a different tool's flag, so the grep is for the docker spelling the builder
+	// emits. A second place emitting it is a second, unvalidated path to uid 0.
+	const dir = new URL("../src/", import.meta.url);
+	const hits = readdirSync(dir).filter((f) => f.endsWith(".mjs") && f !== "docker-run.mjs").filter((f) => readFileSync(new URL(f, dir), "utf8").includes("--user="));
+	assert.deepEqual(hits, []);
 });
 
 test("refuses to build without image / name / workspace", () => {
@@ -209,6 +255,7 @@ test("the spec describes the box in its own vocabulary, not docker's", () => {
 	]);
 	assert.equal(spec.image, base.image);
 	assert.equal(spec.network, "pi-job-1-net");
+	assert.equal(spec.user, null, "no user unless asked: the image's own USER runs");
 	// Named for what it is. A non-docker consumer must REFUSE this field rather than translate it.
 	assert.deepEqual(spec.dockerExtra, []);
 	assert.equal("extraFlags" in spec, false, "the docker-only escape hatch is not disguised as portable");
@@ -244,6 +291,7 @@ test("composing the two halves is exactly what the public builder does", () => {
 		{ ...base, sessionDir: "/s", globalPiDir: "/g", network: "n", env: { A: "1", B: undefined } },
 		{ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j", extraFlags: ["-i", "-t", "--entrypoint", "bash"] },
 		{ image: "i", name: "n", workspace: "/w", memory: "8g", cpus: "4" },
+		{ ...base, user: "1234:1234", network: "n" },
 	];
 	for (const s of shapes) assert.deepEqual(dockerArgsFromSpec(containerSpec({ ...s })), buildDockerRunArgs({ ...s }));
 });

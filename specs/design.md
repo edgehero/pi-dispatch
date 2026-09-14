@@ -3189,7 +3189,15 @@ a tunnel.
   every job on one segment, have no way to stop a runaway job, or ship the per-job token to a daemon this
   deployment does not own.
 - **One `local` declaration is `asserted`: `nonRoot`**, because `USER pi` is the image's and `SECURITY.md`
-  says "Non-root is not in that argv". It was `enforced` in a draft. `credentialTransit` was `asserted` too,
+  said "Non-root is not in that argv". Since issue #341 the argv can supply it: on a daemon that enforces bind-mount
+  ownership the job runs `--user=<worker uid>:<gid>`, which the builder refuses unless both parts are non-zero.
+  The word stays `asserted`, because on Docker Desktop the image's `USER` still provides it
+  (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`).
+- **`localFolders` is `enforced` by deciding who runs the job, and refusing where no uid works** (issue #341).
+  A bind mount is "edited in place" only when the job's uid can write what it edits. The worker decides that
+  uid per daemon from facts, and refuses rootless daemons, userns-remap and a root worker by name, rather than
+  downgrading a word. A wrong inference is caught by the runner before spend and by `doctor --live` on request
+  (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). It was `enforced` in a draft. `credentialTransit` was `asserted` too,
   because every spawn is `docker` with the worker's environment inherited and `DOCKER_HOST`, `DOCKER_CONTEXT`
   or a context selected in the CLI's config redirects that connection to another machine with the provider
   key and the forge token riding along, and nothing in the repository looked.
@@ -3437,6 +3445,8 @@ a tunnel.
   · `worker/src/backend-local.mjs` -> `makeLocalBackend`, `jobContainerName`
   · `worker/src/container-spec.mjs` -> `containerSpec`
   · `worker/src/docker-run.mjs` -> `dockerArgsFromSpec`, `DOCKER_EXTRA_FORBIDDEN`
+  · `worker/src/job-user.mjs` -> `decideJobUser`, `resolveImageUser`; `worker/src/container-spec.mjs` ->
+  `assertJobUser` (#341)
   · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
   · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
   `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
@@ -3756,6 +3766,101 @@ a tunnel.
   one-line script gets the push; no payload text crosses either channel; with the knob unset the HOOK is
   absent byte-identically (the comments are knobless by design, per the Rejected list).
 
+## DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST
+
+- **Decision** (issue #341): which uid a job container runs as is DECIDED by the worker from facts it can read
+  without starting a container, and READ BACK only when an operator asks (`pi-dispatch doctor --live`). There are
+  three outcomes:
+  - **`image`**: the image's own `USER` runs, and the argv carries no `--user` (byte-identical to before);
+  - **`worker`**: the job runs `--user=<worker euid>:<egid>` with `HOME=/home/pi`, so it owns what the worker
+    owns;
+  - **`unmappable`**: no uid works, and the job is refused by name.
+- **Why**: on a daemon that enforces bind-mount ownership (native Linux Docker, rootful Podman), a job can read
+  its `0700` job dir, write its mounts and leave files the host can remove only as the uid that owns them.
+  - The image runs as uid 1001 and the worker as whoever started it. Measured in a nested rootful-Docker lab, a
+    worker uid other than 1001 means EVERY job fails: `/job` is unreadable, `/session` is `0700`, and the forge
+    clone and `/outbox` are worker-owned and `0755`, so git also refuses the clone as dubious ownership.
+  - It stayed hidden because Docker Desktop maps ownership (fakeowner presents every dir as owned by the
+    container uid, measured), the GitHub runner user is uid 1001, and `doctor --live` built its fixture with
+    modes no job gets.
+- **The facts, in rule order** (`worker/src/job-user.mjs` `decideJobUser`, then `resolveImageUser`):
+  1. `darwin`/`win32` → `image` (Docker Desktop is the only local daemon there).
+  2. The docker endpoint is observed not local → `image` (bind sources are another machine's paths).
+  3. `docker info --format={{json .}}` did not answer → `unknown`, or `unmappable` `runtime-unreadable` for a
+     clean exit that parses to neither shape.
+  4. No endpoint resolved: a Podman-shaped body (the podman-docker emulation) goes on, with the socket from
+     `host.remoteSocket.path`; a Docker-shaped one is `unknown`.
+  5. `OperatingSystem: "Docker Desktop"` on Linux → `unmappable` `desktop-linux-userns`, unless the kernel
+     release is WSL.
+  6. `name=rootless` / `name=userns` (or Podman's `host.security.rootless`) → `unmappable`.
+  7. A local socket owned by the worker's own non-root uid → `unmappable` `rootless` (Podman before its compat
+     info carried the marker).
+  8. euid 0 → `unmappable` `worker-is-root`.
+  9. Otherwise `worker`.
+
+  Then, per image:
+  - euid 1001 → no `--user` at all, whatever the image declares;
+  - an image without the `anyUid` capability → refused `job-image-any-uid-unsupported`;
+  - on the `--user` path only, a primary gid of 0 (`root-group`) or of the docker socket's group
+    (`docker-group`) → refused.
+- **Measured behind the rows** (Phase 0 labs: Docker 27.5.1 rootful and rootless in dind, Podman 5.8.2 rootful
+  and rootless through its Docker API and through podman-docker, all nested in Docker Desktop's LinuxKit VM):
+  - **Rootless daemons** show the job dir as `0:0` inside the container, and only `--user=0:0` can use the
+    mounts, which `nonRoot` forbids.
+  - **`--user` without HOME** gives `HOME=/` on Docker (unwritable, and silent, because pi swallows the
+    auth-lock failure) and `HOME=/workspace` on Podman (`auth.json` lands in the operator's repository). So HOME
+    is paired with `--user` on the job and sandbox paths.
+  - **uid 1001** with the unchanged image works today, which is why it takes no `--user`.
+  - **The docker CLI** rejects `--userns=keep-id` itself (exit 125, "invalid USER mode").
+  - **Info markers:** Podman's compat API reports `ProductLicense: "Apache-2.0"`, and podman-docker renders
+    Podman's own info shape with no docker context.
+- **How a wrong inference surfaces**, since nothing here reads the mounts back per job:
+  - the runner refuses a job whose `/job` or overlay it cannot traverse before any spend (exit 2
+    `job-inputs-unreadable`) and logs advisories for unwritable mounts and HOME;
+  - `pi-dispatch doctor --live` reads the mounts back with the job's real modes and checks the host owner of what
+    the job wrote.
+- **Rejected**:
+  - **A job-shaped probe container at boot or per job**, which measures instead of inferring.
+    `CONST-ISOLATION-CONTAINER-PER-JOB` rejects "probing at worker boot or per job". Pre-approval verification
+    also found the edge cases it drags in: Windows workers, bind sources invisible to the daemon (snap Docker,
+    `PrivateTmp`), which image to probe, and uid-1001 hosts regressing.
+  - **`process.platform` alone**: wrong for rootless daemons and Docker Desktop on Linux.
+  - **Unconditional `--user $(id -u)`**: root under sudo, gid 0 for a bare uid, and a change to every Docker
+    Desktop job.
+  - **Declaring `localFolders: asserted` on Linux**: `/job`, `/session` and the forge clone stay broken, and the
+    read-back fails `asserted` too.
+  - **Documenting the permissions only.**
+  - **`ENV HOME` in the image**: it pollutes derived images' root build steps.
+  - **`HOME=/tmp`**: it loses config baked into `/home/pi`.
+  - **Container root on rootless daemons**: `nonRoot`, and root owns the image's guardrail files.
+  - **A builder-emitted `--userns=keep-id`**: the docker CLI refuses it.
+  - **A distinct job uid with ACLs or group-writable dirs**: the worker could not delete what the agent creates.
+  - **`--group-add`**: it widens what the process may do.
+  - **A `PI_JOB_USER` knob**: no measured need.
+  - **An `observedBy` observation for `localFolders`**: permanent warning noise, and a word is the wrong
+    instrument for "every job fails".
+- **Residuals**:
+  - NFS root_squash and SELinux are caught only at run time or by the read-back.
+  - Supplementary groups are dropped under `--user`.
+  - A daemon can be reconfigured behind an unchanged endpoint.
+  - Unmeasured setups: Docker Desktop on Linux (refused from its vendor docs), Docker Desktop on WSL2 (falls
+    through), OrbStack, Colima.
+  - Rootful Podman with containers.conf `userns="auto"` never reports `name=userns` and is caught only by the
+    runner's exit 2.
+  - Rootless Podman with `userns="keep-id"` in containers.conf works through the compat socket (measured) but
+    reads exactly like plain rootless and is refused.
+  - Derived images inherit `anyUid` whether or not their layer keeps the home writable.
+  - A container escape that keeps its uid lands as the worker's own account; see `OQ-036`.
+- **Code evidence**: `worker/src/job-user.mjs` -> `parseDaemonFacts`, `makeDaemonFactsReader`, `socketFacts`,
+  `decideJobUser`, `resolveImageUser`, `makeJobUserResolver`, `JOB_USER_FIX`
+  · `worker/src/container-spec.mjs` -> `containerSpec` (`user`), `assertJobUser`, `CONTAINER_HOME`,
+  `SHIPPED_IMAGE_UID`
+  · `worker/src/docker-run.mjs` -> `dockerArgsFromSpec` (`--user`), `DOCKER_EXTRA_FORBIDDEN` (`--user`, `-u`, fused
+  short flags)
+  · `image/runner/src/config.mjs` -> `assertJobInputsReadable`, `mountAdvisories`
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
+  `DES-WORKER-ON-HOST`, `DES-CONTAINER-BACKEND-REGISTRY`, `OQ-012`
+
 ## Revision History
 
 | Date | Change |
@@ -3866,3 +3971,4 @@ a tunnel.
 | 2026-09-14 | Issue #277, attribution. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: new bullet "Attribution is the other half of selection" (one derivation, three stores, resolved name never the raw field, absent reads as the literal `local`, the venue as a session sidecar rather than key material); the sandbox bullet becomes a per-job refusal by the local adapter's name, replacing the deployment-wide predicate the panel never applied; the registry bullet names the shared derivation; four Rejected entries (a registry method, stamp-after-rename or deletion, narrowing the predicate, `remote === false` as held). A correction in the same entry: the `PI_BACKENDS` bullet still said nothing SELECTS a backend and that the rule would come out with selection -- false since #227's slice 4, and the rule stayed for its own reason, which the bullet now gives. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key stays `(kind, repo, ref)`, and the venue-as-key-material alternative is recorded as rejected here. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh container from image and workspace; only which runs may be reopened moved. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: one more field in the same flat file. **`CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no gate moved relative to a spend, a venue this worker never built is now a recorded policy refusal rather than an infra retry, and no mount or flag changed. |
 | 2026-09-14 | Issue #278, part 1: credentialTransit earns `enforced` where credentials leave. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `local`'s `credentialTransit` moves from `asserted` to `enforced`, gated by the new per-backend `observedBy` on the `dockerEndpointLocal` observation, read by asking the docker CLI (`docker context inspect`) rather than reimplementing its precedence; `effectiveWord` degrades it to `asserted` by the operator when the endpoint is not observed on this host; the floor reads the observed word (`unobservedFloor`, `observationRefusals`): `enforced` refuses a redirect, `asserted` holds; checked at boot and again before each job's spend; doctor renders the observed word, names its shell's answer, and skips its in-image `gh` probe on a redirected CLI. The "two asserted" bullet is corrected to one. Six Rejected entries. **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: the credentials and their scope do not move; this is about where they travel. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor gains words and loses a probe on a redirect, and no `fixAction`. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the per-job read is free and sits before the reserve. The review of this part moved the per-job read ahead of the image and egress preflights, refused leading-zero loopback literals, kept a UNC named pipe (and a `.`/`..` segment, split on either separator) off the local list, reduced the displayed endpoint instead of editing it, and named the resolver's residual on `localhost`; a stderr table that made unrecognised CLI exits transient was tried and withdrawn. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: this site classifies on values like every other, a non-zero exit stays determinate on its `gh auth token` precedent, and the passing permission error that decision leaves is named in the bullet. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the counts become three verified by the harness, six read back off a live container, four unverified; a bullet records the read-back (one container from the job builder, run only on a docker CLI observed local, egress folded from the canary, `readBack` for other venues) with eight Rejected entries; Code evidence. **`DES-CLI-SURFACE` AMENDED**: `doctor --live` sits on an operator-typed, shown, self-removing tier beside `sandbox`, not the consented one. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: the probe is not a sandbox and reads no retained run. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the probe asks the CLI and never reimplements its resolution. |
+| 2026-09-14 | Issue #341, part 2 (the builder and the decision). **NEW `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`**: the job user is decided per daemon from facts (platform, the worker's ids, the observed endpoint, one parsed `docker info --format={{json .}}`, a local socket's owner) and read back only on request. Modes are image, worker and unmappable. The rule order, the measured rows behind it, the per-image rule (uid 1001 first; `anyUid`; the group rows only on the `--user` path), how a wrong inference surfaces, eleven rejected alternatives (a boot or per-job probe container above all, which `CONST-ISOLATION-CONTAINER-PER-JOB` rejects) and the residuals are recorded there. The wiring into boot, jobs, the sandbox and doctor lands in the same PR. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the `nonRoot` bullet says the argv can now supply the uid while the word stays `asserted`, and a new `localFolders` bullet says it is enforced by deciding who runs the job. **THE 2026-09-01 ROW ABOVE IS REFUTED IN ONE SENTENCE**: it said "`--user` is deliberately NOT refused: it is the documented Linux-only `uid:gid`". Nothing documented `--user` and no production caller passed it, which is how every job on a native Linux daemon came to run as a uid that cannot read its own inputs. `--user` and `-u` are now on `DOCKER_EXTRA_FORBIDDEN`, because the builder owns the job user as a validated spec field. The same review found the deny-list compared only the text before `=`, so fused short flags (`-u0`, `-iu0`, `-v/:/h`, `-m1g`) walked past it; a single-dash token longer than two characters is now refused. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: its finding (2) about bind mounts stands, and the ownership half is carried by the new entry, not by editing a finding. |

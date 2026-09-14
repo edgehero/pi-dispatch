@@ -20,7 +20,7 @@
 // `buildDockerRunArgs`, which never moved; the entry that names `containerSpec` is design.md's 2026-08-31
 // row, and this move is recorded in its own row rather than by leaving that pointer to rot.
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
-import { containerSpec } from "./container-spec.mjs";
+import { assertJobUser, containerSpec } from "./container-spec.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -66,13 +66,15 @@ export const ISOLATION_FLAGS = [
  * which stay allowed -- so this closes a hole rather than changing a behaviour, and it makes "the builder
  * CANNOT DECLINE the boundary" true of the whole argv instead of of one boolean field.
  *
- * `--user` is DELIBERATELY NOT HERE, and it is the one that looks like it belongs. It is a documented,
- * tested feature -- the Linux-only `uid:gid` on a bind-mounted local folder, so files the agent writes into
- * an operator's own directory come back owned by the operator rather than by root. It also does not touch
- * this boundary: it changes which uid runs, not what that uid may do, and `--cap-drop=ALL` plus
- * `no-new-privileges` hold either way. What it does bear on is `nonRoot`, which the backend table already
- * declares `asserted` for the separate reason that the image's `USER pi` is what provides it. Denying it
- * here would break local-folder jobs to make a word honest that is already honest.
+ * `--user` and `-u` ARE here (issue #341), because the builder owns the job user now: `containerSpec`'s `user` field,
+ * validated non-root and emitted before `dockerExtra`. A second `--user` in `dockerExtra` would win last and could
+ * name uid 0, which is `nonRoot` gone. An earlier version of this comment called `--user` "a documented, tested
+ * feature" and left it allowed; nothing documented it and nothing passed it, which is how every job on a native
+ * Linux daemon came to run as a uid that cannot read its own inputs.
+ *
+ * ONE SHORT FLAG PER TOKEN, and that is a separate rule below the list: docker parses `-u0` as `-u 0`, `-iu0` as
+ * `-i -u 0`, `-v/:/h` as a mount and `-m1g` as a memory bound, and a list compared on the text before `=` sees none
+ * of those. A single-dash token longer than two characters is refused outright; every caller passes separate tokens.
  */
 export const DOCKER_EXTRA_FORBIDDEN = [
 	// Each of the seven logical flags in ISOLATION_FLAGS, and the argv member beside them that the worker's
@@ -118,6 +120,9 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	"--uts",
 	"--userns",
 	"--cgroupns",
+	// The job user is a spec field (issue #341). Here so a repeat cannot override it with uid 0.
+	"--user",
+	"-u",
 ];
 
 export function dockerArgsFromSpec(spec) {
@@ -139,7 +144,13 @@ export function dockerArgsFromSpec(spec) {
 		if (DOCKER_EXTRA_FORBIDDEN.includes(flag.split("=", 1)[0])) {
 			throw new Error(`docker run: refusing a dockerExtra flag that would supersede the isolation boundary: ${flag}`);
 		}
+		// Fused short flags (see the list's header). After the list check, so a listed flag keeps its own refusal.
+		if (/^-[^-]/.test(flag) && flag.length > 2) {
+			throw new Error(`docker run: refusing a dockerExtra flag that would supersede the isolation boundary: ${flag} (one short flag per token)`);
+		}
 	}
+	// Re-checked here for a hand-built spec, the same reason `isolated` is.
+	assertJobUser(spec.user);
 
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
@@ -153,6 +164,8 @@ export function dockerArgsFromSpec(spec) {
 	// before this feature existed. Same shape as the sessionDir/outboxDir/globalPiDir mounts below.
 	const args = ["run", `--name=${spec.name}`, ...ISOLATION_FLAGS, `--memory=${spec.memory}`, `--cpus=${spec.cpus}`];
 	if (spec.network) args.push(`--network=${spec.network}`);
+	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
+	if (spec.user) args.push(`--user=${spec.user}`);
 	args.push(...(spec.dockerExtra ?? []));
 
 	// Explicit env allowlist. Each entry is `-e NAME=VALUE`, built from the closed map -- so a

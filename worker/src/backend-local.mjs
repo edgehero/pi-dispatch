@@ -235,7 +235,9 @@ export function makeReaper({ log, exec = execDocker }) {
  * never contacts a daemon.
  *
  * The format is NARROW on purpose -- the context's name and the docker endpoint's host, each JSON-quoted -- and
- * never `{{json .}}`, which carries TLS material paths and storage locations nobody asked for.
+ * never `{{json .}}`, which carries TLS material paths and storage locations nobody asked for. (`job-user.mjs`'s
+ * `docker info` read is the one exception, and says why there: it parses the body in memory and keeps five facts,
+ * and a narrow template turns a field one runtime lacks into a template error indistinguishable from no daemon.)
  */
 export const DOCKER_ENDPOINT_ARGS = Object.freeze(["context", "inspect", "--format={{json .Name}}|{{json .Endpoints.docker.Host}}"]);
 
@@ -377,7 +379,7 @@ export function classifyEndpointFailure({ error = null, code = null } = {}) {
  * (`retention-sweep.mjs` records the same). A separate timer settles the promise regardless, kills with
  * SIGKILL and destroys the pipes. REF'D, because at boot nothing else may be holding the event loop.
  */
-export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile } = {}) {
+export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile, maxBuffer = 64 * 1024 } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		let child = null;
@@ -401,7 +403,7 @@ export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFil
 		try {
 			// No `env`: the endpoint that matters is the one the job's own `docker run` will use, and that spawn
 			// inherits this process's environment. Passing an env here would ask about a different CLI.
-			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer: 64 * 1024 }, (err, stdout) => {
+			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer }, (err, stdout) => {
 				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), error: err ?? null });
 			});
 		} catch (err) {

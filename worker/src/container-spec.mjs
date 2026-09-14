@@ -46,6 +46,28 @@ export const CONTAINER_SESSION_DIR = "/session";
 export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
 
 /**
+ * The job image's home, and the uid its `USER` directive runs as (issue #341, `DES-JOB-USER-INFERRED-READ-BACK-ON-
+ * REQUEST`). A job the worker runs under `--user` is given `HOME=CONTAINER_HOME` beside it, because such a uid has no
+ * passwd entry in the image: Docker would give it `HOME=/`, Podman `HOME=/workspace`. `SHIPPED_IMAGE_UID` is the one
+ * uid that needs no `--user` at all, since the image already runs as it; a test pins it against `image/Dockerfile`'s
+ * `useradd` so the two cannot drift.
+ */
+export const CONTAINER_HOME = "/home/pi";
+export const SHIPPED_IMAGE_UID = 1001;
+
+// "<uid>:<gid>", both non-zero decimal. A bare uid is refused because docker then takes the group from the image's
+// passwd, which is gid 0 for a uid it has no entry for; a name is refused because the image decides what it means.
+const JOB_USER_RE = /^[1-9]\d{0,9}:[1-9]\d{0,9}$/;
+
+/** Throws unless `user` is null/undefined or a non-root "<uid>:<gid>" (`nonRoot`, issue #341). */
+export function assertJobUser(user) {
+	if (user === null || user === undefined) return;
+	if (typeof user !== "string" || !JOB_USER_RE.test(user)) {
+		throw new Error(`docker run: refusing a job user that is not "<uid>:<gid>" with both parts non-zero: ${JSON.stringify(user)}`);
+	}
+}
+
+/**
  * WHAT the box is, with no Docker vocabulary in it.
  *
  * Split from the argv builder so the description of a container exists as a VALUE before it becomes one
@@ -57,8 +79,8 @@ export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
  * strings, because the flattening IS the Docker part: a runtime that does not bind-mount has to be able to
  * see which host path becomes which container path, and what may be written.
  *
- * `dockerExtra` is named for what it is. It carries raw Docker flags (`-i -t --entrypoint bash`, a
- * Linux-only `--user`), so it is the one field a non-Docker consumer must refuse rather than translate.
+ * `dockerExtra` is named for what it is. It carries raw Docker flags (`-i -t --entrypoint bash`), so it is the one
+ * field a non-Docker consumer must refuse rather than translate. The job user is NOT in it: it is `user`, a field.
  * Calling it `extraFlags` at the boundary would have hidden that.
  *
  * @param image      pinned job image tag/digest
@@ -73,7 +95,9 @@ export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
  * @param memory     e.g. "4g"; cpus e.g. "2"
  * @param network    the per-job egress network this container joins (REQ-EGRESS-ALLOWLIST); null = the
  *                   docker default bridge, which is what every job did before that requirement existed
- * @param extraFlags escape hatch for a Linux-only --user uid:gid on a bind-mounted local folder
+ * @param user       "<uid>:<gid>" the job runs as (issue #341), or null for the image's own USER. Portable: it says WHO
+ *                   runs the box, which a non-docker runtime must honour too.
+ * @param extraFlags raw docker flags for the few callers that need them (the sandbox's -i -t --entrypoint bash)
  */
 export function containerSpec({
 	image,
@@ -87,9 +111,11 @@ export function containerSpec({
 	memory = "4g",
 	cpus = "2",
 	network = null,
+	user = null,
 	extraFlags = [],
 }) {
 	if (!image) throw new Error("docker run: image is required");
+	assertJobUser(user);
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 
@@ -123,6 +149,7 @@ export function containerSpec({
 		memory,
 		cpus,
 		network,
+		user,
 		// UNCONDITIONALLY true, and there is deliberately no parameter that can unset it. The boundary is
 		// not a thing a caller opts into -- CONST-ISOLATION-CONTAINER-PER-JOB is why every other flag here
 		// exists -- so the spec is simply unable to describe an unisolated container, and the builder in
