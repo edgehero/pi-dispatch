@@ -47,7 +47,7 @@ const defaultFs = { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync,
  * nothing was retained -- and on `null` the caller has nothing left to do, because every failure path
  * here removes `jobDir` itself. Retention must never leave debris behind.
  *
- * `prepared.sandbox` is `{ jobId, kind, image }`, stamped by `makePrepareWorkspace`. Absent (a bare
+ * `prepared.sandbox` is `{ jobId, kind, image, backend }`, stamped by `makePrepareWorkspace`. Absent (a bare
  * construction, a test, an unwired dispatcher) means no retention, which keeps such a caller on exactly
  * the pre-feature path.
  */
@@ -79,6 +79,10 @@ export function retainJobDir(prepared, { sandboxDir, fs = defaultFs, log = () =>
 			jobId: meta.jobId,
 			kind: meta.kind ?? null,
 			image: meta.image ?? null,
+			// The venue the job resolved to (#277), which `resolveSandbox` refuses by when it is not this
+			// host's. `?? null`, never a guessed `local`: a stamp with no venue is refused, and only a manifest
+			// that predates the key entirely reads as local.
+			backend: meta.backend ?? null,
 			workspace: rebaseWorkspace(prepared.workspace, jobDir, dest),
 			createdAt: new Date(now()).toISOString(),
 			keepUntil: null,

@@ -1608,8 +1608,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   teardown is the `rm -rf` it always was.
 - **Scope**: Every job kind. A forge job's clone travels with its directory; a local job's workspace is
   the operator's own folder and is never moved, so only its `/job` inputs and `/outbox` are retained.
-  Available from the CLI and from the admin panel's RUN_DETAIL screen; never from a trigger, an
-  `/outbox` chain request, or a model tool.
+  Available from the CLI and from the admin panel's RUN_DETAIL screen, and from either only for a run whose
+  venue this host holds (issue #277); never from a trigger, an `/outbox` chain request, or a model tool.
 - **Why**: Perhaps 5% of runs end on a question the run record cannot answer — *does the thing it built
   actually work?* Three separate facts make that unanswerable today: `--rm` disposes the container at
   exit, stdin is `ignore` with no TTY so nothing can be typed into a live run either, and for a forge
@@ -1649,7 +1649,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and an explicit non-loopback bind is refused. Given a worker restart while a sandbox runs, the
   container survives (`docker ps --filter name=pi-job-` never matches it) and its directory is not
   swept. Given a run whose window has closed, the refusal names the window. Given a job that persisted a
-  session, no transcript exists anywhere under the retention root.
+  session, no transcript exists anywhere under the retention root. Given a run whose manifest names a venue
+  other than `local`, both the CLI and the panel refuse to open it, naming the venue, and `--list` does not
+  show it as re-openable; given a run retained before venues were recorded, it opens as before.
 
 ## REQ-REPLICA-RUNS
 
@@ -1987,6 +1989,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #277, part 3: the sandbox refuses by the venue a run was in. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**: its scope now says both entry points serve only a run whose venue this host holds, and its acceptance gains the refusal for both, the `--list` marking, and a pre-venue run opening as before. **Code evidence**: worker/src/sandbox.mjs -> sandboxVenueRefusal, resolveSandbox; worker/src/sandbox-store.mjs -> retainJobDir; worker/src/prepare.mjs -> makePrepareWorkspace; worker/src/sandbox-cli.mjs -> runSandbox, renderList; admin/src/index.ts -> readSandboxInfo. |
 | 2026-09-14 | Issue #277, part 2: resume is gated on venue. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript written in another venue joins the fail-open list as a named cold start (`venue-changed`), and the acceptance gains the moved-trigger and pre-venue-key cases plus the venue stamp among the writes a completed promotion makes. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: `venue-changed` is a fixed token like its siblings. **Code evidence**: worker/src/session-store.mjs -> makeSessionStore (resolveSession, promoteSession, readCanonical, readVenue, replaceSidecar); worker/src/run-history.mjs -> SESSION_REASONS; worker/src/start.mjs -> startWorker (the store's defaultBackend). |
 | 2026-09-14 | Issue #277, part 1: the record names its venue. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**, and the check is the substantive one it was for `host`: its acceptance says a record carries no issue or comment body, title or username, and the new `backend` field satisfies it -- a backend name is operator-authored configuration validated against a charset at load, and no path from any payload reaches it. **Code evidence**: worker/src/backend-registry.mjs -> resolveBackendName; worker/src/run-history.mjs -> buildRecord; worker/src/start.mjs -> startWorker (recordRun); worker/src/index.mjs -> makeProcessor (the container-name refusal caught at pickup); admin/src/dashboard.ts -> renderRunDetail. |
 | 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: the semantic-window swallow becomes VISIBLE -- `enqueueForgeJob` compares `queue.add`'s returned id against the computed one (the window returns the survivor's DIFFERENT id at the pin's own Lua; a GUID replay returns the SAME id and stays silent by design, its true answer being "queued"), the receiver logs one `deduplicated` line per swallow with the surviving id, logs `enqueued` only for jobs actually created, and answers `202 {status:"deduplicated"}` when a delivery created nothing. Before this, re-labelling inside the window did nothing with no feedback anywhere. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the FAILED section and `f` view add NO tool and NO subcommand, so the enumeration and its pin stand untouched (the DES entry records both as Rejected). **`REQ-WAIT-FOR` UNCHANGED, checked**: hold semantics untouched; the status area's breakdown counts holds from the wait index without touching it. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: no comment surface moves. **Code evidence**: worker/src/queue.mjs; receiver/src/receiver.mjs; receiver/src/poller.mjs; admin/src/dashboard.ts; admin/src/render.mjs; admin/src/read-model.mjs; worker/src/branch.mjs; worker/src/prepare-local.mjs; worker/src/service.mjs. |

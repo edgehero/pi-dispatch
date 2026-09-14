@@ -215,7 +215,13 @@ a trigger selects it with `run.backend`.
   `run.backend` must not become a way back to it.
 - **`PI_BACKEND_FLOOR` bounds you.** An operator can require a minimum of every blessed backend, and a floor
   naming a switched-off control refuses at boot.
-- **The sandbox is local-only.** `pi-dispatch sandbox` opens a shell on this host's daemon against a
-  retained job directory, so it cannot reach a job that ran anywhere else.
+- **The sandbox is local-only, per job.** `pi-dispatch sandbox` and the panel open a shell on this host's
+  daemon against a retained job directory, so a run whose retained record names another backend is refused
+  by name. That refusal is per run, not per deployment: blessing a remote venue does not stop local runs
+  from reopening.
+- **Every job's venue is recorded, and your adapter supplies nothing for it.** The run record's `backend`,
+  the session store's venue stamp and the sandbox manifest all record the venue the registry resolved, so a
+  job that landed on the wrong venue shows it, and a resumed transcript is never handed to a venue that did
+  not write it.
 - **A local or cron trigger cannot run remotely.** The operator's own folder has to be bind-mounted and
   edited in place. There is no volume to hide behind.

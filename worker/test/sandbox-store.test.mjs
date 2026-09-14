@@ -50,7 +50,7 @@ function fakeFs({ files = {}, failOn = null } = {}) {
 const prepared = (over = {}) => ({
 	jobDir: "/jobs/job-xyz",
 	workspace: "/jobs/job-xyz/workspace",
-	sandbox: { jobId: "gh-1", kind: "github", image: "pi-job:latest" },
+	sandbox: { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local" },
 	...over,
 });
 
@@ -63,6 +63,8 @@ test("retention renames the per-job dir and records a manifest", () => {
 	assert.equal(manifest.image, "pi-job:latest");
 	assert.equal(manifest.createdAt, "2026-08-01T10:00:00.000Z");
 	assert.equal(manifest.keepUntil, null, "a fresh retention is never pinned");
+	assert.equal(manifest.backend, "local", "the venue the job resolved to, which the sandbox refuses by (#277)");
+	assert.equal(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).backend, "local", "and it is on disk, not only returned");
 	// The forge workspace lived inside jobDir, so its recorded path must follow the rename.
 	assert.equal(manifest.workspace, "/sbx/gh-1/workspace");
 	assert.equal(fs.calls.made.find((m) => m.p === "/sbx/gh-1/manifest.json")?.mode, 0o600);
@@ -136,6 +138,18 @@ test("readManifest and listSandboxes are filename-keyed, and skip what cannot be
 	const rows = listSandboxes({ sandboxDir: "/sbx", fs });
 	assert.deepEqual(rows.map((r) => r.jobId), ["gh-3", "gh-1"], "newest first; the unparseable one is skipped");
 	assert.deepEqual(listSandboxes({ sandboxDir: null, fs }), []);
+});
+
+test("a stamp with no venue records null, never a guessed local, and a pin keeps the venue (#277)", () => {
+	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	const manifest = retainJobDir(prepared({ sandbox: { jobId: "gh-1", kind: "github", image: "pi-job:latest" } }), { sandboxDir: "/sbx", fs, now: () => Date.parse("2026-08-01T10:00:00Z") });
+	assert.ok("backend" in manifest, "the key is written, so the manifest is not mistaken for a pre-#277 one");
+	assert.equal(manifest.backend, null);
+
+	const pinFs = fakeFs({ files: { "/sbx/gh-2/manifest.json": JSON.stringify({ jobId: "gh-2", backend: "far", createdAt: "2026-08-01T00:00:00Z" }) } });
+	const at = Date.parse("2026-08-01T12:00:00Z");
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-2", pinDays: 7, fs: pinFs, now: () => at }).pinned, true);
+	assert.equal(JSON.parse(pinFs.files["/sbx/gh-2/manifest.json"]).backend, "far", "a pin must not turn a far run into an unkeyed, local-reading one");
 });
 
 test("a pin is a TIMESTAMP, never a boolean -- there is no keep-forever", () => {

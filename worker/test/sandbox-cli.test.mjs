@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { runSandbox, sandboxUnreachableFrom } from "../src/sandbox-cli.mjs";
+import { runSandbox } from "../src/sandbox-cli.mjs";
 
 /**
  * `pi-dispatch sandbox`, driven through its injected seams. Nothing here reaches docker or a terminal:
@@ -13,13 +13,14 @@ import { runSandbox, sandboxUnreachableFrom } from "../src/sandbox-cli.mjs";
  */
 
 /** A retention root with one retained run in it, on a real temp dir (readManifest reads it for real). */
-function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUntil = null } = {}) {
+function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUntil = null, backend } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "sbx-"));
 	const dir = join(root, jobId);
 	mkdirSync(dir, { recursive: true });
 	const ws = workspace ?? join(dir, "workspace");
 	mkdirSync(ws, { recursive: true });
-	writeFileSync(join(dir, "manifest.json"), JSON.stringify({ jobId, kind: "github", image, workspace: ws, createdAt: new Date().toISOString(), keepUntil }));
+	// `backend` omitted writes no key at all, which is every manifest retained before #277.
+	writeFileSync(join(dir, "manifest.json"), JSON.stringify({ jobId, kind: "github", image, workspace: ws, createdAt: new Date().toISOString(), keepUntil, ...(backend !== undefined ? { backend } : {}) }));
 	return { root, dir, workspace: ws };
 }
 
@@ -182,29 +183,30 @@ test("a pinned row reads as pinned, and a plain one counts down the window", asy
 	assert.match(c2.text(), /24h left/);
 });
 
-test("the sandbox is LOCAL-ONLY, and says so rather than failing on a missing directory (#227)", async () => {
+test("the sandbox is LOCAL-ONLY PER JOB: a run from another venue is refused by name, a local one opens (#227, #277)", async () => {
 	// `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer` seam and hard-wired to
-	// this host's docker CLI. It reopens a retained job directory, and `manifest.workspace` is a path on THIS
-	// machine -- for a job that ran in another venue that path either does not exist, or exists and
-	// reproduces a run from the wrong host, silently. INT-SANDBOX-CONTRACT is already "a SIBLING ... never an
-	// amendment"; this is the clause that says which sibling.
-	// A deployment that blesses only local must NOT be refused: that is every deployment today, and a
-	// refusal here would break the command outright.
-	const c = capture({ running: async () => [] });
-	assert.equal(await runSandbox(["gh-1"], { env: envWith("/nope", { PI_BACKENDS: "local" }), deps: c.deps }), 1);
-	assert.doesNotMatch(c.errText(), /remote venue/, "the local-only deployment reaches the ordinary not-found path");
+	// this host's docker CLI, and `manifest.workspace` is a path on THIS machine. The refusal used to be
+	// deployment-wide because the command could not learn a job's venue; the manifest records it now.
+	const far = retained({ backend: "far" });
+	let launched = false;
+	const c = capture({ launch: async () => ((launched = true), { code: 0 }) });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(far.root), deps: c.deps }), 1);
+	assert.match(c.errText(), /"far" backend/, "the refusal names the venue, which is the whole diagnosis");
+	assert.equal(launched, false, "and no container starts");
 
-	// The refusal itself is driven as a predicate, because it is unreachable through the CLI while `local`
-	// is the only backend -- and an unreachable rule with no test is one a mutation pass deletes in silence,
-	// which is exactly what happened to the trigger-side remote refusal one slice ago.
-	assert.equal(sandboxUnreachableFrom({ backends: ["local"] }), false);
-	assert.equal(sandboxUnreachableFrom({ backends: ["local", "far"] }), true, "ANY remote venue puts a retained dir out of reach");
-	assert.equal(sandboxUnreachableFrom({ backends: ["far"] }), true);
-	// An UNCONFIGURED deployment is a local one -- `parseBackendList` returns ["local"] for an unset
-	// PI_BACKENDS -- so it must stay reachable. This is the case that would break every existing operator
-	// if the predicate were fail-closed on absence, and it is the one place in this feature where "declares
-	// nothing" does not mean "gets no benefit of the doubt": the deployment did declare, by default.
-	assert.equal(sandboxUnreachableFrom({}), false);
-	// A name nothing implements is unreachable, though: that is a venue this host cannot have run.
-	assert.equal(sandboxUnreachableFrom({ backends: ["not-a-backend"] }), true);
+	// A run retained before venues were recorded ran on local, and opens as it always did.
+	const old = retained();
+	const c2 = capture();
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(old.root), deps: c2.deps }), 0);
+	const local = retained({ backend: "local" });
+	const c3 = capture();
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(local.root), deps: c3.deps }), 0);
+});
+
+test("--list still shows a run from another venue, but not as time left on something re-openable (#277)", async () => {
+	const far = retained({ backend: "far" });
+	const c = capture();
+	await runSandbox(["--list"], { env: envWith(far.root), deps: c.deps });
+	assert.match(c.text(), /not here \(ran on far\)/);
+	assert.doesNotMatch(c.text(), /left/);
 });

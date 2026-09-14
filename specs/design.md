@@ -3248,11 +3248,13 @@ a tunnel.
   left the suite green. As a pure function over an explicit list (`backendRefusals`), each rule can be
   driven against a backend that fails it, using an unknown name as a stand-in for a backend that provides
   nothing. `config.mjs` re-tags the first message as a config error and does nothing else.
-- **`PI_BACKENDS` must contain the backend that actually runs jobs.** Nothing SELECTS a backend yet:
-  `start.mjs` builds `local` unconditionally, so a set excluding it would tell an operator their jobs run
-  somewhere they do not AND skip the backend actually running them from the floor check. `doctor` says so
-  in the line itself rather than printing a bare "Jobs run on", which would be true today only by the
-  coincidence that `local` is the sole entry. Both come out in the slice that wires selection.
+- **`PI_BACKENDS` must contain `local`.** When this entry was written nothing SELECTED a backend and
+  `start.mjs` built `local` unconditionally, so a set excluding it would have described jobs running
+  somewhere they did not. Selection has shipped since (the registry below), and the rule stayed for a reason
+  of its own: `PI_BACKENDS[0]` is where a job naming no venue is dispatched, and `parseBackendList` refuses a
+  set without `local` because the default must be a venue this build can run. (Corrected under #277; the
+  earlier "Both come out in the slice that wires selection" did not happen and this bullet was not updated
+  when that slice shipped.)
 - **`doctor` is what makes the declaration admissible at all.** A table of guarantees nothing ever prints is
   precisely the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` says is worse than a known-absent one,
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
@@ -3283,7 +3285,8 @@ a tunnel.
   and REFUSED a bundle that supplied either by name, because an adapter author whose `stopContainer` was
   silently dropped would believe a runaway job could be stopped through their backend while the abort path
   still called docker. The seams are real now and the refusal is gone.
-- **`makeBackendRegistry` is the one place that resolves which venue runs a job**, and it is deliberately
+- **`makeBackendRegistry` is where a job's venue is dispatched**, resolving it through `resolveBackendName`,
+  the one derivation the stores that record a venue share (below), and it is deliberately
   not a `switch`: every per-job function dispatches through the SAME resolution, so a function added later
   cannot be dispatched on one path and hardcoded on another -- which is exactly how `stopContainer` ended up
   hard-wired while `runContainer` was injectable. `stopContainer` now takes the JOB as well as the name,
@@ -3327,13 +3330,34 @@ a tunnel.
   collide with the runner's own channel (`INT-RUNNER-EXIT-CODE-PROTOCOL`), and the worker resolved that
   collision by ASSUMING the runtime is docker -- silently wrong for any venue where 125 is a real runner
   exit, and invisible while there was one runtime. An adapter declares its own set or normalises itself.
-- **The sandbox is declared LOCAL-ONLY.** `buildSandboxRunArgs` is a second container producer outside the
-  `runContainer` seam, hard-wired to this host's docker CLI, and it reopens a retained job directory whose
-  `manifest.workspace` is a path on THIS machine. For a job that ran elsewhere that path either does not
-  exist or reproduces a run from the wrong host, silently. `INT-SANDBOX-CONTRACT` is already "a SIBLING ...
-  never an amendment"; this is the clause that says which sibling. The predicate is exported and driven,
-  because an unreachable rule with no test is one a mutation pass deletes in silence -- which had just
-  happened to the trigger-side remote refusal.
+- **The sandbox is declared LOCAL-ONLY, and refuses PER JOB (#277).** `buildSandboxRunArgs` is a second
+  container producer outside the `runContainer` seam, hard-wired to this host's docker CLI, and it reopens a
+  retained job directory whose `manifest.workspace` is a path on THIS machine. For a job that ran elsewhere
+  that path either does not exist or reproduces a run from the wrong host, silently. `INT-SANDBOX-CONTRACT`
+  is already "a SIBLING ... never an amendment"; this is the clause that says which sibling. The manifest
+  records the venue, and `sandboxVenueRefusal` inside `resolveSandbox` refuses a run whose venue is not the
+  local adapter, for the CLI and the panel alike. The deployment-wide predicate it replaced refused every
+  sandbox when any blessed venue was remote, was never applied by the panel, and could say nothing honest
+  once the manifest names the venue.
+- **Attribution is the other half of selection (#277).** Selection had a ladder -- unknown names refused at
+  load, unblessed names pre-spend, near misses at load -- and nothing recorded which venue a job actually got.
+  Three stores now do, all from `resolveBackendName` (`run.backend`, else `PI_BACKENDS[0]`, absent meaning
+  the key is absent): the run record's `backend` (an audit, written for refusals too), the session store's
+  `venue` stamp (a gate: a transcript resumes only in the venue that wrote it), and the sandbox manifest's
+  `backend` (a gate: a sandbox reopens only a local run). Each store records the RESOLVED name, never the raw
+  field, because the raw field is absent for nearly every trigger and would mean "whatever the default was
+  that day". An artifact with no venue predates attribution and reads as the literal `local`
+  (`UNATTRIBUTED_BACKEND`), never as the deployment default, which can move. The venue is a session SIDECAR
+  and not key material (`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED`): a move gates the one lineage instead of
+  forking a second one nothing sweeps. This is what a second entry in `BACKENDS_TABLE` needed first: with two
+  venues and no attribution, a job run on the wrong one is "ran somewhere else while the file reads as
+  though it chose", arriving as success.
+- **Rejected (#277)**: resolution as a registry METHOD, because the session store is built in `startWorker`
+  before any bundle and would reach it through a temporal dead zone. Rejected: stamping the session venue
+  after the transcript rename, or invalidating it by deletion, since an absent stamp reads as `local` and a
+  failed write would leave one venue's transcript under another's stamp. Rejected: narrowing the
+  deployment-wide sandbox predicate instead of retiring it. Rejected: `remote === false` as "this host holds
+  it", since the sandbox launcher is the docker CLI and a non-remote venue on another runtime would pass.
 - **Rejected**: putting `make()` in the table (kills the leaf property above). Rejected: spreading the
   bundle into the processor's `deps`, which would put a backend's `name` into a namespace the processor is
   free to mean something else by. Rejected: a `backends/` directory, since `worker/src` is flat. Rejected:
@@ -3347,6 +3371,9 @@ a tunnel.
   · `worker/src/backend-local.mjs` -> `makeLocalBackend`, `jobContainerName`
   · `worker/src/container-spec.mjs` -> `containerSpec`
   · `worker/src/docker-run.mjs` -> `dockerArgsFromSpec`, `DOCKER_EXTRA_FORBIDDEN`
+  · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
+  · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
+  `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
 
 ## DES-PER-TRIGGER-TOOL-EXCLUSIONS
 
@@ -3767,3 +3794,4 @@ a tunnel.
 | 2026-09-09 | Issue #287, the operator cancel. **NEW `DES-CANCEL-VIA-REDIS-REQUEST-KEY`** (decision, the rejected quintet -- pub/sub, `getTrackedJobIds` coupling, state-polling-as-ack, a `dispatch_cancel` model tool, cursor-folded held rows -- and the named residuals). **`DES-CLI-SURFACE` AMENDED**: `cancel` joins the operator-typed ungated tier, one job id, one job stopped. **`DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool is added or removed, so the enumeration its Decision carries -- and the two-directional pin `admin/test/wiring.test.mjs` keeps on it -- stands untouched; `dispatch_wait_cancel` changes only its description string (it stops claiming to be the only door). **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` UNCHANGED, checked**: hold semantics, keyspace and refusal ladder are untouched; the cancel sequence merely moved from the admin into `cancel-state.mjs` with the admin delegating, byte-identical behaviour under the existing held tests. |
 | 2026-09-09 | Issue #288. **NEW `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`**: the post-spend terminals comment through the existing adapter (a reason-token map at the processor's return sites; the infra terminal at the failed listener on BullMQ's own `finishedOn`), and `PI_ON_FAILURE` is wait-check.mjs reduced further, fired from the two existing listener bodies for the paid terminals only. The Rejected list carries the nine alternatives with their reasons -- most load-bearing: no in-project transport ever (the id-only argv IS the feature), no knob over the comments (they discharge `REQ-JOB-STATUS-COMMENTS`' standing acceptance), recordRun refused as mount (fires on retried attempts), the processor catch refused as the infra site (misses the stall-kill and the wait-gate escape), and the runner's exit-line reason vocabulary stays unread (the exit codes already draw the needed distinction). **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: no retry classification moves; the comments and the hook observe outcomes, never decide them. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: operator-cancel gains its comment ROW here and is excluded from the hook (the operator initiated it), both anticipated by that entry's map shape. |
 | 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: the dedup-visibility bullet (the two layers' asymmetric returns at the pin's Lua; the receiver's honesty rule), with three new Rejected entries -- a QueueEvents subscriber (a blocking connection and a lifecycle for a fact the add's return carries), surfacing GUID replays (the shield's silence is its correctness), a non-2xx swallow answer (a redelivery storm bought for a status code). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the FAILED surface bullet -- the first queue-Job hydration for display, admissible by the one-statement/closed-projection rule, the source-plus-belt posture on failedReason (`OQ-035`), the stated retention split; REJECTED a `dispatch_failed` tool and a `failed` subcommand (the tool enumerations and their two-directional pins stand UNTOUCHED -- verified against `admin/test/wiring.test.mjs`) and a per-job delayed classifier. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: the delayed-count naming bullet, stating compatibility with (not reversal of) its own rejected classifier -- parts counted from their own sources, nothing enumerated, nothing guessed. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: the failure hook and the FAILED section answer different questions (being told vs going looking) and share no code. |
+| 2026-09-14 | Issue #277, attribution. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: new bullet "Attribution is the other half of selection" (one derivation, three stores, resolved name never the raw field, absent reads as the literal `local`, the venue as a session sidecar rather than key material); the sandbox bullet becomes a per-job refusal by the local adapter's name, replacing the deployment-wide predicate the panel never applied; the registry bullet names the shared derivation; four Rejected entries (a registry method, stamp-after-rename or deletion, narrowing the predicate, `remote === false` as held). A correction in the same entry: the `PI_BACKENDS` bullet still said nothing SELECTS a backend and that the rule would come out with selection -- false since #227's slice 4, and the rule stayed for its own reason, which the bullet now gives. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key stays `(kind, repo, ref)`, and the venue-as-key-material alternative is recorded as rejected here. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh container from image and workspace; only which runs may be reopened moved. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: one more field in the same flat file. **`CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no gate moved relative to a spend, a venue this worker never built is now a recorded policy refusal rather than an infra retry, and no mount or flag changed. |

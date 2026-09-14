@@ -24,6 +24,12 @@ name rather than letting docker fail with "the input device is not a TTY". And i
 **already running**, it refuses and points at it: `docker attach pi-sandbox-<jobId>`, or exit that one
 first.
 
+A run from another backend does not open here. A sandbox is a shell on this host's Docker daemon, so the
+retained record says which backend ran the job, and a run that did not run on `local` is refused by name,
+from the CLI and the panel alike (the panel does not offer `b` for it, and `--list` shows it as `not here`).
+Open it on the venue that ran it. A run retained before backends were recorded ran locally and opens as it
+always did.
+
 ## What is preserved, and what is not
 
 | | |

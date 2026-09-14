@@ -1121,6 +1121,8 @@ export async function startWorker(
 				// REQ-RESURRECTABLE-SANDBOX: the deployment default, resolved per job against run.image so a
 				// retained directory records the image that actually ran and a sandbox re-opens that one.
 				jobImage: config.jobImage,
+				// #277: the venue a retained directory records, which the sandbox refuses by when it is not here.
+				defaultBackend: config.defaultBackend,
 				preparers: makeForgePreparers({ gitlabApiUrl: config.gitlab?.apiUrl ?? null, forgejoApiUrl: config.forgejo?.apiUrl ?? null, azureOrgUrl: config.azure?.orgUrl ?? null }),
 				// The cron event.json's previousRunAt (INT-CONTAINER-JOB-INPUTS): read back from the same
 				// per-job run-history sidecars recordRun writes above -- no new store, no new query surface.

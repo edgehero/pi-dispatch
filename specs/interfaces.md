@@ -1358,12 +1358,22 @@ contract governs the argv of one container, this governs the estate that argv jo
 
 ## INT-SANDBOX-CONTRACT
 
-**LOCAL-ONLY (issue #227).** This command opens a shell on THIS host's docker daemon against the job's
-retained directory, so it cannot reach a job that ran in another venue: `manifest.workspace` is a path on
-this machine, which for such a job either does not exist or exists and reproduces a run from the wrong
-host, silently. `buildSandboxRunArgs` is a second container producer outside the `runContainer` seam and is
-hard-wired to the local CLI. A deployment blessing any remote backend is REFUSED here in words rather than
-left to fail on a missing directory.
+**LOCAL-ONLY, PER JOB (issues #227, #277).** A sandbox opens a shell on THIS host's docker daemon against
+the job's retained directory, so it cannot reach a job that ran in another venue: `manifest.workspace` is a
+path on this machine, which for such a job either does not exist or exists and reproduces a run from the
+wrong host, silently. `buildSandboxRunArgs` is a second container producer outside the `runContainer` seam
+and is hard-wired to the local CLI. **The manifest records the venue the job resolved to, and
+`resolveSandbox` refuses a run whose venue this host does not hold, by name** (`venue-unreachable`) and
+AHEAD of the image and workspace checks, whose failures would otherwise be the symptom reported instead of
+the cause. `resolveSandbox` is the one function both entry points pass through, the CLI and the admin
+panel's RUN_DETAIL, so the refusal holds for both; the panel also asks `sandboxVenueRefusal` before it
+advertises the key. **Held means the local adapter by name** (`DEFAULT_BACKEND`, the local bundle's own
+name), not "any venue declaring `remote: false`": the launcher is the docker CLI, so a non-remote venue on
+another runtime would pass that and be reopened under docker. A name this build does not know is refused. A
+manifest with no `backend` key predates venue attribution and reads as `local`; a key that is present but
+not a non-empty string is refused, because a venue that was never known is not a local one. This REPLACES
+a deployment-wide refusal (every sandbox refused when any blessed venue was remote), which the command
+needed only while it could not learn a job's venue, and which the panel never applied.
 
 **operator → docker daemon.** A SIBLING of `INT-CONTAINER-RUNTIME-CONTRACT`, never an amendment to it.
 That contract governs the container the harness launches against untrusted input and says **"No TTY
@@ -1408,12 +1418,15 @@ sibling rather than an extension of the GitHub one for the same reason.
       workspace/                     forge jobs only; a local job's workspace is the operator's folder
     ```
     ```jsonc
-    { "jobId": "gh-12345", "kind": "github", "image": "pi-job:latest",
+    { "jobId": "gh-12345", "kind": "github", "image": "pi-job:latest", "backend": "local",
       "workspace": "/abs/host/path", "createdAt": "2026-08-01T10:00:00.000Z", "keepUntil": null }
     ```
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
     `run-container.mjs` use — so the tag that was checked, the tag that ran and the tag re-opened are one
-    answer rather than three call sites that agree by luck. `workspace` is rebased onto the retained
+    answer rather than three call sites that agree by luck. `backend` is resolved through
+    `resolveBackendName`, the function the registry dispatches on, so the venue that ran and the venue a
+    sandbox checks are one answer the same way; a stamp that carries no venue writes `null`, never a guessed
+    `local`, and a pin rewrites the manifest with every key kept. `workspace` is rebased onto the retained
     directory when the run's workspace lived inside it, and recorded verbatim when it did not; decided by
     path containment, never by `kind`, so a preparer that moves its clone cannot record a path that does
     not exist.
@@ -1450,7 +1463,11 @@ sibling rather than an extension of the GitHub one for the same reason.
   sweep whose docker lookup failed removes nothing. Unless `PI_EGRESS=0` the argv carries
   `--network=pi-sandbox-<jobId>-net` and the three proxy variables, and **still no credential** -- a proxy
   URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS=0`, the argv is
-  byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed.
+  byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed. Given a manifest whose `backend` names a
+  venue other than `local`, or names nothing, `resolveSandbox` refuses it as `venue-unreachable` before the
+  image and workspace checks, the CLI exits 1 naming the venue and launches nothing, the panel's
+  `readSandboxInfo` reports it not re-openable, and `--list` shows it without time left; given a manifest with
+  no `backend` key, it resolves as a local run did before.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -2182,11 +2199,12 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **Absent carries no `backend` key at all**, so a trigger that names nothing normalizes and enqueues job
   data byte-identical to one written before this field existed.
 
-  **NOTHING DISPATCHES ON THE FIELD YET**, and the honest statement of what this buys is worth making
-  plainly: `start.mjs` builds the local backend unconditionally and no code reads a job's backend to choose
-  an adapter, so `run.backend` is today a VALIDATED, GATED LABEL -- refused at load if unknown, refused
-  pre-spend if unblessed, and not routed on. The dispatch arrives with `stopContainer` and `reap`, which
-  need the same per-backend lookup and should grow it once rather than twice.
+  **The field DISPATCHES** (`DES-CONTAINER-BACKEND-REGISTRY`). On every pickup the backend registry
+  resolves `run.backend`, else `PI_BACKENDS[0]`, through `resolveBackendName`, and routes `runContainer`,
+  both preflights, `stopContainer` and the container name through that one bundle; a name it does not hold
+  is refused rather than defaulted. The same resolved name is what the three stores that record a venue
+  write down -- the run record's `backend`, the session store's `venue` stamp and the sandbox manifest's
+  `backend` (issue #277) -- never the raw field, which is absent for every trigger that names no venue.
 
 - **`run.excludeTools` (ALL trigger kinds, optional non-empty array of pi tool names)**: the built-in pi
   tools this trigger's sessions must NOT have (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`,
@@ -3941,3 +3959,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-09 | Issue #289. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**, the operator-surface bullet: the per-job-classifier refusal is qualified as exactly that (per-job) and kept, while the status area now names the two parts countable from their OWN sources (scheduler list, `wait:held` index) with the remainder stated undifferentiated -- still never enumerating or hydrating a delayed job, which is the PII wall the bullet exists for. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no field and no token moves; the FAILED section reads the QUEUE's own failedReason, which is not the record's surface, and `buildRecord` still never carries a message. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: no exit code is touched; the de-payloaded branch.mjs/prepare-local messages change what a throw SAYS, not how it classifies. **The receiver's wire contract**: `202 {status:"deduplicated"}` joins `202 {status:"queued"}` as the answer for a delivery the semantic window swallowed whole; forges act on the status code, and the code stays 2xx precisely so a handled delivery is never redelivered into a storm (the body is honest, the code is safe -- `REQ-DEDUP-BY-DELIVERY-GUID` carries the full argument). **Code evidence**: worker/src/queue.mjs -> enqueueForgeJob's return comparison; receiver/src/receiver.mjs -> fanout, respondEnqueueOutcome; receiver/src/poller.mjs; admin/src/dashboard.ts -> delayedBreakdownLine, failedSection, scrubReason; admin/src/read-model.mjs -> readQueueState.cronNext; admin/src/render.mjs -> renderStatus; worker/src/branch.mjs; worker/src/prepare-local.mjs. |
 | 2026-09-14 | Issue #277, part 1: the record names its venue. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the twenty-sixth tail field `backend`, the RESOLVED venue (`run.backend`, else `PI_BACKENDS[0]`) through `resolveBackendName`, the one derivation the registry dispatches on; no producer writes a null, and an explicit null in job data is recorded as one (absent means the key is absent, matching the blessed gate); on a pre-container refusal it is the venue the job resolved to (a `backend-unblessed` refusal records the unblessed name, including a venue this worker never built, whose registry refusal the processor now catches by code at pickup instead of letting it skip the record); admissible as operator-authored config; stamped by `recordRun` from `config.defaultBackend`; an audit, not a guard. Acceptance gains the matching clause. The record's `reason` enum listing gains `backend-unblessed`, which #227 made a record reason without adding it there. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the near-miss entry: "byte-identical in the record, the panel and the log" is no longer true of the record and the panel, which now confirm the fallen-back venue after the spend, so the sweep's justification is restated as the preventing half. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: dispatch itself does not move, only what is written down about it. |
 | 2026-09-14 | Issue #277, part 2: the session store gates resume on venue. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `venue` sidecar (not key material; absent reads as the literal `local`, never the default; `lstat`/ENOENT alone decides absence; an unreadable stamp fails closed), its ladder position (behind every arm a venue move cannot cause, ahead of both `pi-version` arms it can), the always-sentinel write order (fatal `(pending)` before the swap, the real stamp after it and before `pi-version`), the resolve-side re-check after the copy, what `venue-changed` does not distinguish, and the ABA and mixed-version residuals; acceptance gains the venue cases. Two corrections in the same entry: the write path said "the two sidecars" while three were written after the swap, and the lstat bullet said every write goes through a rename while the `pi-version` write is plain -- both now state what the code does. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `venue-changed` joins the `session.reason` enum and the resolve path's producer row. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: the container still sees only `/session/current.jsonl`, and nothing venue-derived crosses the boundary. |
+| 2026-09-14 | Issue #277, part 3: the sandbox refuses per job. **`INT-SANDBOX-CONTRACT` AMENDED**: the manifest gains `backend` (resolved through `resolveBackendName`; `null` for a stamp with no venue, never a guessed `local`; kept across a pin), and LOCAL-ONLY becomes a per-job refusal (`venue-unreachable`) inside `resolveSandbox`, ahead of the image and workspace checks, for both entry points, with held meaning the local adapter by name and a keyless manifest reading as local; it replaces the deployment-wide refusal the panel never applied. Acceptance gains the matching cases. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, a correction: its `run.backend` entry still said "NOTHING DISPATCHES ON THE FIELD YET", false since #227's slice 4; it now describes the registry that dispatches and the three stores that record the resolved name. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the sandbox is still its sibling, and the job container is untouched. |

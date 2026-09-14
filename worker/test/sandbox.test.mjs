@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { buildSandboxRunArgs, listRunningSandboxes, parsePublish, resolveSandbox, sandboxContainerName, SANDBOX_NAME_PREFIX } from "../src/sandbox.mjs";
+import { buildSandboxRunArgs, listRunningSandboxes, parsePublish, resolveSandbox, SANDBOX_NAME_PREFIX, sandboxContainerName, sandboxVenueRefusal } from "../src/sandbox.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -107,6 +107,34 @@ test("resolveSandbox names the cause: retention off, swept, imageless, workspace
 	const gone = resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(manifest), fileExists: () => false });
 	assert.equal(gone.refused, "workspace-gone");
 	assert.match(gone.message, /\/w/, "the missing path IS the diagnosis, so it must appear");
+});
+
+test("resolveSandbox refuses a run from a venue this host did not run, ahead of the image and the workspace (#277)", () => {
+	const manifest = { jobId: "j1", kind: "github", image: "pi-job:latest", workspace: "/w", createdAt: "2026-08-01T00:00:00Z" };
+	const fsWith = (m) => ({ readFileSync: () => JSON.stringify(m) });
+	const resolve = (m, fileExists = () => true) => resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith(m), fileExists });
+
+	// Another venue: refused by name, and BEFORE the symptoms -- an imageless manifest whose workspace is gone
+	// still reports the venue, because that is the cause an operator can act on.
+	const far = resolve({ ...manifest, backend: "far", image: null }, () => false);
+	assert.equal(far.refused, "venue-unreachable");
+	assert.match(far.message, /"far"/);
+	// A workspace that happens to exist at the same path here must not let it through either.
+	assert.equal(resolve({ ...manifest, backend: "far" }).refused, "venue-unreachable");
+	// A name this build does not know is not a venue this host holds.
+	assert.equal(resolve({ ...manifest, backend: "not-a-backend" }).refused, "venue-unreachable");
+	// A stamp that is PRESENT but names nothing is refused, not read as local -- the table's backendFor(null)
+	// would say `local`, and a venue that was never known is not a local one.
+	for (const backend of [null, "", 7]) {
+		const r = resolve({ ...manifest, backend });
+		assert.equal(r.refused, "venue-unreachable", JSON.stringify(backend));
+		assert.match(r.message, /names no backend/);
+	}
+	// Held means the local adapter by name.
+	assert.equal(resolve({ ...manifest, backend: "local" }).refused, undefined);
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "local" } }), null);
+	// A manifest with no key at all predates venue attribution, and ran on local.
+	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest }), null);
 });
 
 test("resolveSandbox yields the manifest and the container name when the run is intact", () => {

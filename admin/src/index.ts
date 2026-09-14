@@ -122,7 +122,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { setGlyphs } from "./panel.mjs";
-import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName } from "@edgehero/pi-dispatch/sandbox";
+import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName, sandboxVenueRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
@@ -1747,16 +1747,23 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
  * currently running is deliberately NOT asked -- that needs docker and `pi-dispatch sandbox --list`
  * already answers it.
  */
-function readSandboxInfo(paths: any, jobId: string): any {
+export function readSandboxInfo(paths: any, jobId: string, { now = Date.now }: { now?: () => number } = {}): any {
   if (!jobId) return null;
   if (!paths?.sandboxRetentionHours) return { retained: false, reason: "retention off" };
   const manifest = readManifest({ sandboxDir: paths.sandboxDir, jobId });
   if (!manifest) return { retained: false, reason: "swept" };
+  // #277: the SAME venue refusal `resolveSandbox` applies when the key is pressed, asked here so the panel
+  // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
+  // verdict, which is what the dashboard's key guard reads.
+  if (sandboxVenueRefusal({ jobId, manifest })) {
+    const venue = typeof manifest.backend === "string" && manifest.backend !== "" ? manifest.backend : "an unrecorded venue";
+    return { retained: false, reason: `not reopenable here (ran on ${venue})` };
+  }
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");
   const until = Number.isFinite(keepUntil) ? keepUntil : createdAt + paths.sandboxRetentionHours * 3600000;
   if (!Number.isFinite(until)) return { retained: true };
-  const hours = Math.max(0, Math.round((until - Date.now()) / 3600000));
+  const hours = Math.max(0, Math.round((until - now()) / 3600000));
   return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d` };
 }
 
@@ -1804,7 +1811,7 @@ async function openSandboxSession(paths: any, jobId: string): Promise<void> {
  * `stdin.once("data")` here would never fire and the panel would hang suspended forever -- waiting on
  * input from a stream the suspend just paused. Resuming stdin to read one key would mean re-entering the
  * input handling that the suspend exists to hand away. A fixed pause cannot deadlock, and this path is
- * only reached when a workspace disappears between opening RUN_DETAIL and pressing the key.
+ * reached whenever `resolveSandbox` refuses at the key press, or docker cannot be started.
  */
 function pauseForMessage(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 2500));

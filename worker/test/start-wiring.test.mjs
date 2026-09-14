@@ -1027,6 +1027,16 @@ test("every session bound config reads is actually handed to the store", () => {
 	}
 });
 
+test("the sandbox stamp resolves its venue with the same default (#277)", () => {
+	// A window of the source between the preparer's construction and its preparers argument, rather than a
+	// regex over the whole object literal: that literal nests other calls' braces.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	const from = src.indexOf("prepareWorkspace: makePrepareWorkspace({");
+	const to = src.indexOf("preparers: makeForgePreparers(", from);
+	assert.ok(from >= 0 && to > from, "the preparer is constructed where this pin expects");
+	assert.match(src.slice(from, to), /defaultBackend:\s*config\.defaultBackend/, "the retained manifest records the venue the registry dispatches to");
+});
+
 test("the record's default venue and the registry's come from the one config value (#277)", () => {
 	// Asserted against the SOURCE so it runs without Valkey. Two defaults read from two places would let the
 	// record name a venue the registry never dispatched to, and nothing else would notice.

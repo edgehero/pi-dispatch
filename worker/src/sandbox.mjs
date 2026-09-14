@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
+import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { buildDockerRunArgs } from "./docker-run.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
@@ -31,7 +32,7 @@ const exec = promisify(execFile);
 
 /**
  * The name namespace, and it is load-bearing. The boot reaper filters `name=pi-job-`
- * (`makeReaper` in start.mjs) and docker matches that as a SUBSTRING, so a sandbox must not contain it --
+ * (`makeReaper` in backend-local.mjs) and docker matches that as a SUBSTRING, so a sandbox must not contain it --
  * otherwise a worker restart kills the shell an operator is sitting in. `pi-sandbox-` is outside that
  * filter on purpose, and a test pins it.
  */
@@ -137,9 +138,40 @@ export async function listRunningSandboxes({ execFn = exec } = {}) {
 }
 
 /**
+ * Whether a retained run can be re-opened HERE, judged by the venue it ran in (issue #277). `null` when it
+ * can, else `{ refused, message }`. Exported for the admin panel, which asks before advertising the key.
+ *
+ * WHY THIS IS PER JOB. A sandbox opens a shell on THIS host's docker daemon against the job's retained
+ * directory, so it can reproduce only a run whose container was built here. The check used to be
+ * deployment-wide (refuse every sandbox when any blessed venue was remote) because the command takes a job
+ * id and could not learn its venue; the manifest now records it, and the answer belongs to the job.
+ *
+ * HELD MEANS THE LOCAL ADAPTER, by name. The launcher below is hard-wired to this host's docker CLI, which is
+ * exactly the `local` bundle (its name is `DEFAULT_BACKEND`). Not "any venue declaring `remote: false`": a
+ * future non-remote venue on another runtime would pass that and be reopened under docker, reproducing a
+ * run from a runtime it never ran in. Such a venue must widen this deliberately.
+ *
+ * A MANIFEST WITH NO `backend` KEY predates venue attribution and ran on `local` (`UNATTRIBUTED_BACKEND`).
+ * A key that is PRESENT but not a name is refused: `typeof` first, because the table's `backendFor(null)`
+ * returns `local`, and a null stamp means the venue was never known, not that it was local.
+ */
+export function sandboxVenueRefusal({ jobId, manifest }) {
+	const venue = Object.hasOwn(manifest ?? {}, "backend") ? manifest.backend : UNATTRIBUTED_BACKEND;
+	if (typeof venue !== "string" || venue === "") {
+		return { refused: "venue-unreachable", message: `the manifest for ${jobId} names no backend, so this host cannot tell whether the run happened here` };
+	}
+	if (venue === DEFAULT_BACKEND) return null;
+	return {
+		refused: "venue-unreachable",
+		message: `${jobId} ran on the ${JSON.stringify(venue)} backend, not on this host's docker daemon — a sandbox opens a shell here against the retained directory, so it cannot reproduce that run. Open it on the venue that ran it.`,
+	};
+}
+
+/**
  * Resolve one retained run into a launchable argv, or a NAMED refusal.
  *
- * Split out from the launch so both callers -- the CLI and the admin panel -- refuse identically, and so
+ * Split out from the launch so both callers -- the CLI and the admin panel -- refuse identically, the venue
+ * refusal included, and so
  * the whole decision is testable without docker. Every refusal names what to do next, the posture
  * `doctor` sets: a bare "not found" for a run the operator watched finish ten minutes ago is the least
  * useful thing this could say.
@@ -153,6 +185,11 @@ export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = []
 			? { refused: "retention-off", message: "workspace retention is off — set PI_SANDBOX_RETENTION_HOURS to a positive number to make future runs resurrectable" }
 			: { refused: "absent", message: `no retained workspace for ${jobId} — it was swept after ${retentionHours}h, or the run predates retention (\`pi-dispatch sandbox --list\` shows what is left)` };
 	}
+	// The venue BEFORE the image and the workspace (#277): for a run from another venue those two are the
+	// symptoms, and the first refusal an operator reads should be the cause. A workspace that happens to
+	// exist at the same path on this host would otherwise pass and silently reproduce the wrong run.
+	const venue = sandboxVenueRefusal({ jobId, manifest });
+	if (venue) return venue;
 	if (!manifest.image) {
 		return { refused: "no-image", message: `the manifest for ${jobId} names no image, so the sandbox cannot reproduce the run` };
 	}

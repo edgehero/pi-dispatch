@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveBackendName } from "./backend-registry.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { retainJobDir } from "./sandbox-store.mjs";
 import { prepareGithubWorkspace } from "./prepare-github.mjs";
@@ -42,6 +43,10 @@ export const TRIGGER_SKILLS_SUBDIR = "trigger-skills";
 export function makePrepareWorkspace({
 	jobsDir,
 	forgeFor,
+	// #277. The deployment's default venue, for the sandbox stamp: a retained directory records the venue the
+	// job resolved to through the SAME function the registry dispatches on, so the venue that ran and the
+	// venue a sandbox later checks are one answer. Null (a DI seam) stamps no venue, and the sandbox refuses.
+	defaultBackend = null,
 	// REQ-RESURRECTABLE-SANDBOX. The DEPLOYMENT default image, resolved per job against the trigger's own
 	// `run.image` through the SAME function the pre-spend preflight and run-container use -- so the tag that
 	// was checked, the tag that ran and the tag a sandbox later re-opens are one answer by construction
@@ -85,9 +90,9 @@ export function makePrepareWorkspace({
 			log("trigger_skills_injected", { dirs: injected.dirs, files: injected.files, bytes: injected.bytes });
 		}
 		// What `cleanup` needs to retain this run's directory, stamped here because this is the only place
-		// that holds all three at once. Applied to the RESULT rather than mutated in, so a preparer's
+		// that holds all of it at once. Applied to the RESULT rather than mutated in, so a preparer's
 		// `{ outcome: "policy" }` refusal -- which carries no jobDir -- is passed through untouched.
-		const sandbox = { jobId: queueJobId ?? null, kind: job.kind ?? null, image: resolveJobImage(job, jobImage) };
+		const sandbox = { jobId: queueJobId ?? null, kind: job.kind ?? null, image: resolveJobImage(job, jobImage), backend: resolveBackendName(job, defaultBackend) };
 		if (job.kind === "local") {
 			// Harness text above, operator DATA below: the fixed pointer line names /job/event.json so a
 			// flow can discover the trigger context (mirroring the github prompt, which names the same
