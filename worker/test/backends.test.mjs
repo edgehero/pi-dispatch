@@ -44,8 +44,8 @@ test("an artifact that names no venue was produced on a LOCAL one, which the tab
 });
 
 test("every backend name fits the charset a venue stamp relies on (#277)", () => {
-	// The session store invalidates a venue stamp with a sentinel written in characters no venue can carry.
-	// That is only a proof while every name this build knows stays inside the trigger charset.
+	// A recorded venue is only unambiguous while every name this build knows stays inside the trigger
+	// charset: a sentinel or separator written outside it can then never be mistaken for a venue.
 	for (const name of BACKEND_NAMES) assert.match(name, /^[A-Za-z0-9._-]+$/, name);
 });
 

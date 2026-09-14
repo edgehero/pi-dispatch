@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { InfraRetry } from "../src/processor.mjs";
 // run-history.mjs pulls in only node:fs/node:path -- safe below the node floor alongside processor.mjs.
 import { buildRecord, makeRecordWriter } from "../src/run-history.mjs";
+import { makeBackendRegistry } from "../src/backend-registry.mjs";
 
 // index.mjs imports bullmq, so this skips below the node floor / without deps and runs in CI,
 // where PI_DISPATCH_REQUIRE_WORKER_TESTS=1 turns a skip into a hard failure.
@@ -756,10 +757,11 @@ const secretJob = (id = "j1") => ({
 
 // A processor wired to the real recordRun. `runContainer`/`redis` are overridable so the infra-exit
 // paths (b)/(c2) reuse the same construction with a different container exit.
-function realRecordProcessor(recordRun, { runContainer, redis } = {}) {
+function realRecordProcessor(recordRun, { runContainer, redis, containerName } = {}) {
 	return mod.makeProcessor({
 		cancelJob: () => {},
 		stopContainer: () => {},
+		...(containerName ? { containerName } : {}),
 		redis: redis ?? { async incr() { return 1; }, async expire() {}, async decr() {} },
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
 		timeoutMs: 100000,
@@ -812,12 +814,31 @@ test("(a) completed run: real writer serialises a PII-free record to <jobId>.jso
 	assert.equal(writes[0].data.includes("SECRET_LABEL"), false, "the matched label must not leak into the record bytes");
 });
 
-test("(a2) a backend-unblessed refusal records the venue it refused, not the default it did not fall back to (#277)", { skip }, async () => {
+test("(a2) a venue this worker never built is refused AND recorded, not retried as an infra failure (#277)", { skip }, async () => {
+	// The container name comes from the REAL registry, as start.mjs wires it, and that registry holds only
+	// `local`. Its `containerName` throws for `far` -- a job a newer producer enqueued for a venue this build
+	// does not know -- and that throw used to skip runJob and every recordRun: no record, no refusal, a retry.
+	const local = {
+		name: "local",
+		runContainer: async () => ({ code: 0 }),
+		imagePreflight: async () => ({}),
+		egressPreflight: async () => ({}),
+		stopContainer: async () => {},
+		reap: async () => ({ reaped: true }),
+		neverStartedExits: [125, 126, 127],
+		containerName: (id) => `pi-job-${id}`,
+	};
+	const registry = makeBackendRegistry({ bundles: [local], defaultName: "local" });
+	assert.throws(() => registry.containerName({ id: "j-far", backend: "far" }), /no backend named "far"/, "the precondition: the registry refuses the name");
+
 	const { recordRun, writes } = makeRealRecordRun();
 	const job = secretJob("j-far");
 	job.data.backend = "far";
 	let ran = false;
-	const processor = realRecordProcessor(recordRun, { runContainer: async () => ((ran = true), { code: 0, aborted: false, turns: 1 }) });
+	const processor = realRecordProcessor(recordRun, {
+		containerName: registry.containerName,
+		runContainer: async () => ((ran = true), { code: 0, aborted: false, turns: 1 }),
+	});
 
 	const res = await processor(job, "tok", new AbortController().signal);
 

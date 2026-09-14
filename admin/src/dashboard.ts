@@ -1824,9 +1824,9 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   out.push(kv("image", t.image ?? "deployment default", t.image ? "accent" : "dim"));
   // #227, and it earns its row by the same argument the image row states: the dim "deployment default" is
   // "I checked". Where the box was BUILT bounds what the box can be, so it is not a fact to leave implicit.
-  // This row is what the trigger REQUESTED, readable before anything runs; what a job actually GOT is the
-  // run record's `backend` (#277), shown in RUN_DETAIL. Both are needed, because the record can only
-  // confirm a venue after the job already spent.
+  // This row is what the trigger REQUESTED, readable before anything runs; the venue a job actually resolved
+  // to is the run record's `backend` (#277), shown in RUN_DETAIL. Both are needed, because the record can
+  // only confirm a venue after the job was picked up.
   out.push(kv("backend", t.backend ?? "deployment default", t.backend ? "accent" : "dim"));
   // #291, beside the image row by the issue's own instruction: what the box CANNOT DO is not a fact to
   // leave implicit, and the dim "full pinned tool set" is the image row's "I checked", not an omission.
@@ -2201,12 +2201,13 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // and framed at DRILL_WIDTH. Absent on records written before the field existed, and on a deployment
   // that never declared a name, so a single-host drill-in is byte-identical.
   if (r.host) out.push(kv("host", String(r.host)));
-  // WHICH VENUE, beside which machine (#277): the backend this job resolved to, which TRIGGER_DETAIL's
-  // backend row cannot show -- that row is what a trigger REQUESTED, this is what a job GOT. Not nested
-  // under `host`: a single-host deployment names no host and still has a venue. Absent on records written
-  // before the field existed, and this line does not infer `local` for them -- the panel shows a record, it
-  // does not decide anything from one. Every new record carries the field, so unlike the host line this
-  // one appears on every drill-in from now on, deliberately.
+  // WHICH VENUE, beside which machine (#277): the backend this job RESOLVED to, which TRIGGER_DETAIL's
+  // backend row cannot show -- that row is what a trigger requested before anything ran. A refused job
+  // resolved to a venue too, so this is not a claim that a container ran there; the header's outcome says
+  // whether one did. Not nested under `host`: a single-host deployment names no host and still has a venue.
+  // Absent on a record that carries no field (written before #277, or by an older host in a mixed fleet),
+  // and nothing is inferred for it -- the panel shows a record, it decides nothing from one. Unlike the host
+  // line, every record this version writes carries the field, so the line is the normal case.
   if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", r.backend));
 
   // turns · exit · budget slot · attempt (each present only when the field is).

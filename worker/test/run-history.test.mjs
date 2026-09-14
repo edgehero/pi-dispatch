@@ -306,6 +306,9 @@ test("the record names the RESOLVED venue in tail position, read from the job DA
 		"local",
 		"read from job.data: a key on the BullMQ wrapper is not the trigger's venue, and reading it there is the bug index.mjs records",
 	);
+	// An explicit null is a name the processor's gate refuses, not a request for the default, so the record
+	// does not claim the default for it.
+	assert.equal(record(wrap({ ...data, backend: null }), { defaultBackend: "local" }).backend, null);
 	// No default passed is a dependency-injection seam, and it records nothing rather than guessing `local`.
 	const seam = record(wrap(data));
 	assert.ok("backend" in seam, "the key is always present");

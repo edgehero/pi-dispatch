@@ -39,28 +39,34 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
 /**
  * The NAME of the venue a job resolves to: its own `run.backend`, else the deployment default.
  *
- * ONE DERIVATION, READ BY EVERY STORE THAT RECORDS A VENUE (issue #277). The registry dispatches on it, and
- * the run record, the session stamp and the sandbox manifest write it down. Four copies of `?? defaultName`
- * would be four places a later change could land in one and not the others, and the whole value of those
- * stores is that what they record IS what dispatched: a record naming a venue the registry did not choose is
- * an audit trail that lies.
+ * ONE DERIVATION FOR DISPATCH AND FOR EVERY STORE THAT RECORDS A VENUE (issue #277). The registry dispatches
+ * on it and the run record writes it down. A copy of the expression per store would be one more place a
+ * later change could land in one and not the others, and the whole value of a recorded venue is that it IS
+ * what dispatched: a record naming a venue the registry did not choose is an audit trail that lies.
+ *
+ * ABSENT MEANS THE KEY IS ABSENT, `undefined` and nothing else. The loader writes no `backend` key for a
+ * trigger that names no venue, and the processor's blessed gate tests `!== undefined`, so an explicit `null`
+ * is a NAME the gate refuses rather than a request for the default. Resolving it with `??` would record the
+ * default on a job the processor refused for naming something else. No producer writes a null today; this
+ * keeps the three readers agreeing if one ever does.
  *
  * TAKES JOB DATA, NEVER THE BULLMQ WRAPPER. A wrapper's own keys are `id` and `data`, so `wrapper.backend`
  * is always undefined and every job would resolve to the default in silence -- the defect `index.mjs`
  * records beside `containerName`, which shipped once. Callers holding a wrapper pass `wrapper.data`.
  *
  * `null` WHEN NEITHER IS KNOWN, never a guessed `local`. Only a dependency-injection seam reaches that (every
- * wired caller is handed `config.defaultBackend`), and each consumer fails closed on it: the record stores a
- * null, the session store never resumes, and the sandbox refuses. A default here would hide a dropped wire
- * today and become a wrong answer the day `PI_BACKENDS` names a remote venue first.
+ * wired caller is handed `config.defaultBackend`), and a consumer must fail closed on it: the record stores
+ * the null, and the registry refuses a job it cannot name. A default here would hide a dropped wire today and
+ * become a wrong answer the day `PI_BACKENDS` names a remote venue first.
  *
  * HERE rather than in `backends.mjs`, whose `backendFor(name)` falls back to the TABLE's default -- a
  * different question, and putting the two side by side invites answering one with the other. And a free
- * function rather than a registry method, because the session store is constructed in `startWorker` well
- * before any bundle exists, which is the temporal dead zone `reapAll` above already records.
+ * function rather than a registry method, because a store constructed in `startWorker` before any bundle
+ * exists could not reach one -- the temporal dead zone `reapAll` above already records.
  */
 export function resolveBackendName(data, defaultName) {
-	return data?.backend ?? defaultName ?? null;
+	const named = data?.backend;
+	return named !== undefined ? named : (defaultName ?? null);
 }
 
 /**

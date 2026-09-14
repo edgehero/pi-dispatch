@@ -481,7 +481,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//
 		// ADMISSIBLE for the reason `processor.mjs` gives where it logs the same name: a backend name is
 		// operator-authored config checked against a charset at load, never payload. `null` only where no
-		// default was passed, which is a dependency-injection seam; `recordRun` in start.mjs always passes one.
+		// default was passed (a dependency-injection seam; `recordRun` in start.mjs always passes one) or
+		// where the job data carries an explicit null, which no producer writes and the blessed gate refuses.
 		backend: resolveBackendName(data, defaultBackend),
 	};
 }

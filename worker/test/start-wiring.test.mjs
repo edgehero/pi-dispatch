@@ -1648,6 +1648,9 @@ test("the run record resolves a venue with the SAME default the registry dispatc
 	captured.recordRun({ job: job("gh-far", { backend: "far" }), result: { outcome: "policy", reason: "backend-unblessed" }, startedAt: at, endedAt: at });
 
 	assert.equal(records.length, 2);
+	// Equal today partly by construction: this build's table holds only `local` and PI_BACKENDS must include
+	// it, so both defaults are the same word however they are wired. The source-pin test on start.mjs is what catches the
+	// two being wired from different places; this proves the live closure reaches a real record.
 	assert.equal(records[0].backend, registryArgs.defaultName, "a job naming no venue records the registry's own default");
 	assert.equal(records[0].backend, "local");
 	assert.equal(records[1].backend, "far", "and a named venue is recorded as named");

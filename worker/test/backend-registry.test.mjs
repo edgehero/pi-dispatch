@@ -44,10 +44,19 @@ test("dispatch resolves a venue exactly as the stores that record it do (#277)",
 	for (const data of [{}, { backend: "b" }, null, undefined]) {
 		assert.equal(reg.backendFor(data).name, resolveBackendName(data, "local"), `for ${JSON.stringify(data)}`);
 	}
-	// `??`, not `||`: an empty name is still a NAME, so it resolves to itself and the registry refuses it,
-	// rather than falling back to the default and recording a venue nobody chose.
+	// A default that is NOT `local`. With `local` as the only default under test, a registry that stopped
+	// calling the shared derivation and hardcoded the word `local` would agree with it by coincidence.
+	const farFirst = makeBackendRegistry({ bundles: [bundle("local", calls), bundle("b", calls)], defaultName: "b" });
+	for (const data of [{}, null, undefined, { backend: "local" }]) {
+		assert.equal(farFirst.backendFor(data).name, resolveBackendName(data, "b"), `default b, for ${JSON.stringify(data)}`);
+	}
+	// An empty name and an explicit null are still NAMES, so each resolves to itself and the registry refuses
+	// it, rather than falling back to the default and recording a venue nobody chose. Absent means the key is
+	// absent, which is what the processor's blessed gate tests too (`!== undefined`).
 	assert.equal(resolveBackendName({ backend: "" }, "local"), "");
 	assert.throws(() => reg.backendFor({ backend: "" }), /no backend named ""/);
+	assert.equal(resolveBackendName({ backend: null }, "local"), null);
+	assert.throws(() => reg.backendFor({ backend: null }), /no backend named null/);
 	assert.equal(resolveBackendName({}, undefined), null, "no default is a seam, and resolves to nothing rather than a guess");
 	assert.equal(resolveBackendName({ id: "j", data: { backend: "b" } }, "local"), "local", "a BullMQ wrapper is not job data");
 });
