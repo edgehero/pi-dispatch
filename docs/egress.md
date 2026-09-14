@@ -98,7 +98,9 @@ deployment. `doctor` does it once, when you ask.
 The last two each run a throwaway container on a throwaway network, using **your job image's own node**, so
 they prove the path your jobs actually take. They cost nothing: `api.anthropic.com` answers `401` to an
 unauthenticated request, so reaching the provider and being refused for the key proves the whole path
-without spending a token.
+without spending a token. The deny probe asks for `example.com`, a host that resolves and answers, so a proxy
+that lets everything out is caught; it is only contacted if your proxy lets the request out, which is the
+finding. A probe container that does not run at all is reported as not run, never as a deny.
 
 An absent proxy is a **hard failure** in doctor, because every job is refused while it is down. Everything
 that needs the network to answer is a **warning**, because a custom provider base URL or a transient blip

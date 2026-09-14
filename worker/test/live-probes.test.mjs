@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -27,12 +27,13 @@ import {
 	parseStatus,
 	pinningProbeRunArgs,
 	runLiveProbes,
+	sweepStaleContainers,
 	sweepStaleFixtures,
 } from "../src/live-probes.mjs";
 
 const FIXTURE = liveFixture("/tmp/pi-dispatch-live-1-abc");
 const ID = "a".repeat(64);
-const nodeFs = { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync };
+const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync };
 
 // What the shipped image reads under the builder's flags (measured on docker 27.4 / Docker Desktop), and what the
 // same image reads WITHOUT them. The second is the non-vacuity fixture: CapEff is 0 in both.
@@ -155,9 +156,11 @@ test("localFolders tells a folder the job user cannot write from a write the hos
 	const eacces = localFoldersVerdict({ code: 0, stdout: "not-writable\n", hostRead: null, nonce: "n" });
 	assert.equal(eacces.ok, false);
 	assert.match(eacces.detail, /cannot write/);
+	assert.equal(eacces.cause, "not-writable", "the cause rides the verdict, so doctor can give each its own fix");
 	const invisible = localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: null, nonce: "n" });
 	assert.equal(invisible.ok, false);
 	assert.match(invisible.detail, /not visible in the host folder/);
+	assert.equal(invisible.cause, "not-visible");
 	assert.equal(localFoldersVerdict({ code: 1, stdout: "", hostRead: null, nonce: "n" }).warn, true, "a vanished container is not read back, never a failure");
 });
 
@@ -179,6 +182,8 @@ test("egress is folded from the canary: off or partial is not read back, a wrong
 	const leak = egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: true }] });
 	assert.equal(leak.ok, false);
 	assert.match(leak.detail, /unlisted host was reached/);
+	assert.equal(egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: null }] }).warn, true, "a probe that did not run is no reading, never a deny");
+	assert.match(egressVerdict({ armed: null, results: [] }).detail, /could not be read/, "a malformed PI_EGRESS is not reported as off");
 });
 
 test("containerIdOf takes the ID docker run -d printed, and nothing else", () => {
@@ -254,9 +259,11 @@ test("a green run reads back all six, in the conformance list's order, and leave
 	assert.equal(result.ran, true);
 	assert.deepEqual(result.verdicts.map((v) => v.property), [...READ_BACK_BY_A_LIVE_PROBE]);
 	assert.deepEqual(result.verdicts.filter((v) => !v.ok).map((v) => v.property), ["egress"], "egress is off in this fixture, so it alone is unread");
-	assert.deepEqual(docker.calls.filter((a) => a[0] === "rm"), [["rm", "-f", ID]], "removed BY THE ID run -d printed");
+	assert.deepEqual(docker.calls.filter((a) => a[0] === "rm"), [["rm", "-f", ID], ["rm", "-f", "pi-dispatch-live-pin-4242-n0nce"]], "the probe BY THE ID run -d printed; the pin, which printed none, by its own pid-and-nonce name");
 	assert.deepEqual(readdirSync(args.jobsDir), [], "the fixture is gone");
 	assert.deepEqual(result.notes, []);
+	const run = docker.calls.find((a) => a[0] === "run" && a.includes("sleep"));
+	assert.equal(run.at(-1), String(liveSleepSeconds(1000)), "the argv the sequence builds ends in the sleep DERIVED from its own step bound");
 });
 
 test("the mutation is ANNOUNCED before the first docker call, and not at all when nothing will run", async () => {
@@ -265,7 +272,7 @@ test("the mutation is ANNOUNCED before the first docker call, and not at all whe
 	const run = async (args) => (order.push(`docker ${args[0]}`), docker.run(args));
 	await runLiveProbes(probeArgs(docker, { run, announce: (line) => order.push(line) }));
 	assert.match(order[0], /^starting pi-dispatch-live-probe-4242-n0nce from pi-job:x .* both are removed/);
-	assert.equal(order[1], "docker run");
+	assert.deepEqual(order.slice(1, 3), ["docker ps", "docker run"], "announced before the sweep's first docker call and the probe's");
 	const silent = [];
 	await runLiveProbes(probeArgs(fakeDocker(), { endpoint: { local: false }, announce: (line) => silent.push(line) }));
 	assert.deepEqual(silent, []);
@@ -288,8 +295,45 @@ test("a probe container that never started removes nothing it did not create, an
 	const args = probeArgs(docker);
 	const result = await runLiveProbes(args);
 	assert.equal(result.ran, false);
-	assert.deepEqual(docker.calls.map((a) => a[0]), ["run"], "no inspect, no exec, no pin, and no rm of a container that does not exist");
+	assert.deepEqual(docker.calls.map((a) => a[0]), ["ps", "run", "rm"], "no inspect, no exec, no pin");
+	assert.deepEqual(docker.calls.at(-1), ["rm", "-f", "pi-dispatch-live-probe-4242-n0nce"], "no ID came back, so its own pid-and-nonce name, in case the create landed");
 	assert.deepEqual(readdirSync(args.jobsDir), []);
+});
+
+test("a start that printed an ID and then failed or timed out is removed BY THAT ID: --rm never runs for it", async () => {
+	for (const code of [127, null]) {
+		const docker = fakeDocker({ run: async () => ({ code, stdout: `${ID}\n`, stderr: "" }) });
+		const result = await runLiveProbes(probeArgs(docker));
+		assert.equal(result.ran, false);
+		assert.deepEqual(docker.calls.filter((a) => a[0] === "rm"), [["rm", "-f", ID]], `exit ${code}`);
+	}
+});
+
+test("a fixture that cannot be created is a reason not to run, never an exception, and a half-made one is removed", async () => {
+	const docker = fakeDocker();
+	for (const [name, fs] of [
+		["mkdtemp", { ...nodeFs, mkdtempSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } }],
+		["realpath", { ...nodeFs, realpathSync: () => { throw Object.assign(new Error("ELOOP"), { code: "ELOOP" }); } }],
+	]) {
+		const args = probeArgs(docker, { fs });
+		const result = await runLiveProbes(args);
+		assert.equal(result.ran, false, name);
+		assert.match(result.notes[0], /fixture could not be created .*\((EACCES|ELOOP)\)/);
+		assert.deepEqual(readdirSync(args.jobsDir), [], `${name}: nothing mkdtemp made is left behind`);
+	}
+	assert.ok(!docker.calls.some((a) => a[0] === "run"), "no container");
+	const empty = await runLiveProbes(probeArgs(fakeDocker(), { jobsDir: "" }));
+	assert.equal(empty.ran, false, 'PI_JOBS_DIR="" is a note, not a crash');
+});
+
+test("the endpoint is asked AGAIN before the first command, and a context switched since the collection runs nothing", async () => {
+	const docker = fakeDocker();
+	const announced = [];
+	const result = await runLiveProbes(probeArgs(docker, { resolveEndpoint: async () => ({ local: false }), announce: (l) => announced.push(l) }));
+	assert.equal(result.ran, false);
+	assert.deepEqual(docker.calls, []);
+	assert.deepEqual(announced, []);
+	assert.equal((await runLiveProbes(probeArgs(fakeDocker(), { resolveEndpoint: async () => LOCAL }))).ran, true);
 });
 
 test("teardown by ID runs in finally when a step times out or the container vanishes mid-read", async () => {
@@ -324,8 +368,8 @@ test("two concurrent runs never remove each other's container or fixture", async
 		runLiveProbes(probeArgs(a, { jobsDir, pid: 1, nonce: "x", isAlive: () => true })),
 		runLiveProbes(probeArgs(b, { jobsDir, pid: 2, nonce: "y", isAlive: () => true })),
 	]);
-	assert.deepEqual(a.calls.filter((c) => c[0] === "rm").map((c) => c[2]), ["a".repeat(64)]);
-	assert.deepEqual(b.calls.filter((c) => c[0] === "rm").map((c) => c[2]), ["b".repeat(64)]);
+	assert.deepEqual(a.calls.filter((c) => c[0] === "rm").map((c) => c[2]), ["a".repeat(64), "pi-dispatch-live-pin-1-x"]);
+	assert.deepEqual(b.calls.filter((c) => c[0] === "rm").map((c) => c[2]), ["b".repeat(64), "pi-dispatch-live-pin-2-y"]);
 	assert.ok(a.calls.find((c) => c[0] === "run").some((x) => x === "--name=pi-dispatch-live-probe-1-x"));
 });
 
@@ -343,13 +387,35 @@ test("a pinning container that WAS created is removed by its own ID and pinning 
 	assert.deepEqual(docker.calls.filter((a) => a[0] === "rm").map((a) => a[2]), [ID, pinId]);
 });
 
-test("the stale-fixture sweep removes only a dead PID's fixture, never a live run's or its own", () => {
+test("the stale-fixture sweep removes only a dead PID's fixture of mkdtemp's exact shape, never a live run's, its own, or a lookalike", () => {
 	const jobsDir = mkdtempSync(join(tmpdir(), "pi-live-sweep-"));
-	for (const d of [`${LIVE_PREFIX}100-aaa`, `${LIVE_PREFIX}200-bbb`, `${LIVE_PREFIX}300-ccc`, "some-job-dir"]) mkdirSync(join(jobsDir, d));
+	const target = mkdtempSync(join(tmpdir(), "pi-live-sweep-target-"));
+	writeFileSync(join(target, "keep.txt"), "x");
+	for (const d of [`${LIVE_PREFIX}100-aB3xYz`, `${LIVE_PREFIX}200-bbbbbb`, `${LIVE_PREFIX}300-cccccc`, `${LIVE_PREFIX}98765-notes`, "some-job-dir"]) mkdirSync(join(jobsDir, d));
+	writeFileSync(join(jobsDir, `${LIVE_PREFIX}101-fil3ab`), "a file, not a fixture");
+	symlinkSync(target, join(jobsDir, `${LIVE_PREFIX}102-l1nkab`));
 	const swept = sweepStaleFixtures({ jobsDir, pid: 300, fs: nodeFs, isAlive: (p) => p === 200 });
-	assert.deepEqual(swept, [`${LIVE_PREFIX}100-aaa`]);
-	assert.deepEqual(readdirSync(jobsDir).sort(), [`${LIVE_PREFIX}200-bbb`, `${LIVE_PREFIX}300-ccc`, "some-job-dir"]);
+	assert.deepEqual(swept, [`fixture ${LIVE_PREFIX}100-aB3xYz`]);
+	assert.deepEqual(readdirSync(jobsDir).sort(), [`${LIVE_PREFIX}101-fil3ab`, `${LIVE_PREFIX}102-l1nkab`, `${LIVE_PREFIX}200-bbbbbb`, `${LIVE_PREFIX}300-cccccc`, `${LIVE_PREFIX}98765-notes`, "some-job-dir"]);
+	assert.ok(existsSync(join(target, "keep.txt")), "a symlink's target is never touched");
 	assert.deepEqual(sweepStaleFixtures({ jobsDir: join(jobsDir, "absent"), pid: 1, fs: nodeFs, isAlive: () => false }), [], "an unreadable dir sweeps nothing and does not throw");
+});
+
+test("the container sweep removes a probe or pin a DEAD pid left, by ID, and says so; never a live run's, its own, or another name", async () => {
+	const calls = [];
+	const listing = [
+		`${"1".repeat(12)} pi-dispatch-live-probe-100-abc123`,
+		`${"2".repeat(12)} pi-dispatch-live-pin-100-abc123`,
+		`${"3".repeat(12)} pi-dispatch-live-probe-200-def456`,
+		`${"4".repeat(12)} pi-dispatch-live-probe-300-aaa111`,
+		`${"5".repeat(12)} pi-dispatch-live-probe-100-notes`,
+		`${"6".repeat(12)} pi-job-pi-dispatch-live-probe-100-abc123`,
+	].join("\n");
+	const step = async (args) => (calls.push(args), args[0] === "ps" ? { code: 0, stdout: listing } : { code: 0, stdout: "" });
+	const swept = await sweepStaleContainers({ step, pid: 300, isAlive: (p) => p === 200 });
+	assert.deepEqual(swept, ["container pi-dispatch-live-probe-100-abc123", "container pi-dispatch-live-pin-100-abc123"]);
+	assert.deepEqual(calls.filter((a) => a[0] === "rm").map((a) => a[2]), ["1".repeat(12), "2".repeat(12)]);
+	assert.deepEqual(await sweepStaleContainers({ step: async () => ({ code: 1, stdout: "" }), pid: 1, isAlive: () => false }), [], "a docker that cannot list sweeps nothing");
 });
 
 test("the fixture is created under jobsDir, resolved, and traversable by the job user", async () => {

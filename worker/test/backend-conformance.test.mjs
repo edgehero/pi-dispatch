@@ -280,6 +280,17 @@ test("a readBack report is read per property: held passes, unread abstains, a fa
 	for (const p of READ_BACK_BY_A_LIVE_PROBE) assert.equal(findings(absent, p)[0].unverifiable, true, p);
 });
 
+test("a readBack report cannot pass what it did not read: warn beats ok, a repeated property abstains, inherited keys do not count (#278)", async () => {
+	const base = { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) };
+	const warned = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => ({ isolation: { ok: true, warn: true, detail: "not read back: cgroup v1" } }) });
+	assert.equal(findings(warned, "isolation")[0].unverifiable, true, "a reading marked not-read-back is never a pass");
+	const repeated = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => [{ property: "isolation", ok: false, detail: "CapBnd a80425fb" }, { property: "isolation", ok: true, detail: "fine" }] });
+	assert.equal(findings(repeated, "isolation")[0].unverifiable, true, "a failure cannot be overwritten by a later pass");
+	assert.match(findings(repeated, "isolation")[0].detail, /more than once/);
+	const inherited = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => Object.create({ nonRoot: { ok: true, detail: "from the prototype" } }) });
+	assert.equal(findings(inherited, "nonRoot")[0].unverifiable, true, "only the report's own properties are read");
+});
+
 test("a read-back that does not hold passes against a backend that declares the property absent", async () => {
 	const absentIsolation = { ...BACKENDS.local.declares, isolation: "absent" };
 	const r = await runBackendConformance(referenceBackend({ declares: absentIsolation }), { readBack: async () => ({ isolation: { ok: false, detail: "CapBnd a80425fb" } }) });

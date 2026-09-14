@@ -1513,8 +1513,10 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
 - **Contract**:
   - **Only on a docker CLI observed local.** Before anything runs, the endpoint read that
     `INT-CONTAINER-RUNTIME-CONTRACT`'s "Which daemon" bullet describes must answer local. Otherwise one ⚠ and no
-    docker command: on a redirected daemon the bind paths and `.Mounts` are another machine's. It is also not run
-    when the daemon does not answer or `PI_JOB_IMAGE` is absent.
+    docker command: on a redirected daemon the bind paths and `.Mounts` are another machine's. It is asked AGAIN
+    immediately before the first probe command, since prompts and slow checks sit between doctor's collection and
+    the probe. It is also not run when the daemon does not answer or `PI_JOB_IMAGE` is absent, or when the fixture
+    cannot be created (a jobs dir this shell cannot write is a note, never an exception).
   - **The argv is built by the SAME builder.** `buildDockerRunArgs` with the fixture mounts, `network: "none"`,
     `env: {}` and `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. It adds
     exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and `--cpus` reach
@@ -1528,11 +1530,13 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     directory `pi-dispatch-live-<pid>-...`: outside `pi-job-`, `pi-sandbox-` and `pi-dispatch-valkey`, and unique
     per run.
   - **Shown first, removed by ID.** Doctor prints the probe's name, image and fixture location before the first
-    docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` (never the name, which a
-    concurrent run cannot share but a stray could), the same for a pinning container only if one was created,
-    and removes the fixture. A removal that fails is a ⚠ carrying the command. A fixture left by an interrupted
-    run is removed at the start of the next one only when its PID is no longer alive; an interrupted probe
-    container removes itself when its sleep ends (`--rm`).
+    docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` whenever one was printed,
+    whatever the exit (a start that failed or timed out after the create leaves a container `--rm` never
+    removes), falls back to the pid-and-nonce NAME only when no ID came back, does the same for the pinning
+    container, and removes the fixture. A removal that fails is a ⚠ carrying the command. **What an interrupted
+    run leaves, the next removes, and says so**: fixtures of exactly `mkdtemp`'s shape that are real directories,
+    and probe or pinning containers by name shape, in both cases only for a PID no longer alive. A probe that
+    had STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
   - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
     a pass:
     - `isolation`: one `docker exec` of a constant script reading `/proc/1/status` and the cgroup files. `CapBnd`
@@ -1550,14 +1554,16 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
       afterwards; a refusal in other words is not read back.
     - `egress`: **the one reading this builder does not make.** It needs a job-shaped `--internal` network and
       the proxy, so it is folded in from `doctor`'s egress canary, whose two probe checks carry a non-rendered
-      `readBack`. Both readings must be present; the policy off, the proxy down or a skipped canary is not read
-      back.
+      `readBack`. Both readings must be present and must be answers: the deny probe asks for `example.com`, a host
+      that resolves (a reserved `.example` name no proxy can reach read as denied behind an allow-everything
+      proxy), and a probe container that did not run (any exit but the script's 0 or 3) is no reading. The policy
+      off, the proxy down or a skipped canary is not read back.
   - **No budget, no credential, no fix.** Nothing here reserves budget (`reserveBudget` is called only from the
     processor), mints a token, or puts a key in a container, and no check it renders carries a `fixAction`.
   - **Other venues** read back through the conformance harness: `runBackendConformance(backend, { readBack })`
-    takes the same verdicts, keyed by property or as this module's array, for `READ_BACK_BY_A_LIVE_PROBE`; a
-    property the report omits or could not read abstains, and one read as not holding fails a backend that
-    declares it `enforced` or `asserted`.
+    takes the same verdicts, keyed by property or as this module's array, for `READ_BACK_BY_A_LIVE_PROBE`. A
+    property the report omits, marks `warn` (whatever its `ok`), names twice, or carries only by inheritance
+    abstains; one read as not holding fails a backend that declares it `enforced` or `asserted`.
 - **Why**: `doctor` printed the declarations and nothing read them back (#278). A probe with its own argv would
   read back a container no job is, which is exactly the second place for the boundary to live that
   `INT-SANDBOX-CONTRACT` calls its load-bearing sentence.
@@ -1571,7 +1577,11 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
   CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
   container that vanishes, or a step that throws, the probe container is removed by its ID and the fixture is
   removed; given a `docker run -d` that failed, no removal is attempted; two concurrent runs remove only their own
-  containers. Given `doctor` without `--live`, its output and its spawns are unchanged.
+  containers. Given a `docker run -d` that printed an ID and then failed, that ID is removed. Given a fixture that
+  cannot be created, nothing runs and doctor reports it. Given a probe or fixture a dead PID left, the next run
+  removes it and names it; given a directory that is not of `mkdtemp`'s shape, or a symlink, it is not touched.
+  Given an allow-everything proxy, the egress deny probe reads as reached. Given `doctor` without `--live`, its
+  output and its spawns are unchanged.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 

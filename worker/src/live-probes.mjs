@@ -41,7 +41,8 @@ const STEPS_WHILE_ALIVE = 3;
 /**
  * How long the probe container sleeps: every step that needs it alive at its full bound, plus a margin for the
  * spawn itself. DERIVED, so a longer step bound cannot leave a container that exits under the last read, and a
- * Ctrl-C mid-probe leaves one that removes itself (`--rm`) within that window rather than a literal 300 seconds.
+ * Ctrl-C mid-probe leaves a STARTED one that removes itself (`--rm`) within that window rather than a literal 300
+ * seconds. One interrupted before it started has no `--rm` to run; the next run's sweep removes it.
  */
 export function liveSleepSeconds(stepTimeoutMs = LIVE_STEP_TIMEOUT_MS) {
 	return Math.ceil((STEPS_WHILE_ALIVE * stepTimeoutMs) / 1000) + 30;
@@ -207,9 +208,9 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
 export function localFoldersVerdict({ code, stdout, hostRead, nonce }) {
 	if (code !== 0) return notReadBack("localFolders", "the write probe did not run in the container");
 	const said = String(stdout ?? "").trim();
-	if (said === "not-writable") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place");
+	if (said === "not-writable") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
 	if (said !== "wrote") return notReadBack("localFolders", "the write probe gave no answer");
-	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace is not visible in the host folder, so the folder is not the one edited in place");
+	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace is not visible in the host folder, so the folder is not the one edited in place", { cause: "not-visible" });
 	return verdict("localFolders", true, "a file written inside /workspace was read back from the host folder");
 }
 
@@ -237,57 +238,75 @@ export function imagePinningVerdict({ code, output, stillAbsent }) {
  * "not read back", never a pass.
  */
 export function egressVerdict({ armed, results }) {
+	if (armed === null) return notReadBack("egress", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
 	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
+	if (results.some((r) => typeof r.reached !== "boolean")) return notReadBack("egress", "an egress probe did not run to an answer (see the egress lines above)");
 	const wrong = results.filter((r) => r.reached !== r.want);
 	if (wrong.length > 0) return verdict("egress", false, wrong.map((r) => (r.want ? "the provider was not reached" : "an unlisted host was reached")).join("; "));
 	return verdict("egress", true, "the provider was reached and an unlisted host was not");
 }
 
 /**
- * The whole sequence. Returns `{ ran, verdicts, notes }`: `ran` false with one note when nothing may run; the
- * verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed.
+ * The whole sequence. Returns `{ ran, verdicts, notes, swept }`: `ran` false with one note when nothing may run; the
+ * verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed; `swept` for what an
+ * interrupted earlier run left and this one removed.
  *
- * Order: precondition, stale-fixture sweep, fixture, probe container, reads, pinning probe -- and a `finally` that
- * removes the probe container BY THE ID `run -d` PRINTED (never by name, which a concurrent run could reuse) and
- * the fixture, whatever happened above it.
+ * Order: precondition, a FRESH endpoint read, the announcement, the sweep, the fixture, the probe container, the
+ * reads, the pinning probe -- and a `finally` that removes each container BY THE ID `run -d` printed (by its
+ * pid-and-nonce name only when no ID came back, which a CLI killed or timed out mid-create can leave) and the
+ * fixture, whatever happened above it.
  */
-export async function runLiveProbes({ image, endpoint, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS }) {
-	if (endpoint?.local !== true) {
-		return { ran: false, verdicts: [], notes: ["this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run"] };
-	}
-	if (dockerReachable !== true) return { ran: false, verdicts: [], notes: ["the Docker daemon did not answer, so no container was run"] };
-	if (imagePresent !== true) return { ran: false, verdicts: [], notes: [`the job image ${image} is not present, so no container was run`] };
+export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS }) {
+	const notLocal = { ran: false, verdicts: [], notes: ["this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run"], swept: [] };
+	if (endpoint?.local !== true) return notLocal;
+	if (dockerReachable !== true) return { ran: false, verdicts: [], notes: ["the Docker daemon did not answer, so no container was run"], swept: [] };
+	if (imagePresent !== true) return { ran: false, verdicts: [], notes: [`the job image ${image} is not present, so no container was run`], swept: [] };
+	// ASKED AGAIN, immediately before the first command. The answer above came from the start of doctor's run, and
+	// prompts and slow checks sit between the two; a `docker context use` in that window would otherwise send every
+	// read below to another machine and report it as this one (the per-job re-read in `start.mjs`, for the same reason).
+	if (typeof resolveEndpoint === "function" && (await resolveEndpoint())?.local !== true) return notLocal;
 
 	const names = liveNames(pid, nonce);
 	const notes = [];
-	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): the one host mutation this makes is named, with where it
-	// lives and that it goes away, before the sweep or the fixture touches anything.
-	announce(`starting ${names.probe} from ${image} (no network, no environment) with a fixture under ${jobsDir}; both are removed when the read-back ends`);
-	sweepStaleFixtures({ jobsDir, pid, fs, isAlive });
+	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
+	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): the host mutation this makes is named, with where it lives
+	// and that it goes away, before the sweep or the fixture touches anything.
+	announce(`starting ${names.probe} from ${image} (no network, no environment) with a fixture under ${jobsDir}; both are removed when the read-back ends, as is anything an interrupted earlier run left`);
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive }))];
 
 	let root = null;
 	let probeId = null;
 	let pinId = null;
-	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
+	let probeTried = false;
+	let pinTried = false;
 	try {
-		fs.mkdirSync(jobsDir, { recursive: true });
-		root = fs.realpathSync(fs.mkdtempSync(`${jobsDir}/${names.fixturePrefix}`));
-		fs.chmodSync(root, 0o755);
-		const fixture = liveFixture(root);
-		for (const dir of Object.values(fixture)) {
-			fs.mkdirSync(dir, { recursive: true });
-			fs.chmodSync(dir, 0o755);
+		// A jobs dir this shell cannot write (another user's, `PI_JOBS_DIR=""`, a path that is a file) is a reason not
+		// to run, said as one, never an exception that takes the rest of doctor's output with it. `root` is set before
+		// the realpath so a directory mkdtemp did make is still removed below when a later call fails.
+		let fixture;
+		try {
+			fs.mkdirSync(jobsDir, { recursive: true });
+			root = fs.mkdtempSync(`${jobsDir}/${names.fixturePrefix}`);
+			root = fs.realpathSync(root);
+			fs.chmodSync(root, 0o755);
+			fixture = liveFixture(root);
+			for (const dir of Object.values(fixture)) {
+				fs.mkdirSync(dir, { recursive: true });
+				fs.chmodSync(dir, 0o755);
+			}
+		} catch (err) {
+			return { ran: false, verdicts: [], notes: [`the fixture could not be created under ${JSON.stringify(jobsDir)} (${err?.code ?? "error"}), so no container was run`], swept };
 		}
 
+		probeTried = true;
 		const started = await step(liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs) }));
-		const id = containerIdOf(started);
-		if (started?.code !== 0 || id === null) {
-			// A zero exit with no ID means a container may exist that cannot be removed by ID; say how to find it.
-			const stray = started?.code === 0 ? [`the probe container printed no ID; if one is left, docker rm -f ${names.probe}`] : [];
-			return { ran: false, verdicts: [], notes: ["the probe container did not start, so nothing was read back", ...stray] };
+		// The ID is taken whenever one was printed, whatever the exit: a start that failed or timed out after the create
+		// still leaves a container, and `--rm` never runs for one that did not start.
+		probeId = containerIdOf(started);
+		if (started?.code !== 0 || probeId === null) {
+			return { ran: false, verdicts: [], notes: ["the probe container did not start, so nothing was read back"], swept };
 		}
-		probeId = id;
 
 		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
@@ -307,19 +326,25 @@ export async function runLiveProbes({ image, endpoint, dockerReachable, imagePre
 		}
 		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce });
 
+		pinTried = true;
 		const pinned = await step(pinningProbeRunArgs({ name: names.pin, nonce, fixture }));
-		if (pinned?.code === 0) pinId = containerIdOf(pinned);
+		pinId = containerIdOf(pinned);
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinned?.code, output: `${pinned?.stdout ?? ""}${pinned?.stderr ?? ""}`, stillAbsent });
 
 		const byProperty = { isolation, mountSet, egress: egressVerdict(egress ?? {}), imagePinning, nonRoot, localFolders };
-		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes };
+		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept };
 	} finally {
-		for (const [what, id] of [["probe container", probeId], ["pinning container", pinId]]) {
-			if (id === null) continue;
-			const removed = await step(["rm", "-f", id]);
-			if (removed?.code !== 0) notes.push(`the ${what} ${id.slice(0, 12)} could not be removed: docker rm -f ${id}`);
+		for (const [what, id, tried, name] of [["probe container", probeId, probeTried, names.probe], ["pinning container", pinId, pinTried, names.pin]]) {
+			if (id !== null) {
+				const removed = await step(["rm", "-f", id]);
+				if (removed?.code !== 0) notes.push(`the ${what} ${id.slice(0, 12)} could not be removed: docker rm -f ${id}`);
+			} else if (tried) {
+				// No ID came back. The name carries this run's pid and nonce, so no other run's container can answer to it;
+				// usually there is nothing by that name and docker says so, which is not worth a line.
+				await step(["rm", "-f", name]);
+			}
 		}
 		if (root !== null) {
 			try {
@@ -339,9 +364,11 @@ export function containerIdOf(result) {
 }
 
 /**
- * A fixture left by a `--live` run that did not reach its `finally` (a Ctrl-C). Only one whose PID is no longer
- * alive is removed, so a concurrent run's fixture is never pulled out from under its container. Best effort: a
- * sweep that fails is not a reason not to probe.
+ * A fixture left by a `--live` run that did not reach its `finally` (a Ctrl-C). Only an entry of EXACTLY the shape
+ * `mkdtemp` makes (the prefix, a PID, six characters), only a real directory (a symlink is never followed or
+ * removed), and only one whose PID is no longer alive, so a concurrent run's fixture is never pulled out from under
+ * its container and nothing an operator named alike is touched. Returns what it removed, so it is said. Best effort:
+ * a sweep that fails is not a reason not to probe.
  */
 export function sweepStaleFixtures({ jobsDir, pid, fs, isAlive }) {
 	let entries;
@@ -352,14 +379,34 @@ export function sweepStaleFixtures({ jobsDir, pid, fs, isAlive }) {
 	}
 	const swept = [];
 	for (const entry of entries) {
-		const m = new RegExp(`^${LIVE_PREFIX}(\\d+)-`).exec(entry);
+		const m = new RegExp(`^${LIVE_PREFIX}(\\d+)-[A-Za-z0-9]{6}$`).exec(entry);
 		if (!m || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
 		try {
+			const st = fs.lstatSync(`${jobsDir}/${entry}`);
+			if (!st.isDirectory() || st.isSymbolicLink()) continue;
 			fs.rmSync(`${jobsDir}/${entry}`, { recursive: true, force: true });
-			swept.push(entry);
+			swept.push(`fixture ${entry}`);
 		} catch {
 			// left for the next run
 		}
+	}
+	return swept;
+}
+
+/**
+ * A probe or pinning container left by a run interrupted before its container STARTED, which `--rm` never removes
+ * (measured: a SIGINT during `docker run -d` leaves one in `created`). Only names of exactly this module's shape and
+ * a PID no longer alive, removed by ID. Best effort, like the fixture sweep.
+ */
+export async function sweepStaleContainers({ step, pid, isAlive }) {
+	const listed = await step(["ps", "-a", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.ID}} {{.Names}}"]);
+	if (listed?.code !== 0) return [];
+	const swept = [];
+	for (const line of String(listed.stdout ?? "").split(/\r?\n/)) {
+		const [id, name] = line.trim().split(/\s+/);
+		const m = new RegExp(`^${LIVE_PREFIX}(?:probe|pin)-(\\d+)-[0-9a-f]+$`).exec(name ?? "");
+		if (!m || !/^[0-9a-f]{12,64}$/.test(id ?? "") || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
+		if ((await step(["rm", "-f", id]))?.code === 0) swept.push(`container ${name}`);
 	}
 	return swept;
 }

@@ -43,6 +43,11 @@
  * only fix by guessing -- see the fixAction comment at its first use below. Offering fixes changes NOTHING
  * about severity: a --fix run still exits by the same failed/ok logic, warns stay warns, and the fix pass
  * happens at most once (check, fix, re-check -- never a loop).
+ *
+ * `doctor --live` (issue #278, INT-LIVE-PROBE-CONTRACT) reads the backend declarations back off one real container
+ * (`live-probes.mjs`), ONCE, after any fix pass, from the facts the final collection gathered. Its container and
+ * fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
+ * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -118,7 +123,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
 		live = false,
-		liveFs = { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync },
+		liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync },
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
@@ -2397,9 +2402,13 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	if ((await runCmd(spawn, "docker", ["network", "create", "--internal", net])) !== 0) return checks;
 	try {
 		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
+		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
+		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
+		// allow-all squid answered 503 for it and let `example.com` through). `example.com` is reserved for exactly
+		// this use, answers everywhere, and is contacted only when the proxy lets the request out, which is the finding.
 		for (const [slug, host, url, want] of [
 			["provider", "the provider", "https://api.anthropic.com/v1/messages", true],
-			["unlisted", "an unlisted host", "https://pi-dispatch-not-on-your-allowlist.example/", false],
+			["unlisted", "an unlisted host", "https://example.com/", false],
 		]) {
 			const probe = await runCmdCapture(spawn, "docker", [
 				"run",
@@ -2408,7 +2417,8 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 				// so the name exists for the operator watching `docker ps` during a doctor run and for the one
 				// reading `ps` afterwards to find out what a wedged probe was doing.
 				"--name",
-				`pi-dispatch-egress-probe-${slug}`,
+				// The PID too, so two doctor runs at once do not collide on a name and read the loser's exit 125 as a deny.
+				`pi-dispatch-egress-probe-${slug}-${process.pid}`,
 				"--pull=never",
 				`--network=${net}`,
 				"-e",
@@ -2425,6 +2435,18 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 				// doctor run can see exactly which host is being probed.
 				`fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)})`,
 			]);
+			// The script exits 0 (reached) or 3 (blocked). Anything else is the container not running it -- a name clash,
+			// the image, the daemon -- which is no reading at all, and must not pass for a deny.
+			if (probe.code !== 0 && probe.code !== 3) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `Egress policy probe for ${host} did not run (docker run exited ${probe.code})`,
+					fix: "re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
+					readBack: { property: "egress", want, reached: null },
+				});
+				continue;
+			}
 			const reached = probe.code === 0;
 			checks.push({
 				ok: reached === want,
@@ -2937,6 +2959,8 @@ export async function liveChecks(env, seams, facts) {
 	const result = await runLiveProbes({
 		image: facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest",
 		endpoint: facts.endpoint,
+		// Asked again right before the first probe command, through the same resolver as the collection's read.
+		resolveEndpoint: makeDockerEndpointResolver({ run: dockerRunVia(spawn) }),
 		dockerReachable: facts.dockerCode === 0,
 		imagePresent: facts.imageCode === 0,
 		jobsDir: jobsDirPath(env),
@@ -2953,13 +2977,17 @@ export async function liveChecks(env, seams, facts) {
 	if (!result.ran) {
 		return result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: not run -- ${note}`, fix: "the declarations above are unchanged and still unverified; fix what stopped the probe and re-run `pi-dispatch doctor --live`" }));
 	}
-	const checks = result.verdicts.map((v) => {
-		if (v.ok) return { ok: true, label: `read back on local: ${v.property} holds (${v.detail})` };
-		if (v.warn) return { ok: false, warn: true, label: `read back on local: ${v.property} ${v.detail}`, fix: LIVE_UNREAD_FIX };
-		const declared = declarationOf(DEFAULT_LOCAL_BACKEND, v.property)?.word ?? "undeclared";
-		return { ok: false, label: `read back on local: ${v.property} does NOT hold -- declared ${declared}, observed: ${v.detail}`, fix: LIVE_FAIL_FIX[v.property] };
-	});
-	for (const note of result.notes) checks.push({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand; nothing else in pi-dispatch sweeps a live-probe container" });
+	const checks = (result.swept ?? []).map((what) => ({ ok: true, label: `read back on local: removed ${what}, left by an interrupted --live run` }));
+	checks.push(
+		...result.verdicts.map((v) => {
+			if (v.ok) return { ok: true, label: `read back on local: ${v.property} holds (${v.detail})` };
+			if (v.warn) return { ok: false, warn: true, label: `read back on local: ${v.property} ${v.detail}`, fix: LIVE_UNREAD_FIX };
+			const declared = declarationOf(DEFAULT_LOCAL_BACKEND, v.property)?.word ?? "undeclared";
+			const fix = LIVE_FAIL_FIX[v.cause ? `${v.property}:${v.cause}` : v.property] ?? LIVE_FAIL_FIX[v.property];
+			return { ok: false, label: `read back on local: ${v.property} does NOT hold -- declared ${declared}, observed: ${v.detail}`, fix };
+		}),
+	);
+	for (const note of result.notes) checks.push({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand now, or let the next `pi-dispatch doctor --live` remove it once this process has exited" });
 	// What a green read-back does NOT mean, on a line of its own so a row of ✓ is never read as more than it is.
 	// env-internal DOCKER_CONTENT_TRUST: the docker CLI's own variable, read here only to say that it changes what
 	// --pull=never governs; pi-dispatch sets nothing with it, so it is not a key of ours to document.
@@ -2988,7 +3016,9 @@ const LIVE_FAIL_FIX = {
 	egress: "see the egress lines above: the proxy's allowlist, or the job image's NODE_USE_ENV_PROXY support",
 	imagePinning: "the daemon ran or pulled an image this host does not have -- check for a docker CLI plugin or wrapper that rewrites `docker run`",
 	nonRoot: "PI_JOB_IMAGE runs as root: the root-owned hard-rules floor does not bind a root agent -- use an image with a non-root USER (the shipped pi-job image does)",
-	localFolders: "on Linux the job user (uid 1001 in the shipped image) cannot write a folder owned by you; a local-folder job needs the folder writable by that uid",
+	"localFolders:not-writable": "on Linux the job user (uid 1001 in the shipped image) cannot write a folder owned by you; a local-folder job needs the folder writable by that uid",
+	"localFolders:not-visible": "the daemon is not sharing the jobs directory's filesystem with containers as a live bind mount (on Docker Desktop, check its file sharing settings), so a local-folder job's edits would not land in the folder",
+	localFolders: "a bind-mounted host folder did not behave as one a job edits in place",
 };
 
 /** A PID-liveness check for the stale-fixture sweep: EPERM means alive and owned by someone else. */

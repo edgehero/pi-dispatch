@@ -167,8 +167,8 @@ passing, on the record — issue #80.)
   fourth test as well: it is not a harness invocation (the operator's typed flag, and no trigger, chain request
   or model tool reaches it), it is operator-present (a doctor run), it holds no credential (no `-e` of any
   kind), and it **processes no adversarial input** -- its mounts are fixture directories it creates empty, never
-  a workspace a job produced, and what runs inside is two constant scripts. It is removed by the ID
-  `docker run -d` printed when the read ends. **Rejected**: reading the declarations back off a real job
+  a workspace a job produced, and what runs inside is two constant scripts. It is removed when the read ends,
+  by the ID `docker run -d` printed, and one an interrupted run left is removed by the next. **Rejected**: reading the declarations back off a real job
   container (a job holds credentials and untrusted input, and reading inside one is the `docker exec` into a
   live job the sandbox paragraph above already refused); probing at worker boot or per job (a container start
   for every boot or job to re-read what the table states and an operator can read on request).
@@ -213,7 +213,7 @@ passing, on the record — issue #80.)
   **Given a live probe** (`INT-LIVE-PROBE-CONTRACT`) -- not a job either, and asserted separately: its argv
   carries every member of `ISOLATION_FLAGS`, `--network=none` and no `-e`, its mounts are fixture directories
   under the jobs directory, its name contains no `pi-job-`, no trigger, chain request or model tool can start
-  one, and it is removed by its ID when the read ends.
+  one, and it is removed when the read ends (or, if that run was interrupted, by the next).
   **Given an egress policy** (`CONST-EGRESS-POLICY-IN-THE-ARGV`) -- asserted separately rather than folded
   into the mount enumeration above, because a network is not a mount: the job's network is `--internal` and
   its only other member is the allowlist proxy, so no job container can open a connection to a

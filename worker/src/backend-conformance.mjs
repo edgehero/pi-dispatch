@@ -264,13 +264,28 @@ async function checkReadBack(backend, { readBack }) {
 		return READ_BACK_BY_A_LIVE_PROBE.map((property) => abstain(property, "no `readBack` probe supplied, so it was not read off a live container (doctor --live reads local's)"));
 	}
 	const raw = await readBack(backend);
-	const report = Array.isArray(raw) ? Object.fromEntries(raw.map((v) => [v?.property, v])) : (raw ?? {});
+	// OWN properties only, and a property named twice in an array is ambiguous rather than last-wins: a report that
+	// says a property both fails and holds must not be read as holding.
+	const report = Object.create(null);
+	const repeated = new Set();
+	if (Array.isArray(raw)) {
+		for (const v of raw) {
+			const property = v?.property;
+			if (typeof property !== "string") continue;
+			if (Object.hasOwn(report, property)) repeated.add(property);
+			report[property] = v;
+		}
+	} else if (raw && typeof raw === "object") {
+		for (const property of Object.keys(raw)) report[property] = raw[property];
+	}
 	const declares = backend?.declares ?? {};
 	return READ_BACK_BY_A_LIVE_PROBE.map((property) => {
-		const got = report[property];
+		if (repeated.has(property)) return abstain(property, "the readBack report names it more than once, so which reading holds is not known");
+		const got = Object.hasOwn(report, property) ? report[property] : undefined;
 		if (!got || typeof got.ok !== "boolean") return abstain(property, "the readBack report does not cover it");
-		if (got.ok === true) return pass(property, `read back off a live container: ${got.detail ?? "holds"}`);
+		// `warn` first: a reading marked not-read-back is never a pass, whatever its `ok` says.
 		if (got.warn === true) return abstain(property, `${got.detail ?? "not read back"}`);
+		if (got.ok === true) return pass(property, `read back off a live container: ${got.detail ?? "holds"}`);
 		if (declares[property] === "enforced" || declares[property] === "asserted") {
 			return fail(property, `declared ${declares[property]}, and read back off a live container as not holding: ${got.detail ?? "no detail"}`);
 		}
