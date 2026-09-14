@@ -784,17 +784,7 @@ export async function collectChecks(env, seams) {
 	// Preflight gh INSIDE the job image: a token that works host-side but not in-container (no egress from
 	// containers, stale image) fails jobs mid-run, not at submit. Only meaningful when docker and the image
 	// are green; otherwise it is noise on top of the failures already reported above.
-	if (dockerCode === 0 && imageCode === 0 && endpoint.local !== true) {
-		// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
-		// token -- full scope and non-expiring by default -- to `docker run -e`, and on a redirected CLI that
-		// token rides to another machine. A check must not do the thing the credentialTransit line warns about.
-		checks.push({
-			ok: false,
-			warn: true,
-			label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpoint.endpoint}, which is not this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
-			fix: "point the docker CLI at this host and re-run doctor to check it",
-		});
-	} else if (dockerCode === 0 && imageCode === 0) {
+	if (dockerCode === 0 && imageCode === 0) {
 		if (ghSource === "app") {
 			checks.push({ ok: true, label: "in-image gh auth: skipped (GITHUB_AUTH_SOURCE=app mints per-job)" });
 		} else {
@@ -807,7 +797,18 @@ export async function collectChecks(env, seams) {
 				const patVar = env.GITHUB_PAT_VAR ?? "GITHUB_PAT"; // config.mjs's patVar default, read directly
 				token = (env[patVar] ?? "").trim(); // absent → skip; loadConfig fails loud at worker boot anyway
 			}
-			if (token) {
+			if (token && endpoint.local !== true) {
+				// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
+				// token -- full scope and non-expiring by default -- to `docker run -e`, and on a redirected CLI that
+				// token rides to another machine. A check must not do the thing the credentialTransit line warns
+				// about. Only once there IS a token: app mode and an unset PAT never run the probe at all.
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpoint.endpoint}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
+					fix: "point the docker CLI at this host and re-run doctor to check it",
+				});
+			} else if (token) {
 				// Value-less `-e` flags: docker forwards GH_TOKEN/GITHUB_TOKEN from the spawn env, so the
 				// token value never enters argv (visible in `ps`) and never reaches doctor's output.
 				const probe = await runCmdCapture(
@@ -2803,12 +2804,15 @@ export function backendChecks(env, { endpoint = null } = {}) {
 				// #278: the word holds only while the docker CLI sends containers to this host. Printed as what it
 				// degrades to, and who is asserting it, with THIS SHELL named: the service's EnvironmentFile or a
 				// systemd User= can resolve differently, and the worker logs its own answer at boot.
-				const seen = endpoint?.local === false ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}, which is not this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
+				const redirected = endpoint?.local === false;
+				const seen = redirected ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}, which is not shown to be on this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
 				checks.push({
 					ok: false,
 					warn: true,
 					label: `${name}: ${property} is ASSERTED by the operator, not enforced: ${seen}`,
-					fix: `the provider key, the per-job forge token and any run.secrets values ride to that daemon across a network this worker cannot see; point the docker CLI back at this host, or accept it deliberately. The worker logs its own answer at boot (worker_started.dockerEndpointLocal)`,
+					fix: redirected
+						? `the provider key, the per-job forge token and any run.secrets values ride to that daemon across a network this worker cannot see; point the docker CLI back at this host, or accept it deliberately. The worker logs its own answer at boot (worker_started.dockerEndpointLocal)`
+						: `nothing shows where job containers (and the credentials they carry) would go; fix what stops the docker CLI answering, then re-run doctor. The worker logs its own answer at boot (worker_started.dockerEndpointLocal)`,
 				});
 				continue;
 			}
@@ -2864,10 +2868,11 @@ function dockerRunVia(spawn) {
 			try {
 				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
-				resolve({ code: null, stdout: "", error: err });
+				resolve({ code: null, stdout: "", stderr: "", error: err });
 				return;
 			}
 			let stdout = "";
+			let stderr = "";
 			let done = false;
 			const finish = (value) => {
 				if (done) return;
@@ -2879,10 +2884,12 @@ function dockerRunVia(spawn) {
 				try {
 					child.kill("SIGKILL");
 				} catch {}
-				finish({ code: null, stdout: "", error: { timedOut: true } });
+				finish({ code: null, stdout: "", stderr: "", error: { timedOut: true } });
 			}, 5000);
 			child.stdout?.on("data", (d) => (stdout += d));
-			child.on("error", (err) => finish({ code: null, stdout: "", error: err }));
-			child.on("close", (code, signal) => finish({ code, stdout, error: signal ? { signal } : null }));
+			// Captured to CLASSIFY a failure (a missing context vs a permission error), and never printed.
+			child.stderr?.on("data", (d) => (stderr = (stderr + d).slice(-4096)));
+			child.on("error", (err) => finish({ code: null, stdout: "", stderr: "", error: err }));
+			child.on("close", (code, signal) => finish({ code, stdout, stderr, error: signal ? { signal } : null }));
 		});
 }

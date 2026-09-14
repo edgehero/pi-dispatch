@@ -1407,7 +1407,7 @@ function dockerEndpointState(endpoint) {
  */
 function dockerEndpointEvidence(endpoint) {
 	if (endpoint.local === null) return `the docker CLI did not say which endpoint it resolves (${endpoint.reason})`;
-	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}${endpoint.local ? ", on this host" : ", which is not this host"}`;
+	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}${endpoint.local ? ", on this host" : ", which is not shown to be on this host"}`;
 }
 
 /** Log an endpoint answer that is not plainly local; a return to local is logged only as a change. */

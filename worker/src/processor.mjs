@@ -259,6 +259,40 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "backend-unblessed", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		// Issue #278. PI_BACKEND_FLOOR can ask for a guarantee a backend declares but EARNS only while something
+		// about this host is observed -- `local`'s credentialTransit, which holds only while the docker CLI sends
+		// containers to a daemon on this host. The read is repeated here, per job, because the CLI's context can
+		// change after boot and every later job's provider key and forge token would follow it. FREE and
+		// pre-spend: a refusal that will recur on every job must not cost each one a slot. Determinate is a
+		// RETURN (CONST-RETRY-INFRA-ONLY); a CLI that could not be asked for a transient reason is a throw,
+		// pre-reserve, so the refund is a no-op.
+		//
+		// AHEAD of the image and egress preflights, not beside them, because both of those talk to the daemon
+		// this gate is about: on a redirected CLI an unreachable daemon made the image inspect throw a retry, and
+		// a reachable one without the image refused as `job-image-missing` with a comment blaming the image --
+		// the right refusal lost behind the wrong one. This read touches only the CLI's local configuration.
+		const observed = await observationPreflight(job);
+		if (observed?.refused) {
+			// Fixed text: the endpoint (an internal host name or address) goes to the operator's log, never to a
+			// forge comment. "Not observed" rather than "not on this host", because a CLI that could not be asked
+			// for a determinate reason (no docker on PATH, a context that does not exist) refuses here too.
+			await comment(job, "Refused: this deployment's PI_BACKEND_FLOOR requires a guarantee this host is not observed to provide right now (the docker CLI is not observed sending containers to a daemon on this host, so the job's credentials could cross a network the deployment does not own). Not run.");
+			log("refused_backend_floor_unobserved", { message: observed.message });
+			return {
+				outcome: "policy",
+				reason: "backend-floor-unobserved",
+				exitCode: null,
+				turns: null,
+				tokens: null,
+				provider: job.provider ?? null,
+				model: job.model ?? null,
+				budgetReserved: false,
+			};
+		}
+		if (observed?.unavailable) {
+			throw new InfraRetry("docker CLI unavailable, the endpoint observation could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
 		// credential-less, so it precedes the mint, the clone and the reservation: a host that cannot run the
 		// image refuses without minting a credential it will not use, cloning a repo it will not read, or
@@ -434,35 +468,6 @@ export async function runJob(job, deps) {
 			// determinate/indeterminate split the image preflight draws one gate up, and thrown for the same
 			// reason. Pre-reserve, so the refund below is a no-op and still honest if this gate ever moves.
 			throw new InfraRetry("docker unavailable, egress preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
-		}
-
-		// Issue #278. PI_BACKEND_FLOOR can ask for a guarantee a backend declares but EARNS only while something
-		// about this host is observed -- `local`'s credentialTransit, which holds only while the docker CLI sends
-		// containers to a daemon on this host. The read is repeated here, per job, because the CLI's context can
-		// change after boot and every later job's provider key and forge token would follow it. FREE and
-		// pre-spend, beside the egress preflight for its reason: a refusal that will recur on every job must not
-		// cost each one a slot. Determinate is a RETURN (CONST-RETRY-INFRA-ONLY); a CLI that could not be asked
-		// for a transient reason is a throw, pre-reserve, so the refund is a no-op.
-		const observed = await observationPreflight(job);
-		if (observed?.refused) {
-			// Fixed text: the endpoint (an internal host name or address) goes to the operator's log, never to a
-			// forge comment. "Not observed" rather than "not on this host", because a CLI that could not be asked
-			// for a determinate reason (no docker on PATH, a context that does not exist) refuses here too.
-			await comment(job, "Refused: this deployment's PI_BACKEND_FLOOR requires a guarantee this host is not observed to provide right now (the docker CLI is not observed sending containers to a daemon on this host, so the job's credentials could cross a network the deployment does not own). Not run.");
-			log("refused_backend_floor_unobserved", { message: observed.message });
-			return {
-				outcome: "policy",
-				reason: "backend-floor-unobserved",
-				exitCode: null,
-				turns: null,
-				tokens: null,
-				provider: job.provider ?? null,
-				model: job.model ?? null,
-				budgetReserved: false,
-			};
-		}
-		if (observed?.unavailable) {
-			throw new InfraRetry("docker CLI unavailable, the endpoint observation could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// REQ-RESUMABLE-SESSION's one fail-CLOSED case. Everything else in that feature fails OPEN and

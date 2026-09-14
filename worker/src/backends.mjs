@@ -403,7 +403,7 @@ const BACKENDS_TABLE = {
 			//
 			// WHAT THE OBSERVATION CANNOT SEE, stated rather than claimed away: it judges the endpoint's FORM, so a
 			// unix socket or a loopback port that is really a tunnel (`ssh -L`, socat) to another machine reads as
-			// local; and a redirect that lands between the per-job read and that job's `docker run` spawn is not
+			// local, as does a `localhost` this host's resolver maps elsewhere; and a redirect that lands between the per-job read and that job's `docker run` spawn is not
 			// caught for that job. That window is not small: the read sits before the spend, so it spans the secret
 			// resolution, the token mint, the clone and the reservation.
 			credentialTransit: ENFORCED,

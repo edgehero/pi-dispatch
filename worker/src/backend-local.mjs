@@ -240,8 +240,10 @@ export function makeReaper({ log, exec = execDocker }) {
 export const DOCKER_ENDPOINT_ARGS = Object.freeze(["context", "inspect", "--format={{json .Name}}|{{json .Endpoints.docker.Host}}"]);
 
 /**
- * `{ context, host }` from the CLI's output, or `null`. Scans from the LAST line, because a caller that merges
- * stderr into the capture (doctor's does) would otherwise read a warning as the answer.
+ * `{ context, host }` from the CLI's output, or `null`. Both runners hand over stdout alone, and docker 27.4 puts
+ * nothing on stdout but the answer (its warnings and errors go to stderr). The scan still runs from the LAST line
+ * and credits only a line that parses whole, so a notice a plugin or a later CLI prints ahead of the answer is
+ * never read as it.
  */
 export function parseDockerEndpoint(output) {
 	const lines = String(output ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -261,8 +263,11 @@ export function parseDockerEndpoint(output) {
 
 /** 127.0.0.0/8 as a literal dotted quad, and nothing that merely starts with "127." (`127.0.0.1.nip.io` resolves anywhere). */
 function isLoopbackV4(hostname) {
+	// No leading zeros. Go's parser (which the docker CLI dials with) refuses `127.0.0.09` as an address, so it is
+	// a NAME: looked up by the resolver, and sent through HTTP_PROXY when one is set -- measured, with the job's
+	// `-e` values in the proxied request. Only the canonical dotted quad is an address the CLI will not proxy.
 	const parts = hostname.split(".");
-	return parts.length === 4 && parts[0] === "127" && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
+	return parts.length === 4 && parts[0] === "127" && parts.every((p) => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255);
 }
 
 /**
@@ -275,24 +280,24 @@ function isLoopbackV4(hostname) {
  *     this machine's own runtime, not a network the deployment does not own).
  *   - `npipe:` with the `.` host -- `npipe:////./pipe/docker_engine`. A named pipe on another host is SMB, and
  *     the CLI accepts one. Parsed by hand: `new URL` puts the `.` in the path with an empty host.
- *   - `tcp://` to exactly `localhost`, a literal `127.0.0.0/8` address or `[::1]`.
+ *   - `tcp://` to exactly `localhost`, a canonical literal `127.0.0.0/8` address (no leading zeros) or `[::1]`.
  * NOT local: `ssh://` (including `ssh://localhost` -- `~/.ssh/config` can send that anywhere), `tcp://` to any
  * other name or address, any other scheme, and nothing at all.
  *
  * WHAT THIS CANNOT SEE, and says so: a unix socket or a loopback port can be a tunnel (`ssh -L`, socat) to
- * another machine. The form is local and the daemon is not. That residual is named in the declaration's
- * comment rather than claimed away.
+ * another machine, and `localhost` is whatever this host's resolver says it is. The form is local and the daemon
+ * is not. That residual is named in the declaration's comment rather than claimed away.
  */
 export function classifyDockerEndpoint(host) {
 	if (typeof host !== "string" || host === "") return { local: false, display: "" };
-	// Up to the LAST `@` before the path, as a URL parser splits it: a password may itself hold an `@`, and
-	// stopping at the first would print the rest of it.
-	const display = host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/]*)/i, (_m, scheme, authority) => scheme + authority.slice(authority.lastIndexOf("@") + 1));
 	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(host)?.[1]?.toLowerCase();
+	const display = displayEndpoint(host, scheme);
 	if (scheme === "unix") return { local: true, display };
 	if (scheme === "npipe") {
-		const server = host.slice("npipe:".length).replace(/^\/+/, "").split("/")[0];
-		return { local: server === ".", display };
+		// `\\.\pipe\name` is this machine's pipe namespace; `\\.\UNC\host\...` is the same `.` prefix
+		// reaching another host over SMB, so the segment after `.` must be `pipe` too.
+		const [server, namespace] = host.slice("npipe:".length).replace(/^\/+/, "").split("/");
+		return { local: server === "." && String(namespace).toLowerCase() === "pipe", display };
 	}
 	if (scheme === "tcp") {
 		let hostname;
@@ -307,26 +312,66 @@ export function classifyDockerEndpoint(host) {
 }
 
 /**
- * Why a resolve failed, as `{ reason, transient }`. A fixed token, never the CLI's stderr: a missing context's
- * message carries the operator's home path.
- *
- * TRANSIENT only where retrying can change the answer, on `transient.mjs`'s allow-list and for its reason: a
- * docker binary that is not there is determinate, a spawn that ran out of processes or file descriptors is not,
- * and a CLI that had to be killed on the timeout is not. A non-zero exit is the CLI's own answer (a context that
- * does not exist) and is determinate.
+ * The CLI's own determinate answers, matched on its stderr (measured, docker 27.4): a context that does not exist
+ * (`DOCKER_CONTEXT`, or a `currentContext` naming one), and a `DOCKER_HOST` it cannot parse (`http://...`, a bad
+ * port, a list). Each answers the same an hour from now until the operator changes the configuration.
  */
-export function classifyEndpointFailure({ error = null, code = null } = {}) {
-	if (error?.timedOut || error?.killed || error?.signal) return { reason: "timeout", transient: true };
+const CLI_DETERMINATE = [
+	[/context not found/, "context-not-found"],
+	[/invalid bind address format|invalid proto|^parse "[^"]*":/m, "docker-host-invalid"],
+];
+
+/**
+ * The endpoint with any credentials removed, for logs and output. Nothing is touched without an `@`. A URL that
+ * parses loses its userinfo exactly where a URL parser (and the CLI's, which splits the same way) finds it: the
+ * authority ends at the first `/`, `?` or `#`, and a password may itself hold an `@`. One that does NOT parse --
+ * `ssh://bob:s3cr/et@remote`, which the CLI echoes verbatim and then refuses to dial -- is cut from `://` to its
+ * last `@` before any `?` or `#`, because the `/` is then as likely to be inside a password as to end a host.
+ * `unix` and `npipe` are paths, where an `@` is a filename character, so only an authority is cut there.
+ */
+function displayEndpoint(host, scheme) {
+	if (!host.includes("@")) return host;
+	if (scheme === "unix" || scheme === "npipe") {
+		return host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)/i, (_m, prefix, authority) => prefix + authority.slice(authority.lastIndexOf("@") + 1));
+	}
+	try {
+		const url = new URL(host);
+		if (url.username === "" && url.password === "") return host;
+		url.username = "";
+		url.password = "";
+		return url.href;
+	} catch {
+		return host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^?#]*)/i, (_m, prefix, rest) => prefix + rest.slice(rest.lastIndexOf("@") + 1));
+	}
+}
+
+/**
+ * Why a resolve failed, as `{ reason, transient }`. A fixed token, never the CLI's stderr: a missing context's
+ * message carries the operator's home path. `stderr` is read here to CLASSIFY and goes nowhere else.
+ *
+ * TRANSIENT unless the failure is on an allow-list of determinate answers, `transient.mjs`'s shape and for its
+ * reason (the expensive direction is the false determinate, which exits 2 at boot and is left stopped): a docker
+ * binary that is not there is determinate, and so are the CLI's two recognised configuration refusals above. A
+ * non-zero exit with any other message is transient -- a `permission denied` on the context store is `EACCES`,
+ * which that module keeps retryable on purpose. A CLI killed by the timer is a timeout; one killed by any other
+ * signal is named by it.
+ */
+export function classifyEndpointFailure({ error = null, code = null, stderr = "" } = {}) {
+	if (error?.timedOut || error?.killed) return { reason: "timeout", transient: true };
+	if (typeof error?.signal === "string") return { reason: `signal-${error.signal.toLowerCase()}`, transient: true };
 	if (error?.code === "ENOENT") return { reason: "docker-not-found", transient: false };
 	if (typeof error?.code === "string") return { reason: `spawn-${error.code.toLowerCase()}`, transient: !isDeterminateFsCode(error.code) };
-	if (typeof error?.code === "number" && error.code !== 0) return { reason: `exit-${error.code}`, transient: false };
-	if (typeof code === "number" && code !== 0) return { reason: `exit-${code}`, transient: false };
+	const exit = typeof error?.code === "number" && error.code !== 0 ? error.code : typeof code === "number" && code !== 0 ? code : null;
+	if (exit !== null) {
+		const known = CLI_DETERMINATE.find(([re]) => re.test(String(stderr ?? "")));
+		return known ? { reason: known[1], transient: false } : { reason: `exit-${exit}`, transient: true };
+	}
 	if (error) return { reason: "spawn-failed", transient: true };
 	return { reason: "unparseable", transient: false };
 }
 
 /**
- * Run the CLI bounded, as `{ code, stdout, error }`. `execFile`'s own `timeout` is NOT the bound: it sends a
+ * Run the CLI bounded, as `{ code, stdout, stderr, error }` (stderr only to classify a failure, never logged). `execFile`'s own `timeout` is NOT the bound: it sends a
  * signal and then still waits for the child's `close`, so a CLI wedged on a dead socket never settles
  * (`retention-sweep.mjs` records the same). A separate timer settles the promise regardless, kills with
  * SIGKILL and destroys the pipes. REF'D, because at boot nothing else may be holding the event loop.
@@ -350,16 +395,16 @@ export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFil
 			} catch {
 				// already gone
 			}
-			finish({ code: null, stdout: "", error: { timedOut: true } });
+			finish({ code: null, stdout: "", stderr: "", error: { timedOut: true } });
 		}, timeoutMs);
 		try {
 			// No `env`: the endpoint that matters is the one the job's own `docker run` will use, and that spawn
 			// inherits this process's environment. Passing an env here would ask about a different CLI.
-			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer: 64 * 1024 }, (err, stdout) => {
-				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), error: err ?? null });
+			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer: 64 * 1024 }, (err, stdout, stderr) => {
+				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), error: err ?? null });
 			});
 		} catch (err) {
-			finish({ code: null, stdout: "", error: err });
+			finish({ code: null, stdout: "", stderr: "", error: err });
 		}
 	});
 }
@@ -367,7 +412,7 @@ export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFil
 /**
  * The resolver: `async () => ({ local, context, endpoint, reason, transient })`. `local` is `true`, `false`, or
  * `null` when the CLI did not answer; `endpoint` is the display form; `reason` and `transient` are set only when
- * `local` is `null`. `run(args)` is the seam, returning `{ code, stdout, error }`.
+ * `local` is `null`. `run(args)` is the seam, returning `{ code, stdout, stderr, error }`.
  */
 export function makeDockerEndpointResolver({ run = (args) => execDockerBounded(args) } = {}) {
 	return async function resolveDockerEndpoint() {
@@ -379,7 +424,7 @@ export function makeDockerEndpointResolver({ run = (args) => execDockerBounded(a
 		}
 		const parsed = result?.error || result?.code !== 0 ? null : parseDockerEndpoint(result.stdout);
 		if (!parsed) {
-			const { reason, transient } = classifyEndpointFailure({ error: result?.error ?? null, code: result?.code ?? null });
+			const { reason, transient } = classifyEndpointFailure({ error: result?.error ?? null, code: result?.code ?? null, stderr: result?.stderr ?? "" });
 			return { local: null, context: null, endpoint: null, reason, transient };
 		}
 		const { local, display } = classifyDockerEndpoint(parsed.host);

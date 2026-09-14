@@ -1923,7 +1923,7 @@ test("a floor asking credentialTransit=enforced refuses to BOOT on a docker CLI 
 	const order = [];
 	await assert.rejects(
 		() => runStart({ env: { PI_BACKEND_FLOOR: "credentialTransit=enforced" }, resolveDockerEndpoint: REMOTE_ENDPOINT, order, makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
-		(err) => err.piDispatchConfig === true && /credentialTransit=enforced holds only while/.test(err.message) && /tcp:\/\/10\.1\.2\.3:2375, which is not this host/.test(err.message),
+		(err) => err.piDispatchConfig === true && /credentialTransit=enforced holds only while/.test(err.message) && /tcp:\/\/10\.1\.2\.3:2375, which is not shown to be on this host/.test(err.message),
 	);
 	assert.deepEqual(order, [], "no reaper and no worker: the refusal comes first");
 });
@@ -1966,6 +1966,21 @@ test("without a floor a redirected docker CLI boots, logs it once without creden
 	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "docker_endpoint_local").length, 1, "a return to this host is logged once, as a change");
 });
 
+test("a floor asking only credentialTransit=asserted BOOTS on a redirected CLI and admits every job (#278)", { skip }, async () => {
+	// The decision that keeps every existing floor working: `asserted` is exactly what a redirect degrades to, so
+	// it is met, and only the operator's pointing the CLI elsewhere is being asserted.
+	const { captured, logs } = await runStart({
+		env: { PI_BACKEND_FLOOR: "credentialTransit=asserted" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		resolveDockerEndpoint: REMOTE_ENDPOINT,
+	});
+	assert.ok(logs.some((l) => l.event === "docker_endpoint_not_local"), "the redirect is still said");
+	assert.equal(logs.find((l) => l.event === "worker_started").dockerEndpointLocal, false);
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+});
+
 test("with a floor, a context switched AFTER boot refuses the next job before it spends (#278)", { skip }, async () => {
 	let answer = { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false };
 	const { captured, logs } = await runStart({
@@ -1981,6 +1996,7 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 	const refused = await captured.deps.observationPreflight(job);
 	assert.equal(refused.refused, true);
 	assert.match(refused.message, /tcp:\/\/10\.1\.2\.3:2375/);
+	assert.match(refused.message, /\blocal: credentialTransit=enforced holds only while/, "the refusal names the venue the job RESOLVED to, not its absent run.backend");
 	assert.ok(parseLines(bootLines.slice(mark)).some((l) => l.event === "docker_endpoint_not_local" && l.context === "pd-remote"), "the change is logged when it happens");
 	assert.ok(!logs.some((l) => l.event === "docker_endpoint_not_local"), "and not at boot, where it was local");
 	answer = { local: null, context: null, endpoint: null, reason: "timeout", transient: true };

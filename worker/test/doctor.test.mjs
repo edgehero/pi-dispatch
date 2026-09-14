@@ -3068,5 +3068,24 @@ test("doctor: the in-image gh probe does NOT run on a docker CLI that points off
 	const plan = { ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' }, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run": 0 };
 	await runDoctor(ghEnv(), ghDeps(out, plan, calls));
 	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args.includes("GH_TOKEN")), "no container was handed the token");
-	assert.match(text(), /⚠ in-image gh auth: not checked, because this shell's docker CLI resolves tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
+	assert.match(text(), /⚠ in-image gh auth: not checked, because this shell's docker CLI resolves tcp:\/\/10\.1\.2\.3:2375, which is not shown to be on this host/);
+});
+
+test("doctor: the in-image gh probe does NOT run when the docker CLI could not say where it points (#278)", async () => {
+	// Not only a redirect: an endpoint doctor could not read is not observed local either, and gets no credit.
+	const { out, text } = capture();
+	const calls = [];
+	const plan = { ...green, "docker context inspect": { code: 1, output: "" }, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run": 0 };
+	await runDoctor(ghEnv(), ghDeps(out, plan, calls));
+	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args.includes("GH_TOKEN")), "no container was handed the token");
+	assert.match(text(), /⚠ in-image gh auth: not checked, because this shell's docker CLI did not say which daemon it uses \(exit-1\)/);
+});
+
+test("doctor: under GITHUB_AUTH_SOURCE=app a redirected CLI does not claim a probe would send a token (#278)", async () => {
+	// App mode mints per job and never runs the probe, so the redirect warning would be about nothing.
+	const { out, text } = capture();
+	const plan = { ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } };
+	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "app" }), ghDeps(out, plan));
+	assert.match(text(), /✓ in-image gh auth: skipped \(GITHUB_AUTH_SOURCE=app mints per-job\)/);
+	assert.doesNotMatch(text(), /would send your gh token/);
 });

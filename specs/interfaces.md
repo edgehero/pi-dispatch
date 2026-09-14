@@ -871,7 +871,7 @@ refactor apart.
     `credentialTransit` (`DES-CONTAINER-BACKEND-REGISTRY`): an endpoint not observed on this host is logged
     (`docker_endpoint_not_local`, credentials in the URL stripped), reported in `worker_started`, and refused
     only under a `PI_BACKEND_FLOOR` asking `credentialTransit=enforced`: at boot, and per job as the policy
-    reason `backend-floor-unobserved`, before any reservation.
+    reason `backend-floor-unobserved`, ahead of the image and egress preflights and so before any reservation.
   - **Which image — and why this contract is now a checklist rather than a description.** This contract is
     written against *an* image, never against `pi-job:latest`, and until now that was true by accident:
     there was exactly one image and this repo built it. The worker resolves the tag **per job**

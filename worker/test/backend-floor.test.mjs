@@ -279,17 +279,46 @@ test("observationRefusals names the backend, the property, the observation and w
 		backends: ["local"],
 		backendFloor: { credentialTransit: ENFORCED },
 		observations: { [DOCKER_ENDPOINT_LOCAL]: false },
-		evidence: { [DOCKER_ENDPOINT_LOCAL]: "the docker CLI resolves context \"remote\" to tcp://10.1.2.3:2375, which is not this host" },
+		evidence: { [DOCKER_ENDPOINT_LOCAL]: "the docker CLI resolves context \"remote\" to tcp://10.1.2.3:2375, which is not shown to be on this host" },
 	});
 	assert.match(message, /local: credentialTransit=enforced holds only while the docker endpoint this host's docker CLI resolves is on this host/);
-	assert.match(message, /tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
+	assert.match(message, /tcp:\/\/10\.1\.2\.3:2375, which is not shown to be on this host/);
 	assert.match(message, /lower that entry to `asserted`/);
 	assert.deepEqual(observationRefusals({ backends: ["local"], backendFloor: { credentialTransit: ENFORCED }, observations: { [DOCKER_ENDPOINT_LOCAL]: true } }), []);
 });
 
+test("doctor names WHY its docker CLI did not answer, classified from stderr it never prints (#278)", async () => {
+	const buf = [];
+	const home = "/Users/someone-private/.docker/contexts/meta/ab/meta.json";
+	await runDoctor(
+		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" },
+		{
+			out: (s) => buf.push(s),
+			spawn: (cmd, args) => {
+				if (cmd === "docker" && args[0] === "context") {
+					const handlers = {};
+					const stderr = { on: (ev, cb) => ((stderr[ev] = cb), stderr) };
+					queueMicrotask(() => {
+						stderr.data?.(`context "gone": context not found: open ${home}: no such file or directory\n`);
+						handlers.close?.(1);
+					});
+					return { stdout: { on() {} }, stderr, kill() {}, on: (ev, cb) => ((handlers[ev] = cb), undefined) };
+				}
+				throw new Error("doctor must not need the docker daemon for the backend section");
+			},
+			probeValkey: async () => true,
+			fileExists: () => true,
+			nodeVersion: "22.19.0",
+		},
+	);
+	const text = buf.join("");
+	assert.match(text, /did not say which endpoint it resolves \(context-not-found\)/);
+	assert.ok(!text.includes("someone-private"), "the CLI's message carries a home path and is never printed");
+});
+
 test("doctor renders a redirected docker CLI as credentialTransit ASSERTED by the operator, and a floor as refused (#278)", async () => {
 	const remote = await doctorText({}, '"remote"|"tcp://10.1.2.3:2375"');
-	assert.match(remote, /⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "remote" to tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
+	assert.match(remote, /⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "remote" to tcp:\/\/10\.1\.2\.3:2375, which is not shown to be on this host/);
 	assert.match(remote, /→ the provider key, the per-job forge token and any run\.secrets values ride to that daemon/);
 	assert.doesNotMatch(remote, /✓ local: credentialTransit/);
 
@@ -299,6 +328,8 @@ test("doctor renders a redirected docker CLI as credentialTransit ASSERTED by th
 
 	const unresolved = await doctorText({}, null);
 	assert.match(unresolved, /⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI did not say which endpoint it resolves/);
+	assert.doesNotMatch(unresolved, /ride to that daemon/, "with no answer there is no daemon to name");
+	assert.match(unresolved, /→ nothing shows where job containers \(and the credentials they carry\) would go/);
 
 	const floored = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=enforced" }, '"remote"|"tcp://10.1.2.3:2375"');
 	assert.match(floored, /✗ PI_BACKEND_FLOOR asks for credentialTransit=enforced, which local provides only while this shell's docker CLI resolves an endpoint on this host, and it does not/);

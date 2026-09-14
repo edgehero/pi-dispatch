@@ -133,12 +133,20 @@ test("dockerExtra cannot carry a flag that would supersede the isolation boundar
 test("an endpoint is LOCAL only when its form shows it, and credentials in it are never displayed", () => {
 	const local = ["unix:///var/run/docker.sock", "unix:///Users/x/.docker/run/docker.sock", "npipe:////./pipe/docker_engine", "npipe:////./pipe/dockerDesktopLinuxEngine", "npipe://./pipe/docker_engine", "tcp://127.0.0.1:2375", "tcp://127.255.0.9:2376", "tcp://localhost:2375", "tcp://[::1]:2375"];
 	const notLocal = ["tcp://10.1.2.3:2375", "tcp://127.0.0.1.nip.io:2375", "tcp://localhost.evil.com:2375", "tcp://128.0.0.1:2375", "tcp://127.0.0.256:2375", "ssh://remote", "ssh://localhost", "ssh://bob@127.0.0.1", "npipe:////remotebox/pipe/docker_engine", "fd://", "http://localhost:2375", "", null, undefined, "garbage"];
+	// Leading zeros make a NAME to Go's parser, which the CLI then sends through HTTP_PROXY when one is set.
+	notLocal.push("tcp://127.0.0.09:2375", "tcp://127.000.000.001:2375", "tcp://0127.0.0.1:2375");
+	// The `.` server followed by UNC is another host's share, not this machine's pipe namespace.
+	notLocal.push("npipe:////./UNC/remotebox/pipe/docker_engine");
 	for (const h of local) assert.equal(classifyDockerEndpoint(h).local, true, h);
 	for (const h of notLocal) assert.equal(classifyDockerEndpoint(h).local, false, String(h));
 	assert.equal(classifyDockerEndpoint("ssh://bob:hunter2@remote:22").display, "ssh://remote:22");
 	assert.equal(classifyDockerEndpoint("tcp://user@10.1.2.3:2375").display, "tcp://10.1.2.3:2375");
 	assert.equal(classifyDockerEndpoint("tcp://user:p@ss@10.1.2.3:2375").display, "tcp://10.1.2.3:2375", "a password holding an @ is removed whole");
 	assert.equal(classifyDockerEndpoint("unix:///run/user@1000/docker.sock").display, "unix:///run/user@1000/docker.sock", "an @ in a path is not userinfo");
+	assert.equal(classifyDockerEndpoint("ssh://bob:s3cr/et@remote").display, "ssh://remote", "a password holding a / is removed whole, though the URL does not parse");
+	// An `@` after `?` or `#` is not userinfo, and the display must name the host the CLI dials, not the one after it.
+	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375?@localhost").display, "tcp://10.1.2.3:2375?@localhost");
+	assert.deepEqual(classifyDockerEndpoint("tcp://127.0.0.1:2375#frag@10.1.2.3"), { local: true, display: "tcp://127.0.0.1:2375#frag@10.1.2.3" });
 });
 
 test("the CLI's answer is read from the last line that parses, so a warning ahead of it is not mistaken for it", () => {
@@ -154,12 +162,20 @@ test("a failed resolve names a fixed reason, and only a failure retrying can cha
 	assert.deepEqual(classifyEndpointFailure({ error: { code: "ENOENT" } }), { reason: "docker-not-found", transient: false });
 	assert.deepEqual(classifyEndpointFailure({ error: { timedOut: true } }), { reason: "timeout", transient: true });
 	assert.deepEqual(classifyEndpointFailure({ error: { killed: true } }), { reason: "timeout", transient: true });
-	assert.deepEqual(classifyEndpointFailure({ error: { signal: "SIGKILL" } }), { reason: "timeout", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { signal: "SIGSEGV" } }), { reason: "signal-sigsegv", transient: true }, "only the timer's kill is a timeout");
 	assert.deepEqual(classifyEndpointFailure({ error: { code: "EAGAIN" } }), { reason: "spawn-eagain", transient: true });
 	assert.deepEqual(classifyEndpointFailure({ error: { code: "EMFILE" } }), { reason: "spawn-emfile", transient: true });
 	assert.deepEqual(classifyEndpointFailure({ error: { code: "ENOTDIR" } }), { reason: "spawn-enotdir", transient: false });
-	assert.deepEqual(classifyEndpointFailure({ error: { code: 1 } }), { reason: "exit-1", transient: false });
-	assert.deepEqual(classifyEndpointFailure({ code: 1 }), { reason: "exit-1", transient: false });
+	// A non-zero exit is determinate only on the CLI's recognised configuration refusals (measured, docker 27.4).
+	const refused = (stderr) => classifyEndpointFailure({ error: { code: 1 }, code: 1, stderr });
+	assert.deepEqual(refused('context "nonexistent": context not found: open /home/x/.docker/contexts/meta/ab/meta.json: no such file or directory'), { reason: "context-not-found", transient: false });
+	assert.deepEqual(refused("invalid bind address format: http://127.0.0.1:2375"), { reason: "docker-host-invalid", transient: false });
+	assert.deepEqual(refused("invalid proto, expected tcp: a:1,tcp://b:2"), { reason: "docker-host-invalid", transient: false });
+	assert.deepEqual(refused('\nparse "tcp://host:notaport": invalid port ":notaport" after host'), { reason: "docker-host-invalid", transient: false });
+	// Anything else retries: a permission error on the context store is EACCES, retryable by transient.mjs's rule.
+	assert.deepEqual(refused('context "x": open /home/x/.docker/contexts/meta/ab/meta.json: permission denied'), { reason: "exit-1", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { code: 1 } }), { reason: "exit-1", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ code: 1 }), { reason: "exit-1", transient: true });
 	assert.deepEqual(classifyEndpointFailure({}), { reason: "unparseable", transient: false });
 });
 
@@ -168,7 +184,9 @@ test("the resolver asks the CLI with the narrow format and reports local, redire
 	const answer = (result) => makeDockerEndpointResolver({ run: async (args) => (seen.push(args), result) })();
 	assert.deepEqual(await answer({ code: 0, stdout: '"desktop-linux"|"unix:///x.sock"\n' }), { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false });
 	assert.deepEqual(await answer({ code: 0, stdout: '"default"|"ssh://bob@remote"\n' }), { local: false, context: "default", endpoint: "ssh://remote", reason: null, transient: false });
-	assert.deepEqual(await answer({ code: 1, stdout: "", error: { code: 1 } }), { local: null, context: null, endpoint: null, reason: "exit-1", transient: false });
+	assert.deepEqual(await answer({ code: 1, stdout: "", stderr: 'context "gone": context not found: open /x: no such file or directory', error: { code: 1 } }), { local: null, context: null, endpoint: null, reason: "context-not-found", transient: false });
+	assert.deepEqual(await answer({ code: 1, stdout: "", error: { code: 1 } }), { local: null, context: null, endpoint: null, reason: "exit-1", transient: true });
+	assert.equal((await answer({ code: 1, stdout: '"a"|"unix:///x.sock"\n', error: { code: 1 } })).local, null, "an answer on a failed exit is not credited");
 	assert.deepEqual(await answer({ code: 0, stdout: "nonsense" }), { local: null, context: null, endpoint: null, reason: "unparseable", transient: false });
 	const thrown = await makeDockerEndpointResolver({ run: async () => { throw Object.assign(new Error("x"), { code: "ENOENT" }); } })();
 	assert.equal(thrown.reason, "docker-not-found");
@@ -189,8 +207,9 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 	assert.equal(killed, "SIGKILL");
 	assert.equal(Object.hasOwn(opts, "env"), false, "the job's docker run inherits this process's env, so the read must too");
 
-	const ok = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(null, '"a"|"unix:///s"')), {}) });
-	assert.deepEqual(ok, { code: 0, stdout: '"a"|"unix:///s"', error: null });
-	const exit = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(Object.assign(new Error("exit"), { code: 1 }), "")), {}) });
+	const ok = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(null, '"a"|"unix:///s"', "")), {}) });
+	assert.deepEqual(ok, { code: 0, stdout: '"a"|"unix:///s"', stderr: "", error: null });
+	const exit = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(Object.assign(new Error("exit"), { code: 1 }), "", "context not found")), {}) });
 	assert.equal(exit.code, 1);
+	assert.equal(exit.stderr, "context not found", "handed back to classify the failure");
 });

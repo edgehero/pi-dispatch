@@ -747,6 +747,23 @@ test("a floor the docker endpoint does not meet refuses BEFORE reserveBudget, an
 	assert.ok(logged.some(([e, f]) => e === "refused_backend_floor_unobserved" && /10\.1\.2\.3/.test(f.message)), "it reaches the operator's log");
 });
 
+test("the endpoint gate runs AHEAD of the image and egress preflights, which talk to the daemon it is about (#278)", async () => {
+	// On a redirected CLI an unreachable daemon made the image inspect throw a retry, and a reachable one without
+	// the image refused as job-image-missing: the right refusal lost behind the wrong one.
+	const { deps: d } = deps({
+		observationPreflight: async () => ({ refused: true, message: "floor" }),
+		imagePreflight: async () => {
+			throw new Error("the image inspect must not reach a daemon the floor refuses");
+		},
+		egressPreflight: async () => {
+			throw new Error("nor the egress inspect");
+		},
+		log: () => {},
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "backend-floor-unobserved");
+});
+
 test("an endpoint that could not be read for a transient reason is retried, not refused (#278)", async () => {
 	const redis = fakeRedis();
 	const { deps: d } = deps({ redis, observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
