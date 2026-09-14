@@ -88,7 +88,8 @@ export function main({ env = process.env, run = sh, writeOutput = (line) => appe
 		// no tag, and nothing else would ever say so. A warning, never a failure: this push's own tags are unaffected.
 		const seen = run("docker", ["buildx", "imagetools", "inspect", `${image}:${versionNow}`]);
 		if (seen.code !== 0 && NOT_FOUND.test(seen.output ?? "")) {
-			log(`::warning::${image}:${versionNow} is not on the registry although v${versionNow} is the current version; publish it with: gh workflow run --ref v${versionNow} -f push_version_tag=true`);
+			const workflow = env.GITHUB_WORKFLOW ? `"${env.GITHUB_WORKFLOW}" ` : "";
+			log(`::warning::${image}:${versionNow} is not on the registry although v${versionNow} is the current version; publish it with: gh workflow run ${workflow}--ref v${versionNow} -f push_version_tag=true`);
 		}
 	}
 	log(`version tag ${versionNow}: ${decision.push ? "push" : "skip"} (${decision.reason}; previous version ${versionBefore ?? "unknown"})`);

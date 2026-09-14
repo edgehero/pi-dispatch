@@ -132,7 +132,7 @@ else
 				# layer that creates ~/.cache or ~/.npm as 0755 pi leaves a dir `mkdir -p` happily "creates" and no tool can
 				# write. Plus a real file write, so a home on a read-only layer cannot pass on permission bits alone.
 				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --user 4242:4242 -e HOME=/home/pi \
-					--entrypoint sh "$IMAGE_REF" -c '[ "$(id -u):$(id -g)" = 4242:4242 ] || exit 1; mkdir -p "$HOME/.pi/agent" && : > "$HOME/.pi/agent/.anyuid-probe" || exit 1; [ -z "$(find "$HOME" -xdev -type d ! -writable 2>/dev/null)" ]' >/dev/null 2>&1 \
+					--entrypoint sh "$IMAGE_REF" -c '[ "$(id -u):$(id -g)" = 4242:4242 ] || exit 1; mkdir -p "$HOME/.pi/agent" && : > "$HOME/.pi/agent/.anyuid-probe" || exit 1; d=$(find "$HOME" -xdev -type d ! -writable 2>/dev/null) && [ -z "$d" ]' >/dev/null 2>&1 \
 					|| fail "the image declares 'anyUid' but /home/pi is not writable by an arbitrary uid -- a job run as the worker's own uid would lose auth.json and every tool cache"
 				any_uid=1
 				;;
@@ -194,7 +194,7 @@ ok "/job:ro is enforced by the kernel (a writable control mount accepted the sam
 
 # pi lazily creates ~/.pi/agent and writes auth.json on the FIRST credential operation. It swallows a failure to
 # do so, so a root-owned dir does not stop the job: playwright, npm or gh fail later instead, on a path nothing in
-# a Dockerfile hints at, and the runner logs home_not_writable (issue #341).
+# a Dockerfile hints at, and the runner logs agent_dir_not_writable (issue #341).
 docker run --rm --entrypoint sh "$IMAGE_REF" -c 'touch "$HOME/.pi/agent/auth.json" && rm "$HOME/.pi/agent/auth.json"' >/dev/null 2>&1 \
 	|| fail "\$HOME/.pi/agent is not writable by the runtime user. pi skips auth.json silently and the tools fail later."
 ok "the agent dir is writable by the runtime user"

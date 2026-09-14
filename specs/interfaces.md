@@ -951,8 +951,9 @@ refactor apart.
     `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
-    in any image): one writes a file into the home, the agent dir and the `.cache` and `.config` dirs (a
-    `mkdir -p` of an existing unwritable dir would pass, so each gets a write), one renders a page. The worker
+    in any image): one writes a file into the agent dir and requires that NO directory under the home is
+    unwritable for that uid (a `mkdir -p` of an existing unwritable dir would pass, and a derived layer can leave
+    one anywhere), one renders a page. The worker
     reads the label from part 2 of issue #341.
   - User: non-root
   - **`--pull=never`.** `docker run` defaults to `--pull=missing`, which makes an unrecognised image name a

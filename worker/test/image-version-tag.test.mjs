@@ -99,13 +99,13 @@ test("an ordinary push warns when the current version's tag is missing from the 
 	const logs = [];
 	const outputs = [];
 	main({
-		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3" },
+		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3", GITHUB_WORKFLOW: "image" },
 		run: fakeRun([["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }], ["docker buildx imagetools inspect", notFound]], []),
 		writeOutput: (l) => outputs.push(l),
 		log: (l) => logs.push(l),
 	});
 	assert.deepEqual(outputs, ["push=false"]);
-	assert.ok(logs.some((l) => l.startsWith("::warning::") && l.includes("--ref v1.10.3")), logs.join("\n"));
+	assert.ok(logs.some((l) => l.startsWith("::warning::") && l.includes('gh workflow run "image" --ref v1.10.3')), logs.join("\n"));
 	const quiet = [];
 	main({
 		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3" },
