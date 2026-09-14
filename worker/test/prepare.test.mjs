@@ -294,6 +294,11 @@ test("a prepared job carries the stamp cleanup needs to retain it (REQ-RESURRECT
 
 		const plain = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-7" });
 		assert.deepEqual(plain.sandbox, { jobId: "gh-7", kind: "github", image: "pi-job:deployment-default", backend: "local" });
+		// Issue #341: the job user the processor decided rides the stamp, so a sandbox re-opens as the uid owning the files.
+		const stamped = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-8", jobUser: { user: "1234:1234", home: "/home/pi" } });
+		assert.deepEqual(stamped.sandbox.jobUser, { user: "1234:1234", home: "/home/pi" });
+		const imageUser = await prepareWorkspace({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-11", jobUser: { user: null, home: null } });
+		assert.deepEqual(imageUser.sandbox.jobUser, { user: null, home: null }, "the image's own user is stamped too, as a decision rather than an absence");
 		// #277: the venue is resolved exactly as the registry dispatches it, so a trigger's own run.backend wins.
 		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b", backend: "far" }, "tok", { queueJobId: "gh-9" })).sandbox.backend, "far");
 		// No default wired (a DI seam) stamps a null venue, which the sandbox refuses -- never a guessed local.

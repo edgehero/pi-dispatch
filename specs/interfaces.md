@@ -965,11 +965,11 @@ refactor apart.
     `PI_FORWARD_ENV` and secrets loops, so neither can move it), unless the worker is uid 1001, the image's own
     uid, which needs no flag. The builder refuses a user that is not a non-root `<uid>:<gid>`, `--user`/`-u` are
     on the `dockerExtra` deny-list (which also accepts only what its callers pass), and `runContainer` refuses a
-    user without that HOME. Rootless daemons,
-    userns-remap, a root worker and Docker Desktop on Linux (not WSL) are refused by name (at boot when `local`
-    is the default venue, per job otherwise), as are an image without `anyUid` for another uid
-    (`job-image-any-uid-unsupported`) and a `--user` whose gid is 0 or the docker socket's group. Decided from
-    facts, never a probe container: `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`.
+    user without that HOME. Rootless daemons, userns-remap, a root worker and Docker Desktop on Linux (not WSL)
+    are refused by name (at boot when `local` is the default venue and the boot read answers in time, per job
+    otherwise), as are an image without `anyUid` for another uid (`job-image-any-uid-unsupported`) and a
+    `--user` whose gid is 0 or the docker socket's group. Decided from facts, never a probe container:
+    `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`.
   - **`--pull=never`.** `docker run` defaults to `--pull=missing`, which makes an unrecognised image name a
     **registry fetch**: a typo in the operator's image config would pull and execute a stranger's image under
     a name that looks like theirs. `never` makes that branch **unreachable rather than merely unlikely** --
@@ -1080,7 +1080,9 @@ refactor apart.
     asserts MEMBERSHIP against the factory-derived pinned set pre-spend, exit 2, because pi silently
     ignores unknown `excludeTools` names -- then passes the list to `createAgentSession` and logs
     `tools_excluded` with the session's active tool list read back. Enforcement, refusal and read-back
-    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); and each name in `PI_FORWARD_ENV` (an explicit operator
+    are `INT-TRIGGERS-FILE-CONTRACT`'s `run.excludeTools` bullet); `HOME=/home/pi` (issue #341: set ONLY beside
+    `--user`, assigned after the `PI_FORWARD_ENV` and `run.secrets` loops so neither can move it, and reserved so a
+    trigger cannot bind it); and each name in `PI_FORWARD_ENV` (an explicit operator
     allowlist of extra host vars — e.g. a custom provider's key — forwarded by exact `-e NAME=VALUE`, never a
     pass-through, so it satisfies `no-broad-env-into-container`; **every** minted-token name is refused in
     the allowlist at config load — derived from the forge table rather than enumerated here, currently
@@ -1486,8 +1488,9 @@ sibling rather than an extension of the GitHub one for the same reason.
     not gate a sandbox**: that is a money gate and a sandbox spends nothing, so a missing proxy fails when the
     session's network is created, refused in words and before any container starts, in front of an operator
     at a terminal, which is the one place a late failure is cheap.
-  - **Env is exactly `TERM` and `TMOUT`**, plus the four proxy variables when a policy is armed. No minted forge token under any forge's variable names, no
-    provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables. `buildContainerEnv`
+  - **Env is exactly `TERM` and `TMOUT`**, plus the four proxy variables when a policy is armed, plus
+    `HOME=/home/pi` beside `--user` when the run had a job user (issue #341). No minted forge token under any
+    forge's variable names, no provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables. `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
   - **Name**: `pi-sandbox-<sanitizeJobId(jobId)>`. Docker matches `--filter name=` as a **substring**, and
@@ -1502,8 +1505,14 @@ sibling rather than an extension of the GitHub one for the same reason.
     ```
     ```jsonc
     { "jobId": "gh-12345", "kind": "github", "image": "pi-job:latest", "backend": "local",
+      "jobUser": { "user": "1234:1234", "home": "/home/pi" },
       "workspace": "/abs/host/path", "createdAt": "2026-08-01T10:00:00.000Z", "keepUntil": null }
     ```
+    `jobUser` (issue #341) is the job user the run had, and a sandbox reads it for IDENTITY only: `null` means
+    nothing decided one (a bare wiring), so the sandbox decides from the CLI's own ids; `{ "user": null, "home":
+    null }` is the image's own user, reopened without `--user`; `{ "user": "<uid>:<gid>", "home": "/home/pi" }`
+    reopens as that uid. Any other shape refuses `job-user-stamp-invalid`. A manifest from before the key decides
+    like `null`.
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
     `run-container.mjs` use — so the tag that was checked, the tag that ran and the tag re-opened are one
     answer rather than three call sites that agree by luck. `backend` is resolved through
@@ -4137,4 +4146,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #278, part 1. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a "Which daemon" bullet -- the endpoint the docker CLI resolves, asked of the CLI at boot and per job with no `env` passed to either spawn, gating `local`'s `credentialTransit` and refused only under a floor. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `backend-floor-unobserved` joins the `reason` enum. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: a sandbox carries no credential, so where its daemon is does not move a credential. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **NEW `INT-LIVE-PROBE-CONTRACT`**, a sibling of `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`: one container from the job builder with `--network=none`, an empty environment and `-d --entrypoint sleep`, fixture mounts under `jobsDirPath`, names by pid and nonce outside every sweep's namespace, announced before and removed by ID in a `finally`, run only on a docker CLI observed local; six verdicts, with `egress` folded from the canary's `readBack` as the one reading not from this builder; the conformance harness's `readBack` shape for other venues. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv changes, and the probe reuses its builder rather than amending its contract. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: the sandbox launcher, its names and its reaper are untouched, and no live-probe name falls in `pi-sandbox-`. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a probe is not a job and writes no record. |
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: the agent-dir bullet becomes a home bullet and is CORRECTED -- an unwritable home does not kill the job with EACCES as it claimed, because pi's `AuthStorage` swallows the lock failure and an env-keyed job carries on (measured in a native-Linux lab: `HOME=/` still reaches "no configured auth"), so the breakage surfaces later inside a tool; the recipe becomes `chown -R pi:pi /home/pi` plus `chmod 0777` on the home and agent dir (not sticky: `fs.protected_symlinks` then refuses a root-owned symlink under it, measured), drops the stale `COPY --chown ... APPEND_SYSTEM.md` line (the floor has lived at `/opt/pi-dispatch` since before this entry), and records why the image sets no `ENV HOME` (images built FROM it run root build steps). `anyUid` joins the capability tokens, with evidence by two uid-4242 runs rather than a grep. Measured behind it: on a native rootful Docker 27.5.1 daemon and on rootful Podman 5.8.2 through its Docker API, a job as the image's uid 1001 cannot traverse a worker-owned `0700` job dir; with `--user=<owner>` every mount works but `HOME` is `/` (Docker) or `/workspace` (Podman, whose injected passwd entry puts `auth.json` in the operator's repository); Chromium renders as an arbitrary uid only on the world-writable-home image with `HOME=/home/pi`. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `job-inputs-unreadable` under the existing policy code, from a pre-spend `access(2)` on `/job` beside the mount asserts for EVERY job (a command job never reads `prompt.md`, and the loader's `existsSync` gate would drop its trigger skills silently) and from the prompt read; the session assert names an inaccessible `/session` instead of reporting "did not land"; five advisory log lines that change no exit code. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked**: no mount, env var or file moved -- the worker that passes `--user` lands with part 2. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: runner reasons ride the exit line, not the record's reason enum (`command-unregistered` precedent). |
-| 2026-09-14 | Issue #341, part 2 (the wiring). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: `User: non-root` becomes the job-user bullet. It covers the image's own user on Docker Desktop, the worker's own non-root uid with `HOME=/home/pi` on a daemon that enforces bind-mount ownership (none for uid 1001), the builder and `runContainer` refusals, and the named refusals for rootless daemons, userns-remap, a root worker, Docker Desktop on Linux, a missing `anyUid` and the two group rows. **INT-CONTAINER-JOB-INPUTS AMENDED**: the per-job dir is a `0700` mkdtemp, so the job's uid must be the worker's where ownership is enforced, else the runner refuses `job-inputs-unreadable`. **INT-SANDBOX-CONTRACT AMENDED**: `--user`/HOME when the run had a job user, the uid from the manifest's new `jobUser` stamp and the daemon rows from the CLI's own facts, and its refusals (a malformed stamp, an undecidable daemon, an unmappable daemon or group, an image without `anyUid` or not inspectable), all before a network exists. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: `job-user-unmappable` and `job-image-any-uid-unsupported` join the reason enum, both policy, pre-reserve and pre-mint. **INT-SESSION-STORE-CONTRACT and INT-OUTBOX-CONTRACT UNCHANGED, checked**: the files they read are now owned by the worker's own uid where ownership is enforced, which is the reader's own; nothing they check depends on an owner (their `lstat` rules stand). |
+| 2026-09-14 | Issue #341, part 2 (the wiring). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: `HOME` joins the env list (only beside `--user`), and `User: non-root` becomes the job-user bullet. It covers the image's own user on Docker Desktop, the worker's own non-root uid with `HOME=/home/pi` on a daemon that enforces bind-mount ownership (none for uid 1001), the builder and `runContainer` refusals, and the named refusals for rootless daemons, userns-remap, a root worker, Docker Desktop on Linux, a missing `anyUid` and the two group rows. **INT-CONTAINER-JOB-INPUTS AMENDED**: the per-job dir is a `0700` mkdtemp, so the job's uid must be the worker's where ownership is enforced, else the runner refuses `job-inputs-unreadable`. **INT-SANDBOX-CONTRACT AMENDED**: `--user`/HOME when the run had a job user (HOME joins "Env is exactly"), the manifest shape gains `jobUser` with its three meanings, the uid from the manifest's new `jobUser` stamp and the daemon rows from the CLI's own facts, and its refusals (a malformed stamp, an undecidable daemon, an unmappable daemon or group, an image without `anyUid` or not inspectable), all before a network exists. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: `job-user-unmappable` and `job-image-any-uid-unsupported` join the reason enum, both policy, pre-reserve and pre-mint. **INT-SESSION-STORE-CONTRACT and INT-OUTBOX-CONTRACT UNCHANGED, checked**: the files they read are now owned by the worker's own uid where ownership is enforced, which is the reader's own; nothing they check depends on an owner (their `lstat` rules stand). |

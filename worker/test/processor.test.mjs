@@ -1614,13 +1614,16 @@ test("the job-user gate sits after the image probe and before the credential gat
 });
 
 test("an unmappable job user comments fixed text and logs the cause; an image without anyUid is named in the comment", async () => {
-	for (const [refusal, reason, pattern] of [
-		[{ refused: "job-user-unmappable", cause: "docker-group" }, "job-user-unmappable", /cannot give this job a non-root user/],
-		[{ refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" }, "job-image-any-uid-unsupported", /pi-job:old.*does not declare `anyUid`/],
+	for (const [refusal, reason, pattern, event] of [
+		[{ refused: "job-user-unmappable", cause: "docker-group" }, "job-user-unmappable", /cannot give this job a non-root user/, "refused_job_user_unmappable"],
+		[{ refused: "job-user-unmappable", cause: "runtime-unreadable" }, "job-user-unmappable", /answered in a form the worker cannot read/, "refused_job_user_unmappable"],
+		[{ refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" }, "job-image-any-uid-unsupported", /pi-job:old.*does not declare `anyUid`/, "refused_job_image_any_uid_unsupported"],
 	]) {
 		const texts = [];
 		const logged = [];
+		const redis = fakeRedis();
 		const { deps: d } = deps({
+			redis,
 			imagePreflight: async () => ({ ok: true, image: "pi-job:old", capabilities: [] }),
 			jobUserPreflight: async () => refusal,
 			comment: async (_j, t) => texts.push(t),
@@ -1628,16 +1631,22 @@ test("an unmappable job user comments fixed text and logs the cause; an image wi
 		});
 		const r = await runJob(ghJob, d);
 		assert.equal(r.reason, reason);
+		assert.equal(r.outcome, "policy");
+		assert.equal(r.budgetReserved, false, `${refusal.cause}: nothing was reserved, and the record must not say otherwise`);
+		assert.equal(redis.incrCalls, 0);
 		assert.match(texts[0], pattern);
-		assert.doesNotMatch(texts[0], /docker-group|rootless/, "the cause goes to the log, never the forge");
+		assert.doesNotMatch(texts[0], /docker-group|rootless|runtime-unreadable/, "the cause goes to the log, never the forge");
+		assert.ok(logged.some(([e]) => e === event), event);
 	}
 });
 
 test("an undecidable job user is retried as never-started, before any reserve", async () => {
 	const redis = fakeRedis();
-	const { deps: d } = deps({ redis, jobUserPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
-	await assert.rejects(() => runJob(ghJob, d), (err) => err instanceof InfraRetry && err.reason === "container-never-started");
+	const logged = [];
+	const { deps: d } = deps({ redis, jobUserPreflight: async () => ({ unavailable: true, reason: "endpoint-unresolved" }), log: (e, f) => logged.push([e, f]) });
+	await assert.rejects(() => runJob(ghJob, d), (err) => err instanceof InfraRetry && err.reason === "container-never-started" && !/docker info/.test(err.message));
 	assert.equal(redis.incrCalls, 0);
+	assert.deepEqual(logged.find(([e]) => e === "job_user_unavailable")?.[1], { reason: "endpoint-unresolved" }, "why it keeps retrying is in the log");
 });
 
 test("the user the gate decided is the user that runs, and prepare stamps it for the sandbox", async () => {

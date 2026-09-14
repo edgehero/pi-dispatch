@@ -96,6 +96,16 @@ test("a sandbox opened from the panel lands on its own egress network, like the 
   assert.deepEqual(off.docker, []);
 });
 
+test("the panel launches a sandbox as the user the job-user seam answers, like the CLI (#341)", async () => {
+  const paths = { sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+  let asked = null;
+  const { io, launched } = panelIo({ env: { PI_EGRESS: "0" }, resolveJobUser: async ({ manifest }) => ((asked = manifest), { user: "1234:1234", home: "/home/pi" }) });
+  await mod.openSandboxSession(paths, "gh-1", io);
+  assert.equal(asked?.jobId, "gh-1");
+  assert.ok(launched[0].includes("--user=1234:1234"));
+  assert.ok(launched[0].includes("HOME=/home/pi"));
+});
+
 test("the panel refuses what the CLI refuses: another venue, a running sandbox, a malformed PI_EGRESS", async () => {
   const far = panelIo();
   await mod.openSandboxSession({ sandboxDir: retainedRoot({ backend: "far" }), sandboxRetentionHours: 24 }, "gh-1", far.io);

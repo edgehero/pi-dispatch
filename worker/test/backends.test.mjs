@@ -135,6 +135,8 @@ test("declarationOf joins a word to what qualifies it, so a consumer cannot prin
 	// An asserted word carries WHO asserts it. "not us" without "them" leaves an operator nothing to check,
 	// which is why doctor can honestly say it names the asserter.
 	assert.match(declarationOf("local", "nonRoot").assertedBy, /USER directive/);
+	// Issue #341: and who asserts it where the argv supplies the uid, with the uid-1001 exception named.
+	assert.match(declarationOf("local", "nonRoot").assertedBy, /worker uid other than 1001 the worker's own non-zero uid passed as `--user`/);
 	assert.equal(declarationOf("local", "credentialTransit").assertedBy, null, "enforced, so no asserter");
 	assert.equal(declarationOf("local", "isolation").assertedBy, null, "meaningless for an enforced word");
 	assert.equal(declarationOf("nope", "egress"), undefined);

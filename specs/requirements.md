@@ -1623,8 +1623,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   snapshot would preserve more and is rejected in `DES-SANDBOX-IS-A-FRESH-CONTAINER` — gigabytes per run
   to serve a case image+workspace already serves.
 - **No credential, and it is not a knob.** No minted forge token, no provider key, no forwarded host
-  variable; the container env is `TERM` and `TMOUT`. `buildContainerEnv` is deliberately not reused —
-  it writes the mint into that forge's variable names and throws when no provider credential resolves,
+  variable; the container env is `TERM` and `TMOUT` (plus the proxy variables when egress is armed, and
+  `HOME=/home/pi` beside `--user` when the run had a job user, issue #341). `buildContainerEnv` is deliberately
+  not reused: it writes the mint into that forge's variable names and throws when no provider credential resolves,
   so a credential-free container cannot be produced from it. An operator who needs to push authenticates
   themselves inside the shell.
 - **Bounded, and swept like every other artifact.** `PI_SANDBOX_RETENTION_HOURS` (default 24) with a
@@ -1799,8 +1800,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   size cap or returns a value containing a NUL. A resolver that exits 1, exits with an unrecognised code, or
   times out is INFRASTRUCTURE and the job is retried as `secret-resolver-unreachable`. A refusal names the
   field or the variable and never the reference, the resolver's path or its standard error. The whole job
-  refuses rather than injecting a partial set. A resurrected sandbox carries exactly `TERM` and `TMOUT`, and
-  `doctor` fails when a trigger names a profile no deployment entry declares.
+  refuses rather than injecting a partial set. A resurrected sandbox carries no secret (its env is `TERM`,
+  `TMOUT`, the proxy variables and, beside `--user`, `HOME`), and `doctor` fails when a trigger names a profile
+  no deployment entry declares.
 
 ## REQ-DEPLOYMENT-BOOTSTRAP
 
@@ -1999,6 +2001,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #341, part 2 (the wiring). **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each: the sandbox env they list as exactly `TERM` and `TMOUT` also carries the proxy variables when egress is armed (true since #202 and never written here) and `HOME=/home/pi` beside `--user` when the run had a job user. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. |
 | 2026-09-14 | Issue #341, part 1. **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the Chromium assertion gains its arbitrary-uid half for an image declaring `anyUid` -- measured in a native-Linux lab, today's image renders as `pi` and fails as uid 4242 with or without `HOME`, so a label claiming the capability without the render would lie about the one tool that fails loudest. `image/verify-image.sh` runs both, and CI's image job runs the script. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: nothing doctor or `up` does moves in this part. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED, in the Statement**: `doctor [--fix] [--live]`, and the "never perform an unshown host mutation" clause now names what `--live` adds -- a probe container and a fixture, shown before they exist and removed when the read ends, approved by typing the flag, beside the egress canary's existing unprompted network and probes -- rather than leaving a live read-back to contradict it. Acceptance gains the `--live` case and the case that nothing else starts a probe. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: the probe shares the builder, not the sandbox's launcher, names or reaper. |
 | 2026-09-14 | Issue #277, part 4. **`REQ-EGRESS-ALLOWLIST` AMENDED**, a correction of scope rather than of intent: its Scope said a resurrected sandbox joins the same kind of network, and that was true only of the CLI. A sandbox opened from the admin panel's RUN_DETAIL passed no network and ran on docker's default bridge with the policy armed. Both entry points now share one launcher, and the Scope says both. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: no credential, mount or retention rule moved. **Code evidence**: worker/src/sandbox.mjs -> openSandbox, sandboxEgress; worker/src/egress.mjs -> egressProxyName; worker/src/sandbox-cli.mjs -> runSandbox; admin/src/index.ts -> openSandboxSession. |

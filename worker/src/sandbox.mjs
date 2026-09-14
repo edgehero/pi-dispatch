@@ -28,7 +28,8 @@ import { readManifest } from "./sandbox-store.mjs";
  *     `buildContainerEnv` is deliberately NOT reused: it writes the mint into that forge's variable names
  *     (env-allowlist.mjs) and throws outright when no provider credential resolves, so a credential-free
  *     container cannot be produced from it. The env here is two variables about the terminal, plus the four
- *     proxy variables when an egress policy is armed.
+ *     proxy variables when an egress policy is armed, plus `HOME=/home/pi` beside `--user` when the run had a job
+ *     user (issue #341).
  *   - No `/outbox`, no `/session`, no `/opt/pi-global`. The agent is not running; there is nothing to
  *     chain, no transcript to continue and no overlay to layer.
  *
@@ -120,14 +121,14 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 			// Beside `--user` only (issue #341). Not a credential either.
 			HOME: user !== null ? home : undefined,
 			// Still NO CREDENTIALS, and that clause is untouched: a proxy URL is not a credential, and
-			// buildContainerEnv is still not reused here. The env is two variables about the terminal and,
-			// when a policy is armed, four about the network.
+			// buildContainerEnv is still not reused here. The env is two variables about the terminal, HOME
+			// beside `--user`, and, when a policy is armed, four about the network.
 			...proxyEnv,
 		},
 		// Ahead of the env and the mounts, and well ahead of the image, which buildDockerRunArgs keeps as
 		// the final positional. `--entrypoint` also clears the image's CMD; this repo's Dockerfile sets
 		// none, so `bash` runs bare and `-it` makes it interactive, in the baked WORKDIR as the baked
-		// non-root USER.
+		// non-root USER, or as `user` when the run had one.
 		extraFlags: ["-i", "-t", "--entrypoint", "bash", ...publish],
 	});
 }
@@ -402,6 +403,11 @@ export async function decideSandboxJobUser({
 		: daemon?.answered ? daemon.facts.remoteSocketPath : null;
 	const socket = socketFacts(socketPath, stat ? { stat } : {});
 	const decision = decideJobUser({ platform, release, ...identity, endpoint, daemon, socket });
+	// A run from before the stamp, opened with sudo: the root here is this shell's, not the worker's, so the worker's
+	// fix text would send the operator to change the wrong thing.
+	if (decision.cause === "worker-is-root" && (stamp === undefined || stamp === null)) {
+		return { refused: "job-user-unmappable", message: "this run recorded no job user, so a sandbox opened as root cannot tell which uid owns its files; open it as the worker's own account (issue #341)" };
+	}
 	// The shared fixed texts, without the forge comment's "Refused:" lead: the CLI prints its own `error:`.
 	if (decision.mode === "unmappable") return { refused: "job-user-unmappable", message: `${JOB_USER_FIX[decision.cause] ?? "the job user could not be decided"} (issue #341)` };
 	if (decision.mode === "unknown") {

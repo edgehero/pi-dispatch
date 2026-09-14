@@ -130,6 +130,20 @@ test("a good run builds a credential-free argv, launches it, and returns the she
 	assert.match(c.text(), /no credentials are set in this container/);
 });
 
+test("the CLI hands the run's manifest to the job-user seam and launches as the user it answers (#341)", async () => {
+	const { root } = retained();
+	let args = null;
+	let asked = null;
+	const c = capture({
+		resolveJobUser: async ({ manifest }) => ((asked = manifest), { user: "1234:1234", home: "/home/pi" }),
+		launch: async (a) => ((args = a.args), { code: 0 }),
+	});
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps }), 0);
+	assert.equal(asked?.jobId, "gh-1", "the seam is asked about this run");
+	assert.ok(args.includes("--user=1234:1234"));
+	assert.ok(args.includes("HOME=/home/pi"));
+});
+
 test("a docker that will not start is reported as such, not as a shell that exited", async () => {
 	const { root } = retained();
 	const c = capture({ launch: async () => ({ code: null, error: new Error("spawn docker ENOENT") }) });

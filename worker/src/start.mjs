@@ -391,9 +391,11 @@ export async function startWorker(
 	);
 	const bootDecision = bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" };
 	log("job_user", { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause, reason: bootDecision.reason });
-	if (bootDecision.mode === "unmappable" && BOOT_REFUSING_JOB_USER_CAUSES.has(bootDecision.cause) && config.defaultBackend === DEFAULT_BACKEND) {
-		throw configError(jobUserRefusal(bootDecision));
-	}
+	// Said again whenever a job's decision differs from the last one said, so a boot that read `unknown` (a daemon still
+	// starting) and a later answer that refuses every job are never separated by silence.
+	let jobUserSaid = jobUserLogKey(bootDecision);
+	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
+	if (bootRefusal) throw configError(bootRefusal);
 
 	// The forge a job belongs to is resolved PER JOB from `job.kind`, not bound once for the process.
 	// Each entry is `{ auth, host }`: `auth` is get-token's `{ mintToken, selfId, source }` (null when that
@@ -1164,6 +1166,10 @@ export async function startWorker(
 				if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
 				const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
 				const { decision, socket } = await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) });
+				if (jobUserLogKey(decision) !== jobUserSaid) {
+					jobUserSaid = jobUserLogKey(decision);
+					log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
+				}
 				return resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
 			},
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
@@ -1438,9 +1444,25 @@ export async function startWorker(
 	}
 }
 
-// Issue #341: the job-user verdicts that stop a worker whose default venue is `local`. The rest (the group rows,
-// `runtime-unreadable`) refuse per job, where a later read or another image can still answer differently.
+// Issue #341: the job-user verdicts that stop a worker whose default venue is `local`: facts about the daemon or the
+// worker's own identity, which no job on that venue can get past. The rest refuse per job instead: the group rows
+// apply only to a job whose image needs `--user`, and `runtime-unreadable` describes one answer, which the next job
+// reads again.
 const BOOT_REFUSING_JOB_USER_CAUSES = new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
+
+/**
+ * The boot refusal text for a job-user decision, or `null` to boot. Exported so the branch a build with one venue
+ * cannot reach (a default venue other than `local`) is still pinned.
+ */
+export function jobUserBootRefusal(decision, defaultBackend) {
+	if (decision?.mode !== "unmappable" || !BOOT_REFUSING_JOB_USER_CAUSES.has(decision.cause)) return null;
+	return defaultBackend === DEFAULT_BACKEND ? jobUserRefusal(decision) : null;
+}
+
+/** What makes two job-user decisions the same for the `job_user` log line. */
+function jobUserLogKey(decision) {
+	return `${decision?.mode}|${decision?.user ?? ""}|${decision?.cause ?? ""}|${decision?.reason ?? ""}`;
+}
 
 /** A one-line summary of an endpoint answer, used only to notice that it changed. */
 function dockerEndpointState(endpoint) {

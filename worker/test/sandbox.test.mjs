@@ -471,4 +471,23 @@ describe("decideSandboxJobUser", () => {
 		assert.equal((await decideSandboxJobUser({ ...base, readFacts: rootless, euid: 1234, egid: 1234, manifest: stamped })).refused, "job-user-unmappable");
 		assert.equal((await decideSandboxJobUser({ ...base, readFacts: async () => ({ answered: false, reason: "timeout", transient: true }), euid: 1234, egid: 1234, manifest: stamped })).refused, "job-user-unknown");
 	});
+
+	test("the group rows run through this CLI's socket: a stamped docker-group gid refuses, and the socket read is the endpoint's", async () => {
+		const statted = [];
+		const stat = (p) => (statted.push(p), { uid: 0, gid: 2375 });
+		const r = await decideSandboxJobUser({ ...base, stat, euid: 0, egid: 0, manifest: { image: "pi-job:x", jobUser: { user: "1235:2375", home: "/home/pi" } } });
+		assert.equal(r.refused, "job-user-unmappable");
+		assert.match(r.message, /docker socket's group/);
+		assert.deepEqual(statted, ["/var/run/docker.sock"]);
+	});
+
+	test("a retained image that cannot be inspected refuses in its own words, and a stampless run under sudo is told to use the worker's account", async () => {
+		const gone = await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, imageCapabilities: async () => ({ missing: "pi-job:gone" }), manifest: { image: "pi-job:gone", jobUser: { user: "1234:1234", home: "/home/pi" } } });
+		assert.equal(gone.refused, "job-user-image");
+		assert.match(gone.message, /could not be inspected/);
+		const sudo = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest: { image: "pi-job:x" } });
+		assert.equal(sudo.refused, "job-user-unmappable");
+		assert.match(sudo.message, /recorded no job user/);
+		assert.doesNotMatch(sudo.message, /run the worker as an unprivileged account/, "the root is this shell's, not the worker's");
+	});
 });

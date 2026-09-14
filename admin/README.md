@@ -32,7 +32,7 @@ Every trigger produces the same job, through the same path: one queue, one conta
      pi + your .pi/skills          edits your code in place, opens a PR or MR, comments back
 ```
 
-The container is the boundary (pi's missing permission system, enforced by Docker). Those isolation flags are built by the worker's own `docker run` argv, so nothing an image contains can weaken them; the non-root user is a property of the **image**, which is why an image has to meet the conformance checklist in [`docs/job-image.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/job-image.md). Spend is checked before a container starts, so a runaway or a junk trigger costs a refusal, not a surprise bill. The job image is yours to shape, per deployment or per trigger, and it ships Playwright and Chromium so a flow can build a frontend, screenshot it, and iterate on the render.
+The container is the boundary (pi's missing permission system, enforced by Docker). Those isolation flags are built by the worker's own `docker run` argv, so nothing an image contains can weaken them; the non-root user comes from the **image** on Docker Desktop (and for a worker running as uid 1001), and from the worker's own uid on a native Linux daemon, which is why an image has to meet the conformance checklist in [`docs/job-image.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/job-image.md). Spend is checked before a container starts, so a runaway or a junk trigger costs a refusal, not a surprise bill. The job image is yours to shape, per deployment or per trigger, and it ships Playwright and Chromium so a flow can build a frontend, screenshot it, and iterate on the render.
 
 ## Triggers: what starts a job
 

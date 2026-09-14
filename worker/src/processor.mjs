@@ -13,6 +13,8 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
  * The order is the contract, and every step before `runContainer` must be free of provider spend:
  *
  *   0. refuse a job image this host does not have  -- INT-CONTAINER-RUNTIME-CONTRACT
+ *   0a. refuse a job no non-root uid can run on this daemon, or whose image cannot run as the worker's uid
+ *       (issue #341), and retry one whose job user could not be decided -- DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST
  *   0b. REFUSE a deployment with no usable credential for the job's provider, which costs nothing to
  *       ask and would otherwise be discovered with the budget already reserved -- CONST-BUDGET-BEFORE-TOKENS
  *       (gates 0 and 0b are not the first two: a one-shot already spent, a skewed wait, an unblessed
@@ -53,6 +55,13 @@ const TERMINAL_COMMENTS = {
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
 };
+
+// Issue #341: the forge comments for a `job-user-unmappable` refusal, keyed by cause. Shorter than the operator
+// texts in job-user.mjs on purpose: a comment's reader may be an issue author, who can act on none of it.
+const JOB_USER_COMMENTS = Object.freeze({
+	default: "Refused: the worker host's container runtime cannot give this job a non-root user that can read and write its own files. Not run.",
+	"runtime-unreadable": "Refused: the worker host's container runtime answered in a form the worker cannot read, so which user this job may run as is unknown. Not run.",
+});
 
 export async function runJob(job, deps) {
 	const {
@@ -157,7 +166,8 @@ export async function runJob(job, deps) {
 		mintToken,
 		isDefaultBranchProtected, // (job, token) => boolean; same reason -- the forge is the job's, not the process's
 		prepareWorkspace, // (job, token) => { workspaceDir, jobDir }  (clone+materialise+prompt)
-		// runContainer({ job, token, prepared, secrets, name, signal }) => { code, aborted, abortReason, turns, tokens, session, usage, context }.
+		// runContainer({ job, token, prepared, secrets, name, signal, user, home }) => { code, aborted, abortReason, turns, tokens, session, usage, context }.
+		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
 		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal, and
@@ -404,8 +414,9 @@ export async function runJob(job, deps) {
 		// `anyUid` capability, and still FREE: one cached `docker info` per endpoint, no mint, no clone, no reserve.
 		const jobUser = await jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });
 		if (jobUser?.refused === "job-user-unmappable") {
-			// Fixed text: the cause and anything the runtime said go to the operator's log, never a forge comment.
-			await comment(job, "Refused: the worker host's container runtime cannot give this job a non-root user that can read and write its own files. Not run.");
+			// Fixed text per cause class: the cause and anything the runtime said go to the operator's log, never a forge
+			// comment.
+			await comment(job, JOB_USER_COMMENTS[jobUser.cause] ?? JOB_USER_COMMENTS.default);
 			log("refused_job_user_unmappable", { cause: jobUser.cause ?? null });
 			return { outcome: "policy", reason: "job-user-unmappable", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
@@ -419,7 +430,9 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: "job-image-any-uid-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 		if (jobUser?.unavailable) {
-			throw new InfraRetry("the job user could not be decided (docker info did not answer)", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			// The reason is a fixed token (`daemon-unreachable`, `timeout`, `endpoint-unresolved`...), never CLI text.
+			log("job_user_unavailable", { reason: jobUser.reason ?? null });
+			throw new InfraRetry("the job user could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function

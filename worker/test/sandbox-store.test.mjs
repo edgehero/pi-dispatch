@@ -157,6 +157,20 @@ test("a stamp with no venue records null, never a guessed local, and a pin keeps
 	assert.equal(Object.hasOwn(JSON.parse(oldFs.files["/sbx/gh-3/manifest.json"]), "backend"), false);
 });
 
+test("the job user the run had is written to the manifest, null when nothing decided one, and a pin keeps it (#341)", () => {
+	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	const stamped = retainJobDir(prepared({ sandbox: { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local", jobUser: { user: "1234:1234", home: "/home/pi" } } }), { sandboxDir: "/sbx", fs, now: () => Date.parse("2026-08-01T10:00:00Z") });
+	assert.deepEqual(stamped.jobUser, { user: "1234:1234", home: "/home/pi" });
+	assert.deepEqual(JSON.parse(fs.files["/sbx/gh-1/manifest.json"]).jobUser, { user: "1234:1234", home: "/home/pi" }, "on disk, where the sandbox reads it");
+
+	const bare = fakeFs({ files: { "/jobs/job-xyz": "<dir>" } });
+	assert.equal(retainJobDir(prepared(), { sandboxDir: "/sbx", fs: bare }).jobUser, null, "no decision is null, which the sandbox reads as 'decide from this shell'");
+
+	const pinFs = fakeFs({ files: { "/sbx/gh-2/manifest.json": JSON.stringify({ jobId: "gh-2", backend: "local", jobUser: { user: "1234:1234", home: "/home/pi" }, createdAt: "2026-08-01T00:00:00Z" }) } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-2", pinDays: 7, fs: pinFs, now: () => Date.parse("2026-08-01T12:00:00Z") }).pinned, true);
+	assert.deepEqual(JSON.parse(pinFs.files["/sbx/gh-2/manifest.json"]).jobUser, { user: "1234:1234", home: "/home/pi" });
+});
+
 test("a pin is a TIMESTAMP, never a boolean -- there is no keep-forever", () => {
 	const fs = fakeFs({ files: { "/sbx/gh-1/manifest.json": JSON.stringify({ jobId: "gh-1", createdAt: "2026-08-01T00:00:00Z" }) } });
 	const at = Date.parse("2026-08-01T12:00:00Z");

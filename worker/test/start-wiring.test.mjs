@@ -74,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -179,7 +179,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeSandboxReaper: sandboxReaper,
 			makeRunContainer: runContainerFactory,
 			makeSecretsResolver: (args) => (secretsResolverCalls.push(args), async () => ({ ok: true, secrets: {} })),
-			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
+			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => bootImage ?? { ok: true }),
 			// Issue #278: never the real CLI under test. A local socket unless a test says otherwise.
 			resolveDockerEndpoint: resolveDockerEndpoint ?? (async () => ({ local: true, context: "test", endpoint: "unix:///test.sock", reason: null, transient: false })),
 			// Issue #341: never the real daemon or this process's ids under test. A rootful Docker body and uid 1001, so the
@@ -2021,12 +2021,29 @@ test("a rootless daemon or a root worker refuses to BOOT when local is the defau
 		["desktop-linux", DOCKER_FACTS({ os: "Docker Desktop" }), LINUX_ID(1234), /Docker Desktop on Linux/],
 	]) {
 		const order = [];
+		const makeAuth = async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" });
 		await assert.rejects(
-			() => runStart({ readDaemonFacts, jobUserIdentity, order, makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
+			() => runStart({ readDaemonFacts, jobUserIdentity, order, makeAuth, makeHost: () => fakeHost(), makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
 			(err) => err.piDispatchConfig === true && pattern.test(err.message),
 			label,
 		);
-		assert.deepEqual(order, [], `${label}: the refusal comes before the reaper and the worker`);
+		assert.deepEqual(order, [], `${label}: the refusal comes before forge auth, the reaper and the worker`);
+	}
+	// Non-vacuous: the same recorders on a decidable daemon do see forge auth, so an empty array above means "before".
+	const order = [];
+	await runStart({ readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: LINUX_ID(1234), order, makeAuth: async () => (order.push("makeAuth"), { mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) });
+	assert.ok(order.includes("makeAuth") && order.includes("makeReaper"), JSON.stringify(order));
+});
+
+test("only an identity verdict refuses at boot, and only while local is the default venue", { skip: skipNoModule }, async () => {
+	// Pinned on the predicate, because this build's backends table holds `local` alone and no config can make another
+	// venue the default: the branch is unreachable end to end until a second venue exists, and must not rot meanwhile.
+	for (const cause of ["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]) {
+		assert.match(mod.jobUserBootRefusal({ mode: "unmappable", cause }, "local"), /^Refused: /, cause);
+		assert.equal(mod.jobUserBootRefusal({ mode: "unmappable", cause }, "far"), null, `${cause}: local blessed but not default boots`);
+	}
+	for (const decision of [{ mode: "unmappable", cause: "runtime-unreadable" }, { mode: "unmappable", cause: "docker-group" }, { mode: "unknown", reason: "timeout" }, { mode: "worker", user: "1234:1234" }, { mode: "image", cause: "desktop-platform" }]) {
+		assert.equal(mod.jobUserBootRefusal(decision, "local"), null, JSON.stringify(decision));
 	}
 });
 
@@ -2050,17 +2067,78 @@ test("on macOS the job user is the image's and the daemon is never asked", { ski
 
 test("the per-job gate: --user with HOME for another uid on an anyUid image, refused without it, nothing for uid 1001", { skip }, async () => {
 	const endpointReads = [];
-	const endpoint = { local: true, context: "default", endpoint: "unix:///var/run/docker.sock", reason: null, transient: false };
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	// Never this machine's socket: the owner and group are the test's.
+	const stat = () => ({ uid: 0, gid: 2375 });
 
-	const other = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: LINUX_ID(1234), resolveDockerEndpoint: async () => (endpointReads.push(1), endpoint) });
+	const other = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: { ...LINUX_ID(1234), stat }, resolveDockerEndpoint: async () => (endpointReads.push(1), endpoint) });
 	assert.ok(other.logs.some((l) => l.event === "job_image_any_uid_unsupported"), "the default image cannot run as this uid: said once at boot");
 	const reads = endpointReads.length;
 	assert.deepEqual(await other.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi" });
 	assert.equal(endpointReads.length, reads, "the endpoint the observation just read is reused, never read twice for one job");
 	assert.deepEqual(await other.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" });
 
-	const shipped = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: LINUX_ID(1001) });
+	const shipped = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: { ...LINUX_ID(1001), stat } });
 	assert.ok(!shipped.logs.some((l) => l.event === "job_image_any_uid_unsupported"), "uid 1001 needs no anyUid");
 	assert.deepEqual(await shipped.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { user: null, home: null });
+});
+
+test("the per-job gate refuses a docker-group primary gid through the socket it statted, the endpoint the job observed", { skip }, async () => {
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const statted = [];
+	const stat = (path) => (statted.push(path), { uid: 0, gid: 2375 });
+	const bootEndpoint = { local: true, context: "default", endpoint: "unix:///run/pd-boot/docker.sock", reason: null, transient: false };
+	const { captured, logs } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: DOCKER_FACTS(),
+		jobUserIdentity: { ...LINUX_ID(1235, 2375), stat },
+		resolveDockerEndpoint: async () => bootEndpoint,
+		bootImage: { ok: true, capabilities: ["anyUid"] },
+	});
+	assert.equal(logs.find((l) => l.event === "job_user_group_refused")?.cause, "docker-group", "said once at boot for the default image");
+	const observed = { local: true, context: "other", endpoint: "unix:///run/pd-job/docker.sock", reason: null, transient: false };
+	statted.length = 0;
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint: observed } }), { refused: "job-user-unmappable", cause: "docker-group" });
+	assert.deepEqual(statted, ["/run/pd-job/docker.sock"], "the socket of the endpoint THIS job observed, never the boot one");
+});
+
+test("a job on another venue never reaches the job-user decision, and a changed decision is logged when a job meets it", { skip }, async () => {
+	let answer = { answered: false, reason: "timeout", transient: true };
+	let reads = 0;
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	const { captured, logs } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => (reads++, answer),
+		jobUserIdentity: { ...LINUX_ID(1234), stat: () => ({ uid: 0, gid: 2375 }) },
+		resolveDockerEndpoint: async () => endpoint,
+	});
+	assert.equal(logs.filter((l) => l.event === "job_user").length, 1);
+	const mark = bootLines.length;
+	const readsAtBoot = reads;
+	assert.deepEqual(await captured.deps.jobUserPreflight({ kind: "github", repo: "o/r", backend: "far" }, { capabilities: [], observed: { ok: true, endpoint } }), { user: null, home: null });
+	assert.equal(reads, readsAtBoot, "another venue's job asks this daemon nothing");
+
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	assert.equal((await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } })).unavailable, true);
+	assert.ok(!parseLines(bootLines.slice(mark)).some((l) => l.event === "job_user"), "an unchanged unknown is not said again");
+	answer = { answered: true, facts: (await DOCKER_FACTS({ rootless: true })()).facts };
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { refused: "job-user-unmappable", cause: "rootless" });
+	const said = parseLines(bootLines.slice(mark)).filter((l) => l.event === "job_user");
+	assert.deepEqual(said.map((l) => [l.mode, l.cause]), [["unmappable", "rootless"]], "a boot that read unknown is not left as the last word");
+});
+
+test("PI_FORWARD_ENV=HOME on a worker that runs jobs under --user is said at boot", { skip }, async () => {
+	const { logs } = await runStart({
+		env: { PI_FORWARD_ENV: "HOME" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: DOCKER_FACTS(),
+		jobUserIdentity: { ...LINUX_ID(1234), stat: () => ({ uid: 0, gid: 2375 }) },
+		bootImage: { ok: true, capabilities: ["anyUid"] },
+	});
+	assert.ok(logs.some((l) => l.event === "forward_env_home_overridden"));
+	assert.ok(!logs.some((l) => l.event === "job_user_group_refused" || l.event === "job_image_any_uid_unsupported"));
 });

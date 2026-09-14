@@ -107,8 +107,7 @@ worth calling out because they are the ones adapters get wrong:
   The worker decides this from facts at boot and before each job, never by starting a probe container. It
   refuses by name what no uid can serve: rootless Docker or Podman, userns-remap, a root worker, Docker
   Desktop on Linux (WSL is not affected), an image without the `anyUid` capability for another uid, and a
-  `--user` whose primary group is 0 or the docker socket's. `pi-dispatch doctor --live` reads the result back.
-  An adapter for another runtime answers the same question in its own terms.
+  `--user` whose primary group is 0 or the docker socket's. An adapter for another runtime answers the same question in its own terms.
 
 ## A declaration is not a claim that the property holds
 

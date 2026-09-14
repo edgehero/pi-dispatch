@@ -31,6 +31,10 @@ import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
  */
 export const DAEMON_FACTS_ARGS = Object.freeze(["info", "--format={{json .}}"]);
 const DAEMON_FACTS_MAX_BUFFER = 256 * 1024;
+// Longer than the endpoint read's 5 s: `docker info` counts containers and images, and on a busy host it is the slow
+// one. A per-job `unknown` retries the job, so a bound the host routinely misses would retry every job forever. Boot
+// is bounded separately (`settleWithin`), and a read still in flight there is joined by the first job.
+export const DAEMON_FACTS_TIMEOUT_MS = 15_000;
 
 // Podman's compat API has hard-coded this since v2 (pkg/api/handlers/compat/info.go); Docker CE packages say
 // "Community Engine" and Docker Desktop omits the key (measured). Used only to withhold credit, never to grant it.
@@ -40,10 +44,11 @@ export const PODMAN_PRODUCT_LICENSE = "Apache-2.0";
  * What a `docker info --format={{json .}}` answer says: `{ facts }`, `{ unreachable: true }`, or `null` when no line
  * parses to either shape.
  *
- * NO DAEMON IS NOT A SHAPE. When the CLI's `/info` request fails, a docker CLI up to 28.0 still exits 0 under
- * `--format` and prints a Docker-shaped body with every server field empty and the error in `ServerErrors` (measured
- * on 27.5.1 against a missing socket; source for the other versions; from 28.1 the CLI exits non-zero, which the
- * reader already treats as transient). Read as facts, that body has no rootless marker and decides `worker`, so it is
+ * NO DAEMON IS NOT A SHAPE. When the CLI's `/info` request fails, the docker CLI still exits 0 under `--format` and
+ * prints a Docker-shaped body with every server field empty and the error in `ServerErrors` (measured on 27.5.1
+ * against a missing socket). From 28.1 a CONNECTION failure exits non-zero instead, which the reader already treats
+ * as transient, but any other `/info` failure (an authorization plugin, an API version mismatch) still exits 0 with
+ * `ServerErrors` on every version (source). Read as facts, that body has no rootless marker and decides `worker`, so it is
  * recognised FIRST: a non-empty `ServerErrors` is `unreachable` (the error text is never read), and a Docker-shaped
  * body with no `ServerVersion` is no shape at all. A daemon that answers `/info` always sets `ServerVersion`
  * (Docker and Podman's compat handler, source).
@@ -113,7 +118,7 @@ export function parseDaemonFacts(output) {
  * timeout, a signal, no docker binary. A worker unit with `RestartPreventExitStatus=2` must never be stranded by a
  * daemon that is merely late. No CLI text is ever read or logged.
  */
-export function makeDaemonFactsReader({ run = (args) => execDockerBounded(args, { maxBuffer: DAEMON_FACTS_MAX_BUFFER }) } = {}) {
+export function makeDaemonFactsReader({ run = (args) => execDockerBounded(args, { timeoutMs: DAEMON_FACTS_TIMEOUT_MS, maxBuffer: DAEMON_FACTS_MAX_BUFFER }) } = {}) {
 	return async function readDaemonFacts() {
 		let result;
 		try {
@@ -160,8 +165,9 @@ function isUnixSocketPath(path) {
 	return typeof path === "string" && (path.startsWith("/") || path.startsWith("unix:///"));
 }
 
-// The fixed texts every surface shares (boot refusal, the forge comment, sandbox, doctor). No CLI output, no
-// endpoint, no path: a refusal that repeats what docker printed can repeat a credential.
+// The fixed operator texts, one per cause, for the boot refusal, the sandbox and doctor. The forge comments keep
+// their own shorter texts (a comment's reader may not be the operator), and no text carries CLI output, an endpoint
+// or a path: a refusal that repeats what docker printed can repeat a credential.
 export const JOB_USER_FIX = Object.freeze({
 	rootless: "the container runtime runs rootless (a user namespace between the job and this worker), so no uid a job may run as can read the worker's 0700 job dir; run jobs on a rootful Docker or Podman daemon. If this was inferred from a socket this worker's uid owns on a rootful daemon (a systemd SocketUser= override), point the worker at the daemon's own socket",
 	"userns-remap": "the Docker daemon remaps container uids (userns-remap), so no uid a job may run as can read the worker's 0700 job dir; run jobs on a daemon without userns-remap",
@@ -270,7 +276,10 @@ export function makeJobUserResolver({
 		if (cached && cached.key === key) return cached.value;
 		if (inFlight.has(key)) return inFlight.get(key);
 		const work = (async () => {
-			const daemon = platform === "darwin" || platform === "win32" ? { answered: false, reason: "not-read", transient: true } : await readFacts();
+			// Not asked where no answer could change the decision: a VM-backed platform, or an endpoint observed on another
+			// machine (row 2 decides `image` before any daemon fact is read, and the read would be a remote round trip).
+			const skip = platform === "darwin" || platform === "win32" || endpoint?.local === false;
+			const daemon = skip ? { answered: false, reason: "not-read", transient: true } : await readFacts();
 			// A local docker endpoint's display form IS its unix path (credentials never ride a unix URL); with no endpoint,
 			// Podman's own shape names the service socket.
 			const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	DAEMON_FACTS_ARGS,
+	DAEMON_FACTS_TIMEOUT_MS,
 	decideJobUser,
 	JOB_USER_FIX,
 	jobUserRefusal,
@@ -249,6 +250,19 @@ test("with no endpoint, the resolver takes the socket from Podman's own unix pat
 	seen.length = 0;
 	await makeJobUserResolver({ readFacts: async () => answered("shimRootful"), platform: "linux", release: "6.8.0", euid: 1234, egid: 1234, stat })({ endpoint: LOCAL, key: "k" });
 	assert.deepEqual(seen, ["/var/run/docker.sock"]);
+});
+
+test("the resolver asks no daemon for an endpoint observed on another machine: row 2 decides before any fact", async () => {
+	let reads = 0;
+	const resolve = makeJobUserResolver({ readFacts: async () => (reads++, answered("dockerRootful")), platform: "linux", release: "6.8.0", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }) });
+	const out = await resolve({ endpoint: { ...LOCAL, local: false, endpoint: "tcp://10.0.0.5:2376" }, key: "remote" });
+	assert.equal(reads, 0);
+	assert.deepEqual(out.decision, { mode: "image", user: null, cause: "endpoint-not-local", reason: null });
+});
+
+test("the facts read is bounded longer than the endpoint read, because a busy host's `docker info` is the slow one", () => {
+	assert.equal(DAEMON_FACTS_TIMEOUT_MS, 15_000);
+	assert.match(makeDaemonFactsReader.toString(), /timeoutMs: DAEMON_FACTS_TIMEOUT_MS/);
 });
 
 test("the resolver never runs docker on macOS or Windows", async () => {

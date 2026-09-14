@@ -1392,7 +1392,8 @@ adversarial passes did.
 - **What bounds it meanwhile**:
   - `deploy/worker.service` runs the worker as a dedicated account (`User=pi`), not a login account.
   - A root worker is refused.
-  - The gid rows refuse the two privileged groups that matter.
+  - The gid rows refuse the two privileged groups that matter (the docker-group row needs a unix socket to
+    stat, so on a loopback TCP endpoint it cannot see that group).
   - Nothing a trigger or a model can set moves the uid (it is the worker's own, and `run.secrets` and
     `PI_FORWARD_ENV` cannot override HOME).
 - **What would close it**: a distinct job uid the worker can still clean up after (ACLs, or a helper that

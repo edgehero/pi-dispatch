@@ -84,7 +84,8 @@ pull request on your own machine — and the container still applies every isola
 ## No credentials, and why
 
 A sandbox carries no `GITHUB_TOKEN`, no `GH_TOKEN`, no GitLab/Forgejo/Azure token, and no provider API
-key. The env is `TERM` and `TMOUT`, plus four proxy variables when egress is on. `TERM` and `TMOUT` are
+key. The env is `TERM` and `TMOUT`, plus four proxy variables when egress is on, plus `HOME=/home/pi` when the
+run ran as the worker's own uid (see *Known limitations*). `TERM` and `TMOUT` are
 dropped when they have nothing to say, so an unset host `TERM` or `PI_SANDBOX_IDLE_MINUTES=0` emits nothing
 rather than an empty string.
 
@@ -166,9 +167,10 @@ session that ends in a closed laptop still keeps the workspace.
 
 - **Which user the shell runs as.** A sandbox runs as the uid the job ran as: the worker's own on a native
   Linux daemon, the image's `pi` user on Docker Desktop (issue #341). The retained files are owned by that
-  uid and readable only by it, so open the sandbox as the worker's account, or with `sudo -E` (the recorded
-  uid is used either way). A rootless daemon, userns-remap or Docker Desktop on Linux is refused with the
-  reason.
+  uid and readable only by it, so open the sandbox as the worker's account, or with `sudo -E`: the uid the
+  run recorded is used either way. A run retained before this was recorded has no uid on file, so it opens as
+  the account you run the command as, and as root it is refused; open such a run as the worker's account. A
+  rootless daemon, userns-remap or Docker Desktop on Linux is refused with the reason.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>`. The
