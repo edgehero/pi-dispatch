@@ -938,3 +938,30 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }), null);
 	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
 });
+
+test("the reaper removes an expired key, keeps a fresh one, and never touches a key with no transcript", () => {
+	// The disk sweep keys on the TRANSCRIPT's mtime alone. A key directory with no transcript (a first promotion
+	// that died before the swap) is skipped rather than guessed at, which is why a lock leaked there outlives it.
+	const later = Date.now() + 3 * 86400000;
+	const { store, sessionsDir, logs } = fixture({ ttlDays: 1, now: () => later });
+	const expired = sessionKeyFor(ghIssue);
+	const fresh = sessionKeyFor({ ...ghIssue, target: { type: "issue", number: 8 } });
+	const empty = sessionKeyFor({ ...ghIssue, target: { type: "issue", number: 9 } });
+	seed(sessionsDir, expired, { venue: "local" });
+	const freshFile = seed(sessionsDir, fresh, { venue: "local" });
+	utimesSync(freshFile, later / 1000, later / 1000);
+	mkdirSync(join(sessionsDir, empty), { recursive: true });
+	writeFileSync(join(sessionsDir, empty, "lock"), "");
+
+	store.reapSessions();
+	assert.equal(existsSync(join(sessionsDir, expired)), false, "an expired transcript's key is swept whole, stamp and all");
+	assert.equal(existsSync(join(sessionsDir, fresh, SESSION_FILE_NAME)), true, "a fresh one is kept");
+	assert.equal(existsSync(join(sessionsDir, empty, "lock")), true, "a key with no transcript is not swept");
+	assert.ok(logs.some(([event, fields]) => event === "reaped_session" && fields.key === expired));
+
+	// Retention 0 is "keep forever": the sweep does nothing at all.
+	const keep = fixture({ ttlDays: 0, now: () => later });
+	seed(keep.sessionsDir, expired);
+	keep.store.reapSessions();
+	assert.equal(existsSync(join(keep.sessionsDir, expired, SESSION_FILE_NAME)), true);
+});
