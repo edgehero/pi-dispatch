@@ -280,7 +280,7 @@ async function checkReadBack(backend, { readBack }) {
 	}
 	const declares = backend?.declares ?? {};
 	const claimed = (property) => declares[property] === "enforced" || declares[property] === "asserted";
-	// A reading counts only through its OWN `ok` and `warn`, and any truthy `warn` means not read back.
+	// A reading counts only through its OWN `ok`; any truthy `warn`, own or not, means not read back.
 	const failing = (v) => v && typeof v === "object" && Object.hasOwn(v, "ok") && v.ok === false && !v.warn;
 	return READ_BACK_BY_A_LIVE_PROBE.map((property) => {
 		if (repeated.has(property)) {

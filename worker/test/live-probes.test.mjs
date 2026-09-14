@@ -311,7 +311,7 @@ test("on a not-run path a removal that fails is still reported, beside the reaso
 	assert.match(result.notes.join("\n"), new RegExp(`docker rm -f ${ID}`), "the finally's note reaches the caller on this path too");
 });
 
-test("a start that printed an ID and then failed or timed out is removed BY THAT ID: --rm never runs for it", async () => {
+test("a start that printed an ID and then failed or timed out is removed BY THAT ID, whether or not the daemon already did", async () => {
 	for (const code of [127, null]) {
 		const docker = fakeDocker({ run: async () => ({ code, stdout: `${ID}\n`, stderr: "" }) });
 		const result = await runLiveProbes(probeArgs(docker));
@@ -332,6 +332,11 @@ test("a fixture that cannot be created is a reason not to run, never an exceptio
 		assert.match(result.reason, /fixture could not be created .*\((EACCES|ELOOP)\)/);
 		assert.deepEqual(readdirSync(args.jobsDir), [], `${name}: nothing mkdtemp made is left behind`);
 	}
+	// A fixture whose removal then fails is still reported on this not-run path: the notes are the ones the finally fills.
+	const stuck = { ...nodeFs, realpathSync: () => { throw Object.assign(new Error("ELOOP"), { code: "ELOOP" }); }, rmSync: () => { throw new Error("EBUSY"); } };
+	const stuckResult = await runLiveProbes(probeArgs(fakeDocker(), { fs: stuck }));
+	assert.equal(stuckResult.ran, false);
+	assert.match(stuckResult.notes.join("\n"), /the fixture .* could not be removed/);
 	assert.ok(!docker.calls.some((a) => a[0] === "run"), "no container");
 	const empty = await runLiveProbes(probeArgs(fakeDocker(), { jobsDir: "" }));
 	assert.equal(empty.ran, false, 'PI_JOBS_DIR="" is a note, not a crash');

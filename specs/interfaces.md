@@ -1533,11 +1533,12 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` whenever one was printed,
     whatever the exit (a CLI killed or timed out after the create can leave a container that never started, which
     `--rm` does not remove), falls back to the pid-and-nonce NAME only when no ID came back, does the same for the
-    pinning container, and removes the fixture. A removal that fails is a ⚠ carrying the command, whether or not
-    anything was read back. **What an interrupted
-    run leaves, the next removes, and says so**: fixtures of exactly `mkdtemp`'s shape that are real directories,
-    and probe or pinning containers by name shape, in both cases only for a PID no longer alive, and said on
-    every path. The shape is narrow, not unique: the jobs dir is not a place for anything else. A probe that had
+    pinning container, and removes the fixture. A removal BY ID that fails is a ⚠ carrying the command, whether
+    or not anything was read back; the name fallback and the sweep are best effort and silent when they fail.
+    **What an interrupted run leaves, the next removes, and says so**: fixtures of exactly `mkdtemp`'s shape that
+    are real directories, and probe or pinning containers by name shape, in both cases only for a PID no longer
+    alive, and said on every path. The shape is narrow, not unique: the jobs dir is not a place for anything
+    else. A probe that had
     STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
   - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
     a pass:
@@ -1579,13 +1580,13 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
   `Unable to find image`, imagePinning fails; given a root image, nonRoot fails and doctor exits 1. Given a docker
   CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
   container that vanishes, or a step that throws, the probe container is removed by its ID and the fixture is
-  removed; given a `docker run -d` that printed no ID, the removal is by its pid-and-nonce name; two concurrent runs
-  remove only their own containers. Given a `docker run -d` that printed an ID and then failed, that ID is removed. Given a fixture that
-  cannot be created, nothing runs and doctor reports it. Given a probe or fixture a dead PID left, the next run
-  removes it and names it; given a directory that is not of `mkdtemp`'s shape, or a symlink, it is not touched.
-  Given an allow-everything proxy, the egress deny probe reads as reached and egress fails, even when the provider
-  probe did not run. Given `doctor` without `--live`, its
-  output and its spawns are unchanged.
+  removed; given a `docker run -d` that printed no ID, the removal is by its pid-and-nonce name; two concurrent
+  runs remove only their own containers. Given a `docker run -d` that printed an ID and then failed, that ID is
+  removed. Given a fixture that cannot be created, nothing runs and doctor reports it. Given a probe or fixture a
+  dead PID left, the next run removes it and names it; given a directory that is not of `mkdtemp`'s shape, or a
+  symlink, it is not touched. Given an allow-everything proxy, the egress deny probe reads as reached and egress
+  fails, even when the provider probe did not run. Given `doctor` without `--live`, its output and its spawns are
+  unchanged.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 

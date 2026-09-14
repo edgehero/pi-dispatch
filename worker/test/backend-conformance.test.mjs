@@ -294,6 +294,21 @@ test("a readBack report cannot pass what it did not read: warn beats ok, a repea
 		const r = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => readings.map((v) => ({ property: "isolation", detail: "x", ...v })) });
 		assert.equal(findings(r, "isolation")[0].ok, false, JSON.stringify(readings));
 	}
+	// Otherwise a repeat abstains: never a pass, and never a failure of a word that claims nothing, or of a reading
+	// that was not read back.
+	const abstaining = [
+		[[{ ok: true }, { ok: true }], "local"],
+		[[{ ok: true }, { ok: true, warn: true }], "local"],
+		[[{ ok: false, warn: true }, { ok: true }], "local"],
+		[[{ ok: false }, { ok: false }], "absent"],
+	];
+	for (const [readings, declared] of abstaining) {
+		const backend = declared === "absent" ? referenceBackend({ declares: { ...BACKENDS.local.declares, isolation: "absent" } }) : referenceBackend();
+		const r = await runBackendConformance(backend, { ...base, readBack: async () => readings.map((v) => ({ property: "isolation", detail: "x", ...v })) });
+		assert.equal(findings(r, "isolation")[0].unverifiable, true, `${JSON.stringify(readings)} against ${declared}`);
+	}
+	const inheritedFail = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => [{ property: "isolation", ok: true }, Object.assign(Object.create({ ok: false }), { property: "isolation" })] });
+	assert.equal(findings(inheritedFail, "isolation")[0].unverifiable, true, "an inherited ok:false is not a failing reading either");
 	const truthyWarn = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => ({ isolation: { ok: true, warn: 1, detail: "not read back" } }) });
 	assert.equal(findings(truthyWarn, "isolation")[0].unverifiable, true, "any truthy warn is not read back");
 	const inheritedOk = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => ({ isolation: Object.create({ ok: true }) }) });

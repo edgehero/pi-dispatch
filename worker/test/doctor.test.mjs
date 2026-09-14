@@ -3235,10 +3235,11 @@ test("doctor --live's not-run path still names what it swept", async () => {
 	const env = liveEnv();
 	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99998-aB3xYz"));
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
-	const failing = { ...liveOk(), "docker run --name=pi-dispatch-live-probe-": { code: 125, output: "" } };
+	const failing = { ...liveOk(), "docker run --name=pi-dispatch-live-probe-": { code: 127, output: `${LIVE_ID}\n` }, "docker rm -f": 1 };
 	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...failing, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks[0].label, /removed fixture pi-dispatch-live-99998-aB3xYz/);
 	assert.ok(checks.some((c) => /not run -- the probe container did not start/.test(c.label)));
+	assert.ok(checks.some((c) => c.warn && new RegExp(`could not be removed: docker rm -f ${LIVE_ID}`).test(c.label)), "a failed removal by ID is said on this path too");
 });
 
 test("doctor --live's not-writable localFolders failure keeps its own uid fix", async () => {
