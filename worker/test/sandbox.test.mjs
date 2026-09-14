@@ -245,15 +245,12 @@ test("openSandbox puts an armed session on its own egress network, and removes i
 	assert.deepEqual(calls, [
 		// The hook first: a throw there (a failed pin) must not leave a network behind, so it runs before one exists.
 		"beforeLaunch",
-		// Docker said nothing is running for this job, so any network under this name is a leftover; cleared first.
-		"docker network disconnect -f pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
-		"docker network rm pi-sandbox-gh-1-net",
 		"docker network create --internal pi-sandbox-gh-1-net",
 		"docker network connect pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
 		"launch",
 		"docker network disconnect -f pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
 		"docker network rm pi-sandbox-gh-1-net",
-	], "hook, leftover cleared, built before the launch, torn down after it");
+	], "hook, built before the launch, torn down after it -- and nothing is removed before the build");
 });
 
 test("openSandbox with egress off builds exactly the argv it always did, and touches no network", async () => {
@@ -283,7 +280,8 @@ test("openSandbox launches nothing when the egress network cannot be built", asy
 		...session,
 		...openable(),
 		egress: { armed: true, proxy: "p" },
-		spawnNetwork: recordingDocker([], (args) => (args[1] === "connect" ? 1 : 0)),
+		// The proxy is missing: connect fails, createJobNetwork rolls its own network back, so inspect finds none.
+		spawnNetwork: recordingDocker([], (args) => (args[1] === "connect" || args[1] === "inspect" ? 1 : 0)),
 		launch: async () => ((launched = true), { code: 0 }),
 	});
 	assert.equal(result.refused, "egress-network-failed");
@@ -327,10 +325,51 @@ test("openSandbox leaves the network of a DETACHED sandbox, and clears a leftove
 	assert.equal(detached.detached, true);
 	assert.equal(calls.at(-1), "docker network connect pi-sandbox-gh-1-net p", "nothing after the launch: the live sandbox keeps its network");
 
-	// A docker that could not say what is running gets no pre-clean: the name might belong to a live sandbox.
+	// A docker that cannot be asked AFTER the launch is not a detach: the network is torn down, as it always was.
 	const unknown = [];
-	await openSandbox({ ...session, ...openable(), running: async () => { throw new Error("daemon down"); }, egress: { armed: true, proxy: "p" }, spawnNetwork: recordingDocker(unknown), launch: async () => ({ code: 0 }) });
-	assert.equal(unknown[0], "docker network create --internal pi-sandbox-gh-1-net", "no removal before the create when docker could not be asked");
+	let asks = 0;
+	const gone = await openSandbox({
+		...session,
+		...openable(),
+		running: async () => {
+			if (asks++ === 0) return [];
+			throw new Error("daemon went away");
+		},
+		egress: { armed: true, proxy: "p" },
+		spawnNetwork: recordingDocker(unknown),
+		launch: async () => ({ code: 0 }),
+	});
+	assert.equal(gone.detached, undefined);
+	assert.equal(unknown.at(-1), "docker network rm pi-sandbox-gh-1-net");
+});
+
+test("openSandbox REFUSES a network already under the session's name and names it, never removing it", async () => {
+	// A leftover from a dead session, a detached sandbox that has exited, or an open of the same run in progress:
+	// removing it automatically stripped the proxy from a racing open's live shell, so it is named instead.
+	const calls = [];
+	let launched = false;
+	const exists = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "my-proxy" },
+		spawnNetwork: recordingDocker(calls, (args) => (args[1] === "create" ? 1 : 0)),
+		launch: async () => ((launched = true), { code: 0 }),
+	});
+	assert.equal(exists.refused, "egress-network-exists");
+	assert.match(exists.message, /docker network disconnect -f pi-sandbox-gh-1-net my-proxy; docker network rm pi-sandbox-gh-1-net/);
+	assert.equal(launched, false);
+	assert.ok(!calls.some((c) => c.includes(" rm ") || c.includes("disconnect")), "nothing was removed or disconnected");
+
+	// No such network: the failure is about the proxy, and says where the setting is read.
+	const missing = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "p" },
+		spawnNetwork: recordingDocker([], (args) => (args[1] === "create" || args[1] === "inspect" ? 1 : 0)),
+		launch: async () => ({ code: 0 }),
+	});
+	assert.equal(missing.refused, "egress-network-failed");
+	assert.match(missing.message, /is the proxy running\?.*read from this process's environment/);
 });
 
 test("openSandbox refuses a running sandbox by its SANITIZED id, which is what docker reports", async () => {

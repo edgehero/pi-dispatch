@@ -104,7 +104,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	});
 	if (result.refused) return fail(err, result.message);
 	if (result.error) return fail(err, `could not start docker: ${result.error.message}`);
-	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running, and its egress network stays until it exits -- \`docker attach ${sandboxContainerName(jobId)}\` to return\n`);
+	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running with its egress network, which is left in place after it exits -- \`docker attach ${sandboxContainerName(jobId)}\` to return\n`);
 	return result.code ?? 0;
 }
 

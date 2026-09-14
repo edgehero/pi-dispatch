@@ -117,13 +117,21 @@ test("a network the panel cannot create names where the panel reads the egress s
   const failing = panelIo({
     spawnNetwork: (cmd, args) => {
       const child = new EventEmitter();
-      queueMicrotask(() => child.emit("close", args[1] === "create" ? 1 : 0));
+      queueMicrotask(() => child.emit("close", args[1] === "create" || args[1] === "inspect" ? 1 : 0));
       return child;
     },
   });
   await mod.openSandboxSession({ sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24 }, "gh-1", failing.io);
   const text = failing.written.join("");
   assert.match(text, /could not create the egress network/);
-  assert.match(text, /reads PI_EGRESS and PI_EGRESS_PROXY from the environment pi runs in/);
+  assert.match(text, /read from this process's environment \(PI_EGRESS, PI_EGRESS_PROXY\)/);
   assert.deepEqual(failing.launched, []);
+});
+
+test("a detached panel session says so, and leaves the network (#277)", async () => {
+  let asks = 0;
+  const detached = panelIo({ running: async () => (asks++ === 0 ? [] : ["gh-1"]) });
+  await mod.openSandboxSession({ sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24 }, "gh-1", detached.io);
+  assert.match(detached.written.join(""), /detached: the sandbox is still running with its egress network, which is left in place after it exits/);
+  assert.ok(!detached.docker.includes("network rm pi-sandbox-gh-1-net"));
 });

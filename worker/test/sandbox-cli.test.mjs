@@ -223,3 +223,11 @@ test("--list says no venue is recorded for a manifest whose stamp names none, ra
 	assert.match(c.text(), /not openable \(no venue recorded\)/);
 	assert.doesNotMatch(c.text(), /ran on|left/);
 });
+
+test("a detached shell says the sandbox is still running and that its network is left in place (#277)", async () => {
+	const { root } = retained({ backend: "local" });
+	let asks = 0;
+	const c = capture({ running: async () => (asks++ === 0 ? [] : ["gh-1"]) });
+	assert.equal(await runSandbox(["gh-1"], { env: envWith(root), deps: c.deps }), 0);
+	assert.match(c.text(), /detached: pi-sandbox-gh-1 is still running with its egress network, which is left in place after it exits/);
+});

@@ -98,14 +98,17 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 A sandbox lands on **the network your egress setting gives a job**, whether you open it from the CLI or from
 the panel. By default that is its own `--internal` network with no route anywhere except the allowlist
 proxy; with `PI_EGRESS=0` it is Docker's default bridge and the whole internet, which is what `SECURITY.md`
-discloses. The setting is read where you open the sandbox: the CLI reads your deployment's configuration,
-and the panel reads the environment pi was started in, so set `PI_EGRESS` there too if you only set it in
-`.env` (the panel refuses rather than guessing, and says so). (Before #277 a sandbox opened from the panel
+discloses. The setting is read from the environment of whatever opens the sandbox: the shell you run
+`pi-dispatch sandbox` in, or the environment pi was started in for the panel. Neither reads your
+deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, export them where you open
+sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so). (Before #277 a sandbox opened from the panel
 skipped the network and got the whole internet even with the policy on. If you rely on the policy for
 sandboxes, run a version that carries #277.)
 
-If you detach from a sandbox shell (Ctrl-P Ctrl-Q), it keeps running with its network; the next time you open
-that run, a network left behind by a closed terminal is cleaned up first. The policy, how to change it, and a
+If you detach from a sandbox shell (Ctrl-P Ctrl-Q), it keeps running with its network, and the network is left
+in place after it exits. A network left that way, or by a terminal closed mid-session, makes the next open of
+that run refuse and print the two commands that remove it; nothing removes it for you, because a second open
+cannot safely tell a leftover from a session starting at the same moment. The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a
