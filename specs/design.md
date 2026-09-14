@@ -525,8 +525,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   the validator, and why the console has to be republished with the loaders.
   **Reserving `HOME` (issue #341) is one more narrowing, and it is not the fourth.** Others landed after #313
   without a line here, each refusing a file that used to load: #291 reserved `PI_EXCLUDE_TOOLS` in
-  `CONTAINER_ENV_NAMES` and refused `run.tools`, `run.noTools` and near-miss spellings of `run.excludeTools` by name
-  (cb43dd3); #314 reserved the provider-steering variables (`ANTHROPIC_BASE_URL`, `AZURE_OPENAI_BASE_URL` and the
+  `CONTAINER_ENV_NAMES`, refused `run.tools` and `run.noTools` by name, and refused near-miss spellings of the
+  `excludeTools` key through a sweep (cb43dd3); #314 reserved the provider-steering variables (`ANTHROPIC_BASE_URL`, `AZURE_OPENAI_BASE_URL` and the
   rest of `PROVIDER_STEERING_VARS`) in `run.secrets` (cf8b4fe). Now a `run.secrets` entry binding `HOME` refuses the
   whole file at parse, in the worker, the receiver and the admin validator alike, because the worker sets
   `HOME=/home/pi` beside `--user` and a secret of that name could otherwise have been meant to override it. No
@@ -3909,7 +3909,10 @@ a tunnel.
     rootless on one socket path) is read again only after a worker restart.
   - The docker-group row needs a unix socket to stat. On a loopback TCP endpoint there is none, so a worker whose
     primary group is docker is not refused there.
-  - A host whose `docker info` routinely takes longer than its 15 s bound retries every local job as `unknown`.
+  - A host whose `docker info` routinely takes longer than its 15 s bound retries every local job as `unknown`;
+    doctor reads with the same bound, so it says the same.
+  - Doctor's warning that a system unit runs the worker as another account reads the unit's own `User=` (root
+    when it names none) and no drop-in, and skips `DynamicUser=`.
   - Derived images inherit `anyUid` whether or not their layer keeps the home writable.
   - A container escape that keeps its uid lands as the worker's own account; see `OQ-036`.
 - **Code evidence**: `worker/src/job-user.mjs` -> `parseDaemonFacts`, `makeDaemonFactsReader`, `socketFacts`,

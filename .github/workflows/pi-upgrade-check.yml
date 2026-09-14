@@ -392,23 +392,24 @@ jobs:
       # in its own primary group and in the docker group, against this job's real daemon, which enforces
       # bind-mount ownership. The script drives the real modules (the facts reader and resolver, the preparers
       # and session store, the builder, the cleanup, doctor's read-back) and the real runner, with no network
-      # and no key, and it refuses to pass unless every negative control ran and failed as it must.
-      # `$(command -v node)` and PATH are carried explicitly: sudo resets both, and setup-node's node is not on
-      # the default secure_path.
+      # and no key, and it refuses to pass unless every negative control ran and failed as it must. RUNNER, not
+      # CORE: it asserts this repository's runner and worker, not what any nameable image must do.
+      # PATH and the node binary are carried explicitly, because sudo's secure_path replaces PATH and setup-node's
+      # node lives in the tool cache, off it; -H gives pdjob its own HOME, so host git does not read the runner's.
       - uses: actions/setup-node@v4
         with:
           node-version-file: ".nvmrc"
 
       - run: npm ci --no-audit --no-fund
 
-      - name: "CORE: every job mount works for a worker that is not uid 1001 (issue #341)"
+      - name: "RUNNER: every job mount works for a worker that is not uid 1001 (issue #341)"
         run: |
           sudo useradd -m --uid 1234 --user-group pdjob
           sudo usermod -aG docker pdjob
           sudo cp -a "$GITHUB_WORKSPACE" /srv/pd
           sudo chown -R pdjob:pdjob /srv/pd
           sudo install -d -o pdjob -g pdjob -m 0755 /srv/pd-jobs
-          sudo -u pdjob env "PATH=$PATH" PI_JOBS_DIR=/srv/pd-jobs "$(command -v node)" /srv/pd/.github/scripts/job-user-e2e.mjs "$IMAGE_REF"
+          sudo -H -u pdjob env "PATH=$PATH" PI_JOBS_DIR=/srv/pd-jobs "$(command -v node)" /srv/pd/.github/scripts/job-user-e2e.mjs "$IMAGE_REF"
 
       # --- INT-CONTAINER-JOB-INPUTS / REQ-GLOBAL-PI-OVERLAY ---
       # A staged package that did not mount must be refused BEFORE any spend. This is the one failure

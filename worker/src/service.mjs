@@ -232,13 +232,15 @@ export function readUnitSeam(text, platform) {
 }
 
 /**
- * The account a SYSTEM unit runs the worker as (`User=`), or `null` (issue #341). Only systemd has one: a user-scope
- * unit, a launchd agent and an nssm service run as whoever installed them. Separate from `readUnitSeam` because it
- * is not part of the render round trip: `deploy/worker.service` carries it, the renderer does not write it.
+ * The account a SYSTEM unit runs the worker as (`User=`), or `null` when it names none (issue #341). Only systemd has
+ * one: a user-scope unit, a launchd agent and an nssm service run as whoever installed them. Separate from
+ * `readUnitSeam` because it is not part of the render round trip (a `--system` render writes the invoking user, a
+ * `--user` render strips the line). Read as systemd does: whitespace around `=` allowed, and the LAST assignment wins.
  */
 export function readUnitUser(text, platform) {
 	if (platform !== "linux" || typeof text !== "string") return null;
-	const value = /^User=(.*)$/m.exec(text.replace(/\0/g, ""))?.[1]?.replace(/\r$/, "").trim();
+	const hits = [...text.replace(/\0/g, "").matchAll(/^[ \t]*User[ \t]*=[ \t]*(.*?)[ \t]*\r?$/gm)];
+	const value = hits.at(-1)?.[1];
 	return value ? value : null;
 }
 

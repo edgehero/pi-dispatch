@@ -72,7 +72,7 @@ import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
@@ -2926,25 +2926,26 @@ export function backendChecks(env, { endpoint = null } = {}) {
 	return checks;
 }
 
-// Issue #341: the job-user causes that stop a worker whose default venue is `local`, the only ones doctor marks ✗.
-// Everything else the decision can say refuses jobs one by one while the worker runs, so it is a warning here.
-const BOOT_REFUSING_JOB_USER_CAUSES = new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
-
 /**
  * WHO a local job runs as on this host (issue #341, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`), decided with the
- * worker's own resolver from THIS SHELL's facts: its ids, the endpoint above, one `docker info`, the socket's owner,
- * and the job image's `anyUid`. No container runs. Returns `{ checks, forLive }`, where `forLive` is what `--live`
- * runs its probe as: `{ run: true, user }`, or `{ run: false, reason }` where a job would be refused anyway.
+ * worker's own resolver from THIS SHELL's facts: its ids, the endpoint above, one `docker info` under the worker's own
+ * bound, the socket's owner, and the job image's `anyUid`. No container runs. Returns `{ checks, forLive }`, where
+ * `forLive` is what `--live` runs its probe as: `{ run: true, user }`, or `{ run: false, reason }` wherever no job
+ * would run as a decided uid (a refusal, an unreadable answer, an undecidable daemon). Exported for the CI e2e.
  *
  * Severity follows the worker: ✗ only for what stops it booting (an identity verdict while `local` is the default
- * venue); a per-job refusal, an unreadable answer and an undecidable daemon are ⚠, because the worker runs and says
- * so per job. Nothing is read when docker itself did not answer: the daemon line above already failed.
+ * venue, from the set the worker's boot reads); a per-job refusal, an unreadable answer and an undecidable daemon are
+ * ⚠, because the worker runs and says so per job. Nothing is read when docker itself did not answer: the daemon line
+ * above already failed.
  */
-async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) {
+export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) {
 	const { spawn, cwd, home, fileExists, jobUserIdentity: ids = {}, stat, passwd, readUnit = (path) => readFileSync(path, "utf8") } = seams;
 	if (dockerCode !== 0) return { checks: [], forLive: { run: true, user: null } };
 	const platform = ids.platform ?? seams.platform;
-	const resolve = makeJobUserResolver({ readFacts: makeDaemonFactsReader({ run: dockerRunVia(spawn) }), platform, release: ids.release ?? "", euid: ids.euid, egid: ids.egid, ...(stat ? { stat } : {}) });
+	// The worker's bound, not the endpoint read's 5 s: `docker info` is the slow read on a busy host, and a doctor that
+	// gave up sooner would call undecidable a host the worker decides.
+	const readFacts = makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) });
+	const resolve = makeJobUserResolver({ readFacts, platform, ...(ids.release !== undefined ? { release: ids.release } : {}), euid: ids.euid, egid: ids.egid, ...(stat ? { stat } : {}) });
 	const { decision, socket } = await resolve({ endpoint, key: "doctor" });
 	let defaultIsLocal = true;
 	try {
@@ -2959,17 +2960,19 @@ async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobI
 		checks.push({ ok: true, label: `local: jobs run as the job image's own user (${why})` });
 	} else if (decision.mode === "unknown") {
 		checks.push({ ok: false, warn: true, label: `local: which uid a job runs as could not be decided (${decision.reason})`, fix: "the worker retries every local job until it can decide; start or fix the daemon and re-run doctor" });
-		forLive = { run: true, user: null, undecided: decision.reason };
+		forLive = { run: false, reason: `the job user could not be decided (${decision.reason}), so a probe as any uid would read back a container no job gets` };
 	} else if (decision.mode === "unmappable") {
 		const boot = BOOT_REFUSING_JOB_USER_CAUSES.has(decision.cause) && defaultIsLocal;
+		const unreadable = decision.cause === "runtime-unreadable";
 		checks.push({
 			ok: false,
 			...(boot ? {} : { warn: true }),
-			label: `local: no job can run as a non-root user that owns its files on this daemon (${decision.cause})${boot ? " -- the worker refuses to boot" : " -- every local job is refused"}`,
+			label: unreadable
+				? "local: which uid a job runs as could not be read from the daemon's answer (runtime-unreadable) -- every local job is refused"
+				: `local: no job can run as a non-root user that owns its files on this daemon (${decision.cause})${boot ? " -- a worker running as this account refuses to boot" : " -- every local job is refused"}`,
 			fix: JOB_USER_FIX[decision.cause] ?? "see DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST",
 		});
-		// An unreadable answer is not a verdict about the daemon: the probe still runs, as the image's own user, and says so.
-		forLive = decision.cause === "runtime-unreadable" ? { run: true, user: null, undecided: decision.cause } : { run: false, reason: `a local job is refused on this daemon (${decision.cause}), so a probe would read back a container no job gets` };
+		forLive = { run: false, reason: `a local job is refused on this daemon (${decision.cause}), so a probe would read back a container no job gets` };
 	} else if (ids.euid === SHIPPED_IMAGE_UID) {
 		checks.push({ ok: true, label: `local: jobs run as the job image's own user (this shell is uid ${SHIPPED_IMAGE_UID}, the image's own uid)` });
 	} else if (imageCode !== 0) {
@@ -2996,10 +2999,11 @@ async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobI
 			}
 		}
 	}
-	// This answer is THIS SHELL's. A system unit that runs the worker as another account decides for that account.
+	// This answer is THIS SHELL's. A system unit that runs the WORKER as another account decides for that account (the
+	// receiver runs no job, so its unit is not compared). Drop-ins (`*.service.d/*.conf`) are not read.
 	if (platform === "linux" && typeof ids.euid === "number") {
-		for (const { path, scope } of installedUnitPaths(platform, home)) {
-			if (scope !== "system" || !fileExists(path)) continue;
+		for (const { path, scope, which } of installedUnitPaths(platform, home)) {
+			if (which !== "worker" || scope !== "system" || !fileExists(path)) continue;
 			let text;
 			try {
 				text = readUnit(path);
@@ -3007,14 +3011,18 @@ async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobI
 				continue;
 			}
 			if (readUnitSeam(text, platform).deployDir !== cwd) continue;
-			const user = readUnitUser(text, platform);
-			const uid = user === null ? null : /^\d+$/.test(user) ? Number(user) : uidOf(user, passwd);
+			// A system unit with no User= runs as root, which the worker refuses (worker-is-root); DynamicUser= allocates a uid
+			// nobody can name ahead, so it is skipped rather than guessed.
+			if (/^\s*DynamicUser\s*=\s*(yes|true|on|1)\s*$/im.test(text)) continue;
+			const named = readUnitUser(text, platform);
+			const user = named ?? "root";
+			const uid = named === null ? 0 : /^\d+$/.test(named) ? Number(named) : uidOf(named, passwd);
 			if (uid !== null && uid !== ids.euid) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
-					fix: `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
+					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}${named === null ? ", no User= line" : ""}), so the job-user line above is this shell's answer, not the service's`,
+					fix: uid === 0 ? "a worker running as root refuses to boot (worker-is-root): give the unit a User= line naming an unprivileged account" : `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
 		}
@@ -3041,7 +3049,7 @@ function uidOf(name, passwd) {
  * The endpoint resolver's `run` seam over doctor's own spawn (#278), so the tests' fake spawn answers it. Bounded
  * like the worker's runner: a CLI that does not answer is killed and reported as a timeout rather than awaited.
  */
-function dockerRunVia(spawn) {
+function dockerRunVia(spawn, timeoutMs = 5000) {
 	return (args) =>
 		new Promise((resolve) => {
 			let child;
@@ -3064,7 +3072,7 @@ function dockerRunVia(spawn) {
 					child.kill("SIGKILL");
 				} catch {}
 				finish({ code: null, stdout: "", error: { timedOut: true } });
-			}, 5000);
+			}, timeoutMs);
 			child.stdout?.on("data", (d) => (stdout += d));
 			// stderr is never read: it carries the operator's home path, and a DOCKER_HOST the CLI could not parse
 			// is repeated in it with any credentials still inside.
@@ -3104,7 +3112,8 @@ export async function liveChecks(env, seams, facts) {
 		isAlive,
 		announce: (line) => out(`\nread back on local: ${line}\n`),
 		user: jobUser.user ?? null,
-		euid: ids.euid,
+		// root can remove whatever a job leaves, and a sudo'd doctor is not the worker, so there is no owner to compare.
+		euid: ids.euid === 0 ? undefined : ids.euid,
 	});
 	const checks = (result.swept ?? []).map((what) => ({ ok: true, label: `read back on local: removed ${what}, left by an interrupted --live run` }));
 	const noteChecks = () => result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand now, or let the next `pi-dispatch doctor --live` remove it once this process has exited" }));
@@ -3122,8 +3131,6 @@ export async function liveChecks(env, seams, facts) {
 		checks.push({ ok: false, label: `read back on local: the probe ran as uid ${result.ranAs}, not the decided job user ${jobUser.user}`, fix: "the daemon did not apply --user as the worker passes it: no job here runs as the uid its files belong to" });
 	} else if (wantUid !== null) {
 		checks.push({ ok: true, label: `read back on local: the probe ran as uid ${result.ranAs}, the job user this host decides (${jobUser.user})` });
-	} else if (jobUser.undecided) {
-		checks.push({ ok: false, warn: true, label: `read back on local: the probe ran as the image's own user (uid ${result.ranAs}), because the job user could not be decided (${jobUser.undecided})`, fix: LIVE_UNREAD_FIX });
 	} else {
 		checks.push({ ok: true, label: `read back on local: the probe ran as the job image's own user (uid ${result.ranAs})` });
 	}
@@ -3143,7 +3150,7 @@ export async function liveChecks(env, seams, facts) {
 	const contentTrust = env.DOCKER_CONTENT_TRUST === "1";
 	const unread = [
 		"the probe runs `sleep` in place of the job image's entrypoint",
-		`it ran as this shell's job user${typeof ids.euid === "number" ? ` (shell uid ${ids.euid})` : ""}, and the worker service may run as another account`,
+		`it ran as ${jobUser.user ? `the job user ${jobUser.user}` : "the image's own user"}, decided for this shell${typeof ids.euid === "number" ? ` (uid ${ids.euid})` : ""}, and the worker service may run as another account`,
 		"it wrote to a fixture folder, not to any folder of yours",
 		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
 		"ephemeral and jobToJobIsolation are not probed",
@@ -3167,7 +3174,7 @@ const LIVE_FAIL_FIX = {
 	imagePinning: "the daemon ran or pulled an image this host does not have -- check for a docker CLI plugin or wrapper that rewrites `docker run`",
 	nonRoot: "PI_JOB_IMAGE runs as root: the root-owned hard-rules floor does not bind a root agent -- use an image with a non-root USER (the shipped pi-job image does)",
 	"localFolders:not-writable": "the job user cannot write a folder this shell owns: where the daemon enforces bind-mount ownership a local-folder job runs as the worker's own uid (issue #341), so the folder must be writable by the account the worker runs as",
-	"localFolders:job-unreadable": "the job user cannot list a 0700 job directory: the uid decided above is not the one that owns the jobs directory here (a rootless daemon, userns-remap, NFS root_squash or SELinux can each cause it), so every job on this host fails before it starts",
+	"localFolders:job-unreadable": "the job user cannot list a 0700 job directory: the uid the job-user line above names is not the one that owns the jobs directory here (a rootless daemon, userns-remap, NFS root_squash or SELinux can each cause it), so every job on this host fails before it starts",
 	"localFolders:mount-not-writable": "the job user cannot write the outbox or session mount, which a local job and a resumed job write; the same ownership rule as the job directory applies",
 	"localFolders:not-yours": "a job's files land owned by another uid, so the worker cannot remove what a job leaves: run doctor as the worker's own account, and check the job-user line above",
 	"localFolders:not-visible": "the daemon is not sharing the jobs directory's filesystem with containers as a live bind mount (on Docker Desktop, check its file sharing settings), so a local-folder job's edits would not land in the folder",

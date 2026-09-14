@@ -9,15 +9,17 @@
  *   node .github/scripts/job-user-e2e.mjs <image>
  *
  * It drives the REAL modules only (the facts reader, the resolver, the preparers, the session store, the builder,
- * the cleanup, doctor's read-back) and the REAL runner. Nothing spends: `--network=none`, no provider key, no secret.
- * Each negative control is counted, and the script refuses to pass unless every one of them ran and failed the way
- * it must, so deleting a control turns this red rather than vacuously green.
+ * the cleanup, doctor's decision and read-back) and the REAL runner. Nothing spends: `--network=none`, no provider
+ * key, no secret. The runner and read-back negative controls are counted, and the script refuses to pass unless every
+ * one of them ran and failed the way it must, so deleting a control's call turns this red rather than vacuously green.
+ * What it does NOT exercise: a RESUMED session (the store stages a cold, empty transcript here; a resumed one is the
+ * canonical file copied into the same `0700` directory, owned by the same uid).
  */
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, release as osRelease, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -43,7 +45,7 @@ const { makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } = await l
 const { makeCleanup, makeForgePreparers, makePrepareWorkspace } = await load("worker/src/prepare.mjs");
 const { prepareGithubWorkspace } = await load("worker/src/prepare-github.mjs");
 const { makeSessionStore } = await load("worker/src/session-store.mjs");
-const { liveChecks } = await load("worker/src/doctor.mjs");
+const { jobUserChecks, liveChecks } = await load("worker/src/doctor.mjs");
 
 const say = (line) => console.log(`OK: ${line}`);
 const controls = { expected: 3, ran: 0 };
@@ -69,10 +71,17 @@ const img = await makeImagePreflight({ image })({});
 assert.equal(img.ok, true, JSON.stringify(img));
 const jobUser = resolveImageUser(decision, { capabilities: img.capabilities, euid, egid, socket });
 assert.deepEqual(jobUser, { user: `${euid}:${egid}`, home: CONTAINER_HOME });
-say(`decided --user=${jobUser.user} with HOME=${jobUser.home} (socket gid ${socket?.gid ?? "unread"})`);
+// doctor's own decision, from its own reads (its bound, its image preflight), must be the worker's.
+const identity = { platform: process.platform, release: osRelease(), euid, egid };
+const doctored = await jobUserChecks({}, { spawn, cwd: process.cwd(), home: homedir(), fileExists: existsSync, platform: process.platform, jobUserIdentity: identity }, { endpoint, dockerCode: 0, imageCode: 0, jobImage: image });
+assert.deepEqual(doctored.forLive, { run: true, user: jobUser.user }, JSON.stringify(doctored));
+assert.ok(doctored.checks.some((c) => c.ok && c.label.includes(`uid:gid ${jobUser.user}`)), doctored.checks.map((c) => c.label).join("\n"));
+say(`decided --user=${jobUser.user} with HOME=${jobUser.home} (socket gid ${socket?.gid ?? "unread"}), and doctor decides the same`);
 
-// --- 3. real workspaces: a forge clone with a resumed session, and a local folder ---------------------------------
+// --- 3. real workspaces: a forge clone with a staged (cold) session, and a local folder ----------------------------
 const scratch = mkdtempSync(join(tmpdir(), "pd-e2e-"));
+// A failed assertion exits without reaching the removal at the end; the scratch repos go either way.
+process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 const git = (cwd, ...args) => execFileSync("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", ...args], { cwd, encoding: "utf8" }).trim();
 const seed = join(scratch, "seed");
 mkdirSync(seed);
@@ -116,7 +125,7 @@ const MOUNT_SCRIPT = [
 	"cd /job && ls /job >/dev/null && cat /job/prompt.md >/dev/null",
 	'touch /workspace/.pd-e2e && git -C /workspace status --porcelain >/dev/null',
 	'if [ -d /outbox ]; then touch /outbox/.pd-e2e; fi',
-	'if [ -d /session ]; then touch /session/.pd-e2e; fi',
+	'if [ -d /session ]; then cat /session/current.jsonl >/dev/null && touch /session/.pd-e2e; fi',
 	'touch "$HOME/.pd-e2e"',
 	"if touch /job/x 2>/dev/null; then echo job-writable; exit 3; fi",
 	"if chmod 777 /job 2>/dev/null; then echo job-chmod; exit 4; fi",
@@ -172,7 +181,7 @@ assert.equal(existsSync(tight.jobDir), false);
 say("umask 077 changes nothing for the job user");
 
 // --- 8. doctor --live, run as this user, reads the same answer back -------------------------------------------------
-const facts = { endpoint, dockerCode: 0, imageCode: 0, jobImage: image, triggerImages: [], egress: { armed: false, results: [] }, jobUser: { run: true, user: jobUser.user } };
+const facts = { endpoint, dockerCode: 0, imageCode: 0, jobImage: image, triggerImages: [], egress: { armed: false, results: [] }, jobUser: doctored.forLive };
 const liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
 const checks = await liveChecks({ PI_JOBS_DIR: jobsDir, PI_EGRESS: "0" }, { spawn, liveFs, jobUserIdentity: { euid } }, facts);
 const failed = checks.filter((c) => !c.ok && !c.warn);
@@ -181,7 +190,8 @@ assert.ok(checks.some((c) => c.ok && new RegExp(`the probe ran as uid ${euid}, t
 assert.ok(checks.some((c) => c.ok && /localFolders holds/.test(c.label)));
 // The read-back in a job's modes must also FAIL where a job would: the same probe as the image's own user.
 const asImage = await liveChecks({ PI_JOBS_DIR: jobsDir, PI_EGRESS: "0" }, { spawn, liveFs, jobUserIdentity: { euid } }, { ...facts, jobUser: { run: true, user: null } });
-assert.ok(asImage.some((c) => !c.ok && !c.warn && /localFolders does NOT hold/.test(c.label)), `the image's own user must fail the read-back here:\n${asImage.map((c) => c.label).join("\n")}`);
+// Exactly the job-dir failure: an older fixture in friendlier modes would fail on the workspace write instead.
+assert.ok(asImage.some((c) => !c.ok && !c.warn && /localFolders does NOT hold .*cannot list a 0700 job directory/.test(c.label)), `the image's own user must fail on the 0700 job dir here:\n${asImage.map((c) => c.label).join("\n")}`);
 controls.ran++;
 say("doctor --live read the job user and every mount back, and failed them as the image's own user");
 

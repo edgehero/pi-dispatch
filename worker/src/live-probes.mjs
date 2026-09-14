@@ -100,12 +100,13 @@ export const STATUS_SCRIPT = [
 ].join("\n");
 
 /**
- * The write probe, as a job uses its mounts (issue #341): traverse and list the `0700` job dir, then write the
+ * The write probe, as a job uses its mounts (issue #341): read and traverse the `0700` job dir (`[ -r ]` and `[ -x ]`,
+ * shell builtins, the runner's own `access(R_OK|X_OK)`, so no image binary answers for it), then write the
  * workspace, the outbox and the session. The nonce rides argv as `$1`, never the script text; `-w` answers
  * writability without prose, and the FIRST mount that fails is named by its fixed path, never by an error message.
  */
 export const WRITE_SCRIPT = [
-	"cd /job 2>/dev/null && ls /job >/dev/null 2>&1 || { echo job-unreadable; exit 0; }",
+	'[ -r /job ] && [ -x /job ] || { echo job-unreadable; exit 0; }',
 	'for d in /workspace /outbox /session; do [ -w "$d" ] || { echo "not-writable $d"; exit 0; }; done',
 	'printf %s "$1" > /workspace/.pi-dispatch-live-probe && printf %s "$1" > /outbox/.pi-dispatch-live-probe && printf %s "$1" > /session/.pi-dispatch-live-probe && echo wrote',
 ].join("\n");
@@ -227,10 +228,10 @@ export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner =
 	if (code !== 0) return notReadBack("localFolders", "the write probe did not run in the container");
 	const said = String(stdout ?? "").trim();
 	if (said === "job-unreadable") return verdict("localFolders", false, "the job user cannot list a 0700 job directory this shell created, so no job here can read its own inputs", { cause: "job-unreadable" });
-	if (said === "not-writable /workspace" || said === "not-writable") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
+	if (said === "not-writable /workspace") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
 	if (said === "not-writable /outbox" || said === "not-writable /session") return verdict("localFolders", false, `the job user cannot write ${said.slice("not-writable ".length)}, a mount every job of that kind writes`, { cause: "mount-not-writable" });
 	if (said !== "wrote") return notReadBack("localFolders", "the write probe gave no answer");
-	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace is not visible in the host folder, so the folder is not the one edited in place", { cause: "not-visible" });
+	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace, /outbox or /session is not visible on the host, so that mount is not the folder a job edits in place", { cause: "not-visible" });
 	if (typeof euid === "number" && typeof hostOwner === "number" && hostOwner !== euid) {
 		return verdict("localFolders", false, `a file the job wrote is owned by uid ${hostOwner} on the host, not by this shell's uid ${euid}, so the worker could not remove what a job leaves`, { cause: "not-yours" });
 	}
@@ -349,11 +350,22 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 		const written = await step(["exec", probeId, "sh", "-c", WRITE_SCRIPT, "sh", nonce]);
 		let hostRead = null;
 		let hostOwner = null;
+		const readBack = (dir) => {
+			try {
+				return fs.readFileSync(`${dir}/.pi-dispatch-live-probe`, "utf8");
+			} catch {
+				return null;
+			}
+		};
+		// The workspace nonce is the check; the outbox's and the session's must match it too, or a write the container
+		// reported is not one the host can see. A read that worked with a stat that did not leaves the owner unchecked.
+		const others = [readBack(fixture.outboxDir), readBack(fixture.sessionDir)];
+		hostRead = readBack(fixture.workspace);
+		if (hostRead !== null && others.some((r) => r !== hostRead)) hostRead = null;
 		try {
-			hostRead = fs.readFileSync(`${fixture.workspace}/.pi-dispatch-live-probe`, "utf8");
 			hostOwner = fs.statSync(`${fixture.workspace}/.pi-dispatch-live-probe`).uid;
 		} catch {
-			// hostRead null is "not visible"; a read that worked with a stat that did not leaves the owner unchecked
+			hostOwner = null;
 		}
 		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce, hostOwner, euid });
 

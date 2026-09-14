@@ -21,7 +21,7 @@ import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
-import { jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -1443,12 +1443,6 @@ export async function startWorker(
 		throw err;
 	}
 }
-
-// Issue #341: the job-user verdicts that stop a worker whose default venue is `local`: facts about the daemon or the
-// worker's own identity, which no job on that venue can get past. The rest refuse per job instead: the group rows
-// apply only to a job whose image needs `--user`, and `runtime-unreadable` describes one answer, which the next job
-// reads again.
-const BOOT_REFUSING_JOB_USER_CAUSES = new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
 
 /**
  * The boot refusal text for a job-user decision, or `null` to boot. Exported so the branch a build with one venue

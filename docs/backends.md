@@ -202,7 +202,7 @@ take. Print it beside your findings; nothing prints it for you.
 builder (no network, no environment, fixture folders, `sleep` in place of the entrypoint), reads the six
 properties off it, folds in the egress canary, and removes it by ID. It runs as the job user a local job on
 this host gets (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the
-host; where a local job would be refused, it runs nothing and says so. It runs only when the docker CLI is
+host; where a local job would be refused, or the job user cannot be decided, it runs nothing and says so. It runs only when the docker CLI is
 observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own
 folders or the images your triggers name, and doctor prints those limits beside a green result.
 `worker/src/live-probes.mjs` is the worked example of a `readBack`: its verdicts are the shape the harness

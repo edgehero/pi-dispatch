@@ -1330,6 +1330,7 @@ test("readUnitUser reads a systemd unit's User= and nothing else, so doctor can 
 	const shipped = readFileSync(new URL("../../deploy/worker.service", import.meta.url), "utf8");
 	assert.equal(readUnitUser(shipped, "linux"), "pi", "the shipped unit's account");
 	assert.equal(readUnitUser("[Service]\nUser=4242\r\n", "linux"), "4242");
+	assert.equal(readUnitUser("[Service]\n  User = pi \nUser=op\n", "linux"), "op", "whitespace allowed, and systemd's last assignment wins");
 	for (const [text, platform] of [["[Service]\nExecStart=x\n", "linux"], ["[Service]\nUser=\n", "linux"], ["User=pi\n", "darwin"], ["User=pi\n", "win32"], [null, "linux"]]) {
 		assert.equal(readUnitUser(text, platform), null, `${platform}: ${JSON.stringify(text)}`);
 	}

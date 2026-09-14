@@ -3102,6 +3102,14 @@ const LIVE_STATUS = (uid = "1001") => `Name:\tdocker-init\nUid:\t${uid}\t${uid}\
  * The docker answers a --live pass needs, as function outcomes that read the probe's own argv. Listed FIRST wherever
  * spread, because `green`'s broad "docker image" key would otherwise answer the pinning probe's absent-image inspect.
  */
+// Issue #341: a rootful daemon's `docker info` body and the identities the job-user tests use.
+const ROOTFUL_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
+const ROOTLESS_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], PidsLimit: false, MemoryLimit: false });
+const LINUX_ID = (euid, egid = euid) => ({ platform: "linux", release: "6.8.0-test", euid, egid });
+const imageLabels = (capabilities) => ({ "docker image inspect --format={{.Id}}": { code: 0, output: `sha256:abc|0.80.7||${capabilities}\n` } });
+const socketStat = () => ({ uid: 0, gid: 2375 });
+const infoPlan = (body) => ({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` } });
+
 function liveOk({ uid = "1001" } = {}) {
 	let volumes = [];
 	return {
@@ -3110,10 +3118,14 @@ function liveOk({ uid = "1001" } = {}) {
 			return { code: 0, output: `${LIVE_ID}\n` };
 		},
 		"docker inspect --format={{json .Mounts}}": () => ({ code: 0, output: JSON.stringify(volumes.map((v) => ({ Type: "bind", Source: v.split(":")[0], Destination: v.split(":")[1], RW: v.split(":")[2] !== "ro" }))) }),
+		// A readable rootful daemon, so the job user is decided and the probe runs (issue #341).
+		...infoPlan(ROOTFUL_INFO),
 		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS(uid) },
-		[`docker exec ${LIVE_ID} sh -c cd /job`]: (_cmd, args) => {
-			const ws = volumes.find((v) => v.split(":")[1] === "/workspace").split(":")[0];
-			writeFileSync(join(ws, ".pi-dispatch-live-probe"), args.at(-1));
+		[`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: (_cmd, args) => {
+			for (const dest of ["/workspace", "/outbox", "/session"]) {
+				const src = volumes.find((v) => v.split(":")[1] === dest).split(":")[0];
+				writeFileSync(join(src, ".pi-dispatch-live-probe"), args.at(-1));
+			}
 			return { code: 0, output: "wrote\n" };
 		},
 		"docker run --name=pi-dispatch-live-pin-": { code: 125, output: "docker: Error response from daemon: No such image: pi-dispatch-live-probe.invalid/absent:x.\n" },
@@ -3155,6 +3167,8 @@ test("doctor --live reads the six back, reports the limits, leaves no fixture, a
 	}
 	assert.match(text(), /⚠ read back on local: egress not read back: PI_EGRESS is off/);
 	assert.match(text(), /✓ read back on local: limits of this read-back -- the probe runs `sleep`/);
+	assert.match(text(), /✓ read back on local: the probe ran as the job image's own user \(uid 1001\)/, "issue #341: the uid-1001 shell's probe is the image's user, read back");
+	assert.match(text(), /it ran as the image's own user, decided for this shell \(uid 1001\)/);
 	assert.ok(text().indexOf("read back on local: starting pi-dispatch-live-probe-7-n from pi-job:latest") < text().indexOf("✓ read back on local: isolation"), "shown before its results");
 	assert.ok(text().includes(`with a fixture under ${env.PI_JOBS_DIR};`), "the fixture lives under the worker's own jobs dir (jobsDirPath), not a path doctor derived for itself");
 	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args), [["rm", "-f", LIVE_ID], ["rm", "-f", "pi-dispatch-live-pin-7-n"]]);
@@ -3198,7 +3212,7 @@ test("doctor --live gives each localFolders failure its own fix, and names what 
 	const env = liveEnv();
 	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99999-aB3xYz"));
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
-	const invisible = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c cd /job`]: { code: 0, output: "wrote\n" } };
+	const invisible = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "wrote\n" } };
 	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...invisible, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks[0].label, /✓?read back on local: removed fixture pi-dispatch-live-99999-aB3xYz, left by an interrupted --live run/);
 	const folders = checks.find((c) => /localFolders does NOT hold/.test(c.label));
@@ -3251,7 +3265,7 @@ test("doctor --live's not-run path still names what it swept", async () => {
 test("doctor --live's not-writable localFolders failure keeps its own ownership fix", async () => {
 	const env = liveEnv();
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
-	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c cd /job`]: { code: 0, output: "not-writable\n" } };
+	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "not-writable /workspace\n" } };
 	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...notWritable, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks.find((c) => /localFolders does NOT hold/.test(c.label)).fix, /the account the worker runs as/, "issue #341: the fix names the worker's uid, no longer the image's 1001");
 });
@@ -3280,12 +3294,7 @@ test("the egress canary carries a non-rendered readBack, so --live folds it in w
 
 // --- issue #341: the job-user line, and the probe run as the job user ------------------------------------------
 
-const ROOTFUL_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
-const ROOTLESS_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], PidsLimit: false, MemoryLimit: false });
-const LINUX_ID = (euid, egid = euid) => ({ platform: "linux", release: "6.8.0-test", euid, egid });
-const imageLabels = (capabilities) => ({ "docker image inspect --format={{.Id}}": { code: 0, output: `sha256:abc|0.80.7||${capabilities}\n` } });
-const socketStat = () => ({ uid: 0, gid: 2375 });
-const infoPlan = (body) => ({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` } });
+
 
 test("doctor names who a local job runs as, from the worker's own resolver, and never starts a container for it (#341)", async () => {
 	for (const [label, ids, plan, pattern] of [
@@ -3306,14 +3315,14 @@ test("doctor names who a local job runs as, from the worker's own resolver, and 
 test("doctor marks ✗ only what stops the worker booting; a per-job refusal or an undecidable daemon is ⚠ (#341)", async () => {
 	const rootless = capture();
 	assert.equal(await runDoctor(ghEnv(), { ...ghDeps(rootless.out, { ...infoPlan(ROOTLESS_INFO), ...green }), jobUserIdentity: LINUX_ID(1234), stat: () => ({ uid: 1234, gid: 1234 }) }), 1);
-	assert.match(rootless.text(), /✗ local: no job can run as a non-root user that owns its files on this daemon \(rootless\) -- the worker refuses to boot/);
+	assert.match(rootless.text(), /✗ local: no job can run as a non-root user that owns its files on this daemon \(rootless\) -- a worker running as this account refuses to boot/);
 	assert.match(rootless.text(), /run jobs on a rootful Docker or Podman daemon/, "the fix is the worker's own text");
 
 	for (const [label, ids, plan, pattern] of [
 		["no anyUid", LINUX_ID(1234), { ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas") }, /⚠ local: every job on pi-job:latest is refused as this uid \(job-image-any-uid-unsupported\)/],
 		["docker group", LINUX_ID(1235, 2375), { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid") }, /⚠ local: every local job is refused as this uid \(docker-group\)/],
 		["undecidable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 1, output: "" } }, /⚠ local: which uid a job runs as could not be decided \(exit-1\)/],
-		["unreadable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 0, output: "not json\n" } }, /⚠ local: no job can run as a non-root user that owns its files on this daemon \(runtime-unreadable\) -- every local job is refused/],
+		["unreadable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 0, output: "not json\n" } }, /⚠ local: which uid a job runs as could not be read from the daemon's answer \(runtime-unreadable\) -- every local job is refused/],
 	]) {
 		const { out, text } = capture();
 		const code = await runDoctor(ghEnv(), { ...ghDeps(out, { ...plan, ...green }), jobUserIdentity: ids, stat: socketStat });
@@ -3331,25 +3340,32 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	const home = mkdtempSync(join(tmpdir(), "pi-unit-home-"));
 	const unitPath = "/etc/systemd/system/pi-dispatch-worker.service";
 	const unit = `[Service]\nUser=pi\nWorkingDirectory=${deployDir}\n`;
-	for (const [label, user, passwd, want] of [
-		["by name", "pi", () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\n", /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/],
-		["numeric", "4242", () => "", /runs the worker as 4242 \(uid 4242\)/],
-	]) {
+	const PASSWD = () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\nop:x:1234:1234::/home/op:/bin/sh\n";
+	const run = async (body, { passwd = PASSWD, path = unitPath, cwd = deployDir } = {}) => {
 		const { out, text } = capture();
-		const text0 = unit.replace("User=pi", `User=${user}`);
 		await runDoctor(ghEnv(), {
 			...ghDeps(out, { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }),
-			cwd: deployDir,
+			cwd,
 			home,
 			platform: "linux",
-			fileExists: (p) => p === unitPath || existsSync(p),
+			fileExists: (p) => p === path || existsSync(p),
 			jobUserIdentity: LINUX_ID(1234),
 			stat: socketStat,
 			passwd,
-			readUnit: () => text0,
+			readUnit: (p) => (p === path ? body : (() => { throw new Error("ENOENT"); })()),
 		});
-		assert.match(text(), want, label);
-	}
+		return text();
+	};
+	const warned = /this shell is uid 1234, but/;
+	assert.match(await run(unit), /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/, "by name");
+	assert.match(await run(unit.replace("User=pi", "User=4242")), /runs the worker as 4242 \(uid 4242\)/, "numeric");
+	assert.match(await run(unit.replace("User=pi", "User = pi\n  User=4242")), /runs the worker as 4242 \(uid 4242\)/, "systemd's last assignment wins, whitespace allowed");
+	assert.match(await run(unit.replace("User=pi\n", "")), /runs the worker as root \(uid 0, no User= line\)/, "a system unit with no User= is root, which the worker refuses");
+	assert.doesNotMatch(await run(unit.replace("User=pi\n", "DynamicUser=yes\n")), warned, "a DynamicUser uid cannot be named ahead, so nothing is guessed");
+	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
+	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
+	assert.doesNotMatch(await run(unit, { cwd: mkdtempSync(join(tmpdir(), "pi-other-deploy-")) }), warned, "a unit serving another deployment is not this one's");
+	assert.doesNotMatch(await run(unit, { path: "/etc/systemd/system/pi-dispatch-receiver.service" }), warned, "the receiver runs no job, so its account is not compared");
 });
 
 test("doctor --live runs its probes as the decided job user and reads the uid back (#341)", async () => {
@@ -3360,7 +3376,7 @@ test("doctor --live runs its probes as the decided job user and reads the uid ba
 	assert.equal(code, 0, text());
 	assert.ok(calls.filter((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-")).every((c) => c.args.includes("--user=1234:1234")), "the reading and the pinning probe");
 	assert.match(text(), /✓ read back on local: the probe ran as uid 1234, the job user this host decides \(1234:1234\)/);
-	assert.match(text(), /it ran as this shell's job user \(shell uid 1234\)/);
+	assert.match(text(), /it ran as the job user 1234:1234, decided for this shell \(uid 1234\)/);
 
 	const wrong = capture();
 	assert.equal(await runDoctor(liveEnv(), { ...ghDeps(wrong.out, { ...liveOk({ uid: "1001" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" }), 1);
@@ -3371,4 +3387,52 @@ test("doctor --live runs its probes as the decided job user and reads the uid ba
 	await runDoctor(liveEnv(), { ...ghDeps(refused.out, { ...liveOk(), ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas"), ...green }, refusedCalls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(refused.text(), /⚠ read back on local: not run -- a local job is refused as this uid \(any-uid-unsupported\)/);
 	assert.ok(!refusedCalls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), "no probe for a container no job gets");
+});
+
+test("doctor --live runs nothing where no job would run as a decided uid: a rootless daemon, an undecidable one, an unreadable answer (#341)", async () => {
+	for (const [label, ids, plan, reason] of [
+		["rootless", LINUX_ID(1234), { ...infoPlan(ROOTLESS_INFO) }, /a local job is refused on this daemon \(rootless\)/],
+		["undecidable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 1, output: "" } }, /the job user could not be decided \(exit-1\)/],
+		["unreadable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 0, output: "not json\n" } }, /a local job is refused on this daemon \(runtime-unreadable\)/],
+	]) {
+		const { out, text } = capture();
+		const calls = [];
+		await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...plan, ...green }, calls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: ids, stat: () => ({ uid: 0, gid: 2375 }), isAlive: () => false, pid: 7, nonce: "n" });
+		assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), `${label}: no probe`);
+		assert.match(text(), new RegExp(`⚠ read back on local: not run -- ${reason.source}`), label);
+	}
+});
+
+test("doctor --live gives job-unreadable, mount-not-writable and not-yours each its own fix, and compares the owner with this shell (#341)", async () => {
+	const env = liveEnv();
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] }, jobUser: { run: true, user: "1234:1234" } };
+	const fixes = [];
+	for (const [label, over, fsUid, pattern] of [
+		["job-unreadable", { [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "job-unreadable\n" } }, 1234, /cannot list a 0700 job directory/],
+		["mount-not-writable", { [`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: { code: 0, output: "not-writable /outbox\n" } }, 1234, /outbox or session mount/],
+		["not-yours", {}, 999, /owned by another uid, so the worker cannot remove/],
+	]) {
+		const checks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...over, ...green }), liveFs: liveFsAs(fsUid), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
+		const folders = checks.find((c) => /localFolders does NOT hold/.test(c.label));
+		assert.ok(folders, `${label}: ${checks.map((c) => c.label).join("\n")}`);
+		assert.match(folders.fix, pattern, label);
+		fixes.push(folders.fix);
+	}
+	assert.equal(new Set(fixes).size, 3, "three causes, three fixes: none falls back to the generic one");
+	// A sudo'd doctor is not the worker, and root can remove anything: no owner comparison, so no false not-yours.
+	const root = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(999), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: { platform: "darwin", euid: 0, egid: 0 } }, facts);
+	assert.ok(!root.some((c) => /not-yours|owned by another uid/.test(`${c.label} ${c.fix ?? ""}`)));
+});
+
+test("doctor and the worker read ONE set of boot-refusing causes, and doctor waits as long as the worker for docker info (#341)", async () => {
+	const { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS } = await import("../src/job-user.mjs");
+	assert.deepEqual([...BOOT_REFUSING_JOB_USER_CAUSES].sort(), ["desktop-linux-userns", "rootless", "userns-remap", "worker-is-root"]);
+	for (const file of ["doctor.mjs", "start.mjs"]) {
+		const source = readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+		assert.doesNotMatch(source, /const BOOT_REFUSING_JOB_USER_CAUSES\s*=/, `${file} keeps no copy of its own`);
+		assert.match(source, /import \{[^}]*BOOT_REFUSING_JOB_USER_CAUSES[^}]*\} from "\.\/job-user\.mjs"/, `${file} imports the one set`);
+	}
+	assert.equal(DAEMON_FACTS_TIMEOUT_MS, 15_000);
+	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	assert.match(doctorSource, /makeDaemonFactsReader\(\{ run: dockerRunVia\(spawn, DAEMON_FACTS_TIMEOUT_MS\) \}\)/, "a shorter doctor bound calls undecidable a host the worker decides");
 });

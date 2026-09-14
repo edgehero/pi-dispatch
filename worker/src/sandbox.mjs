@@ -106,8 +106,9 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 		workspace,
 		jobDir,
 		// The terminal's two variables, and neither is a credential. TERM so the shell renders; TMOUT so a
-		// forgotten session closes itself. HOME beside `--user` and the proxy variables below are the rest. `buildDockerRunArgs` skips undefined, so an unset TERM or a
-		// disabled idle timeout emits nothing rather than an empty string.
+		// forgotten session closes itself. HOME beside `--user` and the proxy variables below are the rest.
+		// `buildDockerRunArgs` skips undefined, so an unset TERM or a disabled idle timeout emits nothing rather than
+		// an empty string.
 		// A sandbox joins the SAME kind of network a job did, by the same builder, so the boundary cannot
 		// land on job containers and miss this one. Leaving sandboxes on the default bridge was the tempting
 		// alternative and it is the wrong one: it reads as a convenience (install a missing dependency while

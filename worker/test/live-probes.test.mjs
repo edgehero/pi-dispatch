@@ -85,8 +85,13 @@ test("the scripts interpolate nothing from the host: the nonce rides argv", () =
 	assert.ok(!STATUS_SCRIPT.includes("${"), "no template value");
 	assert.ok(!WRITE_SCRIPT.includes("${"), "no template value");
 	assert.match(WRITE_SCRIPT, /"\$1"/);
-	// Issue #341: it uses every mount a job uses, the 0700 job dir first.
-	for (const step of ["cd /job", "ls /job", "/workspace", "/outbox", "/session"]) assert.ok(WRITE_SCRIPT.includes(step), step);
+	// Issue #341: PINNED LITERALLY, line by line. A unit test cannot run it (its paths are a container's), so a step
+	// dropped from it (the job dir check, a mount out of the -w loop) would otherwise pass every assertion here.
+	assert.deepEqual(WRITE_SCRIPT.split("\n"), [
+		'[ -r /job ] && [ -x /job ] || { echo job-unreadable; exit 0; }',
+		'for d in /workspace /outbox /session; do [ -w "$d" ] || { echo "not-writable $d"; exit 0; }; done',
+		'printf %s "$1" > /workspace/.pi-dispatch-live-probe && printf %s "$1" > /outbox/.pi-dispatch-live-probe && printf %s "$1" > /session/.pi-dispatch-live-probe && echo wrote',
+	]);
 });
 
 test("the probes run as the job user a job on this host gets, and still carry no environment at all (#341)", () => {
@@ -164,13 +169,13 @@ test("mountSet refuses the docker socket, the home directory or an ancestor, and
 
 test("localFolders tells a folder the job user cannot write from a write the host cannot see", () => {
 	assert.equal(localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n" }).ok, true);
-	const eacces = localFoldersVerdict({ code: 0, stdout: "not-writable\n", hostRead: null, nonce: "n" });
+	const eacces = localFoldersVerdict({ code: 0, stdout: "not-writable /workspace\n", hostRead: null, nonce: "n" });
 	assert.equal(eacces.ok, false);
 	assert.match(eacces.detail, /cannot write/);
 	assert.equal(eacces.cause, "not-writable", "the cause rides the verdict, so doctor can give each its own fix");
 	const invisible = localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: null, nonce: "n" });
 	assert.equal(invisible.ok, false);
-	assert.match(invisible.detail, /not visible in the host folder/);
+	assert.match(invisible.detail, /not visible on the host/);
 	assert.equal(invisible.cause, "not-visible");
 	assert.equal(localFoldersVerdict({ code: 1, stdout: "", hostRead: null, nonce: "n" }).warn, true, "a vanished container is not read back, never a failure");
 });
@@ -184,6 +189,7 @@ test("localFolders reads every mount a job uses, in a job's modes, and the host 
 		assert.match(v.detail, new RegExp(mount));
 	}
 	assert.equal(localFoldersVerdict({ code: 0, stdout: "not-writable /workspace\n", hostRead: null, nonce: "n" }).cause, "not-writable");
+	assert.equal(localFoldersVerdict({ code: 0, stdout: "not-writable\n", hostRead: null, nonce: "n" }).warn, true, "a bare answer the constant script never prints is no answer");
 	const theirs = localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n", hostOwner: 1001, euid: 1234 });
 	assert.deepEqual([theirs.ok, theirs.cause], [false, "not-yours"]);
 	assert.match(theirs.detail, /uid 1001 on the host, not by this shell's uid 1234/);
@@ -249,8 +255,11 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 			case "status":
 				return { code: 0, stdout: HELD_STATUS, stderr: "" };
 			case "write": {
-				const ws = volumes.find((v) => v.split(":")[1] === "/workspace").split(":")[0];
-				writeFileSync(join(ws, ".pi-dispatch-live-probe"), args.at(-1));
+				// What the constant script does on a host that holds: the nonce into every writable mount a job uses.
+				for (const dest of ["/workspace", "/outbox", "/session"]) {
+					const src = volumes.find((v) => v.split(":")[1] === dest).split(":")[0];
+					writeFileSync(join(src, ".pi-dispatch-live-probe"), args.at(-1));
+				}
 				return { code: 0, stdout: "wrote\n", stderr: "" };
 			}
 			case "pin":
@@ -504,4 +513,16 @@ test("a live run passes the job user into both probes, checks the host owner, an
 	const other = fakeDocker();
 	const theirs = await runLiveProbes(probeArgs(other, { euid: 999_999, fs: { ...nodeFs, statSync: () => ({ uid: 1001 }) } }));
 	assert.equal(theirs.verdicts.find((v) => v.property === "localFolders").cause, "not-yours");
+
+	// The outbox and session writes are read back too: a container that said "wrote" without landing one is not visible.
+	const partial = fakeDocker({
+		write: (args) => {
+			const runArgs = partial.calls.find((a) => a[0] === "run" && a.includes("sleep"));
+			const ws = runArgs.find((a) => a.endsWith(":/workspace")).split(":")[0];
+			writeFileSync(join(ws, ".pi-dispatch-live-probe"), args.at(-1));
+			return { code: 0, stdout: "wrote\n", stderr: "" };
+		},
+	});
+	const missing = await runLiveProbes(probeArgs(partial));
+	assert.equal(missing.verdicts.find((v) => v.property === "localFolders").cause, "not-visible");
 });

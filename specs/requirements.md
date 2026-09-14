@@ -1817,10 +1817,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and its fixture directory are named before either exists; and both are removed when the read ends, or by the
   next `--live` when that run was interrupted, which names what it removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
 - **`doctor` says who a local job runs as** (issue #341). From the same facts and the same resolver the worker
-  uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its HOME, or the
-  refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs one by
-  one, and it warns when this shell's uid is not the account a system unit runs the worker as, since the answer
-  is then this shell's rather than the service's. `doctor --live` reads that decision back.
+  uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
+  HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
+  one by one, and it warns when this shell's uid is not the account a system unit's `User=` runs the worker as
+  (root when the unit names none; drop-ins are not read), since the answer is then this shell's rather than the
+  service's. `doctor --live` reads that decision back.
 - **`doctor` reports a bound that is set and asleep.** A knob an operator sets, doctor stays silent about,
   and nothing enforces is this project's own believed-on-while-off failure by another route, so where a
   feature's control CAN be inert for a reason the operator cannot see from their own configuration,
@@ -1926,11 +1927,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   carries an internal marker at its read site, and neither list is hand-maintained beside the code.
   Given `doctor --live`, then a line names the probe container, its image and its fixture location before the
   first docker command, no check it renders carries a fix action, and afterwards neither the container nor the
-  fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and doctor's
-  output is unchanged. Given a native Linux daemon and a shell uid other than 1001 with an `anyUid` image, then
-  doctor names the `<uid>:<gid>` it passes as `--user` and `doctor --live` runs its probe with that `--user` and
-  reads that uid back; given a rootless daemon, then doctor fails with the worker's own refusal text and `--live` runs no
-  container.
+  fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and no read-back
+  line appears. Given a native Linux daemon and a shell uid other than 1001 with an `anyUid` image, then doctor
+  names the `<uid>:<gid>` it passes as `--user` and `doctor --live` runs its probe with that `--user` and reads
+  that uid back; given a rootless daemon while `local` is the default venue, then doctor fails with the worker's
+  own refusal text and `--live` runs no container.
 
 ## Notes (not requirements)
 

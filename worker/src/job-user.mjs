@@ -246,6 +246,14 @@ export function resolveImageUser(decision, { capabilities = [], euid, egid, sock
 	return { user: decision.user, home: CONTAINER_HOME };
 }
 
+/**
+ * The causes that stop a worker whose default venue is `local` from booting: facts about the daemon or the worker's
+ * own identity, which no job on that venue can get past. ONE set, read by the worker's boot and by doctor's severity,
+ * so doctor cannot show a warning for a cause the worker refuses to boot on. The rest refuse per job: the group rows
+ * apply only to a job whose image needs `--user`, and `runtime-unreadable` describes one answer.
+ */
+export const BOOT_REFUSING_JOB_USER_CAUSES = Object.freeze(new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]));
+
 /** The operator-facing refusal for an unmappable decision or cause. */
 export function jobUserRefusal(causeOrDecision) {
 	const cause = typeof causeOrDecision === "string" ? causeOrDecision : causeOrDecision?.cause;
