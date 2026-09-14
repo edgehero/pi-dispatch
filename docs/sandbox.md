@@ -85,7 +85,7 @@ pull request on your own machine — and the container still applies every isola
 
 A sandbox carries no `GITHUB_TOKEN`, no `GH_TOKEN`, no GitLab/Forgejo/Azure token, and no provider API
 key. The env is `TERM` and `TMOUT`, plus four proxy variables when egress is on, plus `HOME=/home/pi` when the
-run ran as the worker's own uid (see *Known limitations*). `TERM` and `TMOUT` are
+sandbox runs with `--user` (see *Known limitations*). `TERM` and `TMOUT` are
 dropped when they have nothing to say, so an unset host `TERM` or `PI_SANDBOX_IDLE_MINUTES=0` emits nothing
 rather than an empty string.
 

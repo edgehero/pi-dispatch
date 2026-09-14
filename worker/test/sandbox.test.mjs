@@ -485,9 +485,11 @@ describe("decideSandboxJobUser", () => {
 		const gone = await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, imageCapabilities: async () => ({ missing: "pi-job:gone" }), manifest: { image: "pi-job:gone", jobUser: { user: "1234:1234", home: "/home/pi" } } });
 		assert.equal(gone.refused, "job-user-image");
 		assert.match(gone.message, /could not be inspected/);
-		const sudo = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest: { image: "pi-job:x" } });
-		assert.equal(sudo.refused, "job-user-unmappable");
-		assert.match(sudo.message, /recorded no job user/);
-		assert.doesNotMatch(sudo.message, /run the worker as an unprivileged account/, "the root is this shell's, not the worker's");
+		for (const manifest of [{ image: "pi-job:x" }, { image: "pi-job:x", jobUser: null }]) {
+			const sudo = await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest });
+			assert.equal(sudo.refused, "job-user-unmappable", JSON.stringify(manifest));
+			assert.match(sudo.message, /recorded no job user/, "a missing key and the null retainJobDir writes read alike");
+			assert.doesNotMatch(sudo.message, /run the worker as an unprivileged account/, "the root is this shell's, not the worker's");
+		}
 	});
 });

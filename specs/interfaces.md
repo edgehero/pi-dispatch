@@ -1452,8 +1452,9 @@ sibling rather than an extension of the GitHub one for the same reason.
     own. A malformed stamp refuses (`job-user-stamp-invalid`) rather than reading as absent; a run from before
     the stamp decides from the CLI's own ids; an undecidable daemon refuses (`job-user-unknown`); so do an
     unmappable daemon or group (`job-user-unmappable`), a retained image without `anyUid`
-    (`job-image-any-uid-unsupported`) and one that cannot be inspected (`job-user-image`). All of this happens
-    before any network is created.
+    (`job-image-any-uid-unsupported`) and one that cannot be inspected (`job-user-image`), and a run from before
+    the stamp opened as root refuses in its own words, since that root is the shell's and not the worker's. All of
+    this happens before any network is created.
   - **Mounts**: the retained per-job directory at `/job:ro` and its workspace at `/workspace:rw` — the
     same two the run itself had, from the same paths. **No `/outbox`** (nothing to chain: no agent),
     **no `/session`** (the transcript is deleted before retention), **no `/opt/pi-global`** (pi is not
@@ -1511,8 +1512,8 @@ sibling rather than an extension of the GitHub one for the same reason.
     `jobUser` (issue #341) is the job user the run had, and a sandbox reads it for IDENTITY only: `null` means
     nothing decided one (a bare wiring), so the sandbox decides from the CLI's own ids; `{ "user": null, "home":
     null }` is the image's own user, reopened without `--user`; `{ "user": "<uid>:<gid>", "home": "/home/pi" }`
-    reopens as that uid. Any other shape refuses `job-user-stamp-invalid`. A manifest from before the key decides
-    like `null`.
+    reopens as that uid. A stamp with no `user` key, a `user` that is not a non-root `<uid>:<gid>`, or a `home` that
+    does not match its `user`, refuses `job-user-stamp-invalid`. A manifest from before the key decides like `null`.
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
     `run-container.mjs` use — so the tag that was checked, the tag that ran and the tag re-opened are one
     answer rather than three call sites that agree by luck. `backend` is resolved through

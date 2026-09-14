@@ -2126,8 +2126,9 @@ test("a job on another venue never reaches the job-user decision, and a changed 
 	assert.ok(!parseLines(bootLines.slice(mark)).some((l) => l.event === "job_user"), "an unchanged unknown is not said again");
 	answer = { answered: true, facts: (await DOCKER_FACTS({ rootless: true })()).facts };
 	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { refused: "job-user-unmappable", cause: "rootless" });
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { refused: "job-user-unmappable", cause: "rootless" });
 	const said = parseLines(bootLines.slice(mark)).filter((l) => l.event === "job_user");
-	assert.deepEqual(said.map((l) => [l.mode, l.cause]), [["unmappable", "rootless"]], "a boot that read unknown is not left as the last word");
+	assert.deepEqual(said.map((l) => [l.mode, l.cause]), [["unmappable", "rootless"]], "a boot that read unknown is not left as the last word, and the same answer twice is said once");
 });
 
 test("PI_FORWARD_ENV=HOME on a worker that runs jobs under --user is said at boot", { skip }, async () => {
@@ -2141,4 +2142,14 @@ test("PI_FORWARD_ENV=HOME on a worker that runs jobs under --user is said at boo
 	});
 	assert.ok(logs.some((l) => l.event === "forward_env_home_overridden"));
 	assert.ok(!logs.some((l) => l.event === "job_user_group_refused" || l.event === "job_image_any_uid_unsupported"));
+	// A uid-1001 worker runs jobs with no --user, so its forwarded HOME is really forwarded: nothing to say.
+	const shipped = await runStart({
+		env: { PI_FORWARD_ENV: "HOME" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: DOCKER_FACTS(),
+		jobUserIdentity: { ...LINUX_ID(1001), stat: () => ({ uid: 0, gid: 2375 }) },
+		bootImage: { ok: true, capabilities: ["anyUid"] },
+	});
+	assert.ok(!shipped.logs.some((l) => l.event === "forward_env_home_overridden"));
 });
