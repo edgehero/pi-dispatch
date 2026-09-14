@@ -37,6 +37,33 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
 }
 
 /**
+ * The NAME of the venue a job resolves to: its own `run.backend`, else the deployment default.
+ *
+ * ONE DERIVATION, READ BY EVERY STORE THAT RECORDS A VENUE (issue #277). The registry dispatches on it, and
+ * the run record, the session stamp and the sandbox manifest write it down. Four copies of `?? defaultName`
+ * would be four places a later change could land in one and not the others, and the whole value of those
+ * stores is that what they record IS what dispatched: a record naming a venue the registry did not choose is
+ * an audit trail that lies.
+ *
+ * TAKES JOB DATA, NEVER THE BULLMQ WRAPPER. A wrapper's own keys are `id` and `data`, so `wrapper.backend`
+ * is always undefined and every job would resolve to the default in silence -- the defect `index.mjs`
+ * records beside `containerName`, which shipped once. Callers holding a wrapper pass `wrapper.data`.
+ *
+ * `null` WHEN NEITHER IS KNOWN, never a guessed `local`. Only a dependency-injection seam reaches that (every
+ * wired caller is handed `config.defaultBackend`), and each consumer fails closed on it: the record stores a
+ * null, the session store never resumes, and the sandbox refuses. A default here would hide a dropped wire
+ * today and become a wrong answer the day `PI_BACKENDS` names a remote venue first.
+ *
+ * HERE rather than in `backends.mjs`, whose `backendFor(name)` falls back to the TABLE's default -- a
+ * different question, and putting the two side by side invites answering one with the other. And a free
+ * function rather than a registry method, because the session store is constructed in `startWorker` well
+ * before any bundle exists, which is the temporal dead zone `reapAll` above already records.
+ */
+export function resolveBackendName(data, defaultName) {
+	return data?.backend ?? defaultName ?? null;
+}
+
+/**
  * WHICH backend runs THIS job, and the one place that decides (issue #227).
  *
  * The three earlier slices built a table, taught the deployment to read it, and let a trigger name a venue.
@@ -117,7 +144,7 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 
 	/** The bundle this job runs in. Throws for a name no gate should have let through. */
 	function backendFor(job) {
-		const name = job?.backend ?? defaultName;
+		const name = resolveBackendName(job, defaultName);
 		const bundle = byName.get(name);
 		if (!bundle) {
 			throw new Error(`backend registry: no backend named ${JSON.stringify(name)} is registered (have: ${[...byName.keys()].join(", ")})`);

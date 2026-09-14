@@ -1823,9 +1823,10 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   // "I checked". Which image runs is which code runs, so it is not a fact to leave implicit.
   out.push(kv("image", t.image ?? "deployment default", t.image ? "accent" : "dim"));
   // #227, and it earns its row by the same argument the image row states: the dim "deployment default" is
-  // "I checked". Where the box was BUILT bounds what the box can be, so it is not a fact to leave implicit
-  // -- and without this row an operator has no surface anywhere (panel, run record, success log) on which
-  // to confirm a venue their trigger named.
+  // "I checked". Where the box was BUILT bounds what the box can be, so it is not a fact to leave implicit.
+  // This row is what the trigger REQUESTED, readable before anything runs; what a job actually GOT is the
+  // run record's `backend` (#277), shown in RUN_DETAIL. Both are needed, because the record can only
+  // confirm a venue after the job already spent.
   out.push(kv("backend", t.backend ?? "deployment default", t.backend ? "accent" : "dim"));
   // #291, beside the image row by the issue's own instruction: what the box CANNOT DO is not a fact to
   // leave implicit, and the dim "full pinned tool set" is the image row's "I checked", not an omission.
@@ -2200,6 +2201,13 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // and framed at DRILL_WIDTH. Absent on records written before the field existed, and on a deployment
   // that never declared a name, so a single-host drill-in is byte-identical.
   if (r.host) out.push(kv("host", String(r.host)));
+  // WHICH VENUE, beside which machine (#277): the backend this job resolved to, which TRIGGER_DETAIL's
+  // backend row cannot show -- that row is what a trigger REQUESTED, this is what a job GOT. Not nested
+  // under `host`: a single-host deployment names no host and still has a venue. Absent on records written
+  // before the field existed, and this line does not infer `local` for them -- the panel shows a record, it
+  // does not decide anything from one. Every new record carries the field, so unlike the host line this
+  // one appears on every drill-in from now on, deliberately.
+  if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", r.backend));
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];

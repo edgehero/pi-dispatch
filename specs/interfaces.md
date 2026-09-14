@@ -2161,8 +2161,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
   **A NEAR-MISS SPELLING IS REFUSED**, which puts this field in `run.waitFor`'s class rather than
   `run.image`'s. A misspelled image gives you the default image and a job that ran; a misspelled `backend`
-  gives you the DEFAULT VENUE and a job that ran, byte-identical in the record, the panel and the log to one
-  that correctly chose, while the file reads as though it chose. The **plural** `run.backends` is included
+  gives you the DEFAULT VENUE and a job that ran, while the file reads as though it chose. Since #277 the run
+  record and the panel's RUN_DETAIL name the venue the job fell back to, but only AFTER it ran and spent: a
+  record is an audit, not a guard, so it covers the confirming half and the sweep still covers the
+  preventing one. The **plural** `run.backends` is included
   in that sweep and is the likeliest miss of all, because the deployment-side variable is `PI_BACKENDS`. On
   `on` every spelling is refused including the correct one, since a venue is a property of the run.
 
@@ -2673,7 +2675,8 @@ validator rather than a second copy of it.
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
                  "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
-    "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null }   // which machine ran it (#57)
+    "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
+    "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
   ```
   **`host` (issue #57) is additive, nullable, an explicit literal, and TAIL position** -- every prior
   addition took the tail, and because field order is this record's contract, the tail is the only
@@ -2691,6 +2694,23 @@ validator rather than a second copy of it.
   every packet the machine sends, and `PI_WORKER_NAME` is the documented answer for anyone who wants
   something else here. It is stamped by the `recordRun` closure rather than inside the processor, which is
   what keeps `buildRecord` a pure function of its arguments and every processor call site unchanged.
+
+  **`backend` (issue #277) names the venue the job RESOLVED to, and is additive, an explicit literal, and
+  TAIL position** after `host`, on `host`'s own argument: the tail leaves twenty-five existing positions
+  untouched. It is UNCONDITIONAL, and in a record a wired worker writes it is never null. It holds the
+  **resolved** name, `run.backend` else the deployment default (`PI_BACKENDS[0]`), computed by
+  `resolveBackendName` (`worker/src/backend-registry.mjs`), the same function the registry dispatches on --
+  never the raw `run.backend` field, which is ABSENT for every trigger that names no venue and would make
+  the record mean "whatever the default was that day". On a job refused before any container it is still
+  the venue the job resolved to, not a claim that a container ran there: `outcome` and `reason` say whether
+  one did, exactly as `provider`/`model` still attribute a catch-path death. A `backend-unblessed` refusal
+  therefore records the unblessed name, because the registry never falls back and a null would discard the
+  one fact that refusal is about. Admissibility is the argument `processor.mjs` already makes where it logs
+  the same name: a backend name is operator-authored configuration checked against a charset at load, never
+  payload. It is stamped by the `recordRun` closure from `config.defaultBackend`, the value the registry is
+  built with; `null` appears only where a caller passes no default, which is a dependency-injection seam. A
+  record is an AUDIT of the venue, not a guard on it: it confirms a venue after the job already spent, which
+  is why the loader's near-miss sweep on `run.backend` stays.
 
   Field order is the serialisation order (`JSON.stringify` emits insertion order). The filename uses the
   **sanitized** id (`:` → `_`, because `repeat:<sched>:<millis>` is NTFS-illegal); the record **body**
@@ -2862,7 +2882,11 @@ validator rather than a second copy of it.
   (`metered: false`) or pre-ledger run, `usage` is `null` and no reader treats that as an error. Given a
   forge job whose data carries `trigger.matched`, the record holds `triggerIndex` and `triggerType` —
   index `0` persists as `0`, never as `null` — and neither field ever carries the matched
-  `label`/`phrase`/`action`; given a cron, chained, or manual job, both are `null`.
+  `label`/`phrase`/`action`; given a cron, chained, or manual job, both are `null`. Given any terminal
+  record a wired worker writes, `backend` is a string equal to the job's `run.backend`, else the deployment
+  default, including a job refused before any container (a `backend-unblessed` refusal records the
+  unblessed name); given a deployment that never sets `run.backend`, the first twenty-five fields serialise
+  exactly as before and `backend` names the default.
 
 ## INT-OUTBOX-CONTRACT
 
@@ -3850,3 +3874,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-09 | Issue #287, the operator cancel. **NEW `INT-CANCEL-CHANNEL-CONTRACT`**: the `cancel:req:`/`cancel:ack:` key pair, the per-active-job worker poll beside the kill timer, the closed abort-reason discrimination, the requester's state dispatch (held through the shared `removeHeldJob` FIRST, plain delayed via `job.remove()`, active via the channel), the OQ-008 distinction (transient attended one-shot, loss REPORTED) and its falsification test, and the named residuals (one-tick ack race, unreachable-owner honesty, record latency up to the abort grace). **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: operator cancel joins the worker-initiated terminators, with the closed exact-match rule -- only the literal `operator-cancel` riding the abort signal reclassifies; timer, shutdown, absence and garbage all stay `worker-abort`. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reason enum gains `operator-cancel` beside `worker-abort`; queued and held cancels write NO record (the #230 rule restated, not changed), and `abortReason` never enters the record (buildRecord's explicit literal, pinned). **`INT-WAIT-PROFILES-CONTRACT` AMENDED**, the operator-surface bullet: `dispatch_wait_cancel` stops being the only door -- the CLI verb and the panel's `h`-then-`x` drill-in are model-free doors through the SAME extracted sequence (`removeHeldJob`, admin delegating) -- and the held section's no-keybinding clause is retired because the fold's divider now names `h` (the unreachable degrade alone stays keyless). **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: the ack reuses its content rule (names, never paths) but the registry itself gains no field and no reader. **Code evidence**: worker/src/cancel-state.mjs; worker/src/index.mjs -> the poll + abortReason mapping; worker/src/processor.mjs -> the classification; worker/src/cancel-cli.mjs; worker/src/cli.mjs; admin/src/read-model.mjs -> cancelHeldJob delegation; admin/src/dashboard.ts; worker/test/cancel-state.test.mjs; worker/test/cancel-cli.test.mjs; worker/test/wiring.test.mjs; worker/test/processor.test.mjs; admin/test/dashboard.test.mjs. |
 | 2026-09-09 | Issue #288, the paid failures announce themselves. **NEW `INT-ON-FAILURE-HOOK-CONTRACT`** (id-only argv with the shape-guarded reason, all-stdio-ignored, the paid-terminals trigger set read off BullMQ's own `finishedOn` and the completed event's policy reasons, at-most-once best-effort, exit codes unread, unset-is-absence with its falsification test). **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no outcome, no reason token and no field moves -- the comments and the hook observe the record's existing vocabulary. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: no exit code is reinterpreted, and the runner's exit-line reason vocabulary stays deliberately unread (the DES entry's Rejected list records why). **`INT-WAIT-PROFILES-CONTRACT` UNCHANGED, checked**: the hook mirrors its Invocation model (same blast radius, bounded the same way) without touching it; the one behavioural intersection -- an aborted wait check counts no fault -- is untouched. **Comment surface widened, not reshaped**: worker-abort, operator-cancel and runner-policy now post fixed sentences through the existing adapter, and the FINAL infra failure posts once from the failed listener; a retried attempt still posts nothing. **Code evidence**: worker/src/on-failure.mjs; worker/src/start.mjs -> the listener bodies; worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/config.mjs; worker/test/on-failure.test.mjs; worker/test/start-wiring.test.mjs; worker/test/processor.test.mjs. |
 | 2026-09-09 | Issue #289. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**, the operator-surface bullet: the per-job-classifier refusal is qualified as exactly that (per-job) and kept, while the status area now names the two parts countable from their OWN sources (scheduler list, `wait:held` index) with the remainder stated undifferentiated -- still never enumerating or hydrating a delayed job, which is the PII wall the bullet exists for. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no field and no token moves; the FAILED section reads the QUEUE's own failedReason, which is not the record's surface, and `buildRecord` still never carries a message. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: no exit code is touched; the de-payloaded branch.mjs/prepare-local messages change what a throw SAYS, not how it classifies. **The receiver's wire contract**: `202 {status:"deduplicated"}` joins `202 {status:"queued"}` as the answer for a delivery the semantic window swallowed whole; forges act on the status code, and the code stays 2xx precisely so a handled delivery is never redelivered into a storm (the body is honest, the code is safe -- `REQ-DEDUP-BY-DELIVERY-GUID` carries the full argument). **Code evidence**: worker/src/queue.mjs -> enqueueForgeJob's return comparison; receiver/src/receiver.mjs -> fanout, respondEnqueueOutcome; receiver/src/poller.mjs; admin/src/dashboard.ts -> delayedBreakdownLine, failedSection, scrubReason; admin/src/read-model.mjs -> readQueueState.cronNext; admin/src/render.mjs -> renderStatus; worker/src/branch.mjs; worker/src/prepare-local.mjs. |
+| 2026-09-14 | Issue #277, part 1: the record names its venue. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the twenty-sixth tail field `backend`, the RESOLVED venue (`run.backend`, else `PI_BACKENDS[0]`) through `resolveBackendName`, the one derivation the registry dispatches on; never null in a wired worker's record; on a pre-container refusal it is the venue the job resolved to (a `backend-unblessed` refusal records the unblessed name); admissible as operator-authored config; stamped by `recordRun` from `config.defaultBackend`; an audit, not a guard. Acceptance gains the matching clause. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the near-miss entry: "byte-identical in the record, the panel and the log" is no longer true of the record and the panel, which now confirm the fallen-back venue after the spend, so the sweep's justification is restated as the preventing half. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: dispatch itself does not move, only what is written down about it. |

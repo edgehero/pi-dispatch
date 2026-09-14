@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { makeBackendRegistry, reapAll } from "../src/backend-registry.mjs";
+import { makeBackendRegistry, reapAll, resolveBackendName } from "../src/backend-registry.mjs";
 import { containerSpec, copyDowngrades, transfersFromSpec } from "../src/container-spec.mjs";
 
 const bundle = (name, calls = []) => ({
@@ -34,6 +34,22 @@ test("every per-job function resolves the SAME way, so none can be forgotten", (
 		["far", "far", "far", "far"],
 		"every one went to the named venue",
 	);
+});
+
+test("dispatch resolves a venue exactly as the stores that record it do (#277)", () => {
+	// The run record, the session stamp and the sandbox manifest write down `resolveBackendName`'s answer.
+	// If the registry resolved any other way, those stores would record a venue dispatch never chose.
+	const calls = [];
+	const reg = makeBackendRegistry({ bundles: [bundle("local", calls), bundle("b", calls)], defaultName: "local" });
+	for (const data of [{}, { backend: "b" }, null, undefined]) {
+		assert.equal(reg.backendFor(data).name, resolveBackendName(data, "local"), `for ${JSON.stringify(data)}`);
+	}
+	// `??`, not `||`: an empty name is still a NAME, so it resolves to itself and the registry refuses it,
+	// rather than falling back to the default and recording a venue nobody chose.
+	assert.equal(resolveBackendName({ backend: "" }, "local"), "");
+	assert.throws(() => reg.backendFor({ backend: "" }), /no backend named ""/);
+	assert.equal(resolveBackendName({}, undefined), null, "no default is a seam, and resolves to nothing rather than a guess");
+	assert.equal(resolveBackendName({ id: "j", data: { backend: "b" } }, "local"), "local", "a BullMQ wrapper is not job data");
 });
 
 test("a job that names no venue runs in the default", () => {

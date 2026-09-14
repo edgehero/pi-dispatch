@@ -1,5 +1,6 @@
 import * as nodeFs from "node:fs";
 import { basename, join } from "node:path";
+import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 
 /**
@@ -378,7 +379,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null }) {
 	const data = job.data ?? {};
 	const kind = data.kind ?? job.name;
 	const source = result ?? error ?? {};
@@ -463,6 +464,25 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// Passed in rather than read from a module-level value, so `buildRecord` stays pure and every
 		// existing caller keeps getting `null` without knowing this field exists.
 		host,
+		// Which VENUE it resolved to (issue #277). Additive, an explicit literal, TAIL position after `host`,
+		// on host's own argument: field order is the serialisation order, so the tail leaves twenty-five
+		// existing positions untouched. Unconditional, on the same `tokens`/`usage`/`session` precedent.
+		//
+		// THE RESOLVED NAME, NEVER THE RAW FIELD. `data.backend` is ABSENT for every trigger that names no
+		// venue, which is nearly all of them, and an absent key would mean "whatever the default was that
+		// day" -- exactly what a record exists not to mean. `resolveBackendName` is the registry's own
+		// expression, so what this records is what dispatch chose rather than a second opinion of it.
+		//
+		// ON A JOB REFUSED BEFORE ANY CONTAINER, it is still the venue the job RESOLVED to, not a claim that a
+		// container ran there; `outcome` and `reason` say whether one did, the way `provider`/`model` above
+		// still attribute a catch-path death. A `backend-unblessed` refusal therefore records the unblessed
+		// name -- the default would be false (the registry never falls back) and a null would discard the
+		// one fact that refusal is about.
+		//
+		// ADMISSIBLE for the reason `processor.mjs` gives where it logs the same name: a backend name is
+		// operator-authored config checked against a charset at load, never payload. `null` only where no
+		// default was passed, which is a dependency-injection seam; `recordRun` in start.mjs always passes one.
+		backend: resolveBackendName(data, defaultBackend),
 	};
 }
 

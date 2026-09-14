@@ -1855,6 +1855,35 @@ test("RUN_DETAIL names the host when a record carries one, and is unchanged when
   assert.ok(!/^\s*host\s/m.test(bare), "a record from before the field, or from a deployment that never named a host, shows no line");
 });
 
+test("RUN_DETAIL names the venue a job resolved to, beside the host and without one (#277)", async () => {
+  // TRIGGER_DETAIL's backend row is what a trigger REQUESTED; this line is what a job GOT, read off the record.
+  const withBoth = await openRunDetail({
+    fetchSnapshot: async () => ({ ...SNAPSHOT, runs: SNAPSHOT.runs.map((r) => ({ ...r, host: "mac-mini-1", backend: "local" })) }),
+  });
+  const lines = withBoth.render(80).map((l) => stripAnsi(l));
+  await withBoth.dispose();
+  const hostAt = lines.findIndex((l) => /host\s+mac-mini-1/.test(l));
+  const backendAt = lines.findIndex((l) => /backend\s+local/.test(l));
+  assert.ok(hostAt >= 0 && backendAt === hostAt + 1, "the venue sits directly under the machine");
+  const widths = new Set(lines.map((l) => visibleLen(l)));
+  assert.equal(widths.size, 1, `every drill-in line is one width, got ${[...widths].join(", ")}`);
+
+  // Not nested under the host: a single-host deployment names no host and still ran somewhere.
+  const noHost = await openRunDetail({
+    fetchSnapshot: async () => ({ ...SNAPSHOT, runs: SNAPSHOT.runs.map((r) => ({ ...r, backend: "far" })) }),
+  });
+  const bare = stripAnsi(noHost.render(80).join("\n"));
+  await noHost.dispose();
+  assert.match(bare, /backend\s+far/);
+  assert.ok(!/^\s*│?\s*host\s/m.test(bare));
+
+  // A record written before the field existed shows no line, and the panel does not infer `local` for it.
+  const old = await openRunDetail();
+  const oldText = stripAnsi(old.render(80).join("\n"));
+  await old.dispose();
+  assert.ok(!/backend\s/.test(oldText), "no venue line on a record that carries none");
+});
+
 // --- the panel's REAL deps factory (issue #57) -----------------------------------------------------------
 //
 // This factory had no test, which is how it came to build its own single queue and do its own pausing,

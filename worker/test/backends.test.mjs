@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DEFAULT_BACKEND, ENFORCED, PROPERTIES, PROPERTY_NAMES, backendFor, declarationOf, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DEFAULT_BACKEND, ENFORCED, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -33,6 +33,20 @@ test("every backend declares whether it is REMOTE, because a missing key would r
 		assert.equal(typeof BACKENDS[name].remote, "boolean", `${name} must declare remote as a boolean`);
 	}
 	assert.equal(BACKENDS.local.remote, false);
+});
+
+test("an artifact that names no venue was produced on a LOCAL one, which the table still holds (#277)", () => {
+	// An unstamped transcript or an unkeyed sandbox manifest predates venue attribution, when `local` was the
+	// only entry. Readers treat it as that venue, so it has to stay a real, non-remote entry.
+	assert.equal(UNATTRIBUTED_BACKEND, "local");
+	assert.ok(Object.hasOwn(BACKENDS, UNATTRIBUTED_BACKEND));
+	assert.equal(BACKENDS[UNATTRIBUTED_BACKEND].remote, false);
+});
+
+test("every backend name fits the charset a venue stamp relies on (#277)", () => {
+	// The session store invalidates a venue stamp with a sentinel written in characters no venue can carry.
+	// That is only a proof while every name this build knows stays inside the trigger charset.
+	for (const name of BACKEND_NAMES) assert.match(name, /^[A-Za-z0-9._-]+$/, name);
 });
 
 test("the closed list covers the guarantees a backend could otherwise silently drop", () => {

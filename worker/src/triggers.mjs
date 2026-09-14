@@ -1091,9 +1091,10 @@ export function refusesLocalWorkspace(entry, localWorkspace) {
  *
  * A NEAR-MISS SPELLING IS REFUSED, which puts this in `waitFor`'s class rather than `run.imgae`'s. A
  * misspelled image gives you the default image and a job that ran; a misspelled `backend` gives you the
- * DEFAULT VENUE and a job that ran -- byte-identical in the record, the panel and the log to one that
- * correctly named a venue, while the operator reads the file as though it chose. That is the destructive
- * absence `validateWaitFor` refuses near-misses for, one field over.
+ * DEFAULT VENUE and a job that ran, while the operator reads the file as though it chose. Since #277 the run
+ * record and RUN_DETAIL name the venue the job fell back to, but only AFTER it ran and spent: a record is an
+ * audit, not a guard. That is the destructive absence `validateWaitFor` refuses near-misses for, one field
+ * over.
  */
 function validateBackend(on, run, at, path, { localWorkspace }) {
 	// The near-miss sweep, exactly `validateWaitFor`'s: on `run` the exact spelling is the field, on `on`

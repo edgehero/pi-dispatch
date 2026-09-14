@@ -733,7 +733,8 @@ function makeRealRecordRun({ writeThrows = false } = {}) {
 		},
 	};
 	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs: fakeFs, log: () => {} });
-	const recordRun = (a) => writeRecord(buildRecord(a));
+	// The default venue is passed exactly as start.mjs's closure passes it (#277).
+	const recordRun = (a) => writeRecord(buildRecord({ ...a, defaultBackend: "local" }));
 	return { recordRun, writes };
 }
 
@@ -802,10 +803,30 @@ test("(a) completed run: real writer serialises a PII-free record to <jobId>.jso
 	// the integer and the enum persist, the collaborator-applied label does not.
 	assert.equal(rec.triggerIndex, 0, "matched.index persists, and index 0 is 0, never null");
 	assert.equal(rec.triggerType, "label");
+	// The venue rides the serialized bytes end to end (#277): a trigger naming none records the default it
+	// resolved to, never an absent key.
+	assert.equal(rec.backend, "local");
 	// buildRecord reads only stable non-PII fields, so the serialized bytes carry neither title nor body.
 	assert.equal(writes[0].data.includes("SECRET_T"), false, "issue title must not leak into the record bytes");
 	assert.equal(writes[0].data.includes("SECRET_B"), false, "issue body must not leak into the record bytes");
 	assert.equal(writes[0].data.includes("SECRET_LABEL"), false, "the matched label must not leak into the record bytes");
+});
+
+test("(a2) a backend-unblessed refusal records the venue it refused, not the default it did not fall back to (#277)", { skip }, async () => {
+	const { recordRun, writes } = makeRealRecordRun();
+	const job = secretJob("j-far");
+	job.data.backend = "far";
+	let ran = false;
+	const processor = realRecordProcessor(recordRun, { runContainer: async () => ((ran = true), { code: 0, aborted: false, turns: 1 }) });
+
+	const res = await processor(job, "tok", new AbortController().signal);
+
+	assert.equal(res.reason, "backend-unblessed");
+	assert.equal(ran, false, "refused before any container");
+	assert.equal(writes.length, 1);
+	const rec = JSON.parse(writes[0].data);
+	assert.equal(rec.outcome, "policy");
+	assert.equal(rec.backend, "far", "the one fact the refusal is about; the default would claim a venue the registry never chose");
 });
 
 test("(b) infra exit 1: a failed record is written on the catch path BEFORE InfraRetry rethrows", { skip }, async () => {

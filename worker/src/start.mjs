@@ -653,7 +653,9 @@ export async function startWorker(
 	const recordRun = ({ job, result, error, startedAt, endedAt }) => {
 		// The `host` is stamped HERE rather than inside the processor, which is what keeps every one of its
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName });
+		// The default venue rides the same way and for the same reason (#277): it is the value the registry
+		// below is built with, so the record resolves a job's venue exactly as dispatch does.
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend });
 		writeRecord(record);
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,

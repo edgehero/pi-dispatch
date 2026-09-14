@@ -1025,6 +1025,14 @@ test("every session bound config reads is actually handed to the store", () => {
 	}
 });
 
+test("the record's default venue and the registry's come from the one config value (#277)", () => {
+	// Asserted against the SOURCE so it runs without Valkey. Two defaults read from two places would let the
+	// record name a venue the registry never dispatched to, and nothing else would notice.
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.match(src, /buildRecord\(\{[^}]*defaultBackend:\s*config\.defaultBackend/, "recordRun passes the default venue to buildRecord");
+	assert.match(src, /defaultName:\s*config\.defaultBackend/, "and the registry is built with the same value");
+});
+
 // --- one-shot wiring (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE): the file path, the deps entry,
 // --- and the record-before-disarm order. startWorker exposes no factory seam for makeDisarmOnce /
 // --- makeCheckOnceSpent, so these pins drive the REAL closures against a real temp triggers file.
@@ -1620,6 +1628,29 @@ test("startWorker CONNECTS the registry to the processor, and to the abort (#227
 	assert.deepEqual(seen.sort(), ["far:egressPreflight", "far:imagePreflight", "far:runContainer", "far:stopContainer"].sort());
 	assert.deepEqual(captured.deps.neverStartedExits(job), [7], "the exit set is the venue's too");
 	assert.equal(captured.containerName(job), "far-j", "and the NAME the abort stops is built by that venue");
+});
+
+test("the run record resolves a venue with the SAME default the registry dispatches with (#277)", { skip }, async () => {
+	let registryArgs = null;
+	const records = [];
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeBackendRegistry: (args) => {
+			registryArgs = args;
+			return realRegistry(args);
+		},
+		makeRecordWriter: () => (record) => records.push(record),
+	});
+	const at = "2026-09-14T09:00:00.000Z";
+	const job = (id, extra = {}) => ({ id, attemptsMade: 0, name: "github", data: { kind: "github", repo: "o/r", flow: "fix", target: { type: "issue", number: 1 }, ...extra } });
+	captured.recordRun({ job: job("gh-plain"), result: { outcome: "completed", exitCode: 0 }, startedAt: at, endedAt: at });
+	captured.recordRun({ job: job("gh-far", { backend: "far" }), result: { outcome: "policy", reason: "backend-unblessed" }, startedAt: at, endedAt: at });
+
+	assert.equal(records.length, 2);
+	assert.equal(records[0].backend, registryArgs.defaultName, "a job naming no venue records the registry's own default");
+	assert.equal(records[0].backend, "local");
+	assert.equal(records[1].backend, "far", "and a named venue is recorded as named");
 });
 
 // ── issue #292: the periodic retention sweep ────────────────────────────────────────────────────────

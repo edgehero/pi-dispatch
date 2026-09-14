@@ -49,8 +49,9 @@ test("a name this BUILD does not know is refused at load, and the message says w
 
 test("a NEAR-MISS spelling is refused, because a dropped venue is a destructive absence", () => {
 	// `run.imgae` gives you the default image and a job that ran, which is harmless. A misspelled `backend`
-	// gives you the DEFAULT VENUE and a job that ran -- byte-identical in the record, the panel and the log
-	// to one that correctly chose -- while the file reads as though it chose. That is `waitFor`'s class.
+	// gives you the DEFAULT VENUE and a job that ran while the file reads as though it chose. The record
+	// names that venue since #277, but only after the spend, so it audits rather than guards. That is
+	// `waitFor`'s class.
 	for (const key of ["Backend", "backEnd", "back_end", "back-end", "backends", "BACKEND"]) {
 		assert.throws(() => parse([cron({ [key]: "local" })]), /is not a field -- did you mean run\.backend\?/, key);
 	}

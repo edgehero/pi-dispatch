@@ -273,8 +273,9 @@ test("the record carries a host, in tail position, and null when nobody named on
 
 	const withHost = buildRecord({ ...args, host: "mac-mini-1" });
 	const keys = Object.keys(withHost);
-	assert.equal(keys.at(-1), "host", "tail position: every prior addition took the tail, and field order is the contract");
-	assert.equal(keys.length, 25);
+	// `host` was the tail when it landed; `backend` (#277) took the tail after it, on the same argument.
+	assert.equal(keys.at(-2), "host", "tail position when it landed: field order is the contract");
+	assert.equal(keys.length, 26);
 	assert.equal(withHost.host, "mac-mini-1");
 
 	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
@@ -288,6 +289,42 @@ test("the record carries a host, in tail position, and null when nobody named on
 	// The admissibility argument in one assertion: this value cannot be path-shaped, so it cannot carry
 	// the OS account name that `targetFor` drops a local folder to a basename to avoid.
 	assert.ok(!/[\\/]/.test(String(withHost.host)));
+});
+
+test("the record names the RESOLVED venue in tail position, read from the job DATA (#277)", () => {
+	const data = { kind: "github", repo: "acme/web", target: { number: 7 }, flow: "deploy" };
+	const at = { startedAt: "2026-08-30T12:00:00.000Z", endedAt: "2026-08-30T12:00:01.000Z" };
+	const wrap = (d, extra = {}) => ({ id: "gh-1", name: "github", attemptsMade: 0, data: d, ...extra });
+	const record = (job, over = {}) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...at, ...over });
+
+	const unflagged = record(wrap(data), { defaultBackend: "local" });
+	assert.equal(Object.keys(unflagged).at(-1), "backend", "the newest field takes the tail");
+	assert.equal(unflagged.backend, "local", "a trigger that names no venue records the default it resolved to, never an absent key");
+	assert.equal(record(wrap({ ...data, backend: "far" }), { defaultBackend: "local" }).backend, "far", "a named venue wins over the default");
+	assert.equal(
+		record(wrap(data, { backend: "far" }), { defaultBackend: "local" }).backend,
+		"local",
+		"read from job.data: a key on the BullMQ wrapper is not the trigger's venue, and reading it there is the bug index.mjs records",
+	);
+	// No default passed is a dependency-injection seam, and it records nothing rather than guessing `local`.
+	const seam = record(wrap(data));
+	assert.ok("backend" in seam, "the key is always present");
+	assert.equal(seam.backend, null);
+	assert.deepEqual(Object.keys(seam), Object.keys(unflagged), "the key SET does not depend on whether a default was passed");
+});
+
+test("a deployment that never names a backend keeps the first twenty-five fields exactly as they were", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 }, flow: "deploy" } };
+	const rec = buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, startedAt: "2026-08-30T12:00:00.000Z", endedAt: "2026-08-30T12:00:01.000Z", host: "mac-mini-1", defaultBackend: "local" });
+	assert.deepEqual(Object.keys(rec).slice(0, 25), [
+		"jobId", "kind", "target", "flow", "startedAt", "endedAt", "outcome", "reason", "exitCode", "turns", "tokens", "usage",
+		"provider", "model", "budgetReserved", "attempt", "parentJobId", "chainDepth", "chainRefused", "replica", "replicas",
+		"triggerIndex", "triggerType", "session", "host",
+	]);
+	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new field is appended.
+	const { backend, ...before } = rec;
+	assert.equal(backend, "local");
+	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local"}`);
 });
 
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
