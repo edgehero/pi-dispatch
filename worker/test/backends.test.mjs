@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DEFAULT_BACKEND, ENFORCED, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATIONS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -98,13 +98,21 @@ test("every ASSERTED property names who asserts it, and no other property claims
 	}
 });
 
-test("credentialTransit is ASSERTED, because DOCKER_HOST can redirect every spawn", () => {
-	// The second honest one. Every spawn is `docker` with the worker's environment inherited, so
-	// DOCKER_HOST=tcp://... or a docker context sends the connection to another machine with the provider
-	// key and the per-job forge token riding as `-e NAME=VALUE`. DOCKER_HOST appears nowhere in this repo:
-	// no code sets it, no check refuses it, no test reads it back -- so `enforced` would be an overclaim by
-	// this module's own definition of the word.
-	assert.equal(BACKENDS.local.declares.credentialTransit, ASSERTED);
+test("credentialTransit is ENFORCED only while the docker endpoint is OBSERVED on this host (#278)", () => {
+	// It was ASSERTED while nothing in the repo looked where the docker CLI sends containers. The worker now
+	// asks the CLI, so the word is earned -- but only while the answer is "this host": a redirected CLI takes
+	// the provider key and the per-job forge token along as `-e NAME=VALUE`, and the word must not survive that.
+	assert.equal(BACKENDS.local.declares.credentialTransit, ENFORCED);
+	assert.equal(BACKENDS.local.observedBy.credentialTransit, DOCKER_ENDPOINT_LOCAL);
+	assert.equal(BACKENDS.local.asserts.credentialTransit, undefined, "no asserter: the worker observes it");
+	assert.equal(effectiveWord("local", "credentialTransit", { [DOCKER_ENDPOINT_LOCAL]: true }), ENFORCED);
+	for (const seen of [{ [DOCKER_ENDPOINT_LOCAL]: false }, {}, undefined, { [DOCKER_ENDPOINT_LOCAL]: "true" }]) {
+		assert.equal(effectiveWord("local", "credentialTransit", seen), ASSERTED, `degrades for ${JSON.stringify(seen)}`);
+	}
+	// Properties with no observation keep their declared word whatever is observed.
+	assert.equal(effectiveWord("local", "isolation", {}), ENFORCED);
+	assert.equal(effectiveWord("local", "nonRoot", { [DOCKER_ENDPOINT_LOCAL]: true }), ASSERTED);
+	assert.equal(effectiveWord("nope", "egress", {}), undefined);
 	// And secretsCustody keeps ENFORCED only because it no longer asks the network question.
 	assert.equal(BACKENDS.local.declares.secretsCustody, ENFORCED);
 	assert.equal(/network/i.test(PROPERTIES.secretsCustody.question), false, "that clause belongs to credentialTransit");
@@ -120,12 +128,14 @@ test("declarationOf joins a word to what qualifies it, so a consumer cannot prin
 		armedBy: "PI_EGRESS",
 		question: PROPERTIES.egress.question,
 		assertedBy: null,
+		observedBy: null,
 	});
+	assert.equal(declarationOf("local", "credentialTransit").observedBy, DOCKER_ENDPOINT_LOCAL, "and an observation-gated word says so");
 	assert.equal(declarationOf("local", "isolation").armedBy, null);
 	// An asserted word carries WHO asserts it. "not us" without "them" leaves an operator nothing to check,
 	// which is why doctor can honestly say it names the asserter.
 	assert.match(declarationOf("local", "nonRoot").assertedBy, /USER directive/);
-	assert.match(declarationOf("local", "credentialTransit").assertedBy, /DOCKER_HOST/);
+	assert.equal(declarationOf("local", "credentialTransit").assertedBy, null, "enforced, so no asserter");
 	assert.equal(declarationOf("local", "isolation").assertedBy, null, "meaningless for an enforced word");
 	assert.equal(declarationOf("nope", "egress"), undefined);
 	assert.equal(declarationOf("local", "egres"), undefined);
@@ -148,6 +158,17 @@ test("the table is deeply FROZEN, so a bundle holder cannot rewrite what doctor 
 	assert.ok(Object.isFrozen(BACKENDS));
 	assert.ok(Object.isFrozen(BACKENDS.local));
 	assert.ok(Object.isFrozen(BACKENDS.local.declares));
+	// #278: the maps beside it too. `asserts` is what doctor prints beside a word and `observedBy` decides
+	// whether the word holds; `asserts` had been left mutable.
+	assert.ok(Object.isFrozen(BACKENDS.local.asserts));
+	assert.ok(Object.isFrozen(BACKENDS.local.observedBy));
+	assert.throws(() => {
+		BACKENDS.local.observedBy.credentialTransit = "nothing";
+	}, TypeError);
+	assert.throws(() => {
+		BACKENDS.local.asserts.nonRoot = "trust me";
+	}, TypeError);
+	assert.ok(Object.isFrozen(OBSERVATIONS));
 	// PROPERTIES is the sharper one: `isProperty` reads it, and `isProperty` is the whole of `shortfall`'s
 	// validation gate. Unfrozen, one assignment deletes a property (every floor naming it then throws
 	// "unknown property"), adds one, or nulls out an `armedBy` so the capability word prints bare again --
@@ -258,4 +279,13 @@ test("a floor asking for nothing is met by anything, including an unknown backen
 	assert.deepEqual(shortfall("does-not-exist", {}), []);
 	assert.deepEqual(shortfall("local", null), []);
 	assert.deepEqual(shortfall("local"), []);
+});
+
+test("every observedBy names a property and an observation from the closed list (#278)", () => {
+	for (const name of BACKEND_NAMES) {
+		for (const [property, observation] of Object.entries(BACKENDS[name].observedBy)) {
+			assert.ok(isProperty(property), `${name}.observedBy.${property} is a property`);
+			assert.ok(Object.hasOwn(OBSERVATIONS, observation), `${name}.observedBy.${property} names a known observation`);
+		}
+	}
 });

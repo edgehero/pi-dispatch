@@ -96,6 +96,9 @@ function stripFlowLines(output) {
 // in-image gh probe. A correct policy reaches the provider (exit 0) and is blocked from an unlisted host
 // (exit 3), which is what makes both directions of the allowlist assertable.
 const EGRESS_OK = {
+	// Issue #278: the docker CLI's endpoint, answered as a local socket. Here rather than only in `green`,
+	// because plans that build on EGRESS_OK without `green` would otherwise read an unresolved endpoint.
+	"docker context inspect": { code: 0, output: '"desktop-linux"|"unix:///Users/x/.docker/run/docker.sock"\n' },
 	"docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n" },
 	"docker network": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
@@ -3055,4 +3058,15 @@ test("an explicitly-set swept path names the variable, because that one really w
 	assert.match(warns[0].label, /PI_LOGS_DIR \(/);
 	assert.ok(!warns[0].label.includes("PI_SETTINGS_FILE"), "the durable one is not dragged in");
 	assert.match(warns[0].fix, /unsetting it falls back to/, "and here `unset` IS the remedy, because it leads somewhere durable");
+});
+
+test("doctor: the in-image gh probe does NOT run on a docker CLI that points off this host (#278)", async () => {
+	// The probe hands the operator's own gh token to `docker run -e`; on a redirected CLI that token rides to
+	// another machine. A check must not do what the credentialTransit line warns about.
+	const { out, text } = capture();
+	const calls = [];
+	const plan = { ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' }, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run": 0 };
+	await runDoctor(ghEnv(), ghDeps(out, plan, calls));
+	assert.ok(!calls.some((c) => c.cmd === "docker" && c.args.includes("GH_TOKEN")), "no container was handed the token");
+	assert.match(text(), /⚠ in-image gh auth: not checked, because this shell's docker CLI resolves tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
 });

@@ -61,7 +61,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | A job container's `/outbox` request file | **None** — agent-authored | An agent-initiated signal channel back to the host; validated host-side before anything is enqueued. **Local jobs only** — a github job has no `/outbox` mount at all |
 | A job container's `/session` transcript | **None** — agent-authored | The **second** agent-initiated channel, and this row exists because the line above used to say "only". Written by the agent, read back host-side on a `completed` exit, `lstat`-checked and regular-files-only on both edges |
 | A **resurrected sandbox**'s operator shell (`pi-dispatch sandbox`) | **Operator — the same trust as a terminal on this host** | A third channel, and the first the **operator** opens rather than the agent. Not a job container: no minted token, no provider key, no agent running, started only by a keypress. It re-mounts a finished run's workspace, which for a forge job holds attacker-influenced code — the same trust shape as checking out a stranger's pull request locally. Every isolation flag still applies; ports it publishes are `127.0.0.1`-only and last only while it does |
-| The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon on this host, so the answer is "the operator's own machine" and nothing changes. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
+| The **venue** a job's container is built in (`run.backend`, `PI_BACKENDS`) | **Operator — the same trust as the daemon they point the worker at** | A different axis from every row above. Those ask *who wrote this*; this asks *who is holding the execution*. Today there is one venue, the Docker daemon the worker's docker CLI resolves, which is the operator's own machine unless `DOCKER_HOST` or a docker context points it elsewhere; the worker reads that answer at boot and before each job, logs a redirect, and a floor asking `credentialTransit=enforced` refuses one. A venue that is not this host holds the container, the job's files, the provider key and the per-job forge token, and the isolation flags in **this worker's argv do not reach it**. What bounds it is a declaration an operator reads (`docs/backends.md`), a floor they can require of every blessed venue, and a boot refusal when the two disagree. |
 | Receiver, worker, queue, admin extension | Trusted | They never execute agent-authored content — the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer |
 
 ## What is defended
@@ -320,7 +320,7 @@ Stated openly rather than discovered later:
   holds a write-capable forge token, and your forge is on the egress allowlist by necessity. What bounds
   the damage is what it always was: how narrow the thing you named is, and what it can do if spent.
   Two further exposures are worth stating plainly. Every environment value reaches the container as
-  `-e NAME=VALUE` in the worker's own `docker run` argv, so under a default `hidepid` any local user can
+  `-e NAME=VALUE` in the worker's own `docker run` argv, sent to whichever daemon the docker CLI resolves, so under a default `hidepid` any local user can
   read it from `/proc/<pid>/cmdline` for the container's lifetime; that is already true of the provider key
   and the forge token, and a vault-managed value arriving there is new in kind rather than in mechanism.
   And a container's output is teed to the worker's stdout unconditionally, independent of
@@ -345,7 +345,7 @@ Stated openly rather than discovered later:
   *deleted* from the prompt — that is asserted by a test. It can be *contradicted* by a project persona,
   because prompt ordering is not an enforcement mechanism. This is the same honesty as the point above:
   what stops a merge is branch protection, not a sentence telling the agent not to.
-- **The host Docker daemon is trusted, and so is the worker.** A container escape is a full compromise.
+- **The host Docker daemon is trusted, and so is the worker.** A container escape is a full compromise. "The host" means the daemon the docker CLI resolves: a CLI pointed at another machine sends that machine every job's provider key and forge token, which the worker logs at boot and a `credentialTransit=enforced` floor refuses.
   The worker drives the Docker CLI, so a compromise of the worker process — or of its dependency tree —
   is root-equivalent on the host. The worker never reads issue text (that is the agent's job, in the
   container), so this is a supply-chain risk, not an injection one. Keep Docker patched; do not run this

@@ -726,6 +726,34 @@ test("an absent egress proxy refuses BEFORE reserveBudget -- and this gate is wo
 	);
 });
 
+test("a floor the docker endpoint does not meet refuses BEFORE reserveBudget, and says nothing about the endpoint publicly (#278)", async () => {
+	const redis = fakeRedis();
+	const logged = [];
+	const texts = [];
+	const { deps: d, calls } = deps({
+		redis,
+		observationPreflight: async () => ({ refused: true, message: "PI_BACKEND_FLOOR asks for ... tcp://10.1.2.3:2375 ..." }),
+		comment: async (_j, t) => (texts.push(t), calls.push(`comment:${t.slice(0, 12)}`)),
+		log: (event, fields) => logged.push([event, fields]),
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "backend-floor-unobserved");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0, "no slot for a job whose credentials would cross a network the floor forbids");
+	assert.ok(!calls.includes("run-container") && !calls.includes("prepare") && !calls.some((c) => c.startsWith("mint:")));
+	assert.equal(texts.length, 1);
+	assert.doesNotMatch(texts[0], /10\.1\.2\.3|tcp:/, "an internal endpoint never reaches a forge comment");
+	assert.ok(logged.some(([e, f]) => e === "refused_backend_floor_unobserved" && /10\.1\.2\.3/.test(f.message)), "it reaches the operator's log");
+});
+
+test("an endpoint that could not be read for a transient reason is retried, not refused (#278)", async () => {
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, observationPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
+	await assert.rejects(() => runJob(ghJob, d), (err) => err instanceof InfraRetry);
+	assert.equal(redis.incrCalls, 0);
+});
+
 test("a proxy that exists but is STOPPED is its own reason, because the fix is a different one", async () => {
 	const redis = fakeRedis();
 	const { deps: d } = deps({ redis, egressPreflight: async () => ({ proxyStopped: "pi-dispatch-egress-proxy" }) });

@@ -74,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -180,6 +180,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeRunContainer: runContainerFactory,
 			makeSecretsResolver: (args) => (secretsResolverCalls.push(args), async () => ({ ok: true, secrets: {} })),
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
+			// Issue #278: never the real CLI under test. A local socket unless a test says otherwise.
+			resolveDockerEndpoint: resolveDockerEndpoint ?? (async () => ({ local: true, context: "test", endpoint: "unix:///test.sock", reason: null, transient: false })),
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
@@ -1909,4 +1911,78 @@ test("a real err.reason token rides the hook's argv end to end, through a REAL s
 	assert.deepEqual(argv.slice(0, 3), ["gh-9", "failed", "container-never-started"], "a VALID token passes the guard verbatim; the message never rides");
 	assert.equal(argv.length, 5, "host rides fourth, whatever this machine calls itself, then the marker cell");
 	assert.equal(argv[4], "marker=threaded", "the hook runs with the worker's injected env, never the ambient one");
+});
+
+// ── issue #278: which daemon the job credentials travel to ─────────────────────────────────────────────────
+
+const REMOTE_ENDPOINT = async () => ({ local: false, context: "remote", endpoint: "tcp://10.1.2.3:2375", reason: null, transient: false });
+// These refuse BEFORE any Valkey contact, so they need the module, not a queue.
+const skipNoModule = !mod ? `worker deps not installed (node ${process.version} < 22.19.0); CI runs these` : false;
+
+test("a floor asking credentialTransit=enforced refuses to BOOT on a docker CLI that points off this host, tagged, before anything is built", { skip: skipNoModule }, async () => {
+	const order = [];
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKEND_FLOOR: "credentialTransit=enforced" }, resolveDockerEndpoint: REMOTE_ENDPOINT, order, makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
+		(err) => err.piDispatchConfig === true && /credentialTransit=enforced holds only while/.test(err.message) && /tcp:\/\/10\.1\.2\.3:2375, which is not this host/.test(err.message),
+	);
+	assert.deepEqual(order, [], "no reaper and no worker: the refusal comes first");
+});
+
+test("an endpoint read that timed out refuses a floor UNTAGGED, so the supervisor retries; a determinate one is tagged", { skip: skipNoModule }, async () => {
+	const env = { PI_BACKEND_FLOOR: "credentialTransit=enforced" };
+	await assert.rejects(
+		() => runStart({ env, resolveDockerEndpoint: async () => ({ local: null, context: null, endpoint: null, reason: "timeout", transient: true }) }),
+		(err) => err.piDispatchConfig !== true && /did not say which endpoint it resolves \(timeout\)/.test(err.message),
+	);
+	await assert.rejects(
+		() => runStart({ env, resolveDockerEndpoint: async () => ({ local: null, context: null, endpoint: null, reason: "docker-not-found", transient: false }) }),
+		(err) => err.piDispatchConfig === true,
+	);
+});
+
+test("without a floor a redirected docker CLI boots, logs it once without credentials, and gates each job only by the floor", { skip }, async () => {
+	let answer = { local: false, context: "remote", endpoint: "ssh://remote", reason: null, transient: false };
+	const { captured, logs } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		resolveDockerEndpoint: async () => answer,
+	});
+	const notLocal = logs.filter((l) => l.event === "docker_endpoint_not_local");
+	assert.equal(notLocal.length, 1);
+	assert.equal(notLocal[0].endpoint, "ssh://remote");
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.equal(started.dockerEndpointLocal, false);
+	assert.equal(started.dockerContext, "remote");
+
+	// Each job re-reads it; with no floor the answer never refuses, and an unchanged answer logs nothing more.
+	// `logs` is a snapshot taken when boot returned, so later lines are read off the shared capture.
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const mark = bootLines.length;
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "docker_endpoint_not_local").length, 0, "a standing redirect is one line at boot, not one per job");
+	answer = { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false };
+	await captured.deps.observationPreflight(job);
+	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "docker_endpoint_local").length, 1, "a return to this host is logged once, as a change");
+});
+
+test("with a floor, a context switched AFTER boot refuses the next job before it spends (#278)", { skip }, async () => {
+	let answer = { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false };
+	const { captured, logs } = await runStart({
+		env: { PI_BACKEND_FLOOR: "credentialTransit=enforced" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		resolveDockerEndpoint: async () => answer,
+	});
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true }, "booted on a local endpoint, so the first job runs");
+	const mark = bootLines.length;
+	answer = { local: false, context: "pd-remote", endpoint: "tcp://10.1.2.3:2375", reason: null, transient: false };
+	const refused = await captured.deps.observationPreflight(job);
+	assert.equal(refused.refused, true);
+	assert.match(refused.message, /tcp:\/\/10\.1\.2\.3:2375/);
+	assert.ok(parseLines(bootLines.slice(mark)).some((l) => l.event === "docker_endpoint_not_local" && l.context === "pd-remote"), "the change is logged when it happens");
+	assert.ok(!logs.some((l) => l.event === "docker_endpoint_not_local"), "and not at boot, where it was local");
+	answer = { local: null, context: null, endpoint: null, reason: "timeout", transient: true };
+	assert.deepEqual(await captured.deps.observationPreflight(job), { unavailable: true, reason: "timeout" }, "a transient read retries rather than refusing");
 });

@@ -19,6 +19,7 @@ mine: {
   remote: true,                  // true unless the container runs on the worker's own host
   declares: { /* all thirteen properties, see below */ },
   asserts: { nonRoot: "the Acme image spec's USER field" },   // required for every `asserted` word
+  // observedBy: only for a word earned by observing THIS host (see `credentialTransit` below)
 },
 ```
 
@@ -94,6 +95,11 @@ worth calling out because they are the ones adapters get wrong:
   posture. `local` can enforce egress; a deployment with `PI_EGRESS=0` is not getting it. Those are two
   different sentences and doctor prints both.
 - **`abortable`** is the 30-minute kill. Declaring it means `stopContainer` actually ends the container.
+- **`local`'s `credentialTransit` is `enforced` only while observed.** It holds while the docker CLI sends
+  containers to a daemon on this host, which the worker checks at boot and before each job. On a CLI pointed
+  elsewhere it counts as `asserted`, by you, and doctor says so. The table entry says this with
+  `observedBy: { credentialTransit: "dockerEndpointLocal" }`. That observation is a fact about this host's
+  docker CLI, so an entry for a remote venue leaves `observedBy` out and declares its own word.
 
 ## A declaration is not a claim that the property holds
 
@@ -214,7 +220,8 @@ a trigger selects it with `run.backend`.
 - **A trigger selects a venue; it never configures a posture.** `run.network` was rejected outright, and
   `run.backend` must not become a way back to it.
 - **`PI_BACKEND_FLOOR` bounds you.** An operator can require a minimum of every blessed backend, and a floor
-  naming a switched-off control refuses at boot.
+  naming a switched-off control, or a guarantee this host is not observed to provide, refuses at boot (and,
+  for an observation, before each job).
 - **The sandbox is local-only, per job.** `pi-dispatch sandbox` and the panel open a shell on this host's
   daemon against a retained job directory, so a run whose retained record names another backend is refused
   by name. That refusal is per run, not per deployment: blessing a remote venue does not stop local runs

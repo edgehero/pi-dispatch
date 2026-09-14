@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ASSERTED, DEFAULT_BACKEND, ENFORCED, backendRefusals, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor } from "../src/backends.mjs";
+import { ASSERTED, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, backendRefusals, floorShortfall, observationRefusals, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "../src/backends.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { backendChecks, runDoctor } from "../src/doctor.mjs";
 
@@ -123,14 +123,25 @@ test("every refusal reason is reported, not only the first one found", () => {
 // on the check OBJECT, which passed while every one of those lines rendered as a green tick -- `render`
 // tests `c.ok` first, so `{ok: true, warn: true}` is a plain pass and its `fix` line is never printed. The
 // promise this slice makes is about what an operator SEES, so the test has to look at that.
-async function doctorText(env) {
+async function doctorText(env, endpoint = '"desktop-linux"|"unix:///Users/x/.docker/run/docker.sock"') {
 	const buf = [];
 	await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...env },
 		{
 			out: (s) => buf.push(s),
-			spawn: () => {
-				throw new Error("doctor must not need docker for the backend section");
+			// The only docker call the backend section may make is the CLI's endpoint read (#278), answered from
+			// local config; anything that would need the DAEMON still throws.
+			spawn: (cmd, args) => {
+				if (cmd === "docker" && args[0] === "context" && endpoint !== null) {
+					const handlers = {};
+					const stdout = { on: (ev, cb) => ((stdout[ev] = cb), stdout) };
+					queueMicrotask(() => {
+						stdout.data?.(`${endpoint}\n`);
+						handlers.close?.(0);
+					});
+					return { stdout, stderr: { on() {} }, kill() {}, on: (ev, cb) => ((handlers[ev] = cb), undefined) };
+				}
+				throw new Error("doctor must not need the docker daemon for the backend section");
 			},
 			probeValkey: async () => true,
 			fileExists: () => true,
@@ -146,7 +157,8 @@ test("doctor RENDERS asserted as a warning, naming who asserts it", async () => 
 	// assertion here, not a field. `warn` still keeps the RUN green -- render only fails on !ok && !warn.
 	const text = await doctorText(base());
 	assert.match(text, /⚠ local: nonRoot is ASSERTED by the job image's USER directive/);
-	assert.match(text, /⚠ local: credentialTransit is ASSERTED by the docker endpoint DOCKER_HOST resolves to/);
+	// credentialTransit is enforced while this shell's CLI resolves a local endpoint, so it stays quiet (#278).
+	assert.doesNotMatch(text, /local: credentialTransit/);
 	assert.doesNotMatch(text, /✓ local: \w+ is ASSERTED/, "an asserted property must never render as a plain pass");
 	// The fix line only prints for a non-ok check, so this also proves the operator gets the actionable half.
 	assert.match(text, /→ not verifiable from here, so treat it as a claim rather than a control/);
@@ -243,4 +255,57 @@ test("arming egress on the real deployment still boots", () => {
 	// The case that must never regress while the ladders above are tightened.
 	assert.equal(loadConfig({ PI_EGRESS: "1" }).egress, true);
 	assert.deepEqual(floorShortfall(["local"], { egress: ASSERTED }), [], "local clears the implied floor");
+});
+
+test("unobservedFloor refuses what capability alone would pass, and degrades to asserted, not absent (#278)", () => {
+	const off = { [DOCKER_ENDPOINT_LOCAL]: false };
+	const on = { [DOCKER_ENDPOINT_LOCAL]: true };
+	assert.deepEqual(unobservedFloor(["local"], { credentialTransit: ENFORCED }, off), [{ backend: "local", property: "credentialTransit", have: ASSERTED, want: ENFORCED, observedBy: DOCKER_ENDPOINT_LOCAL }]);
+	assert.deepEqual(unobservedFloor(["local"], { credentialTransit: ENFORCED }, on), []);
+	// Pointing the worker at a daemon is the operator's call: a floor of `asserted` holds on a redirect.
+	assert.deepEqual(unobservedFloor(["local"], { credentialTransit: ASSERTED }, off), []);
+	assert.deepEqual(unobservedFloor(["local"], { credentialTransit: "absent" }, off), []);
+	// An observation nobody made gets no credit.
+	assert.equal(unobservedFloor(["local"], { credentialTransit: ENFORCED }, {}).length, 1);
+	// Not observation-gated: never this function's miss.
+	assert.deepEqual(unobservedFloor(["local"], { isolation: ENFORCED }, off), []);
+	// Capability misses stay floorShortfall's: nonRoot is asserted by declaration, not by observation.
+	assert.deepEqual(unobservedFloor(["local"], { nonRoot: ENFORCED }, off), []);
+	assert.deepEqual(unobservedFloor(["local", "not-a-backend"], { credentialTransit: ENFORCED }, off).map((m) => m.backend), ["local"]);
+});
+
+test("observationRefusals names the backend, the property, the observation and what was seen (#278)", () => {
+	const [message] = observationRefusals({
+		backends: ["local"],
+		backendFloor: { credentialTransit: ENFORCED },
+		observations: { [DOCKER_ENDPOINT_LOCAL]: false },
+		evidence: { [DOCKER_ENDPOINT_LOCAL]: "the docker CLI resolves context \"remote\" to tcp://10.1.2.3:2375, which is not this host" },
+	});
+	assert.match(message, /local: credentialTransit=enforced holds only while the docker endpoint this host's docker CLI resolves is on this host/);
+	assert.match(message, /tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
+	assert.match(message, /lower that entry to `asserted`/);
+	assert.deepEqual(observationRefusals({ backends: ["local"], backendFloor: { credentialTransit: ENFORCED }, observations: { [DOCKER_ENDPOINT_LOCAL]: true } }), []);
+});
+
+test("doctor renders a redirected docker CLI as credentialTransit ASSERTED by the operator, and a floor as refused (#278)", async () => {
+	const remote = await doctorText({}, '"remote"|"tcp://10.1.2.3:2375"');
+	assert.match(remote, /⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "remote" to tcp:\/\/10\.1\.2\.3:2375, which is not this host/);
+	assert.match(remote, /→ the provider key, the per-job forge token and any run\.secrets values ride to that daemon/);
+	assert.doesNotMatch(remote, /✓ local: credentialTransit/);
+
+	const userinfo = await doctorText({}, '"remote"|"ssh://bob@remote"');
+	assert.doesNotMatch(userinfo, /bob@/, "credentials in an endpoint never reach doctor's output");
+	assert.match(userinfo, /ssh:\/\/remote/);
+
+	const unresolved = await doctorText({}, null);
+	assert.match(unresolved, /⚠ local: credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI did not say which endpoint it resolves/);
+
+	const floored = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=enforced" }, '"remote"|"tcp://10.1.2.3:2375"');
+	assert.match(floored, /✗ PI_BACKEND_FLOOR asks for credentialTransit=enforced, which local provides only while this shell's docker CLI resolves an endpoint on this host, and it does not/);
+	assert.doesNotMatch(floored, /PI_BACKEND_FLOOR holds/);
+
+	const heldLocal = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=enforced" });
+	assert.match(heldLocal, /✓ PI_BACKEND_FLOOR holds \(credentialTransit=enforced\)/);
+	const heldAsserted = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=asserted" }, '"remote"|"tcp://10.1.2.3:2375"');
+	assert.match(heldAsserted, /✓ PI_BACKEND_FLOOR holds \(credentialTransit=asserted\)/);
 });

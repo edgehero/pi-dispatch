@@ -24,6 +24,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
 
@@ -220,3 +221,168 @@ export function makeReaper({ log, exec = execDocker }) {
 	};
 }
 
+/**
+ * WHERE THE DOCKER CLI WILL SEND A CONTAINER, AND WHETHER THAT IS THIS HOST (issue #278).
+ *
+ * `credentialTransit` is the property that the provider key and the per-job forge token reach the container
+ * without crossing a network this deployment does not own. For `local` they ride the worker's own `docker run`
+ * argv as `-e NAME=VALUE`, so the question is which daemon that CLI talks to -- and the CLI decides it from
+ * `DOCKER_HOST`, else `DOCKER_CONTEXT`, else the config file's `currentContext`, with its own normalisation
+ * (`DOCKER_HOST=bogus` becomes `tcp://bogus:2375`). Checking `DOCKER_HOST` alone misses both other sources, and
+ * this very machine resolves through a context. So the CLI is ASKED, never re-implemented: `DES-WORKER-ON-HOST`
+ * already rejected reimplementing docker's path translation, and a second copy of its context precedence would
+ * be the same failure one layer over. `docker context inspect` answers from local config in milliseconds and
+ * never contacts a daemon.
+ *
+ * The format is NARROW on purpose -- the context's name and the docker endpoint's host, each JSON-quoted -- and
+ * never `{{json .}}`, which carries TLS material paths and storage locations nobody asked for.
+ */
+export const DOCKER_ENDPOINT_ARGS = Object.freeze(["context", "inspect", "--format={{json .Name}}|{{json .Endpoints.docker.Host}}"]);
+
+/**
+ * `{ context, host }` from the CLI's output, or `null`. Scans from the LAST line, because a caller that merges
+ * stderr into the capture (doctor's does) would otherwise read a warning as the answer.
+ */
+export function parseDockerEndpoint(output) {
+	const lines = String(output ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const at = lines[i].indexOf("|");
+		if (at <= 0) continue;
+		try {
+			const context = JSON.parse(lines[i].slice(0, at));
+			const host = JSON.parse(lines[i].slice(at + 1));
+			if (typeof context === "string" && typeof host === "string") return { context, host };
+		} catch {
+			// not this line
+		}
+	}
+	return null;
+}
+
+/** 127.0.0.0/8 as a literal dotted quad, and nothing that merely starts with "127." (`127.0.0.1.nip.io` resolves anywhere). */
+function isLoopbackV4(hostname) {
+	const parts = hostname.split(".");
+	return parts.length === 4 && parts[0] === "127" && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
+}
+
+/**
+ * Is this endpoint on this host, judged by its FORM? `{ local, display }`, where `display` is the endpoint with
+ * any `user:pass@` removed, because it is logged and printed.
+ *
+ * LOCAL only when it can be shown local, the polarity this codebase uses wherever a thing that cannot be shown
+ * to be on gets no credit:
+ *   - `unix://` -- a socket on this machine's filesystem (Docker Desktop's and colima's VMs included: they are
+ *     this machine's own runtime, not a network the deployment does not own).
+ *   - `npipe:` with the `.` host -- `npipe:////./pipe/docker_engine`. A named pipe on another host is SMB, and
+ *     the CLI accepts one. Parsed by hand: `new URL` puts the `.` in the path with an empty host.
+ *   - `tcp://` to exactly `localhost`, a literal `127.0.0.0/8` address or `[::1]`.
+ * NOT local: `ssh://` (including `ssh://localhost` -- `~/.ssh/config` can send that anywhere), `tcp://` to any
+ * other name or address, any other scheme, and nothing at all.
+ *
+ * WHAT THIS CANNOT SEE, and says so: a unix socket or a loopback port can be a tunnel (`ssh -L`, socat) to
+ * another machine. The form is local and the daemon is not. That residual is named in the declaration's
+ * comment rather than claimed away.
+ */
+export function classifyDockerEndpoint(host) {
+	if (typeof host !== "string" || host === "") return { local: false, display: "" };
+	// Up to the LAST `@` before the path, as a URL parser splits it: a password may itself hold an `@`, and
+	// stopping at the first would print the rest of it.
+	const display = host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/]*)/i, (_m, scheme, authority) => scheme + authority.slice(authority.lastIndexOf("@") + 1));
+	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(host)?.[1]?.toLowerCase();
+	if (scheme === "unix") return { local: true, display };
+	if (scheme === "npipe") {
+		const server = host.slice("npipe:".length).replace(/^\/+/, "").split("/")[0];
+		return { local: server === ".", display };
+	}
+	if (scheme === "tcp") {
+		let hostname;
+		try {
+			hostname = new URL(host).hostname;
+		} catch {
+			return { local: false, display };
+		}
+		return { local: hostname === "localhost" || hostname === "[::1]" || isLoopbackV4(hostname), display };
+	}
+	return { local: false, display };
+}
+
+/**
+ * Why a resolve failed, as `{ reason, transient }`. A fixed token, never the CLI's stderr: a missing context's
+ * message carries the operator's home path.
+ *
+ * TRANSIENT only where retrying can change the answer, on `transient.mjs`'s allow-list and for its reason: a
+ * docker binary that is not there is determinate, a spawn that ran out of processes or file descriptors is not,
+ * and a CLI that had to be killed on the timeout is not. A non-zero exit is the CLI's own answer (a context that
+ * does not exist) and is determinate.
+ */
+export function classifyEndpointFailure({ error = null, code = null } = {}) {
+	if (error?.timedOut || error?.killed || error?.signal) return { reason: "timeout", transient: true };
+	if (error?.code === "ENOENT") return { reason: "docker-not-found", transient: false };
+	if (typeof error?.code === "string") return { reason: `spawn-${error.code.toLowerCase()}`, transient: !isDeterminateFsCode(error.code) };
+	if (typeof error?.code === "number" && error.code !== 0) return { reason: `exit-${error.code}`, transient: false };
+	if (typeof code === "number" && code !== 0) return { reason: `exit-${code}`, transient: false };
+	if (error) return { reason: "spawn-failed", transient: true };
+	return { reason: "unparseable", transient: false };
+}
+
+/**
+ * Run the CLI bounded, as `{ code, stdout, error }`. `execFile`'s own `timeout` is NOT the bound: it sends a
+ * signal and then still waits for the child's `close`, so a CLI wedged on a dead socket never settles
+ * (`retention-sweep.mjs` records the same). A separate timer settles the promise regardless, kills with
+ * SIGKILL and destroys the pipes. REF'D, because at boot nothing else may be holding the event loop.
+ */
+export function execDockerBounded(args, { timeoutMs = 5000, execFileFn = execFile } = {}) {
+	return new Promise((resolve) => {
+		let settled = false;
+		let child = null;
+		let timer = null;
+		const finish = (value) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(value);
+		};
+		timer = setTimeout(() => {
+			try {
+				child?.kill?.("SIGKILL");
+				child?.stdout?.destroy?.();
+				child?.stderr?.destroy?.();
+			} catch {
+				// already gone
+			}
+			finish({ code: null, stdout: "", error: { timedOut: true } });
+		}, timeoutMs);
+		try {
+			// No `env`: the endpoint that matters is the one the job's own `docker run` will use, and that spawn
+			// inherits this process's environment. Passing an env here would ask about a different CLI.
+			child = execFileFn("docker", [...args], { killSignal: "SIGKILL", maxBuffer: 64 * 1024 }, (err, stdout) => {
+				finish({ code: err ? (typeof err.code === "number" ? err.code : null) : 0, stdout: String(stdout ?? ""), error: err ?? null });
+			});
+		} catch (err) {
+			finish({ code: null, stdout: "", error: err });
+		}
+	});
+}
+
+/**
+ * The resolver: `async () => ({ local, context, endpoint, reason, transient })`. `local` is `true`, `false`, or
+ * `null` when the CLI did not answer; `endpoint` is the display form; `reason` and `transient` are set only when
+ * `local` is `null`. `run(args)` is the seam, returning `{ code, stdout, error }`.
+ */
+export function makeDockerEndpointResolver({ run = (args) => execDockerBounded(args) } = {}) {
+	return async function resolveDockerEndpoint() {
+		let result;
+		try {
+			result = await run(DOCKER_ENDPOINT_ARGS);
+		} catch (err) {
+			result = { code: null, stdout: "", error: err };
+		}
+		const parsed = result?.error || result?.code !== 0 ? null : parseDockerEndpoint(result.stdout);
+		if (!parsed) {
+			const { reason, transient } = classifyEndpointFailure({ error: result?.error ?? null, code: result?.code ?? null });
+			return { local: null, context: null, endpoint: null, reason, transient };
+		}
+		const { local, display } = classifyDockerEndpoint(parsed.host);
+		return { local, context: parsed.context, endpoint: display, reason: null, transient: false };
+	};
+}

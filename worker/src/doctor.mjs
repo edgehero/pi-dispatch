@@ -59,7 +59,8 @@ import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
-import { ABSENT, ASSERTED, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor } from "./backends.mjs";
+import { ABSENT, ASSERTED, DOCKER_ENDPOINT_LOCAL, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
+import { makeDockerEndpointResolver } from "./backend-local.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -262,6 +263,11 @@ export async function collectChecks(env, seams) {
 		label: "Docker daemon reachable",
 		fix: dockerCode === null ? "install Docker — `docker` was not found on PATH" : "start Docker (the daemon is not responding)",
 	});
+	// Issue #278: which daemon THIS SHELL's docker CLI resolves, read once and used twice -- by the in-image gh
+	// probe below, which would otherwise send the operator's gh token to it, and by the backend section's
+	// credentialTransit line. Through the worker's own resolver, so doctor and the worker cannot disagree about
+	// what an answer means; only the runner differs, because doctor's spawn is a seam.
+	const endpoint = await makeDockerEndpointResolver({ run: dockerRunVia(spawn) })();
 
 	// Read once, used twice, so the triggers file is parsed a single time: `images` drives the per-trigger
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
@@ -473,7 +479,7 @@ export async function collectChecks(env, seams) {
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
 	checks.push(...(await egressChecks(env, seams, { dockerCode, imageCode, jobImage })));
-	checks.push(...backendChecks(env));
+	checks.push(...backendChecks(env, { endpoint }));
 
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
 	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
@@ -778,7 +784,17 @@ export async function collectChecks(env, seams) {
 	// Preflight gh INSIDE the job image: a token that works host-side but not in-container (no egress from
 	// containers, stale image) fails jobs mid-run, not at submit. Only meaningful when docker and the image
 	// are green; otherwise it is noise on top of the failures already reported above.
-	if (dockerCode === 0 && imageCode === 0) {
+	if (dockerCode === 0 && imageCode === 0 && endpoint.local !== true) {
+		// NOT RUN on a daemon that is not observed on this host (#278). The probe hands the operator's own gh
+		// token -- full scope and non-expiring by default -- to `docker run -e`, and on a redirected CLI that
+		// token rides to another machine. A check must not do the thing the credentialTransit line warns about.
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpoint.endpoint}, which is not this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
+			fix: "point the docker CLI at this host and re-run doctor to check it",
+		});
+	} else if (dockerCode === 0 && imageCode === 0) {
 		if (ghSource === "app") {
 			checks.push({ ok: true, label: "in-image gh auth: skipped (GITHUB_AUTH_SOURCE=app mints per-job)" });
 		} else {
@@ -2731,8 +2747,11 @@ async function defaultProbeValkey(url) {
  * Reads the environment directly, like every other check here, and parses through `backends.mjs` so doctor
  * and the worker cannot disagree about what a floor says.
  */
-export function backendChecks(env) {
+export function backendChecks(env, { endpoint = null } = {}) {
 	const checks = [];
+	// What this shell's docker CLI resolves (#278), as the observation map the table's `observedBy` reads. An
+	// endpoint doctor was not given is not observed, which gets no credit -- the same polarity as everywhere.
+	const observations = { [DOCKER_ENDPOINT_LOCAL]: endpoint?.local === true };
 	let backends;
 	let floor;
 	try {
@@ -2780,6 +2799,19 @@ export function backendChecks(env) {
 				checks.push({ ok: false, warn: true, label: `${name}: ${property} CAN be ${d.word} here, but ${d.armedBy} is off, so this deployment is not getting it`, fix: `arm ${d.armedBy} to get it (${d.question})` });
 				continue;
 			}
+			if (d.observedBy === DOCKER_ENDPOINT_LOCAL && observations[DOCKER_ENDPOINT_LOCAL] !== true) {
+				// #278: the word holds only while the docker CLI sends containers to this host. Printed as what it
+				// degrades to, and who is asserting it, with THIS SHELL named: the service's EnvironmentFile or a
+				// systemd User= can resolve differently, and the worker logs its own answer at boot.
+				const seen = endpoint?.local === false ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}, which is not this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${name}: ${property} is ASSERTED by the operator, not enforced: ${seen}`,
+					fix: `the provider key, the per-job forge token and any run.secrets values ride to that daemon across a network this worker cannot see; point the docker CLI back at this host, or accept it deliberately. The worker logs its own answer at boot (worker_started.dockerEndpointLocal)`,
+				});
+				continue;
+			}
 			if (d.word === ASSERTED) {
 				checks.push({ ok: false, warn: true, label: `${name}: ${property} is ASSERTED by ${d.assertedBy ?? "something outside this worker"}, not enforced by it`, fix: `not verifiable from here, so treat it as a claim rather than a control: ${d.question}` });
 				continue;
@@ -2800,6 +2832,7 @@ export function backendChecks(env) {
 
 	const misses = floorShortfall(backends, floor);
 	const unarmed = unarmedFloor(floor, switches);
+	const unobserved = unobservedFloor(backends, floor, observations);
 	// A floor whose every entry is `absent` parses, reads, and bounds NOTHING: `meets(have, absent)` is true
 	// for every value. It is the one READABLE word that reproduces the outcome `isDeclaration` refuses a
 	// typo for, so it is named rather than affirmed.
@@ -2809,6 +2842,8 @@ export function backendChecks(env) {
 		checks.push({ ok: false, label: `PI_BACKEND_FLOOR is not met: ${misses.map((m) => `${m.backend}.${m.property} is ${m.have}`).join(", ")}`, fix: "raise the backend, lower PI_BACKEND_FLOOR, or drop the backend from PI_BACKENDS" });
 	} else if (unarmed.length > 0) {
 		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${unarmed.map((u) => `${u.property}=${u.want}`).join(", ")}, which ${[...new Set(unarmed.map((u) => u.armedBy))].join(", ")} has switched off`, fix: "arm the switch, or lower that entry to `absent` if you did not mean to require it" });
+	} else if (unobserved.length > 0) {
+		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${unobserved.map((u) => `${u.property}=${u.want}`).join(", ")}, which ${[...new Set(unobserved.map((u) => u.backend))].join(", ")} provides only while this shell's docker CLI resolves an endpoint on this host, and it does not`, fix: "point the docker CLI back at this host, or lower that entry to `asserted` if the redirect is deliberate; the worker refuses to boot, and refuses each job, on the same answer" });
 	} else if (bounding.length === 0) {
 		checks.push({ ok: false, warn: true, label: `PI_BACKEND_FLOOR (${spelled}) requires nothing: every entry asks for "absent", which every backend meets`, fix: "raise an entry to `asserted` or `enforced` for it to bound anything" });
 	} else {
@@ -2816,4 +2851,38 @@ export function backendChecks(env) {
 	}
 
 	return checks;
+}
+
+/**
+ * The endpoint resolver's `run` seam over doctor's own spawn (#278), so the tests' fake spawn answers it. Bounded
+ * like the worker's runner: a CLI that does not answer is killed and reported as a timeout rather than awaited.
+ */
+function dockerRunVia(spawn) {
+	return (args) =>
+		new Promise((resolve) => {
+			let child;
+			try {
+				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+			} catch (err) {
+				resolve({ code: null, stdout: "", error: err });
+				return;
+			}
+			let stdout = "";
+			let done = false;
+			const finish = (value) => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				resolve(value);
+			};
+			const timer = setTimeout(() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {}
+				finish({ code: null, stdout: "", error: { timedOut: true } });
+			}, 5000);
+			child.stdout?.on("data", (d) => (stdout += d));
+			child.on("error", (err) => finish({ code: null, stdout: "", error: err }));
+			child.on("close", (code, signal) => finish({ code, stdout, error: signal ? { signal } : null }));
+		});
 }

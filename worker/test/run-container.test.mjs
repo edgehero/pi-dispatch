@@ -316,3 +316,22 @@ test("the argv can never fetch an image -- --pull=never rides every run, whichev
 		assert.ok(args.includes("--pull=never"), "a per-trigger image name must not become a registry pull");
 	}
 });
+
+test("the job's docker run passes NO env, so it talks to the daemon the endpoint read observed (#278)", { skip }, async () => {
+	// credentialTransit's observation asks the docker CLI with this process's own environment. If the job's
+	// spawn passed an env of its own, the read would describe a different CLI than the one carrying the
+	// provider key and forge token, and the enforced word would be about the wrong connection.
+	let opts = null;
+	const spawnFn = (cmd, args, o) => {
+		opts = o;
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		queueMicrotask(() => child.emit("close", 0));
+		return child;
+	};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn });
+	await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.ok(opts, "docker was spawned");
+	assert.equal(Object.hasOwn(opts, "env"), false);
+});

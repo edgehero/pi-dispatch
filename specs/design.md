@@ -3185,12 +3185,37 @@ a tunnel.
   and still reuse one container across mutually untrusting issue authors, bind-mount the docker socket, put
   every job on one segment, have no way to stop a runaway job, or ship the per-job token to a daemon this
   deployment does not own.
-- **Two `local` declarations are `asserted`, and both were `enforced` in a draft.** `nonRoot`, because
-  `USER pi` is the image's and `SECURITY.md` says "Non-root is not in that argv". `credentialTransit`,
-  because every spawn is `docker` with the worker's environment inherited and `DOCKER_HOST` redirects that
-  connection to another machine with the provider key and the forge token riding along -- and `DOCKER_HOST`
-  appears nowhere in this repository, so no code builds the property and no test reads it back. A boot check
-  on it would earn `enforced`.
+- **One `local` declaration is `asserted`: `nonRoot`**, because `USER pi` is the image's and `SECURITY.md`
+  says "Non-root is not in that argv". It was `enforced` in a draft. `credentialTransit` was `asserted` too,
+  because every spawn is `docker` with the worker's environment inherited and `DOCKER_HOST`, `DOCKER_CONTEXT`
+  or a context selected in the CLI's config redirects that connection to another machine with the provider
+  key and the forge token riding along, and nothing in the repository looked.
+- **`credentialTransit` is now `enforced`, and only while OBSERVED (issue #278).** The worker asks the docker
+  CLI which endpoint it resolves (`docker context inspect`, a narrow format) rather than reading
+  `DOCKER_HOST` itself: the CLI's precedence (`DOCKER_HOST`, then `DOCKER_CONTEXT`, then the config's
+  `currentContext`) and its normalisation are exactly what `DES-WORKER-ON-HOST` refused to reimplement for
+  paths, and a `DOCKER_HOST`-only check misses the context this very development machine resolves through.
+  The endpoint is local only when its form shows it (`unix://`; `npipe` to `.`; `tcp` to `localhost`,
+  `127.0.0.0/8` or `[::1]`), and nothing that cannot be shown local gets credit. The entry carries
+  `observedBy: { credentialTransit: dockerEndpointLocal }`, and `effectiveWord` degrades the word to
+  `asserted` -- asserted by the operator who pointed the CLI elsewhere -- whenever the observation is not
+  `true`. **`observedBy` is per backend, not per property like `armedBy`**: a deployment switch means the same
+  thing for every venue, while an observation of this host's docker CLI means nothing for a remote venue.
+  **The floor reads the observed word, not the declared one** (`unobservedFloor`, `observationRefusals`),
+  which is `unarmedFloor`'s lesson one field over: a floor asking `enforced` refuses a redirect, a floor asking
+  `asserted` holds, and with no floor a redirect is words only, because pointing the worker at a daemon is the
+  operator's call. **Checked where credentials leave**: at boot (after the free file validations, before
+  forge auth, the reaper and Valkey; a transient failure to ask exits 1 so the supervisor retries, a
+  determinate one exits 2), and AGAIN before each job's spend for a venue observation-gated on it, because a
+  `docker context use` after boot redirects every later job and a preflight that answered once would give a
+  wrong decision all day. The per-job read logs only when the answer changes. **Residuals**: the form of a
+  unix socket or a loopback port says nothing about a tunnel behind it, and a redirect landing between a
+  job's read and its `docker run` spawn is not caught for that job, and that window spans the secret
+  resolution, the mint, the clone and the reservation, because the read belongs before the spend.
+  **Rejected**: a `DOCKER_HOST`-only env check (incomplete); reimplementing the CLI's context resolution;
+  refusing any redirect (the operator's call); refusing an `asserted` floor on a redirect (breaks the
+  vocabulary's meaning of asserted); a boot-only read (a mid-day context switch); an optional backend bundle
+  function for the observation (an adapter contract change for a fact about this host's CLI).
 - **`worker/src/backend-conformance.mjs` is what turns a declaration into something that can be WRONG**, and
   it ships in `src/` rather than `test/` on purpose: a suite beside this repo's own tests could only ever
   check this repo's own backend, while an adapter is written elsewhere by someone who will never run
@@ -3259,7 +3284,11 @@ a tunnel.
   precisely the believed-in control `CONST-EGRESS-POLICY-IN-THE-ARGV` says is worse than a known-absent one,
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
   warning that NAMES its asserter (`asserts` on the backend entry -- "not us" without "them" leaves an
-  operator nothing to go and check), and `absent` renders as a failure. `absent` OUTRANKS the gate, because
+  operator nothing to go and check), and `absent` renders as a failure. An observation-gated word (#278)
+  renders quietly only while doctor's own read of the docker CLI shows this host; otherwise as `asserted` by
+  the operator, naming THIS SHELL's answer and pointing at the service's own (`worker_started.dockerEndpointLocal`),
+  since a unit's `EnvironmentFile` or `User=` can resolve differently. Doctor's in-image `gh` probe does not run
+  on a CLI not observed local, because it hands the operator's token to `docker run -e`. `absent` OUTRANKS the gate, because
   a control that does not exist is a different fact from one that is unarmed.
 - **The warning shape is `ok: false, warn: true`, and a draft of this got it backwards.** `render` reads
   `c.ok` FIRST, so `ok: true, warn: true` prints the plain pass glyph and drops the `fix` line with it. The
@@ -3795,3 +3824,4 @@ a tunnel.
 | 2026-09-09 | Issue #288. **NEW `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`**: the post-spend terminals comment through the existing adapter (a reason-token map at the processor's return sites; the infra terminal at the failed listener on BullMQ's own `finishedOn`), and `PI_ON_FAILURE` is wait-check.mjs reduced further, fired from the two existing listener bodies for the paid terminals only. The Rejected list carries the nine alternatives with their reasons -- most load-bearing: no in-project transport ever (the id-only argv IS the feature), no knob over the comments (they discharge `REQ-JOB-STATUS-COMMENTS`' standing acceptance), recordRun refused as mount (fires on retried attempts), the processor catch refused as the infra site (misses the stall-kill and the wait-gate escape), and the runner's exit-line reason vocabulary stays unread (the exit codes already draw the needed distinction). **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: no retry classification moves; the comments and the hook observe outcomes, never decide them. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: operator-cancel gains its comment ROW here and is excluded from the hook (the operator initiated it), both anticipated by that entry's map shape. |
 | 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: the dedup-visibility bullet (the two layers' asymmetric returns at the pin's Lua; the receiver's honesty rule), with three new Rejected entries -- a QueueEvents subscriber (a blocking connection and a lifecycle for a fact the add's return carries), surfacing GUID replays (the shield's silence is its correctness), a non-2xx swallow answer (a redelivery storm bought for a status code). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the FAILED surface bullet -- the first queue-Job hydration for display, admissible by the one-statement/closed-projection rule, the source-plus-belt posture on failedReason (`OQ-035`), the stated retention split; REJECTED a `dispatch_failed` tool and a `failed` subcommand (the tool enumerations and their two-directional pins stand UNTOUCHED -- verified against `admin/test/wiring.test.mjs`) and a per-job delayed classifier. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: the delayed-count naming bullet, stating compatibility with (not reversal of) its own rejected classifier -- parts counted from their own sources, nothing enumerated, nothing guessed. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: the failure hook and the FAILED section answer different questions (being told vs going looking) and share no code. |
 | 2026-09-14 | Issue #277, attribution. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: new bullet "Attribution is the other half of selection" (one derivation, three stores, resolved name never the raw field, absent reads as the literal `local`, the venue as a session sidecar rather than key material); the sandbox bullet becomes a per-job refusal by the local adapter's name, replacing the deployment-wide predicate the panel never applied; the registry bullet names the shared derivation; four Rejected entries (a registry method, stamp-after-rename or deletion, narrowing the predicate, `remote === false` as held). A correction in the same entry: the `PI_BACKENDS` bullet still said nothing SELECTS a backend and that the rule would come out with selection -- false since #227's slice 4, and the rule stayed for its own reason, which the bullet now gives. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key stays `(kind, repo, ref)`, and the venue-as-key-material alternative is recorded as rejected here. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh container from image and workspace; only which runs may be reopened moved. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: one more field in the same flat file. **`CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no gate moved relative to a spend, a venue this worker never built is now a recorded policy refusal rather than an infra retry, and no mount or flag changed. |
+| 2026-09-14 | Issue #278, part 1: credentialTransit earns `enforced` where credentials leave. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `local`'s `credentialTransit` moves from `asserted` to `enforced`, gated by the new per-backend `observedBy` on the `dockerEndpointLocal` observation, read by asking the docker CLI (`docker context inspect`) rather than reimplementing its precedence; `effectiveWord` degrades it to `asserted` by the operator when the endpoint is not observed on this host; the floor reads the observed word (`unobservedFloor`, `observationRefusals`): `enforced` refuses a redirect, `asserted` holds; checked at boot and again before each job's spend; doctor renders the observed word, names its shell's answer, and skips its in-image `gh` probe on a redirected CLI. The "two asserted" bullet is corrected to one. Six Rejected entries. **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: the credentials and their scope do not move; this is about where they travel. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor gains words and loses a probe on a redirect, and no `fixAction`. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the per-job read is free and sits before the reserve. |

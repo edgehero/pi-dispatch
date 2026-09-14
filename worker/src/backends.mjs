@@ -263,13 +263,79 @@ export function declarationOf(name, property) {
 		// Only meaningful for an asserted word, and null otherwise rather than absent, so a consumer that
 		// prints it unconditionally renders nothing rather than "undefined".
 		assertedBy: word === ASSERTED ? (entry.asserts?.[property] ?? null) : null,
+		// The observation this word holds only while (#278), or null. A consumer that prints the word without it
+		// would print `enforced` for a daemon that is elsewhere.
+		observedBy: entry.observedBy?.[property] ?? null,
 	};
+}
+
+/**
+ * The word a backend EARNS for a property given what is observed on this host (issue #278). The declared word
+ * when the property is not observation-gated or its observation is `true`; otherwise at most `asserted`, since
+ * the guarantee then rests on whoever arranged for the observation to be false. `undefined` observations get no
+ * credit, this file's standing polarity. `undefined` for an unknown backend or property.
+ */
+export function effectiveWord(name, property, observations = {}) {
+	const entry = backendFor(name);
+	if (!entry || !isProperty(property)) return undefined;
+	const word = entry.declares[property] ?? ABSENT;
+	const observation = entry.observedBy?.[property];
+	if (!observation || observations?.[observation] === true) return word;
+	return (RANK[word] ?? 0) > RANK[ASSERTED] ? ASSERTED : word;
+}
+
+/**
+ * Which floored properties a backend declares strongly enough but does not EARN given the observations, as
+ * `[{ backend, property, have, want, observedBy }]` -- the floor misses the observation alone causes. The
+ * capability misses stay `floorShortfall`'s, checked at config load; this is the half only a live read can
+ * answer, so it is checked where the read happens (boot, and before each job's spend).
+ */
+export function unobservedFloor(backends, floor, observations = {}) {
+	const out = [];
+	for (const backend of backends ?? []) {
+		const entry = backendFor(backend);
+		if (!entry) continue;
+		for (const [property, want] of Object.entries(floor ?? {})) {
+			if (!isProperty(property) || !isDeclaration(want) || want === ABSENT) continue;
+			const declared = entry.declares[property] ?? ABSENT;
+			const have = effectiveWord(backend, property, observations);
+			if (meets(declared, want) && !meets(have, want)) out.push({ backend, property, have, want, observedBy: entry.observedBy[property] });
+		}
+	}
+	return out;
+}
+
+/**
+ * The refusals `unobservedFloor` implies, as operator-facing messages; empty when the floor holds. Outside
+ * `backendRefusals` because `loadConfig` is synchronous and cannot observe anything; the caller that made the
+ * observation passes it, with `evidence` -- `{ [observation]: "what was seen" }` -- for the message.
+ */
+export function observationRefusals({ backends = [], backendFloor = {}, observations = {}, evidence = {} } = {}) {
+	const misses = unobservedFloor(backends, backendFloor, observations);
+	if (misses.length === 0) return [];
+	const lines = misses.map((m) => `  ${m.backend}: ${m.property}=${m.want} holds only while ${OBSERVATIONS[m.observedBy] ?? m.observedBy}; ${evidence[m.observedBy] ?? "that was not observed"}`);
+	return [
+		`PI_BACKEND_FLOOR asks for something this host is not observed to provide:\n${lines.join("\n")}\n` +
+			"Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
+	];
 }
 
 /** Is `name` one of the closed list? `Object.hasOwn`, so `"toString"` is not a property. */
 export function isProperty(name) {
 	return Object.hasOwn(PROPERTIES, name);
 }
+
+/** The observation that the docker CLI on this host resolves an endpoint on this host (issue #278). */
+export const DOCKER_ENDPOINT_LOCAL = "dockerEndpointLocal";
+
+/**
+ * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
+ * reason `PROPERTIES` is: a typo in a table entry must not become an observation nobody makes, which would
+ * degrade a word forever with nothing saying why.
+ */
+export const OBSERVATIONS = Object.freeze({
+	[DOCKER_ENDPOINT_LOCAL]: "the docker endpoint this host's docker CLI resolves is on this host",
+});
 
 const BACKENDS_TABLE = {
 	local: {
@@ -324,15 +390,23 @@ const BACKENDS_TABLE = {
 			// and `buildRecord` is an explicit literal with no spread. Where the values GO is
 			// `credentialTransit`'s question, not this one's.
 			secretsCustody: ENFORCED,
-			// ASSERTED, and this is the second honest one. The intent is that the daemon is on this host, so
-			// nothing leaves it -- but every spawn is `docker` with the worker's own environment inherited,
-			// and `DOCKER_HOST=tcp://...` or a `docker context` redirects that connection to another machine
-			// with the provider key and the per-job forge token riding along as `-e NAME=VALUE`. `DOCKER_HOST`
-			// appears NOWHERE in this repository: no code sets it, no check refuses it, no test reads it back.
-			// By this file's own definition of `enforced` -- "this worker CAN build it, in its own code, and a
-			// test in this repo reads it back" -- there is no such code, so the word would be exactly the
-			// overclaim `nonRoot` avoids one property up. A boot check on DOCKER_HOST would earn `enforced`.
-			credentialTransit: ASSERTED,
+			// ENFORCED, AND ONLY WHILE OBSERVED (issue #278). Every spawn is `docker` with the worker's own
+			// environment inherited, and `DOCKER_HOST`, `DOCKER_CONTEXT` or a context selected in the CLI's config
+			// can send that connection to another machine with the provider key and the per-job forge token riding
+			// along as `-e NAME=VALUE`. This was `asserted` while nothing in the repository looked. Now the worker
+			// asks the CLI which endpoint it resolves (`backend-local.mjs`, `makeDockerEndpointResolver`) at boot
+			// and before every job's spend, and the word is what that answer earns: `observedBy` below names the
+			// observation, and `effectiveWord` degrades this to `asserted` -- asserted by the operator who pointed
+			// the CLI elsewhere -- whenever the endpoint is not observed on this host. A floor asking for
+			// `enforced` then refuses; a floor asking for `asserted` holds, because pointing the worker at a daemon
+			// is the operator's call. That split is `unarmedFloor`'s lesson: a floor is not met by capability alone.
+			//
+			// WHAT THE OBSERVATION CANNOT SEE, stated rather than claimed away: it judges the endpoint's FORM, so a
+			// unix socket or a loopback port that is really a tunnel (`ssh -L`, socat) to another machine reads as
+			// local; and a redirect that lands between the per-job read and that job's `docker run` spawn is not
+			// caught for that job. That window is not small: the read sits before the spend, so it spans the secret
+			// resolution, the token mint, the clone and the reservation.
+			credentialTransit: ENFORCED,
 			// The whole reason `DES-WORKER-ON-HOST` reversed the containerised worker.
 			localFolders: ENFORCED,
 		},
@@ -347,7 +421,15 @@ const BACKENDS_TABLE = {
 		 */
 		asserts: {
 			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not)",
-			credentialTransit: "the docker endpoint DOCKER_HOST resolves to, which is this host unless something redirects it",
+		},
+		/**
+		 * Which declared words hold only while something about THIS HOST is observed (issue #278), as
+		 * `{ property: observation }`. A per-BACKEND map rather than a field on `PROPERTIES` like `armedBy`:
+		 * `armedBy` names a deployment switch that means the same thing for every venue, while an observation of
+		 * this host's docker CLI means nothing for a remote venue, whose `credentialTransit` a vendor might assert.
+		 */
+		observedBy: {
+			credentialTransit: DOCKER_ENDPOINT_LOCAL,
 		},
 	},
 };
@@ -360,7 +442,13 @@ const BACKENDS_TABLE = {
  */
 export const BACKENDS = Object.freeze(
 	Object.fromEntries(
-		Object.entries(BACKENDS_TABLE).map(([name, entry]) => [name, Object.freeze({ ...entry, declares: Object.freeze({ ...entry.declares }) })]),
+		// EVERY nested map, not just `declares`: `asserts` is what `doctor` prints beside a word and `observedBy` is
+		// what decides whether the word holds, and an unfrozen one is the shared mutable declaration this freeze
+		// exists to prevent (#278 found `asserts` had been left mutable).
+		Object.entries(BACKENDS_TABLE).map(([name, entry]) => [
+			name,
+			Object.freeze({ ...entry, declares: Object.freeze({ ...entry.declares }), asserts: Object.freeze({ ...(entry.asserts ?? {}) }), observedBy: Object.freeze({ ...(entry.observedBy ?? {}) }) }),
+		]),
 	),
 );
 

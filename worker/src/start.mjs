@@ -35,9 +35,9 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
-import { makeBackendRegistry, reapAll } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND } from "./backends.mjs";
+import { makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusals } from "./backends.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
@@ -304,6 +304,9 @@ export async function startWorker(
 		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
 		makeHostRegistry: makeHostRegistryFn = makeHostRegistry,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
+		// Which docker endpoint this host's CLI resolves (issue #278). A seam because the real one spawns the
+		// docker CLI, and a wiring test must decide what it answers.
+		resolveDockerEndpoint: resolveDockerEndpointFn = makeDockerEndpointResolver(),
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -347,6 +350,26 @@ export async function startWorker(
 	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
 	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
 	const scopedLimits = { current: loadScopedLimits(config) };
+
+	// Issue #278: WHICH DOCKER DAEMON the job containers' credentials will travel to. Asked of the CLI at boot,
+	// AFTER the free file validations above (a wedged CLI costs up to its bound, and must not delay them) and
+	// BEFORE forge auth, the reaper, Valkey and the worker -- so a refusal here stops a process that built
+	// nothing. Without a floor naming credentialTransit a redirect is words only: pointing the worker at a
+	// daemon is the operator's call. With one asking for `enforced`, it refuses: a floor is not met by capability
+	// alone. A TRANSIENT failure to ask (a timeout, a spawn out of resources) throws untagged, exit 1, so the
+	// supervisor retries; everything else is a config error, exit 2.
+	const bootEndpoint = await resolveDockerEndpointFn();
+	logDockerEndpoint(log, bootEndpoint);
+	const [endpointRefusal] = observationRefusals({
+		backends: config.backends,
+		backendFloor: config.backendFloor,
+		observations: { [DOCKER_ENDPOINT_LOCAL]: bootEndpoint.local === true },
+		evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(bootEndpoint) },
+	});
+	if (endpointRefusal) throw bootEndpoint.local === null && bootEndpoint.transient ? new Error(endpointRefusal) : configError(endpointRefusal);
+	// The per-job read (below, `observationPreflight`) logs only when the answer CHANGES from the last one, so a
+	// deliberate, standing redirect writes one line at boot rather than one per job.
+	let endpointSeen = dockerEndpointState(bootEndpoint);
 
 	// The forge a job belongs to is resolved PER JOB from `job.kind`, not bound once for the process.
 	// Each entry is `{ auth, host }`: `auth` is get-token's `{ mintToken, selfId, source }` (null when that
@@ -1079,6 +1102,29 @@ export async function startWorker(
 			},
 			imagePreflight: backends.imagePreflight,
 			egressPreflight: backends.egressPreflight,
+			// Issue #278: the docker endpoint read AGAIN before each job's spend, because a `docker context use`
+			// after boot redirects every later job, and a preflight that answered once at boot would give a
+			// wrong decision all day (the image preflight is not cached for the same reason). Only for a venue
+			// whose declaration is observation-gated on it, and only a refusal under a floor that needs it.
+			observationPreflight: async (job) => {
+				const venue = resolveBackendName(job, config.defaultBackend);
+				if (!Object.values(backendFor(venue)?.observedBy ?? {}).includes(DOCKER_ENDPOINT_LOCAL)) return { ok: true };
+				const endpoint = await resolveDockerEndpointFn();
+				const state = dockerEndpointState(endpoint);
+				if (state !== endpointSeen) {
+					endpointSeen = state;
+					logDockerEndpoint(log, endpoint, { changed: true });
+				}
+				const [refusal] = observationRefusals({
+					backends: [venue],
+					backendFloor: config.backendFloor,
+					observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
+					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
+				});
+				if (!refusal) return { ok: true };
+				if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
+				return { refused: true, message: refusal };
+			},
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
 			promoteSession: sessionStore.promoteSession,
@@ -1312,6 +1358,10 @@ export async function startWorker(
 
 		log("worker_started", {
 			queue: "pi-jobs",
+			// Issue #278: the service's OWN answer to which daemon its jobs go to. `doctor` reads its caller's
+			// shell, and a service's EnvironmentFile or a systemd User= can resolve differently.
+			dockerContext: bootEndpoint.context,
+			dockerEndpointLocal: bootEndpoint.local,
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
@@ -1344,4 +1394,25 @@ export async function startWorker(
 		await Promise.resolve(worker?.stop?.()).catch(() => {});
 		throw err;
 	}
+}
+
+/** A one-line summary of an endpoint answer, used only to notice that it changed. */
+function dockerEndpointState(endpoint) {
+	return `${endpoint.local}|${endpoint.context ?? ""}|${endpoint.endpoint ?? ""}|${endpoint.reason ?? ""}`;
+}
+
+/**
+ * What an endpoint answer shows, for a refusal message. The context name is operator config; the endpoint is
+ * the display form, with any `user:pass@` already removed.
+ */
+function dockerEndpointEvidence(endpoint) {
+	if (endpoint.local === null) return `the docker CLI did not say which endpoint it resolves (${endpoint.reason})`;
+	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}${endpoint.local ? ", on this host" : ", which is not this host"}`;
+}
+
+/** Log an endpoint answer that is not plainly local; a return to local is logged only as a change. */
+function logDockerEndpoint(log, endpoint, { changed = false } = {}) {
+	if (endpoint.local === false) log("docker_endpoint_not_local", { context: endpoint.context, endpoint: endpoint.endpoint });
+	else if (endpoint.local === null) log("docker_endpoint_unresolved", { reason: endpoint.reason });
+	else if (changed) log("docker_endpoint_local", { context: endpoint.context, endpoint: endpoint.endpoint });
 }

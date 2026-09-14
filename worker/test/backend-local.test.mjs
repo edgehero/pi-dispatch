@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, JOB_NAME_PREFIX, jobContainerName, makeLocalBackend, makeReaper, makeStopContainer } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 
 const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) });
@@ -126,4 +126,71 @@ test("dockerExtra cannot carry a flag that would supersede the isolation boundar
 	// on -- nonRoot -- is declared `asserted` already. Denying it would break local-folder jobs to make a
 	// word honest that is already honest. docker-run.test.mjs pins the feature itself.
 	assert.ok(buildDockerRunArgs({ ...base, extraFlags: ["--user", "1000:1000"] }).includes("--user"));
+});
+
+// --- which daemon the docker CLI resolves (issue #278) ---------------------------------------------------------
+
+test("an endpoint is LOCAL only when its form shows it, and credentials in it are never displayed", () => {
+	const local = ["unix:///var/run/docker.sock", "unix:///Users/x/.docker/run/docker.sock", "npipe:////./pipe/docker_engine", "npipe:////./pipe/dockerDesktopLinuxEngine", "npipe://./pipe/docker_engine", "tcp://127.0.0.1:2375", "tcp://127.255.0.9:2376", "tcp://localhost:2375", "tcp://[::1]:2375"];
+	const notLocal = ["tcp://10.1.2.3:2375", "tcp://127.0.0.1.nip.io:2375", "tcp://localhost.evil.com:2375", "tcp://128.0.0.1:2375", "tcp://127.0.0.256:2375", "ssh://remote", "ssh://localhost", "ssh://bob@127.0.0.1", "npipe:////remotebox/pipe/docker_engine", "fd://", "http://localhost:2375", "", null, undefined, "garbage"];
+	for (const h of local) assert.equal(classifyDockerEndpoint(h).local, true, h);
+	for (const h of notLocal) assert.equal(classifyDockerEndpoint(h).local, false, String(h));
+	assert.equal(classifyDockerEndpoint("ssh://bob:hunter2@remote:22").display, "ssh://remote:22");
+	assert.equal(classifyDockerEndpoint("tcp://user@10.1.2.3:2375").display, "tcp://10.1.2.3:2375");
+	assert.equal(classifyDockerEndpoint("tcp://user:p@ss@10.1.2.3:2375").display, "tcp://10.1.2.3:2375", "a password holding an @ is removed whole");
+	assert.equal(classifyDockerEndpoint("unix:///run/user@1000/docker.sock").display, "unix:///run/user@1000/docker.sock", "an @ in a path is not userinfo");
+});
+
+test("the CLI's answer is read from the last line that parses, so a warning ahead of it is not mistaken for it", () => {
+	assert.deepEqual(parseDockerEndpoint('"desktop-linux"|"unix:///x.sock"\n'), { context: "desktop-linux", host: "unix:///x.sock" });
+	assert.deepEqual(parseDockerEndpoint('WARNING: DOCKER_HOST overrides the context\n"default"|"tcp://10.1.2.3:2375"\n'), { context: "default", host: "tcp://10.1.2.3:2375" });
+	assert.equal(parseDockerEndpoint(""), null);
+	assert.equal(parseDockerEndpoint("context not found: /Users/x/.docker/contexts/meta/..."), null);
+	assert.equal(parseDockerEndpoint('"a"|null'), null);
+	assert.deepEqual([...DOCKER_ENDPOINT_ARGS], ["context", "inspect", "--format={{json .Name}}|{{json .Endpoints.docker.Host}}"], "never {{json .}}, which carries TLS paths");
+});
+
+test("a failed resolve names a fixed reason, and only a failure retrying can change is transient", () => {
+	assert.deepEqual(classifyEndpointFailure({ error: { code: "ENOENT" } }), { reason: "docker-not-found", transient: false });
+	assert.deepEqual(classifyEndpointFailure({ error: { timedOut: true } }), { reason: "timeout", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { killed: true } }), { reason: "timeout", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { signal: "SIGKILL" } }), { reason: "timeout", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { code: "EAGAIN" } }), { reason: "spawn-eagain", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { code: "EMFILE" } }), { reason: "spawn-emfile", transient: true });
+	assert.deepEqual(classifyEndpointFailure({ error: { code: "ENOTDIR" } }), { reason: "spawn-enotdir", transient: false });
+	assert.deepEqual(classifyEndpointFailure({ error: { code: 1 } }), { reason: "exit-1", transient: false });
+	assert.deepEqual(classifyEndpointFailure({ code: 1 }), { reason: "exit-1", transient: false });
+	assert.deepEqual(classifyEndpointFailure({}), { reason: "unparseable", transient: false });
+});
+
+test("the resolver asks the CLI with the narrow format and reports local, redirected and unanswered", async () => {
+	const seen = [];
+	const answer = (result) => makeDockerEndpointResolver({ run: async (args) => (seen.push(args), result) })();
+	assert.deepEqual(await answer({ code: 0, stdout: '"desktop-linux"|"unix:///x.sock"\n' }), { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false });
+	assert.deepEqual(await answer({ code: 0, stdout: '"default"|"ssh://bob@remote"\n' }), { local: false, context: "default", endpoint: "ssh://remote", reason: null, transient: false });
+	assert.deepEqual(await answer({ code: 1, stdout: "", error: { code: 1 } }), { local: null, context: null, endpoint: null, reason: "exit-1", transient: false });
+	assert.deepEqual(await answer({ code: 0, stdout: "nonsense" }), { local: null, context: null, endpoint: null, reason: "unparseable", transient: false });
+	const thrown = await makeDockerEndpointResolver({ run: async () => { throw Object.assign(new Error("x"), { code: "ENOENT" }); } })();
+	assert.equal(thrown.reason, "docker-not-found");
+	assert.deepEqual(seen[0], DOCKER_ENDPOINT_ARGS);
+});
+
+test("the bounded runner passes NO env, and settles on its own timer when the CLI never answers", async () => {
+	let opts = null;
+	let killed = null;
+	const hanging = (cmd, args, o) => {
+		opts = o;
+		return { kill: (sig) => (killed = sig), stdout: { destroy() {} }, stderr: { destroy() {} } };
+	};
+	const started = Date.now();
+	const result = await execDockerBounded(["context", "inspect"], { timeoutMs: 50, execFileFn: hanging });
+	assert.ok(Date.now() - started < 2000, "the promise settled although the child never called back");
+	assert.deepEqual(result.error, { timedOut: true });
+	assert.equal(killed, "SIGKILL");
+	assert.equal(Object.hasOwn(opts, "env"), false, "the job's docker run inherits this process's env, so the read must too");
+
+	const ok = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(null, '"a"|"unix:///s"')), {}) });
+	assert.deepEqual(ok, { code: 0, stdout: '"a"|"unix:///s"', error: null });
+	const exit = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(Object.assign(new Error("exit"), { code: 1 }), "")), {}) });
+	assert.equal(exit.code, 1);
 });
