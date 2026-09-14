@@ -47,8 +47,9 @@ export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
 
 /**
  * The job image's home, and the uid its `USER` directive runs as (issue #341, `DES-JOB-USER-INFERRED-READ-BACK-ON-
- * REQUEST`). A job the worker runs under `--user` is given `HOME=CONTAINER_HOME` beside it, because such a uid has no
- * passwd entry in the image: Docker would give it `HOME=/`, Podman `HOME=/workspace`. `SHIPPED_IMAGE_UID` is the one
+ * REQUEST`). A job run under `--user` needs `HOME=CONTAINER_HOME` beside it, because such a uid has no passwd entry in
+ * the image: Docker gives it `HOME=/`, Podman `HOME=/workspace` (both measured). The builder does not pair them; the
+ * job and sandbox paths that pass a `user` do. `SHIPPED_IMAGE_UID` is the one
  * uid that needs no `--user` at all, since the image already runs as it; a test pins it against `image/Dockerfile`'s
  * `useradd` so the two cannot drift.
  */

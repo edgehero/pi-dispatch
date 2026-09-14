@@ -56,9 +56,9 @@ export const ISOLATION_FLAGS = [
  * The list covers every member of `ISOLATION_FLAGS`, the container name, and the near-synonyms that reach
  * the same effect without repeating a listed flag (`--volumes-from` for a mount, `--memory-swap` for the
  * memory bound). It is a DENY-list and therefore only as good as its coverage: docker's surface is large
- * and a release can add another way in. So it NARROWS the gap rather than closing it, and the backend
- * table's `isolation` and `ephemeral` words rest on this plus the single production caller passing fixed
- * literals, never on this alone.
+ * and a release can add another way in. So it NARROWS the gap rather than closing it; since issue #341 the
+ * allow-list below closes it, and the backend table's `isolation` and `ephemeral` words rest on both plus the
+ * callers passing fixed literals.
  *
  * Without this the two standing assertions that "every member of ISOLATION_FLAGS reaches the argv" would
  * still pass on an argv with no boundary left, because membership is not effectiveness. Nothing passes any
@@ -70,11 +70,18 @@ export const ISOLATION_FLAGS = [
  * validated non-root and emitted before `dockerExtra`. A second `--user` in `dockerExtra` would win last and could
  * name uid 0, which is `nonRoot` gone. An earlier version of this comment called `--user` "a documented, tested
  * feature" and left it allowed; nothing documented it and nothing passed it, which is how every job on a native
- * Linux daemon came to run as a uid that cannot read its own inputs.
+ * Linux daemon whose worker uid is not 1001 came to run as a uid that cannot read its own inputs.
  *
  * ONE SHORT FLAG PER TOKEN, and that is a separate rule below the list: docker parses `-u0` as `-u 0`, `-iu0` as
  * `-i -u 0`, `-v/:/h` as a mount and `-m1g` as a memory bound, and a list compared on the text before `=` sees none
  * of those. A single-dash token longer than two characters is refused outright; every caller passes separate tokens.
+ *
+ * AND AN ALLOW-LIST CLOSES WHAT THE DENY-LIST ONLY NARROWED (issue #341, found by an adversarial pass): a bare
+ * positional token or `--` becomes the IMAGE, with every `-e` and `-v` after it passed to that image as arguments;
+ * `--annotation run.oci.keep_original_groups=1` keeps the worker's groups on Podman; `--uidmap`/`--gidmap` remap
+ * the user on podman-docker; `--use-api-socket` mounts the daemon socket on a recent CLI. None was listed, and the
+ * next release adds another. So after the refusals above, a token must be one of what the callers actually pass,
+ * `DOCKER_EXTRA_ALLOWED`, or it is refused. The deny-list stays for its named reasons and its tests.
  */
 export const DOCKER_EXTRA_FORBIDDEN = [
 	// Each of the seven logical flags in ISOLATION_FLAGS, and the argv member beside them that the worker's
@@ -125,6 +132,17 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	"-u",
 ];
 
+/**
+ * Everything a `dockerExtra` may say. Bare flags stand alone; a valued flag takes the NEXT token, and that token must
+ * match its pattern: an entrypoint is a command name, never a flag, and a published port is bound to loopback
+ * (`parsePublish` never builds anything else). The sandbox passes `-i -t --entrypoint bash -p 127.0.0.1:<h>:<c>`;
+ * the live probes pass `-d --entrypoint sleep` and `-d`.
+ */
+export const DOCKER_EXTRA_ALLOWED = Object.freeze({
+	bare: Object.freeze(["-i", "-t", "-d"]),
+	valued: Object.freeze({ "--entrypoint": /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/, "-p": /^127\.0\.0\.1:\d{1,5}:\d{1,5}$/ }),
+});
+
 export function dockerArgsFromSpec(spec) {
 	// The builder CANNOT DECLINE the boundary. `containerSpec` cannot produce anything but `true`, so this
 	// only ever fires on a hand-built spec -- and a hand-built spec that forgot the field is exactly the
@@ -134,7 +152,9 @@ export function dockerArgsFromSpec(spec) {
 	// Same refusal, one level down. `dockerExtra` is raw Docker flags by design, and it lands after the
 	// boundary where a repeat supersedes it -- so the escape hatch is bounded by what it may not say.
 	// Split on `=` so `--network=foo` is caught alongside `--network foo`.
-	for (const flag of spec.dockerExtra ?? []) {
+	const extra = spec.dockerExtra ?? [];
+	for (let i = 0; i < extra.length; i++) {
+		const flag = extra[i];
 		// REFUSED, not skipped. Skipping a non-string still PUSHED it into the argv below, so
 		// `new String("--privileged")` and `{ toString: () => "--privileged" }` walked past the check and
 		// then reached docker as the flag they stringify to.
@@ -148,6 +168,13 @@ export function dockerArgsFromSpec(spec) {
 		if (/^-[^-]/.test(flag) && flag.length > 2) {
 			throw new Error(`docker run: refusing a dockerExtra flag that would supersede the isolation boundary: ${flag} (one short flag per token)`);
 		}
+		if (DOCKER_EXTRA_ALLOWED.bare.includes(flag)) continue;
+		const valuePattern = Object.hasOwn(DOCKER_EXTRA_ALLOWED.valued, flag) ? DOCKER_EXTRA_ALLOWED.valued[flag] : null;
+		if (valuePattern && typeof extra[i + 1] === "string" && valuePattern.test(extra[i + 1])) {
+			i++;
+			continue;
+		}
+		throw new Error(`docker run: refusing a dockerExtra token outside what the builder's callers pass (-i, -t, -d, --entrypoint <command>, -p 127.0.0.1:<host>:<container>): ${JSON.stringify(flag)}`);
 	}
 	// Re-checked here for a hand-built spec, the same reason `isolated` is.
 	assertJobUser(spec.user);

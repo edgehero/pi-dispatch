@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "../src/container-spec.mjs";
-import { buildDockerRunArgs, containerSpec, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -119,7 +119,44 @@ test("fused short flags are refused: -u0, -iu0, -v/:/h, -m1g all reach docker as
 		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [bad] }), /supersede the isolation boundary/, bad);
 	}
 	// What callers really pass stays allowed: separate tokens, long flags, their values.
-	assert.doesNotThrow(() => buildDockerRunArgs({ ...base, extraFlags: ["-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-d", "--", "x"] }));
+	assert.doesNotThrow(() => buildDockerRunArgs({ ...base, extraFlags: ["-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:3000:3000", "-d"] }));
+});
+
+test("dockerExtra is an allow-list: only what the sandbox and the live probes pass reaches docker (issue #341)", () => {
+	// Each of these reached docker past the deny-list (an adversarial pass): a bare token or `--` becomes the IMAGE and
+	// turns every later -e and -v into that image's arguments; the rest change the user, the groups or the mounts.
+	const refused = [
+		["alpine"],
+		["--", "alpine"],
+		["--annotation", "run.oci.keep_original_groups=1"],
+		["--annotation=run.oci.keep_original_groups=1"],
+		["--uidmap", "0:1:1"],
+		["--gidmap=0:1:1"],
+		["--use-api-socket"],
+		["--env", "X=1"],
+		["-e", "X=1"],
+		["--read-only=false"],
+		["-p", "8080:80"],
+		["-p", "0.0.0.0:8080:80"],
+		["-p", "127.0.0.1:8080:80", "-p"],
+		["-p=127.0.0.1:8080:80"],
+		["--entrypoint"],
+		["--entrypoint", "--privileged"],
+		["--entrypoint", "sh -c id"],
+		["--entrypoint=bash"],
+		["-i", "bash"],
+	];
+	for (const extra of refused) {
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: extra }), /refusing a dockerExtra (token|flag)/, JSON.stringify(extra));
+	}
+	// A valued flag consumes exactly its next token, so a value can never be read as a flag, nor a flag as a value.
+	assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: ["--entrypoint", "-i"] }), /outside what the builder's callers pass/);
+	// The pinned shape of the list, and every real caller's exact tokens.
+	assert.deepEqual([...DOCKER_EXTRA_ALLOWED.bare], ["-i", "-t", "-d"]);
+	assert.deepEqual(Object.keys(DOCKER_EXTRA_ALLOWED.valued), ["--entrypoint", "-p"]);
+	for (const extra of [["-i", "-t", "--entrypoint", "bash", "-p", "127.0.0.1:1:65535", "-p", "127.0.0.1:8080:3000"], ["-d", "--entrypoint", "sleep"], ["-d"], []]) {
+		assert.doesNotThrow(() => buildDockerRunArgs({ ...base, extraFlags: extra }), JSON.stringify(extra));
+	}
 });
 
 test("SHIPPED_IMAGE_UID and CONTAINER_HOME are the image's own useradd uid and home", () => {

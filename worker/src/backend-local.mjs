@@ -236,8 +236,8 @@ export function makeReaper({ log, exec = execDocker }) {
  *
  * The format is NARROW on purpose -- the context's name and the docker endpoint's host, each JSON-quoted -- and
  * never `{{json .}}`, which carries TLS material paths and storage locations nobody asked for. (`job-user.mjs`'s
- * `docker info` read is the one exception, and says why there: it parses the body in memory and keeps five facts,
- * and a narrow template turns a field one runtime lacks into a template error indistinguishable from no daemon.)
+ * `docker info` read is the one exception, and says why there: it parses the body in memory, keeps a handful of
+ * facts and drops the rest, and a narrow template turns a field one runtime lacks into a template error indistinguishable from no daemon.)
  */
 export const DOCKER_ENDPOINT_ARGS = Object.freeze(["context", "inspect", "--format={{json .Name}}|{{json .Endpoints.docker.Host}}"]);
 

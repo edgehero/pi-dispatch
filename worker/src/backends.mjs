@@ -353,8 +353,8 @@ const BACKENDS_TABLE = {
 			// against the imported array by two tests. `dockerArgsFromSpec` additionally refuses a
 			// `dockerExtra` carrying a flag that would supersede one of them -- membership in an argv is not
 			// effectiveness of that argv, and without that guard those two assertions would pass on an argv
-			// with no boundary left. It is a deny-list, so it NARROWS that gap rather than closing it; what
-			// closes it today is that the only production caller passes fixed literals.
+			// with no boundary left. The deny-list only NARROWED that gap; since issue #341 an allow-list of what
+			// the callers pass (`DOCKER_EXTRA_ALLOWED`) closes it, and every caller still passes fixed literals.
 			isolation: ENFORCED,
 			// `--rm` leads ISOLATION_FLAGS and the container name carries the job id, so no container is
 			// reachable to reuse even in principle.

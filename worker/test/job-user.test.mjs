@@ -12,19 +12,31 @@ import {
 	socketFacts,
 } from "../src/job-user.mjs";
 
-// Issue #341. The fixtures are `docker info --format={{json .}}` bodies MEASURED in the Phase 0 labs, trimmed to the
-// keys the parser reads (the full bodies carry proxy and storage fields that have no business in a test file).
+// Issue #341. The fixtures are `docker info --format={{json .}}` bodies from the labs (nested in Docker Desktop's
+// LinuxKit VM), trimmed to the keys the parser reads: the full bodies carry proxy and storage fields that have no
+// business in a test file. Where a key was not in the saved extract, the comment says where its value comes from.
 const BODY = {
-	desktop: { OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=unconfined", "name=cgroupns"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: true },
-	dockerRootful: { OperatingSystem: "Alpine Linux v3.21 (containerized)", SecurityOptions: ["name=seccomp,profile=builtin", "name=cgroupns"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: true, ProductLicense: "Community Engine" },
-	dockerRootless: { OperatingSystem: "Alpine Linux v3.21", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless", "name=cgroupns"], PidsLimit: false, MemoryLimit: false, CpuCfsQuota: false },
-	podmanCompatRootful: { OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" },
-	podmanCompatRootless: { OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default", "name=rootless"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" },
+	// Measured: Docker Desktop 27.4.0 on macOS (raw body).
+	desktop: { ServerVersion: "27.4.0", OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=unconfined", "name=cgroupns"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: true },
+	// Measured: rootful docker:27-dind (raw body).
+	dockerRootful: { ServerVersion: "27.5.1", OperatingSystem: "Alpine Linux v3.21 (containerized)", SecurityOptions: ["name=seccomp,profile=builtin", "name=cgroupns"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: true, ProductLicense: "Community Engine" },
+	// Measured: docker:27-dind-rootless, from the extract of the keys below (ProductLicense was not extracted).
+	dockerRootless: { ServerVersion: "27.5.1", OperatingSystem: "Alpine Linux v3.21", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless", "name=cgroupns"], PidsLimit: false, MemoryLimit: false, CpuCfsQuota: false },
+	// Measured: rootful Podman 5.8.2 through its Docker API with the real docker CLI (raw body).
+	podmanCompatRootful: { ServerVersion: "5.8.2", OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" },
+	// Measured: rootless Podman 5.8.2 the same way, from the extract; ProductLicense was not extracted and is Podman's
+	// hard-coded compat value (source), the same one the rootful raw body shows.
+	podmanCompatRootless: { ServerVersion: "5.8.2", OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default", "name=rootless"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" },
+	// Measured: podman-docker, rootful and rootless (raw bodies).
 	shimRootful: { host: { os: "linux", serviceIsRemote: true, remoteSocket: { path: "unix:///run/podman/podman.sock", exists: true }, security: { rootless: false } } },
 	shimRootless: { host: { os: "linux", serviceIsRemote: false, remoteSocket: { path: "/run/user/1234/podman/podman.sock", exists: true }, security: { rootless: true } } },
-	dockerRemap: { OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=apparmor", "name=seccomp,profile=builtin", "name=userns"], PidsLimit: true, MemoryLimit: true, ProductLicense: "Community Engine" },
+	// Measured: docker:27-dind with --userns-remap=default (raw body); a 0700 dir was unreadable to every uid inside.
+	dockerRemap: { ServerVersion: "27.5.1", OperatingSystem: "Alpine Linux v3.21 (containerized)", SecurityOptions: ["name=seccomp,profile=builtin", "name=userns", "name=cgroupns"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: true, ProductLicense: "Community Engine" },
+	// Measured: the docker 27.5.1 CLI with no daemon behind its endpoint EXITS 0 under --format and prints this shape,
+	// every server field empty and the dial error in ServerErrors (trimmed; the error names the socket path).
+	daemonDown: { ID: "", ServerVersion: "", OperatingSystem: "", SecurityOptions: null, PidsLimit: false, MemoryLimit: false, ServerErrors: ["Cannot connect to the Docker daemon at unix:///nonexistent.sock. Is the docker daemon running?"], ClientInfo: { Version: "27.5.1" } },
 };
-const facts = (name) => parseDaemonFacts(JSON.stringify(BODY[name]));
+const facts = (name) => parseDaemonFacts(JSON.stringify(BODY[name]))?.facts;
 const answered = (name) => ({ answered: true, facts: facts(name) });
 const LOCAL = { local: true, context: "default", endpoint: "unix:///var/run/docker.sock", reason: null, transient: false };
 const UNRESOLVED = { local: null, context: null, endpoint: null, reason: "unparseable", transient: false };
@@ -41,7 +53,7 @@ test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, 
 	assert.equal(facts("dockerRemap").userns, true);
 	assert.ok(!("cpu" in facts("dockerRootful").bounds), "CPU is never read: Podman reports CpuCfsQuota:false while applying --cpus");
 	// A marker is a whole comma-separated part, never a substring of another option.
-	assert.equal(parseDaemonFacts(JSON.stringify({ OperatingSystem: "x", SecurityOptions: ["name=rootlessish", "profile=name=rootless"] })).rootless, false);
+	assert.equal(parseDaemonFacts(JSON.stringify({ ServerVersion: "1", OperatingSystem: "x", SecurityOptions: ["name=rootlessish", "profile=name=rootless"] })).facts.rootless, false);
 });
 
 test("a Podman-served body gets no bounds, from ProductLicense alone or from Podman's own shape", () => {
@@ -50,13 +62,32 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootless").rootless, true);
 	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock" });
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
+	// Only a unix path is kept: a remote service's path can carry `user:password@` in an ssh URL.
+	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
+		const body = { host: { ...BODY.shimRootful.host, remoteSocket: { path: remote } } };
+		assert.equal(parseDaemonFacts(JSON.stringify(body)).facts.remoteSocketPath, null, remote);
+	}
 	assert.equal(facts("desktop").podman, false);
 	assert.equal(facts("dockerRootful").podman, false);
 });
 
 test("parseDaemonFacts scans from the last line, skips junk, and returns null for neither shape", () => {
-	assert.deepEqual(parseDaemonFacts(`a warning line\n${JSON.stringify(BODY.dockerRootful)}\n`), facts("dockerRootful"));
+	assert.deepEqual(parseDaemonFacts(`a warning line\n${JSON.stringify(BODY.dockerRootful)}\n`), { facts: facts("dockerRootful") });
 	for (const junk of ["", "not json", "[]", "{}", '{"Name":"x"}', "null"]) assert.equal(parseDaemonFacts(junk), null, junk);
+	// A Docker shape needs a server version: without one no daemon described itself.
+	assert.equal(parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ServerVersion: "" })), null);
+	assert.equal(parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ServerVersion: undefined })), null);
+});
+
+test("no daemon is not a shape: the CLI's exit-0 body with ServerErrors is unreachable, never facts that decide worker", async () => {
+	assert.deepEqual(parseDaemonFacts(JSON.stringify(BODY.daemonDown)), { unreachable: true });
+	// ServerErrors wins even over a body that otherwise parses, and its text is never carried anywhere.
+	assert.deepEqual(parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ServerErrors: ["x"] })), { unreachable: true });
+	assert.deepEqual(parseDaemonFacts(JSON.stringify({ ...BODY.dockerRootful, ServerErrors: [] })), { facts: facts("dockerRootful") });
+	const read = await makeDaemonFactsReader({ run: async () => ({ code: 0, stdout: JSON.stringify(BODY.daemonDown), error: null }) })();
+	assert.deepEqual(read, { answered: false, reason: "daemon-unreachable", transient: true });
+	assert.ok(!JSON.stringify(read).includes("Cannot connect"));
+	assert.deepEqual(decideJobUser({ ...linux, endpoint: LOCAL, daemon: read, socket: { uid: 0, gid: 2375 } }), { mode: "unknown", user: null, cause: null, reason: "daemon-unreachable" });
 });
 
 test("the reader: an unparseable clean exit is determinate, every failure to answer is transient and names no CLI text", async () => {
@@ -80,6 +111,18 @@ test("socketFacts follows the link (stat, not lstat), takes either spelling, and
 	assert.equal(socketFacts("/run/user/1000/docker.sock", { stat }), null);
 	for (const notUnix of [null, undefined, "tcp://127.0.0.1:2375", "npipe:////./pipe/docker_engine", "relative.sock"]) assert.equal(socketFacts(notUnix, { stat }), null, String(notUnix));
 	assert.match(socketFacts.toString(), /stat = statSync/, "stat, never lstat: /var/run/docker.sock is a symlink on Docker Desktop");
+});
+
+test("the default stat is node's statSync, and the resolver's default is the same function", async () => {
+	// Pinned against the module's source, because an import renamed as `lstatSync as statSync` would keep every
+	// injected-seam test above green while reading a symlinked socket as the link's own owner.
+	const { readFileSync } = await import("node:fs");
+	const source = readFileSync(new URL("../src/job-user.mjs", import.meta.url), "utf8");
+	assert.match(source, /^import \{ statSync \} from "node:fs";$/m);
+	assert.ok(!/lstat/i.test(source.replace(/\/\/.*$|^\s*\*.*$/gm, "")), "no lstat anywhere in the code");
+	assert.match(makeJobUserResolver.toString(), /stat = statSync/);
+	assert.match(makeJobUserResolver.toString(), /release = osRelease\(\)/, "the WSL row needs the real kernel release by default");
+	assert.match(decideJobUser.toString(), /release = osRelease\(\)/);
 });
 
 test("macOS and Windows keep the image's own user: Docker Desktop maps ownership", () => {
@@ -109,9 +152,18 @@ test("Docker Desktop on Linux is refused unless the release is WSL, which falls 
 
 test("an unresolved endpoint with a Docker-shaped body is unknown, and a remote Podman client is not this host's", () => {
 	assert.deepEqual(decideJobUser({ ...linux, endpoint: UNRESOLVED, daemon: answered("dockerRootful"), socket: null }), { mode: "unknown", user: null, cause: null, reason: "endpoint-unresolved" });
-	const remote = { answered: true, facts: { ...facts("shimRootful"), remoteSocketPath: "ssh://core@10.0.0.5:22/run/podman/podman.sock" } };
+	const remoteBody = { host: { ...BODY.shimRootful.host, remoteSocket: { path: "ssh://core@10.0.0.5:22/run/podman/podman.sock" } } };
+	const remote = { answered: true, facts: parseDaemonFacts(JSON.stringify(remoteBody)).facts };
 	assert.equal(decideJobUser({ ...linux, endpoint: UNRESOLVED, daemon: remote }).cause, "endpoint-not-local");
-	assert.equal(decideJobUser({ ...linux, endpoint: { ...LOCAL, local: false }, daemon: answered("dockerRootful") }).cause, "endpoint-not-local");
+	// A remote client whose path IS a unix path is the rootful shim on this host (measured: serviceIsRemote true).
+	assert.equal(decideJobUser({ ...linux, endpoint: UNRESOLVED, daemon: answered("shimRootful"), socket: { uid: 0, gid: 2000 } }).mode, "worker");
+});
+
+test("an endpoint observed not local is image mode BEFORE the daemon is asked, even when that read is transient", () => {
+	const notLocal = { ...LOCAL, local: false, endpoint: "tcp://10.0.0.5:2376" };
+	for (const daemon of [answered("dockerRootful"), answered("dockerRootless"), { answered: false, reason: "timeout", transient: true }, { answered: false, reason: "unparseable", transient: false }]) {
+		assert.deepEqual(decideJobUser({ ...linux, endpoint: notLocal, daemon }), { mode: "image", user: null, cause: "endpoint-not-local", reason: null }, JSON.stringify(daemon));
+	}
 });
 
 test("no facts: transient is unknown, unparseable is unmappable runtime-unreadable", () => {
@@ -138,7 +190,7 @@ test("resolveImageUser: uid 1001 first, with or without anyUid and whatever its 
 
 test("resolveImageUser: another uid needs anyUid, and only then do the group rows apply", () => {
 	const worker = { mode: "worker", user: "1234:1234", cause: null, reason: null };
-	assert.deepEqual(resolveImageUser(worker, { capabilities: ["replicas"], euid: 1234, egid: 1234 }), { refused: "job-image-any-uid-unsupported", cause: null });
+	assert.deepEqual(resolveImageUser(worker, { capabilities: ["replicas"], euid: 1234, egid: 1234 }), { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" });
 	assert.deepEqual(resolveImageUser(worker, { capabilities: ["anyUid"], euid: 1234, egid: 1234, socket: { uid: 0, gid: 2375 } }), { user: "1234:1234", home: "/home/pi" });
 	assert.deepEqual(resolveImageUser({ ...worker, user: "1234:0" }, { capabilities: ["anyUid"], euid: 1234, egid: 0 }), { refused: "job-user-unmappable", cause: "root-group" });
 	assert.deepEqual(resolveImageUser({ ...worker, user: "1235:2375" }, { capabilities: ["anyUid"], euid: 1235, egid: 2375, socket: { uid: 0, gid: 2375 } }), { refused: "job-user-unmappable", cause: "docker-group" });
@@ -152,8 +204,11 @@ test("resolveImageUser passes the other modes through", () => {
 });
 
 test("every cause has fixed text, and a refusal carries no CLI output", () => {
-	assert.deepEqual(Object.keys(JOB_USER_FIX).sort(), ["desktop-linux-userns", "docker-group", "root-group", "rootless", "runtime-unreadable", "userns-remap", "worker-is-root"]);
+	assert.deepEqual(Object.keys(JOB_USER_FIX).sort(), ["any-uid-unsupported", "desktop-linux-userns", "docker-group", "root-group", "rootless", "runtime-unreadable", "userns-remap", "worker-is-root"]);
 	assert.match(jobUserRefusal("docker-group"), /log out and back in rather than `newgrp docker`/);
+	assert.match(jobUserRefusal("any-uid-unsupported"), /does not declare `anyUid`/);
+	// No text points at a document that does not exist yet.
+	for (const [cause, text] of Object.entries(JOB_USER_FIX)) assert.ok(!/docs\/podman\.md/.test(text), cause);
 	assert.match(jobUserRefusal({ cause: "rootless" }), /^Refused: /);
 });
 
@@ -172,6 +227,28 @@ test("the resolver caches a decision per key, never caches unknown, and shares o
 	assert.equal((await resolve({ endpoint: LOCAL, key: "k2" })).decision.mode, "unknown");
 	assert.equal((await resolve({ endpoint: LOCAL, key: "k2" })).decision.mode, "unknown");
 	assert.equal(reads, 3, "unknown is asked again every time");
+	// runtime-unreadable describes an answer, not a daemon: never cached, so a recovered daemon is seen by the next job.
+	answer = { answered: false, reason: "unparseable", transient: false };
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k3" })).decision.cause, "runtime-unreadable");
+	answer = answered("dockerRootful");
+	assert.equal((await resolve({ endpoint: LOCAL, key: "k3" })).decision.mode, "worker");
+	assert.equal(reads, 5, "runtime-unreadable is asked again");
+});
+
+test("with no endpoint, the resolver takes the socket from Podman's own unix path, and a remote path yields no socket", async () => {
+	const seen = [];
+	const stat = (p) => (seen.push(p), { uid: 0, gid: 2000 });
+	const resolve = makeJobUserResolver({ readFacts: async () => answered("shimRootful"), platform: "linux", release: "6.8.0", euid: 1234, egid: 2000, stat });
+	const out = await resolve({ endpoint: UNRESOLVED, key: "shim" });
+	assert.deepEqual(seen, ["/run/podman/podman.sock"]);
+	assert.deepEqual(out.socket, { uid: 0, gid: 2000 });
+	assert.equal(out.decision.mode, "worker");
+	// The socket's gid then reaches the per-image docker-group row.
+	assert.deepEqual(resolveImageUser(out.decision, { capabilities: ["anyUid"], euid: 1234, egid: 2000, socket: out.socket }), { refused: "job-user-unmappable", cause: "docker-group" });
+	// A local endpoint's own path wins over whatever the body names.
+	seen.length = 0;
+	await makeJobUserResolver({ readFacts: async () => answered("shimRootful"), platform: "linux", release: "6.8.0", euid: 1234, egid: 1234, stat })({ endpoint: LOCAL, key: "k" });
+	assert.deepEqual(seen, ["/var/run/docker.sock"]);
 });
 
 test("the resolver never runs docker on macOS or Windows", async () => {

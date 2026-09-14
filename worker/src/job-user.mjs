@@ -17,6 +17,7 @@
  */
 
 import { statSync } from "node:fs";
+import { release as osRelease } from "node:os";
 import { execDockerBounded } from "./backend-local.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 
@@ -35,7 +36,14 @@ const DAEMON_FACTS_MAX_BUFFER = 256 * 1024;
 export const PODMAN_PRODUCT_LICENSE = "Apache-2.0";
 
 /**
- * The facts of a `docker info --format={{json .}}` answer, or `null` when no line parses to either shape.
+ * What a `docker info --format={{json .}}` answer says: `{ facts }`, `{ unreachable: true }`, or `null` when no line
+ * parses to either shape.
+ *
+ * NO DAEMON IS NOT A SHAPE. With the daemon down or still starting, the docker CLI still exits 0 under `--format` and
+ * prints a Docker-shaped body with every server field empty and the dial error in `ServerErrors` (measured, Docker CLI
+ * 27.5.1). Read as facts, that body has no rootless marker and decides `worker`, so it is recognised FIRST: a
+ * non-empty `ServerErrors` is `unreachable` (the error text is never read), and a Docker-shaped body with no
+ * `ServerVersion` is no shape at all.
  *
  * TWO SHAPES, both measured. The real docker CLI against any daemon (Docker, or Podman's compat socket) prints the
  * Docker shape. Podman's docker emulation (podman-docker) prints Podman's own (`host.security.rootless`,
@@ -57,10 +65,11 @@ export function parseDaemonFacts(output) {
 			continue;
 		}
 		if (!body || typeof body !== "object" || Array.isArray(body)) continue;
+		if (Array.isArray(body.ServerErrors) && body.ServerErrors.length > 0) return { unreachable: true };
 		if (body.host && typeof body.host === "object") {
 			const rootless = body.host.security?.rootless;
 			const path = body.host.remoteSocket?.path;
-			return {
+			return { facts: {
 				shape: "podman",
 				podman: true,
 				os: typeof body.host.os === "string" ? body.host.os : null,
@@ -68,14 +77,16 @@ export function parseDaemonFacts(output) {
 				userns: false,
 				bounds: null,
 				serviceIsRemote: typeof body.host.serviceIsRemote === "boolean" ? body.host.serviceIsRemote : null,
-				remoteSocketPath: typeof path === "string" && path !== "" ? path : null,
-			};
+				// Only a unix path is kept. A remote service's path can be an `ssh://user@host` URL, which is a credential
+				// shape, and nothing downstream needs more than "not a local socket" (`serviceIsRemote` says that).
+				remoteSocketPath: isUnixSocketPath(path) ? path : null,
+			} };
 		}
-		if (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions)) {
+		if (typeof body.ServerVersion === "string" && body.ServerVersion !== "" && (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions))) {
 			const options = Array.isArray(body.SecurityOptions) ? body.SecurityOptions.filter((o) => typeof o === "string") : [];
 			const named = (name) => options.some((o) => o.split(",").includes(`name=${name}`));
 			const podman = body.ProductLicense === PODMAN_PRODUCT_LICENSE;
-			return {
+			return { facts: {
 				shape: "docker",
 				podman,
 				os: typeof body.OperatingSystem === "string" ? body.OperatingSystem : null,
@@ -84,7 +95,7 @@ export function parseDaemonFacts(output) {
 				bounds: podman ? null : { pids: body.PidsLimit === true, memory: body.MemoryLimit === true },
 				serviceIsRemote: null,
 				remoteSocketPath: null,
-			};
+			} };
 		}
 	}
 	return null;
@@ -94,9 +105,10 @@ export function parseDaemonFacts(output) {
  * `async () => ({ answered: true, facts } | { answered: false, reason, transient })`.
  *
  * A clean exit that parses to neither shape is DETERMINATE (`unparseable`): the CLI answered and said something no
- * rule can read. Every other failure (a non-zero exit, a timeout, a signal, no docker binary) is TRANSIENT here, on
- * purpose and unlike the endpoint read: a daemon still starting answers non-zero, and a worker unit with
- * `RestartPreventExitStatus=2` must never be stranded by one. No CLI text is ever read or logged.
+ * rule can read. Every other failure is TRANSIENT here, on purpose and unlike the endpoint read: a clean exit whose
+ * body says no daemon answered (`daemon-unreachable`, what a daemon down or still starting gives), a non-zero exit, a
+ * timeout, a signal, no docker binary. A worker unit with `RestartPreventExitStatus=2` must never be stranded by a
+ * daemon that is merely late. No CLI text is ever read or logged.
  */
 export function makeDaemonFactsReader({ run = (args) => execDockerBounded(args, { maxBuffer: DAEMON_FACTS_MAX_BUFFER }) } = {}) {
 	return async function readDaemonFacts() {
@@ -116,8 +128,9 @@ export function makeDaemonFactsReader({ run = (args) => execDockerBounded(args, 
 				: "spawn-failed";
 			return { answered: false, reason, transient: true };
 		}
-		const facts = parseDaemonFacts(result.stdout);
-		return facts ? { answered: true, facts } : { answered: false, reason: "unparseable", transient: false };
+		const parsed = parseDaemonFacts(result.stdout);
+		if (parsed?.unreachable) return { answered: false, reason: "daemon-unreachable", transient: true };
+		return parsed ? { answered: true, facts: parsed.facts } : { answered: false, reason: "unparseable", transient: false };
 	};
 }
 
@@ -147,17 +160,19 @@ function isUnixSocketPath(path) {
 // The fixed texts every surface shares (boot refusal, the forge comment, sandbox, doctor). No CLI output, no
 // endpoint, no path: a refusal that repeats what docker printed can repeat a credential.
 export const JOB_USER_FIX = Object.freeze({
-	rootless: "the container runtime runs rootless (a user namespace between the job and this worker), so no uid a job may run as can read the worker's 0700 job dir; run jobs on a rootful Docker or Podman daemon (docs/podman.md). If this was inferred from a socket this worker's uid owns on a rootful daemon (a systemd SocketUser= override), point the worker at the daemon's own socket",
+	rootless: "the container runtime runs rootless (a user namespace between the job and this worker), so no uid a job may run as can read the worker's 0700 job dir; run jobs on a rootful Docker or Podman daemon. If this was inferred from a socket this worker's uid owns on a rootful daemon (a systemd SocketUser= override), point the worker at the daemon's own socket",
 	"userns-remap": "the Docker daemon remaps container uids (userns-remap), so no uid a job may run as can read the worker's 0700 job dir; run jobs on a daemon without userns-remap",
 	"worker-is-root": "the worker runs as root, and a job must not run as root (nonRoot); run the worker as an unprivileged account, as deploy/worker.service's User= does",
 	"desktop-linux-userns": "Docker Desktop on Linux maps container uids like a rootless daemon, so no uid a job may run as can read the worker's 0700 job dir; use Docker Engine on this host (WSL2 is not affected)",
 	"runtime-unreadable": "the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon",
 	"root-group": "the worker's primary group is gid 0, and a job runs with that group; run the worker with an unprivileged primary group",
 	"docker-group": "the worker's primary group is the docker socket's group, and a job runs with that group; make docker a supplementary group (log out and back in rather than `newgrp docker`)",
+	// Not a daemon cause: the per-image rule's refusal (`job-image-any-uid-unsupported`), here so every surface shares one text.
+	"any-uid-unsupported": "the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which this host's container runtime requires; rebuild it from a release that has this feature, or run the worker as uid 1001",
 });
 
 /**
- * The daemon half of the decision. Pure. Returns `{ mode, user, cause, reason }`:
+ * The daemon half of the decision. Pure. Returns `{ mode, user, cause, reason }`, one of FOUR modes:
  *   - `image`: the image's own USER runs, argv byte-identical to before issue #341;
  *   - `worker`: the job runs as `user`, the worker's own "<euid>:<egid>" (the per-image rule may still decline);
  *   - `unmappable`: no uid works, `cause` names why;
@@ -166,12 +181,13 @@ export const JOB_USER_FIX = Object.freeze({
  * `endpoint` is the endpoint resolver's answer; `daemon` is `readDaemonFacts()`'s; `socket` is `socketFacts(...)`.
  * The rows are ORDERED, and the order is part of the contract (the design entry's table).
  */
-export function decideJobUser({ platform, release = "", euid, egid, endpoint, daemon, socket = null }) {
+export function decideJobUser({ platform, release = osRelease(), euid, egid, endpoint, daemon, socket = null }) {
 	const image = (cause) => ({ mode: "image", user: null, cause, reason: null });
 	const unmappable = (cause) => ({ mode: "unmappable", user: null, cause, reason: null });
 	const unknown = (reason) => ({ mode: "unknown", user: null, cause: null, reason });
 
-	// Docker Desktop is the only daemon these platforms reach locally, and it maps ownership.
+	// A daemon on these platforms runs in a Linux VM, and Docker Desktop's file sharing maps ownership (measured), so the
+	// image's own user works. The other VM-backed daemons there (OrbStack, Colima, Podman machine) are unmeasured.
 	if (platform === "darwin" || platform === "win32") return image("desktop-platform");
 	// Bind-mount sources are another machine's paths: nothing about this host's uids applies, and doctor already warns.
 	if (endpoint?.local === false) return image("endpoint-not-local");
@@ -181,7 +197,8 @@ export function decideJobUser({ platform, release = "", euid, egid, endpoint, da
 		// No docker endpoint resolved. Only Podman's own shape (its docker emulation) says enough to go on; a Docker
 		// shape with no endpoint leaves the socket rows below blind.
 		if (facts.shape !== "podman") return unknown("endpoint-unresolved");
-		if (facts.serviceIsRemote === true && !isUnixSocketPath(facts.remoteSocketPath)) return image("endpoint-not-local");
+		// A remote podman client: no unix path survives parsing, so the service is another machine's.
+		if (facts.serviceIsRemote === true && facts.remoteSocketPath === null) return image("endpoint-not-local");
 	}
 	if (facts.os === "Docker Desktop") {
 		if (!/microsoft/i.test(String(release))) return unmappable("desktop-linux-userns");
@@ -211,7 +228,7 @@ export function resolveImageUser(decision, { capabilities = [], euid, egid, sock
 	if (decision?.mode === "unmappable") return { refused: "job-user-unmappable", cause: decision.cause };
 	if (decision?.mode !== "worker") return { unavailable: true, reason: decision?.reason ?? "unknown" };
 	if (euid === SHIPPED_IMAGE_UID) return { user: null, home: null };
-	if (!Array.isArray(capabilities) || !capabilities.includes("anyUid")) return { refused: "job-image-any-uid-unsupported", cause: null };
+	if (!Array.isArray(capabilities) || !capabilities.includes("anyUid")) return { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" };
 	if (egid === 0) return { refused: "job-user-unmappable", cause: "root-group" };
 	if (socket && egid === socket.gid) return { refused: "job-user-unmappable", cause: "docker-group" };
 	return { user: decision.user, home: CONTAINER_HOME };
@@ -225,12 +242,18 @@ export function jobUserRefusal(causeOrDecision) {
 
 /**
  * `async ({ endpoint, key }) => ({ decision, facts, socket })`, cached by `key` (the endpoint state string the
- * caller already keeps). `unknown` is never cached, and concurrent callers for one key share one read.
+ * caller already keeps). Concurrent callers for one key share one read.
+ *
+ * NOT cached: `unknown`, and `unmappable` `runtime-unreadable`. Both describe an answer rather than a daemon, and a
+ * cached one would retry or refuse every later job on that endpoint until the worker restarted, long after the daemon
+ * recovered.
+ * A cached decision is otherwise kept until the endpoint state changes: a daemon reconfigured behind an unchanged
+ * endpoint (rootful to rootless on one socket path) is read again only after a restart, a residual the design entry names.
  */
 export function makeJobUserResolver({
 	readFacts,
 	platform = process.platform,
-	release = "",
+	release = osRelease(),
 	euid = process.geteuid?.(),
 	egid = process.getegid?.(),
 	stat = statSync,
@@ -250,7 +273,7 @@ export function makeJobUserResolver({
 			const socket = socketFacts(socketPath, { stat });
 			const decision = decideJobUser({ platform, release, euid, egid, endpoint, daemon, socket });
 			const value = { decision, facts: daemon?.answered ? daemon.facts : null, socket };
-			if (decision.mode !== "unknown") cached = { key, value };
+			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable") cached = { key, value };
 			return value;
 		})();
 		inFlight.set(key, work);
