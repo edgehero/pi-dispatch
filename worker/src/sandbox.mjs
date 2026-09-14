@@ -296,12 +296,15 @@ export async function openSandbox({
 		// without unwinding), or a detached sandbox's that has since exited, or the network of an open of this
 		// same run happening right now. Removing it automatically was tried under #277 and withdrawn: a second
 		// open racing the first stripped the proxy from the first's live shell. Telling the two apart safely
-		// needs more than this function can see, so the operator is told what it is and how to clear it.
-		// `createJobNetwork` rolls back a network it built itself, so one still present was not built here.
+		// needs more than this function can see, so the operator is told what it is and how to clear it. The
+		// printed commands disconnect whatever is attached rather than the configured proxy, because a leftover
+		// can carry a different one (a changed PI_EGRESS_PROXY, or two environments that disagree).
+		// `createJobNetwork` rolls back a network it built itself, so one still present was almost always not
+		// built here; the exception is a rollback whose own remove failed, which these commands also clear.
 		if (await networkExists(spawnNetwork, network)) {
 			return {
 				refused: "egress-network-exists",
-				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, remove it: \`docker network disconnect -f ${network} ${egressProxyName({ PI_EGRESS_PROXY: egress.proxy })}; docker network rm ${network}\``,
+				message: `the egress network ${network} already exists -- left by an earlier session of ${jobId} that did not clean up, or one opening right now. If \`pi-dispatch sandbox --list\` shows no sandbox running for it, disconnect whatever is attached and remove it: \`for c in $(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' ${network}); do docker network disconnect -f ${network} "$c"; done; docker network rm ${network}\``,
 			};
 		}
 		return {
@@ -316,7 +319,9 @@ export async function openSandbox({
 		// Tearing the network down then would strip the proxy from a live sandbox, so `docker attach` reopens a
 		// shell with no egress at all. Leave it. An unanswered ask is NOT detached: the network is torn down, as it
 		// always was. A network left this way outlives the sandbox, and the next open of this run names it.
-		if (network && !error) detached = (await ask()).live.has(id);
+		// Exit 0 as well: docker's detach returns 0, while a `docker run` that failed (125, a name taken by another
+		// open of the same run with a different egress setting) must not be read as this session detaching.
+		if (network && !error && code === 0) detached = (await ask()).live.has(id);
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}) };
 	} finally {
 		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });

@@ -203,8 +203,8 @@ export async function networkExists(spawnFn, network) {
  * Detach the proxy and remove the network. Best-effort and never throws: it runs in a `finally`, after the
  * container has exited (or when a network has just been built for a container that will not start), and a
  * failure here must not change the outcome. What it leaves behind if it fails is a network, which the boot
- * reaper sweeps for a job (`pi-job-`) and does not for a sandbox (`pi-sandbox-`); a sandbox's next open of the
- * same run refuses and names it for removal.
+ * reaper tries to remove for a job (`pi-job-`, and only once nothing is attached) and never for a sandbox
+ * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
 export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
 	await runDocker(spawnFn, ["network", "disconnect", "-f", network, proxy]);

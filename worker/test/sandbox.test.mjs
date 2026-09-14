@@ -309,7 +309,7 @@ test("sandboxEgress reads the posture exactly as the worker does, and refuses a 
 	assert.throws(() => sandboxEgress({ PI_EGRESS: "no" }), /PI_EGRESS must be exactly/);
 });
 
-test("openSandbox leaves the network of a DETACHED sandbox, and clears a leftover only when docker has answered", async () => {
+test("openSandbox leaves the network of a DETACHED sandbox, and tears it down when docker cannot say or the run failed", async () => {
 	// Detach (Ctrl-P Ctrl-Q) returns while the container keeps running; tearing the network down would strip the
 	// proxy from a live sandbox.
 	const calls = [];
@@ -341,6 +341,21 @@ test("openSandbox leaves the network of a DETACHED sandbox, and clears a leftove
 	});
 	assert.equal(gone.detached, undefined);
 	assert.equal(unknown.at(-1), "docker network rm pi-sandbox-gh-1-net");
+
+	// A docker run that failed (125: another open of this run, with a different egress setting, took the name)
+	// is not this session detaching, even though docker now lists a sandbox by that name.
+	const conflict = [];
+	let asked2 = 0;
+	const failed = await openSandbox({
+		...session,
+		...openable(),
+		running: async () => (asked2++ === 0 ? [] : ["gh-1"]),
+		egress: { armed: true, proxy: "p" },
+		spawnNetwork: recordingDocker(conflict),
+		launch: async () => ({ code: 125 }),
+	});
+	assert.equal(failed.detached, undefined);
+	assert.equal(conflict.at(-1), "docker network rm pi-sandbox-gh-1-net", "its own network is removed");
 });
 
 test("openSandbox REFUSES a network already under the session's name and names it, never removing it", async () => {
@@ -356,7 +371,8 @@ test("openSandbox REFUSES a network already under the session's name and names i
 		launch: async () => ((launched = true), { code: 0 }),
 	});
 	assert.equal(exists.refused, "egress-network-exists");
-	assert.match(exists.message, /docker network disconnect -f pi-sandbox-gh-1-net my-proxy; docker network rm pi-sandbox-gh-1-net/);
+	// Disconnects whatever is attached, not the configured proxy: a leftover can carry a different one.
+	assert.match(exists.message, /docker network inspect -f '\{\{range \.Containers\}\}\{\{\.Name\}\} \{\{end\}\}' pi-sandbox-gh-1-net\); do docker network disconnect -f pi-sandbox-gh-1-net "\$c"; done; docker network rm pi-sandbox-gh-1-net/);
 	assert.equal(launched, false);
 	assert.ok(!calls.some((c) => c.includes(" rm ") || c.includes("disconnect")), "nothing was removed or disconnected");
 
