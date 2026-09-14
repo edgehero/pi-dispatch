@@ -3013,14 +3013,24 @@ validator rather than a second copy of it.
   a failed post-swap stamp leaves the sentinel, which cold-starts everywhere rather than attributing a
   transcript to the wrong venue. **The resolve path re-checks the stamp after its copy**, because the read
   and the copy are not under the promotion lock: a stamp that no longer names the job's venue empties the
-  staged copy and cold-starts. What `venue-changed` does not distinguish is stated rather than hidden: it
-  also names a leftover sentinel from an interrupted promotion, an unreadable stamp, and a SAME-venue
-  promotion that lands between another job's read and its copy (that job cold-starts once), exactly as
-  `pi-version-changed` already covers an unreadable version stamp. Two residuals: two complete promotions
-  from different venues inside one copy window (A, B, A) leave the stamp matching again and the re-check
-  cannot see the round trip, the same unguarded race `pi-version` has always had; and a worker older than
-  #277 sharing a `PI_SESSIONS_DIR` neither reads nor writes the stamp, so every worker on a shared store
-  must run a release carrying it before a second venue is blessed.
+  staged copy and cold-starts; a fault while emptying it removes the staged directory, so a `null` resolve
+  leaves nothing readable under the job dir. What `venue-changed` does not distinguish is stated rather
+  than hidden: it also names a leftover sentinel from an interrupted promotion, an unreadable stamp, and a
+  SAME-venue promotion whose sentinel is in place when another job reads or re-checks the stamp (that job
+  cold-starts once), exactly as `pi-version-changed` already covers an unreadable version stamp. A
+  same-venue promotion that lands ENTIRELY between another job's read and its copy is not caught: that job
+  resumes the newer transcript, which no gate judged -- the unguarded race `pi-version` has always had.
+  **A process killed inside the promotion lock** leaves the sentinel and, as any kill inside that lock
+  always has, the lock itself: the key cold-starts on every venue and later promotions report `locked`
+  until the reaper sweeps it (never, with `PI_SESSIONS_TTL_DAYS=0`, until the lock file is removed). **Two
+  triggers on one key that name different venues** replace each other's transcript and so cold-start on
+  every alternation; that is the cost of keeping the venue out of the key, and it is the right way round,
+  since the alternative resumes one venue's conversation in the other. The reaper removes a key's
+  transcript before the rest of its directory, so a concurrent read never sees an unstamped transcript
+  mid-sweep. Two residuals: two complete promotions from different venues inside one copy window (A, B, A)
+  leave the stamp matching again and the re-check cannot see the round trip; and a worker older than #277
+  sharing a `PI_SESSIONS_DIR` neither reads nor writes the stamp, so every worker on a shared store must run
+  a release carrying it before a second venue is blessed.
 - **The chain counter**: an integer file beside the transcript, written immediately after the swap and
   under the same promotion lock, so it can never describe a transcript older than the one now in place.
   **It counts the HOST'S DELIVERIES**, incremented whenever the host handed this key's transcript to a
@@ -3078,8 +3088,10 @@ validator rather than a second copy of it.
   it, in that order, and are deliberately not described as part of it: the swap is one rename and cannot be
   widened. **A post-swap sidecar write that fails is logged, never fatal** (the `pi-version` write excepted,
   above), because it runs after the transcript is already promoted and throwing would report
-  `promote-failed` for a promotion that demonstrably happened, telling an operator the next run will cold
-  start when it will in fact resume.
+  `promote-failed` for a promotion that demonstrably happened. For the chain and context sidecars that
+  would also tell an operator the next run will cold start when it will in fact resume. For the venue stamp
+  the forecast runs the other way: a failed stamp leaves the sentinel, so the next run WILL cold-start, and
+  the logged `session_sidecar_failed` line is what explains it.
   **`locked` means EEXIST and nothing else**: a read-only directory or a full disk also fails to create the
   lock, and reporting those as `locked` sends an operator looking for a stuck lock file that does not
   exist, so they fall through to `promote-failed`. A job that cannot take the lock discards rather

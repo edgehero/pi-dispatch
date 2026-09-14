@@ -1044,7 +1044,7 @@ test("the abort resolves the venue from job.DATA, not the BullMQ wrapper (#227)"
 test("the prepareWorkspace wrapper EXTENDS runJob's options instead of replacing them (#227)", async () => {
 	// The bug this pins made every `run.resume` cold-start on every wired worker, silently. `runJob` calls
 	// `prepareWorkspace(job, token, { piVersion })`, and the wrapper passed only `{ queueJobId }` -- so
-	// `piVersion` arrived undefined, defaulted to null, and `readCanonical`'s first gate is
+	// `piVersion` arrived undefined, defaulted to null, and `readCanonical`'s pi-version gate is
 	// `if (piVersion === null) return COLD("pi-version-changed")`. The stamp `promoteSession` wrote was
 	// correct the whole time; the comparison never happened. REQ-RESUMABLE-SESSION was inert.
 	//

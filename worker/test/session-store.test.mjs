@@ -828,3 +828,135 @@ test("a promotion from another venue that lands between the gate and the copy is
 	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
 	assert.equal(readFileSync(join(sessionsDir, key, "resume-chain"), "utf8"), "0", "a cold start resets the chain");
 });
+
+test("an lstat failure on the stamp that is NOT absence fails closed, never reading as local", () => {
+	// Only ENOENT is absence. An EIO or EACCES on the stamp says nothing about which venue wrote the transcript,
+	// and reading it as `local` would resume another venue's conversation on the strength of a disk fault.
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			lstatSync: (p, ...rest) => {
+				if (String(p).endsWith(`${join(sessionKeyFor(ghIssue), "venue")}`)) {
+					const err = new Error("EIO: i/o error");
+					err.code = "EIO";
+					throw err;
+				}
+				return realFs.lstatSync(p, ...rest);
+			},
+		},
+	});
+	seed(sessionsDir, sessionKeyFor(ghIssue), { venue: "far" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed");
+	assert.equal(s.resume, false);
+});
+
+test("a job with no resolvable venue never resumes, even where the stamp cannot be read either", () => {
+	// The one input where the stamp read also yields nothing: an unusable stamp. Without the explicit null
+	// check, "nothing" would equal "nothing" and the job would resume.
+	const { store, jobDir, sessionsDir } = fixture({ defaultBackend: null });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	mkdirSync(join(sessionsDir, key, "venue"));
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed");
+	assert.equal(s.resume, false);
+	assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, "nothing was staged");
+	// And the arm itself names the refusal, ahead of the pi-version arm, without the re-check behind it.
+	const v = fixture({ defaultBackend: null });
+	seed(v.sessionsDir, key);
+	assert.equal(v.store.resolveSession(ghIssue, { jobDir: v.jobDir, piVersion: null }).reason, "venue-changed");
+});
+
+test("the real stamp is written BEFORE the pi-version write, so that write failing cannot strand a landed transcript under the sentinel", () => {
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			writeFileSync: (p, ...rest) => {
+				if (String(p).endsWith(join(sessionKeyFor(ghIssue), "pi-version"))) throw new Error("ENOSPC: no space left on device");
+				return realFs.writeFileSync(p, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	const s = store.resolveSession(farIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}far\n`);
+	// The pi-version write is the one post-swap write that still reports promote-failed (a stated residual).
+	assert.equal(store.promoteSession(s, { piVersion: PI }).reason, "promote-failed");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("far"), true, "the transcript did land");
+	assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "far", "and its venue is stamped, not left pending");
+});
+
+test("a promotion from another venue that COMPLETES between the gate and the copy is caught too", () => {
+	// The stamp then names the other venue outright rather than the sentinel. A re-check that only looked for
+	// the sentinel would resume that venue's transcript.
+	const key = sessionKeyFor(ghIssue);
+	let sessionsDirRef;
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (from, to) => {
+				if (String(from).startsWith(sessionsDirRef) && String(to).includes(join("session", SESSION_FILE_NAME))) {
+					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "far");
+				}
+				return realFs.copyFileSync(from, to);
+			},
+		},
+	});
+	sessionsDirRef = sessionsDir;
+	seed(sessionsDir, key, { venue: "local" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed");
+	assert.equal(s.resume, false);
+	assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0);
+});
+
+test("a fault while emptying a re-checked copy leaves nothing of it under the job dir", () => {
+	// The job dir is mounted /job:ro. A `null` resolve means no /session mount, but a transcript left at
+	// jobDir/session/current.jsonl would still be readable there.
+	const key = sessionKeyFor(ghIssue);
+	let sessionsDirRef;
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (from, to) => {
+				if (String(from).startsWith(sessionsDirRef) && String(to).includes(join("session", SESSION_FILE_NAME))) {
+					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "far");
+				}
+				return realFs.copyFileSync(from, to);
+			},
+			writeFileSync: (p, data, ...rest) => {
+				if (String(p).includes(join("session", SESSION_FILE_NAME)) && data === "") throw new Error("EIO: i/o error");
+				return realFs.writeFileSync(p, data, ...rest);
+			},
+		},
+	});
+	sessionsDirRef = sessionsDir;
+	seed(sessionsDir, key, { venue: "local" });
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }), null);
+	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
+});
+
+test("the reaper removes a key's transcript before the stamp beside it", () => {
+	// An absent stamp reads as local, so a sweep that removed the stamp first would, for a moment, leave another
+	// venue's transcript readable as a local one.
+	const order = [];
+	const { store, sessionsDir } = fixture({
+		ttlDays: 1,
+		now: () => Date.now() + 3 * 86400000,
+		fs: {
+			...realFs,
+			unlinkSync: (p) => (order.push(["unlink", String(p)]), realFs.unlinkSync(p)),
+			rmSync: (p, opts) => (order.push(["rm", String(p), existsSync(join(String(p), SESSION_FILE_NAME))]), realFs.rmSync(p, opts)),
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "far" });
+	store.reapSessions();
+	const rm = order.find(([op, p]) => op === "rm" && p.endsWith(key));
+	assert.ok(rm, "the key was swept");
+	assert.equal(rm[2], false, "its transcript was already gone when the directory went");
+	assert.equal(existsSync(join(sessionsDir, key)), false);
+});

@@ -152,6 +152,8 @@ export function makeSessionStore({
 	 *   /session mount at all (unarmed, or no key) -- which is byte-identical to a pre-feature job.
 	 */
 	function resolveSession(job, { jobDir, resolved = {}, piVersion = null } = {}) {
+		// Declared outside the try so a fault can take back what this call staged (below).
+		let hostDir = null;
 		try {
 			// Unreachable in a wired worker, and deliberately kept: resolveSession is only ever called for a
 			// job that armed run.resume (prepare-github.mjs), and processor.mjs refuses exactly that job
@@ -174,7 +176,7 @@ export function makeSessionStore({
 			// the session like `modelId`, so the promotion stamps the venue that produced the transcript rather
 			// than re-deriving one later.
 			const venue = normaliseVenue(resolveBackendName(job, defaultBackend));
-			const hostDir = join(jobDir, "session");
+			hostDir = join(jobDir, "session");
 			const staged = join(hostDir, SESSION_FILE_NAME);
 			fs.mkdirSync(hostDir, { recursive: true, mode: 0o700 });
 
@@ -183,9 +185,11 @@ export function makeSessionStore({
 				fs.copyFileSync(canonicalFile(key), staged);
 				// The read above and this copy are not under the promotion lock, so a promotion from ANOTHER venue
 				// can land between them and the copy would stage that venue's transcript. Every promotion writes
-				// the pending sentinel before it swaps, so a stamp that no longer names this venue after the copy
-				// means the file just copied may not be the one that was judged. Cold start, and empty the staged
-				// copy so the container is handed nothing of it -- the 0-byte shape every cold start gets.
+				// the pending sentinel before it swaps and its own venue after, so a stamp that no longer names this
+				// venue after the copy -- pending, or another venue outright -- means the file just copied may not
+				// be the one that was judged. Cold start, and empty the staged copy so the container is handed
+				// nothing of it -- the 0-byte shape every cold start gets. If emptying fails, the catch below
+				// removes the staged directory rather than leave the copy behind.
 				if (readVenue(key) !== venue) {
 					fs.writeFileSync(staged, "");
 					verdict = COLD("venue-changed");
@@ -202,6 +206,17 @@ export function makeSessionStore({
 		} catch (err) {
 			// A history fault must never fail the prepare that asked.
 			log("session_store_failed", { phase: "resolve", reason: err?.message });
+			// `null` means NO MOUNT AND NOTHING WRITTEN, so make the second half true. A fault after the copy --
+			// a partial copy, or the venue re-check failing to empty a transcript another venue just promoted
+			// (#277) -- would otherwise leave that file under the job dir, which is mounted `/job:ro`: no
+			// `/session`, but the transcript readable at `/job/session/current.jsonl` all the same.
+			if (hostDir !== null) {
+				try {
+					fs.rmSync(hostDir, { recursive: true, force: true });
+				} catch {
+					// Best effort; the job dir itself is removed at teardown.
+				}
+			}
 			return null;
 		}
 	}
@@ -265,15 +280,20 @@ export function makeSessionStore({
 				// sits under another venue's stamp and the next job there resumes it. So every promotion first
 				// writes a stamp no venue matches. If that write fails, nothing has been swapped and the outer
 				// catch reports `promote-failed`; if the process dies after it, the key cold-starts everywhere
-				// until a promotion completes. Unconditional rather than only on a venue change, so the decision
-				// needs no read of the stamp under the lock and there is no branch to get wrong.
+				// until a promotion completes -- and a process killed anywhere inside this lock also leaks the lock
+				// itself, so later promotions report `locked` until the reaper sweeps the key (that half predates
+				// the stamp). Unconditional rather than only on a venue change, so the decision needs no read of
+				// the stamp under the lock and there is no branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
 				fs.renameSync(tmp, canonicalFile(session.key));
 				// The real stamp, straight after the swap and BEFORE the pi-version write, which can throw: a
-				// completed promotion must not be left under the sentinel because a later write failed. Non-fatal
-				// for `writeSidecar`'s reason -- the transcript is already promoted -- and a failure here leaves
-				// the sentinel, which cold-starts rather than misattributes. A session with no venue (a DI seam)
-				// leaves the sentinel on purpose: no stamp is better than a guessed one.
+				// completed promotion must not be left under the sentinel because a later write failed. Non-fatal,
+				// but NOT for `writeSidecar`'s stated reason, which is about the next run resuming: a failed stamp
+				// leaves the sentinel, so the next run WILL cold-start. It is non-fatal because the transcript has
+				// landed and the chain and context sidecars below still describe it truthfully; `promote-failed`
+				// would claim no promotion happened. The `session_sidecar_failed` line is what links the promotion
+				// to the cold start that follows it. A session with no venue (a DI seam) leaves the sentinel on
+				// purpose: no stamp is better than a guessed one.
 				const venue = normaliseVenue(session.venue);
 				if (venue !== null) writeSidecar(dir, VENUE_FILE, session.key, venue);
 				fs.writeFileSync(join(dir, PI_VERSION_FILE), String(piVersion ?? ""));
@@ -633,6 +653,15 @@ export function makeSessionStore({
 				const dir = join(sessionsDir, name);
 				const st = fs.lstatSync(join(dir, SESSION_FILE_NAME));
 				if (st.mtimeMs < cutoff) {
+					// The transcript FIRST, then the directory. An absent venue stamp reads as `local` (#277), and a
+					// recursive remove in whatever order the filesystem walks could delete the stamp while the
+					// transcript is still readable, for a moment in which another venue's transcript reads as local.
+					// With the transcript gone first, a concurrent read in that moment finds it `absent`.
+					try {
+						fs.unlinkSync(join(dir, SESSION_FILE_NAME));
+					} catch {
+						// A transcript that is not a plain file (a planted directory) is left to the recursive remove.
+					}
 					fs.rmSync(dir, { recursive: true, force: true });
 					log("reaped_session", { key: name });
 				}
