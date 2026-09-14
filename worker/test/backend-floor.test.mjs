@@ -324,6 +324,9 @@ test("doctor renders a redirected docker CLI as credentialTransit ASSERTED by th
 
 	const userinfo = await doctorText({}, '"remote"|"ssh://bob@remote"');
 	assert.doesNotMatch(userinfo, /bob@/, "credentials in an endpoint never reach doctor's output");
+	const password = await doctorText({}, '"remote"|"ssh://bob:p@ss?word@remote"');
+	assert.doesNotMatch(password, /bob|p@ss|word/, "nor any part of a password that holds an @ and a ?");
+	assert.match(password, /resolves context "remote" to ssh:\/\/\(credentials not shown\)/);
 	assert.match(userinfo, /ssh:\/\/remote/);
 
 	const unresolved = await doctorText({}, null);

@@ -137,23 +137,29 @@ test("an endpoint is LOCAL only when its form shows it, and credentials in it ar
 	notLocal.push("tcp://127.0.0.09:2375", "tcp://127.000.000.001:2375", "tcp://0127.0.0.1:2375");
 	// The `.` server followed by UNC is another host's share, not this machine's pipe namespace; and a `..` that
 	// Windows would resolve could climb back out of `pipe`.
-	notLocal.push("npipe:////./UNC/remotebox/pipe/docker_engine", "npipe:////./pipe/../UNC/remotebox/pipe/x", "npipe:////./pipe/./x", "npipe:////./pipe");
+	notLocal.push("npipe:////./UNC/remotebox/pipe/docker_engine", "npipe:////./pipe/../UNC/remotebox/pipe/x", "npipe:////./pipe/./x", "npipe:////./pipe", "npipe:////./pipe/..\\UNC\\remotebox\\share", "npipe:////./pipe/x\\..\\..\\UNC\\remotebox");
 	// Case matters: Go treats only lowercase `localhost` as never-proxied (measured: `LOCALHOST` went through HTTP_PROXY).
 	notLocal.push("tcp://LOCALHOST:2375");
 	for (const h of local) assert.equal(classifyDockerEndpoint(h).local, true, h);
 	for (const h of notLocal) assert.equal(classifyDockerEndpoint(h).local, false, String(h));
-	assert.equal(classifyDockerEndpoint("ssh://bob:hunter2@remote:22").display, "ssh://remote:22");
+	// With an `@` present the value is REDUCED, never edited: a password may hold `@`, `/`, `?` or `#`, and every
+	// splitting rule tried kept part of one (`ssh://bob:p@ss?word@remote` parses with host `ss`).
+	const hidden = "ssh://(credentials not shown)";
+	for (const h of ["ssh://bob:hunter2@remote:22", "ssh://bob:s3cr/et@remote", "ssh://bob:pa?ss@remote", "ssh://bob:pa#ss@remote", "ssh://bob:p@ss?word@remote", "ssh://bob:p@ss#word@remote", "ssh://bob:p@ss/word@remote", "ssh://bob:pa?ss\n@remote", "ssh://bob:pa?s@s@remote"]) {
+		assert.equal(classifyDockerEndpoint(h).display, hidden, JSON.stringify(h));
+	}
+	assert.equal(classifyDockerEndpoint("tcp://user:p@ss@10.1.2.3:2375").display, "tcp://(credentials not shown)");
+	assert.equal(classifyDockerEndpoint("bob:pw@remote").display, "(credentials not shown)", "a username is not named as if it were a scheme");
+	// No password: `scheme://host[:port]` only, so a username, and a path, query or fragment holding an `@`, go.
+	assert.equal(classifyDockerEndpoint("ssh://bob@remote:2222").display, "ssh://remote:2222");
 	assert.equal(classifyDockerEndpoint("tcp://user@10.1.2.3:2375").display, "tcp://10.1.2.3:2375");
-	assert.equal(classifyDockerEndpoint("tcp://user:p@ss@10.1.2.3:2375").display, "tcp://10.1.2.3:2375", "a password holding an @ is removed whole");
+	assert.equal(classifyDockerEndpoint("ssh://bob@remote/p@x").display, "ssh://remote");
+	// An `@` after `?` or `#` is not userinfo: the host shown is the one the CLI dials, not the one after it.
+	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375?@localhost").display, "tcp://10.1.2.3:2375");
+	assert.deepEqual(classifyDockerEndpoint("tcp://127.0.0.1:2375#frag@10.1.2.3"), { local: true, display: "tcp://127.0.0.1:2375" });
+	// Paths: an `@` is a filename character there, and verbatim is right.
 	assert.equal(classifyDockerEndpoint("unix:///run/user@1000/docker.sock").display, "unix:///run/user@1000/docker.sock", "an @ in a path is not userinfo");
-	assert.equal(classifyDockerEndpoint("ssh://bob:s3cr/et@remote").display, "ssh://remote", "a password holding a / is removed whole, though the URL does not parse");
-	assert.equal(classifyDockerEndpoint("ssh://bob:pa?ss@remote").display, "ssh://remote", "and one holding a ?");
-	assert.equal(classifyDockerEndpoint("ssh://bob:pa#ss@remote").display, "ssh://remote", "and one holding a #");
-	// A URL that PARSES keeps an `@` in its path: only the userinfo the parser found goes.
-	assert.equal(classifyDockerEndpoint("ssh://bob@remote/p@x").display, "ssh://remote/p@x");
-	// An `@` after `?` or `#` is not userinfo, and the display must name the host the CLI dials, not the one after it.
-	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375?@localhost").display, "tcp://10.1.2.3:2375?@localhost");
-	assert.deepEqual(classifyDockerEndpoint("tcp://127.0.0.1:2375#frag@10.1.2.3"), { local: true, display: "tcp://127.0.0.1:2375#frag@10.1.2.3" });
+	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375").display, "tcp://10.1.2.3:2375", "no @, nothing touched");
 });
 
 test("the CLI's answer is read from the last line that parses, so a warning ahead of it is not mistaken for it", () => {
@@ -177,6 +183,7 @@ test("a failed resolve names a fixed reason, and only a failure retrying can cha
 	// precedent): no table of its stderr prose, which is not even handed over.
 	assert.deepEqual(classifyEndpointFailure({ error: { code: 1 } }), { reason: "exit-1", transient: false });
 	assert.deepEqual(classifyEndpointFailure({ code: 1 }), { reason: "exit-1", transient: false });
+	assert.deepEqual(classifyEndpointFailure({ error: Object.assign(new Error("Command failed: docker context inspect\nopen /x/meta.json: permission denied"), { code: 1 }) }), { reason: "exit-1", transient: false }, "the message, which carries stderr, is not read either");
 	assert.deepEqual(classifyEndpointFailure({}), { reason: "unparseable", transient: false });
 });
 
@@ -211,5 +218,5 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 	assert.deepEqual(ok, { code: 0, stdout: '"a"|"unix:///s"', error: null });
 	const exit = await execDockerBounded(["x"], { execFileFn: (c, a, o, cb) => (queueMicrotask(() => cb(Object.assign(new Error("exit"), { code: 1 }), "", "parse \"ssh://bob:pa?ss@remote\": invalid port")), {}) });
 	assert.equal(exit.code, 1);
-	assert.equal(Object.hasOwn(exit, "stderr"), false, "stderr repeats an unparseable DOCKER_HOST with its credentials, and is not handed on");
+	assert.equal(Object.hasOwn(exit, "stderr"), false, "stderr repeats an unparseable DOCKER_HOST with its credentials, and is not handed on as its own field");
 });

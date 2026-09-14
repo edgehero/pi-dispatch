@@ -296,8 +296,9 @@ export function classifyDockerEndpoint(host) {
 	if (scheme === "npipe") {
 		// `\\.\pipe\name` is this machine's pipe namespace; `\\.\UNC\host\...` is the same `.` prefix
 		// reaching another host over SMB, so the segment after `.` must be `pipe` too, and no later segment may
-		// be `.` or `..`, which Windows resolves in a `\\.\` path and could climb back out of `pipe` with.
-		const [server, namespace, ...rest] = host.slice("npipe:".length).replace(/^\/+/, "").split("/");
+		// be `.` or `..`, which Windows resolves in a `\\.\` path and could climb back out of `pipe` with. Split on
+		// both separators, because the CLI passes a backslash through and Windows reads it as one.
+		const [server, namespace, ...rest] = host.slice("npipe:".length).replace(/^[\\/]+/, "").split(/[\\/]/);
 		return { local: server === "." && String(namespace).toLowerCase() === "pipe" && rest.length > 0 && !rest.some((seg) => seg === "." || seg === ".." || seg === ""), display };
 	}
 	if (scheme === "tcp") {
@@ -313,28 +314,32 @@ export function classifyDockerEndpoint(host) {
 }
 
 /**
- * The endpoint with any credentials removed, for logs and output. Nothing is touched without an `@`. A URL that
- * parses loses its userinfo exactly where a URL parser (and the CLI's, which splits the same way) finds it: the
- * authority ends at the first `/`, `?` or `#`, and a password may itself hold an `@`. One that does NOT parse --
- * `ssh://bob:s3cr/et@remote` or `ssh://bob:pa?ss@remote`, which the CLI echoes verbatim and then refuses to
- * dial -- is cut from `://` to its LAST `@` anywhere: it names no host the CLI will dial, so there is no host to
- * get wrong, and any `/`, `?` or `#` in it is as likely to be inside a password as to end one.
- * `unix` and `npipe` are paths, where an `@` is a filename character, so only an authority is cut there.
+ * The endpoint as it may be logged and printed. Verbatim when it holds no `@`, since there is then no userinfo to
+ * hide. With one, it is REDUCED rather than edited, because editing is what kept failing: a password may itself
+ * hold `@`, `/`, `?` or `#`, so any rule that splits the string and keeps a part can keep part of a password
+ * (`ssh://bob:p@ss?word@remote` parses with host `ss`). So:
+ *   - a URL that parses with no password shows `scheme://host[:port]` and nothing else -- a username is dropped,
+ *     and so are a path, query and fragment, which is where a stray `@` would otherwise sit;
+ *   - one that parses WITH a password, or does not parse, or has no host, shows that credentials were withheld
+ *     and nothing of the value. The CLI refuses to dial every such form anyway (ssh does not take a plain-text
+ *     password), so no host an operator needs is lost.
+ * `unix` and `npipe` are paths, where `@` is a filename character, so only an authority before the path is cut.
  */
 function displayEndpoint(host, scheme) {
 	if (!host.includes("@")) return host;
 	if (scheme === "unix" || scheme === "npipe") {
 		return host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)/i, (_m, prefix, authority) => prefix + authority.slice(authority.lastIndexOf("@") + 1));
 	}
+	let url = null;
 	try {
-		const url = new URL(host);
-		if (url.username === "" && url.password === "") return host;
-		url.username = "";
-		url.password = "";
-		return url.href;
+		url = new URL(host);
 	} catch {
-		return host.replace(/^([a-z][a-z0-9+.-]*:\/\/)(.*)$/is, (_m, prefix, rest) => prefix + rest.slice(rest.lastIndexOf("@") + 1));
+		// not a URL this parser accepts
 	}
+	// The scheme is named only when the value really starts `scheme://`: in `bob:pw@host` the "scheme" is a username.
+	const prefix = scheme && host.slice(0, scheme.length + 3).toLowerCase() === `${scheme}://` ? `${scheme}://` : "";
+	if (url === null || url.password !== "" || url.host === "") return `${prefix}(credentials not shown)`;
+	return `${url.protocol}//${url.host}`;
 }
 
 /**
@@ -346,13 +351,13 @@ function displayEndpoint(host, scheme) {
  *   - the SPAWN errno through `transient.mjs`'s allow-list (no docker binary is determinate; a spawn out of
  *     processes or descriptors, or refused with `EACCES`, is not);
  *   - the timer's kill is a `timeout`, and a death by any other signal is named by it; both are transient;
- *   - a NON-ZERO EXIT is determinate. It is the CLI's own answer, and on docker 27.4 every one measured is a
- *     configuration refusal that answers the same until the operator changes something: a context that does not
- *     exist, a `DOCKER_HOST` it cannot parse, a context file it cannot parse. Telling the one exception apart --
- *     `permission denied` on the context store, which can be passing -- would need a table of another tool's
- *     stderr prose, the shape that entry rejects for `gh auth token` on exactly this argument, so the residual is
- *     named instead: under a floor such an error exits 2 at boot (and is most often a service `User=` that
- *     cannot read the operator's docker config, which is not passing either);
+ *   - a NON-ZERO EXIT is determinate. It is the CLI's own answer, and on docker 27.4 most measured are
+ *     configuration refusals that answer the same until the operator changes something: a context that does not
+ *     exist, a `DOCKER_HOST` it cannot parse, a context file it cannot parse. Some are not -- `permission denied`
+ *     on the context store, a CLI starved of file descriptors -- and telling them apart would need a table of
+ *     another tool's stderr prose, the shape that entry rejects for `gh auth token` on exactly this argument. So
+ *     the residual is named instead: under a floor such a passing failure exits 2 at boot, and per job it
+ *     refuses with the fixed comment as `backend-floor-unobserved` rather than retrying;
  *   - output that does not parse on a clean exit is determinate.
  */
 export function classifyEndpointFailure({ error = null, code = null } = {}) {
