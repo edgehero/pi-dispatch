@@ -938,25 +938,3 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }), null);
 	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
 });
-
-test("the reaper removes a key's transcript before the stamp beside it", () => {
-	// An absent stamp reads as local, so a sweep that removed the stamp first would, for a moment, leave another
-	// venue's transcript readable as a local one.
-	const order = [];
-	const { store, sessionsDir } = fixture({
-		ttlDays: 1,
-		now: () => Date.now() + 3 * 86400000,
-		fs: {
-			...realFs,
-			unlinkSync: (p) => (order.push(["unlink", String(p)]), realFs.unlinkSync(p)),
-			rmSync: (p, opts) => (order.push(["rm", String(p), existsSync(join(String(p), SESSION_FILE_NAME))]), realFs.rmSync(p, opts)),
-		},
-	});
-	const key = sessionKeyFor(ghIssue);
-	seed(sessionsDir, key, { venue: "far" });
-	store.reapSessions();
-	const rm = order.find(([op, p]) => op === "rm" && p.endsWith(key));
-	assert.ok(rm, "the key was swept");
-	assert.equal(rm[2], false, "its transcript was already gone when the directory went");
-	assert.equal(existsSync(join(sessionsDir, key)), false);
-});

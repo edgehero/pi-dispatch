@@ -3013,24 +3013,28 @@ validator rather than a second copy of it.
   a failed post-swap stamp leaves the sentinel, which cold-starts everywhere rather than attributing a
   transcript to the wrong venue. **The resolve path re-checks the stamp after its copy**, because the read
   and the copy are not under the promotion lock: a stamp that no longer names the job's venue empties the
-  staged copy and cold-starts; a fault while emptying it removes the staged directory, so a `null` resolve
-  leaves nothing readable under the job dir. What `venue-changed` does not distinguish is stated rather
+  staged copy and cold-starts; a fault while emptying it removes the staged directory, best effort, so a
+  `null` resolve leaves nothing readable under the job dir unless that removal fails too. What `venue-changed` does not distinguish is stated rather
   than hidden: it also names a leftover sentinel from an interrupted promotion, an unreadable stamp, and a
   SAME-venue promotion whose sentinel is in place when another job reads or re-checks the stamp (that job
   cold-starts once), exactly as `pi-version-changed` already covers an unreadable version stamp. A
   same-venue promotion that lands ENTIRELY between another job's read and its copy is not caught: that job
   resumes the newer transcript, which no gate judged -- the unguarded race `pi-version` has always had.
-  **A process killed inside the promotion lock** leaves the sentinel and, as any kill inside that lock
-  always has, the lock itself: the key cold-starts on every venue and later promotions report `locked`
-  until the reaper sweeps it (never, with `PI_SESSIONS_TTL_DAYS=0`, until the lock file is removed). **Two
+  **A process killed inside the promotion lock** leaks the lock, as any kill there always has, so later
+  promotions report `locked` until the reaper sweeps the key. Killed between the sentinel and the real stamp,
+  it also leaves the sentinel, and the key cold-starts on every venue meanwhile; killed after the stamp, the
+  stamped venue keeps resuming. The reaper keys only on the transcript's mtime, so it sweeps such a key once
+  that expires -- never with `PI_SESSIONS_TTL_DAYS=0`, and never for a key whose FIRST promotion was killed
+  before any transcript landed; those stay locked until the lock file is removed. **Two
   triggers on one key that name different venues** replace each other's transcript and so cold-start on
   every alternation; that is the cost of keeping the venue out of the key, and it is the right way round,
-  since the alternative resumes one venue's conversation in the other. The reaper removes a key's
-  transcript before the rest of its directory, so a concurrent read never sees an unstamped transcript
-  mid-sweep. Two residuals: two complete promotions from different venues inside one copy window (A, B, A)
-  leave the stamp matching again and the re-check cannot see the round trip; and a worker older than #277
-  sharing a `PI_SESSIONS_DIR` neither reads nor writes the stamp, so every worker on a shared store must run
-  a release carrying it before a second venue is blessed.
+  since the alternative resumes one venue's conversation in the other. Three residuals: two complete
+  promotions from different venues inside one copy window (A, B, A) leave the stamp matching again and the
+  re-check cannot see the round trip; the reaper takes no lock and removes a key in one recursive walk, so a
+  promotion landing on an EXPIRED key during its own sweep could, for a moment, leave that transcript
+  without its stamp, which reads as `local`; and a worker older than #277 sharing a `PI_SESSIONS_DIR`
+  neither reads nor writes the stamp, so every worker on a shared store must run a release carrying it
+  before a second venue is blessed.
 - **The chain counter**: an integer file beside the transcript, written immediately after the swap and
   under the same promotion lock, so it can never describe a transcript older than the one now in place.
   **It counts the HOST'S DELIVERIES**, incremented whenever the host handed this key's transcript to a

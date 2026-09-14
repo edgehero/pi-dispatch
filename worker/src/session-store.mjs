@@ -206,15 +206,16 @@ export function makeSessionStore({
 		} catch (err) {
 			// A history fault must never fail the prepare that asked.
 			log("session_store_failed", { phase: "resolve", reason: err?.message });
-			// `null` means NO MOUNT AND NOTHING WRITTEN, so make the second half true. A fault after the copy --
-			// a partial copy, or the venue re-check failing to empty a transcript another venue just promoted
-			// (#277) -- would otherwise leave that file under the job dir, which is mounted `/job:ro`: no
-			// `/session`, but the transcript readable at `/job/session/current.jsonl` all the same.
+			// `null` means NO MOUNT AND NOTHING WRITTEN, so make the second half true, best effort. A fault after
+			// the copy -- a partial copy, or the venue re-check failing to empty a transcript another venue just
+			// promoted (#277) -- would otherwise leave that file under the job dir, which is mounted `/job:ro`:
+			// no `/session`, but the transcript readable at `/job/session/current.jsonl` all the same.
 			if (hostDir !== null) {
 				try {
 					fs.rmSync(hostDir, { recursive: true, force: true });
 				} catch {
-					// Best effort; the job dir itself is removed at teardown.
+					// If this fails too, the copy stays under the job dir, which the container mounts before
+					// teardown removes it. Two consecutive disk faults on one path; nothing further to try.
 				}
 			}
 			return null;
@@ -280,10 +281,12 @@ export function makeSessionStore({
 				// sits under another venue's stamp and the next job there resumes it. So every promotion first
 				// writes a stamp no venue matches. If that write fails, nothing has been swapped and the outer
 				// catch reports `promote-failed`; if the process dies after it, the key cold-starts everywhere
-				// until a promotion completes -- and a process killed anywhere inside this lock also leaks the lock
-				// itself, so later promotions report `locked` until the reaper sweeps the key (that half predates
-				// the stamp). Unconditional rather than only on a venue change, so the decision needs no read of
-				// the stamp under the lock and there is no branch to get wrong.
+				// until a promotion completes. A process KILLED inside this lock also leaks the lock itself, as it
+				// always has, so later promotions report `locked` until the reaper sweeps the key -- which it does
+				// only once the transcript's own mtime expires, and never for a key whose first promotion was
+				// killed before any transcript landed (INT-SESSION-STORE-CONTRACT). Unconditional rather than only
+				// on a venue change, so the decision needs no read of the stamp under the lock and there is no
+				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
 				fs.renameSync(tmp, canonicalFile(session.key));
 				// The real stamp, straight after the swap and BEFORE the pi-version write, which can throw: a
@@ -653,15 +656,12 @@ export function makeSessionStore({
 				const dir = join(sessionsDir, name);
 				const st = fs.lstatSync(join(dir, SESSION_FILE_NAME));
 				if (st.mtimeMs < cutoff) {
-					// The transcript FIRST, then the directory. An absent venue stamp reads as `local` (#277), and a
-					// recursive remove in whatever order the filesystem walks could delete the stamp while the
-					// transcript is still readable, for a moment in which another venue's transcript reads as local.
-					// With the transcript gone first, a concurrent read in that moment finds it `absent`.
-					try {
-						fs.unlinkSync(join(dir, SESSION_FILE_NAME));
-					} catch {
-						// A transcript that is not a plain file (a planted directory) is left to the recursive remove.
-					}
+					// ONE recursive remove, and the transcript's age is the only thing it keys on. Removing the
+					// transcript first (so an absent stamp, which reads as `local`, can never sit beside a readable
+					// transcript mid-sweep) was tried under #277 and withdrawn: a remove that then failed transiently
+					// left the directory with no transcript, which this loop never looks at again, so a leaked lock
+					// in it wedged the key for good. The race it closed needs a promotion landing on an EXPIRED key
+					// during its own sweep on a deployment with a second venue; INT-SESSION-STORE-CONTRACT names it.
 					fs.rmSync(dir, { recursive: true, force: true });
 					log("reaped_session", { key: name });
 				}
