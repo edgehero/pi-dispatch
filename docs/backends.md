@@ -107,8 +107,9 @@ worth calling out because they are the ones adapters get wrong:
   The worker decides this from facts at boot and before each job, never by starting a probe container. It
   refuses by name what no uid can serve: rootless Docker or Podman, userns-remap, a root worker, Docker
   Desktop on Linux (WSL is not affected), an image without the `anyUid` capability for another uid, and a
-  `--user` whose primary group is 0 or the docker socket's. An adapter for another runtime answers the same
-  question in its own terms.
+  `--user` whose primary group is 0 or the docker socket's. `pi-dispatch doctor` names the answer for the shell
+  it runs in, and `pi-dispatch doctor --live` runs its probe as that user and reads it back. An adapter for
+  another runtime answers the same question in its own terms.
 
 ## A declaration is not a claim that the property holds
 
@@ -199,7 +200,9 @@ take. Print it beside your findings; nothing prints it for you.
 
 **The `local` backend's read-back is `pi-dispatch doctor --live`.** It starts one container from the job
 builder (no network, no environment, fixture folders, `sleep` in place of the entrypoint), reads the six
-properties off it, folds in the egress canary, and removes it by ID. It runs only when the docker CLI is
+properties off it, folds in the egress canary, and removes it by ID. It runs as the job user a local job on
+this host gets (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the
+host; where a local job would be refused, it runs nothing and says so. It runs only when the docker CLI is
 observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own
 folders or the images your triggers name, and doctor prints those limits beside a green result.
 `worker/src/live-probes.mjs` is the worked example of a `readBack`: its verdicts are the shape the harness

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -33,7 +33,7 @@ import {
 
 const FIXTURE = liveFixture("/tmp/pi-dispatch-live-1-abc");
 const ID = "a".repeat(64);
-const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync };
+const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
 
 // What the shipped image reads under the builder's flags (measured on docker 27.4 / Docker Desktop), and what the
 // same image reads WITHOUT them. The second is the non-vacuity fixture: CapEff is 0 in both.
@@ -83,7 +83,18 @@ test("the pinning probe is the builder's argv against an image no registry can s
 
 test("the scripts interpolate nothing from the host: the nonce rides argv", () => {
 	assert.ok(!STATUS_SCRIPT.includes("${"), "no template value");
+	assert.ok(!WRITE_SCRIPT.includes("${"), "no template value");
 	assert.match(WRITE_SCRIPT, /"\$1"/);
+	// Issue #341: it uses every mount a job uses, the 0700 job dir first.
+	for (const step of ["cd /job", "ls /job", "/workspace", "/outbox", "/session"]) assert.ok(WRITE_SCRIPT.includes(step), step);
+});
+
+test("the probes run as the job user a job on this host gets, and still carry no environment at all (#341)", () => {
+	const args = liveProbeRunArgs({ image: "pi-job:x", name: "pi-dispatch-live-probe-1-n", fixture: FIXTURE, sleepSeconds: 90, user: "1234:1234" });
+	assert.ok(args.includes("--user=1234:1234"));
+	assert.equal(args.includes("-e"), false, "not even HOME: the probe runs no pi and reads no home");
+	assert.ok(pinningProbeRunArgs({ name: "pi-dispatch-live-pin-1-n", nonce: "n", fixture: FIXTURE, user: "1234:1234" }).includes("--user=1234:1234"));
+	assert.ok(!liveProbeRunArgs({ image: "pi-job:x", name: "p", fixture: FIXTURE, sleepSeconds: 90 }).some((a) => a.startsWith("--user")), "no user, no flag: the image's own");
 });
 
 // --- the verdicts -----------------------------------------------------------------------------------------------
@@ -162,6 +173,23 @@ test("localFolders tells a folder the job user cannot write from a write the hos
 	assert.match(invisible.detail, /not visible in the host folder/);
 	assert.equal(invisible.cause, "not-visible");
 	assert.equal(localFoldersVerdict({ code: 1, stdout: "", hostRead: null, nonce: "n" }).warn, true, "a vanished container is not read back, never a failure");
+});
+
+test("localFolders reads every mount a job uses, in a job's modes, and the host owner of what the job wrote (#341)", () => {
+	const unreadable = localFoldersVerdict({ code: 0, stdout: "job-unreadable\n", hostRead: null, nonce: "n" });
+	assert.deepEqual([unreadable.ok, unreadable.cause], [false, "job-unreadable"]);
+	for (const mount of ["/outbox", "/session"]) {
+		const v = localFoldersVerdict({ code: 0, stdout: `not-writable ${mount}\n`, hostRead: null, nonce: "n" });
+		assert.deepEqual([v.ok, v.cause], [false, "mount-not-writable"], mount);
+		assert.match(v.detail, new RegExp(mount));
+	}
+	assert.equal(localFoldersVerdict({ code: 0, stdout: "not-writable /workspace\n", hostRead: null, nonce: "n" }).cause, "not-writable");
+	const theirs = localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n", hostOwner: 1001, euid: 1234 });
+	assert.deepEqual([theirs.ok, theirs.cause], [false, "not-yours"]);
+	assert.match(theirs.detail, /uid 1001 on the host, not by this shell's uid 1234/);
+	assert.equal(localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n", hostOwner: 1234, euid: 1234 }).ok, true);
+	assert.equal(localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n", hostOwner: 1001, euid: undefined }).ok, true, "no uid to compare (Windows): skipped, not failed");
+	assert.equal(localFoldersVerdict({ code: 0, stdout: "wrote\n", hostRead: "n", nonce: "n", hostOwner: null, euid: 1234 }).ok, true, "an owner the host could not stat: skipped, not failed");
 });
 
 test("imagePinning holds only for a refusal with no pull attempt, and the image still absent", () => {
@@ -439,15 +467,41 @@ test("the container sweep removes a probe or pin a DEAD pid left, by ID, and say
 	assert.deepEqual(await sweepStaleContainers({ step: refusing, pid: 300, isAlive: () => false }), [], "a removal that failed is not reported as done");
 });
 
-test("the fixture is created under jobsDir, resolved, and traversable by the job user", async () => {
+test("the fixture is created under jobsDir, resolved, EMPTY, and in a job's own modes: 0700 job and session dirs (#341)", async () => {
 	const docker = fakeDocker();
-	const seen = [];
-	const fs = { ...nodeFs, chmodSync: (p, m) => (seen.push([p, m]), chmodSync(p, m)) };
+	const chmods = [];
+	const made = new Map();
+	const fs = {
+		...nodeFs,
+		chmodSync: (p, m) => (chmods.push([p, m]), chmodSync(p, m)),
+		mkdirSync: (p, o) => {
+			const r = mkdirSync(p, o);
+			if (p.includes("pi-dispatch-live-4242-")) made.set(p.split("/").at(-1), { mode: statSync(p).mode & 0o777, entries: readdirSync(p).length });
+			return r;
+		},
+	};
 	const args = probeArgs(docker, { fs });
 	await runLiveProbes(args);
-	const root = seen[0][0];
-	assert.ok(root.startsWith(realpathSync(args.jobsDir)), "under the worker's own jobs dir, realpath'd");
-	assert.ok(seen.every(([, m]) => m === 0o755));
-	assert.equal(seen.length, 6, "the root and the five mount directories");
-	assert.equal(existsSync(root), false);
+	assert.deepEqual(chmods, [], "no chmod widens a mode: a probe in friendlier modes than a job passed on hosts where every job failed");
+	assert.deepEqual([...made.keys()].sort(), ["global", "job", "outbox", "session", "workspace"]);
+	for (const dir of ["job", "session"]) assert.equal(made.get(dir).mode, 0o700, `${dir} is 0700, as prepare's mkdtemp and the session store make it`);
+	for (const [dir, { entries }] of made) assert.equal(entries, 0, `${dir} is created empty (CONST-ISOLATION-CONTAINER-PER-JOB)`);
+	const runArgs = docker.calls.find((a) => a[0] === "run" && a.includes("sleep"));
+	const jobMount = runArgs.find((a) => a.endsWith(":/job:ro"));
+	assert.ok(jobMount.startsWith(realpathSync(args.jobsDir)), "under the worker's own jobs dir, realpath'd");
+	assert.equal(existsSync(jobMount.split(":")[0]), false, "and removed");
+});
+
+test("a live run passes the job user into both probes, checks the host owner, and says what uid PID 1 ran as (#341)", async () => {
+	const docker = fakeDocker();
+	const args = probeArgs(docker, { user: "1234:1234", euid: process.geteuid?.() ?? 0 });
+	const result = await runLiveProbes(args);
+	assert.equal(result.ran, true);
+	assert.ok(docker.calls.filter((a) => a[0] === "run").every((a) => a.includes("--user=1234:1234")), "the reading probe and the pinning probe alike");
+	assert.equal(result.ranAs, 1001, "read from PID 1's Uid line, not assumed from the decision");
+	assert.equal(result.verdicts.find((v) => v.property === "localFolders").ok, true, "this shell wrote the fake's nonce, so the owner is this shell's");
+
+	const other = fakeDocker();
+	const theirs = await runLiveProbes(probeArgs(other, { euid: 999_999, fs: { ...nodeFs, statSync: () => ({ uid: 1001 }) } }));
+	assert.equal(theirs.verdicts.find((v) => v.property === "localFolders").cause, "not-yours");
 });

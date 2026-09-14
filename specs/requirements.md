@@ -1816,6 +1816,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   makes and removes unprompted: typing the flag is the approval, as it is for `sandbox`; the probe container
   and its fixture directory are named before either exists; and both are removed when the read ends, or by the
   next `--live` when that run was interrupted, which names what it removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
+- **`doctor` says who a local job runs as** (issue #341). From the same facts and the same resolver the worker
+  uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its HOME, or the
+  refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs one by
+  one, and it warns when this shell's uid is not the account a system unit runs the worker as, since the answer
+  is then this shell's rather than the service's. `doctor --live` reads that decision back.
 - **`doctor` reports a bound that is set and asleep.** A knob an operator sets, doctor stays silent about,
   and nothing enforces is this project's own believed-on-while-off failure by another route, so where a
   feature's control CAN be inert for a reason the operator cannot see from their own configuration,
@@ -1922,7 +1927,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   Given `doctor --live`, then a line names the probe container, its image and its fixture location before the
   first docker command, no check it renders carries a fix action, and afterwards neither the container nor the
   fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and doctor's
-  output is unchanged.
+  output is unchanged. Given a native Linux daemon and a shell uid other than 1001 with an `anyUid` image, then
+  doctor names the `<uid>:<gid>` it passes as `--user` and `doctor --live` runs its probe with that `--user` and
+  reads that uid back; given a rootless daemon, then doctor fails with the worker's own refusal text and `--live` runs no
+  container.
 
 ## Notes (not requirements)
 
@@ -2001,6 +2009,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #341, part 3. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: a bullet saying `doctor` names who a local job runs as, from the worker's own resolver and with no container, failing only for what stops the worker booting and warning when this shell is not the account a system unit runs the worker as; Acceptance gains the native-Linux and rootless cases, for `doctor` and `doctor --live`. Its no-unshown-mutation clause is UNCHANGED, checked: deciding starts nothing. |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each: the sandbox env they list as exactly `TERM` and `TMOUT` also carries the proxy variables when egress is armed (true since #202 and never written here) and `HOME=/home/pi` beside `--user` when the run had a job user. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. |
 | 2026-09-14 | Issue #341, part 1. **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the Chromium assertion gains its arbitrary-uid half for an image declaring `anyUid` -- measured in a native-Linux lab, today's image renders as `pi` and fails as uid 4242 with or without `HOME`, so a label claiming the capability without the render would lie about the one tool that fails loudest. `image/verify-image.sh` runs both, and CI's image job runs the script. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: nothing doctor or `up` does moves in this part. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED, in the Statement**: `doctor [--fix] [--live]`, and the "never perform an unshown host mutation" clause now names what `--live` adds -- a probe container and a fixture, shown before they exist and removed when the read ends, approved by typing the flag, beside the egress canary's existing unprompted network and probes -- rather than leaving a live read-back to contradict it. Acceptance gains the `--live` case and the case that nothing else starts a probe. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: the probe shares the builder, not the sandbox's launcher, names or reaper. |

@@ -67,22 +67,26 @@ export function liveFixture(root) {
 	return { jobDir: `${root}/job`, workspace: `${root}/workspace`, outboxDir: `${root}/outbox`, sessionDir: `${root}/session`, globalPiDir: `${root}/global` };
 }
 
-/** The builder options both probe containers share: the fixture mounts, no network, and no environment at all. */
-function probeOptions({ image, name, fixture }) {
-	return { image, name, env: {}, network: "none", ...fixture };
+/**
+ * The builder options both probe containers share: the fixture mounts, no network, no environment at all, and the
+ * job user a job on this host would get (issue #341). `user` rides the builder's own field, so the probe is `--user`
+ * exactly where a job is; there is still no `-e`, not even HOME, because the probe runs no pi and reads no home.
+ */
+function probeOptions({ image, name, fixture, user = null }) {
+	return { image, name, env: {}, network: "none", user, ...fixture };
 }
 
 /** The probe container's argv: the job builder's, detached, with `sleep <derived seconds>` as its whole program. */
-export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds() }) {
-	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
+export function liveProbeRunArgs({ image, name, fixture, sleepSeconds = liveSleepSeconds(), user = null }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), extraFlags: ["-d", "--entrypoint", "sleep"] }), String(sleepSeconds)];
 }
 
 /**
  * The pinning probe's argv: the job builder's, detached, against an image this host does not have. Detached so a
  * container that WAS created prints the ID it is removed by; with `--pull=never` in the builder none should be.
  */
-export function pinningProbeRunArgs({ name, nonce, fixture }) {
-	return buildDockerRunArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture }), extraFlags: ["-d"] });
+export function pinningProbeRunArgs({ name, nonce, fixture, user = null }) {
+	return buildDockerRunArgs({ ...probeOptions({ image: absentImageRef(nonce), name, fixture, user }), extraFlags: ["-d"] });
 }
 
 /**
@@ -95,8 +99,16 @@ export const STATUS_SCRIPT = [
 	'else echo "cgroup:v1"; echo "pids.max:$(cat /sys/fs/cgroup/pids/pids.max 2>/dev/null)"; echo "memory.max:$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"; fi',
 ].join("\n");
 
-/** The write probe. The nonce rides argv as `$1`, never the script text; `-w` answers writability without prose. */
-export const WRITE_SCRIPT = 'if [ -w /workspace ]; then printf %s "$1" > /workspace/.pi-dispatch-live-probe && echo wrote; else echo not-writable; fi';
+/**
+ * The write probe, as a job uses its mounts (issue #341): traverse and list the `0700` job dir, then write the
+ * workspace, the outbox and the session. The nonce rides argv as `$1`, never the script text; `-w` answers
+ * writability without prose, and the FIRST mount that fails is named by its fixed path, never by an error message.
+ */
+export const WRITE_SCRIPT = [
+	"cd /job 2>/dev/null && ls /job >/dev/null 2>&1 || { echo job-unreadable; exit 0; }",
+	'for d in /workspace /outbox /session; do [ -w "$d" ] || { echo "not-writable $d"; exit 0; }; done',
+	'printf %s "$1" > /workspace/.pi-dispatch-live-probe && printf %s "$1" > /outbox/.pi-dispatch-live-probe && printf %s "$1" > /session/.pi-dispatch-live-probe && echo wrote',
+].join("\n");
 
 /** The fields of `/proc/1/status` and the cgroup lines the verdicts read, or `null` for each one absent. */
 export function parseStatus(output) {
@@ -204,14 +216,25 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
  * LOCAL FOLDERS: a nonce written inside `/workspace` and read on the host, which is what "edited in place" means.
  * A folder the job user cannot write, and a write that does not show up on the host, are different failures with
  * different fixes, so they are told apart -- by `[ -w ]` inside, never by an error message.
+ *
+ * Issue #341 widens it to every mount a job uses, with the fixture in a job's real modes: a `0700` job dir the job
+ * user cannot list (`job-unreadable`), an outbox or session it cannot write (`mount-not-writable`), and a nonce the
+ * host sees owned by a uid other than this shell's (`not-yours`), which is a worker that could not clean up after
+ * its own job. The owner check is skipped where there is no uid to compare (`euid` undefined, as on Windows) or the
+ * host could not stat the file.
  */
-export function localFoldersVerdict({ code, stdout, hostRead, nonce }) {
+export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner = null, euid = undefined }) {
 	if (code !== 0) return notReadBack("localFolders", "the write probe did not run in the container");
 	const said = String(stdout ?? "").trim();
-	if (said === "not-writable") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
+	if (said === "job-unreadable") return verdict("localFolders", false, "the job user cannot list a 0700 job directory this shell created, so no job here can read its own inputs", { cause: "job-unreadable" });
+	if (said === "not-writable /workspace" || said === "not-writable") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
+	if (said === "not-writable /outbox" || said === "not-writable /session") return verdict("localFolders", false, `the job user cannot write ${said.slice("not-writable ".length)}, a mount every job of that kind writes`, { cause: "mount-not-writable" });
 	if (said !== "wrote") return notReadBack("localFolders", "the write probe gave no answer");
 	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace is not visible in the host folder, so the folder is not the one edited in place", { cause: "not-visible" });
-	return verdict("localFolders", true, "a file written inside /workspace was read back from the host folder");
+	if (typeof euid === "number" && typeof hostOwner === "number" && hostOwner !== euid) {
+		return verdict("localFolders", false, `a file the job wrote is owned by uid ${hostOwner} on the host, not by this shell's uid ${euid}, so the worker could not remove what a job leaves`, { cause: "not-yours" });
+	}
+	return verdict("localFolders", true, `every mount a job uses was used as the job user, and a file written inside /workspace was read back from the host folder${typeof euid === "number" && typeof hostOwner === "number" ? `, owned by this shell's uid ${euid}` : ""}`);
 }
 
 /**
@@ -259,7 +282,7 @@ export function egressVerdict({ armed, results }) {
  * pid-and-nonce name only when no ID came back, which a CLI killed or timed out mid-create can leave) and the
  * fixture, whatever happened above it.
  */
-export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS }) {
+export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS, user = null, euid = undefined }) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun("this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run");
 	if (endpoint?.local !== true) return notLocal;
@@ -275,7 +298,7 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
 	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): the host mutation this makes is named, with where it lives
 	// and that it goes away, before the sweep or the fixture touches anything.
-	announce(`starting ${names.probe} from ${image} (no network, no environment) with a fixture under ${jobsDir}; both are removed when the read-back ends, as is anything an interrupted earlier run left`);
+	announce(`starting ${names.probe} from ${image} (no network, no environment, ${user ? `as the job user ${user}` : "as the image's own user"}) with a fixture under ${jobsDir}; both are removed when the read-back ends, as is anything an interrupted earlier run left`);
 	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive }))];
 
 	let root = null;
@@ -292,11 +315,12 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 			fs.mkdirSync(jobsDir, { recursive: true });
 			root = fs.mkdtempSync(`${jobsDir}/${names.fixturePrefix}`);
 			root = fs.realpathSync(root);
-			fs.chmodSync(root, 0o755);
 			fixture = liveFixture(root);
-			for (const dir of Object.values(fixture)) {
-				fs.mkdirSync(dir, { recursive: true });
-				fs.chmodSync(dir, 0o755);
+			// A JOB'S MODES, not friendlier ones (issue #341). A job's dir is a `0700` mkdtemp and its session dir `0700`;
+			// this fixture used to chmod every directory `0755`, which is how a probe passed on hosts where every job
+			// failed. The rest take the default mode, as a job's clone and outbox do. Still created EMPTY.
+			for (const [key, dir] of Object.entries(fixture)) {
+				fs.mkdirSync(dir, { recursive: true, ...(key === "jobDir" || key === "sessionDir" ? { mode: 0o700 } : {}) });
 			}
 		} catch (err) {
 			// The SAME `notes` array the `finally` below pushes into, so a removal that fails there is still reported.
@@ -304,7 +328,7 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 		}
 
 		probeTried = true;
-		const started = await step(liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs) }));
+		const started = await step(liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user }));
 		// The ID is taken whenever one was printed, whatever the exit. A CLI killed or timed out after the create can
 		// leave a container that never started, which `--rm` does not remove; a start the daemon refused with `--rm` set
 		// is removed by the daemon (measured, exit 127), and removing it again is harmless.
@@ -313,7 +337,7 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
 		}
 
-		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture })).mounts;
+		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
 		const mountSet = inspected?.code === 0 ? mountSetVerdict(inspected.stdout, { expected, home, sessionsDir }) : notReadBack("mountSet", "docker inspect did not answer");
 
@@ -324,22 +348,26 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 
 		const written = await step(["exec", probeId, "sh", "-c", WRITE_SCRIPT, "sh", nonce]);
 		let hostRead = null;
+		let hostOwner = null;
 		try {
 			hostRead = fs.readFileSync(`${fixture.workspace}/.pi-dispatch-live-probe`, "utf8");
+			hostOwner = fs.statSync(`${fixture.workspace}/.pi-dispatch-live-probe`).uid;
 		} catch {
-			hostRead = null;
+			// hostRead null is "not visible"; a read that worked with a stat that did not leaves the owner unchecked
 		}
-		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce });
+		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce, hostOwner, euid });
 
 		pinTried = true;
-		const pinned = await step(pinningProbeRunArgs({ name: names.pin, nonce, fixture }));
+		const pinned = await step(pinningProbeRunArgs({ name: names.pin, nonce, fixture, user }));
 		pinId = containerIdOf(pinned);
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
 		const imagePinning = imagePinningVerdict({ code: pinned?.code, output: `${pinned?.stdout ?? ""}${pinned?.stderr ?? ""}`, stillAbsent });
 
 		const byProperty = { isolation, mountSet, egress: egressVerdict(egress ?? {}), imagePinning, nonRoot, localFolders };
-		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept };
+		// The uid PID 1 actually ran as, for doctor's job-user line: the decision it was given, read back.
+		const ranAs = Array.isArray(status?.uids) && /^\d+$/.test(status.uids[1] ?? "") ? Number(status.uids[1]) : null;
+		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept, ranAs };
 	} finally {
 		for (const [what, id, tried, name] of [["probe container", probeId, probeTried, names.probe], ["pinning container", pinId, pinTried, names.pin]]) {
 			if (id !== null) {

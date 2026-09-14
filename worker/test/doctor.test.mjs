@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -3111,7 +3111,7 @@ function liveOk({ uid = "1001" } = {}) {
 		},
 		"docker inspect --format={{json .Mounts}}": () => ({ code: 0, output: JSON.stringify(volumes.map((v) => ({ Type: "bind", Source: v.split(":")[0], Destination: v.split(":")[1], RW: v.split(":")[2] !== "ro" }))) }),
 		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS(uid) },
-		[`docker exec ${LIVE_ID} sh -c if [ -w /workspace ]`]: (_cmd, args) => {
+		[`docker exec ${LIVE_ID} sh -c cd /job`]: (_cmd, args) => {
 			const ws = volumes.find((v) => v.split(":")[1] === "/workspace").split(":")[0];
 			writeFileSync(join(ws, ".pi-dispatch-live-probe"), args.at(-1));
 			return { code: 0, output: "wrote\n" };
@@ -3121,7 +3121,12 @@ function liveOk({ uid = "1001" } = {}) {
 		"docker rm -f": 0,
 	};
 }
-const liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync };
+const liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
+// Issue #341: never this machine's ids in a --live test. uid 1001 is the image's own, so the probe runs as the image's
+// user whatever host runs the suite; the job-user tests below choose other ids on purpose.
+const LINUX_1001 = { platform: "linux", release: "6.8.0-test", euid: 1001, egid: 1001 };
+// The host owner the probe's write reads as, for that identity: the fake container writes as THIS test process.
+const liveFsAs = (uid) => ({ ...liveFs, statSync: (p) => Object.assign(statSync(p), { uid }) });
 const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: mkdtempSync(join(tmpdir(), "pi-live-doctor-")), ...extra });
 
 test("doctor without --live is byte-identical and spawns no probe; a truthy non-boolean `live` runs nothing either", async () => {
@@ -3142,7 +3147,7 @@ test("doctor --live reads the six back, reports the limits, leaves no fixture, a
 	const env = liveEnv();
 	const { out, text } = capture();
 	const calls = [];
-	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 0, text());
 	assert.equal(calls.filter((c) => c.args[0] === "context").length, 2, "the endpoint is read by the collection AND again right before the probe");
 	for (const property of ["isolation", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
@@ -3159,7 +3164,7 @@ test("doctor --live reads the six back, reports the limits, leaves no fixture, a
 
 test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
 	const { out, text } = capture();
-	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 1);
 	assert.match(text(), /✗ read back on local: nonRoot does NOT hold -- declared asserted, observed: Uid 0 0 0 0/);
 	assert.match(text(), /→ PI_JOB_IMAGE runs as root/);
@@ -3169,7 +3174,7 @@ test("doctor --live on a docker CLI not observed local runs no container and say
 	const { out, text } = capture();
 	const calls = [];
 	const plan = { ...liveOk(), ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } };
-	await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs, isAlive: () => false });
+	await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false });
 	assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))));
 	assert.equal(text().match(/read back on local/g).length, 1);
 	assert.match(text(), /⚠ read back on local: not run -- this shell's docker CLI is not observed to point at this host/);
@@ -3193,7 +3198,7 @@ test("doctor --live gives each localFolders failure its own fix, and names what 
 	const env = liveEnv();
 	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99999-aB3xYz"));
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
-	const invisible = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c if [ -w /workspace ]`]: { code: 0, output: "wrote\n" } };
+	const invisible = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c cd /job`]: { code: 0, output: "wrote\n" } };
 	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...invisible, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
 	assert.match(checks[0].label, /✓?read back on local: removed fixture pi-dispatch-live-99999-aB3xYz, left by an interrupted --live run/);
 	const folders = checks.find((c) => /localFolders does NOT hold/.test(c.label));
@@ -3205,9 +3210,10 @@ test("doctor --fix --live reads back ONCE, after the fix pass, from the re-colle
 	const cwd = mkdtempSync(join(tmpdir(), "pi-live-fix-")); // no .env, so the silent `init` fix runs and forces a re-collect
 	const { out, text } = capture();
 	const calls = [];
-	await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...green }, calls), fileExists: existsSync, cwd, fix: true, promptFn: async () => false, live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...green }, calls), fileExists: existsSync, cwd, fix: true, promptFn: async () => false, live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.match(text(), /re-check after fixes/, "the fixture must actually drive a re-collection");
-	const infos = calls.map((c, i) => [c, i]).filter(([c]) => c.args[0] === "info").map(([, i]) => i);
+	// `docker info` bare: the job-user read (`info --format=...`, issue #341) is a different question.
+	const infos = calls.map((c, i) => [c, i]).filter(([c]) => c.args[0] === "info" && c.args.length === 1).map(([, i]) => i);
 	const probes = calls.map((c, i) => [c, i]).filter(([c]) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-probe")).map(([, i]) => i);
 	assert.equal(infos.length, 2, "collected twice");
 	assert.equal(probes.length, 1, "probed once");
@@ -3218,7 +3224,7 @@ test("doctor --live with PI_JOBS_DIR unset builds its fixture under the injected
 	const tmp = mkdtempSync(join(tmpdir(), "pi-live-tmpdir-"));
 	const { out, text } = capture();
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", TMPDIR: tmp };
-	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.ok(text().includes(`with a fixture under ${tmp}/pi-dispatch/jobs;`), text());
 	assert.deepEqual(readdirSync(join(tmp, "pi-dispatch", "jobs")), [], "and removes it");
 });
@@ -3242,12 +3248,12 @@ test("doctor --live's not-run path still names what it swept", async () => {
 	assert.ok(checks.some((c) => c.warn && new RegExp(`could not be removed: docker rm -f ${LIVE_ID}`).test(c.label)), "a failed removal by ID is said on this path too");
 });
 
-test("doctor --live's not-writable localFolders failure keeps its own uid fix", async () => {
+test("doctor --live's not-writable localFolders failure keeps its own ownership fix", async () => {
 	const env = liveEnv();
 	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
-	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c if [ -w /workspace ]`]: { code: 0, output: "not-writable\n" } };
+	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c cd /job`]: { code: 0, output: "not-writable\n" } };
 	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...notWritable, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
-	assert.match(checks.find((c) => /localFolders does NOT hold/.test(c.label)).fix, /uid 1001/);
+	assert.match(checks.find((c) => /localFolders does NOT hold/.test(c.label)).fix, /the account the worker runs as/, "issue #341: the fix names the worker's uid, no longer the image's 1001");
 });
 
 test("an egress probe that did not RUN is reported as not run, and never passes for a deny", async () => {
@@ -3269,4 +3275,100 @@ test("the egress canary carries a non-rendered readBack, so --live folds it in w
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green));
 	const readBacks = checks.filter((c) => c.readBack).map((c) => c.readBack);
 	assert.deepEqual(readBacks, [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }]);
+});
+
+
+// --- issue #341: the job-user line, and the probe run as the job user ------------------------------------------
+
+const ROOTFUL_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
+const ROOTLESS_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], PidsLimit: false, MemoryLimit: false });
+const LINUX_ID = (euid, egid = euid) => ({ platform: "linux", release: "6.8.0-test", euid, egid });
+const imageLabels = (capabilities) => ({ "docker image inspect --format={{.Id}}": { code: 0, output: `sha256:abc|0.80.7||${capabilities}\n` } });
+const socketStat = () => ({ uid: 0, gid: 2375 });
+const infoPlan = (body) => ({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` } });
+
+test("doctor names who a local job runs as, from the worker's own resolver, and never starts a container for it (#341)", async () => {
+	for (const [label, ids, plan, pattern] of [
+		["worker mode", LINUX_ID(1234), { ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas,anyUid") }, /✓ local: jobs run as uid:gid 1234:1234 \(passed as --user\) with HOME=\/home\/pi/],
+		["uid 1001", LINUX_ID(1001), infoPlan(ROOTFUL_INFO), /✓ local: jobs run as the job image's own user \(this shell is uid 1001/],
+		["macOS", { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 }, {}, /✓ local: jobs run as the job image's own user \(a VM-backed daemon/],
+	]) {
+		const { out, text } = capture();
+		const calls = [];
+		const code = await runDoctor(ghEnv(), { ...ghDeps(out, { ...plan, ...green }, calls), jobUserIdentity: ids, stat: socketStat });
+		assert.match(text(), pattern, label);
+		assert.equal(code, 0, `${label}: ${text()}`);
+		assert.ok(!calls.some((c) => c.args[0] === "run" && c.args.some((a) => /^--user/.test(String(a)))), `${label}: no container is started to decide it`);
+		if (ids.platform === "darwin") assert.ok(!calls.some((c) => c.args.includes("--format={{json .}}")), "macOS asks the daemon nothing");
+	}
+});
+
+test("doctor marks ✗ only what stops the worker booting; a per-job refusal or an undecidable daemon is ⚠ (#341)", async () => {
+	const rootless = capture();
+	assert.equal(await runDoctor(ghEnv(), { ...ghDeps(rootless.out, { ...infoPlan(ROOTLESS_INFO), ...green }), jobUserIdentity: LINUX_ID(1234), stat: () => ({ uid: 1234, gid: 1234 }) }), 1);
+	assert.match(rootless.text(), /✗ local: no job can run as a non-root user that owns its files on this daemon \(rootless\) -- the worker refuses to boot/);
+	assert.match(rootless.text(), /run jobs on a rootful Docker or Podman daemon/, "the fix is the worker's own text");
+
+	for (const [label, ids, plan, pattern] of [
+		["no anyUid", LINUX_ID(1234), { ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas") }, /⚠ local: every job on pi-job:latest is refused as this uid \(job-image-any-uid-unsupported\)/],
+		["docker group", LINUX_ID(1235, 2375), { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid") }, /⚠ local: every local job is refused as this uid \(docker-group\)/],
+		["undecidable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 1, output: "" } }, /⚠ local: which uid a job runs as could not be decided \(exit-1\)/],
+		["unreadable", LINUX_ID(1234), { "docker info --format={{json .}}": { code: 0, output: "not json\n" } }, /⚠ local: no job can run as a non-root user that owns its files on this daemon \(runtime-unreadable\) -- every local job is refused/],
+	]) {
+		const { out, text } = capture();
+		const code = await runDoctor(ghEnv(), { ...ghDeps(out, { ...plan, ...green }), jobUserIdentity: ids, stat: socketStat });
+		assert.match(text(), pattern, label);
+		assert.equal(code, 0, `${label}: a warning, because the worker boots and refuses per job: ${text()}`);
+	}
+});
+
+test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a system unit runs the worker as another account (#341)", async () => {
+	const forwarded = capture();
+	await runDoctor(ghEnv({ PI_FORWARD_ENV: "FOO,HOME" }), { ...ghDeps(forwarded.out, { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), jobUserIdentity: LINUX_ID(1234), stat: socketStat });
+	assert.match(forwarded.text(), /⚠ PI_FORWARD_ENV names HOME, which a job run as --user never receives/);
+
+	const deployDir = mkdtempSync(join(tmpdir(), "pi-unit-user-"));
+	const home = mkdtempSync(join(tmpdir(), "pi-unit-home-"));
+	const unitPath = "/etc/systemd/system/pi-dispatch-worker.service";
+	const unit = `[Service]\nUser=pi\nWorkingDirectory=${deployDir}\n`;
+	for (const [label, user, passwd, want] of [
+		["by name", "pi", () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\n", /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/],
+		["numeric", "4242", () => "", /runs the worker as 4242 \(uid 4242\)/],
+	]) {
+		const { out, text } = capture();
+		const text0 = unit.replace("User=pi", `User=${user}`);
+		await runDoctor(ghEnv(), {
+			...ghDeps(out, { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }),
+			cwd: deployDir,
+			home,
+			platform: "linux",
+			fileExists: (p) => p === unitPath || existsSync(p),
+			jobUserIdentity: LINUX_ID(1234),
+			stat: socketStat,
+			passwd,
+			readUnit: () => text0,
+		});
+		assert.match(text(), want, label);
+	}
+});
+
+test("doctor --live runs its probes as the decided job user and reads the uid back (#341)", async () => {
+	const { out, text } = capture();
+	const calls = [];
+	const plan = { ...liveOk({ uid: "1234" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green };
+	const code = await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.equal(code, 0, text());
+	assert.ok(calls.filter((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-")).every((c) => c.args.includes("--user=1234:1234")), "the reading and the pinning probe");
+	assert.match(text(), /✓ read back on local: the probe ran as uid 1234, the job user this host decides \(1234:1234\)/);
+	assert.match(text(), /it ran as this shell's job user \(shell uid 1234\)/);
+
+	const wrong = capture();
+	assert.equal(await runDoctor(liveEnv(), { ...ghDeps(wrong.out, { ...liveOk({ uid: "1001" }), ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" }), 1);
+	assert.match(wrong.text(), /✗ read back on local: the probe ran as uid 1001, not the decided job user 1234:1234/);
+
+	const refused = capture();
+	const refusedCalls = [];
+	await runDoctor(liveEnv(), { ...ghDeps(refused.out, { ...liveOk(), ...infoPlan(ROOTFUL_INFO), ...imageLabels("replicas"), ...green }, refusedCalls), live: true, liveFs: liveFsAs(1234), jobUserIdentity: LINUX_ID(1234), stat: socketStat, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.match(refused.text(), /⚠ read back on local: not run -- a local job is refused as this uid \(any-uid-unsupported\)/);
+	assert.ok(!refusedCalls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), "no probe for a container no job gets");
 });

@@ -1582,14 +1582,23 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     the probe. It is also not run when the daemon does not answer or `PI_JOB_IMAGE` is absent, or when the fixture
     cannot be created (a jobs dir this shell cannot write is a note, never an exception).
   - **The argv is built by the SAME builder.** `buildDockerRunArgs` with the fixture mounts, `network: "none"`,
-    `env: {}` and `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. It adds
+    `env: {}`, the job user doctor decided for this host (issue #341: the builder's `user` field, so `--user` where
+    a job has it and nothing where it does not, still with no `-e`, not even HOME, since the probe runs no pi) and
+    `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. It adds
     exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and `--cpus` reach
     it by construction. The sleep is DERIVED from the step bound (the three steps that need the container alive,
     at 20 seconds each, plus 30), never a literal.
-  - **Fixtures, not the operator's folders.** One directory from `mkdtemp` under `jobsDirPath(env)`, the same
-    derivation `loadConfig` reads `jobsDir` from, `realpath`ed and `chmod 0755`, with a `0755` subdirectory for
-    every conditional mount (`/job`, `/workspace`, `/outbox`, `/session`, `/opt/pi-global`). No workspace a job
-    produced, no session store and no overlay is mounted.
+  - **Fixtures, not the operator's folders, in a JOB'S modes.** One directory from `mkdtemp` under `jobsDirPath(env)`,
+    the same derivation `loadConfig` reads `jobsDir` from, `realpath`ed, with an EMPTY subdirectory for every
+    conditional mount (`/job`, `/workspace`, `/outbox`, `/session`, `/opt/pi-global`). The job and session
+    directories are `0700`, as prepare's `mkdtemp` and the session store make them, and the rest take the default
+    mode; nothing is `chmod`ed (issue #341: the fixture used to be `0755` throughout, which is how a read-back
+    passed on hosts where every job failed). No workspace a job produced, no session store and no overlay is
+    mounted.
+  - **Not run where a local job would be refused.** Doctor decides the job user first (the worker's own
+    resolver, from this shell's ids and daemon); when that decision refuses a local job (a rootless daemon, a
+    root worker, an image without `anyUid` for this uid, a group row), one ⚠ says so and no docker command runs.
+    An undecidable or unreadable daemon still runs the probe, as the image's own user, and says why.
   - **Names**: `pi-dispatch-live-probe-<pid>-<nonce>`, `pi-dispatch-live-pin-<pid>-<nonce>`, and a fixture
     directory `pi-dispatch-live-<pid>-...`: outside `pi-job-`, `pi-sandbox-` and `pi-dispatch-valkey`, and unique
     per run.
@@ -1614,8 +1623,14 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     - `mountSet`: `docker inspect .Mounts` keyed by destination and read-write flag against the spec's own
       mounts. A mount missing, one extra, one with its RW flipped, the docker socket, the home directory or an
       ancestor of it, or the session store fails.
-    - `localFolders`: a nonce passed as `$1` written inside `/workspace` and read on the host; `[ -w ]` tells a
-      folder the job user cannot write from a write the host cannot see.
+    - `localFolders`: one constant script uses every mount a job uses, as the job user: it traverses and lists
+      the `0700` `/job` (else `job-unreadable`), checks `/workspace` (else `not-writable`) and `/outbox` and
+      `/session` (else `mount-not-writable`) with `[ -w ]`, and writes a nonce passed as `$1` into all three. The
+      nonce is read back on the host (else `not-visible`), and the host owner of that file must be this shell's
+      uid (else `not-yours`: a worker could not remove what a job leaves), a comparison skipped where there is
+      no uid (Windows) or the file cannot be stat'ed.
+    - **The job user**, read back beside the verdicts: the uid PID 1 ran as, against the decided `--user`. A
+      different uid fails; one that could not be read is not read back.
     - `imagePinning`: the builder's argv, detached, against `pi-dispatch-live-probe.invalid/absent:<nonce>`. It
       holds only for a nonzero exit, `No such image`, no `Unable to find image`, and the image still absent
       afterwards; a refusal in other words is not read back.
@@ -1638,8 +1653,11 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `DES-CONTAINER-BACKEND-REGISTRY`, `DES-CLI-SURFACE`, `OQ-012`
 - **Acceptance**: The probe argv contains every member of `ISOLATION_FLAGS` (asserted against the imported
-  array), `--network=none`, `-d`, `--entrypoint sleep` and no `-e`, and ends with the image then the derived
-  sleep. No probe name contains `pi-job-` or `pi-sandbox-`. Given a status reading `CapEff 0` with a nonzero
+  array), `--network=none`, `-d`, `--entrypoint sleep`, `--user=<uid>:<gid>` exactly when a job user was decided,
+  and no `-e`, and ends with the image then the derived sleep. The fixture's job and session directories are
+  `0700`, every fixture directory is empty when the probe starts, and nothing is `chmod`ed. Given a job dir the
+  job user cannot list, localFolders fails `job-unreadable`; given a nonce owned on the host by another uid, it
+  fails `not-yours`; given a decision that refuses a local job, no docker command runs. No probe name contains `pi-job-` or `pi-sandbox-`. Given a status reading `CapEff 0` with a nonzero
   `CapBnd`, isolation fails; given a mount set of the right size with one RW flag flipped, mountSet fails; given
   `Unable to find image`, imagePinning fails; given a root image, nonRoot fails and doctor exits 1. Given a docker
   CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
@@ -4148,3 +4166,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **NEW `INT-LIVE-PROBE-CONTRACT`**, a sibling of `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`: one container from the job builder with `--network=none`, an empty environment and `-d --entrypoint sleep`, fixture mounts under `jobsDirPath`, names by pid and nonce outside every sweep's namespace, announced before and removed by ID in a `finally`, run only on a docker CLI observed local; six verdicts, with `egress` folded from the canary's `readBack` as the one reading not from this builder; the conformance harness's `readBack` shape for other venues. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv changes, and the probe reuses its builder rather than amending its contract. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: the sandbox launcher, its names and its reaper are untouched, and no live-probe name falls in `pi-sandbox-`. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a probe is not a job and writes no record. |
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: the agent-dir bullet becomes a home bullet and is CORRECTED -- an unwritable home does not kill the job with EACCES as it claimed, because pi's `AuthStorage` swallows the lock failure and an env-keyed job carries on (measured in a native-Linux lab: `HOME=/` still reaches "no configured auth"), so the breakage surfaces later inside a tool; the recipe becomes `chown -R pi:pi /home/pi` plus `chmod 0777` on the home and agent dir (not sticky: `fs.protected_symlinks` then refuses a root-owned symlink under it, measured), drops the stale `COPY --chown ... APPEND_SYSTEM.md` line (the floor has lived at `/opt/pi-dispatch` since before this entry), and records why the image sets no `ENV HOME` (images built FROM it run root build steps). `anyUid` joins the capability tokens, with evidence by two uid-4242 runs rather than a grep. Measured behind it: on a native rootful Docker 27.5.1 daemon and on rootful Podman 5.8.2 through its Docker API, a job as the image's uid 1001 cannot traverse a worker-owned `0700` job dir; with `--user=<owner>` every mount works but `HOME` is `/` (Docker) or `/workspace` (Podman, whose injected passwd entry puts `auth.json` in the operator's repository); Chromium renders as an arbitrary uid only on the world-writable-home image with `HOME=/home/pi`. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `job-inputs-unreadable` under the existing policy code, from a pre-spend `access(2)` on `/job` beside the mount asserts for EVERY job (a command job never reads `prompt.md`, and the loader's `existsSync` gate would drop its trigger skills silently) and from the prompt read; the session assert names an inaccessible `/session` instead of reporting "did not land"; five advisory log lines that change no exit code. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked**: no mount, env var or file moved -- the worker that passes `--user` lands with part 2. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: runner reasons ride the exit line, not the record's reason enum (`command-unregistered` precedent). |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: `HOME` joins the env list (only beside `--user`), and `User: non-root` becomes the job-user bullet. It covers the image's own user on Docker Desktop, the worker's own non-root uid with `HOME=/home/pi` on a daemon that enforces bind-mount ownership (none for uid 1001), the builder and `runContainer` refusals, and the named refusals for rootless daemons, userns-remap, a root worker, Docker Desktop on Linux, a missing `anyUid` and the two group rows. **INT-CONTAINER-JOB-INPUTS AMENDED**: the per-job dir is a `0700` mkdtemp, so the job's uid must be the worker's where ownership is enforced, else the runner refuses `job-inputs-unreadable`. **INT-SANDBOX-CONTRACT AMENDED**: `--user`/HOME when the run had a job user (HOME joins "Env is exactly"), the manifest shape gains `jobUser` with its three meanings, the uid from the manifest's new `jobUser` stamp and the daemon rows from the CLI's own facts, and its refusals (a malformed stamp, an undecidable daemon, an unmappable daemon or group, an image without `anyUid` or not inspectable), all before a network exists. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: `job-user-unmappable` and `job-image-any-uid-unsupported` join the reason enum, both policy, pre-reserve and pre-mint. **INT-SESSION-STORE-CONTRACT and INT-OUTBOX-CONTRACT UNCHANGED, checked**: the files they read are now owned by the worker's own uid where ownership is enforced, which is the reader's own; nothing they check depends on an owner (their `lstat` rules stand). |
+| 2026-09-14 | Issue #341, part 3 (doctor, `doctor --live` and the CI step). **INT-LIVE-PROBE-CONTRACT AMENDED**: the probe runs as the job user doctor decides for this host, through the builder's `user` field and still with no `-e`; the fixture takes a job's modes (`0700` job and session dirs, nothing `chmod`ed, every directory still empty); the probe is not run where a local job would be refused; `localFolders` now uses every mount a job uses and checks the host owner of what it wrote, with the causes `job-unreadable`, `mount-not-writable` and `not-yours` beside `not-writable` and `not-visible`; the uid PID 1 ran as is read back against the decision. **INT-CONTAINER-RUNTIME-CONTRACT and INT-SANDBOX-CONTRACT UNCHANGED, checked**: no job or sandbox argv changes in this part. |

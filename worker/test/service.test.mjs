@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installedUnitPaths, readUnitSeam, runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { installedUnitPaths, readUnitSeam, readUnitUser, runService, TEMPLATE_PINS } from "../src/service.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // The deploy/ copy the render actually reads: worker/deploy, shipped in the npm tarball and kept
@@ -1324,4 +1324,14 @@ test("the readiness ceiling stays well inside the stub's own lifetime", { skip: 
 		READY_TIMEOUT_MS * 2 <= STUB_LIFETIME_S * 1000,
 		`READY_TIMEOUT_MS (${READY_TIMEOUT_MS}) must leave the stub's ${STUB_LIFETIME_S}s lifetime real headroom: a readiness wait that can outlive the process it is waiting to signal reports the wrong failure`,
 	);
+});
+
+test("readUnitUser reads a systemd unit's User= and nothing else, so doctor can compare it with its own shell (#341)", () => {
+	const shipped = readFileSync(new URL("../../deploy/worker.service", import.meta.url), "utf8");
+	assert.equal(readUnitUser(shipped, "linux"), "pi", "the shipped unit's account");
+	assert.equal(readUnitUser("[Service]\nUser=4242\r\n", "linux"), "4242");
+	for (const [text, platform] of [["[Service]\nExecStart=x\n", "linux"], ["[Service]\nUser=\n", "linux"], ["User=pi\n", "darwin"], ["User=pi\n", "win32"], [null, "linux"]]) {
+		assert.equal(readUnitUser(text, platform), null, `${platform}: ${JSON.stringify(text)}`);
+	}
+	assert.equal(readUnitUser("[Service]\n# User=nobody\nUser=pi\n", "linux"), "pi", "a commented line is not the value");
 });

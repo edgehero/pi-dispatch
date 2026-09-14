@@ -36,6 +36,7 @@ on:
       - ".github/workflows/pi-upgrade-check.yml"
       - ".github/scripts/admin-pi-canary.mjs"
       - ".github/scripts/host-pi-canary.mjs"
+      - ".github/scripts/job-user-e2e.mjs"
   # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status
   # checks on main (issue #105), and a required check that never reports blocks the merge FOREVER -- a
   # docs-only PR under the old path filter reported nothing at all (PR #106: "no checks reported") and
@@ -384,6 +385,30 @@ jobs:
       # for an image claiming anyUid a writable home and a render as an arbitrary uid (issue #341).
       - name: "CORE: the conformance checklist any nameable image must pass"
         run: ./image/verify-image.sh "$IMAGE_REF"
+
+      # --- DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST (issue #341) ---
+      # The runner's own user is uid 1001, the image's, which is exactly the one host shape that can never show
+      # the bug: every job mount works for it with no --user at all. So the check runs as a DIFFERENT uid, 1234
+      # in its own primary group and in the docker group, against this job's real daemon, which enforces
+      # bind-mount ownership. The script drives the real modules (the facts reader and resolver, the preparers
+      # and session store, the builder, the cleanup, doctor's read-back) and the real runner, with no network
+      # and no key, and it refuses to pass unless every negative control ran and failed as it must.
+      # `$(command -v node)` and PATH are carried explicitly: sudo resets both, and setup-node's node is not on
+      # the default secure_path.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: "CORE: every job mount works for a worker that is not uid 1001 (issue #341)"
+        run: |
+          sudo useradd -m --uid 1234 --user-group pdjob
+          sudo usermod -aG docker pdjob
+          sudo cp -a "$GITHUB_WORKSPACE" /srv/pd
+          sudo chown -R pdjob:pdjob /srv/pd
+          sudo install -d -o pdjob -g pdjob -m 0755 /srv/pd-jobs
+          sudo -u pdjob env "PATH=$PATH" PI_JOBS_DIR=/srv/pd-jobs "$(command -v node)" /srv/pd/.github/scripts/job-user-e2e.mjs "$IMAGE_REF"
 
       # --- INT-CONTAINER-JOB-INPUTS / REQ-GLOBAL-PI-OVERLAY ---
       # A staged package that did not mount must be refused BEFORE any spend. This is the one failure

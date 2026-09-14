@@ -231,6 +231,17 @@ export function readUnitSeam(text, platform) {
 	return { setup: clip(grab(readers.setup)), deployDir: clip(grab(readers.deployDir)) };
 }
 
+/**
+ * The account a SYSTEM unit runs the worker as (`User=`), or `null` (issue #341). Only systemd has one: a user-scope
+ * unit, a launchd agent and an nssm service run as whoever installed them. Separate from `readUnitSeam` because it
+ * is not part of the render round trip: `deploy/worker.service` carries it, the renderer does not write it.
+ */
+export function readUnitUser(text, platform) {
+	if (platform !== "linux" || typeof text !== "string") return null;
+	const value = /^User=(.*)$/m.exec(text.replace(/\0/g, ""))?.[1]?.replace(/\r$/, "").trim();
+	return value ? value : null;
+}
+
 const SUBCOMMANDS = new Set(["render", "install", "uninstall", "status", "start", "stop", "restart"]);
 
 const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver) as an OS service, rendered for THIS host
