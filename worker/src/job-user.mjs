@@ -13,7 +13,8 @@
  * runner refuses a job whose inputs it cannot read before any spend (`job-inputs-unreadable`), and `pi-dispatch
  * doctor --live` reads the mounts back on request.
  *
- * Pure parts (`parseDaemonFacts`, `decideJobUser`, `resolveImageUser`) take values; the two readers take seams.
+ * Pure parts (`parseDaemonFacts`, `decideJobUser`, `resolveImageUser`) take values, apart from `decideJobUser`'s
+ * `os.release()` default; the two readers take seams.
  */
 
 import { statSync } from "node:fs";
@@ -39,11 +40,13 @@ export const PODMAN_PRODUCT_LICENSE = "Apache-2.0";
  * What a `docker info --format={{json .}}` answer says: `{ facts }`, `{ unreachable: true }`, or `null` when no line
  * parses to either shape.
  *
- * NO DAEMON IS NOT A SHAPE. With the daemon down or still starting, the docker CLI still exits 0 under `--format` and
- * prints a Docker-shaped body with every server field empty and the dial error in `ServerErrors` (measured, Docker CLI
- * 27.5.1). Read as facts, that body has no rootless marker and decides `worker`, so it is recognised FIRST: a
- * non-empty `ServerErrors` is `unreachable` (the error text is never read), and a Docker-shaped body with no
- * `ServerVersion` is no shape at all.
+ * NO DAEMON IS NOT A SHAPE. When the CLI's `/info` request fails, a docker CLI up to 28.0 still exits 0 under
+ * `--format` and prints a Docker-shaped body with every server field empty and the error in `ServerErrors` (measured
+ * on 27.5.1 against a missing socket; source for the other versions; from 28.1 the CLI exits non-zero, which the
+ * reader already treats as transient). Read as facts, that body has no rootless marker and decides `worker`, so it is
+ * recognised FIRST: a non-empty `ServerErrors` is `unreachable` (the error text is never read), and a Docker-shaped
+ * body with no `ServerVersion` is no shape at all. A daemon that answers `/info` always sets `ServerVersion`
+ * (Docker and Podman's compat handler, source).
  *
  * TWO SHAPES, both measured. The real docker CLI against any daemon (Docker, or Podman's compat socket) prints the
  * Docker shape. Podman's docker emulation (podman-docker) prints Podman's own (`host.security.rootless`,
@@ -77,8 +80,8 @@ export function parseDaemonFacts(output) {
 				userns: false,
 				bounds: null,
 				serviceIsRemote: typeof body.host.serviceIsRemote === "boolean" ? body.host.serviceIsRemote : null,
-				// Only a unix path is kept. A remote service's path can be an `ssh://user@host` URL, which is a credential
-				// shape, and nothing downstream needs more than "not a local socket" (`serviceIsRemote` says that).
+				// Only a unix path is kept, because only a unix path is ever statted. Podman fills this from the SERVICE's own
+				// listener (source): `unix://...` or `tcp://...` for a running service, the bare default path in-process.
 				remoteSocketPath: isUnixSocketPath(path) ? path : null,
 			} };
 		}
@@ -172,7 +175,8 @@ export const JOB_USER_FIX = Object.freeze({
 });
 
 /**
- * The daemon half of the decision. Pure. Returns `{ mode, user, cause, reason }`, one of FOUR modes:
+ * The daemon half of the decision. Pure apart from the `release` default. Returns `{ mode, user, cause, reason }`,
+ * one of FOUR modes:
  *   - `image`: the image's own USER runs, argv byte-identical to before issue #341;
  *   - `worker`: the job runs as `user`, the worker's own "<euid>:<egid>" (the per-image rule may still decline);
  *   - `unmappable`: no uid works, `cause` names why;
@@ -197,7 +201,9 @@ export function decideJobUser({ platform, release = osRelease(), euid, egid, end
 		// No docker endpoint resolved. Only Podman's own shape (its docker emulation) says enough to go on; a Docker
 		// shape with no endpoint leaves the socket rows below blind.
 		if (facts.shape !== "podman") return unknown("endpoint-unresolved");
-		// A remote podman client: no unix path survives parsing, so the service is another machine's.
+		// A client of a service that listens on TCP: its path did not survive parsing, so there is no socket on this host
+		// to read. A client reaching a unix-socket service over ssh reports that service's own unix path and is NOT
+		// caught here (a residual the design entry names).
 		if (facts.serviceIsRemote === true && facts.remoteSocketPath === null) return image("endpoint-not-local");
 	}
 	if (facts.os === "Docker Desktop") {

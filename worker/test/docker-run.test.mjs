@@ -138,6 +138,8 @@ test("dockerExtra is an allow-list: only what the sandbox and the live probes pa
 		["--read-only=false"],
 		["-p", "8080:80"],
 		["-p", "0.0.0.0:8080:80"],
+		// Anchored: the address must BEGIN with loopback, or an IPv6 literal ending in it binds elsewhere.
+		["-p", "2001:db8::127.0.0.1:8080:80"],
 		["-p", "127.0.0.1:8080:80", "-p"],
 		["-p=127.0.0.1:8080:80"],
 		["--entrypoint"],

@@ -12,8 +12,8 @@ import {
 	socketFacts,
 } from "../src/job-user.mjs";
 
-// Issue #341. The fixtures are `docker info --format={{json .}}` bodies from the labs (nested in Docker Desktop's
-// LinuxKit VM), trimmed to the keys the parser reads: the full bodies carry proxy and storage fields that have no
+// Issue #341. The fixtures are `docker info --format={{json .}}` bodies from the labs (Docker Desktop itself, and
+// daemons nested in its LinuxKit VM), trimmed to the keys the parser reads: the full bodies carry proxy and storage fields that have no
 // business in a test file. Where a key was not in the saved extract, the comment says where its value comes from.
 const BODY = {
 	// Measured: Docker Desktop 27.4.0 on macOS (raw body).
@@ -62,7 +62,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootless").rootless, true);
 	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock" });
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
-	// Only a unix path is kept: a remote service's path can carry `user:password@` in an ssh URL.
+	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
 		const body = { host: { ...BODY.shimRootful.host, remoteSocket: { path: remote } } };
 		assert.equal(parseDaemonFacts(JSON.stringify(body)).facts.remoteSocketPath, null, remote);
