@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { buildSandboxRunArgs, listRunningSandboxes, parsePublish, resolveSandbox, SANDBOX_NAME_PREFIX, sandboxContainerName, sandboxVenueRefusal } from "../src/sandbox.mjs";
+import { buildSandboxRunArgs, listRunningSandboxes, openSandbox, parsePublish, resolveSandbox, SANDBOX_NAME_PREFIX, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -205,4 +206,101 @@ test("an armed sandbox joins its OWN network and carries the proxy variables -- 
 	assert.ok(!envValues.some((v) => /TOKEN|API_KEY|_KEY=/.test(v)), "no credential reaches a sandbox");
 	// And every isolation flag still reaches this shape, asserted against the imported array as ever.
 	for (const flag of ISOLATION_FLAGS) assert.ok(args.includes(flag), `missing isolation flag: ${flag}`);
+});
+
+// --- one launcher for both entry points (issue #277) ----------------------------------------------------------
+
+/** A retained local run, read through an injected fs, with its workspace present. */
+function openable(over = {}) {
+	const manifest = { jobId: "gh-1", kind: "github", image: "pi-job:latest", backend: "local", workspace: "/w", createdAt: "2026-09-14T08:00:00Z", keepUntil: null, ...over };
+	return { fs: { readFileSync: () => JSON.stringify(manifest) }, fileExists: () => true };
+}
+
+/** A docker that records every call and answers each with `codeFor(args)` (0 by default). */
+function recordingDocker(calls, codeFor = () => 0) {
+	return (cmd, args) => {
+		calls.push(["docker", ...args].join(" "));
+		const child = new EventEmitter();
+		queueMicrotask(() => child.emit("close", codeFor(args)));
+		return child;
+	};
+}
+
+const session = { jobId: "gh-1", sandboxDir: "/s", retentionHours: 24, term: "xterm", idleSeconds: 1800, running: async () => [] };
+
+test("openSandbox puts an armed session on its own egress network, and removes it after the shell exits", async () => {
+	const calls = [];
+	let launchedWith = null;
+	const result = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+		spawnNetwork: recordingDocker(calls),
+		launch: async ({ args }) => ((launchedWith = args), calls.push("launch"), { code: 3 }),
+	});
+	assert.deepEqual(result, { code: 3, error: null }, "the shell's exit code is the session's");
+	assert.ok(launchedWith.includes("--network=pi-sandbox-gh-1-net"), "the network the job would have had");
+	assert.ok(launchedWith.some((a) => a.startsWith("HTTPS_PROXY=http://pi-dispatch-egress-proxy:")), "and the proxy variables that make it usable");
+	assert.deepEqual(calls, [
+		"docker network create --internal pi-sandbox-gh-1-net",
+		"docker network connect pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
+		"launch",
+		"docker network disconnect -f pi-sandbox-gh-1-net pi-dispatch-egress-proxy",
+		"docker network rm pi-sandbox-gh-1-net",
+	], "built before the launch, torn down after it");
+});
+
+test("openSandbox with egress off builds exactly the argv it always did, and touches no network", async () => {
+	const calls = [];
+	let launchedWith = null;
+	await openSandbox({ ...session, ...openable(), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker(calls), launch: async ({ args }) => ((launchedWith = args), { code: 0 }) });
+	assert.deepEqual(launchedWith, buildSandboxRunArgs({ image: "pi-job:latest", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/s/gh-1", publish: [], term: "xterm", idleSeconds: 1800 }));
+	assert.deepEqual(calls, []);
+});
+
+test("openSandbox refuses a session already running, before any network or shell", async () => {
+	const calls = [];
+	let launched = false;
+	const result = await openSandbox({ ...session, ...openable(), running: async () => ["gh-1"], egress: { armed: true, proxy: "p" }, spawnNetwork: recordingDocker(calls), launch: async () => ((launched = true), { code: 0 }) });
+	assert.equal(result.refused, "already-running");
+	assert.match(result.message, /docker attach pi-sandbox-gh-1/);
+	assert.equal(launched, false);
+	assert.deepEqual(calls, []);
+	// A docker that cannot be asked costs the check, never the session.
+	const unknown = await openSandbox({ ...session, ...openable(), running: () => { throw new Error("daemon down"); }, egress: { armed: false }, launch: async () => ({ code: 0 }) });
+	assert.equal(unknown.code, 0);
+});
+
+test("openSandbox launches nothing when the egress network cannot be built", async () => {
+	let launched = false;
+	const result = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "p" },
+		spawnNetwork: recordingDocker([], (args) => (args[1] === "connect" ? 1 : 0)),
+		launch: async () => ((launched = true), { code: 0 }),
+	});
+	assert.equal(result.refused, "egress-network-failed");
+	assert.equal(launched, false, "never the default bridge instead");
+});
+
+test("openSandbox removes the network even when the launch throws, and refusals come before everything", async () => {
+	const calls = [];
+	await assert.rejects(
+		() => openSandbox({ ...session, ...openable(), egress: { armed: true, proxy: "p" }, spawnNetwork: recordingDocker(calls), launch: async () => { throw new Error("boom"); } }),
+		/boom/,
+	);
+	assert.equal(calls.at(-1), "docker network rm pi-sandbox-gh-1-net");
+
+	const hooks = [];
+	const far = await openSandbox({ ...session, ...openable({ backend: "far" }), egress: { armed: true, proxy: "p" }, spawnNetwork: recordingDocker(hooks), beforeLaunch: () => hooks.push("before"), launch: async () => ((hooks.push("launch")), { code: 0 }) });
+	assert.equal(far.refused, "venue-unreachable");
+	assert.deepEqual(hooks, [], "a refused run prints nothing, builds nothing and launches nothing");
+});
+
+test("sandboxEgress reads the posture exactly as the worker does, and refuses a malformed switch", () => {
+	assert.deepEqual(sandboxEgress({}), { armed: true, proxy: "pi-dispatch-egress-proxy" });
+	assert.deepEqual(sandboxEgress({ PI_EGRESS: "0", PI_EGRESS_PROXY: "my-proxy" }), { armed: false, proxy: "my-proxy" });
+	assert.equal(sandboxEgress({ PI_EGRESS_PROXY: "" }).proxy, "pi-dispatch-egress-proxy", "empty falls back, like the worker");
+	assert.throws(() => sandboxEgress({ PI_EGRESS: "no" }), /PI_EGRESS must be exactly/);
 });

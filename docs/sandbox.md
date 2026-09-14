@@ -18,11 +18,10 @@ flags** — and no credentials at all. The agent is not running. You are.
 You can also open one from the admin panel: `/dispatch`, Enter on a finished run, then `b`. The panel
 suspends itself, hands the terminal to the shell, and comes back when you exit.
 
-Two refusals land before anything else runs, and they are the two an operator meets first. The command
-**needs a terminal**: it opens an interactive shell, so from a pipe, a TTY-less script or CI it refuses by
-name rather than letting docker fail with "the input device is not a TTY". And if a sandbox for that id is
-**already running**, it refuses and points at it: `docker attach pi-sandbox-<jobId>`, or exit that one
-first.
+The command **needs a terminal**: it opens an interactive shell, so from a pipe, a TTY-less script or CI it
+refuses by name before anything else, rather than letting docker fail with "the input device is not a
+TTY". And if a sandbox for that id is **already running**, both the CLI and the panel refuse and point at
+it: `docker attach pi-sandbox-<jobId>`, or exit that one first.
 
 A run from another backend does not open here. A sandbox is a shell on this host's Docker daemon, so the
 retained record says which backend ran the job, and a run that did not run on `local` is refused by name,
@@ -95,9 +94,11 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 
 ## Egress
 
-A sandbox lands on **whatever network the job did**. By default that is its own `--internal` network with
-no route anywhere except the allowlist proxy; with `PI_EGRESS=0` it is Docker's default bridge and the
-whole internet, which is what `SECURITY.md` discloses. The policy, how to change it, and a
+A sandbox lands on **whatever network the job did**, whether you open it from the CLI or from the panel. By
+default that is its own `--internal` network with no route anywhere except the allowlist proxy; with
+`PI_EGRESS=0` it is Docker's default bridge and the whole internet, which is what `SECURITY.md` discloses.
+(Before #277 a sandbox opened from the panel skipped the network and got the whole internet even with the
+policy on. If you rely on the policy for sandboxes, run a version that carries #277.) The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a

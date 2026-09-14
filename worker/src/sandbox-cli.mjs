@@ -2,8 +2,7 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
-import { buildSandboxRunArgs, launchSandbox, listRunningSandboxes, parsePublish, resolveSandbox, sandboxContainerName, sandboxVenueRefusal } from "./sandbox.mjs";
+import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxVenueRefusal } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
 
 /**
@@ -66,11 +65,6 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		return fail(err, "`pi-dispatch sandbox` needs a terminal — it opens an interactive shell, so it cannot run from a pipe, a script without a TTY, or CI");
 	}
 
-	// `listRunningSandboxes` yields ids, already sanitized, so this compares like with like.
-	if ((await liveSandboxes()).has(sanitizeJobId(jobId))) {
-		return fail(err, `a sandbox for ${jobId} is already running — attach to it with \`docker attach ${sandboxContainerName(jobId)}\`, or exit it first`);
-	}
-
 	let publish;
 	try {
 		publish = parsePublish(values.publish ?? []);
@@ -78,68 +72,39 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		return fail(err, error.message);
 	}
 
-	// #227, #277. THE SANDBOX IS LOCAL-ONLY, and `resolveSandbox` is what keeps that true: it refuses a run
-	// whose manifest names a venue this host's docker CLI did not run, per job, for this command and the
-	// admin panel alike. `buildSandboxRunArgs` is a SECOND container producer, outside the `runContainer`
-	// seam and hard-wired to this host's docker CLI, and `manifest.workspace` is a path on THIS machine,
-	// which for a run from another venue either does not exist or reproduces the wrong run in silence.
-	//
-	// This used to be a DEPLOYMENT-wide refusal here, ahead of the manifest read, because the command takes a
-	// job id and could not learn its venue. The manifest records it now, and the deployment-wide rule is gone
-	// rather than narrowed: the only thing it could still say before reading one is "no blessed venue is
-	// local", which `PI_BACKENDS` cannot express (it must include `local`), while keeping it would refuse
-	// local runs on a deployment that also blesses a remote venue.
-	const resolved = resolveSandbox({
+	// #227, #277. Everything from here to the shell is `openSandbox`, shared with the admin panel: every
+	// refusal (the per-job venue refusal included, which replaced a deployment-wide one this command used to
+	// apply on its own), the already-running refusal, this session's egress network and its teardown. The
+	// panel assembled the same session from parts and dropped the network; one function is what stops that.
+	const result = await openSandbox({
 		jobId,
 		sandboxDir: config.sandboxDir,
 		retentionHours: config.sandboxRetentionHours,
-		publish,
-	});
-	if (resolved.refused) return fail(err, resolved.message);
-
-	// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a
-	// crashed terminal or a closed laptop lid must not be the reason the pin never landed.
-	if (values.pin) {
-		const pinned = pinSandbox({ sandboxDir: config.sandboxDir, jobId, pinDays: config.sandboxPinDays, now });
-		if (pinned.pinned) out(`pinned ${jobId} until ${pinned.keepUntil} (${config.sandboxPinDays}d)\n`);
-		else err(`warning: could not pin ${jobId}: ${pinned.reason}\n`);
-	}
-
-	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container
-	// so the reaper's `pi-job-` filter never touches it -- a worker restart must not tear the network out
-	// from under a shell an operator is sitting in.
-	const network = config.egress ? networkNameFor(resolved.name) : null;
-	const args = buildSandboxRunArgs({
-		image: resolved.manifest.image,
-		name: resolved.name,
-		workspace: resolved.manifest.workspace,
-		jobDir: resolved.manifest.dir,
 		publish,
 		// env-internal TERM: the operator's own terminal type, forwarded so the sandbox shell renders the
 		// way their terminal does. Nothing a deployment declares.
 		term: env.TERM,
 		idleSeconds: config.sandboxIdleMinutes * 60,
-		network,
-		egressEnv: egressEnv({ proxy: config.egressProxy, armed: config.egress }),
+		egress: { armed: config.egress, proxy: config.egressProxy },
+		running,
+		launch,
+		spawnNetwork,
+		beforeLaunch: ({ resolved }) => {
+			// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a
+			// crashed terminal or a closed laptop lid must not be the reason the pin never landed.
+			if (values.pin) {
+				const pinned = pinSandbox({ sandboxDir: config.sandboxDir, jobId, pinDays: config.sandboxPinDays, now });
+				if (pinned.pinned) out(`pinned ${jobId} until ${pinned.keepUntil} (${config.sandboxPinDays}d)\n`);
+				else err(`warning: could not pin ${jobId}: ${pinned.reason}\n`);
+			}
+			out(`opening ${resolved.name} — image ${resolved.manifest.image}, workspace ${resolved.manifest.workspace}\n`);
+			out("no credentials are set in this container. exit the shell to dispose of it.\n");
+			if (publish.length > 0) out(`published: ${publish.filter((f) => f !== "-p").join(", ")}\n`);
+		},
 	});
-
-	out(`opening ${resolved.name} — image ${resolved.manifest.image}, workspace ${resolved.manifest.workspace}\n`);
-	out("no credentials are set in this container. exit the shell to dispose of it.\n");
-	if (publish.length > 0) out(`published: ${publish.filter((f) => f !== "-p").join(", ")}\n`);
-
-	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing
-	// proxy fails at `docker run` with docker's own message, in front of an operator at a terminal, which
-	// is the one place a late failure is cheap.
-	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: config.egressProxy }))) {
-		return fail(err, `could not create the egress network ${network} -- is the proxy running? \`docker compose -f deploy/docker-compose.yml --profile egress up -d\``);
-	}
-	try {
-		const { code, error } = await launch({ args });
-		if (error) return fail(err, `could not start docker: ${error.message}`);
-		return code ?? 0;
-	} finally {
-		if (network) await removeJobNetwork(spawnNetwork, { network, proxy: config.egressProxy });
-	}
+	if (result.refused) return fail(err, result.message);
+	if (result.error) return fail(err, `could not start docker: ${result.error.message}`);
+	return result.code ?? 0;
 }
 
 /**

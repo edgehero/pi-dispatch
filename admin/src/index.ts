@@ -122,7 +122,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { setGlyphs } from "./panel.mjs";
-import { buildSandboxRunArgs, launchSandbox as spawnSandbox, resolveSandbox, sandboxContainerName, sandboxVenueRefusal } from "@edgehero/pi-dispatch/sandbox";
+import { openSandbox, sandboxEgress, sandboxVenueRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
@@ -1774,33 +1774,52 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now }: {
  * the terminal to the container until the operator exits. A refusal prints and returns rather than
  * throwing: the panel is mid-suspend, and an exception here would surface as a broken screen instead of a
  * sentence.
+ *
+ * THROUGH `openSandbox`, the same function the CLI uses (#277). This used to call `resolveSandbox` and
+ * `buildSandboxRunArgs` itself and pass no network, so a sandbox opened here ran on docker's default bridge
+ * with `PI_EGRESS` armed, and a second press on a running sandbox tried to start another. The egress posture
+ * is read with the worker's own readers, and a malformed `PI_EGRESS` refuses rather than opening the shell
+ * on the open network.
+ *
+ * `io` is a test seam: every write goes through `io.write`, never `process.stdout` directly, because a test
+ * runner reading the same stream would lose its own result frames to a stray write.
  */
-async function openSandboxSession(paths: any, jobId: string): Promise<void> {
-  const resolved = resolveSandbox({
+export async function openSandboxSession(paths: any, jobId: string, io: any = {}): Promise<void> {
+  const write = io.write ?? ((s: string) => process.stdout.write(s));
+  const pause = io.pause ?? pauseForMessage;
+  const env = io.env ?? process.env;
+  let egress;
+  try {
+    egress = sandboxEgress(env);
+  } catch (err: any) {
+    write(`\ncannot open a sandbox for ${jobId}: ${err?.message}\n`);
+    await pause();
+    return;
+  }
+  const result = await openSandbox({
     jobId,
     sandboxDir: paths.sandboxDir,
     retentionHours: paths.sandboxRetentionHours,
+    // env-internal TERM: the operator's own terminal type, passed through to the sandbox shell.
+    term: env.TERM,
+    idleSeconds: (paths.sandboxIdleMinutes ?? 0) * 60,
+    egress,
+    ...(io.running ? { running: io.running } : {}),
+    ...(io.launch ? { launch: io.launch } : {}),
+    ...(io.spawnNetwork ? { spawnNetwork: io.spawnNetwork } : {}),
+    beforeLaunch: ({ resolved }: any) => {
+      write(`\nopening ${resolved.name} — image ${resolved.manifest.image}\n`);
+      write("no credentials are set in this container. exit the shell to return to the panel.\n\n");
+    },
   });
-  if (resolved.refused) {
-    process.stdout.write(`\ncannot open a sandbox for ${jobId}: ${resolved.message}\n`);
-    await pauseForMessage();
+  if (result.refused) {
+    write(`\ncannot open a sandbox for ${jobId}: ${result.message}\n`);
+    await pause();
     return;
   }
-  const args = buildSandboxRunArgs({
-    image: resolved.manifest.image,
-    name: resolved.name,
-    workspace: resolved.manifest.workspace,
-    jobDir: resolved.manifest.dir,
-    // env-internal TERM: the operator's own terminal type, passed through to the sandbox shell.
-    term: process.env.TERM,
-    idleSeconds: (paths.sandboxIdleMinutes ?? 0) * 60,
-  });
-  process.stdout.write(`\nopening ${sandboxContainerName(jobId)} — image ${resolved.manifest.image}\n`);
-  process.stdout.write("no credentials are set in this container. exit the shell to return to the panel.\n\n");
-  const { error } = await spawnSandbox({ args });
-  if (error) {
-    process.stdout.write(`\ncould not start docker: ${error.message}\n`);
-    await pauseForMessage();
+  if (result.error) {
+    write(`\ncould not start docker: ${result.error.message}\n`);
+    await pause();
   }
 }
 
@@ -1811,7 +1830,7 @@ async function openSandboxSession(paths: any, jobId: string): Promise<void> {
  * `stdin.once("data")` here would never fire and the panel would hang suspended forever -- waiting on
  * input from a stream the suspend just paused. Resuming stdin to read one key would mean re-entering the
  * input handling that the suspend exists to hand away. A fixed pause cannot deadlock, and this path is
- * reached whenever `resolveSandbox` refuses at the key press, or docker cannot be started.
+ * reached whenever `openSandbox` refuses at the key press, or docker cannot be started.
  */
 function pauseForMessage(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 2500));

@@ -210,3 +210,11 @@ test("--list still shows a run from another venue, but not as time left on somet
 	assert.match(c.text(), /not here \(ran on far\)/);
 	assert.doesNotMatch(c.text(), /left/);
 });
+
+test("--list says no venue is recorded for a manifest whose stamp names none, rather than inventing one (#277)", async () => {
+	const unnamed = retained({ backend: null });
+	const c = capture();
+	await runSandbox(["--list"], { env: envWith(unnamed.root), deps: c.deps });
+	assert.match(c.text(), /not openable \(no venue recorded\)/);
+	assert.doesNotMatch(c.text(), /ran on|left/);
+});

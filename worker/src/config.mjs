@@ -9,7 +9,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { delimiter, isAbsolute, posix } from "node:path";
 import { DEFAULT_BACKEND, backendRefusals, parseBackendFloor, parseBackendList } from "./backends.mjs";
-import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
+import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
@@ -311,7 +311,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		// trigger says otherwise". `parseBackendList` never returns empty, so the fallback is belt-and-braces
 		// against a future edit rather than a reachable branch today.
 		defaultBackend: backends[0] ?? DEFAULT_BACKEND,
-		egressProxy: env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY, // || (not ??) so an empty string falls back
+		egressProxy: egressProxyName(env), // one derivation, shared with the panel's sandbox (#277)
 		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV, egressEnabled(env)), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
 		jobsDir: env.PI_JOBS_DIR ?? defaultJobsDir(),

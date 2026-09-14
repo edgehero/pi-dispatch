@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { buildDockerRunArgs } from "./docker-run.mjs";
+import { createJobNetwork, egressArmed, egressEnv, egressProxyName, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { readManifest } from "./sandbox-store.mjs";
 
@@ -200,6 +201,95 @@ export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = []
 	}
 
 	return { manifest, name: sandboxContainerName(jobId), publish };
+}
+
+/**
+ * The egress posture a sandbox opened from `env` gets: `{ armed, proxy }`, through the same two readers the
+ * worker's config uses. THROWS on a malformed `PI_EGRESS`, exactly as the worker refuses to boot on one: a
+ * typo must never open a shell on the default bridge while the operator believes a policy is armed. For the
+ * admin panel, which deliberately never calls `loadConfig`; the CLI has the parsed config already.
+ */
+export function sandboxEgress(env) {
+	return { armed: egressArmed(env), proxy: egressProxyName(env) };
+}
+
+/**
+ * Open one retained run as an operator shell: the ONE path from a job id to a running sandbox, for the CLI
+ * and the admin panel alike (issue #277).
+ *
+ * WHY ONE FUNCTION. The CLI built the session's egress network, refused a sandbox already running and tore
+ * the network down in a finally; the panel called `resolveSandbox` and `buildSandboxRunArgs` directly and did
+ * none of it. So a sandbox opened from RUN_DETAIL ran on docker's default bridge -- the whole internet -- while
+ * `PI_EGRESS` was armed and INT-SANDBOX-CONTRACT said it lands on the network the job did. Two callers
+ * assembling the same session from parts is how one of them drops a part; this is where they now share every
+ * part that decides what the container can reach.
+ *
+ * In order: `resolveSandbox` (every refusal, the venue one included) -> the already-running refusal ->
+ * the argv, with this session's own network and proxy variables when armed -> `beforeLaunch`, the caller's
+ * hook to print or pin once the session is known to be openable -> create the network -> launch -> remove
+ * the network in a finally. Returns `{ refused, message }`, or `{ code, error }` from the launch.
+ *
+ * NOT here, deliberately: the terminal check and `--publish` parsing, which are about the CLI's own
+ * arguments, and the pin, which only the CLI offers (it runs in `beforeLaunch`).
+ */
+export async function openSandbox({
+	jobId,
+	sandboxDir,
+	retentionHours,
+	publish = [],
+	term,
+	idleSeconds = 0,
+	egress,
+	running = listRunningSandboxes,
+	launch = launchSandbox,
+	spawnNetwork = spawn,
+	beforeLaunch = () => {},
+	fs,
+	fileExists,
+}) {
+	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
+	if (resolved.refused) return resolved;
+
+	// A docker that cannot be asked costs this check, never the session: `listRunningSandboxes` throws so the
+	// REAPER can tell "none" from "could not ask", and here the answer only decides whether to refuse early --
+	// docker itself refuses a second container under the same name anyway.
+	const live = new Set(await Promise.resolve().then(() => running()).catch(() => []));
+	if (live.has(sanitizeJobId(jobId))) {
+		return { refused: "already-running", message: `a sandbox for ${jobId} is already running — attach to it with \`docker attach ${resolved.name}\`, or exit it first` };
+	}
+
+	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container so the
+	// reaper's `pi-job-` filter never touches it -- a worker restart must not tear the network out from under a
+	// shell an operator is sitting in.
+	const network = egress?.armed === true ? networkNameFor(resolved.name) : null;
+	const args = buildSandboxRunArgs({
+		image: resolved.manifest.image,
+		name: resolved.name,
+		workspace: resolved.manifest.workspace,
+		jobDir: resolved.manifest.dir,
+		publish: resolved.publish,
+		term,
+		idleSeconds,
+		network,
+		egressEnv: egressEnv({ proxy: egress?.proxy, armed: egress?.armed === true }),
+	});
+	await beforeLaunch({ resolved, args, network });
+
+	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing proxy
+	// fails at network creation, in front of an operator at a terminal, which is the one place a late failure
+	// is cheap.
+	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: egress.proxy }))) {
+		return {
+			refused: "egress-network-failed",
+			message: `could not create the egress network ${network} -- is the proxy running? \`docker compose -f deploy/docker-compose.yml --profile egress up -d\``,
+		};
+	}
+	try {
+		const { code, error } = await launch({ args });
+		return { code: code ?? null, error: error ?? null };
+	} finally {
+		if (network) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
+	}
 }
 
 /**

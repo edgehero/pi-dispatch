@@ -69,6 +69,15 @@ export function egressArmed(env) {
  */
 export const DEFAULT_EGRESS_PROXY = "pi-dispatch-egress-proxy";
 
+/**
+ * The proxy container this deployment names, from env: `PI_EGRESS_PROXY`, else the default. `||` rather than
+ * `??`, so an empty string falls back. The worker's config and the admin panel's sandbox both read it through
+ * here, so the network a panel-opened sandbox is attached to is the one the worker's jobs use.
+ */
+export function egressProxyName(env) {
+	return env?.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY;
+}
+
 /** The port squid listens on inside its container. Never published: reachable only from a job network. */
 export const EGRESS_PROXY_PORT = 3128;
 
