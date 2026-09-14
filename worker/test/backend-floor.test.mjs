@@ -287,7 +287,7 @@ test("observationRefusals names the backend, the property, the observation and w
 	assert.deepEqual(observationRefusals({ backends: ["local"], backendFloor: { credentialTransit: ENFORCED }, observations: { [DOCKER_ENDPOINT_LOCAL]: true } }), []);
 });
 
-test("doctor names WHY its docker CLI did not answer, classified from stderr it never prints (#278)", async () => {
+test("doctor names WHY its docker CLI did not answer as a fixed token, and never prints the CLI's stderr (#278)", async () => {
 	const buf = [];
 	const home = "/Users/someone-private/.docker/contexts/meta/ab/meta.json";
 	await runDoctor(
@@ -312,7 +312,7 @@ test("doctor names WHY its docker CLI did not answer, classified from stderr it 
 		},
 	);
 	const text = buf.join("");
-	assert.match(text, /did not say which endpoint it resolves \(context-not-found\)/);
+	assert.match(text, /did not say which endpoint it resolves \(exit-1\)/);
 	assert.ok(!text.includes("someone-private"), "the CLI's message carries a home path and is never printed");
 });
 

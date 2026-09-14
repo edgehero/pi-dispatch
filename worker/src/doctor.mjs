@@ -2868,11 +2868,10 @@ function dockerRunVia(spawn) {
 			try {
 				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
-				resolve({ code: null, stdout: "", stderr: "", error: err });
+				resolve({ code: null, stdout: "", error: err });
 				return;
 			}
 			let stdout = "";
-			let stderr = "";
 			let done = false;
 			const finish = (value) => {
 				if (done) return;
@@ -2884,12 +2883,12 @@ function dockerRunVia(spawn) {
 				try {
 					child.kill("SIGKILL");
 				} catch {}
-				finish({ code: null, stdout: "", stderr: "", error: { timedOut: true } });
+				finish({ code: null, stdout: "", error: { timedOut: true } });
 			}, 5000);
 			child.stdout?.on("data", (d) => (stdout += d));
-			// Captured to CLASSIFY a failure (a missing context vs a permission error), and never printed.
-			child.stderr?.on("data", (d) => (stderr = (stderr + d).slice(-4096)));
-			child.on("error", (err) => finish({ code: null, stdout: "", stderr: "", error: err }));
-			child.on("close", (code, signal) => finish({ code, stdout, stderr, error: signal ? { signal } : null }));
+			// stderr is never read: it carries the operator's home path, and a DOCKER_HOST the CLI could not parse
+			// is repeated in it with any credentials still inside.
+			child.on("error", (err) => finish({ code: null, stdout: "", error: err }));
+			child.on("close", (code, signal) => finish({ code, stdout, error: signal ? { signal } : null }));
 		});
 }

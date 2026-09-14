@@ -15,8 +15,9 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
  *   0. refuse a job image this host does not have  -- INT-CONTAINER-RUNTIME-CONTRACT
  *   0b. REFUSE a deployment with no usable credential for the job's provider, which costs nothing to
  *       ask and would otherwise be discovered with the budget already reserved -- CONST-BUDGET-BEFORE-TOKENS
- *       (gates 0 and 0b are not the first two: a one-shot already spent, a skewed wait and an unblessed
- *       backend are refused above them, and this ladder has never listed those)
+ *       (gates 0 and 0b are not the first two: a one-shot already spent, a skewed wait, an unblessed
+ *       backend and a backend floor the docker endpoint does not meet (#278) are refused above them, and
+ *       this ladder has never listed those)
  *   1. REFUSE an armed `run.resume` with no session store to persist into (the one fail-CLOSED case)
  *                                                 -- REQ-RESUMABLE-SESSION
  *   2. mint a scoped token (GitHub jobs, and local jobs opted in via `github: true`)
