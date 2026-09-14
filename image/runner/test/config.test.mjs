@@ -156,7 +156,7 @@ test("a staged package path that never mounted is a config error naming the path
 	const present = ["/opt/pi-global/packages/tools", "/opt/pi-global/packages/review"];
 	const fileExists = (path) => path !== "/opt/pi-global/packages/review";
 	try {
-		assertPackagePathsExist(present, { fileExists });
+		assertPackagePathsExist(present, { fileExists, accessCode: () => null });
 		assert.fail("expected a throw for the unmounted package path");
 	} catch (error) {
 		assert.equal(error.piDispatchExit, EXIT_POLICY);
@@ -167,8 +167,8 @@ test("a staged package path that never mounted is a config error naming the path
 	}
 
 	// The POSITIVE half: all present is silent, and no packages at all is silent too.
-	assert.doesNotThrow(() => assertPackagePathsExist(present, { fileExists: () => true }));
-	assert.doesNotThrow(() => assertPackagePathsExist([], { fileExists: () => false }));
+	assert.doesNotThrow(() => assertPackagePathsExist(present, { fileExists: () => true, accessCode: () => null }));
+	assert.doesNotThrow(() => assertPackagePathsExist([], { fileExists: () => false, accessCode: () => null }));
 });
 
 test("enforceOfflineMode sets PI_OFFLINE=1 and is idempotent", () => {

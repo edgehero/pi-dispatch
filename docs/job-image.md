@@ -36,13 +36,17 @@ a second thing to forget to bump. Re-declare only a label whose truth your layer
 single re-declared `dev.pi-dispatch.forges` with `azure` appended (see
 [azure-devops.md](azure-devops.md), which also names the `--build-arg BASE=…` you need).
 
-**Pin the base if you would rather not track `latest`.** Every published build also carries the **product
-version** as a tag (`ghcr.io/edgehero/pi-job:0.8.0`) and the git `sha`, and neither ever moves, while
-`latest` follows `main`. The version tag is published only by the push that bumps the version (or a manual
-run that asks for it) and only while that tag is not on the registry yet, so an unreleased merge moves
-`latest` and never a released version. The receiver image is tagged the same way. A pinned base is the honest choice for a
-derived image whose layer assumes something about the base; the cost is that a pin does not pick up a
-security rebuild, so bump it deliberately.
+**Pin the base if you would rather not track `latest`.** Every published build carries the git `sha` as a
+tag, and a release build also carries the **product version** (`ghcr.io/edgehero/pi-job:0.8.0`). Neither
+ever moves, while `latest` follows `main`: the version tag is published only by the push that bumps the
+version (or a manual run that asks for it) and only while that tag is not on the registry yet, so an
+unreleased merge moves `latest` and never a released version. The receiver image is tagged the same way. A
+pinned base is the honest choice for a derived image whose layer assumes something about the base; the cost
+is that a pin does not pick up a security rebuild, so bump it deliberately.
+
+**A layer that adds anything under `/home/pi` must keep it writable by any uid**, or re-declare
+`dev.pi-dispatch.capabilities` without `anyUid`: the label is inherited, and a `0755` directory your layer
+creates there breaks a job that runs as another uid while the label still claims it works.
 
 **Copy `image/Dockerfile` and add to it.** You inherit every property in the checklist below for free, and
 the only thing you own is your own `RUN apt-get install …` layer. Prefer this over the layer above only when
@@ -59,7 +63,7 @@ list exists.
 
 | What | What breaks without it | Loud or silent |
 |---|---|---|
-| Non-root runtime user with a **writable home** (`~/.pi/agent` and the tool caches), writable by **any** non-root uid if the image claims `anyUid` | The job does NOT fail at the credential write (pi swallows it); playwright, npm or gh fail later on a path no Dockerfile hints at. The runner logs `home_not_writable` first | late, and cryptic |
+| Non-root runtime user with a **writable home** (`~/.pi/agent` and the tool caches), writable by **any** non-root uid if the image claims `anyUid` | The job does NOT fail at the credential write (pi swallows it); playwright, npm or gh fail later on a path no Dockerfile hints at. The runner logs `home_not_writable` or `agent_dir_not_writable` first | late, and cryptic |
 | `ENTRYPOINT` is the pi-dispatch runner | An image that runs *something else* and exits 0 is recorded by the queue as a **completed job** that never started an agent | **silent** |
 | Runner honours the exit-code protocol (0 done / 1 infra / 2 policy) | Node's default exit 1 on a policy failure makes the queue pay to retry work that can never succeed | late, and expensive |
 | The **pinned pi version** (`CONST-PI-VERSION-PINNED`) | A stale pi turns every job into a no-op that reports success | **silent** |
@@ -69,7 +73,7 @@ list exists.
 | The loader flags in `image/runner/src/loader.mjs` | **Security posture is per-image.** A deployment that turned repo-file discovery off for multi-tenancy in one image **has not turned it off in another** | **silent** |
 | Label `dev.pi-dispatch.pi-version` = the pi the image actually carries | The worker reads it pre-spend and treats an absent one as **"never resume"**, the safe direction. Every `run.resume` job then cold-starts: correct, paid for in full, and invisible | **silent** (deliberately) |
 | Label `dev.pi-dispatch.forges` = the forges this image can serve | An **exclusion** list. A label that omits a forge refuses that forge's jobs pre-spend (`job-image-forge-unsupported`); a label naming a forge whose CLI is *not* installed is worse than none, turning that refusal into a paid container that fails at step 3 | loud, pre-spend |
-| Label `dev.pi-dispatch.capabilities` = the optional features it honours (`replicas`, `commands`, `excludeTools`, `anyUid`) | An **inclusion** list. An image without the label is refused **every** replica job pre-spend (`job-image-replicas-unsupported`), because a floor that hard-codes `pi/issue-<n>` would make both replicas converge on one branch; **every** `run.command` job pre-spend (`job-image-commands-unsupported`), because a runner that does not understand `PI_COMMAND` would feed `/name args` to the model as prose or die retryable on `no-terminal-message`; and **every** `run.excludeTools` job pre-spend (`job-image-exclude-tools-unsupported`), because a runner that does not read `PI_EXCLUDE_TOOLS` would run a "read-only" trigger with every tool the file says to remove and record a clean exit. `anyUid` says the image runs correctly as an arbitrary non-root uid with `HOME=/home/pi`, which is what a job needs on a daemon that enforces bind-mount ownership (native Linux Docker, rootful Podman): `chown -R pi:pi /home/pi && chmod 1777 /home/pi /home/pi/.pi /home/pi/.pi/agent` and no `ENV HOME` | loud, pre-spend |
+| Label `dev.pi-dispatch.capabilities` = the optional features it honours (`replicas`, `commands`, `excludeTools`, `anyUid`) | An **inclusion** list. An image without the label is refused **every** replica job pre-spend (`job-image-replicas-unsupported`), because a floor that hard-codes `pi/issue-<n>` would make both replicas converge on one branch; **every** `run.command` job pre-spend (`job-image-commands-unsupported`), because a runner that does not understand `PI_COMMAND` would feed `/name args` to the model as prose or die retryable on `no-terminal-message`; and **every** `run.excludeTools` job pre-spend (`job-image-exclude-tools-unsupported`), because a runner that does not read `PI_EXCLUDE_TOOLS` would run a "read-only" trigger with every tool the file says to remove and record a clean exit. `anyUid` says the image runs correctly as an arbitrary non-root uid with `HOME=/home/pi`, which is what a job needs on a daemon that enforces bind-mount ownership (native Linux Docker, rootful Podman): `chown -R pi:pi /home/pi && chmod 0777 /home/pi /home/pi/.pi /home/pi/.pi/agent` and no `ENV HOME` (the worker reads `anyUid` from part 2 of issue #341; nothing refuses on it before that) | loud, pre-spend |
 
 The two list labels have **opposite polarities**, deliberately: `forges` excludes, so no claim excludes
 nothing and an unlabelled image is admitted everywhere; `capabilities` includes, so no claim includes nothing

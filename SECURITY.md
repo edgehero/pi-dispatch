@@ -268,7 +268,7 @@ Stated openly rather than discovered later:
   ride the `/job` mount that already exists) are all built by the worker's `docker run` argv, so nothing an
   image contains can weaken them. **Non-root is not in that argv.** It is `USER pi` in the image itself, as the trust table
   above says, and that is exactly why an unconformant image can lose it: `docs/job-image.md` requires a
-  non-root runtime user with a writable agent dir, and nothing here verifies that the image you named
+  non-root runtime user with a writable home, and nothing here verifies that the image you named
   honours it. What is **not** checked is the image's contents, and every way that can be wrong fails
   **silently**: absent guardrails at `/opt/pi-dispatch/HARD_RULES.md` remove the safety floor with no error;
   a stale pi turns jobs into no-ops that report success; wrong exit codes make the queue pay to retry work
@@ -514,7 +514,7 @@ Stated openly rather than discovered later:
 - **Every image you name in `triggers.json` is production code, and you are its build gate.** Pull or build
   it yourself on the machine running the worker — jobs launch with `--pull=never`, so nothing is ever fetched
   at job time and a name this host does not have is refused before the job costs anything. Hold it to the
-  conformance checklist in `docs/job-image.md` (non-root with a writable agent dir, the runner as entrypoint,
+  conformance checklist in `docs/job-image.md` (non-root with a writable home, the runner as entrypoint,
   the exit-code protocol, the pinned pi version, root-owned guardrails, fonts, the loader posture), and run
   the `image` CI job against your own tag. `PI_JOB_IMAGE` and each `run.image` are **separate security
   postures**, not one: a carve-out you made in one image is not inherited by another. `pi-dispatch doctor`

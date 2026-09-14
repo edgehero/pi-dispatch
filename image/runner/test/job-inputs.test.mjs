@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { constants } from "node:fs";
 import { test } from "node:test";
-import { assertJobInputsReadable, assertSessionMountReady, HOME_FORBIDDEN_ROOTS, mountAdvisories, readPrompt } from "../src/config.mjs";
+import { readFileSync } from "node:fs";
+import { assertJobInputsReadable, assertPackagePathsExist, assertSessionMountReady, HOME_FORBIDDEN_ROOTS, mountAdvisories, readPrompt } from "../src/config.mjs";
 
 // Issue #341. Every collaborator is injected: the faults under test are uid faults, which a test running as its
 // own file owner cannot produce with a real filesystem, and a chmod is ignored by root.
@@ -24,6 +25,28 @@ test("the /job check asks for read AND traverse, and passes an allowed, an absen
 	assert.equal(asked, constants.R_OK | constants.X_OK, "a dir readable but not traversable still hides prompt.md and the trigger skills");
 	assert.doesNotThrow(() => assertJobInputsReadable("/job", { accessCode: codes({ "/job": "ENOENT" }) }), "an absent /job is the prompt read's fault to name");
 	assert.doesNotThrow(() => assertJobInputsReadable("/job", { accessCode: codes({ "/job": "EIO" }) }), "only the two denial codes refuse");
+});
+
+test("the job-inputs check covers the operator overlay too, and an absent overlay is simply not configured", () => {
+	assert.throws(
+		() => assertJobInputsReadable(["/job", "/opt/pi-global"], { accessCode: codes({ "/opt/pi-global": "EACCES" }), uid: 1234 }),
+		(e) => e.piDispatchReason === "job-inputs-unreadable" && /\/opt\/pi-global/.test(e.message),
+		"the loader existsSync-gates the overlay, so an untraversable one would drop its models and skills silently",
+	);
+	assert.doesNotThrow(() => assertJobInputsReadable(["/job", "/opt/pi-global"], { accessCode: codes({ "/opt/pi-global": "ENOENT" }) }));
+});
+
+test("a staged package root the job user may not enter is named as unreadable, before existence is asked", () => {
+	let existsAsked = false;
+	assert.throws(
+		() => assertPackagePathsExist(["/opt/pi-global/packages/tools"], {
+			accessCode: codes({ "/opt/pi-global/packages/tools": "EACCES" }),
+			fileExists: () => ((existsAsked = true), false),
+			uid: 1234,
+		}),
+		(e) => e.piDispatchExit === 2 && e.piDispatchReason === "job-inputs-unreadable" && /not readable by the job user \(uid 1234\)/.test(e.message),
+	);
+	assert.equal(existsAsked, false, "existsSync answers false for a path it may not look at, which read as never mounted");
 });
 
 test("readPrompt names a missing input, an unreadable input, and rethrows anything else", () => {
@@ -92,6 +115,15 @@ test("mountAdvisories names each unwritable mount and an unwritable HOME, with t
 	);
 });
 
+test("a writable HOME with an agent dir pi cannot write is named, and an absent agent dir is not", () => {
+	assert.deepEqual(
+		mountAdvisories({ env: { HOME: "/home/pi" }, uid: 1001, accessCode: codes({ "/home/pi/.pi/agent": "EACCES" }) }),
+		[["agent_dir_not_writable", { path: "/home/pi/.pi/agent", uid: 1001, code: "EACCES" }]],
+		"a root-owned ~/.pi/agent is exactly the failure pi's swallowed auth lock hides",
+	);
+	assert.deepEqual(mountAdvisories({ env: { HOME: "/home/pi/" }, uid: 1001, accessCode: codes({ "/home/pi/.pi/agent": "ENOENT" }) }), []);
+});
+
 test("a HOME inside a mount root is named, and a sibling that merely shares a prefix is not", () => {
 	// Podman's passwd injection gives a --user with no entry HOME=/workspace (measured), which would put auth.json in
 	// the operator's repository.
@@ -107,4 +139,15 @@ test("a HOME inside a mount root is named, and a sibling that merely shares a pr
 test("the forbidden HOME roots are exactly the four job mounts", () => {
 	assert.deepEqual([...HOME_FORBIDDEN_ROOTS], ["/workspace", "/job", "/outbox", "/session"]);
 	assert.ok(Object.isFrozen(HOME_FORBIDDEN_ROOTS));
+});
+
+test("INT-RUNNER-EXIT-CODE-PROTOCOL names the reason and every advisory event the runner emits", () => {
+	// The spec table is hand-written, so it is pinned against the code's own names: an advisory renamed in one place
+	// and not the other leaves an operator grepping for a line that never appears.
+	const spec = readFileSync(new URL("../../../specs/interfaces.md", import.meta.url), "utf8");
+	const src = readFileSync(new URL("../src/config.mjs", import.meta.url), "utf8");
+	const events = [...src.matchAll(/"([a-z]+(?:_[a-z]+)+)"\]/g)].map((m) => m[1]).concat([...src.matchAll(/push\(\["([a-z_]+)"/g)].map((m) => m[1]));
+	const names = [...new Set(events)].sort();
+	assert.deepEqual(names, ["agent_dir_not_writable", "home_not_writable", "home_under_mount", "outbox_not_writable", "workspace_not_writable"]);
+	for (const name of [...names, "job-inputs-unreadable"]) assert.ok(spec.includes(`\`${name}\``), `interfaces.md must name ${name}`);
 });

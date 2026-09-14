@@ -227,13 +227,15 @@ test("run-job checks /job for every job and logs the mount advisories before any
 	// before getAgentDir/AuthStorage, because pi swallows the auth-lock failure and the line is the only record;
 	// (3) they are logged, never thrown, so nothing that runs today gains an exit.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /assertJobInputsReadable\(JOB_DIR\);/);
-	assert.ok(src.indexOf("assertSessionMountReady(cfg.sessionFile)") < src.indexOf("assertJobInputsReadable(JOB_DIR)"));
+	assert.match(src, /assertJobInputsReadable\(\[JOB_DIR, GLOBAL_PI_DIR\]\);/, "both the job inputs and the operator overlay");
+	assert.ok(src.indexOf("assertSessionMountReady(cfg.sessionFile)") < src.indexOf("assertJobInputsReadable([JOB_DIR"));
 	assert.ok(
-		src.indexOf("assertJobInputsReadable(JOB_DIR)") < src.indexOf("const prompt = cfg.command"),
+		src.indexOf("assertJobInputsReadable([JOB_DIR") < src.indexOf("const prompt = cfg.command"),
 		"the check must precede the command/prompt split, or command jobs skip it",
 	);
 	assert.match(src, /for \(const \[event, fields\] of mountAdvisories\(\)\) log\(event, fields\);/);
 	assert.ok(src.indexOf("mountAdvisories()") < src.indexOf("getAgentDir()"), "advisories must be logged before pi touches HOME");
+	const between = src.slice(src.indexOf("mountAdvisories()"), src.indexOf("getAgentDir()"));
+	assert.doesNotMatch(between, /\bthrow\b|configError\(|process\.exit/, "an advisory must never become an exit: nothing between the advisories and getAgentDir may throw or exit");
 	assert.doesNotMatch(src, /function readPrompt/, "readPrompt lives in src/config.mjs, where its EACCES split is tested");
 });

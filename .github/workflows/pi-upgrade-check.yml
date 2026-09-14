@@ -380,7 +380,8 @@ jobs:
       # The CORE checklist, from the single definition an operator also runs against their own image
       # (docs/job-image.md). Kept as a script rather than inlined steps so the portable half cannot drift
       # from what the docs promise: pi present, CapEff=0, non-root, /job:ro enforced by the kernel, a
-      # writable agent dir, guardrails present AND unwritable, Chromium rendering a real page, fonts.
+      # writable agent dir, guardrails present AND unwritable, Chromium rendering a real page, fonts, and
+      # for an image claiming anyUid a writable home and a render as an arbitrary uid (issue #341).
       - name: "CORE: the conformance checklist any nameable image must pass"
         run: ./image/verify-image.sh "$IMAGE_REF"
 

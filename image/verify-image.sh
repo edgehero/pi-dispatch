@@ -128,8 +128,11 @@ else
 				# took, the home is writable, and pi's agent dir and the tool caches can be created there. uid 4242 has
 				# no passwd entry in any image, which is what a worker's own uid is inside one. The Chromium half of the
 				# claim is checked with the render below.
+				# EVERY directory under the home must be writable by that uid, not only the ones this script names: a derived
+				# layer that creates ~/.cache or ~/.npm as 0755 pi leaves a dir `mkdir -p` happily "creates" and no tool can
+				# write. Plus a real file write, so a home on a read-only layer cannot pass on permission bits alone.
 				docker run --rm --init --cap-drop=ALL --security-opt no-new-privileges --user 4242:4242 -e HOME=/home/pi \
-					--entrypoint sh "$IMAGE_REF" -c '[ "$(id -u):$(id -g)" = 4242:4242 ] && mkdir -p "$HOME/.pi/agent" "$HOME/.cache" "$HOME/.config" && : > "$HOME/.pi/agent/auth.json"' >/dev/null 2>&1 \
+					--entrypoint sh "$IMAGE_REF" -c '[ "$(id -u):$(id -g)" = 4242:4242 ] || exit 1; mkdir -p "$HOME/.pi/agent" && : > "$HOME/.pi/agent/.anyuid-probe" || exit 1; [ -z "$(find "$HOME" -xdev -type d ! -writable 2>/dev/null)" ]' >/dev/null 2>&1 \
 					|| fail "the image declares 'anyUid' but /home/pi is not writable by an arbitrary uid -- a job run as the worker's own uid would lose auth.json and every tool cache"
 				any_uid=1
 				;;
@@ -149,7 +152,7 @@ if [ "$any_uid" != 1 ]; then
 	# Said out loud for the same reason as the playwright skip below: a check that silently does not apply reads
 	# like one that passed.
 	echo "  note no 'anyUid' capability -- on a daemon that enforces bind-mount ownership (native Linux Docker, rootful"
-	echo "       Podman), a job on this image can only run as uid 1001 (issue #341)."
+	echo "       Podman), a job on this image can only run as the image's own user (issue #341)."
 fi
 
 # --cap-drop=ALL is CONST-ISOLATION-CONTAINER-PER-JOB's enforcement surface. Read the effective capability
@@ -189,10 +192,11 @@ fi
 rm -rf "$fixture"
 ok "/job:ro is enforced by the kernel (a writable control mount accepted the same write)"
 
-# pi lazily creates ~/.pi/agent and writes auth.json on the FIRST credential operation. A root-owned dir
-# kills the job with EACCES at run time, on a path nothing in a Dockerfile hints at.
+# pi lazily creates ~/.pi/agent and writes auth.json on the FIRST credential operation. It swallows a failure to
+# do so, so a root-owned dir does not stop the job: playwright, npm or gh fail later instead, on a path nothing in
+# a Dockerfile hints at, and the runner logs home_not_writable (issue #341).
 docker run --rm --entrypoint sh "$IMAGE_REF" -c 'touch "$HOME/.pi/agent/auth.json" && rm "$HOME/.pi/agent/auth.json"' >/dev/null 2>&1 \
-	|| fail "\$HOME/.pi/agent is not writable by the runtime user. pi dies EACCES on its first credential write."
+	|| fail "\$HOME/.pi/agent is not writable by the runtime user. pi skips auth.json silently and the tools fail later."
 ok "the agent dir is writable by the runtime user"
 
 # An agent that can rewrite its own safety floor has none, and an absent floor raises no error at all.
@@ -224,7 +228,8 @@ if docker run --rm --entrypoint sh "$IMAGE_REF" -c 'command -v playwright-cli' >
 		|| fail "Chromium did not render a real page. Check PLAYWRIGHT_BROWSERS_PATH (set at BOTH build and run), PLAYWRIGHT_MCP_BROWSER, PLAYWRIGHT_MCP_SANDBOX, and fonts."
 	ok "Chromium renders a real page as non-root"
 	if [ "$any_uid" = 1 ]; then
-		# Measured (issue #341): today's image renders as pi and fails under --user 4242:4242, with or without HOME.
+		# Measured (issue #341): the image before that change rendered as pi and failed under --user 4242:4242,
+		# with or without HOME.
 		render_check --user 4242:4242 -e HOME=/home/pi \
 			|| fail "the image declares 'anyUid' but Chromium does not render as an arbitrary uid with HOME=/home/pi"
 		ok "Chromium renders a real page as an arbitrary non-root uid (anyUid)"

@@ -84,12 +84,12 @@ test("an absent session file is a mount failure, not an empty transcript", () =>
 	// /session that does not exist here, which satisfies assert.throws for the wrong reason -- the
 	// existence check could be deleted outright and this test would still pass. Mutation-caught.
 	assert.throws(
-		() => assertSessionMountReady("/session/current.jsonl", { fileExists: () => false, checkWritable: () => {} }),
+		() => assertSessionMountReady("/session/current.jsonl", { fileExists: () => false, checkWritable: () => {}, accessCode: () => null }),
 		(e) => e.piDispatchExit === 2 && /did not land/.test(e.message),
 		"the host stages this file ALWAYS, 0 bytes on a cold start included -- so absence proves the bind mount did not land, and that must not be retried",
 	);
 	assert.doesNotThrow(
-		() => assertSessionMountReady("/session/current.jsonl", { fileExists: () => true, checkWritable: () => {} }),
+		() => assertSessionMountReady("/session/current.jsonl", { fileExists: () => true, checkWritable: () => {}, accessCode: () => null }),
 		"a staged file on a writable mount is the normal armed case and must pass both gates",
 	);
 });
@@ -97,6 +97,7 @@ test("an absent session file is a mount failure, not an empty transcript", () =>
 test("an unwritable session dir refuses pre-spend rather than as an EACCES from inside pi", () => {
 	assert.throws(
 		() => assertSessionMountReady("/session/current.jsonl", {
+			accessCode: () => null,
 			fileExists: () => true,
 			checkWritable: () => {
 				throw new Error("EACCES: permission denied");

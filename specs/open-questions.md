@@ -697,8 +697,8 @@ build does not.
   gains a declared `anyUid` capability (a home writable by any non-root uid, Chromium rendering as one) and
   `image/verify-image.sh` proves it with two uid-4242 runs. For an operator-built image that is one more
   thing it can silently lack: without the label it is fit only for the uid it was built for. The detection
-  is the same kind as `replicas` -- a label checked pre-spend, backed by a verify arm -- and **the status
-  stays ACCEPTED RISK**.
+  is the same kind as `replicas` -- a label the worker reads pre-spend from part 2 of #341 (until then nothing
+  refuses on it), backed by a verify arm -- and **the status stays ACCEPTED RISK**.
 - **What would close it**: a worker-side gate at job start. Half the ingredients exist — `image/verify-image.sh`
   is the CORE checklist as one runnable definition, shared by CI and by the operator, and it runs **on the
   host that holds the image**, which is the only place it can (`--pull=never` means the runnable images are

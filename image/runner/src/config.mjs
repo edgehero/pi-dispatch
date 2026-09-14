@@ -322,12 +322,17 @@ const DENIED = new Set(["EACCES", "EPERM"]);
  * file it may not look at), a COMMAND job never reads prompt.md at all, and the loader existsSync-gates
  * `/job/trigger-skills`, so the job's own skills silently vanish and the job spends anyway.
  *
- * Every job runs it, prompt or command. An absent `/job` is not this check's business (the prompt read names that
- * fault), which also keeps the image's own "missing job input" contract steps meaningful.
+ * Every job runs it, prompt or command, over `/job` and the operator's overlay at `/opt/pi-global` (the loader
+ * existsSync-gates the overlay too, so an untraversable one would drop the operator's models and skills without a
+ * word). An absent dir is not this check's business: `/job`'s absence is the prompt read's fault to name, and an
+ * absent overlay is simply not configured, which also keeps the image's own "missing job input" contract steps
+ * meaningful.
  */
-export function assertJobInputsReadable(dir, { accessCode = defaultAccessCode, uid = process.getuid?.() } = {}) {
-	if (DENIED.has(accessCode(dir, constants.R_OK | constants.X_OK))) {
-		throw configError(`job inputs are not readable by the job user (uid ${uid}): ${dir}`, "job-inputs-unreadable");
+export function assertJobInputsReadable(dirs, { accessCode = defaultAccessCode, uid = process.getuid?.() } = {}) {
+	for (const dir of [dirs].flat()) {
+		if (DENIED.has(accessCode(dir, constants.R_OK | constants.X_OK))) {
+			throw configError(`job inputs are not readable by the job user (uid ${uid}): ${dir}`, "job-inputs-unreadable");
+		}
 	}
 }
 
@@ -362,8 +367,9 @@ export const HOME_FORBIDDEN_ROOTS = Object.freeze(["/workspace", "/job", "/outbo
  * reason a write later fails is already in the log, instead of an EACCES from deep inside a tool.
  *
  *   - `workspace_not_writable` / `outbox_not_writable`: the mount exists and this uid may not write it.
- *   - `home_not_writable`: pi swallows the auth-lock failure (measured: a job with HOME=/ still reaches "no
- *     configured auth"), so an unwritable HOME otherwise shows up only as a playwright, npm or gh failure later.
+ *   - `home_not_writable` / `agent_dir_not_writable`: pi swallows the auth-lock failure (measured: a job with HOME=/
+ *     still reaches "no configured auth"), so an unwritable HOME or `~/.pi/agent` otherwise shows up only as a
+ *     playwright, npm or gh failure later, or a credential that is never saved.
  *   - `home_under_mount`: HOME inside a mount root. Podman gives a `--user` with no passwd entry HOME=/workspace
  *     (measured), which would put auth.json into the operator's repository as an untracked file.
  *
@@ -371,7 +377,7 @@ export const HOME_FORBIDDEN_ROOTS = Object.freeze(["/workspace", "/job", "/outbo
  */
 export function mountAdvisories({ env = process.env, uid = process.getuid?.(), accessCode = defaultAccessCode } = {}) {
 	// The env, not a `home` default: a default parameter cannot express "HOME is unset", which is a case this names.
-	// env-internal HOME: the container's own home, set by the image's passwd entry or by the worker beside `--user`;
+	// env-internal HOME: the container's own home, set by the image's passwd entry or on the command line beside `--user`;
 	// read here only to report whether it is usable, never chosen.
 	const home = env.HOME;
 	const out = [];
@@ -385,6 +391,11 @@ export function mountAdvisories({ env = process.env, uid = process.getuid?.(), a
 		}
 		const code = accessCode(home, constants.W_OK);
 		if (code !== null) out.push(["home_not_writable", { home, uid, code }]);
+		// The one dir pi writes its credentials into. A writable HOME with a root-owned agent dir under it is the exact
+		// case pi's swallowed lock failure hides; absent is fine, pi creates it.
+		const agentDir = `${home.replace(/\/+$/, "")}/.pi/agent`;
+		const agentCode = accessCode(agentDir, constants.W_OK);
+		if (agentCode !== null && agentCode !== "ENOENT") out.push(["agent_dir_not_writable", { path: agentDir, uid, code: agentCode }]);
 	} else {
 		out.push(["home_not_writable", { home: home ?? null, uid, code: "UNSET" }]);
 	}
@@ -404,8 +415,13 @@ export function mountAdvisories({ env = process.env, uid = process.getuid?.(), a
  * packages never mounted would otherwise run to a clean exit 0 without the tools its flow was
  * written for, and report success for work it could not have done.
  */
-export function assertPackagePathsExist(paths, { fileExists = existsSync } = {}) {
+export function assertPackagePathsExist(paths, { fileExists = existsSync, accessCode = defaultAccessCode, uid = process.getuid?.() } = {}) {
 	for (const path of paths) {
+		// Asked before existence, for the same reason as the session assert: `existsSync` answers false for a path
+		// this uid may not look at, which would name a mounted package as never mounted (issue #341).
+		if (DENIED.has(accessCode(path, constants.X_OK))) {
+			throw configError(`staged package path is not readable by the job user (uid ${uid}): ${path} (PI_PACKAGES)`, "job-inputs-unreadable");
+		}
 		if (!fileExists(path)) {
 			throw configError(`staged package path does not exist: ${path} (PI_PACKAGES)`);
 		}

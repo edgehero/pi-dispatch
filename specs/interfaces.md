@@ -518,12 +518,13 @@ refactor apart.
   | Event | Surfaces as | Exit / reason |
   |---|---|---|
   | `/job` (or `/job/prompt.md`) denies the job user (`EACCES`/`EPERM`), e.g. a `0700` job dir owned by another uid on a daemon that enforces bind-mount ownership | pre-spend `access(2)` on `/job` beside the mount asserts, and the prompt read | `2` / `job-inputs-unreadable`: deterministic, pre-spend, and it names the uid; before it, a prompt job reported "missing job input", a command job never read `prompt.md` at all, and the loader's `existsSync` gate dropped the job's trigger skills without a word while the job spent |
-  | `/session` denies the job user | the session mount assert asks the directory's access code BEFORE existence | `2` / `config`, "session mount is not accessible to the job user" (no longer misreported as "did not land") |
+  | `/session` denies the job user | the session mount assert asks the directory's access code BEFORE existence | `2` / `config`, "session mount is not accessible to the job user" (no longer misreported as "did not land"); `config` rather than `job-inputs-unreadable` because the transcript mount is not a job input and its other refusals already say `config` |
+  | `/opt/pi-global` (the operator's overlay) or a staged package root denies the job user | the same access check, and the package-path assert | `2` / `job-inputs-unreadable`; before it the loader's `existsSync` gates dropped the overlay silently and a package root read as "does not exist" |
 
   Beside them the runner logs **advisory** lines that change no exit code, because each describes a job that
   runs today and may be doing what its trigger wants: `workspace_not_writable`, `outbox_not_writable`,
-  `home_not_writable` and `home_under_mount` (fields: the path or home, the uid, the access code; never
-  content).
+  `home_not_writable`, `agent_dir_not_writable` and `home_under_mount` (fields: the path or home, the uid,
+  the access code; never content).
 
   **Command jobs (issue #189, `run.command`) add three named reasons under the EXISTING codes — never a
   new code and never a new worker-level outcome** (the admin surfaces bucket outcomes into a closed set
@@ -891,9 +892,9 @@ refactor apart.
     (`job.image ?? PI_JOB_IMAGE`; `INT-TRIGGERS-FILE-CONTRACT`, `DES-PER-TRIGGER-JOB-IMAGE`), so everything
     below is **the conformance checklist any image must satisfy to be nameable in `run.image`**. Each item
     is something the worker *assumes and does not verify at run time*, and — the reason this list exists at
-    all — **every one of them fails silently or late**: a non-root runtime user with a **writable
-    `~/.pi/agent`** (else EACCES on pi's first credential write, inside the container, at run time, on a
-    path no Dockerfile hints at); an `ENTRYPOINT` that is the runner and honours
+    all: **every one of them fails silently or late**: a non-root runtime user with a **writable home**
+    (else pi silently skips `auth.json` and playwright, npm or gh fail later, inside the container, on a
+    path no Dockerfile hints at; issue #341); an `ENTRYPOINT` that is the runner and honours
     `INT-RUNNER-EXIT-CODE-PROTOCOL` (an entrypoint that exits Node's default `1` on a policy failure makes
     the queue pay to retry a job that can never succeed); the **pinned pi version**
     (`CONST-PI-VERSION-PINNED` — a stale pi is the silent-no-op-that-reports-success failure class); the
@@ -940,16 +941,19 @@ refactor apart.
     reason `job-image-replicas-unsupported`. One rule underlies both — an image that declares nothing gets
     no benefit of the doubt about what it contains — and neither costs an unflagged job anything.
     `verify-image.sh` greps the baked guardrails when the label claims `replicas`, so this label cannot lie
-    any more than `forges` can. The token set at this version is `replicas`, `commands` and
-    `excludeTools` -- the last (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
+    any more than `forges` can. The token set at this version is `replicas`, `commands`, `excludeTools` and
+    `anyUid` -- the third (issue #291) declares that the baked runner reads `PI_EXCLUDE_TOOLS`, and
     a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a
     "read-only" trigger with every tool the file says to remove: a permission quietly not enforced.
-    `verify-image.sh` fails on any UNKNOWN token and greps the baked runner for each claimed one, so a
-    new capability cannot ship its label without shipping its evidence. `anyUid` (issue #341) declares that
+    `verify-image.sh` fails on any UNKNOWN token and checks each claimed one (a grep of the baked runner, or
+    for `anyUid` runs as uid 4242), so a new capability cannot ship its label without shipping its evidence.
+    `anyUid` (issue #341) declares that
     the image runs correctly as an ARBITRARY non-root uid given `HOME=/home/pi`: the home is writable by any
     uid, and Chromium renders as one. Its evidence is not a grep but two runs as uid `4242` (no passwd entry
-    in any image): one writes the agent dir and the tool cache dirs, one renders a page.
+    in any image): one writes a file into the home, the agent dir and the `.cache` and `.config` dirs (a
+    `mkdir -p` of an existing unwritable dir would pass, so each gets a write), one renders a page. The worker
+    reads the label from part 2 of issue #341.
   - User: non-root
   - **`--pull=never`.** `docker run` defaults to `--pull=missing`, which makes an unrecognised image name a
     **registry fetch**: a typo in the operator's image config would pull and execute a stranger's image under
@@ -1230,14 +1234,15 @@ refactor apart.
     A home the runtime user cannot write does **not** stop the job: pi's `AuthStorage` swallows the lock
     failure and an env-keyed job reaches its provider (measured: a job with `HOME=/` still answers "no
     configured auth" rather than EACCES, issue #341). The breakage lands later, inside whichever tool wrote
-    first, which is why the runner logs `home_not_writable` and `home_under_mount` advisories before pi
+    first, which is why the runner logs `home_not_writable`, `agent_dir_not_writable` and `home_under_mount` advisories before pi
     starts. `models.json` is the exception: read-only, never created, safe if absent.
     **Why any uid (issue #341)**: on a daemon that enforces bind-mount ownership, a job reads its `0700` job
     dir and leaves files the host can remove only when it runs as the uid that owns them, a `--user` with no
     passwd entry in the image. Docker gives such a uid `HOME=/`; Podman gives it `HOME=/workspace` (measured),
     which would put `auth.json` into the operator's repository. So the image makes `/home/pi` and its agent
-    dir `1777` and declares `anyUid`, and a container started under `--user` is given `HOME=/home/pi` on its
-    own command line. The image sets **no** `ENV HOME`: images built `FROM` it run root build steps, which
+    dir `0777` (not sticky: a job container has one uid, and a sticky world-writable dir stops the kernel
+    following a root-owned symlink under it) and declares `anyUid`, and a container started under `--user` must be given `HOME=/home/pi` on
+    its own command line (the worker does so from part 2 of issue #341). The image sets **no** `ENV HOME`: images built `FROM` it run root build steps, which
     would otherwise leave root-owned cache dirs in that home.
     **Inversely, the guardrails, the runner, `node_modules`, and the browser cache are root-owned and NOT
     writable by the runtime user.** The agent runs *as* that user; if it could rewrite
@@ -1251,7 +1256,7 @@ refactor apart.
     survives the obvious fix. Create, chown and open the directories explicitly:
     ```dockerfile
     RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
-        && chmod 1777 /home/pi /home/pi/.pi /home/pi/.pi/agent
+        && chmod 0777 /home/pi /home/pi/.pi /home/pi/.pi/agent
     ```
   - **Chromium's own sandbox is disabled via `PLAYWRIGHT_MCP_SANDBOX=false`** — an env var, **not** a
     `--no-sandbox` argument, and not a `playwright-cli` flag. This is a **deliberate divergence from
@@ -4108,4 +4113,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #277, part 4: one sandbox launcher for both entry points. **`INT-SANDBOX-CONTRACT` AMENDED**: the network bullet now holds for both entry points through `openSandbox`, which owns the refusals, the already-running check, the session's egress network and its teardown; the admin panel previously built the argv itself with no network, so a panel-opened sandbox ran on the default bridge with `PI_EGRESS` armed (a live gap, fixed here), and a second press on a running sandbox tried to start another container, which docker refused by name. The panel reads the egress posture with the worker's own readers and refuses a malformed `PI_EGRESS`, and a failed network says where the setting is read. The network's lifecycle is stated and now honest about two cases the CLI always had: it is LEFT when the shell detaches with the container still running (tearing it down stripped the proxy from a live sandbox), and a network already under the session's name is refused and named with the commands to remove it rather than blamed on the proxy (automatic removal was tried and withdrawn: a racing second open stripped the first's proxy). A non-boolean posture throws. Two pre-existing miscounts corrected in the same contract: four proxy variables, not three. Acceptance gains the panel cases. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container from image and workspace. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the network, its name and the proxy variables are the ones it already specifies; only which caller builds them moved. |
 | 2026-09-14 | Issue #278, part 1. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a "Which daemon" bullet -- the endpoint the docker CLI resolves, asked of the CLI at boot and per job with no `env` passed to either spawn, gating `local`'s `credentialTransit` and refused only under a floor. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `backend-floor-unobserved` joins the `reason` enum. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: a sandbox carries no credential, so where its daemon is does not move a credential. |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **NEW `INT-LIVE-PROBE-CONTRACT`**, a sibling of `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`: one container from the job builder with `--network=none`, an empty environment and `-d --entrypoint sleep`, fixture mounts under `jobsDirPath`, names by pid and nonce outside every sweep's namespace, announced before and removed by ID in a `finally`, run only on a docker CLI observed local; six verdicts, with `egress` folded from the canary's `readBack` as the one reading not from this builder; the conformance harness's `readBack` shape for other venues. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv changes, and the probe reuses its builder rather than amending its contract. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: the sandbox launcher, its names and its reaper are untouched, and no live-probe name falls in `pi-sandbox-`. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a probe is not a job and writes no record. |
-| 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: the agent-dir bullet becomes a home bullet and is CORRECTED -- an unwritable home does not kill the job with EACCES as it claimed, because pi's `AuthStorage` swallows the lock failure and an env-keyed job carries on (measured in a native-Linux lab: `HOME=/` still reaches "no configured auth"), so the breakage surfaces later inside a tool; the recipe becomes `chown -R pi:pi /home/pi` plus `chmod 1777` on the home and agent dir, drops the stale `COPY --chown ... APPEND_SYSTEM.md` line (the floor has lived at `/opt/pi-dispatch` since before this entry), and records why the image sets no `ENV HOME` (images built FROM it run root build steps). `anyUid` joins the capability tokens, with evidence by two uid-4242 runs rather than a grep. Measured behind it: on a native rootful Docker 27.5.1 daemon and on rootful Podman 5.8.2 through its Docker API, a job as the image's uid 1001 cannot traverse a worker-owned `0700` job dir; with `--user=<owner>` every mount works but `HOME` is `/` (Docker) or `/workspace` (Podman, whose injected passwd entry puts `auth.json` in the operator's repository); Chromium renders as an arbitrary uid only on the 1777 image with `HOME=/home/pi`. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `job-inputs-unreadable` under the existing policy code, from a pre-spend `access(2)` on `/job` beside the mount asserts for EVERY job (a command job never reads `prompt.md`, and the loader's `existsSync` gate would drop its trigger skills silently) and from the prompt read; the session assert names an inaccessible `/session` instead of reporting "did not land"; four advisory log lines that change no exit code. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked**: no mount, env var or file moved -- the worker that passes `--user` lands with part 2. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: runner reasons ride the exit line, not the record's reason enum (`command-unregistered` precedent). |
+| 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: the agent-dir bullet becomes a home bullet and is CORRECTED -- an unwritable home does not kill the job with EACCES as it claimed, because pi's `AuthStorage` swallows the lock failure and an env-keyed job carries on (measured in a native-Linux lab: `HOME=/` still reaches "no configured auth"), so the breakage surfaces later inside a tool; the recipe becomes `chown -R pi:pi /home/pi` plus `chmod 0777` on the home and agent dir (not sticky: `fs.protected_symlinks` then refuses a root-owned symlink under it, measured), drops the stale `COPY --chown ... APPEND_SYSTEM.md` line (the floor has lived at `/opt/pi-dispatch` since before this entry), and records why the image sets no `ENV HOME` (images built FROM it run root build steps). `anyUid` joins the capability tokens, with evidence by two uid-4242 runs rather than a grep. Measured behind it: on a native rootful Docker 27.5.1 daemon and on rootful Podman 5.8.2 through its Docker API, a job as the image's uid 1001 cannot traverse a worker-owned `0700` job dir; with `--user=<owner>` every mount works but `HOME` is `/` (Docker) or `/workspace` (Podman, whose injected passwd entry puts `auth.json` in the operator's repository); Chromium renders as an arbitrary uid only on the world-writable-home image with `HOME=/home/pi`. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `job-inputs-unreadable` under the existing policy code, from a pre-spend `access(2)` on `/job` beside the mount asserts for EVERY job (a command job never reads `prompt.md`, and the loader's `existsSync` gate would drop its trigger skills silently) and from the prompt read; the session assert names an inaccessible `/session` instead of reporting "did not land"; five advisory log lines that change no exit code. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked**: no mount, env var or file moved -- the worker that passes `--user` lands with part 2. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: runner reasons ride the exit line, not the record's reason enum (`command-unregistered` precedent). |

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideVersionTag, IMAGE, main } from "../../.github/scripts/image-version-tag.mjs";
+import { DEFAULT_IMAGE as IMAGE, decideVersionTag, main, releaseTagCommit } from "../../.github/scripts/image-version-tag.mjs";
 
 // Issue #341: image.yml re-pushed the unchanged product version tag on every image/** merge, overwriting a
 // released tag with unreleased contents. The decision is pure and the workflow step is a thin main().
@@ -56,7 +56,7 @@ test("main reads the pushed-over commit's version and asks the registry only for
 	const calls = [];
 	const d = main({
 		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.11.0" },
-		run: fakeRun([[`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }], ["docker buildx imagetools inspect", notFound]], calls),
+		run: fakeRun([["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }], ["docker buildx imagetools inspect", notFound]], calls),
 		writeOutput: (l) => outputs.push(l),
 		log: () => {},
 	});
@@ -68,18 +68,90 @@ test("main reads the pushed-over commit's version and asks the registry only for
 	const outputs2 = [];
 	main({
 		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3" },
-		run: fakeRun([[`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }]], calls2),
+		run: fakeRun([["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }]], calls2),
 		writeOutput: (l) => outputs2.push(l),
 		log: () => {},
 	});
 	assert.deepEqual(outputs2, ["push=false"]);
-	assert.ok(!calls2.some((c) => c.startsWith("docker")), "an unreleased push must not even ask the registry");
+	assert.equal(calls2.filter((c) => c.startsWith("docker")).length, 1, "an unreleased push asks the registry once, only to warn about a lost release tag");
 });
 
-test("main treats an all-zero or unreadable before-sha as not a release", () => {
-	for (const env of [{ EVENT_NAME: "push", BEFORE_SHA: "0".repeat(40), VERSION: "1.11.0" }, { EVENT_NAME: "push", BEFORE_SHA: "b".repeat(40), VERSION: "1.11.0" }]) {
+test("a dispatch asking for the version tag on any commit but the release tag's is REFUSED", () => {
+	for (const [answer, sha] of [[lsRemote, "e".repeat(40)], [{ code: 0, output: "" }, TAG_SHA], [{ code: 2, output: "" }, TAG_SHA]]) {
+		const outputs = [];
+		assert.throws(
+			() => main({ env: { EVENT_NAME: "workflow_dispatch", DISPATCH_PUSH_VERSION_TAG: "true", VERSION: "1.10.3", GITHUB_SHA: sha }, run: fakeRun([["git ls-remote", answer], ["docker", notFound]], []), writeOutput: (l) => outputs.push(l), log: () => {} }),
+			/must build the commit v1\.10\.3 names/,
+		);
+		assert.deepEqual(outputs, []);
+	}
+});
+
+test("releaseTagCommit prefers the peeled commit of an annotated tag", () => {
+	assert.equal(releaseTagCommit(lsRemote), TAG_SHA);
+	assert.equal(releaseTagCommit({ code: 0, output: `${"d".repeat(40)}\trefs/tags/v1.10.3\n` }), "d".repeat(40));
+	assert.equal(releaseTagCommit({ code: 0, output: "" }), null);
+	assert.equal(releaseTagCommit({ code: 128, output: `${"d".repeat(40)}\trefs/tags/v1.10.3` }), null);
+});
+
+test("an ordinary push warns when the current version's tag is missing from the registry, and never fails for it", () => {
+	const before = "a".repeat(40);
+	const logs = [];
+	const outputs = [];
+	main({
+		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3" },
+		run: fakeRun([["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }], ["docker buildx imagetools inspect", notFound]], []),
+		writeOutput: (l) => outputs.push(l),
+		log: (l) => logs.push(l),
+	});
+	assert.deepEqual(outputs, ["push=false"]);
+	assert.ok(logs.some((l) => l.startsWith("::warning::") && l.includes("--ref v1.10.3")), logs.join("\n"));
+	const quiet = [];
+	main({
+		env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.10.3" },
+		run: fakeRun([["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: '{"version":"1.10.3"}' }], ["docker buildx imagetools inspect", found]], []),
+		writeOutput: () => {},
+		log: (l) => quiet.push(l),
+	});
+	assert.ok(!quiet.some((l) => l.startsWith("::warning::")));
+});
+
+test("main treats an all-zero or absent before-sha as not a release", () => {
+	for (const env of [{ EVENT_NAME: "push", BEFORE_SHA: "0".repeat(40), VERSION: "1.11.0" }, { EVENT_NAME: "push", VERSION: "1.11.0" }]) {
 		const outputs = [];
 		main({ env, run: fakeRun([["docker", notFound]], []), writeOutput: (l) => outputs.push(l), log: () => {} });
-		assert.deepEqual(outputs, ["push=false"], env.BEFORE_SHA);
+		assert.deepEqual(outputs, ["push=false"], env.BEFORE_SHA ?? "absent");
 	}
+});
+
+test("a pushed-over commit that cannot be fetched or read FAILS the step, never silently skips a release's tag", () => {
+	const before = "b".repeat(40);
+	for (const answers of [[], [["git fetch", { code: 0, output: "" }]], [["git fetch", { code: 0, output: "" }], [`git show ${before}:package.json`, { code: 0, output: "not json" }]]]) {
+		const outputs = [];
+		assert.throws(
+			() => main({ env: { EVENT_NAME: "push", BEFORE_SHA: before, VERSION: "1.11.0" }, run: fakeRun(answers, []), writeOutput: (l) => outputs.push(l), log: () => {} }),
+			/could not read the root version at the pushed-over commit/,
+		);
+		assert.deepEqual(outputs, [], "no output may be written when the step fails");
+	}
+});
+
+const TAG_SHA = "c".repeat(40);
+const lsRemote = { code: 0, output: `${"d".repeat(40)}\trefs/tags/v1.10.3\n${TAG_SHA}\trefs/tags/v1.10.3^{}\n` };
+
+test("main honours a dispatch that asks for the tag ON the release tag's commit, with the workflow's own image name", () => {
+	const calls = [];
+	const outputs = [];
+	const d = main({
+		env: { EVENT_NAME: "workflow_dispatch", DISPATCH_PUSH_VERSION_TAG: "true", VERSION: "1.10.3", IMAGE: "ghcr.io/edgehero/pi-dispatch-receiver", GITHUB_SHA: TAG_SHA },
+		run: fakeRun([["git ls-remote", lsRemote], ["docker buildx imagetools inspect ghcr.io/edgehero/pi-dispatch-receiver:1.10.3", { code: 1, output: "ERROR: ghcr.io/edgehero/pi-dispatch-receiver:1.10.3: not found" }]], calls),
+		writeOutput: (l) => outputs.push(l),
+		log: () => {},
+	});
+	assert.equal(d.push, true);
+	assert.deepEqual(outputs, ["push=true"]);
+	assert.equal(calls.filter((c) => c.startsWith("docker")).length, 1);
+	const outputs2 = [];
+	main({ env: { EVENT_NAME: "workflow_dispatch", DISPATCH_PUSH_VERSION_TAG: "", VERSION: "1.10.3" }, run: fakeRun([["docker", notFound]], []), writeOutput: (l) => outputs2.push(l), log: () => {} });
+	assert.deepEqual(outputs2, ["push=false"], "an unticked dispatch input renders as an empty string");
 });

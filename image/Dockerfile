@@ -158,24 +158,26 @@ RUN useradd --create-home --shell /bin/bash --uid 1001 pi
 # `home_not_writable` for exactly that reason. `COPY --chown` would not fix a root-owned home anyway:
 # it does not apply to parent dirs COPY auto-creates.
 #
-# 1777 (sticky, world-writable) on the home and the agent dir, so the runtime user does not have to
-# be `pi` (issue #341). On a daemon that enforces bind-mount ownership, a job can only read its 0700
+# 0777 (world-writable, NOT sticky) on the home and the agent dir, so the runtime user does not have
+# to be `pi` (issue #341). On a daemon that enforces bind-mount ownership, a job can only read its 0700
 # job dir, and leave files the host can clean up, when it runs as the uid that owns them: that is a
 # `--user` with no passwd entry here, whose home must therefore be writable by an arbitrary non-root
-# uid. The sticky bit keeps one uid from deleting another's files. uid 1001 still owns the tree and
-# sees no change.
+# uid. No sticky bit, on purpose: a job container runs exactly one uid, so there is no other user's
+# file to protect, and a sticky world-writable dir makes the kernel refuse to follow a symlink that
+# neither the follower nor the dir's owner owns (fs.protected_symlinks, measured): a derived layer's
+# root-owned link under /home/pi would stop resolving even for uid 1001. uid 1001 still owns the tree.
 #
 # There is deliberately NO `ENV HOME` here. Images built FROM this one (image/Dockerfile.azure,
 # docs/job-image.md) run root build steps, and with HOME pointed at /home/pi those steps would
 # leave root-owned .cache/.npm/.azure dirs in it that no runtime user could write. A container
-# started with `--user` is given HOME=/home/pi on its own command line instead.
+# started with `--user` must be given HOME=/home/pi on its own command line instead.
 #
 # /ms-playwright is deliberately NOT chowned. The browsers install root-owned and 0755
 # (world-readable/executable), which is all the non-root runtime user needs -- and root ownership
 # means the agent cannot tamper with its own browser binary. Chowning ~1GB of browser in a
 # separate layer also cost 687MB of overlay2 copy-up for a metadata-only change.
 RUN mkdir -p /home/pi/.pi/agent && chown -R pi:pi /home/pi \
-    && chmod 1777 /home/pi /home/pi/.pi /home/pi/.pi/agent
+    && chmod 0777 /home/pi /home/pi/.pi /home/pi/.pi/agent
 
 # The safety floor and the runner are ROOT-OWNED and NOT writable by pi. The agent runs AS pi;
 # if it could overwrite /opt/pi-dispatch/HARD_RULES.md it would own its own constraints, and if

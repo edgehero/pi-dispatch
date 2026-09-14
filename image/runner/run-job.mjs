@@ -71,7 +71,7 @@ async function main() {
 	assertSessionMountReady(cfg.sessionFile);
 	// Same moment, same exit code, and for EVERY job, command jobs included (issue #341): a job user that cannot
 	// traverse /job loses its trigger skills without a word and would otherwise spend anyway.
-	assertJobInputsReadable(JOB_DIR);
+	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR]);
 	// Offline is a property of the RUNNER, not of whoever started it. Set before the loader is built,
 	// because the loader is what resolves package sources: with offline off, an unresolved source is a
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
