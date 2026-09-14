@@ -1805,9 +1805,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The CLI shall take a fresh machine to a preflighted deployment through **create-only
   scaffolds and per-action consented host mutations** — `pi-dispatch init` (scaffold), `pi-dispatch
-  doctor [--fix]` (preflight; offered fixes), `pi-dispatch up [--yes]` (the consented sequence:
-  default-image pull+tag, loopback Valkey start, scaffold, preflight) — and shall never perform an
-  unshown host mutation, never touch an existing config value, and never spend a token.
+  doctor [--fix] [--live]` (preflight; offered fixes; the backend declarations read back off one real
+  container), `pi-dispatch up [--yes]` (the consented sequence: default-image pull+tag, loopback Valkey start,
+  scaffold, preflight) — and shall never perform an unshown host mutation, never touch an existing config
+  value, and never spend a token. **`doctor --live` is the one mutation `doctor` makes without a prompt, and
+  it is shown rather than consented** (issue #278): typing the flag is the approval, as it is for `sandbox`;
+  the probe container and its fixture directory are named before either exists; and both are removed when
+  the read ends (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
 - **`doctor` reports a bound that is set and asleep.** A knob an operator sets, doctor stays silent about,
   and nothing enforces is this project's own believed-on-while-off failure by another route, so where a
   feature's control CAN be inert for a reason the operator cannot see from their own configuration,
@@ -1893,7 +1897,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `.env` **only when the key is empty** — a generated secret is never printed and an operator's value
   is never replaced.
 - **Traces to**: `DES-CLI-SURFACE`, `CONST-BUDGET-BEFORE-TOKENS`, `SECURITY.md` (pull-it-yourself),
-  `REQ-GLOBAL-PI-OVERLAY` (doctor's existing obligations)
+  `REQ-GLOBAL-PI-OVERLAY` (doctor's existing obligations), `INT-LIVE-PROBE-CONTRACT`
 - **Acceptance**: Given `up` with every prompt declined, then no docker command runs, init reports its
   usual kept/written lines, doctor renders, and the summary names each skipped action. Given `--yes`,
   then exactly the shown commands run, in order. Given a `.env` whose `WEBHOOK_SECRET` has a value,
@@ -1911,6 +1915,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   presence checks. Given the source trees the three services and the runner are built from, when every
   environment variable read in them is collected, then each one is either a key in `.env.example` or
   carries an internal marker at its read site, and neither list is hand-maintained beside the code.
+  Given `doctor --live`, then a line names the probe container, its image and its fixture location before the
+  first docker command, no check it renders carries a fix action, and afterwards neither the container nor the
+  fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and doctor's
+  output is unchanged.
 
 ## Notes (not requirements)
 
@@ -1989,6 +1997,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #278, part 2: `doctor --live`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED, in the Statement**: `doctor [--fix] [--live]`, and the "never perform an unshown host mutation" clause now names the one mutation `doctor` makes without a prompt -- a probe container and a fixture, shown before they exist and removed when the read ends, approved by typing the flag -- rather than leaving a live read-back to contradict it. Acceptance gains the `--live` case and the case that nothing else starts a probe. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: the probe shares the builder, not the sandbox's launcher, names or reaper. |
 | 2026-09-14 | Issue #277, part 4. **`REQ-EGRESS-ALLOWLIST` AMENDED**, a correction of scope rather than of intent: its Scope said a resurrected sandbox joins the same kind of network, and that was true only of the CLI. A sandbox opened from the admin panel's RUN_DETAIL passed no network and ran on docker's default bridge with the policy armed. Both entry points now share one launcher, and the Scope says both. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: no credential, mount or retention rule moved. **Code evidence**: worker/src/sandbox.mjs -> openSandbox, sandboxEgress; worker/src/egress.mjs -> egressProxyName; worker/src/sandbox-cli.mjs -> runSandbox; admin/src/index.ts -> openSandboxSession. |
 | 2026-09-14 | Issue #277, part 3: the sandbox refuses by the venue a run was in. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**: its scope now says both entry points serve only a run whose venue this host holds, and its acceptance gains the refusal for both, the `--list` marking, and a pre-venue run opening as before. **Code evidence**: worker/src/sandbox.mjs -> sandboxVenueRefusal, resolveSandbox; worker/src/sandbox-store.mjs -> retainJobDir; worker/src/prepare.mjs -> makePrepareWorkspace; worker/src/sandbox-cli.mjs -> runSandbox, renderList; admin/src/index.ts -> readSandboxInfo. |
 | 2026-09-14 | Issue #277, part 2: resume is gated on venue. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript written in another venue joins the fail-open list as a named cold start (`venue-changed`), and the acceptance gains the moved-trigger and pre-venue-key cases plus the venue stamp among the writes a completed promotion makes. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: `venue-changed` is a fixed token like its siblings. **Code evidence**: worker/src/session-store.mjs -> makeSessionStore (resolveSession, promoteSession, readCanonical, readVenue, replaceSidecar); worker/src/run-history.mjs -> SESSION_REASONS; worker/src/start.mjs -> startWorker (the store's defaultBackend). |

@@ -314,7 +314,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		egressProxy: egressProxyName(env), // one derivation, shared with the panel's sandbox (#277)
 		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV, egressEnabled(env)), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
-		jobsDir: env.PI_JOBS_DIR ?? defaultJobsDir(),
+		jobsDir: jobsDirPath(env),
 		// REQ-RESURRECTABLE-SANDBOX. `||` (not `??`) so an empty string falls back, matching logsDir.
 		sandboxDir: env.PI_SANDBOX_DIR || defaultSandboxDir(env),
 		// Hours a finished run's directory stays re-openable. NOTE THE SENTINEL, which is the OPPOSITE of
@@ -548,6 +548,17 @@ function defaultJobsDir(env = process.env) {
 	return `${env.TMPDIR ?? env.TEMP ?? "/tmp"}/pi-dispatch/jobs`.replace(/\\/g, "/");
 }
 
+/**
+ * The per-job directory root, ONE derivation (issue #278). `doctor --live` builds its fixture here, and a probe that
+ * derived the path on its own could disagree with the worker about `PI_JOBS_DIR=""` (kept as given, `??` not `||`,
+ * as `loadConfig` always has) or an injected `TMPDIR`, and read back a directory no job uses. `loadConfig` read
+ * `defaultJobsDir()` without its `env` before this, which ignored an injected TMPDIR exactly as `defaultSandboxDir`'s
+ * comment below records for itself; identical on the real path, where env is process.env.
+ */
+export function jobsDirPath(env = process.env) {
+	return env.PI_JOBS_DIR ?? defaultJobsDir(env);
+}
+
 export function defaultSandboxDir(env = process.env) {
 	// Beside the per-job dirs, because a retained directory IS a per-job dir -- `cleanup` renames it here
 	// rather than copying, which only stays atomic while both live on one filesystem. Created mode 0700 by
@@ -558,7 +569,7 @@ export function defaultSandboxDir(env = process.env) {
 	// Under temp deliberately, and unmoved by issue #290: a retained workspace is bounded by
 	// PI_SANDBOX_RETENTION_HOURS and is disposable by design, so a swept temp dir costs nothing that the
 	// sweep was not already going to take.
-	return `${env.PI_JOBS_DIR ?? defaultJobsDir(env)}/sandboxes`.replace(/\\/g, "/");
+	return `${jobsDirPath(env)}/sandboxes`.replace(/\\/g, "/");
 }
 
 /**

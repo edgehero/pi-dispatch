@@ -14,7 +14,9 @@
  *
  * WHAT IT CAN AND CANNOT DO, stated at its true size. It verifies the SHAPE of a bundle, the INTERNAL
  * CONSISTENCY of its declaration, and the behaviour of whatever the caller's PROBES produce. It cannot
- * start a real container, reach a real daemon, or prove a kernel enforced anything.
+ * start a real container, reach a real daemon, or prove a kernel enforced anything itself: the six properties a
+ * container read can reach arrive through a `readBack` probe (READ_BACK_BY_A_LIVE_PROBE), which for `local` is
+ * `doctor --live`.
  *
  * THE PROBES ARE THE ADAPTER'S OWN CODE, and that is a real limit rather than a detail. How you make a
  * container exit 2, or make an enumeration fail, is the runtime's business and cannot be written
@@ -199,7 +201,9 @@ function checkTransfers(backend) {
  * `probe` is the one thing an adapter must supply: `(backend, { exitCode, aborted }) => result`, arranging
  * for the backend's own `runContainer` to produce a container that exits that way. It cannot be written
  * generically -- how you make a container exit 2 is the runtime's business -- and it is the reason this is a
- * function taking probes rather than a fixed suite.
+ * function taking probes rather than a fixed suite. `withBrokenEnumeration` drives the reaper's failure path, and
+ * `readBack(backend)` reports the six properties read off a live container (see READ_BACK_BY_A_LIVE_PROBE); each
+ * one missing abstains.
  *
  * Returns `{ ok, findings }`. `ok` is false if ANY check failed; a check that abstained does not fail the
  * run but is reported, because a property nobody could verify is not a property that was verified.
@@ -236,27 +240,55 @@ async function conformance(backend, probes) {
 		findings.push(abstain("abortable", "no `probe` supplied, so an abort could not be told from an OOM"));
 	}
 	findings.push(...(await checkReaperTriState(backend, probes)));
+	findings.push(...(await checkReadBack(backend, probes)));
 	return { ok: findings.every((f) => f.ok), findings };
 }
 
 /**
- * The properties this harness DOES NOT verify, and why -- printed alongside the findings so a green run is
- * never mistaken for a conformant backend.
+ * The properties a LIVE PROBE reads back off a real container (issue #278), rather than this harness checking a
+ * report or the declaration itself. For `local` that probe ships: `doctor --live` (`live-probes.mjs`). For any other
+ * runtime the adapter supplies `readBack(backend)`, which must return the same verdicts -- `{ [property]: { ok,
+ * warn?, detail } }`, or `live-probes.mjs`'s array of `{ property, ok, warn?, detail }` -- read off a container its
+ * own `runContainer` path started. Like `probe`, a readBack that fabricates its answer passes while proving nothing.
+ */
+export const READ_BACK_BY_A_LIVE_PROBE = Object.freeze(["isolation", "mountSet", "egress", "imagePinning", "nonRoot", "localFolders"]);
+
+/**
+ * THE READ-BACK. Abstains without a report, and per property for anything the report does not cover or could not
+ * read, because a property nobody read is not one that held. A property read back as NOT holding fails when the
+ * backend declares it `enforced` or `asserted` -- both claim it is provided -- and passes against `absent`, which
+ * claimed nothing.
+ */
+async function checkReadBack(backend, { readBack }) {
+	if (typeof readBack !== "function") {
+		return READ_BACK_BY_A_LIVE_PROBE.map((property) => abstain(property, "no `readBack` probe supplied, so it was not read off a live container (doctor --live reads local's)"));
+	}
+	const raw = await readBack(backend);
+	const report = Array.isArray(raw) ? Object.fromEntries(raw.map((v) => [v?.property, v])) : (raw ?? {});
+	const declares = backend?.declares ?? {};
+	return READ_BACK_BY_A_LIVE_PROBE.map((property) => {
+		const got = report[property];
+		if (!got || typeof got.ok !== "boolean") return abstain(property, "the readBack report does not cover it");
+		if (got.ok === true) return pass(property, `read back off a live container: ${got.detail ?? "holds"}`);
+		if (got.warn === true) return abstain(property, `${got.detail ?? "not read back"}`);
+		if (declares[property] === "enforced" || declares[property] === "asserted") {
+			return fail(property, `declared ${declares[property]}, and read back off a live container as not holding: ${got.detail ?? "no detail"}`);
+		}
+		return pass(property, `read back as not holding, which ${JSON.stringify(declares[property])} does not claim`);
+	});
+}
+
+/**
+ * The properties NEITHER this harness NOR a live read-back verifies, and why -- printed alongside the findings so a
+ * green run is never mistaken for a conformant backend.
  *
- * Every one of these needs a live container on the target runtime, which is exactly what this repo's own
- * offline CI cannot have. Naming them is the difference between a suite that is honest about its reach and
- * one that lets a green tick stand for something it never checked. `verify-image.sh` is the shape the
- * missing half would take, and it "runs ON THE HOST THAT HOLDS THE IMAGE, which is the only place it can".
+ * Six of the ten that once stood here are now READ_BACK_BY_A_LIVE_PROBE (issue #278). Two of these four are
+ * container properties a probe COULD read and none was built for; the other two are not container properties at
+ * all, so no container read can reach them.
  */
 export const UNVERIFIED_BY_THIS_HARNESS = Object.freeze({
-	isolation: "needs a live container: read the capability set and no-new-privileges back from inside it",
-	ephemeral: "needs two runs of the same job id and a check that no container survived the first",
-	mountSet: "needs a live container: enumerate its mounts and assert nothing beyond the declared set",
-	egress: "needs a live container and a blocked destination",
-	jobToJobIsolation: "needs two live containers and an attempted connection between them",
-	imagePinning: "needs a run against an image absent from the target runtime",
-	nonRoot: "needs `id -u` inside a live container (`verify-image.sh` is the shape)",
-	secretsCustody: "needs a canary secret and an audit of every log, record and forge comment the run produced",
-	credentialTransit: "needs to observe what actually crossed the network to the runtime",
-	localFolders: "needs a bind-mounted host folder and a write read back outside the container",
+	ephemeral: "a probe could, and none was built: two runs of the same job id and a check that no container survived the first",
+	jobToJobIsolation: "a probe could, and none was built: two live containers and an attempted connection between them",
+	secretsCustody: "not a container property: needs a canary secret and an audit of every log, record and forge comment the run produced",
+	credentialTransit: "not a container property: what crossed the network to the runtime; local's is observed per job from the docker CLI's endpoint instead",
 });

@@ -49,7 +49,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
-import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { randomBytes } from "node:crypto";
+import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -62,6 +63,7 @@ import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, DOCKER_ENDPOINT_LOCAL, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
 import { makeDockerEndpointResolver } from "./backend-local.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
+import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
@@ -112,8 +114,19 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// without uninstalling a dependency. Threaded like every other seam: a seam collectChecks honours
 		// and runDoctor silently drops is a seam that cannot pin an EXIT CODE, only a check object.
 		providerOracle = defaultProviderOracle,
+		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off one real container.
+		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
+		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
+		live = false,
+		liveFs = { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync },
+		isAlive = defaultIsAlive,
+		pid = process.pid,
+		nonce = randomBytes(6).toString("hex"),
 	} = deps;
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle };
+	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
+	// egress canary's readings), filled by collectChecks rather than re-probed.
+	const facts = {};
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -136,6 +149,13 @@ export async function runDoctor(env = process.env, deps = {}) {
 			// not because attempting fixes earns credit.
 			failed = checks.some((c) => !c.ok && !c.warn);
 		}
+	}
+
+	// ONCE, and after --fix: the probes read the host as the fix pass left it, so a fix that pulled the job image is
+	// read back rather than reported absent. Rendered like every other check and judged by the same rule.
+	if (live === true) {
+		const liveResults = await liveChecks(env, { ...seams, liveFs, isAlive, pid, nonce }, facts);
+		if (render(liveResults, out)) failed = true;
 	}
 
 	out(failed ? "\ndoctor: some checks failed — fix the above, then re-run.\n" : "\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n");
@@ -215,7 +235,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -478,7 +498,17 @@ export async function collectChecks(env, seams) {
 	// REQ-EGRESS-ALLOWLIST (issue #202). [] when PI_EGRESS=0, so a deployment that declined it gets
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
-	checks.push(...(await egressChecks(env, seams, { dockerCode, imageCode, jobImage })));
+	const egress = await egressChecks(env, seams, { dockerCode, imageCode, jobImage });
+	checks.push(...egress);
+	if (facts) {
+		let armed;
+		try {
+			armed = egressArmed(env);
+		} catch {
+			armed = null; // malformed: the .env check reports it, and the read-back says it was not read
+		}
+		Object.assign(facts, { endpoint, dockerCode, imageCode, jobImage, triggerImages: images.filter((i) => i !== jobImage), egress: { armed, results: egress.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack) } });
+	}
 	checks.push(...backendChecks(env, { endpoint }));
 
 	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
@@ -2399,6 +2429,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 			checks.push({
 				ok: reached === want,
 				warn: true,
+				// NOT rendered: what `doctor --live` folds into its egress read-back (live-probes.mjs), so the canary is
+				// run once and read twice rather than a second canary built beside it.
+				readBack: { property: "egress", want, reached },
 				label: reached === want
 					? want
 						? `Egress policy reaches the provider (api.anthropic.com answered, so the whole path works and no key was spent)`
@@ -2890,5 +2923,113 @@ function dockerRunVia(spawn) {
 			// is repeated in it with any credentials still inside.
 			child.on("error", (err) => finish({ code: null, stdout: "", error: err }));
 			child.on("close", (code, signal) => finish({ code, stdout, error: signal ? { signal } : null }));
+		});
+}
+
+/**
+ * `doctor --live`'s checks (issue #278, INT-LIVE-PROBE-CONTRACT): the six declarations a container read can reach,
+ * read back off one real container on this host, rendered as `read back on local: ...`. Exported so the never-tier
+ * pin can walk them: like every check doctor has, and on purpose, none carries a `fixAction` -- a failed read-back
+ * is a fact about the image or the runtime, and nothing here may guess at changing either.
+ */
+export async function liveChecks(env, seams, facts) {
+	const { spawn, out = () => {}, home = safeHomeDir(), liveFs, isAlive = defaultIsAlive, pid = process.pid, nonce = randomBytes(6).toString("hex") } = seams;
+	const result = await runLiveProbes({
+		image: facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest",
+		endpoint: facts.endpoint,
+		dockerReachable: facts.dockerCode === 0,
+		imagePresent: facts.imageCode === 0,
+		jobsDir: jobsDirPath(env),
+		home,
+		sessionsDir: env.PI_SESSIONS_DIR || null,
+		egress: facts.egress,
+		pid,
+		nonce,
+		run: liveRunVia(spawn),
+		fs: liveFs,
+		isAlive,
+		announce: (line) => out(`\nread back on local: ${line}\n`),
+	});
+	if (!result.ran) {
+		return result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: not run -- ${note}`, fix: "the declarations above are unchanged and still unverified; fix what stopped the probe and re-run `pi-dispatch doctor --live`" }));
+	}
+	const checks = result.verdicts.map((v) => {
+		if (v.ok) return { ok: true, label: `read back on local: ${v.property} holds (${v.detail})` };
+		if (v.warn) return { ok: false, warn: true, label: `read back on local: ${v.property} ${v.detail}`, fix: LIVE_UNREAD_FIX };
+		const declared = declarationOf(DEFAULT_LOCAL_BACKEND, v.property)?.word ?? "undeclared";
+		return { ok: false, label: `read back on local: ${v.property} does NOT hold -- declared ${declared}, observed: ${v.detail}`, fix: LIVE_FAIL_FIX[v.property] };
+	});
+	for (const note of result.notes) checks.push({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand; nothing else in pi-dispatch sweeps a live-probe container" });
+	// What a green read-back does NOT mean, on a line of its own so a row of ✓ is never read as more than it is.
+	// env-internal DOCKER_CONTENT_TRUST: the docker CLI's own variable, read here only to say that it changes what
+	// --pull=never governs; pi-dispatch sets nothing with it, so it is not a key of ours to document.
+	const contentTrust = env.DOCKER_CONTENT_TRUST === "1";
+	const unread = [
+		"the probe runs `sleep` in place of the job image's entrypoint",
+		"it wrote to a fixture folder, not to any folder of yours",
+		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
+		"ephemeral and jobToJobIsolation are not probed",
+		"secretsCustody and credentialTransit are not container properties",
+		...(contentTrust ? ["DOCKER_CONTENT_TRUST=1 resolves a tag through notary, which --pull=never does not govern"] : []),
+	];
+	checks.push({ ok: true, label: `read back on local: limits of this read-back -- ${unread.join("; ")}` });
+	return checks;
+}
+
+/** The backend `doctor --live` reads back: the table default, which is the only venue on this host's docker CLI. */
+const DEFAULT_LOCAL_BACKEND = "local";
+
+const LIVE_UNREAD_FIX = "this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`";
+
+/** Per property, what a failed read-back points at. Words only: none of these is a thing doctor could do for you. */
+const LIVE_FAIL_FIX = {
+	isolation: "the runtime did not apply a flag the worker passes (on rootless docker, cgroup delegation; otherwise the daemon's security options) -- jobs on this host do not have the boundary the table declares",
+	mountSet: "a container built by the job builder has a mount the contract does not allow -- check the daemon's defaults and any volume plugins before running jobs here",
+	egress: "see the egress lines above: the proxy's allowlist, or the job image's NODE_USE_ENV_PROXY support",
+	imagePinning: "the daemon ran or pulled an image this host does not have -- check for a docker CLI plugin or wrapper that rewrites `docker run`",
+	nonRoot: "PI_JOB_IMAGE runs as root: the root-owned hard-rules floor does not bind a root agent -- use an image with a non-root USER (the shipped pi-job image does)",
+	localFolders: "on Linux the job user (uid 1001 in the shipped image) cannot write a folder owned by you; a local-folder job needs the folder writable by that uid",
+};
+
+/** A PID-liveness check for the stale-fixture sweep: EPERM means alive and owned by someone else. */
+function defaultIsAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return err?.code === "EPERM";
+	}
+}
+
+/** The live probes' `run` seam over doctor's spawn: `{ code, stdout, stderr }`, bounded, `code: null` when it could not run. */
+function liveRunVia(spawn) {
+	return (args, { timeoutMs }) =>
+		new Promise((resolve) => {
+			let child;
+			try {
+				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+			} catch {
+				resolve({ code: null, stdout: "", stderr: "" });
+				return;
+			}
+			let stdout = "";
+			let stderr = "";
+			let done = false;
+			const finish = (code) => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				resolve({ code, stdout, stderr });
+			};
+			const timer = setTimeout(() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {}
+				finish(null);
+			}, timeoutMs);
+			child.stdout?.on("data", (d) => (stdout += d));
+			child.stderr?.on("data", (d) => (stderr += d));
+			child.on("error", () => finish(null));
+			child.on("close", (code) => finish(code));
 		});
 }

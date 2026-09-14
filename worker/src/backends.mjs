@@ -62,10 +62,12 @@
  * and the same is true one level out. The value of the table is not that a vendor is verified; it is that a
  * MISMATCH becomes a refusal instead of a silent downgrade. `backend-conformance.mjs` verifies THREE of the
  * thirteen -- exit-code fidelity, the abort flag's independence from the code, and the read-only downgrade a
- * copying runtime takes -- plus the shape of a bundle and the internal consistency of its declaration. The
- * other ten need a live container on the target runtime, and the harness names each one and what it would
- * take rather than passing them in silence. So a backend can still declare all of this and do most of it:
- * these words are a contract with three of them checked, which is more than none and less than proof.
+ * copying runtime takes -- plus the shape of a bundle and the internal consistency of its declaration. SIX more
+ * are read back off a live container (issue #278): for `local` by `doctor --live` (`live-probes.mjs`), for any
+ * other runtime through the harness's `readBack` probe, which the adapter supplies. The remaining FOUR the harness
+ * names with what each would take rather than passing them in silence. So a backend can still declare all of this
+ * and do most of it: these words are a contract with three of them checked and six readable, which is more than
+ * none and less than proof -- the read-back is of a fixture with the job image, not of every job.
  *
  * THE PROPERTIES ARE NOT A RENDERING OF `ISOLATION_FLAGS`, and must not become one. That array is the
  * literal, value-free, unconditional set the local argv splices in, and two tests assert every member of it

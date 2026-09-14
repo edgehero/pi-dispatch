@@ -664,7 +664,8 @@ build does not.
 - **What detection ships today**: presence, and only presence. The worker's preflight and `pi-dispatch
   doctor` check that every image named across `triggers.json` (plus `PI_JOB_IMAGE`) resolves locally and
   refuse/report by name; doctor additionally **warns** when a named image's entrypoint does not look like
-  the runner. Neither inspects the image's contents. Naming a conformance verdict that had not been computed
+  the runner. Neither inspects the image's contents. (`doctor --live` reads back what the worker's argv does
+  to `PI_JOB_IMAGE`, which is not its contents either; see the #278 bullet below.) Naming a conformance verdict that had not been computed
   would be worse than reporting none — the same honesty as `OQ-011`'s child-process sampler.
 - **AMENDED (issue #227, the container-backend registry): a remote backend takes BOTH load-bearing
   mitigations away, and the row survives only because none is blessed yet.** The first is
@@ -681,6 +682,16 @@ build does not.
   row's own standard and not a closure of it. **The status stays ACCEPTED RISK**, and the ratification it
   wants is now sharper: it is no longer only "an operator's image is outside our gates" but "a venue's
   runtime may be too".
+- **AMENDED (issue #278, `doctor --live`): the "what bounds it meanwhile" argument can now be READ BACK, for
+  one image on one host, and nothing more.** `pi-dispatch doctor --live` starts a container of `PI_JOB_IMAGE`
+  from the job builder and reads `isolation`, `mountSet`, `imagePinning`, `nonRoot` and `localFolders` off it,
+  folding in the egress canary (`INT-LIVE-PROBE-CONTRACT`). That turns the claim that the argv, not the image,
+  is the isolation surface from an assertion into a reading. What it is NOT: a gate (it runs on request, never
+  at job start); a check of trigger-named images (it reads `PI_JOB_IMAGE` only, and prints how many others it
+  did not read); a check of the image's contents (the runner, the pi version, the guardrails floor and the
+  loader posture are untouched, and `image/verify-image.sh` remains that definition); or a read of a remote
+  venue, which reads back only through the conformance harness's `readBack` probe, supplied by its adapter.
+  **The status stays ACCEPTED RISK.**
 - **What would close it**: a worker-side gate at job start. Half the ingredients exist — `image/verify-image.sh`
   is the CORE checklist as one runnable definition, shared by CI and by the operator, and it runs **on the
   host that holds the image**, which is the only place it can (`--pull=never` means the runnable images are
@@ -1403,3 +1414,4 @@ adversarial passes did.
 | 2026-09-09 | Issue #281. **`OQ-015` RATIFIED** -- Status moves from `ACCEPTED RISK -- wants explicit ratification` to `ACCEPTED RISK -- RATIFIED 2026-09-09`, on the `OQ-014` precedent end to end: the verdict's why is a new field (deciding down was the row's own offered alternative and lost on the record -- a shipped, bounded, documented arm is not deleted to settle a paperwork debt; the accretion evidence is #187 widening replicas onto Azure while the row asked), the existing bounds are named as the ratification's TERMS, and the `Needs` field is REPLACED by what would REOPEN it (an HMAC option shipping on Service Hooks; the author gate weakening on Azure; dedup leaving the body-carried id). The ratifying act is `requirements.md`'s Scope sentence, whose revision row of the same date records it, and the acceptance discipline is generalized by the Scope pin test: a new forge cannot ship without the sentence naming it. Every other row UNCHANGED, checked -- `OQ-013` in particular is untouched, and one attribution is stated precisely because the review caught it loose: the Azure two-call-lookup detail rides `OQ-015`'s OWN Related-risks bullet, not `OQ-013`'s body, whose 2026-07-31 "now true of three forges" amendment never reached its Position text -- a pre-existing gap this ratification neither widens nor quietly fixes. |
 | 2026-09-09 | Issue #288. **NEW `OQ-034`**: the failure hook's exit code and delivery are conventions we cannot enforce -- OQ-027/OQ-030's residual at the third operator-command seam, with the at-most-once boundary stated and the reopen condition being any ask for delivery guarantees (the moment a convention becomes a transport). **`OQ-023` UNCHANGED, checked, and the boundary is the point**: #288 comments the POST-SPEND terminals only; the prepare-policy passthrough (`sha-gone`, the `.pi/` caps) stays silent exactly as that row ratified, because its own hazard -- a repo whose `.pi/` breaches a cap commenting on EVERY delivery -- wants the dedup the spend refusals have and this slice does not build. **`OQ-027`/`OQ-030` UNCHANGED, checked**: the new row is a sibling, not a replacement. |
 | 2026-09-09 | Issue #289. **NEW `OQ-035`**: failedReason is a bounded string channel, not a classified one -- the panel's belt (control-byte strip, 120 cap) and the same-slice source fixes (branch.mjs de-payloaded to a type, prepare-local basenamed) hold the no-payload property by inventory plus bound, not by type; the close is #310's classifier generalized, deferred until a regression is actually caught. **`OQ-024` UNCHANGED, checked** (the insights page's surface is untouched). |
+| 2026-09-14 | Issue #278, part 2: `doctor --live`. **`OQ-012` AMENDED**: a bullet recording that the argv-not-image bound can now be read back off a container of `PI_JOB_IMAGE` (`INT-LIVE-PROBE-CONTRACT`), and precisely what that is not -- a gate, a check of trigger-named images, a check of an image's contents, or a read of a remote venue; the detection paragraph gains a pointer to it. **Status UNCHANGED: ACCEPTED RISK**, checked: nothing here runs at job start or reaches a trigger-named image. |

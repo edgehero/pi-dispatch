@@ -52,6 +52,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	const promptCalls = [];
 	const initCalls = [];
 	const doctorCalls = [];
+	const doctorOpts = [];
 	const buf = [];
 	const store = new Map(Object.entries(files));
 	const deps = {
@@ -83,12 +84,13 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			initCalls.push(cwd);
 			return 0;
 		},
-		runDoctorFn: (env) => {
+		runDoctorFn: (env, opts) => {
 			doctorCalls.push(env);
+			doctorOpts.push(opts);
 			return doctorCode;
 		},
 	};
-	return { run: () => runUp(argv, deps), calls, promptCalls, initCalls, doctorCalls, store, text: () => buf.join("") };
+	return { run: () => runUp(argv, deps), calls, promptCalls, initCalls, doctorCalls, doctorOpts, store, text: () => buf.join("") };
 }
 
 const green = { "docker version": 0, "docker image inspect": 0, "docker ps": { code: 0, output: "pi-dispatch-valkey\n" } };
@@ -186,6 +188,9 @@ test("up: init and doctor always run, even when every docker action was declined
 	await h.run();
 	assert.deepEqual(h.initCalls, ["/deploy"], "init ran, in the working directory");
 	assert.equal(h.doctorCalls.length, 1, "doctor ran");
+	// Issue #278: `up` runs plain doctor. `--live` starts containers, and `up`'s consent covers only the actions it
+	// shows, so it must never pass the flag through.
+	assert.equal(Object.hasOwn(h.doctorOpts[0] ?? {}, "live"), false, "up never asks doctor to run live probes");
 	assert.match(h.text(), /never overwrites/, "the never-clobber contract is said out loud");
 });
 

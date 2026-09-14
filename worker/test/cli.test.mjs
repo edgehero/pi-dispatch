@@ -19,6 +19,15 @@ const needsDeps = depsOk ? false : `queue deps not installed (node ${process.ver
 
 const env = { VALKEY_URL: "redis://127.0.0.1:6399" };
 
+test("`doctor --live` reaches runDoctor as live: true, and the usage names the flag (#278)", async () => {
+	// A source pin rather than a run: `main` would call the real doctor, which spawns docker. The flag must reach the
+	// deps bag, where runDoctor reads it strictly as `=== true`.
+	const { readFileSync } = await import("node:fs");
+	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
+	assert.match(src, /runDoctor\(env, \{ fix: argv\.slice\(1\)\.includes\("--fix"\), live: argv\.slice\(1\)\.includes\("--live"\) \}\)/);
+	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\]/);
+});
+
 test("no args prints usage and exits 0", async () => {
 	assert.equal(await main([], env), 0);
 });

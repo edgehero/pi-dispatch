@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { collectChecks, defaultPromptFn, githubProtectionPreflight, runDoctor } from "../src/doctor.mjs";
+import { collectChecks, defaultPromptFn, githubProtectionPreflight, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -57,7 +57,10 @@ function fakeSpawn(plan, calls = []) {
 				handlers.error?.(new Error(`spawn ${cmd} ENOENT`));
 				return;
 			}
-			const { code, output } = typeof outcome === "object" && outcome !== null ? outcome : { code: outcome, output: "" };
+			// A FUNCTION outcome answers from the argv (issue #278's --live sequence, where a later step reads what an
+			// earlier one was given); it may also act, as the in-container write does on the host fixture.
+			const resolved = typeof outcome === "function" ? outcome(cmd, args) : outcome;
+			const { code, output } = typeof resolved === "object" && resolved !== null ? resolved : { code: resolved, output: "" };
 			if (output) child.stdout.handlers.data?.(output);
 			handlers.close?.(code);
 		});
@@ -3088,4 +3091,100 @@ test("doctor: under GITHUB_AUTH_SOURCE=app a redirected CLI does not claim a pro
 	await runDoctor(ghEnv({ GITHUB_AUTH_SOURCE: "app" }), ghDeps(out, plan));
 	assert.match(text(), /✓ in-image gh auth: skipped \(GITHUB_AUTH_SOURCE=app mints per-job\)/);
 	assert.doesNotMatch(text(), /would send your gh token/);
+});
+
+// -- doctor --live (issue #278, INT-LIVE-PROBE-CONTRACT) ----------------------------------------------------------
+
+const LIVE_ID = "d".repeat(64);
+const LIVE_STATUS = (uid = "1001") => `Name:\tdocker-init\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\n`;
+
+/**
+ * The docker answers a --live pass needs, as function outcomes that read the probe's own argv. Listed FIRST wherever
+ * spread, because `green`'s broad "docker image" key would otherwise answer the pinning probe's absent-image inspect.
+ */
+function liveOk({ uid = "1001" } = {}) {
+	let volumes = [];
+	return {
+		"docker run --name=pi-dispatch-live-probe-": (_cmd, args) => {
+			volumes = args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : []));
+			return { code: 0, output: `${LIVE_ID}\n` };
+		},
+		"docker inspect --format={{json .Mounts}}": () => ({ code: 0, output: JSON.stringify(volumes.map((v) => ({ Type: "bind", Source: v.split(":")[0], Destination: v.split(":")[1], RW: v.split(":")[2] !== "ro" }))) }),
+		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS(uid) },
+		[`docker exec ${LIVE_ID} sh -c if [ -w /workspace ]`]: (_cmd, args) => {
+			const ws = volumes.find((v) => v.split(":")[1] === "/workspace").split(":")[0];
+			writeFileSync(join(ws, ".pi-dispatch-live-probe"), args.at(-1));
+			return { code: 0, output: "wrote\n" };
+		},
+		"docker run --name=pi-dispatch-live-pin-": { code: 125, output: "docker: Error response from daemon: No such image: pi-dispatch-live-probe.invalid/absent:x.\n" },
+		"docker image inspect pi-dispatch-live-probe.invalid": 1,
+		"docker rm -f": 0,
+	};
+}
+const liveFs = { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync };
+const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: mkdtempSync(join(tmpdir(), "pi-live-doctor-")), ...extra });
+
+test("doctor without --live is byte-identical and spawns no probe; a truthy non-boolean `live` runs nothing either", async () => {
+	const env = liveEnv();
+	const texts = [];
+	for (const live of [undefined, false, "true", 1]) {
+		const { out, text } = capture();
+		const calls = [];
+		await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), ...(live === undefined ? {} : { live, liveFs }) });
+		assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))), `no probe spawn for live=${JSON.stringify(live)}`);
+		texts.push(text());
+	}
+	assert.ok(texts.every((t) => t === texts[0]), "the output is the same whatever a non-true `live` is");
+	assert.doesNotMatch(texts[0], /read back on local/);
+});
+
+test("doctor --live reads the six back, reports the limits, leaves no fixture, and exits 0 when they hold", async () => {
+	const env = liveEnv();
+	const { out, text } = capture();
+	const calls = [];
+	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.equal(code, 0, text());
+	for (const property of ["isolation", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
+		assert.match(text(), new RegExp(`✓ read back on local: ${property} holds`));
+	}
+	assert.match(text(), /⚠ read back on local: egress not read back: PI_EGRESS is off/);
+	assert.match(text(), /✓ read back on local: limits of this read-back -- the probe runs `sleep`/);
+	assert.ok(text().indexOf("read back on local: starting pi-dispatch-live-probe-7-n from pi-job:latest") < text().indexOf("✓ read back on local: isolation"), "shown before its results");
+	assert.ok(text().includes(`with a fixture under ${env.PI_JOBS_DIR};`), "the fixture lives under the worker's own jobs dir (jobsDirPath), not a path doctor derived for itself");
+	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args), [["rm", "-f", LIVE_ID]]);
+	assert.deepEqual(readdirSync(env.PI_JOBS_DIR), [], "the fixture is removed");
+	assert.ok(calls.findIndex((c) => c.args[0] === "run" && String(c.args[1]).startsWith("--name=pi-dispatch-live-probe")) > calls.findIndex((c) => c.args[0] === "info"), "the probes run after the ordinary checks");
+});
+
+test("doctor --live renders a failed read-back as a hard failure with the declared word beside the observed", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk({ uid: "0" }), ...green }), live: true, liveFs, isAlive: () => false, pid: 7, nonce: "n" });
+	assert.equal(code, 1);
+	assert.match(text(), /✗ read back on local: nonRoot does NOT hold -- declared asserted, observed: Uid 0 0 0 0/);
+	assert.match(text(), /→ PI_JOB_IMAGE runs as root/);
+});
+
+test("doctor --live on a docker CLI not observed local runs no container and says why, once", async () => {
+	const { out, text } = capture();
+	const calls = [];
+	const plan = { ...liveOk(), ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } };
+	await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live: true, liveFs, isAlive: () => false });
+	assert.ok(!calls.some((c) => c.args.some((a) => String(a).includes("pi-dispatch-live"))));
+	assert.equal(text().match(/read back on local/g).length, 1);
+	assert.match(text(), /⚠ read back on local: not run -- this shell's docker CLI is not observed to point at this host/);
+});
+
+test("doctor --live checks carry no fixAction: a failed read-back is never something doctor fixes", async () => {
+	const env = liveEnv();
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: ["a:1", "b:2"], egress: { armed: false, results: [] } };
+	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "0" }), ...green }), home: "/home/u", liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	assert.ok(checks.length >= 7);
+	assert.ok(checks.every((c) => c.fixAction === undefined));
+	assert.match(checks.at(-1).label, /not the 2 image\(s\) your triggers name/);
+});
+
+test("the egress canary carries a non-rendered readBack, so --live folds it in without a second canary", async () => {
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(green));
+	const readBacks = checks.filter((c) => c.readBack).map((c) => c.readBack);
+	assert.deepEqual(readBacks, [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }]);
 });

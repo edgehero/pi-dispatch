@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { delimiter } from "node:path";
 import { test } from "node:test";
-import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, defaultLogsDir, defaultSettingsFile, globalExtensionsEnabled, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
+import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, configError, defaultGraphDir, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, loadConfig, loadGitLabAuth, logsDirPath, normalizeAppPrivateKey, underOsTempDir } from "../src/config.mjs";
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
 
@@ -684,6 +684,18 @@ test("loadConfig and logsDirPath resolve the SAME durable defaults, so nothing r
 	assert.equal(logsDirPath({ PI_LOGS_DIR: "" }), defaultLogsDir(), "|| not ??, so empty falls back");
 	assert.ok(!underOsTempDir(c.logsDir), "a default deployment's run history is durable");
 	assert.ok(!underOsTempDir(c.settingsFile), "a default deployment's caps are durable");
+});
+
+test("loadConfig, the sandbox default and doctor --live read ONE jobs-dir derivation (#278)", () => {
+	// doctor --live builds its fixture under jobsDirPath; a worker that derived the path on its own could disagree
+	// about an injected TMPDIR or PI_JOBS_DIR="" and the probe would read back a directory no job uses.
+	const env = { TMPDIR: "/injected/tmp" };
+	assert.equal(jobsDirPath(env), "/injected/tmp/pi-dispatch/jobs");
+	assert.equal(loadConfig(env).jobsDir, jobsDirPath(env), "an injected TMPDIR now reaches loadConfig too");
+	assert.equal(defaultSandboxDir(env), `${jobsDirPath(env)}/sandboxes`);
+	assert.equal(jobsDirPath({ PI_JOBS_DIR: "/srv/jobs" }), "/srv/jobs");
+	assert.equal(jobsDirPath({ PI_JOBS_DIR: "" }), "", "?? not ||, exactly as loadConfig always read it");
+	assert.equal(loadConfig({ PI_JOBS_DIR: "" }).jobsDir, "");
 });
 
 test("underOsTempDir answers the four cases a naive prefix test gets wrong", () => {

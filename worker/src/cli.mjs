@@ -12,7 +12,9 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
 const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
-  pi-dispatch doctor [--fix]  preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action)
+  pi-dispatch doctor [--fix] [--live]
+                           preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
+                           --live reads the backend declarations back off one real container (shown in docker ps while it runs)
   pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -59,8 +61,8 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 
 	if (cmd === "doctor") {
 		const { runDoctor } = await import("./doctor.mjs");
-		// `fix` rides in the deps position (runDoctor(env, depsOrOpts)) — one options bag, no third arg.
-		return runDoctor(env, { fix: argv.slice(1).includes("--fix") });
+		// `fix` and `live` ride in the deps position (runDoctor(env, depsOrOpts)) — one options bag, no third arg.
+		return runDoctor(env, { fix: argv.slice(1).includes("--fix"), live: argv.slice(1).includes("--live") });
 	}
 
 	if (cmd === "up") {

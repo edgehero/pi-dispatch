@@ -480,7 +480,7 @@ are yours to list and nothing here can know what your own flows reach, so read
 (subagent sessions included),
 and the per-job token budget is enforced against that same total. Where that container gets built is a
 named backend, and what each one guarantees is declared rather than assumed:
-[`docs/backends.md`](docs/backends.md) is the contract, and `pi-dispatch doctor` prints the declaration.
+[`docs/backends.md`](docs/backends.md) is the contract, `pi-dispatch doctor` prints the declaration, and `pi-dispatch doctor --live` reads six of those properties back off one real container on this host.
 
 ### What is inside the container while a job runs
 

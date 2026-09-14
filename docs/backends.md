@@ -173,14 +173,28 @@ const { ok, findings } = await runBackendConformance(myBackend, {
   // Arrange for your reap to run with its enumeration FAILING. This is not `backend.reap()` -- that is the
   // working path, and passing it fails the check with a message about a bug you do not have.
   withBrokenEnumeration: async (backend) => myBackend.reapWith({ listContainers: () => { throw new Error("down"); } }),
+  // Start a container through YOUR runContainer path and read the six READ_BACK_BY_A_LIVE_PROBE properties
+  // off it: { isolation: { ok, warn?, detail }, mountSet: ..., ... }. Leave it out and all six abstain.
+  readBack: async (backend) => { /* ... */ },
 });
 ```
 
 It checks the bundle's shape, the declaration's consistency, exit-code fidelity, the abort flag, the
 reaper's tri-state and the transfer downgrade. That is **three of the thirteen properties** plus two
-structural checks. **It cannot check the other ten**: they need a live container on your runtime, and
-`UNVERIFIED_BY_THIS_HARNESS` names each one and what it would take. Print it beside your findings; nothing
-prints it for you.
+structural checks. **Six more are read back off a live container** (`READ_BACK_BY_A_LIVE_PROBE`: isolation,
+mountSet, egress, imagePinning, nonRoot, localFolders), but only through the `readBack` probe you write,
+because only your runtime can start your container. A property read back as not holding fails when you
+declare it `enforced` or `asserted`; one your report leaves out, or could not read, abstains. **The
+remaining four it cannot reach at all**, and `UNVERIFIED_BY_THIS_HARNESS` names each one and what it would
+take. Print it beside your findings; nothing prints it for you.
+
+**The `local` backend's read-back is `pi-dispatch doctor --live`.** It starts one container from the job
+builder (no network, no environment, fixture folders, `sleep` in place of the entrypoint), reads the six
+properties off it, folds in the egress canary, and removes it by ID. It runs only when the docker CLI is
+observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own
+folders or the images your triggers name, and doctor prints those limits beside a green result.
+`worker/src/live-probes.mjs` is the worked example of a `readBack`: its verdicts are the shape the harness
+takes.
 
 **The probes are your own code, and that is a real limit.** How you make a container exit 2, or make an
 enumeration fail, cannot be written generically, so those checks verify what your probe REPORTS. A probe
@@ -190,12 +204,15 @@ The harness cannot detect that. A green run is not a conformant backend.
 ## Registering it
 
 Pass your bundle to `startWorker` as an extra backend. It is registered after `local`, and its own `reap`
-joins the boot sweep automatically:
+joins the boot sweep automatically. **There is no published import for `startWorker` today**: it lives in
+`worker/src/start.mjs`, which the package's export map does not name, so this works from a checkout of this
+repository and not from an installed package. Its first argument is the environment, and the backends ride
+the second:
 
 ```js
-import { startWorker } from "@edgehero/pi-dispatch";
+import { startWorker } from "./worker/src/start.mjs"; // from a checkout; not an export of @edgehero/pi-dispatch
 
-await startWorker({ extraBackends: [myBackend] });
+await startWorker(process.env, { extraBackends: [myBackend] });
 ```
 
 `startWorker` builds the registry itself:

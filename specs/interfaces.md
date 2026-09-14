@@ -1502,6 +1502,77 @@ sibling rather than an extension of the GitHub one for the same reason.
   under that name is refused and named rather than removed, and a sandbox already running is refused; given a
   malformed `PI_EGRESS`, the panel refuses and launches nothing.
 
+## INT-LIVE-PROBE-CONTRACT
+
+**operator → docker daemon, to read the backend declarations back (issue #278).** A SIBLING of
+`INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`, never an amendment to either: the first governs a
+container launched against untrusted input, the second a shell an operator opens on a finished run, and this one
+a container that runs no agent, is given nothing, and exists to be read. `pi-dispatch doctor --live` is its only
+entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
+
+- **Contract**:
+  - **Only on a docker CLI observed local.** Before anything runs, the endpoint read that
+    `INT-CONTAINER-RUNTIME-CONTRACT`'s "Which daemon" bullet describes must answer local. Otherwise one ⚠ and no
+    docker command: on a redirected daemon the bind paths and `.Mounts` are another machine's. It is also not run
+    when the daemon does not answer or `PI_JOB_IMAGE` is absent.
+  - **The argv is built by the SAME builder.** `buildDockerRunArgs` with the fixture mounts, `network: "none"`,
+    `env: {}` and `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. It adds
+    exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and `--cpus` reach
+    it by construction. The sleep is DERIVED from the step bound (the three steps that need the container alive,
+    at 20 seconds each, plus 30), never a literal.
+  - **Fixtures, not the operator's folders.** One directory from `mkdtemp` under `jobsDirPath(env)`, the same
+    derivation `loadConfig` reads `jobsDir` from, `realpath`ed and `chmod 0755`, with a `0755` subdirectory for
+    every conditional mount (`/job`, `/workspace`, `/outbox`, `/session`, `/opt/pi-global`). No workspace a job
+    produced, no session store and no overlay is mounted.
+  - **Names**: `pi-dispatch-live-probe-<pid>-<nonce>`, `pi-dispatch-live-pin-<pid>-<nonce>`, and a fixture
+    directory `pi-dispatch-live-<pid>-...`: outside `pi-job-`, `pi-sandbox-` and `pi-dispatch-valkey`, and unique
+    per run.
+  - **Shown first, removed by ID.** Doctor prints the probe's name, image and fixture location before the first
+    docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` (never the name, which a
+    concurrent run cannot share but a stray could), the same for a pinning container only if one was created,
+    and removes the fixture. A removal that fails is a ⚠ carrying the command. A fixture left by an interrupted
+    run is removed at the start of the next one only when its PID is no longer alive; an interrupted probe
+    container removes itself when its sleep ends (`--rm`).
+  - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
+    a pass:
+    - `isolation`: one `docker exec` of a constant script reading `/proc/1/status` and the cgroup files. `CapBnd`
+      must be zero and `NoNewPrivs` 1 (`CapEff` alone is zero for any non-root image with no flags at all),
+      `pids.max` must equal the imported `--pids-limit` and `memory.max` the spec's default memory. A literal
+      `max` fails; a bound that could not be read is not read back.
+    - `nonRoot`: all four `Uid` fields of PID 1 nonzero.
+    - `mountSet`: `docker inspect .Mounts` keyed by destination and read-write flag against the spec's own
+      mounts. A mount missing, one extra, one with its RW flipped, the docker socket, the home directory or an
+      ancestor of it, or the session store fails.
+    - `localFolders`: a nonce passed as `$1` written inside `/workspace` and read on the host; `[ -w ]` tells a
+      folder the job user cannot write from a write the host cannot see.
+    - `imagePinning`: the builder's argv, detached, against `pi-dispatch-live-probe.invalid/absent:<nonce>`. It
+      holds only for a nonzero exit, `No such image`, no `Unable to find image`, and the image still absent
+      afterwards; a refusal in other words is not read back.
+    - `egress`: **the one reading this builder does not make.** It needs a job-shaped `--internal` network and
+      the proxy, so it is folded in from `doctor`'s egress canary, whose two probe checks carry a non-rendered
+      `readBack`. Both readings must be present; the policy off, the proxy down or a skipped canary is not read
+      back.
+  - **No budget, no credential, no fix.** Nothing here reserves budget (`reserveBudget` is called only from the
+    processor), mints a token, or puts a key in a container, and no check it renders carries a `fixAction`.
+  - **Other venues** read back through the conformance harness: `runBackendConformance(backend, { readBack })`
+    takes the same verdicts, keyed by property or as this module's array, for `READ_BACK_BY_A_LIVE_PROBE`; a
+    property the report omits or could not read abstains, and one read as not holding fails a backend that
+    declares it `enforced` or `asserted`.
+- **Why**: `doctor` printed the declarations and nothing read them back (#278). A probe with its own argv would
+  read back a container no job is, which is exactly the second place for the boundary to live that
+  `INT-SANDBOX-CONTRACT` calls its load-bearing sentence.
+- **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SANDBOX-CONTRACT`, `DES-CONTAINER-BACKEND-REGISTRY`, `DES-CLI-SURFACE`, `OQ-012`
+- **Acceptance**: The probe argv contains every member of `ISOLATION_FLAGS` (asserted against the imported
+  array), `--network=none`, `-d`, `--entrypoint sleep` and no `-e`, and ends with the image then the derived
+  sleep. No probe name contains `pi-job-` or `pi-sandbox-`. Given a status reading `CapEff 0` with a nonzero
+  `CapBnd`, isolation fails; given a mount set of the right size with one RW flag flipped, mountSet fails; given
+  `Unable to find image`, imagePinning fails; given a root image, nonRoot fails and doctor exits 1. Given a docker
+  CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
+  container that vanishes, or a step that throws, the probe container is removed by its ID and the fixture is
+  removed; given a `docker run -d` that failed, no removal is attempted; two concurrent runs remove only their own
+  containers. Given `doctor` without `--live`, its output and its spawns are unchanged.
+
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
 **GitHub → receiver.** *(GitLab's is a separate contract — `INT-GITLAB-PAYLOAD-SUBSET`. This ID keeps
@@ -3995,3 +4066,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #277, part 3: the sandbox refuses per job. **`INT-SANDBOX-CONTRACT` AMENDED**: the manifest gains `backend` (resolved through `resolveBackendName`; `null` for a stamp with no venue, never a guessed `local`; kept across a pin), and LOCAL-ONLY becomes a per-job refusal (`venue-unreachable`) inside `resolveSandbox`, ahead of the image and workspace checks, for both entry points, with held meaning the local adapter by name and a keyless manifest reading as local; it replaces the deployment-wide refusal the panel never applied. Acceptance gains the matching cases. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, a correction: its `run.backend` entry still said "NOTHING DISPATCHES ON THE FIELD YET", false since #227's slice 4; it now describes the registry that dispatches and the three stores that record the resolved name. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the sandbox is still its sibling, and the job container is untouched. |
 | 2026-09-14 | Issue #277, part 4: one sandbox launcher for both entry points. **`INT-SANDBOX-CONTRACT` AMENDED**: the network bullet now holds for both entry points through `openSandbox`, which owns the refusals, the already-running check, the session's egress network and its teardown; the admin panel previously built the argv itself with no network, so a panel-opened sandbox ran on the default bridge with `PI_EGRESS` armed (a live gap, fixed here), and a second press on a running sandbox tried to start another container, which docker refused by name. The panel reads the egress posture with the worker's own readers and refuses a malformed `PI_EGRESS`, and a failed network says where the setting is read. The network's lifecycle is stated and now honest about two cases the CLI always had: it is LEFT when the shell detaches with the container still running (tearing it down stripped the proxy from a live sandbox), and a network already under the session's name is refused and named with the commands to remove it rather than blamed on the proxy (automatic removal was tried and withdrawn: a racing second open stripped the first's proxy). A non-boolean posture throws. Two pre-existing miscounts corrected in the same contract: four proxy variables, not three. Acceptance gains the panel cases. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container from image and workspace. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the network, its name and the proxy variables are the ones it already specifies; only which caller builds them moved. |
 | 2026-09-14 | Issue #278, part 1. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a "Which daemon" bullet -- the endpoint the docker CLI resolves, asked of the CLI at boot and per job with no `env` passed to either spawn, gating `local`'s `credentialTransit` and refused only under a floor. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `backend-floor-unobserved` joins the `reason` enum. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: a sandbox carries no credential, so where its daemon is does not move a credential. |
+| 2026-09-14 | Issue #278, part 2: `doctor --live`. **NEW `INT-LIVE-PROBE-CONTRACT`**, a sibling of `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`: one container from the job builder with `--network=none`, an empty environment and `-d --entrypoint sleep`, fixture mounts under `jobsDirPath`, names by pid and nonce outside every sweep's namespace, announced before and removed by ID in a `finally`, run only on a docker CLI observed local; six verdicts, with `egress` folded from the canary's `readBack` as the one reading not from this builder; the conformance harness's `readBack` shape for other venues. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv changes, and the probe reuses its builder rather than amending its contract. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: the sandbox launcher, its names and its reaper are untouched, and no live-probe name falls in `pi-sandbox-`. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: a probe is not a job and writes no record. |

@@ -58,6 +58,7 @@
 		"./backend-registry": "./src/backend-registry.mjs",
 		"./container-spec": "./src/container-spec.mjs",
 		"./backend-conformance": "./src/backend-conformance.mjs",
+		"./live-probes": "./src/live-probes.mjs",
 		"./triggers": "./src/triggers.mjs",
     "./triggers-file": "./src/triggers-file.mjs",
     "./packages": "./src/packages.mjs",

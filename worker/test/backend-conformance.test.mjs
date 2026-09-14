@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } from "../src/backend-conformance.mjs";
+import { READ_BACK_BY_A_LIVE_PROBE, UNVERIFIED_BY_THIS_HARNESS, runBackendConformance } from "../src/backend-conformance.mjs";
 import { makeLocalBackend } from "../src/backend-local.mjs";
 import { BACKENDS, PROPERTY_NAMES } from "../src/backends.mjs";
 
@@ -235,18 +235,55 @@ test("a run with no probes ABSTAINS rather than passing the checks it could not 
 });
 
 test("the harness NAMES what it cannot verify, so a green run is not mistaken for a conformant backend", () => {
-	// Ten of the thirteen properties need a live container on the target runtime, which offline CI cannot
-	// have. Listing them is what stops the suite overclaiming.
+	// Four of the thirteen properties are reached by neither this harness nor a live read-back. Listing them, with
+	// why, is what stops the suite overclaiming.
 	for (const property of Object.keys(UNVERIFIED_BY_THIS_HARNESS)) {
 		assert.ok(PROPERTY_NAMES.includes(property), `${property} must be a real property`);
 		assert.ok(UNVERIFIED_BY_THIS_HARNESS[property].length > 20, `${property} must say WHY it is unreachable`);
 	}
-	// And every property is accounted for: either the harness checks it, or it says why it cannot.
-	const checked = ["exitCodes", "abortable", "reap", "readOnlyJobInputs"];
-	for (const property of PROPERTY_NAMES) {
-		assert.ok(
-			checked.includes(property) || property in UNVERIFIED_BY_THIS_HARNESS,
-			`${property} is neither checked nor declared unverifiable -- a property in neither list is one nobody is thinking about`,
-		);
+	// Three lists, PAIRWISE DISJOINT and together covering all thirteen (issue #278): checked here, read back off a
+	// live container, or named as unverified. A property in two is double-counted; one in none is one nobody is
+	// thinking about.
+	const checked = ["exitCodes", "abortable", "readOnlyJobInputs"];
+	const lists = [checked, [...READ_BACK_BY_A_LIVE_PROBE], Object.keys(UNVERIFIED_BY_THIS_HARNESS)];
+	for (let i = 0; i < lists.length; i++) {
+		for (let j = i + 1; j < lists.length; j++) {
+			assert.deepEqual(lists[i].filter((p) => lists[j].includes(p)), [], `lists ${i} and ${j} overlap`);
+		}
 	}
+	assert.deepEqual(lists.flat().sort(), [...PROPERTY_NAMES].sort());
+	for (const property of READ_BACK_BY_A_LIVE_PROBE) assert.ok(PROPERTY_NAMES.includes(property));
+});
+
+test("a readBack report is read per property: held passes, unread abstains, a failed read of a claimed word fails (#278)", async () => {
+	const base = { probe: honestProbe, withBrokenEnumeration: async () => ({ reaped: false }) };
+	const holds = Object.fromEntries(READ_BACK_BY_A_LIVE_PROBE.map((p) => [p, { ok: true, detail: "held" }]));
+	const honest = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => holds });
+	assert.equal(honest.ok, true);
+	for (const p of READ_BACK_BY_A_LIVE_PROBE) assert.equal(findings(honest, p)[0].unverifiable, undefined, `${p} was read back, not abstained`);
+
+	// DISHONEST: local declares isolation enforced and nonRoot asserted; a read-back saying neither holds fails both.
+	const dishonest = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => ({ ...holds, isolation: { ok: false, detail: "CapBnd a80425fb" }, nonRoot: { ok: false, detail: "Uid 0" } }) });
+	assert.equal(dishonest.ok, false);
+	assert.deepEqual(failed(dishonest).sort(), ["isolation", "nonRoot"]);
+
+	// An array of live-probes verdicts is accepted as it is, and a property it does not cover abstains.
+	const partial = await runBackendConformance(referenceBackend(), { ...base, readBack: async () => [{ property: "mountSet", ok: true, detail: "x" }, { property: "egress", ok: false, warn: true, detail: "not read back: off" }] });
+	assert.equal(partial.ok, true);
+	assert.equal(findings(partial, "mountSet")[0].unverifiable, undefined);
+	assert.equal(findings(partial, "egress")[0].unverifiable, true, "not read back is an abstention, never a pass");
+	assert.equal(findings(partial, "isolation")[0].unverifiable, true, "a property the report omits abstains");
+
+	// ABSENT readBack: every one abstains, and the run does not fail for it.
+	const absent = await runBackendConformance(referenceBackend(), base);
+	assert.equal(absent.ok, true);
+	for (const p of READ_BACK_BY_A_LIVE_PROBE) assert.equal(findings(absent, p)[0].unverifiable, true, p);
+});
+
+test("a read-back that does not hold passes against a backend that declares the property absent", async () => {
+	const absentIsolation = { ...BACKENDS.local.declares, isolation: "absent" };
+	const r = await runBackendConformance(referenceBackend({ declares: absentIsolation }), { readBack: async () => ({ isolation: { ok: false, detail: "CapBnd a80425fb" } }) });
+	const f = findings(r, "isolation")[0];
+	assert.equal(f.ok, true);
+	assert.match(f.detail, /does not claim/);
 });

@@ -778,7 +778,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 - **Decision**: The workspace CLI (`pi-dispatch`, bin of the worker package) is the deployment's
   operator surface, and its subcommands sit on an explicit gate ladder. **Read-only / always safe**:
-  `doctor`, `status`. **Operator-typed, ungated**: `run`, `pause`, `resume`, `cancel`, `sandbox`,
+  `doctor`, `status`. **Operator-typed, shown, self-removing**: `doctor --live` (issue #278), which starts one
+  probe container and one fixture directory, names both before either exists, removes both, and offers
+  nothing (`INT-LIVE-PROBE-CONTRACT`); it sits beside `sandbox` rather than on the consented tier, because it
+  changes nothing that outlives the command. **Operator-typed, ungated**: `run`, `pause`, `resume`, `cancel`, `sandbox`,
   `import-pi` (each is its own gate — typing it is the approval, `REQ-ADMIN-VIA-PI-EXTENSION`'s ladder
   top; `cancel` names one job id and stops exactly that job, `DES-CANCEL-VIA-REDIS-REQUEST-KEY`).
   **Create-only, contractually non-destructive**: `init` (idempotent scaffolds; an existing file is
@@ -3235,23 +3238,24 @@ a tunnel.
   it ships in `src/` rather than `test/` on purpose: a suite beside this repo's own tests could only ever
   check this repo's own backend, while an adapter is written elsewhere by someone who will never run
   `npm test` here. It checks the bundle's shape, the declaration's internal consistency, exit-code fidelity,
-  the abort flag's independence from the code, the reaper's tri-state, and the transfer downgrade -- and it
-  NAMES the ten properties it cannot reach, each with the live container it would need, so a green run is
-  never mistaken for a conformant backend. `OQ-012`'s line applies to the harness itself: a check that
+  the abort flag's independence from the code, the reaper's tri-state, and the transfer downgrade; it takes the
+  six properties a container read can reach from a `readBack` probe (#278); and it NAMES the four left, each
+  with what it would need, so a green run is never mistaken for a conformant backend. `OQ-012`'s line applies to the harness itself: a check that
   proves intent is not one that proves conformance, and the difference is stated rather than blurred.
 - **The reference adapter is a fake whose behaviour is a parameter**, not a vendor. No vendor adapter can be
   exercised in this repo's offline CI and this project has twice refused to bless one, so the second thing
   the harness runs against is a backend that can be made to clamp an exit code, drop the abort flag, report
   an OOM as a stop, return `true` from a failed enumeration, or copy files while declaring the kernel
   enforced `/job`. A harness only ever run against a conformant backend proves that it can say yes.
-- **THREE of the thirteen are verified against behaviour; ten are not.** A backend can still declare all of
-  this and do most of it. Only a
+- **THREE of the thirteen are verified against behaviour by the harness, SIX are read back off a live
+  container (#278, below), and FOUR are not.** A backend can still declare all of this and do most of it.
+  Only a
   conformance suite that drives a backend's own `runContainer` and reads each property back off what it
   produced closes the rest. **That suite now exists** and reaches `exitCodes`, `abortable` and
   `readOnlyJobInputs`, plus the shape of a bundle and the internal consistency of its declaration -- which
   are checks but not properties, and counting them as properties is how a draft of this bullet said "six".
-  The other ten need a live container on the target runtime, and the harness names each one and what it
-  would take rather than passing them in silence. Its PROBES are the adapter's own code, so a probe that
+  Of the other ten, six need a live container and now have one (`READ_BACK_BY_A_LIVE_PROBE`), and the harness
+  names the remaining four and what each would take rather than passing them in silence. Its PROBES are the adapter's own code, so a probe that
   fabricates its answer passes while proving nothing; that limit is stated in the module and on the page
   rather than left to be discovered.
 - **The configuration surface is `PI_BACKENDS` and `PI_BACKEND_FLOOR`, both ENV-ONLY** (issue #227,
@@ -3396,6 +3400,21 @@ a tunnel.
   forking a second one nothing sweeps. This is what a second entry in `BACKENDS_TABLE` needed first: with two
   venues and no attribution, a job run on the wrong one is "ran somewhere else while the file reads as
   though it chose", arriving as success.
+- **`doctor --live` reads six declarations back off a real container (#278, `INT-LIVE-PROBE-CONTRACT`).** For
+  `local` the read ships: one container from `buildDockerRunArgs` with `--network=none`, no environment, fixture
+  mounts and `sleep`, read for `CapBnd`/`NoNewPrivs`/cgroup bounds, `.Mounts` by destination and RW, the four
+  `Uid` fields, a nonce written in place, and a refused absent image; `egress` comes from the existing canary.
+  It runs only on a docker CLI observed local, since on a redirected daemon every path it reads is another
+  machine's. Other venues supply `readBack` to the harness. `UNVERIFIED_BY_THIS_HARNESS` shrinks to four: two
+  a probe could reach and none was built for (`ephemeral`, `jobToJobIsolation`), and two that are not
+  container properties (`secretsCustody`, `credentialTransit`, the latter observed per job from the CLI). The
+  verdict is about a fixture and `PI_JOB_IMAGE`, and the green run says so on its own line. **Rejected**: a
+  hand-written probe argv (it would read back a container no job is); `CapEff` as the isolation signal (zero
+  for any non-root image with no flags, measured); counting mounts (a flipped RW with an equal count passes);
+  removing the probe by name (a name is something any container can carry; the ID is the one
+  this run started); probing at boot or per job (a container start to re-read a table); a `fixAction` on any
+  read-back (what fails is the image or the runtime, and doctor never guesses at either); running it on an
+  unobserved endpoint.
 - **Rejected (#277)**: resolution as a registry METHOD, because the session store is built in `startWorker`
   before any bundle and would reach it through a temporal dead zone. Rejected: stamping the session venue
   after the transcript rename, or invalidating it by deletion, since an absent stamp reads as `local` and a
@@ -3418,6 +3437,9 @@ a tunnel.
   · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
   · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
   `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
+  · `worker/src/live-probes.mjs` -> `runLiveProbes`, `isolationVerdict`, `mountSetVerdict`;
+  `worker/src/backend-conformance.mjs` -> `READ_BACK_BY_A_LIVE_PROBE`, `checkReadBack`; `worker/src/doctor.mjs`
+  -> `liveChecks`; `worker/src/config.mjs` -> `jobsDirPath` (#278)
 
 ## DES-PER-TRIGGER-TOOL-EXCLUSIONS
 
@@ -3840,3 +3862,4 @@ a tunnel.
 | 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: the dedup-visibility bullet (the two layers' asymmetric returns at the pin's Lua; the receiver's honesty rule), with three new Rejected entries -- a QueueEvents subscriber (a blocking connection and a lifecycle for a fact the add's return carries), surfacing GUID replays (the shield's silence is its correctness), a non-2xx swallow answer (a redelivery storm bought for a status code). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: the FAILED surface bullet -- the first queue-Job hydration for display, admissible by the one-statement/closed-projection rule, the source-plus-belt posture on failedReason (`OQ-035`), the stated retention split; REJECTED a `dispatch_failed` tool and a `failed` subcommand (the tool enumerations and their two-directional pins stand UNTOUCHED -- verified against `admin/test/wiring.test.mjs`) and a per-job delayed classifier. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: the delayed-count naming bullet, stating compatibility with (not reversal of) its own rejected classifier -- parts counted from their own sources, nothing enumerated, nothing guessed. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked**: the failure hook and the FAILED section answer different questions (being told vs going looking) and share no code. |
 | 2026-09-14 | Issue #277, attribution. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: new bullet "Attribution is the other half of selection" (one derivation, three stores, resolved name never the raw field, absent reads as the literal `local`, the venue as a session sidecar rather than key material); the sandbox bullet becomes a per-job refusal by the local adapter's name, replacing the deployment-wide predicate the panel never applied; the registry bullet names the shared derivation; four Rejected entries (a registry method, stamp-after-rename or deletion, narrowing the predicate, `remote === false` as held). A correction in the same entry: the `PI_BACKENDS` bullet still said nothing SELECTS a backend and that the rule would come out with selection -- false since #227's slice 4, and the rule stayed for its own reason, which the bullet now gives. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key stays `(kind, repo, ref)`, and the venue-as-key-material alternative is recorded as rejected here. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: a sandbox is still a fresh container from image and workspace; only which runs may be reopened moved. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: one more field in the same flat file. **`CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no gate moved relative to a spend, a venue this worker never built is now a recorded policy refusal rather than an infra retry, and no mount or flag changed. |
 | 2026-09-14 | Issue #278, part 1: credentialTransit earns `enforced` where credentials leave. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: `local`'s `credentialTransit` moves from `asserted` to `enforced`, gated by the new per-backend `observedBy` on the `dockerEndpointLocal` observation, read by asking the docker CLI (`docker context inspect`) rather than reimplementing its precedence; `effectiveWord` degrades it to `asserted` by the operator when the endpoint is not observed on this host; the floor reads the observed word (`unobservedFloor`, `observationRefusals`): `enforced` refuses a redirect, `asserted` holds; checked at boot and again before each job's spend; doctor renders the observed word, names its shell's answer, and skips its in-image `gh` probe on a redirected CLI. The "two asserted" bullet is corrected to one. Six Rejected entries. **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: the credentials and their scope do not move; this is about where they travel. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor gains words and loses a probe on a redirect, and no `fixAction`. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the per-job read is free and sits before the reserve. The review of this part moved the per-job read ahead of the image and egress preflights, refused leading-zero loopback literals, kept a UNC named pipe (and a `.`/`..` segment, split on either separator) off the local list, reduced the displayed endpoint instead of editing it, and named the resolver's residual on `localhost`; a stderr table that made unrecognised CLI exits transient was tried and withdrawn. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: this site classifies on values like every other, a non-zero exit stays determinate on its `gh auth token` precedent, and the passing permission error that decision leaves is named in the bullet. |
+| 2026-09-14 | Issue #278, part 2: `doctor --live`. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the counts become three verified by the harness, six read back off a live container, four unverified; a bullet records the read-back (one container from the job builder, run only on a docker CLI observed local, egress folded from the canary, `readBack` for other venues) with seven Rejected entries; Code evidence. **`DES-CLI-SURFACE` AMENDED**: `doctor --live` sits on an operator-typed, shown, self-removing tier beside `sandbox`, not the consented one. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: the probe is not a sandbox and reads no retained run. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: the probe asks the CLI and never reimplements its resolution. |
