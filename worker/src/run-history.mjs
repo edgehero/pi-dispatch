@@ -137,6 +137,7 @@ const SESSION_REASONS = new Set([
 	"too-large",
 	"unparseable",
 	"not-a-regular-file",
+	"venue-changed",
 	"pi-version-changed",
 	"locked",
 	"promote-failed",

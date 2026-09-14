@@ -626,6 +626,8 @@ export async function startWorker(
 		maxAgeDays: config.sessionMaxAgeDays,
 		maxResumeChain: config.sessionMaxResumeChain,
 		maxContextPct: config.sessionMaxContextPct,
+		// The venue a transcript is stamped with and gated on (#277), resolved with the registry's own default.
+		defaultBackend: config.defaultBackend,
 		log,
 	});
 	// Boot sweep, beside the log reaper and for the same reason it is beside rather than inside it: these

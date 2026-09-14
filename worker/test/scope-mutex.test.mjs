@@ -294,7 +294,7 @@ test("a throw between the acquire and the main try releases the hold (the setup 
 		inFlight, now: () => NOW, recordRun: () => {}, timeoutMs: 100000,
 		deps: { log: () => {} },
 	});
-	// Nothing in that window can throw today; force the one injectable seam (the abort listener) to
+	// Nothing in that window throws past its own guards today; force one injectable seam (the abort listener) to
 	// prove the guard, not the weather.
 	const boomSignal = { addEventListener: () => { throw new Error("boom-in-setup"); }, removeEventListener: () => {} };
 	await assert.rejects(() => processor(localJob("j-1", "/f").job, "tok", boomSignal), /boom-in-setup/);

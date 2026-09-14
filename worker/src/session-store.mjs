@@ -13,6 +13,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { sessionKeyFor } from "./session-key.mjs";
+import { resolveBackendName } from "./backend-registry.mjs";
+import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
 
 /**
  * session-store.mjs -- the host side of a resumable session (INT-SESSION-STORE-CONTRACT).
@@ -72,7 +74,24 @@ const RESUME_CHAIN_FILE = "resume-chain";
  * agent-influenced, since the transcript itself is agent-written.
  */
 const CONTEXT_FILE = "context";
-/** Both sidecar formats are a handful of bytes. Generous, and still nowhere near a job's wall clock. */
+/**
+ * The venue whose container produced the transcript beside it (issue #277): a backend name, one line.
+ *
+ * A SIDECAR, NOT KEY MATERIAL. `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` makes the key a pure function of
+ * (kind, repo, ref), and a venue in the key would fork a trigger moved between venues into a second lineage
+ * that nothing ever sweeps. As a sidecar it GATES the one lineage instead: the move costs one cold start.
+ *
+ * ABSENT READS AS `UNATTRIBUTED_BACKEND`, never as the deployment default. Every transcript written before this
+ * stamp existed ran on `local`, and the default is a setting that can move under it.
+ */
+const VENUE_FILE = "venue";
+/**
+ * What the venue stamp reads while a promotion is swapping the transcript under it. It matches no venue:
+ * parentheses are outside the charset every backend name is validated against (a test pins every name this
+ * build knows to it), so a key left holding this cold-starts on every venue until a promotion completes.
+ */
+const VENUE_PENDING = "(pending)";
+/** Every sidecar format is a handful of bytes. Generous, and still nowhere near a job's wall clock. */
 const SIDECAR_MAX_BYTES = 4096;
 /**
  * The host-effective provider and model as one token, or null when the job names neither.
@@ -94,6 +113,15 @@ function modelIdentity(job) {
 }
 
 /**
+ * A venue name as the store handles it: a non-empty string, else `null`. A promotion stamps `String(venue)`,
+ * and `String(undefined)` is the word `undefined`, which is a valid-looking name; normalising first means a
+ * session with no resolvable venue is stamped with nothing rather than with that.
+ */
+function normaliseVenue(venue) {
+	return typeof venue === "string" && venue !== "" ? venue : null;
+}
+
+/**
  * Read-path outcomes. Every one is a named cold start rather than a bare `false`: a feature that fails
  * open is otherwise indistinguishable from a feature nobody switched on, which is precisely how "we
  * never resumed once in three months" goes unnoticed.
@@ -107,6 +135,9 @@ export function makeSessionStore({
 	maxAgeDays = 0,
 	maxResumeChain = 0,
 	maxContextPct = null,
+	// The deployment's default venue, `PI_BACKENDS[0]`, for a job that names none (#277). `null` is a
+	// dependency-injection seam, and a job whose venue cannot be resolved never resumes.
+	defaultBackend = null,
 	log = () => {},
 	now = () => Date.now(),
 	fs = { copyFileSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
@@ -139,13 +170,26 @@ export function makeSessionStore({
 			// count is 78% of a 32k window and 2.5% of a 1M one. Carried on the session object rather than
 			// read again at promote time, so the reading is stamped with the model that produced it.
 			const modelId = modelIdentity(job);
+			// The venue this job will run in, resolved exactly as the registry dispatches it (#277). Carried on
+			// the session like `modelId`, so the promotion stamps the venue that produced the transcript rather
+			// than re-deriving one later.
+			const venue = normaliseVenue(resolveBackendName(job, defaultBackend));
 			const hostDir = join(jobDir, "session");
 			const staged = join(hostDir, SESSION_FILE_NAME);
 			fs.mkdirSync(hostDir, { recursive: true, mode: 0o700 });
 
-			const verdict = readCanonical(key, piVersion, modelId);
+			let verdict = readCanonical(key, piVersion, modelId, venue);
 			if (verdict.resume) {
 				fs.copyFileSync(canonicalFile(key), staged);
+				// The read above and this copy are not under the promotion lock, so a promotion from ANOTHER venue
+				// can land between them and the copy would stage that venue's transcript. Every promotion writes
+				// the pending sentinel before it swaps, so a stamp that no longer names this venue after the copy
+				// means the file just copied may not be the one that was judged. Cold start, and empty the staged
+				// copy so the container is handed nothing of it -- the 0-byte shape every cold start gets.
+				if (readVenue(key) !== venue) {
+					fs.writeFileSync(staged, "");
+					verdict = COLD("venue-changed");
+				}
 			} else {
 				// A 0-BYTE FILE, not an absent one. pi's setSessionFile then takes its empty-file branch and
 				// writes its own header at this exact path, which marks the manager flushed -- so _persist
@@ -154,7 +198,7 @@ export function makeSessionStore({
 				fs.writeFileSync(staged, "");
 			}
 			log("session_resolved", { key, resume: verdict.resume, reason: verdict.reason });
-			return { hostDir, key, modelId, ...verdict };
+			return { hostDir, key, modelId, venue, ...verdict };
 		} catch (err) {
 			// A history fault must never fail the prepare that asked.
 			log("session_store_failed", { phase: "resolve", reason: err?.message });
@@ -215,10 +259,26 @@ export function makeSessionStore({
 					// Absent is the desired state.
 				}
 				fs.copyFileSync(staged, tmp);
+				// THE VENUE STAMP IS INVALIDATED BEFORE THE SWAP, and fatally (#277). Removing a stamp does not
+				// invalidate it, because an absent stamp reads as `local`; stamping only after the rename would
+				// leave a window, and a failed post-swap write a permanent state, in which one venue's transcript
+				// sits under another venue's stamp and the next job there resumes it. So every promotion first
+				// writes a stamp no venue matches. If that write fails, nothing has been swapped and the outer
+				// catch reports `promote-failed`; if the process dies after it, the key cold-starts everywhere
+				// until a promotion completes. Unconditional rather than only on a venue change, so the decision
+				// needs no read of the stamp under the lock and there is no branch to get wrong.
+				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
 				fs.renameSync(tmp, canonicalFile(session.key));
+				// The real stamp, straight after the swap and BEFORE the pi-version write, which can throw: a
+				// completed promotion must not be left under the sentinel because a later write failed. Non-fatal
+				// for `writeSidecar`'s reason -- the transcript is already promoted -- and a failure here leaves
+				// the sentinel, which cold-starts rather than misattributes. A session with no venue (a DI seam)
+				// leaves the sentinel on purpose: no stamp is better than a guessed one.
+				const venue = normaliseVenue(session.venue);
+				if (venue !== null) writeSidecar(dir, VENUE_FILE, session.key, venue);
 				fs.writeFileSync(join(dir, PI_VERSION_FILE), String(piVersion ?? ""));
-				// The two sidecars, immediately after the swap and under the same lock. NOT part of the swap
-				// itself, which is one rename and cannot be widened: what the lock buys them is that no
+				// The chain and context sidecars, immediately after the swap and under the same lock. NOT part of
+				// the swap itself, which is one rename and cannot be widened: what the lock buys them is that no
 				// other job can interleave, and what the ordering buys them is that they never describe a
 				// transcript older than the one now in place.
 				//
@@ -273,19 +333,27 @@ export function makeSessionStore({
 	 * cold start when it will in fact resume. The bookkeeping loss is logged and the truth is kept.
 	 */
 	function writeSidecar(dir, name, key, value) {
-		const file = join(dir, name);
-		const tmp = `${file}.incoming`;
 		try {
-			try {
-				fs.unlinkSync(tmp);
-			} catch {
-				// Absent is the desired state.
-			}
-			fs.writeFileSync(tmp, value);
-			fs.renameSync(tmp, file);
+			replaceSidecar(dir, name, value);
 		} catch (err) {
 			log("session_sidecar_failed", { key, file: name, reason: err?.message });
 		}
+	}
+
+	/**
+	 * `writeSidecar`'s link-safe temp-and-rename, and it THROWS. For the one write whose failure must stop a
+	 * promotion rather than be logged past it: the venue sentinel, which runs before the swap (#277).
+	 */
+	function replaceSidecar(dir, name, value) {
+		const file = join(dir, name);
+		const tmp = `${file}.incoming`;
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Absent is the desired state.
+		}
+		fs.writeFileSync(tmp, value);
+		fs.renameSync(tmp, file);
 	}
 
 	/**
@@ -327,19 +395,32 @@ export function makeSessionStore({
 	}
 
 	/** The read path, gate by gate. The FIRST miss wins and names itself. */
-	function readCanonical(key, piVersion, modelId) {
+	function readCanonical(key, piVersion, modelId, venue) {
 		const file = canonicalFile(key);
 		const check = inspectFile(file);
 		if (!check.ok) return COLD(check.reason);
 
 		if (ttlDays > 0 && now() - check.mtimeMs > ttlDays * 86400000) return COLD("expired");
 
+		// The VENUE the transcript was written in (#277). Placed HERE, after the arms a venue move cannot cause
+		// -- a transcript that is absent, not a regular file, too large or past its TTL is all of those on every
+		// venue -- and AHEAD of both pi-version arms, because a venue move CAN cause those: image preflight is
+		// dispatched per venue, so another venue can report another pi or none. The first miss names itself,
+		// and before this arm a venue move named itself as a version change. Without it, a trigger moved
+		// between venues staged the old venue's transcript into the new venue's container with nothing refusing.
+		//
+		// FAILS CLOSED: a job whose venue cannot be resolved (a DI seam) never resumes, the pi-version gate's
+		// polarity. The token also covers a stamp left pending by an interrupted promotion and a stamp that is
+		// present but unreadable -- a misnaming stated rather than hidden, as `pi-version-changed` already does
+		// for an unreadable version stamp.
+		if (venue === null || readVenue(key) !== venue) return COLD("venue-changed");
+
 		// A transcript outlives the pi that wrote it, and pi's own docs record what then breaks: an older
 		// session's stored tool-call arguments may no longer match the current tool schema. We cannot
 		// repair that mid-run, so a version change is a cold start rather than a mid-run failure. An
 		// image that declares no version never resumes -- the safe direction, never "assume it matches".
 		if (piVersion === null) return COLD("pi-version-changed");
-		// Through the same guarded read as the two sidecars below it. This one predates them and was the
+		// Through the same guarded read as the other sidecars. This one predates them and was the
 		// one unguarded read left in the key directory; a symlink here would have decided a gate on the
 		// contents of some other file entirely.
 		const stamped = readSidecar(key, PI_VERSION_FILE);
@@ -451,6 +532,25 @@ export function makeSessionStore({
 		} catch {
 			return null;
 		}
+	}
+
+	/**
+	 * The venue stamped beside a key's transcript (#277).
+	 *
+	 * ABSENT and UNREADABLE are different answers, and conflating them either way is a defect. An absent stamp
+	 * is a transcript from before venues were recorded, which ran on `local`. A stamp that exists but cannot
+	 * be read -- not a regular file, empty, oversized, unreadable -- matches nothing (`null`), so the key
+	 * cold-starts. Absence is decided by `lstat` and ENOENT ALONE: `stat` or `existsSync` would follow a
+	 * DANGLING symlink planted at this name, report it absent, and resume a transcript as `local` on the
+	 * strength of a link that points nowhere. Any other `lstat` failure is not absence either.
+	 */
+	function readVenue(key) {
+		try {
+			fs.lstatSync(join(keyDir(key), VENUE_FILE));
+		} catch (err) {
+			return err?.code === "ENOENT" ? UNATTRIBUTED_BACKEND : null;
+		}
+		return readSidecar(key, VENUE_FILE);
 	}
 
 	/**

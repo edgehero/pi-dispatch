@@ -1020,6 +1020,8 @@ test("every session bound config reads is actually handed to the store", () => {
 		["maxAgeDays", "config.sessionMaxAgeDays"],
 		["maxResumeChain", "config.sessionMaxResumeChain"],
 		["maxContextPct", "config.sessionMaxContextPct"],
+		// #277: the venue a transcript is stamped with and gated on, from the registry's own default.
+		["defaultBackend", "config.defaultBackend"],
 	]) {
 		assert.match(call[0], new RegExp(`${option}:\\s*${setting.replace(".", "\\.")}`), `${option} must be wired from ${setting}`);
 	}

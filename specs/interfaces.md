@@ -2673,7 +2673,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|pi-version-changed|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|venue-changed|pi-version-changed|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
     "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
@@ -2697,8 +2697,8 @@ validator rather than a second copy of it.
 
   **`backend` (issue #277) names the venue the job RESOLVED to, and is additive, an explicit literal, and
   TAIL position** after `host`, on `host`'s own argument: the tail leaves twenty-five existing positions
-  untouched. It is UNCONDITIONAL, and a wired worker never writes a null here (every producer either omits
-  `run.backend` or writes a loader-validated name). It holds the
+  untouched. It is UNCONDITIONAL, and no producer gives a wired worker a null to write (every producer
+  either omits `run.backend` or writes a loader-validated name). It holds the
   **resolved** name, `run.backend` else the deployment default (`PI_BACKENDS[0]`), computed by
   `resolveBackendName` (`worker/src/backend-registry.mjs`), the same function the registry dispatches on --
   never the raw `run.backend` field, which is ABSENT for every trigger that names no venue and would make
@@ -2714,7 +2714,7 @@ validator rather than a second copy of it.
   the same name: a backend name is operator-authored configuration checked against a charset at load, never
   payload. It is stamped by the `recordRun` closure from `config.defaultBackend`, the value the registry is
   built with; `null` appears only where a caller passes no default (a dependency-injection seam) or where
-  the job data carries an explicit `null` (below). A
+  the job data carries an explicit `null` (above). A
   record is an AUDIT of the venue, not a guard on it: it confirms a venue after the job already spent, which
   is why the loader's near-miss sweep on `run.backend` stays.
 
@@ -2735,7 +2735,7 @@ validator rather than a second copy of it.
 
   | Producer | Tokens |
   |---|---|
-  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `pi-version-changed` |
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
   | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
 
@@ -2967,6 +2967,7 @@ validator rather than a second copy of it.
   ```
   <PI_SESSIONS_DIR>/<key>/current.jsonl   canonical transcript; mode 0700; NEVER bind-mounted
   <PI_SESSIONS_DIR>/<key>/pi-version      the pi version that wrote it
+  <PI_SESSIONS_DIR>/<key>/venue           the backend whose container wrote it (#277); absent reads "local"; "(pending)" mid-promotion
   <PI_SESSIONS_DIR>/<key>/resume-chain    consecutive resumed completions on this key; maintained unconditionally
   <PI_SESSIONS_DIR>/<key>/context         `<tokens> <window> <model>` as last measured; cleared by a cold start
   <PI_SESSIONS_DIR>/<key>/lock            exclusive-create promotion lock; absent when free
@@ -2977,7 +2978,8 @@ validator rather than a second copy of it.
   `PI_SESSIONS_DIR` has **no default**; unset means the feature is unavailable.
 - **Read path**, host-side, fail-open at the first miss, every miss a named cold start: key resolves ->
   canonical file exists -> **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
-  -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `pi-version` matches the job image's label ->
+  -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `venue` matches the job's resolved backend -> stamped
+  `pi-version` matches the job image's label ->
   `resume-chain` below `PI_SESSION_MAX_RESUME_CHAIN` -> stored `context` occupancy below
   `PI_SESSION_MAX_CONTEXT_PCT` -> first parsed line is a `{"type":"session"}` header
   -> that header's `timestamp` is within `PI_SESSION_MAX_AGE_DAYS` -> copy into the per-job dir. A cold start stages a **0-byte file** rather
@@ -2989,7 +2991,36 @@ validator rather than a second copy of it.
   about the lineage rather than the file, so refusing on it need not pull a transcript that may be
   megabytes. What that costs is stated rather than left to be found: a transcript both chain-exhausted and
   corrupt reports the chain, and the corruption is deferred by exactly one run, since that cold start's own
-  promotion resets the counter.
+  promotion resets the counter. The venue arm (#277) sits BEHIND every arm a venue move cannot cause (a file
+  that is absent, not a regular file, too large or past its TTL is all of those on every venue) and AHEAD of
+  both `pi-version` arms, which a venue move CAN cause, since image preflight is dispatched per venue and
+  another venue may report another pi or none. Before it existed a venue move named itself as a version
+  change.
+- **The venue stamp** (issue #277): one backend name beside the transcript, naming the venue whose container
+  wrote it. **A sidecar, NOT key material**: `DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` keeps the key a function
+  of `(kind, repo, ref)`, and a venue in the key would fork a trigger moved between venues into a second
+  lineage nothing ever sweeps; as a sidecar it gates the one lineage, and a move costs one cold start. The
+  job's venue is resolved exactly as the registry dispatches it (`resolveBackendName`: `run.backend`, else
+  `PI_BACKENDS[0]`) and compared by exact string. **An ABSENT stamp is the literal `local`, never the
+  deployment default**: every transcript written before the stamp ran on `local`, and the default is a
+  setting that can move under it. Absence is decided by `lstat` and ENOENT alone, so a dangling symlink at
+  the name is not absence. **A stamp that exists but cannot be read** (not a regular file, empty, oversized,
+  unreadable) matches no venue, and a job whose venue cannot be resolved never resumes. **The write order
+  is the contract**: removing a stamp does not invalidate it, since absence reads as `local`, so every
+  promotion first writes `(pending)` -- parentheses are outside the backend-name charset -- through the
+  link-safe temp-and-rename, FATALLY and BEFORE the transcript swap, then writes the real stamp immediately
+  after the swap and before `pi-version`. A failed sentinel write swaps nothing and reports `promote-failed`;
+  a failed post-swap stamp leaves the sentinel, which cold-starts everywhere rather than attributing a
+  transcript to the wrong venue. **The resolve path re-checks the stamp after its copy**, because the read
+  and the copy are not under the promotion lock: a stamp that no longer names the job's venue empties the
+  staged copy and cold-starts. What `venue-changed` does not distinguish is stated rather than hidden: it
+  also names a leftover sentinel from an interrupted promotion, an unreadable stamp, and a SAME-venue
+  promotion that lands between another job's read and its copy (that job cold-starts once), exactly as
+  `pi-version-changed` already covers an unreadable version stamp. Two residuals: two complete promotions
+  from different venues inside one copy window (A, B, A) leave the stamp matching again and the re-check
+  cannot see the round trip, the same unguarded race `pi-version` has always had; and a worker older than
+  #277 sharing a `PI_SESSIONS_DIR` neither reads nor writes the stamp, so every worker on a shared store
+  must run a release carrying it before a second venue is blessed.
 - **The chain counter**: an integer file beside the transcript, written immediately after the swap and
   under the same promotion lock, so it can never describe a transcript older than the one now in place.
   **It counts the HOST'S DELIVERIES**, incremented whenever the host handed this key's transcript to a
@@ -3027,10 +3058,12 @@ validator rather than a second copy of it.
   branch INCLUDING what compaction folded away, so it over-reads exactly past the threshold the bound
   exists for -- it would fire hardest on the sessions that had just become safe. **The number is
   container-reported**, at the same trust level as `turns` and `tokens`; the residual is `OQ-003`.
-- **Every read in a key directory is an `lstat` first, regular files only, and every write goes through a
-  rename.** The transcript has been guarded this way since the feature shipped and the sidecars are held to
-  it rather than being the exception, including `pi-version`, which predates them and was the one unguarded
-  read left. The store is host-only and never mounted, so this is not a container reaching in; what makes
+- **Every read in a key directory is an `lstat` first, regular files only, and every sidecar write but one
+  goes through a rename.** The transcript has been guarded this way since the feature shipped and the
+  sidecars are held to it rather than being the exception, including `pi-version`, which predates them and
+  was the one unguarded read left. The exception is stated rather than hidden: the `pi-version` WRITE is
+  still a plain write, so it follows a link planted at that name, and a failure there after the swap
+  reports `promote-failed` for a promotion that landed. The store is host-only and never mounted, so this is not a container reaching in; what makes
   it worth the lines is that the directory NAME is derived rather than random, so anyone who knows the
   repository and the branch can compute the path and pre-create it. `readFileSync` follows a link, which
   would decide a gate on some other file's contents; `writeFileSync` and `copyFileSync` follow one at the
@@ -3039,11 +3072,14 @@ validator rather than a second copy of it.
   reads are **size-bounded** for the same reason the transcript is: `PI_SESSION_MAX_BYTES` does not cover
   them, and reading a huge one costs wall clock on the job's own path before any container starts.
 - **Write path**, after a `completed` exit **only**: the same `lstat` and size checks on the container's
-  output, then an atomic rename under the per-key lock. The two sidecars are written under that lock
-  immediately AFTER that rename, and are deliberately not described as part of it: the swap is one rename
-  and cannot be widened. **A sidecar write that fails is logged, never fatal**, because it runs after the
-  transcript is already promoted and throwing would report `promote-failed` for a promotion that
-  demonstrably happened, telling an operator the next run will cold start when it will in fact resume.
+  output, then an atomic rename under the per-key lock. The venue sentinel is written under that lock
+  immediately BEFORE the rename and is the one sidecar write that is fatal (above). The venue stamp,
+  `pi-version`, the chain counter and the context reading are written under that lock immediately AFTER
+  it, in that order, and are deliberately not described as part of it: the swap is one rename and cannot be
+  widened. **A post-swap sidecar write that fails is logged, never fatal** (the `pi-version` write excepted,
+  above), because it runs after the transcript is already promoted and throwing would report
+  `promote-failed` for a promotion that demonstrably happened, telling an operator the next run will cold
+  start when it will in fact resume.
   **`locked` means EEXIST and nothing else**: a read-only directory or a full disk also fails to create the
   lock, and reporting those as `locked` sends an operator looking for a stuck lock file that does not
   exist, so they fall through to `promote-failed`. A job that cannot take the lock discards rather
@@ -3083,7 +3119,13 @@ validator rather than a second copy of it.
   Given a symlink at either edge, it is refused and its target is never read. Given a non-completed exit,
   the canonical file is byte-identical to before the run. Given a second writer holding the lock, the
   loser leaves the canonical transcript untouched. Given an image whose pi version differs from the
-  stamped one, the job cold-starts.
+  stamped one, the job cold-starts. Given a transcript stamped with a venue other than the job's resolved
+  backend, the job cold-starts with `venue-changed`, ahead of any pi-version verdict; given a key with no
+  stamp, it resumes for a job resolving to `local` and cold-starts for any other venue, whatever the
+  deployment default is; given a stamp that exists but is not a readable regular file, including a dangling
+  symlink, the job cold-starts; given a promotion whose transcript rename fails, the stamp reads
+  `(pending)` and both venues cold-start; given a completed promotion, the stamp names the venue of the
+  session that promoted.
 
 ## INT-CONFIG-OVERLAY-CONTRACT
 
@@ -3882,3 +3924,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-09 | Issue #288, the paid failures announce themselves. **NEW `INT-ON-FAILURE-HOOK-CONTRACT`** (id-only argv with the shape-guarded reason, all-stdio-ignored, the paid-terminals trigger set read off BullMQ's own `finishedOn` and the completed event's policy reasons, at-most-once best-effort, exit codes unread, unset-is-absence with its falsification test). **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no outcome, no reason token and no field moves -- the comments and the hook observe the record's existing vocabulary. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: no exit code is reinterpreted, and the runner's exit-line reason vocabulary stays deliberately unread (the DES entry's Rejected list records why). **`INT-WAIT-PROFILES-CONTRACT` UNCHANGED, checked**: the hook mirrors its Invocation model (same blast radius, bounded the same way) without touching it; the one behavioural intersection -- an aborted wait check counts no fault -- is untouched. **Comment surface widened, not reshaped**: worker-abort, operator-cancel and runner-policy now post fixed sentences through the existing adapter, and the FINAL infra failure posts once from the failed listener; a retried attempt still posts nothing. **Code evidence**: worker/src/on-failure.mjs; worker/src/start.mjs -> the listener bodies; worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/config.mjs; worker/test/on-failure.test.mjs; worker/test/start-wiring.test.mjs; worker/test/processor.test.mjs. |
 | 2026-09-09 | Issue #289. **`INT-WAIT-PROFILES-CONTRACT` AMENDED**, the operator-surface bullet: the per-job-classifier refusal is qualified as exactly that (per-job) and kept, while the status area now names the two parts countable from their OWN sources (scheduler list, `wait:held` index) with the remainder stated undifferentiated -- still never enumerating or hydrating a delayed job, which is the PII wall the bullet exists for. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no field and no token moves; the FAILED section reads the QUEUE's own failedReason, which is not the record's surface, and `buildRecord` still never carries a message. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: no exit code is touched; the de-payloaded branch.mjs/prepare-local messages change what a throw SAYS, not how it classifies. **The receiver's wire contract**: `202 {status:"deduplicated"}` joins `202 {status:"queued"}` as the answer for a delivery the semantic window swallowed whole; forges act on the status code, and the code stays 2xx precisely so a handled delivery is never redelivered into a storm (the body is honest, the code is safe -- `REQ-DEDUP-BY-DELIVERY-GUID` carries the full argument). **Code evidence**: worker/src/queue.mjs -> enqueueForgeJob's return comparison; receiver/src/receiver.mjs -> fanout, respondEnqueueOutcome; receiver/src/poller.mjs; admin/src/dashboard.ts -> delayedBreakdownLine, failedSection, scrubReason; admin/src/read-model.mjs -> readQueueState.cronNext; admin/src/render.mjs -> renderStatus; worker/src/branch.mjs; worker/src/prepare-local.mjs. |
 | 2026-09-14 | Issue #277, part 1: the record names its venue. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the twenty-sixth tail field `backend`, the RESOLVED venue (`run.backend`, else `PI_BACKENDS[0]`) through `resolveBackendName`, the one derivation the registry dispatches on; no producer writes a null, and an explicit null in job data is recorded as one (absent means the key is absent, matching the blessed gate); on a pre-container refusal it is the venue the job resolved to (a `backend-unblessed` refusal records the unblessed name, including a venue this worker never built, whose registry refusal the processor now catches by code at pickup instead of letting it skip the record); admissible as operator-authored config; stamped by `recordRun` from `config.defaultBackend`; an audit, not a guard. Acceptance gains the matching clause. The record's `reason` enum listing gains `backend-unblessed`, which #227 made a record reason without adding it there. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the near-miss entry: "byte-identical in the record, the panel and the log" is no longer true of the record and the panel, which now confirm the fallen-back venue after the spend, so the sweep's justification is restated as the preventing half. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: dispatch itself does not move, only what is written down about it. |
+| 2026-09-14 | Issue #277, part 2: the session store gates resume on venue. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `venue` sidecar (not key material; absent reads as the literal `local`, never the default; `lstat`/ENOENT alone decides absence; an unreadable stamp fails closed), its ladder position (behind every arm a venue move cannot cause, ahead of both `pi-version` arms it can), the always-sentinel write order (fatal `(pending)` before the swap, the real stamp after it and before `pi-version`), the resolve-side re-check after the copy, what `venue-changed` does not distinguish, and the ABA and mixed-version residuals; acceptance gains the venue cases. Two corrections in the same entry: the write path said "the two sidecars" while three were written after the swap, and the lstat bullet said every write goes through a rename while the `pi-version` write is plain -- both now state what the code does. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `venue-changed` joins the `session.reason` enum and the resolve path's producer row. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: the container still sees only `/session/current.jsonl`, and nothing venue-derived crosses the boundary. |

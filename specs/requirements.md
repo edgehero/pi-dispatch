@@ -1539,7 +1539,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the design had to serve. What makes it affordable is that the join already exists: an issue-triggered
   job is told to push to `pi/issue-<n>`, so the pull request's head ref IS the issue's branch, and the
   host can compute both without recording anything.
-- **Fail OPEN, and say so.** A missing, expired, oversized, unparseable, locked or foreign transcript, a
+- **Fail OPEN, and say so.** A missing, expired, oversized, unparseable, locked or foreign transcript, one
+  written in another venue, a
   conversation past its age bound, an unresolvable head ref, or a fork — every one degrades to a cold
   start and **never fails the job**. Each is a NAMED reason in the run record
   (`INT-RUN-HISTORY-FILE-CONTRACT`), because a feature that fails open is otherwise indistinguishable from
@@ -1592,8 +1593,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   lets the lineage start again. Given every bound unset, the read path stages the same file and the
   container is handed the same mount set as a pre-bounds run. Two things are deliberately NOT identical: a
   completed promotion also writes the chain counter, so that setting a bound later is honest immediately
-  rather than N runs later; and a run whose host gate refused records the gate's own token where it used to
-  record the container's `absent`.
+  rather than N runs later; a run whose host gate refused records the gate's own token where it used to
+  record the container's `absent`; and a completed promotion also stamps the venue beside the transcript.
+  Given a trigger moved from one venue to another, its next job cold-starts with `venue-changed` and never
+  stages the transcript the other venue wrote; given a key promoted before venues were recorded, it resumes
+  for a job resolving to `local` and for no other venue.
 
 ## REQ-RESURRECTABLE-SANDBOX
 
@@ -1983,6 +1987,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-14 | Issue #277, part 2: resume is gated on venue. **`REQ-RESUMABLE-SESSION` AMENDED**: a transcript written in another venue joins the fail-open list as a named cold start (`venue-changed`), and the acceptance gains the moved-trigger and pre-venue-key cases plus the venue stamp among the writes a completed promotion makes. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: `venue-changed` is a fixed token like its siblings. **Code evidence**: worker/src/session-store.mjs -> makeSessionStore (resolveSession, promoteSession, readCanonical, readVenue, replaceSidecar); worker/src/run-history.mjs -> SESSION_REASONS; worker/src/start.mjs -> startWorker (the store's defaultBackend). |
 | 2026-09-14 | Issue #277, part 1: the record names its venue. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**, and the check is the substantive one it was for `host`: its acceptance says a record carries no issue or comment body, title or username, and the new `backend` field satisfies it -- a backend name is operator-authored configuration validated against a charset at load, and no path from any payload reaches it. **Code evidence**: worker/src/backend-registry.mjs -> resolveBackendName; worker/src/run-history.mjs -> buildRecord; worker/src/start.mjs -> startWorker (recordRun); worker/src/index.mjs -> makeProcessor (the container-name refusal caught at pickup); admin/src/dashboard.ts -> renderRunDetail. |
 | 2026-09-09 | Issue #289, the queue stops rounding distinctions it can make. **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: the semantic-window swallow becomes VISIBLE -- `enqueueForgeJob` compares `queue.add`'s returned id against the computed one (the window returns the survivor's DIFFERENT id at the pin's own Lua; a GUID replay returns the SAME id and stays silent by design, its true answer being "queued"), the receiver logs one `deduplicated` line per swallow with the surviving id, logs `enqueued` only for jobs actually created, and answers `202 {status:"deduplicated"}` when a delivery created nothing. Before this, re-labelling inside the window did nothing with no feedback anywhere. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the FAILED section and `f` view add NO tool and NO subcommand, so the enumeration and its pin stand untouched (the DES entry records both as Rejected). **`REQ-WAIT-FOR` UNCHANGED, checked**: hold semantics untouched; the status area's breakdown counts holds from the wait index without touching it. **`REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked**: no comment surface moves. **Code evidence**: worker/src/queue.mjs; receiver/src/receiver.mjs; receiver/src/poller.mjs; admin/src/dashboard.ts; admin/src/render.mjs; admin/src/read-model.mjs; worker/src/branch.mjs; worker/src/prepare-local.mjs; worker/src/service.mjs. |
 | 2026-09-09 | Issue #288, telling someone when a paid job dies. **NEW `REQ-OPERATOR-FAILURE-NOTIFICATION`**: one operator command, id-only argv, fired on the paid terminals only (final infra failure, worker abort, in-container policy stop), at most once per job, fault-isolated, byte-identical when unset, and the project ships no transport ever. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the acceptance's paid half is now discharged -- a who-authors-which clause records that the agent owns the exit-0 status comment (the prompt contract) and the worker owns every other terminal comment, with once-ness for the infra class read off BullMQ's own `finishedOn` rather than re-derived attempts math, which also covers the stall-killed job the processor never ran on. The prepare-stage silence (`sha-gone`, the `.pi/` caps) stays OUTSIDE: that is `OQ-023`'s ratified accepted risk, boundary restated there, not here. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: the stdout line stays the local terminal signal; the new fixed sentences ride the same adapter fallthrough, which is why they are path-free. **Code evidence**: worker/src/processor.mjs -> TERMINAL_COMMENTS; worker/src/start.mjs -> the hoisted comment adapter, the two listener bodies, makeOnFailure wiring; worker/src/on-failure.mjs; worker/src/config.mjs -> parseOnFailure. |

@@ -37,6 +37,16 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
 }
 
 /**
+ * The `code` on the error the registry throws for a venue it does not hold, and ONLY that error.
+ *
+ * A CODE, not a message match: the processor catches this one refusal at pickup (a venue this worker never
+ * built is refused and recorded rather than retried) and must let every OTHER throw through -- a registered
+ * venue's own `containerName` failing is a broken adapter, and swallowing that would run the job under a
+ * null container name that nothing could stop by name.
+ */
+export const BACKEND_NOT_REGISTERED = "BACKEND_NOT_REGISTERED";
+
+/**
  * The NAME of the venue a job resolves to: its own `run.backend`, else the deployment default.
  *
  * ONE DERIVATION FOR DISPATCH AND FOR EVERY STORE THAT RECORDS A VENUE (issue #277). The registry dispatches
@@ -64,16 +74,6 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
  * function rather than a registry method, because a store constructed in `startWorker` before any bundle
  * exists could not reach one -- the temporal dead zone `reapAll` above already records.
  */
-/**
- * The `code` on the error the registry throws for a venue it does not hold, and ONLY that error.
- *
- * A CODE, not a message match: the processor catches this one refusal at pickup (a venue this worker never
- * built is refused and recorded rather than retried) and must let every OTHER throw through -- a registered
- * venue's own `containerName` failing is a broken adapter, and swallowing that would run the job under a
- * null container name that nothing could stop by name.
- */
-export const BACKEND_NOT_REGISTERED = "BACKEND_NOT_REGISTERED";
-
 export function resolveBackendName(data, defaultName) {
 	const named = data?.backend;
 	return named !== undefined ? named : (defaultName ?? null);

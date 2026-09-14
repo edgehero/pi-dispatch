@@ -370,10 +370,10 @@ export const BACKEND_NAMES = Object.freeze(Object.keys(BACKENDS));
 export const DEFAULT_BACKEND = "local";
 
 /**
- * The venue an artifact that NAMES NO VENUE was produced in: a session transcript with no stamp beside it,
- * a sandbox manifest with no `backend` key (issue #277). Every such artifact was written before venues were
- * recorded, when `local` was the only entry this table had, so this is a fact about the past rather than a
- * setting.
+ * The venue an artifact that NAMES NO VENUE was produced in (issue #277): today, a session transcript with no
+ * stamp beside it. The store stamps every transcript it promotes from #277 on, so an unstamped one was
+ * written before venues were recorded, when `local` was the only entry this table had -- a fact about the
+ * past rather than a setting.
  *
  * DELIBERATELY NOT THE DEPLOYMENT DEFAULT, though today the two spell the same word. The default is
  * `PI_BACKENDS[0]`, which a deployment can change; reading an unstamped transcript as "whatever the default

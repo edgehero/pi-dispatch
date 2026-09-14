@@ -143,6 +143,7 @@ be told apart.
 | `too-large` | over `PI_SESSION_MAX_BYTES` |
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
 | `not-a-regular-file` | ignored, not refused: the check is an `lstat`, so a symlink planted in `/session` is never followed, and the job runs cold |
+| `venue-changed` | the job runs in a different backend than wrote the transcript (see [`backends.md`](backends.md)). A transcript from before venues were recorded counts as `local`, whatever your default is now. It also covers a stamp this store cannot read, and a promotion that was interrupted, or was still landing from another job on the same key, when this job read it: all three cold-start rather than risk handing one venue's conversation to another |
 | `pi-version-changed` | the job image ships a different pi than wrote the transcript |
 | `context-too-full` | the saved session's context was already at or above `PI_SESSION_MAX_CONTEXT_PCT` of its model's window when it was last written. The measurement comes from the job image's runner, so on an image that does not report one this bound does nothing at all; where there is no measurement the gate passes rather than guessing, and it never estimates one from the transcript's size. The reading is stamped with the model that produced it and ignored by a job running a different one, since the same token count is most of a small window and almost none of a large one. A cold start clears it, so a key cannot be refused forever on a number describing a conversation it no longer holds |
 | `resume-chain-too-long` | the host has already handed this key's transcript to a container `PI_SESSION_MAX_RESUME_CHAIN` times in a row. It counts deliveries rather than what pi made of them, so an agent cannot reset it by arranging for pi to find nothing usable in a file it still receives. The count is kept for every key whether or not the bound is set, so setting it takes effect on the next job rather than that many jobs later, and the cold start it causes resets the count **once that run completes**: a lineage whose runs keep failing keeps cold-starting, which is the safe direction |
@@ -152,6 +153,10 @@ an older session's stored tool-call arguments may not match a newer pi's tool sc
 mid-run, the resume is refused. **Upgrading the job image costs every key one cold start**, by design:
 nothing is deleted, each key simply cold-starts the first time its stamped version fails to match, and its
 next completed run rewrites both the transcript and the stamp.
+
+**Moving a trigger to another backend costs each of its keys one cold start** in the same way, and for a
+sharper reason: a transcript written in one venue is never staged into another venue's container, so the
+next job there starts fresh and its first completed run stamps the new venue. Moving back costs one more.
 
 Two further reasons reach `session.reason` without being read-path outcomes at all. Both come from
 `promoteSession`, so both appear only on a **completed** run, and both describe the *write* back to the
@@ -191,6 +196,7 @@ that bounds how long a conversation accumulates.
 ```
 <PI_SESSIONS_DIR>/<hash>/current.jsonl   the transcript
 <PI_SESSIONS_DIR>/<hash>/pi-version      which pi wrote it
+<PI_SESSIONS_DIR>/<hash>/venue           which backend wrote it; absent on keys from before venues were recorded
 <PI_SESSIONS_DIR>/<hash>/resume-chain    how many times in a row it has been resumed
 <PI_SESSIONS_DIR>/<hash>/context         how full the context was when it was last written
 <PI_SESSIONS_DIR>/<hash>/lock            the one-writer promotion lock; absent when free

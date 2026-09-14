@@ -16,24 +16,28 @@ const headerAt = (ms) => `${JSON.stringify({ type: "session", version: 3, id: "s
 const daysAgo = (n) => NOW - n * 86400000;
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
-function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, maxContextPct = null, now = () => NOW, fs } = {}) {
+function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, maxContextPct = null, defaultBackend = "local", now = () => NOW, fs } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];
 	// `fs` omitted = the store's own real-fs default. Passing one is how a disk fault is injected on a
 	// specific call without a chmod, which root ignores and Windows spells differently.
-	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, maxResumeChain, maxContextPct, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
+	// `defaultBackend` is the wired worker's `config.defaultBackend`. Every pre-#277 test here is a job that names
+	// no venue on a deployment whose default is `local`, which is what a wired worker always passes today.
+	const store = makeSessionStore({ sessionsDir, ttlDays, maxBytes, maxAgeDays, maxResumeChain, maxContextPct, defaultBackend, now, log: (e, f) => logs.push([e, f]), ...(fs ? { fs } : {}) });
 	const jobDir = mkdtempSync(join(root, "job-"));
 	return { root, sessionsDir, store, jobDir, logs };
 }
 
 /** Seed the canonical store for a key, the way a promotion would have. */
-function seed(sessionsDir, key, { body = HEADER, piVersion = PI } = {}) {
+function seed(sessionsDir, key, { body = HEADER, piVersion = PI, venue } = {}) {
 	const dir = join(sessionsDir, key);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, SESSION_FILE_NAME), body);
 	writeFileSync(join(dir, "pi-version"), piVersion);
+	// Omitted = no stamp at all, which is every transcript promoted before #277.
+	if (venue !== undefined) writeFileSync(join(dir, "venue"), venue);
 	return join(dir, SESSION_FILE_NAME);
 }
 
@@ -618,4 +622,209 @@ test("promotion stores the container's context reading, and never erases one it 
 	writeFileSync(join(second.hostDir, SESSION_FILE_NAME), HEADER);
 	store.promoteSession(second, { piVersion: PI });
 	assert.equal(readFileSync(sidecar, "utf8"), "12345 200000");
+});
+
+// --- the venue stamp (issue #277) ----------------------------------------------------------------------------
+
+const farIssue = { ...ghIssue, backend: "far" };
+const venueFile = (sessionsDir) => join(sessionsDir, sessionKeyFor(ghIssue), "venue");
+
+test("a transcript stamped with another venue cold-starts as venue-changed, and its own venue resumes it", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	seed(sessionsDir, sessionKeyFor(ghIssue), { venue: "far" });
+	const local = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(local.reason, "venue-changed", "a trigger moved off `far` must not stage far's transcript into a local container");
+	assert.equal(local.resume, false);
+	assert.equal(readFileSync(join(local.hostDir, SESSION_FILE_NAME), "utf8"), "", "and nothing of it is staged");
+	const far = store.resolveSession(farIssue, { jobDir, piVersion: PI });
+	assert.equal(far.reason, "resumed");
+	assert.equal(far.venue, "far", "the session carries the venue it resolved, for the promotion to stamp");
+});
+
+test("an UNSTAMPED transcript was written on local, never on whatever the default is now", () => {
+	const a = fixture();
+	seed(a.sessionsDir, sessionKeyFor(ghIssue));
+	assert.equal(a.store.resolveSession(ghIssue, { jobDir: a.jobDir, piVersion: PI }).reason, "resumed", "every pre-#277 key keeps resuming on local");
+	assert.equal(a.store.resolveSession(farIssue, { jobDir: a.jobDir, piVersion: PI }).reason, "venue-changed");
+	// A deployment whose default venue is not `local`: an unflagged job resolves to `far`, and an unstamped
+	// transcript is still a LOCAL one. Reading absence as the default would resume it there.
+	const b = fixture({ defaultBackend: "far" });
+	seed(b.sessionsDir, sessionKeyFor(ghIssue));
+	assert.equal(b.store.resolveSession(ghIssue, { jobDir: b.jobDir, piVersion: PI }).reason, "venue-changed");
+});
+
+test("venue-changed names itself ahead of both pi-version arms, and expired still names itself first", () => {
+	const v = fixture();
+	seed(v.sessionsDir, sessionKeyFor(ghIssue), { venue: "far", piVersion: "0.79.0" });
+	assert.equal(v.store.resolveSession(ghIssue, { jobDir: v.jobDir, piVersion: PI }).reason, "venue-changed", "a move between venues is not a version change");
+	assert.equal(v.store.resolveSession(ghIssue, { jobDir: v.jobDir, piVersion: null }).reason, "venue-changed", "nor is a venue whose image declares no version");
+
+	const e = fixture({ ttlDays: 1, now: () => Date.now() });
+	const file = seed(e.sessionsDir, sessionKeyFor(ghIssue), { venue: "far" });
+	const old = (Date.now() - 3 * 86400000) / 1000;
+	utimesSync(file, old, old);
+	assert.equal(e.store.resolveSession(ghIssue, { jobDir: e.jobDir, piVersion: PI }).reason, "expired", "a transcript past its TTL is expired on every venue");
+});
+
+test("the venue arm refuses before the transcript body is read", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	seed(sessionsDir, sessionKeyFor(ghIssue), { body: "not a session\n", venue: "far" });
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "venue-changed");
+});
+
+test("a stamp that exists but cannot be read fails CLOSED, and only a missing one reads as local", () => {
+	const key = sessionKeyFor(ghIssue);
+	const cases = {
+		// A link that points nowhere. `stat`/`existsSync` would call this absent, read it as `local`, and resume.
+		dangling: (dir, root) => symlinkSync(join(root, "no-such-file"), join(dir, "venue")),
+		// A link to a file that says `local`: the value must never be read through a link.
+		planted: (dir, root) => (writeFileSync(join(root, "says-local"), "local"), symlinkSync(join(root, "says-local"), join(dir, "venue"))),
+		empty: (dir) => writeFileSync(join(dir, "venue"), ""),
+		oversized: (dir) => writeFileSync(join(dir, "venue"), "local".padEnd(5000, " ")),
+		directory: (dir) => mkdirSync(join(dir, "venue")),
+	};
+	for (const [name, plant] of Object.entries(cases)) {
+		const { store, jobDir, sessionsDir, root } = fixture();
+		seed(sessionsDir, key);
+		plant(join(sessionsDir, key), root);
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		assert.equal(s.reason, "venue-changed", `${name}: an unusable stamp matches no venue`);
+		assert.equal(s.resume, false, name);
+	}
+	// A trailing newline is formatting, not a different venue.
+	const t = fixture();
+	seed(t.sessionsDir, key, { venue: "local\n" });
+	assert.equal(t.store.resolveSession(ghIssue, { jobDir: t.jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("a job whose venue cannot be resolved never resumes", () => {
+	const { store, jobDir, sessionsDir } = fixture({ defaultBackend: null });
+	seed(sessionsDir, sessionKeyFor(ghIssue));
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed", "the DI seam with no default fails closed, the pi-version gate's polarity");
+	assert.equal(s.venue, null);
+});
+
+test("a promotion stamps the venue that produced the transcript, and the next job is gated on it", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const s = store.resolveSession(farIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+	assert.equal(readFileSync(venueFile(sessionsDir), "utf8"), "far");
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "venue-changed");
+	assert.equal(store.resolveSession(farIssue, { jobDir, piVersion: PI }).reason, "resumed");
+});
+
+test("a promotion invalidates the stamp BEFORE the swap, so a failed swap can never leave a transcript misattributed", () => {
+	// Faulted at the CANONICAL rename only: the sentinel's own rename succeeds, the transcript's does not.
+	const key = sessionKeyFor(ghIssue);
+	const renameFaulted = fixture({
+		fs: {
+			...realFs,
+			renameSync: (from, to) => {
+				if (String(to).endsWith(SESSION_FILE_NAME)) throw new Error("ENOSPC: no space left on device");
+				return realFs.renameSync(from, to);
+			},
+		},
+	});
+	const canonical = seed(renameFaulted.sessionsDir, key);
+	const s = renameFaulted.store.resolveSession(farIssue, { jobDir: renameFaulted.jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed");
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message","from":"far"}\n`);
+	assert.equal(renameFaulted.store.promoteSession(s, { piVersion: PI }).reason, "promote-failed");
+	assert.equal(readFileSync(canonical, "utf8"), HEADER, "the local transcript is still in place");
+	assert.equal(readFileSync(join(renameFaulted.sessionsDir, key, "venue"), "utf8"), "(pending)", "and no longer claims any venue");
+	assert.equal(renameFaulted.store.resolveSession(ghIssue, { jobDir: renameFaulted.jobDir, piVersion: PI }).reason, "venue-changed");
+	assert.equal(renameFaulted.store.resolveSession(farIssue, { jobDir: renameFaulted.jobDir, piVersion: PI }).reason, "venue-changed");
+
+	// Faulted at the sentinel write itself: fatal, and nothing is touched.
+	const sentinelFaulted = fixture({
+		fs: {
+			...realFs,
+			writeFileSync: (p, ...rest) => {
+				if (String(p).endsWith("venue.incoming")) throw new Error("EACCES: permission denied");
+				return realFs.writeFileSync(p, ...rest);
+			},
+		},
+	});
+	const canonical2 = seed(sentinelFaulted.sessionsDir, key, { venue: "local" });
+	const s2 = sentinelFaulted.store.resolveSession(farIssue, { jobDir: sentinelFaulted.jobDir, piVersion: PI });
+	writeFileSync(join(s2.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message","from":"far"}\n`);
+	assert.equal(sentinelFaulted.store.promoteSession(s2, { piVersion: PI }).reason, "promote-failed");
+	assert.equal(readFileSync(canonical2, "utf8"), HEADER, "no swap happened");
+	assert.equal(readFileSync(join(sentinelFaulted.sessionsDir, key, "venue"), "utf8"), "local", "and the stamp that described it still does");
+	assert.equal(existsSync(join(sentinelFaulted.sessionsDir, key, "lock")), false, "and the lock is released");
+});
+
+test("a promotion whose real stamp cannot be written landed, and leaves the key cold rather than misattributed", () => {
+	// The sentinel write succeeds; the SECOND write of the stamp (the real venue) fails.
+	let venueWrites = 0;
+	const { store, jobDir, sessionsDir, logs } = fixture({
+		fs: {
+			...realFs,
+			writeFileSync: (p, ...rest) => {
+				if (String(p).endsWith("venue.incoming") && ++venueWrites === 2) throw new Error("ENOSPC: no space left on device");
+				return realFs.writeFileSync(p, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const s = store.resolveSession(farIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}far-turns\n`);
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.promoted, true, "the transcript really was promoted");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("far-turns"), true);
+	assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "(pending)");
+	assert.ok(logs.some(([event, fields]) => event === "session_sidecar_failed" && fields.file === "venue"));
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "venue-changed", "a local job never resumes far's transcript under a stamp that was never written");
+});
+
+test("the stamp follows the transcript that last landed, whichever venue promoted in between", () => {
+	const { store, sessionsDir, root } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	const jobA = mkdtempSync(join(root, "job-a-"));
+	const jobB = mkdtempSync(join(root, "job-b-"));
+	const a = store.resolveSession(ghIssue, { jobDir: jobA, piVersion: PI });
+	assert.equal(a.reason, "resumed");
+	const b = store.resolveSession(farIssue, { jobDir: jobB, piVersion: PI });
+	writeFileSync(join(b.hostDir, SESSION_FILE_NAME), `${HEADER}from-far\n`);
+	assert.equal(store.promoteSession(b, { piVersion: PI }).promoted, true);
+	assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "far");
+	// A, still holding its resolve-time verdict, promotes last.
+	writeFileSync(join(a.hostDir, SESSION_FILE_NAME), `${HEADER}from-local\n`);
+	assert.equal(store.promoteSession(a, { piVersion: PI }).promoted, true);
+	assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "local", "the stamp names the venue of the transcript now in place");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("from-local"), true);
+});
+
+test("a promotion from another venue that lands between the gate and the copy is caught, and nothing of it is staged", () => {
+	const key = sessionKeyFor(ghIssue);
+	let sessionsDirRef;
+	const { store, jobDir, sessionsDir } = fixture({
+		maxResumeChain: 5,
+		fs: {
+			...realFs,
+			// The copy INTO the job dir is where the race lands: a concurrent far promotion writes its sentinel and
+			// swaps its transcript in, and this copy reads the new file.
+			copyFileSync: (from, to) => {
+				if (String(from).startsWith(sessionsDirRef) && String(to).includes(`${join("session", SESSION_FILE_NAME)}`)) {
+					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "(pending)");
+					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+				}
+				return realFs.copyFileSync(from, to);
+			},
+		},
+	});
+	sessionsDirRef = sessionsDir;
+	seed(sessionsDir, key, { venue: "local" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "venue-changed");
+	assert.equal(s.resume, false, "resume is false, so the chain counter and the context reading reset like any cold start");
+	assert.equal(s.bytes, null);
+	assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, "the copied far transcript is emptied, never handed to the container");
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+	assert.equal(readFileSync(join(sessionsDir, key, "resume-chain"), "utf8"), "0", "a cold start resets the chain");
 });
