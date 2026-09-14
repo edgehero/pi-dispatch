@@ -26,6 +26,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		// The docker spawn used for this session's egress network, seamed like `launch` so the tests never
 		// touch a daemon. Not used when PI_EGRESS=0.
 		spawnNetwork = spawn,
+		// Issue #341: which uid the shell runs as. Seamed so the tests never ask a daemon.
+		resolveJobUser,
 		now = () => Date.now(),
 	} = deps;
 
@@ -89,6 +91,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		running,
 		launch,
 		spawnNetwork,
+		...(resolveJobUser ? { resolveJobUser } : {}),
 		beforeLaunch: ({ resolved }) => {
 			// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a
 			// crashed terminal or a closed laptop lid must not be the reason the pin never landed.

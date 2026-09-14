@@ -38,4 +38,7 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",
 	"PLAYWRIGHT_MCP_SANDBOX",
+	// Issue #341: set beside `--user` so a uid with no passwd entry has a writable home. A new reservation, so a
+	// triggers file binding a secret named HOME is now refused at parse (worker, receiver and admin alike).
+	"HOME",
 ]);

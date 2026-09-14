@@ -273,7 +273,7 @@ function resolveEnvName(provider) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, readFile = readFileSync }) {
+export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -400,6 +400,13 @@ export function buildContainerEnv({ provider, model, maxTurns, maxTokens, jobId,
 	// flag. Behind an internal network that is not a leak, it is an outage: every job dies at its first
 	// turn. It rides the closed map, never PI_FORWARD_ENV, so arming the policy cannot half-work.
 	Object.assign(env, egressEnv({ proxy: egressProxy, armed: egress }));
+
+	// Issue #341: the job's HOME, only when the worker runs it under `--user` (`home` is passed then and only then).
+	// AFTER the PI_FORWARD_ENV and secrets loops, for the egress variables' reason: a forwarded or secret HOME must
+	// not win, because a uid with no passwd entry in the image would otherwise get `HOME=/` (Docker) or
+	// `HOME=/workspace` (Podman, measured), and pi's auth.json lands nowhere or in the operator's repository.
+	// env-internal HOME: written into the job's closed env map here, never read from the worker's environment.
+	if (typeof home === "string" && home !== "") env.HOME = home;
 
 	// Forge-backed jobs, and local cron jobs that opted in via run.github. Other local-folder jobs have
 	// no token (CONST-TOKEN-SCOPED-PER-JOB). The mint goes into BOTH of its forge's variables because

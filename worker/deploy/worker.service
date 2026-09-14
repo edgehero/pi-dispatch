@@ -41,6 +41,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# On native Linux a job container runs as this account's uid (issue #341), so a local-folder trigger's folder
+# must be writable by it, and the account must not be root.
 User=pi
 WorkingDirectory=/opt/pi-dispatch
 EnvironmentFile=/opt/pi-dispatch/.env

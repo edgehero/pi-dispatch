@@ -38,7 +38,7 @@ test("resolveJobImage prefers the job's own image and falls back to the deployme
 test("an image that inspects clean is ok, and costs exactly ONE spawn", async () => {
 	const calls = [];
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn(calls, { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7\n`) });
-	assert.deepEqual(await preflight({}), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({}), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: [] });
 	// The `docker info` disambiguation runs ONLY on the failure path. Every job pays this check, so the
 	// happy path must not pay for the diagnosis of a case it is not in. The pi-version label rides this
 	// same inspect for the same reason -- a second spawn would have doubled what every job pays.
@@ -60,7 +60,7 @@ test("an image that declares no pi version reports null, which downstream means 
 		// The digest travels the same short-line rule as the version: a truncated pipe or an older docker
 		// yields null on EVERY field rather than a fragment of one.
 		const imageDigest = out.trim() === "" ? null : "sha256:abc";
-		assert.deepEqual(await preflight({}), { ok: true, image: "i", piVersion: null, imageDigest }, `stdout ${JSON.stringify(out)} must not become a version`);
+		assert.deepEqual(await preflight({}), { ok: true, image: "i", piVersion: null, imageDigest, capabilities: [] }, `stdout ${JSON.stringify(out)} must not become a version`);
 	}
 });
 
@@ -126,7 +126,7 @@ test("a job whose forge the image DOES declare runs, and the label rides the sam
 		spawnFn: fakeSpawn(calls, { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github,gitlab,forgejo\n`),
 	});
 	for (const kind of ["github", "gitlab", "forgejo"]) {
-		assert.deepEqual(await preflight({ kind }), { ok: true, image: "i", piVersion: "0.80.7", imageDigest: "sha256:abc" }, kind);
+		assert.deepEqual(await preflight({ kind }), { ok: true, image: "i", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: [] }, kind);
 	}
 	assert.equal(calls.length, 3, "one spawn per call, still -- the forge list is a second field, not a second probe");
 });
@@ -174,15 +174,15 @@ test("a replica job on an image that declares no capabilities is REFUSED pre-spe
 
 test("an UNFLAGGED job on that same image is ok -- the gate costs a non-replica job nothing", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}\n`) });
-	assert.deepEqual(await preflight({ kind: "github" }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "github" }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: [] });
 });
 
 test("a replica job on an image that declares `replicas` runs", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas\n`) });
-	assert.deepEqual(await preflight({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: ["replicas"] });
 	// A multi-item list parses the same way the forges list does.
 	const multi = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP} replicas , something-else \n`) });
-	assert.deepEqual(await multi({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await multi({ kind: "github", replica: 1, replicas: 2 }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: ["replicas", "something-else"] });
 });
 
 test("`<no value>`, an empty list and a SHORT line all read as no claim, and all refuse a replica job", async () => {
@@ -212,14 +212,14 @@ test("a command job on an image that does not declare `commands` is REFUSED pre-
 
 test("a command job on an image declaring `commands` runs", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas,commands\n`) });
-	assert.deepEqual(await preflight({ kind: "local", command: "wf run" }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "local", command: "wf run" }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: ["replicas", "commands"] });
 });
 
 test("an UNFLAGGED job on a wholly unlabelled image still passes -- the inclusion-list polarity costs it nothing", async () => {
 	// The branch is unreachable unless the job actually carries a command, so the pre-label fleet
 	// (OQ-012 operator-built images included) keeps running every ordinary job untouched.
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, "sha256:abc\n") });
-	assert.deepEqual(await preflight({ kind: "local" }), { ok: true, image: "pi-job:latest", piVersion: null, imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "local" }), { ok: true, image: "pi-job:latest", piVersion: null, imageDigest: "sha256:abc", capabilities: [] });
 });
 
 test("a command job on an unlabelled image refuses with declared: [] -- no claim includes nothing", async () => {
@@ -239,12 +239,12 @@ test("a job carrying exclusions on an image that does not declare `excludeTools`
 
 test("a job carrying exclusions on an image declaring `excludeTools` runs", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}github${FIELD_SEP}replicas,commands,excludeTools\n`) });
-	assert.deepEqual(await preflight({ kind: "local", excludeTools: ["bash", "edit"] }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "local", excludeTools: ["bash", "edit"] }), { ok: true, image: "pi-job:latest", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: ["replicas", "commands", "excludeTools"] });
 });
 
 test("a job WITHOUT exclusions on an unlabelled image is untouched -- the branch is unreachable for the existing fleet", async () => {
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, "sha256:abc\n") });
-	assert.deepEqual(await preflight({ kind: "local" }), { ok: true, image: "pi-job:latest", piVersion: null, imageDigest: "sha256:abc" });
+	assert.deepEqual(await preflight({ kind: "local" }), { ok: true, image: "pi-job:latest", piVersion: null, imageDigest: "sha256:abc", capabilities: [] });
 });
 
 test("the forge refusal still outranks the replica one -- a job that cannot run at all is the first thing to say", async () => {
@@ -263,10 +263,10 @@ test("the capabilities gate is FORGE-BLIND: a non-github replica is refused and 
 		const forges = "github,gitlab,forgejo,azure";
 		const bare = makeImagePreflight({ image: "pi-job:v", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}${forges}${FIELD_SEP}\n`) });
 		assert.deepEqual(await bare({ kind, replica: 2, replicas: 2 }), { replicaUnsupported: "pi-job:v", declared: [] }, `${kind} replica on an unlabelled image`);
-		assert.deepEqual(await bare({ kind }), { ok: true, image: "pi-job:v", piVersion: "0.80.7", imageDigest: "sha256:abc" }, `${kind} unflagged pays nothing`);
+		assert.deepEqual(await bare({ kind }), { ok: true, image: "pi-job:v", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: [] }, `${kind} unflagged pays nothing`);
 
 		const capable = makeImagePreflight({ image: "pi-job:v", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7${FIELD_SEP}${forges}${FIELD_SEP}replicas\n`) });
-		assert.deepEqual(await capable({ kind, replica: 1, replicas: 2 }), { ok: true, image: "pi-job:v", piVersion: "0.80.7", imageDigest: "sha256:abc" }, `${kind} replica on a capable image`);
+		assert.deepEqual(await capable({ kind, replica: 1, replicas: 2 }), { ok: true, image: "pi-job:v", piVersion: "0.80.7", imageDigest: "sha256:abc", capabilities: ["replicas"] }, `${kind} replica on a capable image`);
 	}
 });
 

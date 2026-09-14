@@ -1585,3 +1585,80 @@ test("a LOCAL scope-cap keeps the folder path out of the comment text too -- the
 	assert.ok(!comments[0].includes("/Users/"), "the host path never enters the comment text");
 	assert.ok(!JSON.stringify(logs).includes("/Users/someone"), "and never any log field");
 });
+
+// --- issue #341: the job-user gate ------------------------------------------------------------------------------
+
+test("the job-user gate sits after the image probe and before the credential gate, the mint and the reserve", async () => {
+	const order = [];
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({
+		redis,
+		observationPreflight: async () => (order.push("observation"), { ok: true, endpoint: { local: true } }),
+		imagePreflight: async () => (order.push("image"), { ok: true, image: "pi-job:x", capabilities: ["anyUid"] }),
+		jobUserPreflight: async (_job, { capabilities, observed }) => {
+			order.push("job-user");
+			assert.deepEqual(capabilities, ["anyUid"], "the gate is handed the image's capabilities");
+			assert.deepEqual(observed, { ok: true, endpoint: { local: true } }, "and the observation's answer, so one job reads the endpoint once");
+			return { refused: "job-user-unmappable", cause: "rootless" };
+		},
+		checkProviderCredential: () => (order.push("credential"), { ok: true }),
+		log: () => {},
+	});
+	const r = await runJob(ghJob, d);
+	assert.deepEqual(order, ["observation", "image", "job-user"]);
+	assert.equal(r.outcome, "policy");
+	assert.equal(r.reason, "job-user-unmappable");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0);
+	assert.ok(!calls.includes("prepare") && !calls.includes("run-container") && !calls.some((c) => c.startsWith("mint:")));
+});
+
+test("an unmappable job user comments fixed text and logs the cause; an image without anyUid is named in the comment", async () => {
+	for (const [refusal, reason, pattern] of [
+		[{ refused: "job-user-unmappable", cause: "docker-group" }, "job-user-unmappable", /cannot give this job a non-root user/],
+		[{ refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" }, "job-image-any-uid-unsupported", /pi-job:old.*does not declare `anyUid`/],
+	]) {
+		const texts = [];
+		const logged = [];
+		const { deps: d } = deps({
+			imagePreflight: async () => ({ ok: true, image: "pi-job:old", capabilities: [] }),
+			jobUserPreflight: async () => refusal,
+			comment: async (_j, t) => texts.push(t),
+			log: (e, f) => logged.push([e, f]),
+		});
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, reason);
+		assert.match(texts[0], pattern);
+		assert.doesNotMatch(texts[0], /docker-group|rootless/, "the cause goes to the log, never the forge");
+	}
+});
+
+test("an undecidable job user is retried as never-started, before any reserve", async () => {
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, jobUserPreflight: async () => ({ unavailable: true, reason: "timeout" }) });
+	await assert.rejects(() => runJob(ghJob, d), (err) => err instanceof InfraRetry && err.reason === "container-never-started");
+	assert.equal(redis.incrCalls, 0);
+});
+
+test("the user the gate decided is the user that runs, and prepare stamps it for the sandbox", async () => {
+	let ran = null;
+	let prepOpts = null;
+	const { deps: d } = deps({
+		jobUserPreflight: async () => ({ user: "1234:1234", home: "/home/pi" }),
+		prepareWorkspace: async (_j, _t, opts) => ((prepOpts = opts), { workspaceDir: "/w", jobDir: "/j" }),
+		runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }),
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "completed");
+	assert.equal(ran.user, "1234:1234");
+	assert.equal(ran.home, "/home/pi");
+	assert.deepEqual(prepOpts.jobUser, { user: "1234:1234", home: "/home/pi" });
+});
+
+test("a wiring without the gate runs every job as the image's own user, exactly as before", async () => {
+	let ran = null;
+	const { deps: d } = deps({ runContainer: async (ctx) => ((ran = ctx), { code: 0, aborted: false }) });
+	await runJob(ghJob, d);
+	assert.equal(ran.user, null);
+	assert.equal(ran.home, null);
+});

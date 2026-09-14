@@ -106,7 +106,9 @@ export function makeImagePreflight({ image, spawnFn = spawn }) {
 			if (job?.excludeTools !== undefined && !(capabilities ?? []).includes("excludeTools")) {
 				return { excludeToolsUnsupported: wanted, declared: capabilities ?? [] };
 			}
-			return { ok: true, image: wanted, piVersion, imageDigest };
+			// `capabilities` rides the ok result for issue #341's job-user gate, which needs `anyUid` and runs after
+			// this preflight; an image that declares nothing reads as [].
+			return { ok: true, image: wanted, piVersion, imageDigest, capabilities: capabilities ?? [] };
 		}
 		if ((await runDocker(spawnFn, ["info"])).code === 0) return { missing: wanted };
 		return { unavailable: wanted };

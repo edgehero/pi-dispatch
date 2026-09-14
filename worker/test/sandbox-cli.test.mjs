@@ -50,6 +50,8 @@ function capture(over = {}) {
 			// The egress policy is ON by default, so a sandbox builds its own network. Seamed here for the
 			// reason every docker call in this suite is: a unit test must never reach a daemon.
 			spawnNetwork: fakeDockerSpawn(),
+			// Issue #341: which uid the shell runs as, never decided against a real daemon here.
+			resolveJobUser: async () => ({ user: null, home: null }),
 			...over,
 		},
 	};

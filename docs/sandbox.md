@@ -164,10 +164,11 @@ session that ends in a closed laptop still keeps the workspace.
 
 ## Known limitations
 
-- **Linux bind-mount ownership.** A local-folder sandbox runs as the image's non-root `pi` user (uid
-  1001) against files owned by your host account, so writes may fail with `EACCES` on Linux. This is not
-  new to sandboxes — local *jobs* have the same shape — and it does not arise on Docker Desktop, which
-  maps ownership for you.
+- **Which user the shell runs as.** A sandbox runs as the uid the job ran as: the worker's own on a native
+  Linux daemon, the image's `pi` user on Docker Desktop (issue #341). The retained files are owned by that
+  uid and readable only by it, so open the sandbox as the worker's account, or with `sudo -E` (the recorded
+  uid is used either way). A rootless daemon, userns-remap or Docker Desktop on Linux is refused with the
+  reason.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>`. The

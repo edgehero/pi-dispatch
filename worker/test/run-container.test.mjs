@@ -335,3 +335,24 @@ test("the job's docker run passes NO env, so it talks to the daemon the endpoint
 	assert.ok(opts, "docker was spawned");
 	assert.equal(Object.hasOwn(opts, "env"), false);
 });
+
+test("a job user runs as --user with HOME=/home/pi beside it, and no user means neither (issue #341)", { skip }, async () => {
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(rec) });
+	await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, user: "1234:1234", home: "/home/pi" });
+	assert.ok(rec.args.includes("--user=1234:1234"));
+	assert.ok(rec.args.includes("HOME=/home/pi"));
+	const plain = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(plain) })({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.ok(!plain.args.some((a) => a.startsWith("--user")), "no user, no flag: the argv is the one before issue #341");
+	assert.ok(!plain.args.includes("HOME=/home/pi"));
+});
+
+test("a job user without HOME=/home/pi is refused before docker is ever spawned (issue #341)", { skip }, async () => {
+	for (const home of [null, undefined, "/", "/workspace"]) {
+		const rec = {};
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(rec) });
+		await assert.rejects(() => runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, user: "1234:1234", home }), /must be paired with HOME=\/home\/pi/, String(home));
+		assert.equal(rec.cmd, undefined, String(home));
+	}
+});

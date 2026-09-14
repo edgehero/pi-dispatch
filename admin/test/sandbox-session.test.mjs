@@ -65,6 +65,8 @@ function panelIo(over = {}) {
     env: {},
     running: async () => [],
     launch: async ({ args }) => (launched.push(args), { code: 0 }),
+    // Issue #341: never decided against a real daemon in a unit test.
+    resolveJobUser: async () => ({ user: null, home: null }),
     spawnNetwork: (cmd, args) => {
       docker.push(args.join(" "));
       const child = new EventEmitter();

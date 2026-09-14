@@ -882,7 +882,8 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi" });
+	assert.equal(env.HOME, "/home/pi", "the drift check must see HOME, or a reservation it needs would go unchecked");
 	const dynamic = new Set(["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]); // provider + mint: deployment state, refused pre-spend instead
 	for (const name of Object.keys(env)) {
 		if (dynamic.has(name)) continue;
@@ -983,4 +984,13 @@ test("the control: with no model baseUrl the environment DOES win, which is why 
 	const request = await withEnv({ ANTHROPIC_BASE_URL: "https://evil.example/v1" }, () => anthropicRequestFor(custom));
 	assert.ok(request, "the stub captured no request, so the control proves nothing");
 	assert.match(request.url, /^https:\/\/evil\.example\//, "a model with no baseUrl lets ANTHROPIC_BASE_URL choose the host");
+});
+
+test("HOME is written only when a home is passed, and neither a forwarded nor a secret HOME can win (issue #341)", { skip }, () => {
+	const without = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, HOME: "/root" }, forwardEnv: ["HOME"] });
+	assert.equal(without.HOME, "/root", "no --user: HOME is not the harness's to set, so an explicit forward still applies");
+	const withHome = mod.buildContainerEnv({ ...secretsBase, hostEnv: { ...HOST, HOME: "/root" }, forwardEnv: ["HOME"], secrets: { HOME: "/workspace" }, home: "/home/pi" });
+	assert.equal(withHome.HOME, "/home/pi", "beside --user the harness's HOME is assigned after both loops");
+	for (const empty of [null, undefined, ""]) assert.equal("HOME" in mod.buildContainerEnv({ ...secretsBase, home: empty }), false, String(empty));
+	assert.ok(CONTAINER_ENV_NAMES.has("HOME"), "reserved, so a trigger's run.secrets cannot bind it");
 });

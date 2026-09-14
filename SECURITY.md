@@ -150,8 +150,9 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   path; polling removes the path. Every author/label/bot-loop/dedup gate still runs, on the same
   fields, through the same pure filter. The cost is ~60s of trigger latency.
 - **Isolation.** One ephemeral container per job: `--cap-drop=ALL`, `--security-opt no-new-privileges`,
-  memory/CPU/pids limits, `--rm`, all from the worker's own argv, plus a non-root user which comes from the
-  **image** and not the argv (see *What is NOT defended* for why that distinction matters). Per-job rather
+  memory/CPU/pids limits, `--rm`, all from the worker's own argv, plus a non-root user: on Docker Desktop the
+  image's own `USER`, and on a daemon that enforces bind-mount ownership the worker's own non-root uid, passed
+  as `--user` so the job can use its own files (issue #341; see *What is NOT defended* for what each costs). Per-job rather
   than per-session, so state cannot leak between mutually-untrusting issue authors.
   **An operator can re-open a finished run's sandbox** (`pi-dispatch sandbox`, `docs/sandbox.md`), and
   that does not weaken this: the *job* container is still single-use and still gone the moment it exits.
@@ -266,8 +267,16 @@ Stated openly rather than discovered later:
   memory/CPU/pids limits, `/job` read-only, the closed env allowlist and the mount set (four mounts, five
   once `run.resume` is armed, and `run.skillsDir` adds none: its skills are copied into the per-job dir and
   ride the `/job` mount that already exists) are all built by the worker's `docker run` argv, so nothing an
-  image contains can weaken them. **Non-root is not in that argv.** It is `USER pi` in the image itself, as the trust table
-  above says, and that is exactly why an unconformant image can lose it: `docs/job-image.md` requires a
+  image contains can weaken them. **Non-root is in that argv only where the daemon needs it.** On a daemon that
+  enforces bind-mount ownership (native Linux Docker, rootful Podman) the worker runs every job as its own
+  non-root uid (`--user`, refusing uid 0 and gid 0); on Docker Desktop the argv has no `--user` and non-root is
+  `USER pi` in the image itself, as the trust table above says, which is exactly why an unconformant image can
+  lose it there. Running a job as the worker's uid has a price, recorded in `OQ-036`: a container escape that
+  keeps its uid lands as the worker's own account, files the job creates (setuid and setgid included) carry the
+  worker's uid and primary group, and the worker's `0600` files inside a mounted local folder are readable to
+  the job (as they already are on Docker Desktop); run the worker as a dedicated service account, as
+  `deploy/worker.service` does. On rootful Podman without an empty `/etc/containers/mounts.conf`, every job
+  container also gets a `/run/secrets` mount carrying the host's subscription files where they exist. Where the image provides non-root: `docs/job-image.md` requires a
   non-root runtime user with a writable home, and nothing here verifies that the image you named
   honours it. What is **not** checked is the image's contents, and every way that can be wrong fails
   **silently**: absent guardrails at `/opt/pi-dispatch/HARD_RULES.md` remove the safety floor with no error;

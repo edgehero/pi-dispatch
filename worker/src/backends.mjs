@@ -422,7 +422,9 @@ const BACKENDS_TABLE = {
 		 * rather than aspirational. For a vendor adapter this is where "the vendor's documentation" goes.
 		 */
 		asserts: {
-			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not)",
+			// Issue #341: on a daemon that enforces bind-mount ownership the argv supplies the uid instead, validated
+			// non-zero by the builder; the word stays asserted because on Docker Desktop the image still provides it.
+			nonRoot: "the job image's USER directive (this repo's builds `USER pi`; an operator-built image may not), or on a daemon that enforces bind-mount ownership the worker's own non-zero uid passed as `--user`",
 		},
 		/**
 		 * Which declared words hold only while something about THIS HOST is observed (issue #278), as

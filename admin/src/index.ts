@@ -1807,6 +1807,7 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.running ? { running: io.running } : {}),
     ...(io.launch ? { launch: io.launch } : {}),
     ...(io.spawnNetwork ? { spawnNetwork: io.spawnNetwork } : {}),
+    ...(io.resolveJobUser ? { resolveJobUser: io.resolveJobUser } : {}),
     beforeLaunch: ({ resolved }: any) => {
       write(`\nopening ${resolved.name} — image ${resolved.manifest.image}\n`);
       write("no credentials are set in this container. exit the shell to return to the panel.\n\n");

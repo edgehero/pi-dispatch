@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { CONTAINER_HOME } from "./container-spec.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
@@ -46,8 +47,14 @@ export function makeRunContainer({
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
-	return async function runContainer({ job, token, prepared, secrets = {}, name, signal }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, name, signal, user = null, home = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null }; // killed before it could start
+		// Issue #341. `user` and `home` travel as a PAIR: a uid with no passwd entry in the image gets `HOME=/` from
+		// Docker and `HOME=/workspace` from Podman (measured), so a `--user` without this HOME is refused here rather
+		// than started. The builder does not insist, because `doctor --live`'s probes run `--user` with no environment.
+		if (user !== null && home !== CONTAINER_HOME) {
+			throw new Error(`runContainer: a job user (${user}) must be paired with HOME=${CONTAINER_HOME}`);
+		}
 
 		// Closed env allowlist: only the provider key + the declared PI_* vars. Throws (config) if
 		// the provider is unconfigured, which the processor turns into a policy refusal that refunds the
@@ -99,6 +106,7 @@ export function makeRunContainer({
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the
 			// record may carry nor a deployment setting, it is a live credential, and `token` is its precedent.
 			secrets,
+			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 		});
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
@@ -121,6 +129,7 @@ export function makeRunContainer({
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			network, // REQ-EGRESS-ALLOWLIST: null when no policy is armed, and the flag is then absent
+			user, // issue #341: the worker's own "<uid>:<gid>" on a daemon that enforces bind-mount ownership, else null
 		});
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because

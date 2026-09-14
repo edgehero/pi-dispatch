@@ -67,7 +67,7 @@ export function makePrepareWorkspace({
 	log = () => {},
 }) {
 	mkdirSync(jobsDir, { recursive: true });
-	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null } = {}) {
+	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null } = {}) {
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
@@ -92,7 +92,15 @@ export function makePrepareWorkspace({
 		// What `cleanup` needs to retain this run's directory, stamped here because this is the only place
 		// that holds all of it at once. Applied to the RESULT rather than mutated in, so a preparer's
 		// `{ outcome: "policy" }` refusal -- which carries no jobDir -- is passed through untouched.
-		const sandbox = { jobId: queueJobId ?? null, kind: job.kind ?? null, image: resolveJobImage(job, jobImage), backend: resolveBackendName(job, defaultBackend) };
+		const sandbox = {
+			jobId: queueJobId ?? null,
+			kind: job.kind ?? null,
+			image: resolveJobImage(job, jobImage),
+			backend: resolveBackendName(job, defaultBackend),
+			// Issue #341: WHO the job ran as, so a re-opened sandbox runs as the uid that owns these files. Only when the
+			// processor decided it; a direct call stamps nothing, and the sandbox then decides from its own facts.
+			...(jobUser ? { jobUser: { user: jobUser.user ?? null, home: jobUser.home ?? null } } : {}),
+		};
 		if (job.kind === "local") {
 			// Harness text above, operator DATA below: the fixed pointer line names /job/event.json so a
 			// flow can discover the trigger context (mirroring the github prompt, which names the same

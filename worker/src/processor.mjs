@@ -93,6 +93,10 @@ export async function runJob(job, deps) {
 		// docker endpoint the CLI resolves), judged against the deployment's floor. `{ ok }`, `{ refused, message }`
 		// or `{ unavailable }`. Defaults to ok, so a bare wiring gates nothing, like the two preflights above it.
 		observationPreflight = async () => ({ ok: true }),
+		// Issue #341: which uid this job's container runs as. `(job, { capabilities, observed }) =>` `{ user, home }`
+		// (`user` null = the image's own USER), `{ refused, cause }` or `{ unavailable, reason }`. The default runs
+		// every job as the image's user, exactly as before, so a wiring that omits it changes nothing.
+		jobUserPreflight = async () => ({ user: null, home: null }),
 		// (session, { piVersion, context }) => { promoted, reason, bytes }. Promotes this job's transcript back into
 		// the store, on a COMPLETED exit only. Never throws. The default is a no-op so a wiring that omits
 		// it behaves exactly as before -- no store, no promotion, no session in the record.
@@ -394,6 +398,30 @@ export async function runJob(job, deps) {
 			throw new InfraRetry("docker unavailable, image preflight could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
+		// Issue #341: WHO runs the container. On a daemon that enforces bind-mount ownership the job must run as the
+		// uid that owns its job dir and mounts, or it cannot read its own inputs; where no uid works (a rootless
+		// daemon, userns-remap, a root worker) nothing runs. After the image probe because the answer needs its
+		// `anyUid` capability, and still FREE: one cached `docker info` per endpoint, no mint, no clone, no reserve.
+		const jobUser = await jobUserPreflight(job, { capabilities: img.capabilities ?? [], observed });
+		if (jobUser?.refused === "job-user-unmappable") {
+			// Fixed text: the cause and anything the runtime said go to the operator's log, never a forge comment.
+			await comment(job, "Refused: the worker host's container runtime cannot give this job a non-root user that can read and write its own files. Not run.");
+			log("refused_job_user_unmappable", { cause: jobUser.cause ?? null });
+			return { outcome: "policy", reason: "job-user-unmappable", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+		if (jobUser?.refused === "job-image-any-uid-unsupported") {
+			// The image ref is operator config, the same PII class as the refusals above.
+			await comment(
+				job,
+				`Refused: the job image "${img.image}" does not declare \`anyUid\` (\`dev.pi-dispatch.capabilities\`), so it cannot run as this worker's own uid, which this host's container runtime requires. Rebuild the image from a version that has this feature. Not run.`,
+			);
+			log("refused_job_image_any_uid_unsupported", { image: img.image });
+			return { outcome: "policy", reason: "job-image-any-uid-unsupported", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+		}
+		if (jobUser?.unavailable) {
+			throw new InfraRetry("the job user could not be decided (docker info did not answer)", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+		}
+
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
 		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
 		// pi's auth.json. So it goes here, with the other free gates, which is further than issue #310 asked
@@ -636,7 +664,7 @@ export async function runJob(job, deps) {
 			}
 		}
 
-		prepared = await prepareWorkspace(job, token, { piVersion }); // resolves SHA, clones, materialises .pi/, writes prompt
+		prepared = await prepareWorkspace(job, token, { piVersion, jobUser: { user: jobUser?.user ?? null, home: jobUser?.home ?? null } }); // resolves SHA, clones, materialises .pi/, writes prompt
 
 		// A determinate prepare refusal -- sha-gone (the default branch advanced past the resolved tip),
 		// or a `pi-*` materialiser cap breach (the repo's .pi/ is too large to place in /job, issue #60)
@@ -730,7 +758,8 @@ export async function runJob(job, deps) {
 			return { outcome: "policy", reason: budget.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: true }; // return => not retried
 		}
 
-		const { code, aborted, abortReason, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets });
+		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
+		const { code, aborted, abortReason, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null });
 		containerRan = true;
 		log("container_exit", { exitCode: code, aborted });
 

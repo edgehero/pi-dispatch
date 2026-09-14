@@ -1,9 +1,14 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
+import { makeDockerEndpointResolver } from "./backend-local.mjs";
 import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
+import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs } from "./docker-run.mjs";
+import { makeImagePreflight } from "./image-preflight.mjs";
+import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { createJobNetwork, egressArmed, egressEnv, egressProxyName, networkExists, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { readManifest } from "./sandbox-store.mjs";
@@ -84,9 +89,17 @@ function inPortRange(n) {
  * @param idleSeconds  bash's own TMOUT; 0 omits it
  * @param network      this session's own egress network (REQ-EGRESS-ALLOWLIST); null = the default bridge
  * @param egressEnv    the proxy variables that go with it, or {} when no policy is armed
+ * @param user         "<uid>:<gid>" the run had (issue #341), or null for the image's own USER
+ * @param home         CONTAINER_HOME beside `user`, and required with it
  */
-export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {} }) {
+export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null }) {
+	// Issue #341: the job path's pairing, for the same measured reason (a uid with no passwd entry gets HOME=/ or
+	// HOME=/workspace), so a sandbox shell as that uid can write its own home.
+	if (user !== null && home !== CONTAINER_HOME) {
+		throw new Error(`buildSandboxRunArgs: a user (${user}) must be paired with HOME=${CONTAINER_HOME}`);
+	}
 	return buildDockerRunArgs({
+		user,
 		image,
 		name,
 		workspace,
@@ -104,6 +117,8 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 		env: {
 			TERM: term || undefined,
 			TMOUT: idleSeconds > 0 ? String(idleSeconds) : undefined,
+			// Beside `--user` only (issue #341). Not a credential either.
+			HOME: user !== null ? home : undefined,
 			// Still NO CREDENTIALS, and that clause is untouched: a proxy URL is not a credential, and
 			// buildContainerEnv is still not reused here. The env is two variables about the terminal and,
 			// when a policy is armed, four about the network.
@@ -248,6 +263,9 @@ export async function openSandbox({
 	running = listRunningSandboxes,
 	launch = launchSandbox,
 	spawnNetwork = spawn,
+	// Issue #341: `({ manifest }) => { user, home } | { refused, message }`. Seamed like `launch`, so no test decides
+	// a sandbox's user against a real daemon.
+	resolveJobUser = decideSandboxJobUser,
 	beforeLaunch = () => {},
 	fs,
 	fileExists,
@@ -270,6 +288,11 @@ export async function openSandbox({
 		return { refused: "already-running", message: `a sandbox for ${jobId} is already running — attach to it with \`docker attach ${resolved.name}\`, or exit it first` };
 	}
 
+	// Issue #341: WHO the shell runs as, before anything is created. The daemon is this CLI's own; the uid is the
+	// run's, off its manifest, because that uid owns the retained files.
+	const jobUser = await resolveJobUser({ manifest: resolved.manifest });
+	if (jobUser?.refused) return { refused: jobUser.refused, message: jobUser.message };
+
 	// REQ-EGRESS-ALLOWLIST: this session's own network, exactly like a job's, named off its own container so the
 	// reaper's `pi-job-` filter never touches it -- a worker restart must not tear the network out from under a
 	// shell an operator is sitting in.
@@ -284,6 +307,8 @@ export async function openSandbox({
 		idleSeconds,
 		network,
 		egressEnv: egressEnv({ proxy: egress?.proxy, armed: egress?.armed === true }),
+		user: jobUser?.user ?? null,
+		home: jobUser?.home ?? null,
 	});
 	await beforeLaunch({ resolved, args, network });
 
@@ -326,6 +351,74 @@ export async function openSandbox({
 	} finally {
 		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
 	}
+}
+
+/**
+ * Which uid a re-opened sandbox runs as (issue #341), as `{ user, home }` or `{ refused, message }`.
+ *
+ * TWO SOURCES, on purpose. The DAEMON facts are this CLI's own (platform, endpoint, one `docker info`), because the
+ * sandbox runs on whatever daemon this shell reaches. The IDENTITY is the run's, from the manifest stamp, because
+ * that uid owns the retained files, and because the CLI's own uid need not be the worker's: `sudo pi-dispatch
+ * sandbox` would otherwise be refused as a root worker, or would run as the wrong uid.
+ *
+ * A stamp that is present but malformed is REFUSED, never read as "no stamp": the manifest is host-written, so a
+ * bad shape means something else wrote it. A run from before the stamp existed decides from the CLI's own ids.
+ */
+export async function decideSandboxJobUser({
+	manifest,
+	platform = process.platform,
+	release = osRelease(),
+	euid = process.geteuid?.(),
+	egid = process.getegid?.(),
+	resolveEndpoint = makeDockerEndpointResolver(),
+	readFacts = makeDaemonFactsReader(),
+	imageCapabilities = (image) => makeImagePreflight({ image })({}),
+	stat,
+} = {}) {
+	if (platform === "darwin" || platform === "win32") return { user: null, home: null };
+	const stamp = manifest?.jobUser;
+	let identity = { euid, egid };
+	if (stamp !== undefined && stamp !== null) {
+		const malformed = { refused: "job-user-stamp-invalid", message: "the run's recorded job user is malformed, so the uid that owns its files is unknown; re-run the job instead" };
+		if (typeof stamp !== "object" || !("user" in stamp)) return malformed;
+		if (stamp.user === null) {
+			if (stamp.home !== null && stamp.home !== undefined) return malformed;
+			identity = { euid: SHIPPED_IMAGE_UID, egid: SHIPPED_IMAGE_UID };
+		} else {
+			try {
+				assertJobUser(stamp.user);
+			} catch {
+				return malformed;
+			}
+			if (stamp.home !== CONTAINER_HOME) return malformed;
+			const [uid, gid] = stamp.user.split(":").map(Number);
+			identity = { euid: uid, egid: gid };
+		}
+	}
+	const endpoint = await resolveEndpoint();
+	const daemon = endpoint?.local === false ? { answered: false, reason: "not-read", transient: true } : await readFacts();
+	const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")
+		? endpoint.endpoint
+		: daemon?.answered ? daemon.facts.remoteSocketPath : null;
+	const socket = socketFacts(socketPath, stat ? { stat } : {});
+	const decision = decideJobUser({ platform, release, ...identity, endpoint, daemon, socket });
+	// The shared fixed texts, without the forge comment's "Refused:" lead: the CLI prints its own `error:`.
+	if (decision.mode === "unmappable") return { refused: "job-user-unmappable", message: `${JOB_USER_FIX[decision.cause] ?? "the job user could not be decided"} (issue #341)` };
+	if (decision.mode === "unknown") {
+		return { refused: "job-user-unknown", message: `which uid the sandbox may run as could not be decided (${decision.reason}); is the docker daemon running?` };
+	}
+	if (decision.mode === "image") return { user: null, home: null };
+	const needsImage = identity.euid !== SHIPPED_IMAGE_UID;
+	const caps = needsImage ? await imageCapabilities(manifest?.image) : { ok: true, capabilities: [] };
+	if (needsImage && !caps?.ok) {
+		return { refused: "job-user-image", message: `the retained image ${manifest?.image} could not be inspected, so whether it runs as another uid is unknown` };
+	}
+	const chosen = resolveImageUser(decision, { capabilities: caps.capabilities ?? [], euid: identity.euid, egid: identity.egid, socket });
+	if (chosen.refused === "job-image-any-uid-unsupported") {
+		return { refused: chosen.refused, message: `the retained image ${manifest?.image} does not declare anyUid, so it cannot run as the uid that owns this run's files (issue #341)` };
+	}
+	if (chosen.refused) return { refused: chosen.refused, message: `${JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #341)` };
+	return { user: chosen.user, home: chosen.home };
 }
 
 /**

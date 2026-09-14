@@ -83,6 +83,9 @@ export function retainJobDir(prepared, { sandboxDir, fs = defaultFs, log = () =>
 			// host's. `?? null`, never a guessed `local`: a stamp with no venue is refused, and only a manifest
 			// that predates the key entirely reads as local.
 			backend: meta.backend ?? null,
+			// Issue #341: the job user the run had (`{ user, home }`, `user` null = the image's own USER), or null when
+			// nothing decided one. The sandbox reuses it for IDENTITY only and still checks the daemon itself.
+			jobUser: meta.jobUser ?? null,
 			workspace: rebaseWorkspace(prepared.workspace, jobDir, dest),
 			createdAt: new Date(now()).toISOString(),
 			keepUntil: null,

@@ -1,4 +1,5 @@
 import { readFileSync, watch } from "node:fs";
+import { release as osRelease } from "node:os";
 import { dirname, basename, join } from "node:path";
 import { configError, loadConfig } from "./config.mjs";
 import { makeRedisClient, parseConnection } from "./connection.mjs";
@@ -20,6 +21,7 @@ import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
+import { jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -307,6 +309,10 @@ export async function startWorker(
 		// Which docker endpoint this host's CLI resolves (issue #278). A seam because the real one spawns the
 		// docker CLI, and a wiring test must decide what it answers.
 		resolveDockerEndpoint: resolveDockerEndpointFn = makeDockerEndpointResolver(),
+		// Issue #341: the one `docker info` the job-user decision reads, and the process facts it reads beside it.
+		// Seams for the same reason as the endpoint: a wiring test decides what the daemon and the process say.
+		readDaemonFacts: readDaemonFactsFn = makeDaemonFactsReader(),
+		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.() },
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -370,6 +376,24 @@ export async function startWorker(
 	// The per-job read (below, `observationPreflight`) logs only when the answer CHANGES from the last one, so a
 	// deliberate, standing redirect writes one line at boot rather than one per job.
 	let endpointSeen = dockerEndpointState(bootEndpoint);
+
+	// Issue #341: WHO job containers run as on this daemon (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). Decided
+	// from facts, never a probe container, cached per endpoint state. Bounded like the boot image read, because a
+	// wedged daemon must not hang boot. Only an IDENTITY verdict refuses at boot, and only when `local` is the
+	// default venue: rootless, userns-remap, a root worker and Docker Desktop on Linux cannot run any local job here.
+	// An unknown answer (a daemon still starting) boots, so a unit with RestartPreventExitStatus=2 is never stranded
+	// by one; so does `runtime-unreadable`, which a later job re-reads.
+	const resolveJobUser = makeJobUserResolver({ readFacts: readDaemonFactsFn, ...jobUserIdentity });
+	const bootJobUser = await settleWithin(
+		resolveJobUser({ endpoint: bootEndpoint, key: endpointSeen }).catch(() => null),
+		BOOT_IMAGE_TIMEOUT_MS,
+		null,
+	);
+	const bootDecision = bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" };
+	log("job_user", { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause, reason: bootDecision.reason });
+	if (bootDecision.mode === "unmappable" && BOOT_REFUSING_JOB_USER_CAUSES.has(bootDecision.cause) && config.defaultBackend === DEFAULT_BACKEND) {
+		throw configError(jobUserRefusal(bootDecision));
+	}
 
 	// The forge a job belongs to is resolved PER JOB from `job.kind`, not bound once for the process.
 	// Each entry is `{ auth, host }`: `auth` is get-token's `{ mintToken, selfId, source }` (null when that
@@ -799,6 +823,14 @@ export async function startWorker(
 	// never be able to stop a worker starting. The per-JOB preflight keeps its unbounded wait, where a
 	// wedged daemon is the job's problem and the 30-minute job timeout already covers it.
 	const bootImage = await settleWithin(imagePreflight({}).catch(() => ({})), BOOT_IMAGE_TIMEOUT_MS, {});
+	// Issue #341: say it at boot, not only as a refusal on every job. The deployment's default image cannot run as
+	// this worker's uid on this daemon, so every local job that uses it will be refused pre-spend.
+	if (bootDecision.mode === "worker" && bootImage.ok) {
+		const planned = resolveImageUser(bootDecision, { capabilities: bootImage.capabilities ?? [], euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket: bootJobUser?.socket ?? null });
+		if (planned.refused === "job-image-any-uid-unsupported") log("job_image_any_uid_unsupported", { image: config.jobImage });
+		else if (planned.refused) log("job_user_group_refused", { cause: planned.cause });
+		if (planned.user && config.forwardEnv.includes("HOME")) log("forward_env_home_overridden", { reason: "HOME is set beside --user" });
+	}
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
@@ -1121,9 +1153,18 @@ export async function startWorker(
 					observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
 					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
 				});
-				if (!refusal) return { ok: true };
+				if (!refusal) return { ok: true, endpoint };
 				if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
 				return { refused: true, message: refusal };
+			},
+			// Issue #341: the job user, for a job on the `local` venue only (its containers are this host's docker
+			// CLI's). The endpoint is the one `observationPreflight` just read, so one job's two decisions agree.
+			jobUserPreflight: async (job, { capabilities = [], observed } = {}) => {
+				const venue = resolveBackendName(job, config.defaultBackend);
+				if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
+				const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
+				const { decision, socket } = await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) });
+				return resolveImageUser(decision, { capabilities, euid: jobUserIdentity.euid, egid: jobUserIdentity.egid, socket });
 			},
 			// Completed-only, so a policy or infra exit leaves the canonical transcript byte-identical and a
 			// retry starts from what the first attempt did (CONST-RETRY-INFRA-ONLY).
@@ -1362,6 +1403,7 @@ export async function startWorker(
 			// shell, and a service's EnvironmentFile or a systemd User= can resolve differently.
 			dockerContext: bootEndpoint.context,
 			dockerEndpointLocal: bootEndpoint.local,
+			jobUser: { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause }, // issue #341
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
@@ -1395,6 +1437,10 @@ export async function startWorker(
 		throw err;
 	}
 }
+
+// Issue #341: the job-user verdicts that stop a worker whose default venue is `local`. The rest (the group rows,
+// `runtime-unreadable`) refuse per job, where a later read or another image can still answer differently.
+const BOOT_REFUSING_JOB_USER_CAUSES = new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
 
 /** A one-line summary of an endpoint answer, used only to notice that it changed. */
 function dockerEndpointState(endpoint) {

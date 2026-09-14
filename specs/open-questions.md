@@ -1367,6 +1367,38 @@ adversarial passes did.
   message is operator-log-only -- #310's classifier generalized. Worth it the day a regression is
   actually caught, not before.
 
+## OQ-036: A job that runs as the worker's own uid has the worker's reach if it escapes
+
+- **Status**: **ACCEPTED RISK**, *wants explicit ratification* (issue #341).
+- **Position**: on a daemon that enforces bind-mount ownership, a job can only use its own files as the uid
+  that owns them, so the worker runs it `--user=<worker euid>:<egid>`
+  (`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`). The boundary flags hold either way: `--cap-drop=ALL`,
+  `no-new-privileges` and the mount set. What changes is what an escape inherits, and what the job's own
+  files mean on the host:
+  - **a container escape that keeps its uid lands as the worker's own account**, where it used to land as
+    uid 1001, which on most hosts is nobody;
+  - **files the job creates carry the worker's uid and primary group**, setuid and setgid bits included, so
+    another host user who runs such a file gains that uid or group (the reason a docker-group or root-group
+    primary gid is refused);
+  - **the worker's own `0600` files inside a mounted local folder are readable to the job** (already true on
+    Docker Desktop, whose file sharing maps every uid);
+  - **rootless Docker and rootless Podman are refused rather than supported.** The only uid that can use the
+    mounts there is container root, which `nonRoot` forbids. Rootless Podman with `userns="keep-id"` in
+    containers.conf works through its Docker API (measured), but every fact the decision reads is the same as
+    plain rootless, so it is refused too;
+  - **a rootful Podman host that keeps the default subscription mounts** gives every job a `/run/secrets` mount
+    carrying the host's subscription files where they exist (`/etc/rhsm` readable, measured) unless
+    `/etc/containers/mounts.conf` is empty.
+- **What bounds it meanwhile**:
+  - `deploy/worker.service` runs the worker as a dedicated account (`User=pi`), not a login account.
+  - A root worker is refused.
+  - The gid rows refuse the two privileged groups that matter.
+  - Nothing a trigger or a model can set moves the uid (it is the worker's own, and `run.secrets` and
+    `PI_FORWARD_ENV` cannot override HOME).
+- **What would close it**: a distinct job uid the worker can still clean up after (ACLs, or a helper that
+  owns the job dirs), or rootless isolation that keeps a non-root container uid mapped to a dedicated host uid
+  (Podman keep-id through a native `podman` backend). Neither is built.
+
 ## Revision History
 
 | Date | Change |
@@ -1423,3 +1455,4 @@ adversarial passes did.
 | 2026-09-09 | Issue #289. **NEW `OQ-035`**: failedReason is a bounded string channel, not a classified one -- the panel's belt (control-byte strip, 120 cap) and the same-slice source fixes (branch.mjs de-payloaded to a type, prepare-local basenamed) hold the no-payload property by inventory plus bound, not by type; the close is #310's classifier generalized, deferred until a regression is actually caught. **`OQ-024` UNCHANGED, checked** (the insights page's surface is untouched). |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`OQ-012` AMENDED**: a bullet recording that the argv-not-image bound can now be read back off a container of `PI_JOB_IMAGE` (`INT-LIVE-PROBE-CONTRACT`), and precisely what that is not -- a gate, a check of trigger-named images, a check of an image's contents, or a read of a remote venue; the detection paragraph gains a pointer to it. **Status UNCHANGED: ACCEPTED RISK**, checked: nothing here runs at job start or reaches a trigger-named image. |
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **`OQ-012` AMENDED**: an `anyUid` bullet -- the image's USER stops being the whole story of who runs it on a daemon that enforces bind-mount ownership, so an operator-built image can now also silently lack the capability to run as the worker's uid; the detection is a label plus a verify arm, the `replicas` shape, and the status stays ACCEPTED RISK. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
+| 2026-09-14 | Issue #341, part 2. **NEW `OQ-036`** (ACCEPTED RISK, wants ratification): a job run as the worker's own uid has the worker's reach if it escapes. The row records that files it creates carry the worker's uid and group (setuid and setgid included), that the worker's `0600` files in a mounted folder become readable, that rootless daemons are refused (keep-id Podman included, since it reads like plain rootless), and that rootful Podman's default subscription mounts reach every job without an empty mounts.conf; plus the bounds (dedicated account, root worker refused, the gid rows, nothing trigger-settable moves the uid) and what would close it. **`OQ-012` UNCHANGED, checked**: its `anyUid` bullet from part 1 now has a reader, and the status stays. **`OQ-004` UNCHANGED, checked**: no network surface moved. |

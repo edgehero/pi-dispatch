@@ -74,7 +74,7 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -182,6 +182,10 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => ({ ok: true })),
 			// Issue #278: never the real CLI under test. A local socket unless a test says otherwise.
 			resolveDockerEndpoint: resolveDockerEndpoint ?? (async () => ({ local: true, context: "test", endpoint: "unix:///test.sock", reason: null, transient: false })),
+			// Issue #341: never the real daemon or this process's ids under test. A rootful Docker body and uid 1001, so the
+			// job-user decision is `worker` with no --user (the shipped image's own uid) unless a test says otherwise.
+			readDaemonFacts: readDaemonFacts ?? (async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Test Linux", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null } })),
+			jobUserIdentity: jobUserIdentity ?? { platform: "linux", release: "6.8.0-test", euid: 1001, egid: 1001 },
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
@@ -1958,8 +1962,9 @@ test("without a floor a redirected docker CLI boots, logs it once without creden
 	// `logs` is a snapshot taken when boot returned, so later lines are read off the shared capture.
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
 	const mark = bootLines.length;
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+	// The endpoint rides the ok answer (issue #341), so this job's user is decided against the same read.
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer });
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer });
 	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "docker_endpoint_not_local").length, 0, "a standing redirect is one line at boot, not one per job");
 	answer = { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false };
 	await captured.deps.observationPreflight(job);
@@ -1978,7 +1983,7 @@ test("a floor asking only credentialTransit=asserted BOOTS on a redirected CLI a
 	assert.ok(logs.some((l) => l.event === "docker_endpoint_not_local"), "the redirect is still said");
 	assert.equal(logs.find((l) => l.event === "worker_started").dockerEndpointLocal, false);
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true });
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: await REMOTE_ENDPOINT() });
 });
 
 test("with a floor, a context switched AFTER boot refuses the next job before it spends (#278)", { skip }, async () => {
@@ -1990,7 +1995,7 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 		resolveDockerEndpoint: async () => answer,
 	});
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true }, "booted on a local endpoint, so the first job runs");
+	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer }, "booted on a local endpoint, so the first job runs");
 	const mark = bootLines.length;
 	answer = { local: false, context: "pd-remote", endpoint: "tcp://10.1.2.3:2375", reason: null, transient: false };
 	const refused = await captured.deps.observationPreflight(job);
@@ -2001,4 +2006,61 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 	assert.ok(!logs.some((l) => l.event === "docker_endpoint_not_local"), "and not at boot, where it was local");
 	answer = { local: null, context: null, endpoint: null, reason: "timeout", transient: true };
 	assert.deepEqual(await captured.deps.observationPreflight(job), { unavailable: true, reason: "timeout" }, "a transient read retries rather than refusing");
+});
+
+// --- issue #341: which uid job containers run as ---------------------------------------------------------------
+
+const DOCKER_FACTS = (over = {}) => async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Test Linux", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, ...over } });
+const LINUX_ID = (euid, egid = euid) => ({ platform: "linux", release: "6.8.0-test", euid, egid });
+
+test("a rootless daemon or a root worker refuses to BOOT when local is the default venue, tagged, before anything is built", { skip: skipNoModule }, async () => {
+	for (const [label, readDaemonFacts, jobUserIdentity, pattern] of [
+		["rootless", DOCKER_FACTS({ rootless: true }), LINUX_ID(1234), /runs rootless/],
+		["userns-remap", DOCKER_FACTS({ userns: true }), LINUX_ID(1234), /userns-remap/],
+		["worker-is-root", DOCKER_FACTS(), LINUX_ID(0), /the worker runs as root/],
+		["desktop-linux", DOCKER_FACTS({ os: "Docker Desktop" }), LINUX_ID(1234), /Docker Desktop on Linux/],
+	]) {
+		const order = [];
+		await assert.rejects(
+			() => runStart({ readDaemonFacts, jobUserIdentity, order, makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
+			(err) => err.piDispatchConfig === true && pattern.test(err.message),
+			label,
+		);
+		assert.deepEqual(order, [], `${label}: the refusal comes before the reaper and the worker`);
+	}
+});
+
+test("an unanswered or unreadable daemon BOOTS, and says what it could not decide", { skip }, async () => {
+	for (const [label, readDaemonFacts, mode] of [
+		["transient", async () => ({ answered: false, reason: "timeout", transient: true }), "unknown"],
+		["unparseable", async () => ({ answered: false, reason: "unparseable", transient: false }), "unmappable"],
+	]) {
+		const { logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts, jobUserIdentity: LINUX_ID(1234) });
+		assert.equal(logs.find((l) => l.event === "job_user")?.mode, mode, label);
+		assert.equal(logs.find((l) => l.event === "worker_started")?.jobUser?.mode, mode, `${label}: the boot line names it`);
+	}
+});
+
+test("on macOS the job user is the image's and the daemon is never asked", { skip }, async () => {
+	let reads = 0;
+	const { logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: async () => (reads++, { answered: false, transient: true }), jobUserIdentity: { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 } });
+	assert.equal(reads, 0);
+	assert.deepEqual(logs.find((l) => l.event === "worker_started").jobUser, { mode: "image", user: null, cause: "desktop-platform" });
+});
+
+test("the per-job gate: --user with HOME for another uid on an anyUid image, refused without it, nothing for uid 1001", { skip }, async () => {
+	const endpointReads = [];
+	const endpoint = { local: true, context: "default", endpoint: "unix:///var/run/docker.sock", reason: null, transient: false };
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+
+	const other = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: LINUX_ID(1234), resolveDockerEndpoint: async () => (endpointReads.push(1), endpoint) });
+	assert.ok(other.logs.some((l) => l.event === "job_image_any_uid_unsupported"), "the default image cannot run as this uid: said once at boot");
+	const reads = endpointReads.length;
+	assert.deepEqual(await other.captured.deps.jobUserPreflight(job, { capabilities: ["anyUid"], observed: { ok: true, endpoint } }), { user: "1234:1234", home: "/home/pi" });
+	assert.equal(endpointReads.length, reads, "the endpoint the observation just read is reused, never read twice for one job");
+	assert.deepEqual(await other.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { refused: "job-image-any-uid-unsupported", cause: "any-uid-unsupported" });
+
+	const shipped = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: DOCKER_FACTS(), jobUserIdentity: LINUX_ID(1001) });
+	assert.ok(!shipped.logs.some((l) => l.event === "job_image_any_uid_unsupported"), "uid 1001 needs no anyUid");
+	assert.deepEqual(await shipped.captured.deps.jobUserPreflight(job, { capabilities: [], observed: { ok: true, endpoint } }), { user: null, home: null });
 });

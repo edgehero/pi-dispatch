@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { buildSandboxRunArgs, listRunningSandboxes, openSandbox, parsePublish, resolveSandbox, SANDBOX_NAME_PREFIX, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
+import { buildSandboxRunArgs, decideSandboxJobUser, listRunningSandboxes, openSandbox, parsePublish, resolveSandbox, SANDBOX_NAME_PREFIX, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -226,7 +226,8 @@ function recordingDocker(calls, codeFor = () => 0) {
 	};
 }
 
-const session = { jobId: "gh-1", sandboxDir: "/s", retentionHours: 24, term: "xterm", idleSeconds: 1800, running: async () => [] };
+// `resolveJobUser` is seamed like every docker call here (issue #341): the image's own user unless a test says otherwise.
+const session = { jobId: "gh-1", sandboxDir: "/s", retentionHours: 24, term: "xterm", idleSeconds: 1800, running: async () => [], resolveJobUser: async () => ({ user: null, home: null }) };
 
 test("openSandbox puts an armed session on its own egress network, and removes it after the shell exits", async () => {
 	const calls = [];
@@ -405,4 +406,69 @@ test("openSandbox requires the egress posture, rather than defaulting a forgetfu
 	for (const egress of [undefined, {}, { armed: "true" }, { armed: 1 }]) {
 		await assert.rejects(() => openSandbox({ ...session, ...openable(), egress, launch: async () => ({ code: 0 }) }), /egress\.armed must be a boolean/, JSON.stringify(egress));
 	}
+});
+
+// --- issue #341: which uid a re-opened sandbox runs as -----------------------------------------------------------
+
+test("a sandbox runs as the user its resolver decides, with HOME beside it, and refuses before building a network", async () => {
+	let launchedWith = null;
+	const calls = [];
+	await openSandbox({ ...session, ...openable(), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker(calls), resolveJobUser: async () => ({ user: "1234:1234", home: "/home/pi" }), launch: async ({ args }) => ((launchedWith = args), { code: 0 }) });
+	assert.ok(launchedWith.includes("--user=1234:1234") && launchedWith.includes("HOME=/home/pi"));
+	const refusedCalls = [];
+	let launched = false;
+	const refused = await openSandbox({ ...session, ...openable(), egress: { armed: true, proxy: "p" }, spawnNetwork: recordingDocker(refusedCalls), resolveJobUser: async () => ({ refused: "job-user-unmappable", message: "no uid works" }), launch: async () => ((launched = true), { code: 0 }) });
+	assert.deepEqual(refused, { refused: "job-user-unmappable", message: "no uid works" });
+	assert.equal(launched, false);
+	assert.deepEqual(refusedCalls, [], "no network is built for a sandbox that cannot run");
+});
+
+test("buildSandboxRunArgs refuses a user without HOME=/home/pi", () => {
+	assert.throws(() => buildSandboxRunArgs({ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j", user: "1234:1234" }), /must be paired with HOME/);
+	const plain = buildSandboxRunArgs({ image: "i", name: "pi-sandbox-1", workspace: "/w", jobDir: "/j" });
+	assert.ok(!plain.some((a) => a.startsWith("--user") || a.startsWith("HOME=")));
+});
+
+describe("decideSandboxJobUser", () => {
+	const LOCAL = { local: true, context: "default", endpoint: "unix:///var/run/docker.sock", reason: null, transient: false };
+	const rootful = async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Ubuntu", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null } });
+	const base = { platform: "linux", release: "6.8.0", resolveEndpoint: async () => LOCAL, readFacts: rootful, stat: () => ({ uid: 0, gid: 2375 }), imageCapabilities: async () => ({ ok: true, capabilities: ["anyUid"] }) };
+
+	test("macOS and Windows keep the image's user without asking docker", async () => {
+		let asked = false;
+		assert.deepEqual(await decideSandboxJobUser({ ...base, platform: "darwin", resolveEndpoint: async () => ((asked = true), LOCAL), manifest: {} }), { user: null, home: null });
+		assert.equal(asked, false);
+	});
+
+	test("the run's stamp supplies the uid: sudo (euid 0) reopens a worker-mode run as that run's user", async () => {
+		const manifest = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
+		assert.deepEqual(await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest }), { user: "1234:1234", home: "/home/pi" });
+		assert.deepEqual(await decideSandboxJobUser({ ...base, euid: 0, egid: 0, manifest: { image: "pi-job:x", jobUser: { user: null, home: null } } }), { user: null, home: null }, "a uid-1001 run reopens as the image's user");
+	});
+
+	test("a malformed stamp refuses, never reads as absent", async () => {
+		for (const jobUser of ["1234:1234", { user: "0:0", home: "/home/pi" }, { user: "1234:1234", home: "/" }, { user: null, home: "/home/pi" }, {}]) {
+			const r = await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, manifest: { image: "pi-job:x", jobUser } });
+			assert.equal(r.refused, "job-user-stamp-invalid", JSON.stringify(jobUser));
+		}
+	});
+
+	test("no stamp decides from this CLI's ids, and the retained image must declare anyUid for another uid", async () => {
+		assert.deepEqual(await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, manifest: { image: "pi-job:x" } }), { user: "1234:1234", home: "/home/pi" });
+		const noLabel = await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, imageCapabilities: async () => ({ ok: true, capabilities: [] }), manifest: { image: "pi-job:old" } });
+		assert.equal(noLabel.refused, "job-image-any-uid-unsupported");
+		assert.match(noLabel.message, /pi-job:old/);
+	});
+
+	test("a stamped worker-mode user is refused when the retained image no longer declares anyUid", async () => {
+		const r = await decideSandboxJobUser({ ...base, euid: 1234, egid: 1234, imageCapabilities: async () => ({ ok: true, capabilities: [] }), manifest: { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } } });
+		assert.equal(r.refused, "job-image-any-uid-unsupported");
+	});
+
+	test("the daemon rows are this CLI's own: rootless refuses even with a valid stamp, and an unanswered daemon refuses", async () => {
+		const rootless = async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Ubuntu", rootless: true, userns: false, bounds: { pids: false, memory: false }, serviceIsRemote: null, remoteSocketPath: null } });
+		const stamped = { image: "pi-job:x", jobUser: { user: "1234:1234", home: "/home/pi" } };
+		assert.equal((await decideSandboxJobUser({ ...base, readFacts: rootless, euid: 1234, egid: 1234, manifest: stamped })).refused, "job-user-unmappable");
+		assert.equal((await decideSandboxJobUser({ ...base, readFacts: async () => ({ answered: false, reason: "timeout", transient: true }), euid: 1234, egid: 1234, manifest: stamped })).refused, "job-user-unknown");
+	});
 });

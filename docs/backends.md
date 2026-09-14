@@ -100,6 +100,15 @@ worth calling out because they are the ones adapters get wrong:
   elsewhere it counts as `asserted`, by you, and doctor says so. The table entry says this with
   `observedBy: { credentialTransit: "dockerEndpointLocal" }`. That observation is a fact about this host's
   docker CLI, so an entry for a remote venue leaves `observedBy` out and declares its own word.
+- **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
+  and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
+  Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because
+  only the uid that owns the job's files can use them (a uid-1001 worker, the image's own uid, needs no flag).
+  The worker decides this from facts at boot and before each job, never by starting a probe container. It
+  refuses by name what no uid can serve: rootless Docker or Podman, userns-remap, a root worker, Docker
+  Desktop on Linux (WSL is not affected), an image without the `anyUid` capability for another uid, and a
+  `--user` whose primary group is 0 or the docker socket's. `pi-dispatch doctor --live` reads the result back.
+  An adapter for another runtime answers the same question in its own terms.
 
 ## A declaration is not a claim that the property holds
 
