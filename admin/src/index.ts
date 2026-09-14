@@ -1814,8 +1814,19 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
   });
   if (result.refused) {
     write(`\ncannot open a sandbox for ${jobId}: ${result.message}\n`);
+    // The panel reads PI_EGRESS and PI_EGRESS_PROXY from the environment pi itself was started with, never the
+    // deployment's .env (it never calls loadConfig). A deployment that turns egress off only in .env reads as
+    // armed here, and the failure above is about a proxy that deployment never runs. Say so rather than send the
+    // operator looking for it.
+    if (result.refused === "egress-network-failed") {
+      write("the panel reads PI_EGRESS and PI_EGRESS_PROXY from the environment pi runs in; if your deployment sets them only in its .env, export them where pi starts\n");
+    }
     await pause();
     return;
+  }
+  if (result.detached) {
+    write("\ndetached: the sandbox is still running, and its egress network stays until it exits\n");
+    await pause();
   }
   if (result.error) {
     write(`\ncould not start docker: ${result.error.message}\n`);

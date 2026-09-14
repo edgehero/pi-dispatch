@@ -138,13 +138,18 @@ test("a docker that will not start is reported as such, not as a shell that exit
 test("--pin stamps a deadline BEFORE the shell opens, so a lost session cannot lose the pin", async () => {
 	const { root, dir } = retained();
 	const order = [];
+	let pinnedAtLaunch = null;
 	const c = capture({
 		launch: async () => {
+			// Read the manifest AS the shell opens: a pin that lands only after the shell exits is the one a
+			// closed laptop lid loses, and an after-the-fact read of the file cannot tell the two apart.
+			pinnedAtLaunch = JSON.parse(await import("node:fs").then((fs) => fs.readFileSync(join(dir, "manifest.json"), "utf8"))).keepUntil;
 			order.push("launch");
 			return { code: 0 };
 		},
 	});
 	await runSandbox(["gh-1", "--pin"], { env: envWith(root), deps: c.deps });
+	assert.ok(pinnedAtLaunch, "the deadline was on disk before the shell opened");
 
 	const manifest = JSON.parse(await import("node:fs").then((fs) => fs.readFileSync(join(dir, "manifest.json"), "utf8")));
 	assert.ok(manifest.keepUntil, "the pin is on disk");

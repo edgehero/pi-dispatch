@@ -1365,9 +1365,9 @@ wrong host, silently. `buildSandboxRunArgs` is a second container producer outsi
 and is hard-wired to the local CLI. **The manifest records the venue the job resolved to, and
 `resolveSandbox` refuses a run whose venue this host does not hold, by name** (`venue-unreachable`) and
 AHEAD of the image and workspace checks, whose failures would otherwise be the symptom reported instead of
-the cause. `resolveSandbox` is the one function both entry points pass through, the CLI and the admin
-panel's RUN_DETAIL, so the refusal holds for both; the panel also asks `sandboxVenueRefusal` before it
-advertises the key. **Held means the local adapter by name** (`DEFAULT_BACKEND`, the local bundle's own
+the cause. Both entry points, the CLI and the admin panel's RUN_DETAIL, reach it through `openSandbox`
+(below), so the refusal holds for both; the panel also asks `sandboxVenueRefusal` before it advertises the
+key. **Held means the local adapter by name** (`DEFAULT_BACKEND`, the local bundle's own
 name), not "any venue declaring `remote: false`": the launcher is the docker CLI, so a non-remote venue on
 another runtime would pass that and be reopened under docker. A name this build does not know is refused. A
 manifest with no `backend` key predates venue attribution and reads as `local`; a key that is present but
@@ -1403,17 +1403,24 @@ sibling rather than an extension of the GitHub one for the same reason.
     refusal, the argv with this session's network and proxy variables, the network's creation, the launch and
     the network's removal in a `finally`. Until #277 the admin panel assembled the session from
     `resolveSandbox` and `buildSandboxRunArgs` itself and passed no network, so a sandbox opened from
-    RUN_DETAIL ran on docker's default bridge with `PI_EGRESS` armed and could start a second container for a
-    running sandbox. The panel reads the posture through `sandboxEgress` (the worker's own `egressArmed` and
+    RUN_DETAIL ran on docker's default bridge with `PI_EGRESS` armed, and a second press on a running sandbox
+    tried to start another container, which docker refused by name. The panel reads the posture through `sandboxEgress` (the worker's own `egressArmed` and
     `egressProxyName`), and a malformed `PI_EGRESS` refuses the session rather than opening it on the open
-    network. The CLI keeps only what is about its own arguments: the terminal check, `--publish` and `--pin`.
+    network. The panel reads that posture from the environment pi runs in, not the deployment's `.env`, so a
+    deployment that disables egress only in `.env` gets a refusal naming the proxy (fail closed) and a line
+    saying where the panel reads it. The CLI keeps only what is about its own arguments: the terminal check,
+    `--publish` and `--pin`. **The network's lifecycle**: removed after the shell exits; LEFT when the shell
+    was detached and the container is still running; and removed before creation when docker says this job's
+    sandbox is not running, which clears a network an earlier session left when its process died before its
+    `finally` (the boot reaper sweeps only `pi-job-` networks). An `egress` posture that is not a boolean
+    throws rather than defaulting to the bridge.
     Rejected: leaving sandboxes on the open
     bridge, which reads as a convenience and is a **wider reach than the run the sandbox exists to
     reproduce** -- a shell that can go where the run could not is not reproducing it. The **preflight does
-    not gate a sandbox**: that is a money gate and a sandbox spends nothing, so a missing proxy fails at
-    `docker run` with docker's own message, in front of an operator at a terminal, which is the one place a
-    late failure is cheap.
-  - **Env is exactly `TERM` and `TMOUT`**, plus the three proxy variables when a policy is armed. No minted forge token under any forge's variable names, no
+    not gate a sandbox**: that is a money gate and a sandbox spends nothing, so a missing proxy fails when the
+    session's network is created, refused in words and before any container starts, in front of an operator
+    at a terminal, which is the one place a late failure is cheap.
+  - **Env is exactly `TERM` and `TMOUT`**, plus the four proxy variables when a policy is armed. No minted forge token under any forge's variable names, no
     provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables. `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
@@ -1471,7 +1478,7 @@ sibling rather than an extension of the GitHub one for the same reason.
   `pi-job-`. `--publish 3000` yields `127.0.0.1:3000:3000` and an explicit bind address is refused. A
   retained directory contains no `session/`. A directory whose sandbox is running is not swept, and a
   sweep whose docker lookup failed removes nothing. Unless `PI_EGRESS=0` the argv carries
-  `--network=pi-sandbox-<jobId>-net` and the three proxy variables, and **still no credential** -- a proxy
+  `--network=pi-sandbox-<jobId>-net` and the four proxy variables, and **still no credential** -- a proxy
   URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS=0`, the argv is
   byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed. Given a manifest whose `backend` names a
   venue other than `local`, or names nothing, `resolveSandbox` refuses it as `venue-unreachable` before the
@@ -1479,8 +1486,9 @@ sibling rather than an extension of the GitHub one for the same reason.
   nothing, the panel's `readSandboxInfo` reports it not re-openable, and `--list` shows it without time left; given a manifest with
   no `backend` key, it resolves as a local run did before. Given the admin panel's RUN_DETAIL entry point
   with egress armed, the argv carries `--network=pi-sandbox-<jobId>-net` and the proxy variables, the network
-  is created before the launch and removed after it, and a sandbox already running is refused; given a
-  malformed `PI_EGRESS`, the panel refuses and launches nothing.
+  is created before the launch and removed after the shell exits (left when it detaches, and a leftover one
+  removed at the next open), and a sandbox already running is refused; given a malformed `PI_EGRESS`, the
+  panel refuses and launches nothing.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -3973,4 +3981,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #277, part 1: the record names its venue. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the twenty-sixth tail field `backend`, the RESOLVED venue (`run.backend`, else `PI_BACKENDS[0]`) through `resolveBackendName`, the one derivation the registry dispatches on; no producer writes a null, and an explicit null in job data is recorded as one (absent means the key is absent, matching the blessed gate); on a pre-container refusal it is the venue the job resolved to (a `backend-unblessed` refusal records the unblessed name, including a venue this worker never built, whose registry refusal the processor now catches by code at pickup instead of letting it skip the record); admissible as operator-authored config; stamped by `recordRun` from `config.defaultBackend`; an audit, not a guard. Acceptance gains the matching clause. The record's `reason` enum listing gains `backend-unblessed`, which #227 made a record reason without adding it there. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the near-miss entry: "byte-identical in the record, the panel and the log" is no longer true of the record and the panel, which now confirm the fallen-back venue after the spend, so the sweep's justification is restated as the preventing half. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: dispatch itself does not move, only what is written down about it. |
 | 2026-09-14 | Issue #277, part 2: the session store gates resume on venue. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the `venue` sidecar (not key material; absent reads as the literal `local`, never the default; `lstat`/ENOENT alone decides absence; an unreadable stamp fails closed), its ladder position (behind every arm a venue move cannot cause, ahead of both `pi-version` arms it can), the always-sentinel write order (fatal `(pending)` before the swap, the real stamp after it and before `pi-version`), the resolve-side re-check after the copy, what `venue-changed` does not distinguish, and the ABA and mixed-version residuals; acceptance gains the venue cases. Two corrections in the same entry: the write path said "the two sidecars" while three were written after the swap, and the lstat bullet said every write goes through a rename while the `pi-version` write is plain -- both now state what the code does. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `venue-changed` joins the `session.reason` enum and the resolve path's producer row. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: the container still sees only `/session/current.jsonl`, and nothing venue-derived crosses the boundary. |
 | 2026-09-14 | Issue #277, part 3: the sandbox refuses per job. **`INT-SANDBOX-CONTRACT` AMENDED**: the manifest gains `backend` (resolved through `resolveBackendName`; `null` for a stamp with no venue, never a guessed `local`; kept across a pin), and LOCAL-ONLY becomes a per-job refusal (`venue-unreachable`) inside `resolveSandbox`, ahead of the image and workspace checks, for both entry points, with held meaning the local adapter by name and a keyless manifest reading as local; it replaces the deployment-wide refusal the panel never applied. Acceptance gains the matching cases. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, a correction: its `run.backend` entry still said "NOTHING DISPATCHES ON THE FIELD YET", false since #227's slice 4; it now describes the registry that dispatches and the three stores that record the resolved name. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the sandbox is still its sibling, and the job container is untouched. |
-| 2026-09-14 | Issue #277, part 4: one sandbox launcher for both entry points. **`INT-SANDBOX-CONTRACT` AMENDED**: the network bullet now holds for both entry points through `openSandbox`, which owns the refusals, the already-running check, the session's egress network and its teardown; the admin panel previously built the argv itself with no network, so a panel-opened sandbox ran on the default bridge with `PI_EGRESS` armed (a live gap, fixed here), and could start a second container for a running sandbox. The panel reads the egress posture with the worker's own readers and refuses a malformed `PI_EGRESS`. Acceptance gains the panel cases. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the network, its name and the proxy variables are the ones it already specifies; only which caller builds them moved. |
+| 2026-09-14 | Issue #277, part 4: one sandbox launcher for both entry points. **`INT-SANDBOX-CONTRACT` AMENDED**: the network bullet now holds for both entry points through `openSandbox`, which owns the refusals, the already-running check, the session's egress network and its teardown; the admin panel previously built the argv itself with no network, so a panel-opened sandbox ran on the default bridge with `PI_EGRESS` armed (a live gap, fixed here), and could start a second container for a running sandbox. The panel reads the egress posture with the worker's own readers and refuses a malformed `PI_EGRESS`, and a failed network names where the panel reads it. The network's lifecycle is stated and now honest about two cases the CLI always had: it is LEFT when the shell detaches with the container still running (tearing it down stripped the proxy from a live sandbox), and a network an earlier session left when its process died is removed before the next creation when docker says nothing is running (otherwise every later open blamed the proxy and nothing ever swept it). A non-boolean posture throws. Two pre-existing miscounts corrected in the same contract: four proxy variables, not three. Acceptance gains the panel cases. **`DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked**: still a fresh container from image and workspace. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the network, its name and the proxy variables are the ones it already specifies; only which caller builds them moved. |

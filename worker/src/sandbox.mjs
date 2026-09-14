@@ -22,7 +22,8 @@ import { readManifest } from "./sandbox-store.mjs";
  *   - NO CREDENTIALS. Not the minted forge token, not the provider key, not one forwarded host variable.
  *     `buildContainerEnv` is deliberately NOT reused: it writes the mint into that forge's variable names
  *     (env-allowlist.mjs) and throws outright when no provider credential resolves, so a credential-free
- *     container cannot be produced from it. The env here is two variables, both about the terminal.
+ *     container cannot be produced from it. The env here is two variables about the terminal, plus the four
+ *     proxy variables when an egress policy is armed.
  *   - No `/outbox`, no `/session`, no `/opt/pi-global`. The agent is not running; there is nothing to
  *     chain, no transcript to continue and no overlay to layer.
  *
@@ -105,7 +106,7 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 			TMOUT: idleSeconds > 0 ? String(idleSeconds) : undefined,
 			// Still NO CREDENTIALS, and that clause is untouched: a proxy URL is not a credential, and
 			// buildContainerEnv is still not reused here. The env is two variables about the terminal and,
-			// when a policy is armed, three about the network.
+			// when a policy is armed, four about the network.
 			...proxyEnv,
 		},
 		// Ahead of the env and the mounts, and well ahead of the image, which buildDockerRunArgs keeps as
@@ -227,7 +228,9 @@ export function sandboxEgress(env) {
  * In order: `resolveSandbox` (every refusal, the venue one included) -> the already-running refusal ->
  * the argv, with this session's own network and proxy variables when armed -> `beforeLaunch`, the caller's
  * hook to print or pin once the session is known to be openable -> create the network -> launch -> remove
- * the network in a finally. Returns `{ refused, message }`, or `{ code, error }` from the launch.
+ * the network in a finally. Returns `{ refused, message }`, or `{ code, error }` from the launch, with
+ * `detached: true` when the shell was detached and the container is still running (its network is left).
+ * THROWS when `egress.armed` is not a boolean.
  *
  * NOT here, deliberately: the terminal check and `--publish` parsing, which are about the CLI's own
  * arguments, and the pin, which only the CLI offers (it runs in `beforeLaunch`).
@@ -247,14 +250,22 @@ export async function openSandbox({
 	fs,
 	fileExists,
 }) {
+	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
+	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
+	if (typeof egress?.armed !== "boolean") {
+		throw new Error("openSandbox: egress.armed must be a boolean -- a caller that does not say whether egress is armed must not get the default bridge");
+	}
 	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
 	if (resolved.refused) return resolved;
 
-	// A docker that cannot be asked costs this check, never the session: `listRunningSandboxes` throws so the
-	// REAPER can tell "none" from "could not ask", and here the answer only decides whether to refuse early --
-	// docker itself refuses a second container under the same name anyway.
-	const live = new Set(await Promise.resolve().then(() => running()).catch(() => []));
-	if (live.has(sanitizeJobId(jobId))) {
+	// Whether THIS job's sandbox is running, and whether docker could be asked at all -- two different answers.
+	// `listRunningSandboxes` throws so the REAPER can tell "none" from "could not ask"; here an unanswered ask
+	// costs the early refusal (docker refuses a second container under the same name anyway) and the network
+	// tidy-ups below, never the session.
+	const id = sanitizeJobId(jobId);
+	const ask = () => Promise.resolve().then(() => running()).then((ids) => ({ answered: true, live: new Set(ids) }), () => ({ answered: false, live: new Set() }));
+	const before = await ask();
+	if (before.live.has(id)) {
 		return { refused: "already-running", message: `a sandbox for ${jobId} is already running — attach to it with \`docker attach ${resolved.name}\`, or exit it first` };
 	}
 
@@ -278,17 +289,30 @@ export async function openSandbox({
 	// No pre-spend gate here, deliberately: that is a MONEY gate and a sandbox spends nothing. A missing proxy
 	// fails at network creation, in front of an operator at a terminal, which is the one place a late failure
 	// is cheap.
+	if (network && before.answered) {
+		// A network left under this name by an earlier session whose process died before its `finally` ran (a
+		// closed terminal, a SIGHUP -- pi's own handler exits without unwinding). Docker has just said no sandbox
+		// for this job is running, so nothing can be using it; without this, every later open of this job fails to
+		// create the network, blames the proxy, and the boot reaper -- which sweeps only `pi-job-` networks --
+		// never clears it. Best effort, and a no-op when there is nothing to remove.
+		await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
+	}
 	if (network && !(await createJobNetwork(spawnNetwork, { network, proxy: egress.proxy }))) {
 		return {
 			refused: "egress-network-failed",
 			message: `could not create the egress network ${network} -- is the proxy running? \`docker compose -f deploy/docker-compose.yml --profile egress up -d\``,
 		};
 	}
+	let detached = false;
 	try {
 		const { code, error } = await launch({ args });
-		return { code: code ?? null, error: error ?? null };
+		// DETACHED, not exited: docker's detach sequence (Ctrl-P Ctrl-Q) returns with the container still running.
+		// Tearing the network down then would strip the proxy from a live sandbox, so `docker attach` reopens a
+		// shell with no egress at all. Leave it; the next open of this job, which asks docker first, removes it.
+		if (network && !error) detached = (await ask()).live.has(id);
+		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}) };
 	} finally {
-		if (network) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
+		if (network && !detached) await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy });
 	}
 }
 

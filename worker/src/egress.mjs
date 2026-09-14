@@ -71,8 +71,9 @@ export const DEFAULT_EGRESS_PROXY = "pi-dispatch-egress-proxy";
 
 /**
  * The proxy container this deployment names, from env: `PI_EGRESS_PROXY`, else the default. `||` rather than
- * `??`, so an empty string falls back. The worker's config and the admin panel's sandbox both read it through
- * here, so the network a panel-opened sandbox is attached to is the one the worker's jobs use.
+ * `??`, so an empty string falls back. The worker's config, `doctor` and the admin panel's sandbox all read it
+ * through here, so they cannot disagree about what a given environment means -- though each reads its OWN
+ * environment: the worker's comes from the deployment's .env, the panel's from wherever pi was started.
  */
 export function egressProxyName(env) {
 	return env?.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY;
@@ -193,7 +194,8 @@ export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRES
 /**
  * Detach the proxy and remove the network. Best-effort and never throws: this runs in a `finally`, after
  * the container has already exited, and a failure here must not change the job's outcome. What it leaves
- * behind if it fails is a network with no members, which the boot reaper sweeps.
+ * behind if it fails is a network, which the boot reaper sweeps for a job (`pi-job-`) and does not for a
+ * sandbox (`pi-sandbox-`); a sandbox's next open removes its own.
  */
 export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
 	await runDocker(spawnFn, ["network", "disconnect", "-f", network, proxy]);

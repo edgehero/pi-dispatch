@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxVenueRefusal } from "./sandbox.mjs";
+import { launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxVenueRefusal } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox } from "./sandbox-store.mjs";
 
 /**
@@ -104,6 +104,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	});
 	if (result.refused) return fail(err, result.message);
 	if (result.error) return fail(err, `could not start docker: ${result.error.message}`);
+	if (result.detached) out(`detached: ${sandboxContainerName(jobId)} is still running, and its egress network stays until it exits -- \`docker attach ${sandboxContainerName(jobId)}\` to return\n`);
 	return result.code ?? 0;
 }
 

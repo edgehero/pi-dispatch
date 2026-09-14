@@ -84,8 +84,9 @@ pull request on your own machine — and the container still applies every isola
 ## No credentials, and why
 
 A sandbox carries no `GITHUB_TOKEN`, no `GH_TOKEN`, no GitLab/Forgejo/Azure token, and no provider API
-key. The env is at most two variables: `TERM` and `TMOUT`. Both are dropped when they have nothing to say,
-so an unset host `TERM` or `PI_SANDBOX_IDLE_MINUTES=0` emits nothing rather than an empty string.
+key. The env is `TERM` and `TMOUT`, plus four proxy variables when egress is on. `TERM` and `TMOUT` are
+dropped when they have nothing to say, so an unset host `TERM` or `PI_SANDBOX_IDLE_MINUTES=0` emits nothing
+rather than an empty string.
 
 This is not a precaution that could be relaxed with a flag. A job's credential is minted for that job,
 scoped to that repository, and short-lived (`CONST-TOKEN-SCOPED-PER-JOB`); a shell you can type into is
@@ -94,11 +95,17 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 
 ## Egress
 
-A sandbox lands on **whatever network the job did**, whether you open it from the CLI or from the panel. By
-default that is its own `--internal` network with no route anywhere except the allowlist proxy; with
-`PI_EGRESS=0` it is Docker's default bridge and the whole internet, which is what `SECURITY.md` discloses.
-(Before #277 a sandbox opened from the panel skipped the network and got the whole internet even with the
-policy on. If you rely on the policy for sandboxes, run a version that carries #277.) The policy, how to change it, and a
+A sandbox lands on **the network your egress setting gives a job**, whether you open it from the CLI or from
+the panel. By default that is its own `--internal` network with no route anywhere except the allowlist
+proxy; with `PI_EGRESS=0` it is Docker's default bridge and the whole internet, which is what `SECURITY.md`
+discloses. The setting is read where you open the sandbox: the CLI reads your deployment's configuration,
+and the panel reads the environment pi was started in, so set `PI_EGRESS` there too if you only set it in
+`.env` (the panel refuses rather than guessing, and says so). (Before #277 a sandbox opened from the panel
+skipped the network and got the whole internet even with the policy on. If you rely on the policy for
+sandboxes, run a version that carries #277.)
+
+If you detach from a sandbox shell (Ctrl-P Ctrl-Q), it keeps running with its network; the next time you open
+that run, a network left behind by a closed terminal is cleaned up first. The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a

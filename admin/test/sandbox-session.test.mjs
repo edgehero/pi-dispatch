@@ -84,7 +84,7 @@ test("a sandbox opened from the panel lands on its own egress network, like the 
   assert.equal(launched.length, 1);
   assert.ok(launched[0].includes("--network=pi-sandbox-gh-1-net"));
   assert.ok(launched[0].some((a) => a.startsWith("HTTPS_PROXY=")));
-  assert.deepEqual(docker.slice(0, 1), ["network create --internal pi-sandbox-gh-1-net"]);
+  assert.ok(docker.indexOf("network create --internal pi-sandbox-gh-1-net") >= 0, "the session's own network is created");
   assert.equal(docker.at(-1), "network rm pi-sandbox-gh-1-net", "and removes it when the shell exits");
   assert.match(written.join(""), /no credentials are set/);
 
@@ -109,4 +109,21 @@ test("the panel refuses what the CLI refuses: another venue, a running sandbox, 
   await mod.openSandboxSession({ sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24 }, "gh-1", typo.io);
   assert.match(typo.written.join(""), /PI_EGRESS must be exactly/);
   assert.deepEqual(typo.launched, [], "never the open network on a typo");
+});
+
+test("a network the panel cannot create names where the panel reads the egress setting (#277)", async () => {
+  // A deployment that sets PI_EGRESS=0 only in its .env reads as armed here; the refusal must not just blame a
+  // proxy that deployment never runs.
+  const failing = panelIo({
+    spawnNetwork: (cmd, args) => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit("close", args[1] === "create" ? 1 : 0));
+      return child;
+    },
+  });
+  await mod.openSandboxSession({ sandboxDir: retainedRoot({ backend: "local" }), sandboxRetentionHours: 24 }, "gh-1", failing.io);
+  const text = failing.written.join("");
+  assert.match(text, /could not create the egress network/);
+  assert.match(text, /reads PI_EGRESS and PI_EGRESS_PROXY from the environment pi runs in/);
+  assert.deepEqual(failing.launched, []);
 });

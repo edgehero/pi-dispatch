@@ -60,7 +60,7 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor } from "./backends.mjs";
-import { DEFAULT_EGRESS_PROXY, egressArmed } from "./egress.mjs";
+import { egressArmed, egressProxyName } from "./egress.mjs";
 import { installedUnitPaths, readUnitSeam } from "./service.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
@@ -2297,7 +2297,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		armed = true;
 	}
 	if (!armed) return [];
-	const proxy = env.PI_EGRESS_PROXY || DEFAULT_EGRESS_PROXY;
+	const proxy = egressProxyName(env);
 	const checks = [];
 
 	if (dockerCode !== 0) {
