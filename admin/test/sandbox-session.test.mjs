@@ -48,5 +48,5 @@ test("a manifest that names no venue is not advertised either", () => {
   const paths = { sandboxDir: retainedRoot({ backend: null }), sandboxRetentionHours: 24 };
   const info = mod.readSandboxInfo(paths, "gh-1", { now: () => NOW });
   assert.equal(info.retained, false);
-  assert.match(info.reason, /an unrecorded venue/);
+  assert.match(info.reason, /no venue recorded/);
 });

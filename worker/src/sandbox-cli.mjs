@@ -165,7 +165,9 @@ function renderList({ config, live, out, now }) {
 		// A run this host cannot re-open is still listed (it is still retained and still swept), but not as
 		// time left on something re-openable (#277): the list answers "what can I open", and the venue says why not.
 		const state = sandboxVenueRefusal({ jobId: row.jobId, manifest: row })
-			? `not here (ran on ${typeof row.backend === "string" && row.backend !== "" ? row.backend : "an unrecorded venue"})`
+			? typeof row.backend === "string" && row.backend !== ""
+				? `not here (ran on ${row.backend})`
+				: "not openable (no venue recorded)"
 			: live.has(sanitizeJobId(row.jobId))
 				? "RUNNING"
 				: remaining(row, config.sandboxRetentionHours, now());

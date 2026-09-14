@@ -3250,9 +3250,9 @@ a tunnel.
   nothing. `config.mjs` re-tags the first message as a config error and does nothing else.
 - **`PI_BACKENDS` must contain `local`.** When this entry was written nothing SELECTED a backend and
   `start.mjs` built `local` unconditionally, so a set excluding it would have described jobs running
-  somewhere they did not. Selection has shipped since (the registry below), and the rule stayed for a reason
-  of its own: `PI_BACKENDS[0]` is where a job naming no venue is dispatched, and `parseBackendList` refuses a
-  set without `local` because the default must be a venue this build can run. (Corrected under #277; the
+  somewhere they did not. Selection has shipped since (the registry below) and the rule stayed. It does not
+  by itself make `PI_BACKENDS[0]` runnable -- `far,local` would pass it -- what does is that an unknown name is
+  refused at parse and the registry refuses at boot a default it does not hold. (Corrected under #277; the
   earlier "Both come out in the slice that wires selection" did not happen and this bullet was not updated
   when that slice shipped.)
 - **`doctor` is what makes the declaration admissible at all.** A table of guarantees nothing ever prints is

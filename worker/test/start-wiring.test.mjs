@@ -1023,7 +1023,8 @@ test("every session bound config reads is actually handed to the store", () => {
 		// #277: the venue a transcript is stamped with and gated on, from the registry's own default.
 		["defaultBackend", "config.defaultBackend"],
 	]) {
-		assert.match(call[0], new RegExp(`${option}:\\s*${setting.replace(".", "\\.")}`), `${option} must be wired from ${setting}`);
+		// Anchored to a whole line, so a commented-out wire or a longer name (`config.defaultBackends`) fails.
+		assert.match(call[0], new RegExp(`^\\s*${option}:\\s*${setting.replace(".", "\\.")},\\s*$`, "m"), `${option} must be wired from ${setting}`);
 	}
 });
 
@@ -1034,14 +1035,15 @@ test("the sandbox stamp resolves its venue with the same default (#277)", () => 
 	const from = src.indexOf("prepareWorkspace: makePrepareWorkspace({");
 	const to = src.indexOf("preparers: makeForgePreparers(", from);
 	assert.ok(from >= 0 && to > from, "the preparer is constructed where this pin expects");
-	assert.match(src.slice(from, to), /defaultBackend:\s*config\.defaultBackend/, "the retained manifest records the venue the registry dispatches to");
+	// A whole line: a `//` comment or `config.defaultBackends` must not satisfy it.
+	assert.match(src.slice(from, to), /^\s*defaultBackend:\s*config\.defaultBackend,\s*$/m, "the retained manifest records the venue the registry dispatches to");
 });
 
 test("the record's default venue and the registry's come from the one config value (#277)", () => {
 	// Asserted against the SOURCE so it runs without Valkey. Two defaults read from two places would let the
 	// record name a venue the registry never dispatched to, and nothing else would notice.
 	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	assert.match(src, /buildRecord\(\{[^}]*defaultBackend:\s*config\.defaultBackend/, "recordRun passes the default venue to buildRecord");
+	assert.match(src, /buildRecord\(\{[^}]*defaultBackend:\s*config\.defaultBackend\s*\}\)/, "recordRun passes the default venue to buildRecord");
 	assert.match(src, /defaultName:\s*config\.defaultBackend/, "and the registry is built with the same value");
 });
 

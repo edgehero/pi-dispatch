@@ -150,6 +150,11 @@ test("a stamp with no venue records null, never a guessed local, and a pin keeps
 	const at = Date.parse("2026-08-01T12:00:00Z");
 	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-2", pinDays: 7, fs: pinFs, now: () => at }).pinned, true);
 	assert.equal(JSON.parse(pinFs.files["/sbx/gh-2/manifest.json"]).backend, "far", "a pin must not turn a far run into an unkeyed, local-reading one");
+	// And the other direction: a manifest from before the key existed stays keyless through a pin, because a
+	// pin that wrote `backend: null` into it would make an old local run unopenable.
+	const oldFs = fakeFs({ files: { "/sbx/gh-3/manifest.json": JSON.stringify({ jobId: "gh-3", createdAt: "2026-08-01T00:00:00Z" }) } });
+	assert.equal(pinSandbox({ sandboxDir: "/sbx", jobId: "gh-3", pinDays: 7, fs: oldFs, now: () => at }).pinned, true);
+	assert.equal(Object.hasOwn(JSON.parse(oldFs.files["/sbx/gh-3/manifest.json"]), "backend"), false);
 });
 
 test("a pin is a TIMESTAMP, never a boolean -- there is no keep-forever", () => {

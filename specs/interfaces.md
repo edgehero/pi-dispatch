@@ -1465,8 +1465,8 @@ sibling rather than an extension of the GitHub one for the same reason.
   URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS=0`, the argv is
   byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed. Given a manifest whose `backend` names a
   venue other than `local`, or names nothing, `resolveSandbox` refuses it as `venue-unreachable` before the
-  image and workspace checks, the CLI exits 1 naming the venue and launches nothing, the panel's
-  `readSandboxInfo` reports it not re-openable, and `--list` shows it without time left; given a manifest with
+  image and workspace checks, the CLI exits 1 naming the venue (or saying none is recorded) and launches
+  nothing, the panel's `readSandboxInfo` reports it not re-openable, and `--list` shows it without time left; given a manifest with
   no `backend` key, it resolves as a local run did before.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET

@@ -1756,8 +1756,8 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now }: {
   // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
   // verdict, which is what the dashboard's key guard reads.
   if (sandboxVenueRefusal({ jobId, manifest })) {
-    const venue = typeof manifest.backend === "string" && manifest.backend !== "" ? manifest.backend : "an unrecorded venue";
-    return { retained: false, reason: `not reopenable here (ran on ${venue})` };
+    const named = typeof manifest.backend === "string" && manifest.backend !== "";
+    return { retained: false, reason: named ? `not reopenable here (ran on ${manifest.backend})` : "not reopenable (no venue recorded)" };
   }
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");

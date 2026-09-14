@@ -296,6 +296,14 @@ test("a prepared job carries the stamp cleanup needs to retain it (REQ-RESURRECT
 		assert.deepEqual(plain.sandbox, { jobId: "gh-7", kind: "github", image: "pi-job:deployment-default", backend: "local" });
 		// #277: the venue is resolved exactly as the registry dispatches it, so a trigger's own run.backend wins.
 		assert.equal((await prepareWorkspace({ kind: "github", repo: "a/b", backend: "far" }, "tok", { queueJobId: "gh-9" })).sandbox.backend, "far");
+		// No default wired (a DI seam) stamps a null venue, which the sandbox refuses -- never a guessed local.
+		const unwired = makePrepareWorkspace({
+			jobsDir,
+			jobImage: "pi-job:deployment-default",
+			preparers: { github: async (_j, _t, { jobDir }) => ({ jobDir, workspace: join(jobDir, "workspace"), sha: "s" }) },
+			forgeFor: () => ({ host: { resolveDefaultBranchSha: async () => ({ sha: "s" }) } }),
+		});
+		assert.equal((await unwired({ kind: "github", repo: "a/b" }, "tok", { queueJobId: "gh-10" })).sandbox.backend, null);
 
 		// A trigger's own run.image wins, resolved through the SAME function the preflight and the runner
 		// use -- so the tag that was checked, the tag that ran and the tag a sandbox re-opens are one answer.

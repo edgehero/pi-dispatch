@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
@@ -135,6 +136,17 @@ test("resolveSandbox refuses a run from a venue this host did not run, ahead of 
 	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest: { ...manifest, backend: "local" } }), null);
 	// A manifest with no key at all predates venue attribution, and ran on local.
 	assert.equal(sandboxVenueRefusal({ jobId: "j1", manifest }), null);
+});
+
+test("held means the local adapter BY NAME, pinned in the source because no behaviour can tell it apart yet (#277)", () => {
+	// While `local` is the table's only entry, "venue === DEFAULT_BACKEND" and "backendFor(venue).remote === false"
+	// answer identically for every string, so no behavioural test can catch a swap to the second -- which the
+	// design rejects, because a future non-remote venue on another runtime would then be reopened under docker.
+	// The relation is pinned here as text rather than manufactured as behaviour.
+	const src = readFileSync(new URL("../src/sandbox.mjs", import.meta.url), "utf8");
+	const body = src.slice(src.indexOf("export function sandboxVenueRefusal"), src.indexOf("export function resolveSandbox"));
+	assert.match(body, /if \(venue === DEFAULT_BACKEND\) return null;/);
+	assert.doesNotMatch(body, /\.remote/);
 });
 
 test("resolveSandbox yields the manifest and the container name when the run is intact", () => {

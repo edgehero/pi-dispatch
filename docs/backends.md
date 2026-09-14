@@ -221,7 +221,7 @@ a trigger selects it with `run.backend`.
   from reopening.
 - **Every job's venue is recorded, and your adapter supplies nothing for it.** The run record's `backend`,
   the session store's venue stamp and the sandbox manifest all record the venue the registry resolved, so a
-  job that landed on the wrong venue shows it, and a resumed transcript is never handed to a venue that did
-  not write it.
+  job that landed on the wrong venue shows it, and a resumed transcript is refused to a venue that did not
+  write it (outside the narrow residuals `INT-SESSION-STORE-CONTRACT` names).
 - **A local or cron trigger cannot run remotely.** The operator's own folder has to be bind-mounted and
   edited in place. There is no volume to hide behind.
