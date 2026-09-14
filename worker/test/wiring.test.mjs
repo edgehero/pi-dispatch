@@ -850,6 +850,35 @@ test("(a2) a venue this worker never built is refused AND recorded, not retried 
 	assert.equal(rec.backend, "far", "the one fact the refusal is about; the default would claim a venue the registry never chose");
 });
 
+test("(a3) a REGISTERED venue whose containerName throws is not swallowed: nothing is reserved and nothing runs (#277)", { skip }, async () => {
+	// The pickup catch is for the registry's refusal of an unheld venue ONLY. A broken adapter's own throw
+	// caught there would run the job under a null container name that the timeout could not stop by name.
+	const broken = {
+		name: "local",
+		runContainer: async () => ({ code: 0 }),
+		imagePreflight: async () => ({}),
+		egressPreflight: async () => ({}),
+		stopContainer: async () => {},
+		reap: async () => ({ reaped: true }),
+		neverStartedExits: [125, 126, 127],
+		containerName: () => {
+			throw new Error("adapter: cannot name this job");
+		},
+	};
+	const registry = makeBackendRegistry({ bundles: [broken], defaultName: "local", blessed: ["local"] });
+	const { recordRun } = makeRealRecordRun();
+	let ran = false;
+	let reserved = 0;
+	const processor = realRecordProcessor(recordRun, {
+		containerName: registry.containerName,
+		runContainer: async () => ((ran = true), { code: 0, aborted: false, turns: 1 }),
+		redis: { async incr() { reserved++; return 1; }, async expire() {}, async decr() {} },
+	});
+	await assert.rejects(() => processor(secretJob("j-broken"), "tok", new AbortController().signal), /adapter: cannot name this job/);
+	assert.equal(ran, false, "no container starts under a name nothing could stop");
+	assert.equal(reserved, 0, "and no budget is reserved for it");
+});
+
 test("(b) infra exit 1: a failed record is written on the catch path BEFORE InfraRetry rethrows", { skip }, async () => {
 	const { recordRun, writes } = makeRealRecordRun();
 	const job = secretJob("j1");

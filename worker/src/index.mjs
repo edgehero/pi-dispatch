@@ -1,5 +1,6 @@
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { jobContainerName } from "./backend-local.mjs";
+import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
 import { targetFor } from "./run-history.mjs";
@@ -543,9 +544,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// finally belongs to THAT try, so an unguarded throw here would leak the hold and wedge the
 			// scope until a worker restart. Nothing in this block throws past its own guards (setTimeout,
 			// setInterval and addEventListener on the bullmq-allocated controller are total at processor arity
-			// 3, the cancel poll's redis reads happen inside its own guarded ticks, and the registry's
-			// `containerName` -- which does throw, for a venue it does not hold -- is caught at its call); the
-			// guard below is structural, not observational.
+			// 3, and the cancel poll's redis reads happen inside its own guarded ticks). `containerName` is the
+			// exception, and it is named: the registry's refusal of an unheld venue is caught at the call, and
+			// anything else it throws propagates to the catch below, which releases what was acquired.
 			startedAt = new Date().toISOString();
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
@@ -563,17 +564,23 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// the trigger's, which lives in `data`. Built once so the name and the stop cannot resolve
 			// different backends -- the whole reason the name moved onto the registry in the first place.
 			venue = { ...job.data, id: job.id };
-			// The one call in this block that CAN throw: the registry refuses a venue it does not hold (#277).
-			// Unguarded, that throw skipped `runJob` and every `recordRun` below, so a job naming a venue this
-			// worker never built -- a producer on a newer build that knows a venue this one does not -- left
-			// NO record, no refusal comment, and was retried as if the infrastructure had failed. Such a venue
-			// is never blessed here (the registry refuses a blessed name it does not hold, at boot), so
-			// `runJob` refuses it pre-spend as `backend-unblessed` and records the venue it named; nothing
-			// starts, so there is no container for this name to stop. A null name reaches the abort path's
-			// stop only if an abort lands in that window, and that stop fails into its own log line.
+			// The registry REFUSES a venue it does not hold (#277), and that one refusal is caught here.
+			// Unguarded, it skipped `runJob` and every `recordRun` below, so a job naming a venue this worker
+			// never built -- a producer on a newer build that knows a venue this one does not -- left NO
+			// record, no refusal comment, and was retried as if the infrastructure had failed. Such a venue is
+			// never blessed here (the registry refuses a blessed name it does not hold, at boot), so `runJob`
+			// refuses it pre-spend -- as `backend-unblessed`, or by an earlier refusal that happens to win --
+			// and records it; nothing starts, so there is no container for this name to stop. A null name
+			// reaches the abort path's stop only if an abort lands in that window, and that stop fails into
+			// its own log line.
+			//
+			// ONLY that refusal, by its code. Any other throw is a REGISTERED venue's own `containerName`
+			// failing, a broken adapter: swallowing it would reserve the budget and start a container under a
+			// null name that the timeout could not stop and no reaper sweeps, so it propagates as before.
 			try {
 				name = containerName(venue);
-			} catch {
+			} catch (err) {
+				if (err?.code !== BACKEND_NOT_REGISTERED) throw err;
 				name = null;
 			}
 			timer = setTimeout(() => {

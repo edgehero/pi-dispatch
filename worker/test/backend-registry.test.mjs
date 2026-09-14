@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { makeBackendRegistry, reapAll, resolveBackendName } from "../src/backend-registry.mjs";
+import { BACKEND_NOT_REGISTERED, makeBackendRegistry, reapAll, resolveBackendName } from "../src/backend-registry.mjs";
 import { containerSpec, copyDowngrades, transfersFromSpec } from "../src/container-spec.mjs";
 
 const bundle = (name, calls = []) => ({
@@ -37,8 +37,8 @@ test("every per-job function resolves the SAME way, so none can be forgotten", (
 });
 
 test("dispatch resolves a venue exactly as the stores that record it do (#277)", () => {
-	// The run record, the session stamp and the sandbox manifest write down `resolveBackendName`'s answer.
-	// If the registry resolved any other way, those stores would record a venue dispatch never chose.
+	// The run record writes down `resolveBackendName`'s answer. If the registry resolved any other way, the
+	// record would name a venue dispatch never chose.
 	const calls = [];
 	const reg = makeBackendRegistry({ bundles: [bundle("local", calls), bundle("b", calls)], defaultName: "local" });
 	for (const data of [{}, { backend: "b" }, null, undefined]) {
@@ -57,6 +57,8 @@ test("dispatch resolves a venue exactly as the stores that record it do (#277)",
 	assert.throws(() => reg.backendFor({ backend: "" }), /no backend named ""/);
 	assert.equal(resolveBackendName({ backend: null }, "local"), null);
 	assert.throws(() => reg.backendFor({ backend: null }), /no backend named null/);
+	// The refusal carries a CODE, which is what the processor's pickup catches -- and nothing else.
+	assert.throws(() => reg.containerName({ id: "j", backend: "nope" }), (err) => err.code === BACKEND_NOT_REGISTERED);
 	assert.equal(resolveBackendName({}, undefined), null, "no default is a seam, and resolves to nothing rather than a guess");
 	assert.equal(resolveBackendName({ id: "j", data: { backend: "b" } }, "local"), "local", "a BullMQ wrapper is not job data");
 });

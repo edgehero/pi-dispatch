@@ -36,8 +36,8 @@ test("every backend declares whether it is REMOTE, because a missing key would r
 });
 
 test("an artifact that names no venue was produced on a LOCAL one, which the table still holds (#277)", () => {
-	// An unstamped transcript or an unkeyed sandbox manifest predates venue attribution, when `local` was the
-	// only entry. Readers treat it as that venue, so it has to stay a real, non-remote entry.
+	// An artifact recorded before venue attribution predates every entry but `local`, so whatever reads such an
+	// artifact as this venue needs it to stay a real, non-remote entry.
 	assert.equal(UNATTRIBUTED_BACKEND, "local");
 	assert.ok(Object.hasOwn(BACKENDS, UNATTRIBUTED_BACKEND));
 	assert.equal(BACKENDS[UNATTRIBUTED_BACKEND].remote, false);
