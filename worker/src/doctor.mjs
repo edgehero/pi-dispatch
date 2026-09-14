@@ -2404,8 +2404,8 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
 		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
-		// allow-all squid answered 503 for it and let `example.com` through). `example.com` is reserved for exactly
-		// this use, answers everywhere, and is contacted only when the proxy lets the request out, which is the finding.
+		// allow-all squid answered 503 for it and let `example.com` through). `example.com` is reserved for documentation
+		// (RFC 2606), answers everywhere, and is contacted only when the proxy lets the request out, which is the finding.
 		for (const [slug, host, url, want] of [
 			["provider", "the provider", "https://api.anthropic.com/v1/messages", true],
 			["unlisted", "an unlisted host", "https://example.com/", false],
@@ -2441,7 +2441,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `Egress policy probe for ${host} did not run (docker run exited ${probe.code})`,
+					label: `Egress policy probe for ${host} did not run (${probe.code === null ? "docker run did not finish" : `docker run exited ${probe.code}`})`,
 					fix: "re-run doctor; if it persists, run the job image by hand to see why a container on this network will not start",
 					readBack: { property: "egress", want, reached: null },
 				});
@@ -2974,10 +2974,14 @@ export async function liveChecks(env, seams, facts) {
 		isAlive,
 		announce: (line) => out(`\nread back on local: ${line}\n`),
 	});
-	if (!result.ran) {
-		return result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: not run -- ${note}`, fix: "the declarations above are unchanged and still unverified; fix what stopped the probe and re-run `pi-dispatch doctor --live`" }));
-	}
 	const checks = (result.swept ?? []).map((what) => ({ ok: true, label: `read back on local: removed ${what}, left by an interrupted --live run` }));
+	const noteChecks = () => result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand now, or let the next `pi-dispatch doctor --live` remove it once this process has exited" }));
+	if (!result.ran) {
+		// What was swept and what could not be removed are said on this path too: both are host changes, and neither
+		// depends on whether a reading was made.
+		checks.push({ ok: false, warn: true, label: `read back on local: not run -- ${result.reason}`, fix: "the declarations above are unchanged and still unverified; fix what stopped the probe and re-run `pi-dispatch doctor --live`" }, ...noteChecks());
+		return checks;
+	}
 	checks.push(
 		...result.verdicts.map((v) => {
 			if (v.ok) return { ok: true, label: `read back on local: ${v.property} holds (${v.detail})` };
@@ -2987,7 +2991,7 @@ export async function liveChecks(env, seams, facts) {
 			return { ok: false, label: `read back on local: ${v.property} does NOT hold -- declared ${declared}, observed: ${v.detail}`, fix };
 		}),
 	);
-	for (const note of result.notes) checks.push({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand now, or let the next `pi-dispatch doctor --live` remove it once this process has exited" });
+	checks.push(...noteChecks());
 	// What a green read-back does NOT mean, on a line of its own so a row of ✓ is never read as more than it is.
 	// env-internal DOCKER_CONTENT_TRUST: the docker CLI's own variable, read here only to say that it changes what
 	// --pull=never governs; pi-dispatch sets nothing with it, so it is not a key of ours to document.

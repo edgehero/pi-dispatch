@@ -184,6 +184,9 @@ test("egress is folded from the canary: off or partial is not read back, a wrong
 	assert.match(leak.detail, /unlisted host was reached/);
 	assert.equal(egressVerdict({ armed: true, results: [{ want: true, reached: true }, { want: false, reached: null }] }).warn, true, "a probe that did not run is no reading, never a deny");
 	assert.match(egressVerdict({ armed: null, results: [] }).detail, /could not be read/, "a malformed PI_EGRESS is not reported as off");
+	const reachedWhileProviderUnread = egressVerdict({ armed: true, results: [{ want: true, reached: null }, { want: false, reached: true }] });
+	assert.equal(reachedWhileProviderUnread.ok, false);
+	assert.notEqual(reachedWhileProviderUnread.warn, true, "a reached unlisted host is a finding even when the other probe did not run");
 });
 
 test("containerIdOf takes the ID docker run -d printed, and nothing else", () => {
@@ -286,7 +289,7 @@ test("a docker CLI not observed local runs NOTHING: no container, no fixture", a
 		assert.equal(result.ran, false);
 		assert.deepEqual(docker.calls, []);
 		assert.deepEqual(readdirSync(args.jobsDir), []);
-		assert.match(result.notes[0], /not observed to point at this host/);
+		assert.match(result.reason, /not observed to point at this host/);
 	}
 });
 
@@ -298,6 +301,14 @@ test("a probe container that never started removes nothing it did not create, an
 	assert.deepEqual(docker.calls.map((a) => a[0]), ["ps", "run", "rm"], "no inspect, no exec, no pin");
 	assert.deepEqual(docker.calls.at(-1), ["rm", "-f", "pi-dispatch-live-probe-4242-n0nce"], "no ID came back, so its own pid-and-nonce name, in case the create landed");
 	assert.deepEqual(readdirSync(args.jobsDir), []);
+});
+
+test("on a not-run path a removal that fails is still reported, beside the reason", async () => {
+	const docker = fakeDocker({ run: async () => ({ code: 127, stdout: `${ID}\n`, stderr: "" }), rm: async () => ({ code: 1, stdout: "", stderr: "" }) });
+	const result = await runLiveProbes(probeArgs(docker));
+	assert.equal(result.ran, false);
+	assert.match(result.reason, /did not start/);
+	assert.match(result.notes.join("\n"), new RegExp(`docker rm -f ${ID}`), "the finally's note reaches the caller on this path too");
 });
 
 test("a start that printed an ID and then failed or timed out is removed BY THAT ID: --rm never runs for it", async () => {
@@ -318,7 +329,7 @@ test("a fixture that cannot be created is a reason not to run, never an exceptio
 		const args = probeArgs(docker, { fs });
 		const result = await runLiveProbes(args);
 		assert.equal(result.ran, false, name);
-		assert.match(result.notes[0], /fixture could not be created .*\((EACCES|ELOOP)\)/);
+		assert.match(result.reason, /fixture could not be created .*\((EACCES|ELOOP)\)/);
 		assert.deepEqual(readdirSync(args.jobsDir), [], `${name}: nothing mkdtemp made is left behind`);
 	}
 	assert.ok(!docker.calls.some((a) => a[0] === "run"), "no container");
@@ -333,6 +344,9 @@ test("the endpoint is asked AGAIN before the first command, and a context switch
 	assert.equal(result.ran, false);
 	assert.deepEqual(docker.calls, []);
 	assert.deepEqual(announced, []);
+	const unresolved = fakeDocker();
+	assert.equal((await runLiveProbes(probeArgs(unresolved, { resolveEndpoint: async () => ({ local: null, reason: "timeout" }) }))).ran, false, "an unanswered re-read is not local either");
+	assert.deepEqual(unresolved.calls, []);
 	assert.equal((await runLiveProbes(probeArgs(fakeDocker(), { resolveEndpoint: async () => LOCAL }))).ran, true);
 });
 
@@ -416,6 +430,8 @@ test("the container sweep removes a probe or pin a DEAD pid left, by ID, and say
 	assert.deepEqual(swept, ["container pi-dispatch-live-probe-100-abc123", "container pi-dispatch-live-pin-100-abc123"]);
 	assert.deepEqual(calls.filter((a) => a[0] === "rm").map((a) => a[2]), ["1".repeat(12), "2".repeat(12)]);
 	assert.deepEqual(await sweepStaleContainers({ step: async () => ({ code: 1, stdout: "" }), pid: 1, isAlive: () => false }), [], "a docker that cannot list sweeps nothing");
+	const refusing = async (args) => (args[0] === "ps" ? { code: 0, stdout: listing } : { code: 1, stdout: "" });
+	assert.deepEqual(await sweepStaleContainers({ step: refusing, pid: 300, isAlive: () => false }), [], "a removal that failed is not reported as done");
 });
 
 test("the fixture is created under jobsDir, resolved, and traversable by the job user", async () => {

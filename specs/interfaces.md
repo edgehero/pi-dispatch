@@ -1531,12 +1531,14 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     per run.
   - **Shown first, removed by ID.** Doctor prints the probe's name, image and fixture location before the first
     docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` whenever one was printed,
-    whatever the exit (a start that failed or timed out after the create leaves a container `--rm` never
-    removes), falls back to the pid-and-nonce NAME only when no ID came back, does the same for the pinning
-    container, and removes the fixture. A removal that fails is a ⚠ carrying the command. **What an interrupted
+    whatever the exit (a CLI killed or timed out after the create can leave a container that never started, which
+    `--rm` does not remove), falls back to the pid-and-nonce NAME only when no ID came back, does the same for the
+    pinning container, and removes the fixture. A removal that fails is a ⚠ carrying the command, whether or not
+    anything was read back. **What an interrupted
     run leaves, the next removes, and says so**: fixtures of exactly `mkdtemp`'s shape that are real directories,
-    and probe or pinning containers by name shape, in both cases only for a PID no longer alive. A probe that
-    had STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
+    and probe or pinning containers by name shape, in both cases only for a PID no longer alive, and said on
+    every path. The shape is narrow, not unique: the jobs dir is not a place for anything else. A probe that had
+    STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
   - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
     a pass:
     - `isolation`: one `docker exec` of a constant script reading `/proc/1/status` and the cgroup files. `CapBnd`
@@ -1562,8 +1564,9 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     processor), mints a token, or puts a key in a container, and no check it renders carries a `fixAction`.
   - **Other venues** read back through the conformance harness: `runBackendConformance(backend, { readBack })`
     takes the same verdicts, keyed by property or as this module's array, for `READ_BACK_BY_A_LIVE_PROBE`. A
-    property the report omits, marks `warn` (whatever its `ok`), names twice, or carries only by inheritance
-    abstains; one read as not holding fails a backend that declares it `enforced` or `asserted`.
+    property the report omits, marks with any truthy `warn` (whatever its `ok`), or carries only by inheritance
+    abstains; one read as not holding fails a backend that declares it `enforced` or `asserted`, and so does one
+    the report names more than once with any failing reading among them (otherwise a repeat abstains).
 - **Why**: `doctor` printed the declarations and nothing read them back (#278). A probe with its own argv would
   read back a container no job is, which is exactly the second place for the boundary to live that
   `INT-SANDBOX-CONTRACT` calls its load-bearing sentence.
@@ -1576,11 +1579,12 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
   `Unable to find image`, imagePinning fails; given a root image, nonRoot fails and doctor exits 1. Given a docker
   CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
   container that vanishes, or a step that throws, the probe container is removed by its ID and the fixture is
-  removed; given a `docker run -d` that failed, no removal is attempted; two concurrent runs remove only their own
-  containers. Given a `docker run -d` that printed an ID and then failed, that ID is removed. Given a fixture that
+  removed; given a `docker run -d` that printed no ID, the removal is by its pid-and-nonce name; two concurrent runs
+  remove only their own containers. Given a `docker run -d` that printed an ID and then failed, that ID is removed. Given a fixture that
   cannot be created, nothing runs and doctor reports it. Given a probe or fixture a dead PID left, the next run
   removes it and names it; given a directory that is not of `mkdtemp`'s shape, or a symlink, it is not touched.
-  Given an allow-everything proxy, the egress deny probe reads as reached. Given `doctor` without `--live`, its
+  Given an allow-everything proxy, the egress deny probe reads as reached and egress fails, even when the provider
+  probe did not run. Given `doctor` without `--live`, its
   output and its spawns are unchanged.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET

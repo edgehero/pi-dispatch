@@ -241,16 +241,18 @@ export function egressVerdict({ armed, results }) {
 	if (armed === null) return notReadBack("egress", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("egress", "PI_EGRESS is off, so there is no policy to read back");
 	if (!Array.isArray(results) || results.length < 2) return notReadBack("egress", "the egress canary did not run both probes (see the egress lines above)");
-	if (results.some((r) => typeof r.reached !== "boolean")) return notReadBack("egress", "an egress probe did not run to an answer (see the egress lines above)");
-	const wrong = results.filter((r) => r.reached !== r.want);
+	// A WRONG reading fails first, whatever else is missing: an unlisted host that was reached is a finding even when
+	// the provider probe did not run, and reporting it as merely unread would pass doctor over it.
+	const wrong = results.filter((r) => typeof r.reached === "boolean" && r.reached !== r.want);
 	if (wrong.length > 0) return verdict("egress", false, wrong.map((r) => (r.want ? "the provider was not reached" : "an unlisted host was reached")).join("; "));
+	if (results.some((r) => typeof r.reached !== "boolean")) return notReadBack("egress", "an egress probe did not run to an answer (see the egress lines above)");
 	return verdict("egress", true, "the provider was reached and an unlisted host was not");
 }
 
 /**
- * The whole sequence. Returns `{ ran, verdicts, notes, swept }`: `ran` false with one note when nothing may run; the
- * verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed; `swept` for what an
- * interrupted earlier run left and this one removed.
+ * The whole sequence. Returns `{ ran, reason, verdicts, notes, swept }`: `ran` false with a `reason` when nothing was
+ * read back; the verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed, on
+ * either path; `swept` for what an interrupted earlier run left and this one removed, on either path too.
  *
  * Order: precondition, a FRESH endpoint read, the announcement, the sweep, the fixture, the probe container, the
  * reads, the pinning probe -- and a `finally` that removes each container BY THE ID `run -d` printed (by its
@@ -258,10 +260,11 @@ export function egressVerdict({ armed, results }) {
  * fixture, whatever happened above it.
  */
 export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS }) {
-	const notLocal = { ran: false, verdicts: [], notes: ["this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run"], swept: [] };
+	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
+	const notLocal = notRun("this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run");
 	if (endpoint?.local !== true) return notLocal;
-	if (dockerReachable !== true) return { ran: false, verdicts: [], notes: ["the Docker daemon did not answer, so no container was run"], swept: [] };
-	if (imagePresent !== true) return { ran: false, verdicts: [], notes: [`the job image ${image} is not present, so no container was run`], swept: [] };
+	if (dockerReachable !== true) return notRun("the Docker daemon did not answer, so no container was run");
+	if (imagePresent !== true) return notRun(`the job image ${image} is not present, so no container was run`);
 	// ASKED AGAIN, immediately before the first command. The answer above came from the start of doctor's run, and
 	// prompts and slow checks sit between the two; a `docker context use` in that window would otherwise send every
 	// read below to another machine and report it as this one (the per-job re-read in `start.mjs`, for the same reason).
@@ -296,16 +299,18 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 				fs.chmodSync(dir, 0o755);
 			}
 		} catch (err) {
-			return { ran: false, verdicts: [], notes: [`the fixture could not be created under ${JSON.stringify(jobsDir)} (${err?.code ?? "error"}), so no container was run`], swept };
+			// The SAME `notes` array the `finally` below pushes into, so a removal that fails there is still reported.
+			return { ran: false, reason: `the fixture could not be created under ${JSON.stringify(jobsDir)} (${err?.code ?? "error"}), so no container was run`, verdicts: [], notes, swept };
 		}
 
 		probeTried = true;
 		const started = await step(liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs) }));
-		// The ID is taken whenever one was printed, whatever the exit: a start that failed or timed out after the create
-		// still leaves a container, and `--rm` never runs for one that did not start.
+		// The ID is taken whenever one was printed, whatever the exit. A CLI killed or timed out after the create can
+		// leave a container that never started, which `--rm` does not remove; a start the daemon refused with `--rm` set
+		// is removed by the daemon (measured, exit 127), and removing it again is harmless.
 		probeId = containerIdOf(started);
 		if (started?.code !== 0 || probeId === null) {
-			return { ran: false, verdicts: [], notes: ["the probe container did not start, so nothing was read back"], swept };
+			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
 		}
 
 		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture })).mounts;
@@ -367,8 +372,10 @@ export function containerIdOf(result) {
  * A fixture left by a `--live` run that did not reach its `finally` (a Ctrl-C). Only an entry of EXACTLY the shape
  * `mkdtemp` makes (the prefix, a PID, six characters), only a real directory (a symlink is never followed or
  * removed), and only one whose PID is no longer alive, so a concurrent run's fixture is never pulled out from under
- * its container and nothing an operator named alike is touched. Returns what it removed, so it is said. Best effort:
- * a sweep that fails is not a reason not to probe.
+ * its container. The shape is NARROW, not unique: a directory an operator happened to name `pi-dispatch-live-<n>-xxxxxx`
+ * under the jobs dir, with no live process of that PID, is removed as well, which is why the jobs dir is not a place
+ * for anything else and why what is removed is said. PIDs are this host's: a `--live` run from inside a container
+ * that shares the host's docker numbers its own. Best effort: a sweep that fails is not a reason not to probe.
  */
 export function sweepStaleFixtures({ jobsDir, pid, fs, isAlive }) {
 	let entries;

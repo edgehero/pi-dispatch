@@ -3223,6 +3223,32 @@ test("doctor --live with PI_JOBS_DIR unset builds its fixture under the injected
 	assert.deepEqual(readdirSync(join(tmp, "pi-dispatch", "jobs")), [], "and removes it");
 });
 
+test("an egress probe that timed out or exited 1 is not run either, and doctor says which", async () => {
+	for (const [outcome, said] of [[null, /did not run \(docker run did not finish\)/], [1, /did not run \(docker run exited 1\)/]]) {
+		const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams({ ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": { code: outcome, output: "" } }));
+		assert.ok(checks.some((c) => said.test(c.label)), String(outcome));
+		assert.ok(!checks.some((c) => /denies an unlisted host/.test(c.label)), String(outcome));
+	}
+});
+
+test("doctor --live's not-run path still names what it swept", async () => {
+	const env = liveEnv();
+	mkdirSync(join(env.PI_JOBS_DIR, "pi-dispatch-live-99998-aB3xYz"));
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
+	const failing = { ...liveOk(), "docker run --name=pi-dispatch-live-probe-": { code: 125, output: "" } };
+	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...failing, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	assert.match(checks[0].label, /removed fixture pi-dispatch-live-99998-aB3xYz/);
+	assert.ok(checks.some((c) => /not run -- the probe container did not start/.test(c.label)));
+});
+
+test("doctor --live's not-writable localFolders failure keeps its own uid fix", async () => {
+	const env = liveEnv();
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
+	const notWritable = { ...liveOk(), [`docker exec ${LIVE_ID} sh -c if [ -w /workspace ]`]: { code: 0, output: "not-writable\n" } };
+	const checks = await liveChecks(env, { spawn: fakeSpawn({ ...notWritable, ...green }), liveFs, isAlive: () => false, pid: 1, nonce: "n" }, facts);
+	assert.match(checks.find((c) => /localFolders does NOT hold/.test(c.label)).fix, /uid 1001/);
+});
+
 test("an egress probe that did not RUN is reported as not run, and never passes for a deny", async () => {
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams({ ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": 125 }));
 	assert.ok(checks.some((c) => /Egress policy probe for an unlisted host did not run \(docker run exited 125\)/.test(c.label) && c.warn === true));

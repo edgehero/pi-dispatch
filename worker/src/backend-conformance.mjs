@@ -279,14 +279,22 @@ async function checkReadBack(backend, { readBack }) {
 		for (const property of Object.keys(raw)) report[property] = raw[property];
 	}
 	const declares = backend?.declares ?? {};
+	const claimed = (property) => declares[property] === "enforced" || declares[property] === "asserted";
+	// A reading counts only through its OWN `ok` and `warn`, and any truthy `warn` means not read back.
+	const failing = (v) => v && typeof v === "object" && Object.hasOwn(v, "ok") && v.ok === false && !v.warn;
 	return READ_BACK_BY_A_LIVE_PROBE.map((property) => {
-		if (repeated.has(property)) return abstain(property, "the readBack report names it more than once, so which reading holds is not known");
+		if (repeated.has(property)) {
+			// Ambiguous, but not in the backend's favour: any failing reading among the repeats fails a claimed property.
+			const failed = raw.filter((v) => v?.property === property && failing(v));
+			if (failed.length > 0 && claimed(property)) return fail(property, `declared ${declares[property]}, and among the readings the report names more than once, one does not hold: ${failed[0].detail ?? "no detail"}`);
+			return abstain(property, "the readBack report names it more than once, so which reading holds is not known");
+		}
 		const got = Object.hasOwn(report, property) ? report[property] : undefined;
-		if (!got || typeof got.ok !== "boolean") return abstain(property, "the readBack report does not cover it");
+		if (!got || typeof got !== "object" || !Object.hasOwn(got, "ok") || typeof got.ok !== "boolean") return abstain(property, "the readBack report does not cover it");
 		// `warn` first: a reading marked not-read-back is never a pass, whatever its `ok` says.
-		if (got.warn === true) return abstain(property, `${got.detail ?? "not read back"}`);
+		if (got.warn) return abstain(property, `${got.detail ?? "not read back"}`);
 		if (got.ok === true) return pass(property, `read back off a live container: ${got.detail ?? "holds"}`);
-		if (declares[property] === "enforced" || declares[property] === "asserted") {
+		if (claimed(property)) {
 			return fail(property, `declared ${declares[property]}, and read back off a live container as not holding: ${got.detail ?? "no detail"}`);
 		}
 		return pass(property, `read back as not holding, which ${JSON.stringify(declares[property])} does not claim`);
