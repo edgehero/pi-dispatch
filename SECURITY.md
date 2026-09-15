@@ -279,7 +279,8 @@ Stated openly rather than discovered later:
   the job (as they already are on Docker Desktop); run the worker as a dedicated service account, as
   `deploy/worker.service` does. On rootful Podman without an empty `/etc/containers/mounts.conf`, every job
   container also gets a `/run/secrets` mount carrying the host's subscription files where they exist, so the
-  backend table's `mountSet` word does not hold there (issue #345). Where the image provides non-root:
+  worker does not credit `mountSet` there: doctor says it is asserted, a `PI_BACKEND_FLOOR` asking for it refuses,
+  and `doctor --live` fails it by reading the container's own mount table (issue #345). Where the image provides non-root:
   `docs/job-image.md` requires a
   non-root runtime user with a writable home, and nothing here verifies that the image you named
   honours it. What is **not** checked is the image's contents, and every way that can be wrong fails

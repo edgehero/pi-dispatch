@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import { test } from "node:test";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
-import { InfraRetry, runJob } from "../src/processor.mjs";
+import { InfraRetry, runJob, OBSERVATION_COMMENT } from "../src/processor.mjs";
 
 /** A fake redis whose counter we can preset, to force over/under budget. `decrCalls` spies
  *  releaseBudget, so tests assert the slot is (or is not) given back and never double-released.
@@ -485,6 +486,22 @@ test("exit-1 infra retry KEEPS the slot -- the container ran and spent, so no re
 	assert.equal(redis.decrCalls, 0, "a container that ran must not get its slot back");
 });
 
+test("a DETACHED run keeps its slot and retries as container-detached, never refunded as never-started (#345)", async () => {
+	const redis = fakeRedis();
+	const logged = [];
+	const { deps: d } = deps({ redis, runContainer: async () => ({ code: 125, aborted: false, detached: true }), log: (event, fields) => logged.push([event, fields]) });
+	await assert.rejects(
+		() => runJob(ghJob, d),
+		(e) => e instanceof InfraRetry && e.reason === "container-detached" && e.exitCode === 125 && e.budgetReserved === true,
+	);
+	assert.equal(redis.decrCalls, 0, "the container started, so the slot stays spent even though 125 is a never-started code");
+	assert.ok(logged.some(([e, f]) => e === "container_exit" && f.detached === true));
+	const plain = fakeRedis();
+	const { deps: never } = deps({ redis: plain, runContainer: async () => ({ code: 125, aborted: false }) });
+	await assert.rejects(() => runJob(ghJob, never), (e) => e.reason === "container-never-started");
+	assert.equal(plain.decrCalls, 1, "without detached the same exit is still refunded");
+});
+
 test("InfraRetry back-compat: message-only ctor keeps piDispatchRetry and defaults reason to the message", () => {
 	const e = new InfraRetry("x");
 	assert.equal(e.piDispatchRetry, true);
@@ -745,6 +762,17 @@ test("a floor the docker endpoint does not meet refuses BEFORE reserveBudget, an
 	assert.equal(texts.length, 1);
 	assert.doesNotMatch(texts[0], /10\.1\.2\.3|tcp:/, "an internal endpoint never reaches a forge comment");
 	assert.ok(logged.some(([e, f]) => e === "refused_backend_floor_unobserved" && /10\.1\.2\.3/.test(f.message)), "it reaches the operator's log");
+});
+
+test("a floor refusal's forge comment names each missed observation in fixed words, pinned to the closed list (#345)", async () => {
+	assert.deepEqual(Object.keys(OBSERVATION_COMMENT), Object.keys(OBSERVATIONS), "one fixed reason per observation the table can name");
+	const texts = [];
+	const commentOn = (observations) => deps({ observationPreflight: async () => ({ refused: true, message: "PI_BACKEND_FLOOR asks for ... the daemon is Podman ... /etc/containers/mounts.conf", observations }), comment: async (_j, t) => texts.push(t), log: () => {} }).deps;
+	await runJob(ghJob, commentOn([DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS]));
+	assert.ok(texts[0].includes(OBSERVATION_COMMENT[DAEMON_APPLIES_BOUNDS]) && texts[0].includes(OBSERVATION_COMMENT[RUNTIME_ADDS_NO_MOUNTS]), texts[0]);
+	assert.doesNotMatch(texts[0], /docker CLI is not observed sending|Podman|mounts\.conf/, "neither the endpoint's reason nor the evidence reaches a forge comment");
+	await runJob(ghJob, commentOn(undefined));
+	assert.ok(texts[1].includes(OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]), "a preflight that names no observation keeps the endpoint's words (#278)");
 });
 
 test("the endpoint gate runs AHEAD of the image and egress preflights, which talk to the daemon it is about (#278)", async () => {

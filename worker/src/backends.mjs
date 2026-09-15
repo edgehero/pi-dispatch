@@ -312,14 +312,25 @@ export function unobservedFloor(backends, floor, observations = {}) {
  * `backendRefusals` because `loadConfig` is synchronous and cannot observe anything; the caller that made the
  * observation passes it, with `evidence` -- `{ [observation]: "what was seen" }` -- for the message.
  */
-export function observationRefusals({ backends = [], backendFloor = {}, observations = {}, evidence = {} } = {}) {
-	const misses = unobservedFloor(backends, backendFloor, observations);
+export function observationRefusals({ backends = [], backendFloor = {}, observations = {}, evidence = {}, only = null } = {}) {
+	// `only` narrows the check to the named observations, for a caller that has read just those so far (boot reads the
+	// endpoint before the daemon, and must not refuse on an observation it has not asked yet).
+	const misses = unobservedFloor(backends, backendFloor, observations).filter((m) => !only || only.includes(m.observedBy));
 	if (misses.length === 0) return [];
 	const lines = misses.map((m) => `  ${m.backend}: ${m.property}=${m.want} holds only while ${OBSERVATIONS[m.observedBy] ?? m.observedBy}; ${evidence[m.observedBy] ?? "that was not observed"}`);
-	return [
-		`PI_BACKEND_FLOOR asks for something this host is not observed to provide:\n${lines.join("\n")}\n` +
-			"Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
-	];
+	// One remedy per observation that missed, in the closed list's order, so a bounds miss is never told to repoint the CLI.
+	const remedies = Object.keys(OBSERVATION_FIX).filter((o) => misses.some((m) => m.observedBy === o)).map((o) => OBSERVATION_FIX[o]);
+	return [`PI_BACKEND_FLOOR asks for something this host is not observed to provide:\n${lines.join("\n")}\n${remedies.join("\n")}`];
+}
+
+/**
+ * Whether the floor misses `observationRefusals` would report rest ONLY on observations that were not answered (`null`
+ * or `undefined`, as opposed to an answered `false`): a daemon still starting, a read that timed out. Such a refusal is
+ * transient, and the caller retries rather than refusing for good. `false` when nothing misses.
+ */
+export function observationRefusalIsTransient({ backends = [], backendFloor = {}, observations = {} } = {}) {
+	const missed = unobservedFloor(backends, backendFloor, observations).map((m) => m.observedBy);
+	return missed.length > 0 && missed.every((o) => typeof observations?.[o] !== "boolean");
 }
 
 /** Is `name` one of the closed list? `Object.hasOwn`, so `"toString"` is not a property. */
@@ -331,12 +342,39 @@ export function isProperty(name) {
 export const DOCKER_ENDPOINT_LOCAL = "dockerEndpointLocal";
 
 /**
+ * The observation that the daemon reports it applies a container's pid and memory bounds (issue #345), from the same
+ * `docker info` read the job user is decided from. `true` only for `PidsLimit` and `MemoryLimit` both true on a daemon
+ * that is neither rootless nor Podman: Podman's Docker API hard-codes `PidsLimit` and derives `MemoryLimit` from the root
+ * cgroup, so on Podman the booleans say nothing about a container (source; measured true on a rootless host applying
+ * neither). CPU is never read: rootful Podman reports `CpuCfsQuota: false` while applying `--cpus` (measured).
+ */
+export const DAEMON_APPLIES_BOUNDS = "daemonAppliesBounds";
+
+/**
+ * The observation that the container runtime mounts nothing of its own into a job container (issue #345). Docker adds
+ * none; rootful Podman mounts `/run/secrets` from its default `mounts.conf` into every container, invisible in
+ * `.Mounts` (measured: host subscription files readable by the job user). On Podman it holds only with the documented
+ * empty `/etc/containers/mounts.conf` override and no `volumes`/`mounts` key in any containers.conf this host reads
+ * (`runtime-observations.mjs`).
+ */
+export const RUNTIME_ADDS_NO_MOUNTS = "runtimeAddsNoMounts";
+
+/**
  * The closed list of observations a backend's `observedBy` may name, each with what it means. Closed for the
  * reason `PROPERTIES` is: a typo in a table entry must not become an observation nobody makes, which would
  * degrade a word forever with nothing saying why.
  */
 export const OBSERVATIONS = Object.freeze({
 	[DOCKER_ENDPOINT_LOCAL]: "the docker endpoint this host's docker CLI resolves is on this host",
+	[DAEMON_APPLIES_BOUNDS]: "the daemon reports that it applies a container's pid and memory bounds, and is neither rootless nor Podman",
+	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime adds no mounts of its own to a job container",
+});
+
+/** What to do about each observation that a floor needed and did not get, keyed like `OBSERVATIONS` and pinned to it. */
+export const OBSERVATION_FIX = Object.freeze({
+	[DOCKER_ENDPOINT_LOCAL]: "Point the docker CLI back at this host (DOCKER_HOST, DOCKER_CONTEXT or `docker context use`), or lower that entry to `asserted` if the redirect is deliberate.",
+	[DAEMON_APPLIES_BOUNDS]: "Run jobs on a rootful Docker Engine that reports PidsLimit and MemoryLimit, or lower that entry to `asserted`: on Podman and rootless daemons `pi-dispatch doctor --live` reads pids.max and memory.max off a real container instead.",
+	[RUNTIME_ADDS_NO_MOUNTS]: "On Podman, create an empty /etc/containers/mounts.conf and remove any `volumes` or `mounts` key from containers.conf, or lower that entry to `asserted`.",
 });
 
 const BACKENDS_TABLE = {
@@ -355,13 +393,18 @@ const BACKENDS_TABLE = {
 			// effectiveness of that argv, and without that guard those two assertions would pass on an argv
 			// with no boundary left. The deny-list only NARROWED that gap; since issue #341 an allow-list of what
 			// the callers pass (`DOCKER_EXTRA_ALLOWED`) closes it, and every caller still passes fixed literals.
+			//
+			// AND ONLY WHILE OBSERVED (issue #345): the pid and memory bounds in those flags are the daemon's to apply, and a
+			// rootless daemon without cgroup delegation accepts `--pids-limit` and applies nothing (measured). So the word is
+			// earned by `daemonAppliesBounds` below, and degrades to `asserted` where the daemon is not observed applying them.
 			isolation: ENFORCED,
 			// `--rm` leads ISOLATION_FLAGS and the container name carries the job id, so no container is
 			// reachable to reuse even in principle.
 			ephemeral: ENFORCED,
 			// The mount list is built by `containerSpec` from a fixed set of named host paths and nothing
 			// else. There is no pass-through, and the shared session store under PI_SESSIONS_DIR is never
-			// among them -- only this job's own copy.
+			// among them -- only this job's own copy. AND ONLY WHILE OBSERVED (issue #345): a runtime can mount things of
+			// its own that no argv names (rootful Podman's `/run/secrets`), so the word is earned by `runtimeAddsNoMounts`.
 			mountSet: ENFORCED,
 			// CAPABILITY, gated by PI_EGRESS. When armed: `--network=pi-job-<id>-net`, `--internal`, created
 			// before the spawn and removed in a finally. When PI_EGRESS=0 the flag is absent and the job is
@@ -434,6 +477,8 @@ const BACKENDS_TABLE = {
 		 * this host's docker CLI means nothing for a remote venue, whose `credentialTransit` a vendor might assert.
 		 */
 		observedBy: {
+			isolation: DAEMON_APPLIES_BOUNDS,
+			mountSet: RUNTIME_ADDS_NO_MOUNTS,
 			credentialTransit: DOCKER_ENDPOINT_LOCAL,
 		},
 	},

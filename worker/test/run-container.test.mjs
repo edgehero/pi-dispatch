@@ -356,3 +356,142 @@ test("a job user without HOME=/home/pi is refused before docker is ever spawned 
 		assert.equal(rec.cmd, undefined, String(home));
 	}
 });
+
+// --- issue #345: a container that outlived its docker run -------------------------------------------------------
+
+const CID = "d".repeat(64);
+/** An in-memory host fs for the cidfile: `files` maps a path to its content; every rmSync is recorded. */
+function cidFs(files = {}) {
+	const removed = [];
+	return {
+		files,
+		removed,
+		readFileSync: (p) => {
+			if (files[p] === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+			return files[p];
+		},
+		rmSync: (p) => {
+			removed.push(p);
+			delete files[p];
+		},
+	};
+}
+/**
+ * A docker whose `run` exits `runCode` (writing `cid` to the cidfile first, as the CLI does after a create) and whose
+ * later steps answer from `steps`: `{ ps, stop, rm }`, each `{ code, stdout }` or "hang" (never closes).
+ */
+function detachedDocker({ runCode, cid = CID, steps = {}, fs, onRun = () => {} }) {
+	const calls = [];
+	const spawnFn = (cmd, args) => {
+		calls.push(args);
+		if (args[0] === "run") onRun();
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		if (args[0] === "run") {
+			const cidFile = args.find((a) => a.startsWith("--cidfile="))?.slice("--cidfile=".length);
+			queueMicrotask(() => {
+				if (cid !== null && cidFile) fs.files[cidFile] = `${cid}`;
+				child.emit("close", runCode);
+			});
+			return child;
+		}
+		const answer = steps[args[0]] ?? { code: 0, stdout: "" };
+		if (answer !== "hang") {
+			queueMicrotask(() => {
+				if (answer.stdout) child.stdout.emit("data", answer.stdout);
+				child.emit("close", answer.code);
+			});
+		}
+		return child;
+	};
+	return { spawnFn, calls };
+}
+const runWith = async ({ runCode, cid, steps, files = {}, abortOnRun = false, neverStartedExits } = {}) => {
+	const fs = cidFs(files);
+	const controller = new AbortController();
+	const signal = controller.signal;
+	const atSpawn = {};
+	const docker = detachedDocker({
+		runCode,
+		cid,
+		steps,
+		fs,
+		onRun: () => {
+			atSpawn.files = { ...fs.files };
+			if (abortOnRun) controller.abort();
+		},
+	});
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: docker.spawnFn, fs, ...(neverStartedExits ? { neverStartedExits } : {}) });
+	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal });
+	return { result, calls: docker.calls, fs, atSpawn };
+};
+const psOf = (state) => ({ code: 0, stdout: `${CID} ${state}\n` });
+
+test("the job argv writes this attempt's container ID beside the job dir, removing a stale one first and the file afterwards (#345)", { skip }, async () => {
+	const { result, calls, fs, atSpawn } = await runWith({ runCode: 0, files: { "/host/jobs/j1.cid": "stale" } });
+	assert.equal(atSpawn.files["/host/jobs/j1.cid"], undefined, "gone BEFORE docker is spawned, not only after the run");
+	assert.equal(result.code, 0);
+	assert.equal("detached" in result, false, "the result shape is unchanged unless a container was found detached");
+	const run = calls.find((a) => a[0] === "run");
+	assert.ok(run.includes("--cidfile=/host/jobs/j1.cid"), "beside the job dir, never inside the /job:ro mount");
+	assert.ok(!run.includes("/host/jobs/j1.cid:/job:ro"));
+	assert.equal(fs.removed[0], "/host/jobs/j1.cid", "a stale cidfile is removed before docker is spawned, which refuses an existing one");
+	assert.equal(fs.files["/host/jobs/j1.cid"], undefined, "and the file is gone when the run ends");
+	assert.equal(calls.filter((a) => a[0] !== "run").length, 0, "an exit that is not never-started checks nothing");
+});
+
+test("a never-started exit is checked against the cidfile: nothing created or nothing listed stays never-started, and a created-only container is removed (#345)", { skip }, async () => {
+	for (const [label, opts] of [
+		["no cidfile written (a name conflict, an absent image)", { runCode: 125, cid: null }],
+		["an empty cidfile", { runCode: 125, cid: "" }],
+		["not an ID", { runCode: 125, cid: "abc" }],
+		["the ID no longer listed", { runCode: 125, steps: { ps: { code: 0, stdout: "" } } }],
+	]) {
+		const { result, calls } = await runWith(opts);
+		assert.deepEqual([result.code, "detached" in result], [125, false], label);
+		assert.ok(!calls.some((a) => a[0] === "stop"), `${label}: nothing is stopped`);
+	}
+	const created = await runWith({ runCode: 127, steps: { ps: psOf("created") } });
+	assert.equal("detached" in created.result, false, "created and never started is still never started");
+	assert.deepEqual(created.calls.filter((a) => a[0] !== "run"), [["ps", "-a", "--no-trunc", "--filter", `id=${CID}`, "--format", "{{.ID}} {{.State}}"], ["rm", "-f", CID]], "removed by ID, not stopped");
+});
+
+test("a never-started exit whose container is still there is stopped and removed BY ID and reported detached, and an unanswered ps counts too (#345)", { skip }, async () => {
+	for (const [label, steps] of [
+		["listed running", { ps: psOf("running") }],
+		["listed exited", { ps: psOf("exited") }],
+		["a line that is not this full ID", { ps: { code: 0, stdout: `${CID.slice(0, 12)}\n` } }],
+		["ps failed", { ps: { code: 1, stdout: "" } }],
+	]) {
+		const { result, calls } = await runWith({ runCode: 125, steps });
+		assert.deepEqual([result.code, result.detached], [125, true], label);
+		assert.deepEqual(calls.filter((a) => a[0] === "stop" || a[0] === "rm"), [["stop", CID], ["rm", "-f", CID]], label);
+	}
+	const aborted = await runWith({ runCode: 125, steps: { ps: psOf("running") }, abortOnRun: true });
+	assert.equal(aborted.result.aborted, true, "a run the worker aborted (its own docker stop) is not checked");
+	assert.ok(!aborted.calls.some((a) => a[0] === "ps"));
+	const other = await runWith({ runCode: 1, steps: { ps: psOf("running") } });
+	assert.ok(!other.calls.some((a) => a[0] === "ps"), "exit 1 is the runner's own code: never checked");
+	const declared = await runWith({ runCode: 125, steps: { ps: psOf("running") }, neverStartedExits: [] });
+	assert.equal("detached" in declared.result, false, "an adapter that declares no never-started exits is never checked");
+});
+
+test("the detached check is bounded: a ps that never answers is given up on and still stops the container (#345)", { skip, timeout: 10_000 }, async () => {
+	const fs = cidFs();
+	const calls = [];
+	const spawnFn = (cmd, args) => {
+		calls.push(args);
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		if (args[0] !== "ps") queueMicrotask(() => child.emit("close", 0));
+		return child;
+	};
+	fs.files["/host/jobs/j1.cid"] = CID;
+	assert.equal(await mod.stopDetached({ spawnFn, cidFile: "/host/jobs/j1.cid", fs, timeoutMs: 20 }), true);
+	assert.deepEqual(calls.map((a) => a[0]), ["ps", "stop", "rm"]);
+	assert.equal(mod.DETACHED_CHECK_TIMEOUT_MS, 10_000);
+});

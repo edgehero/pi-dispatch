@@ -41,11 +41,11 @@ export const LIVE_PREFIX = "pi-dispatch-live-";
 export const LIVE_STEP_TIMEOUT_MS = 20_000;
 
 /**
- * The docker steps that run while a container must still be alive: three, for the reading container (inspect, status
- * exec, write exec) and for the peers (the control before, the attempt, the control after; peer2's inspect runs while
- * peer1 is already waiting, well inside one step's bound).
+ * The docker steps that run while a container must still be alive: four for the reading container (inspect, mountinfo
+ * exec, status exec, write exec), and three for the peers (the control before, the attempt, the control after; peer2's
+ * inspect runs while peer1 is already waiting, well inside one step's bound).
  */
-const STEPS_WHILE_ALIVE = 3;
+const STEPS_WHILE_ALIVE = 4;
 
 /**
  * How long the probe container sleeps: every step that needs it alive at its full bound, plus a margin for the
@@ -296,7 +296,44 @@ export function nonRootVerdict(status) {
  * present with its own RW, nothing else may be mounted, and three sources are refused outright wherever they
  * appear: the docker socket, the operator's home directory or any ancestor of it, and the shared session store.
  */
-export function mountSetVerdict(inspectOutput, { expected, home = null, sessionsDir = null }) {
+/**
+ * Mount points `/proc/self/mountinfo` may show inside a job container that no `.Mounts` entry lists, because the runtime
+ * makes them for every container (issue #345, measured with the builder's argv on Docker Desktop, rootful Docker 27.5.1
+ * and rootful Podman 5.8.2): the root, the three files docker writes per container, each runtime's init binary
+ * (`/usr/sbin/docker-init` and `/run/podman-init` measured; `/sbin/docker-init`, where older Docker mounts it, is not),
+ * and Podman's `.containerenv`. EXACT paths, never prefixes, so `/run/secrets` beside `/run/.containerenv` is not allowed.
+ */
+export const MOUNTINFO_ALLOWED_EXACT = Object.freeze(["/", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", "/usr/sbin/docker-init", "/sbin/docker-init", "/run/podman-init", "/run/.containerenv"]);
+
+/**
+ * Kernel filesystems a container always has, allowed with everything beneath them BY PATH SEGMENT (the path itself or
+ * `<tree>/...`): the proc masks (`/proc/kcore`, and Podman's `/proc/interrupts`), `/dev/pts`, `/dev/shm`, `/dev/mqueue`,
+ * cgroup v1's per-controller mounts and `/sys/firmware`. A string prefix would allow `/devices`; a segment does not.
+ */
+export const MOUNTINFO_ALLOWED_TREES = Object.freeze(["/proc", "/dev", "/sys"]);
+
+/**
+ * The mount points in a `/proc/self/mountinfo` body: field five of every line that has the `-` separator, with the
+ * kernel's octal escapes (`\040` for a space) decoded. Lines of any other shape are skipped; an empty answer is `[]`.
+ */
+export function mountPointsOf(mountinfo) {
+	const points = [];
+	for (const line of String(mountinfo ?? "").split(/\r?\n/)) {
+		const fields = line.trim().split(" ");
+		if (fields.length < 10 || !fields.slice(6).includes("-")) continue;
+		const point = fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+		if (point.startsWith("/")) points.push(point);
+	}
+	return points;
+}
+
+/**
+ * THE MOUNT SET. `mountinfo` is what `/proc/self/mountinfo` said inside the container (issue #345): `undefined` when the
+ * caller did not read it, `null` when the read failed. `.Mounts` is the daemon's own list, and a runtime can mount things
+ * into every container that it never lists there (rootful Podman's `/run/secrets`, measured), so a mount point inside
+ * the container that is neither declared nor on the runtime's own short list fails `runtime-mount`.
+ */
+export function mountSetVerdict(inspectOutput, { expected, home = null, sessionsDir = null, mountinfo = undefined }) {
 	let mounts;
 	try {
 		mounts = JSON.parse(String(inspectOutput ?? "").trim());
@@ -321,7 +358,17 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
 		if (sessionsDir && source !== "" && (source === sessionsDir || source.startsWith(`${sessionsDir.replace(/\/+$/, "")}/`) || under(sessionsDir))) failures.push(`${m?.Destination} mounts the shared session store or an ancestor of it`);
 	}
 	if (failures.length > 0) return verdict("mountSet", false, failures.join("; "));
-	return verdict("mountSet", true, `${expected.map((m) => `${m.container}${m.readOnly ? ":ro" : ""}`).join(", ")} and nothing else`);
+	const declaredList = `${expected.map((m) => `${m.container}${m.readOnly ? ":ro" : ""}`).join(", ")} and nothing else`;
+	if (mountinfo === undefined) return verdict("mountSet", true, declaredList);
+	const points = mountinfo === null ? [] : mountPointsOf(mountinfo);
+	if (points.length === 0) return notReadBack("mountSet", `docker inspect lists ${declaredList}, but /proc/self/mountinfo could not be read inside the container, so a mount the runtime adds without listing it was not checked`);
+	const allowed = (point) => declared.has(point) || MOUNTINFO_ALLOWED_EXACT.includes(point) || MOUNTINFO_ALLOWED_TREES.some((tree) => point === tree || point.startsWith(`${tree}/`));
+	// Printable only: a mount point is the container's text, and a verdict detail reaches the operator's terminal.
+	const extra = [...new Set(points.filter((p) => !allowed(p)))].map((p) => p.replace(/[^\x20-\x7e]/g, "?"));
+	if (extra.length > 0) {
+		return verdict("mountSet", false, `${extra.join(", ")} ${extra.length === 1 ? "is" : "are"} mounted inside the container, and neither docker inspect nor the job lists ${extra.length === 1 ? "it" : "them"}`, { cause: "runtime-mount" });
+	}
+	return verdict("mountSet", true, `${declaredList}, in docker inspect and in /proc/self/mountinfo`);
 }
 
 /**
@@ -617,7 +664,9 @@ export async function runLiveProbes({
 
 		const expected = containerSpec(probeOptions({ image, name: names.probe, fixture, user })).mounts;
 		const inspected = await step(["inspect", "--format={{json .Mounts}}", probeId]);
-		const mountSet = inspected?.code === 0 ? mountSetVerdict(inspected.stdout, { expected, home, sessionsDir }) : notReadBack("mountSet", "docker inspect did not answer");
+		// Issue #345: the mount table as the container itself sees it, by a constant `cat`, for what `.Mounts` does not list.
+		const mountinfo = await step(["exec", probeId, "cat", "/proc/self/mountinfo"]);
+		const mountSet = inspected?.code === 0 ? mountSetVerdict(inspected.stdout, { expected, home, sessionsDir, mountinfo: mountinfo?.code === 0 ? mountinfo.stdout : null }) : notReadBack("mountSet", "docker inspect did not answer");
 
 		const statusRun = await step(["exec", probeId, "sh", "-c", STATUS_SCRIPT]);
 		const status = statusRun?.code === 0 ? parseStatus(statusRun.stdout) : null;

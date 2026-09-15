@@ -1,4 +1,4 @@
-import { readFileSync, watch } from "node:fs";
+import { readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { release as osRelease } from "node:os";
 import { dirname, basename, join } from "node:path";
 import { configError, loadConfig } from "./config.mjs";
@@ -39,7 +39,8 @@ import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
 import { makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
-import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusals } from "./backends.mjs";
+import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
+import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
@@ -313,6 +314,9 @@ export async function startWorker(
 		// Seams for the same reason as the endpoint: a wiring test decides what the daemon and the process say.
 		readDaemonFacts: readDaemonFactsFn = makeDaemonFactsReader(),
 		jobUserIdentity = { platform: process.platform, release: osRelease(), euid: process.geteuid?.(), egid: process.getegid?.() },
+		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf). A seam so
+		// a wiring test never reads this machine's /etc.
+		observationFs = { statSync, readFileSync, readdirSync },
 		makeGitLabAuth: makeGitLabAuthFn = makeGitLabAuth,
 		makeGitLabHost: makeGitLabHostFn = makeGitLabHost,
 		makeForgejoAuth: makeForgejoAuthFn = makeForgejoAuth,
@@ -371,6 +375,8 @@ export async function startWorker(
 		backendFloor: config.backendFloor,
 		observations: { [DOCKER_ENDPOINT_LOCAL]: bootEndpoint.local === true },
 		evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(bootEndpoint) },
+		// The daemon has not been read yet; the runtime observations are checked once it has (issue #345).
+		only: [DOCKER_ENDPOINT_LOCAL],
 	});
 	if (endpointRefusal) throw bootEndpoint.local === null && bootEndpoint.transient ? new Error(endpointRefusal) : configError(endpointRefusal);
 	// The per-job read (below, `observationPreflight`) logs only when the answer CHANGES from the last one, so a
@@ -394,6 +400,18 @@ export async function startWorker(
 	// Said again whenever a job's decision differs from the last one said, so a boot that read `unknown` (a daemon still
 	// starting) and a later answer that refuses every job are never separated by silence.
 	let jobUserSaid = jobUserLogKey(bootDecision);
+
+	// Issue #345: the RUNTIME observations, from that same facts read and this host's files, checked against the floor
+	// the way the endpoint was above: `isolation` holds only while the daemon is observed applying a container's bounds,
+	// `mountSet` only while the runtime is observed adding no mounts of its own. Without a floor naming either, this is
+	// words (worker_started, and doctor). A refusal resting only on a read that did not answer (a daemon still starting,
+	// the boot bound) throws untagged, exit 1, so the supervisor retries; one resting on an answer is a config error.
+	const bootObserved = observeHost({ endpoint: bootEndpoint, daemon: bootJobUser?.daemon ?? { answered: false, reason: "boot-read-timeout", transient: true }, fs: observationFs });
+	const bootObservedArgs = { backends: config.backends, backendFloor: config.backendFloor, observations: bootObserved.observations, evidence: bootObserved.evidence };
+	const [runtimeRefusal] = observationRefusals(bootObservedArgs);
+	if (runtimeRefusal) throw observationRefusalIsTransient(bootObservedArgs) ? new Error(runtimeRefusal) : configError(runtimeRefusal);
+	let runtimeObservedSaid = runtimeObservationKey(bootObserved);
+
 	const bootRefusal = jobUserBootRefusal(bootDecision, config.defaultBackend);
 	if (bootRefusal) throw configError(bootRefusal);
 
@@ -1140,24 +1158,35 @@ export async function startWorker(
 			// after boot redirects every later job, and a preflight that answered once at boot would give a
 			// wrong decision all day (the image preflight is not cached for the same reason). Only for a venue
 			// whose declaration is observation-gated on it, and only a refusal under a floor that needs it.
+			// Issue #345: the runtime observations come from the same per-job read, in the same place: the facts the job user is
+			// decided from (cached per endpoint state, so no second daemon call) and this host's Podman files, re-read per job
+			// because an operator creating the empty mounts.conf override must not need a restart.
 			observationPreflight: async (job) => {
 				const venue = resolveBackendName(job, config.defaultBackend);
-				if (!Object.values(backendFor(venue)?.observedBy ?? {}).includes(DOCKER_ENDPOINT_LOCAL)) return { ok: true };
+				if (Object.keys(backendFor(venue)?.observedBy ?? {}).length === 0) return { ok: true };
 				const endpoint = await resolveDockerEndpointFn();
 				const state = dockerEndpointState(endpoint);
 				if (state !== endpointSeen) {
 					endpointSeen = state;
 					logDockerEndpoint(log, endpoint, { changed: true });
 				}
-				const [refusal] = observationRefusals({
+				const jobUser = await resolveJobUser({ endpoint, key: state });
+				const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs });
+				if (runtimeObservationKey(observed) !== runtimeObservedSaid) {
+					runtimeObservedSaid = runtimeObservationKey(observed);
+					log("runtime_observed", { daemonAppliesBounds: observed.observations.daemonAppliesBounds, runtimeAddsNoMounts: observed.observations.runtimeAddsNoMounts, changed: true });
+				}
+				const args = {
 					backends: [venue],
 					backendFloor: config.backendFloor,
-					observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
-					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
-				});
-				if (!refusal) return { ok: true, endpoint };
-				if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
-				return { refused: true, message: refusal };
+					observations: observed.observations,
+					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint), ...observed.evidence },
+				};
+				const [refusal] = observationRefusals(args);
+				if (!refusal) return { ok: true, endpoint, jobUser };
+				const missed = [...new Set(unobservedFloor(args.backends, args.backendFloor, args.observations).map((m) => m.observedBy))];
+				if (observationRefusalIsTransient(args)) return { unavailable: true, reason: observed.reasons[missed[0]] ?? "unknown" };
+				return { refused: true, message: refusal, observations: missed };
 			},
 			// Issue #341: the job user, for a job on the `local` venue only (its containers are this host's docker
 			// CLI's). The endpoint is the one `observationPreflight` just read, so one job's two decisions agree.
@@ -1165,7 +1194,7 @@ export async function startWorker(
 				const venue = resolveBackendName(job, config.defaultBackend);
 				if (venue !== DEFAULT_BACKEND) return { user: null, home: null };
 				const endpoint = observed?.endpoint ?? (await resolveDockerEndpointFn());
-				const { decision, socket } = await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) });
+				const { decision, socket } = observed?.jobUser ?? (await resolveJobUser({ endpoint, key: dockerEndpointState(endpoint) }));
 				if (jobUserLogKey(decision) !== jobUserSaid) {
 					jobUserSaid = jobUserLogKey(decision);
 					log("job_user", { mode: decision.mode, user: decision.user, cause: decision.cause, reason: decision.reason });
@@ -1410,6 +1439,9 @@ export async function startWorker(
 			dockerContext: bootEndpoint.context,
 			dockerEndpointLocal: bootEndpoint.local,
 			jobUser: { mode: bootDecision.mode, user: bootDecision.user, cause: bootDecision.cause }, // issue #341
+			// Issue #345: whether this daemon is observed applying a container's bounds and adding no mounts of its own; null = not read.
+			daemonAppliesBounds: bootObserved.observations.daemonAppliesBounds,
+			runtimeAddsNoMounts: bootObserved.observations.runtimeAddsNoMounts,
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)

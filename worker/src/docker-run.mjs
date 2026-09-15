@@ -20,7 +20,7 @@
 // `buildDockerRunArgs`, which never moved; the entry that names `containerSpec` is design.md's 2026-08-31
 // row, and this move is recorded in its own row rather than by leaving that pointer to rot.
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
-import { assertJobUser, containerSpec } from "./container-spec.mjs";
+import { assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -94,6 +94,9 @@ export const DOCKER_EXTRA_FORBIDDEN = [
 	// last and leaves a container no sweep finds and no timeout can stop. `ephemeral` and `abortable` both
 	// rest on it.
 	"--name",
+	// Issue #345: the run's cidfile is how a container that outlived its `docker run` is found; a second `--cidfile`
+	// would win last and write the ID where the worker does not look.
+	"--cidfile",
 	"--privileged",
 	"--cap-add",
 	"--security-opt",
@@ -178,6 +181,7 @@ export function dockerArgsFromSpec(spec) {
 	}
 	// Re-checked here for a hand-built spec, the same reason `isolated` is.
 	assertJobUser(spec.user);
+	assertCidFile(spec.cidFile);
 
 	// `--network` sits HERE, beside --memory and --cpus, and deliberately NOT inside ISOLATION_FLAGS.
 	// That array is the LITERAL, value-free, unconditional set, and two separate places assert every member
@@ -193,6 +197,9 @@ export function dockerArgsFromSpec(spec) {
 	if (spec.network) args.push(`--network=${spec.network}`);
 	// null => ABSENT, so a job the image's own USER runs has an argv byte-identical to one built before issue #341.
 	if (spec.user) args.push(`--user=${spec.user}`);
+	// null => ABSENT, so every argv but a job's is byte-identical to one built before issue #345. BEFORE `dockerExtra`, and
+	// `--cidfile` is refused there, so no later token can move where the ID lands and turn the detached check off.
+	if (spec.cidFile) args.push(`--cidfile=${spec.cidFile}`);
 	args.push(...(spec.dockerExtra ?? []));
 
 	// Explicit env allowlist. Each entry is `-e NAME=VALUE`, built from the closed map -- so a

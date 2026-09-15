@@ -1,10 +1,20 @@
-import { DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
+import { DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, DOCKER_NEVER_STARTED_EXITS, RUNTIME_ADDS_NO_MOUNTS } from "./backends.mjs";
 import { lstatSync } from "node:fs";
 import { checkTokenCap, recordTokenSpend, releaseBudget, reserveBudget } from "./budget.mjs";
 import { configError } from "./config.mjs";
 import { scopeKeyPrefix } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
+
+/**
+ * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
+ * `OBSERVATIONS` in `backends.mjs` and pinned to it. Fixed words only.
+ */
+export const OBSERVATION_COMMENT = Object.freeze({
+	[DOCKER_ENDPOINT_LOCAL]: "the docker CLI is not observed sending containers to a daemon on this host, so the job's credentials could cross a network the deployment does not own",
+	[DAEMON_APPLIES_BOUNDS]: "the container runtime is not observed applying a container's pid and memory bounds",
+	[RUNTIME_ADDS_NO_MOUNTS]: "the container runtime is not observed adding no mounts of its own to a job container",
+});
 
 /**
  * The job orchestration. Deliberately a pure-ish function over INJECTED side-effecting deps, so
@@ -18,7 +28,7 @@ import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
  *   0b. REFUSE a deployment with no usable credential for the job's provider, which costs nothing to
  *       ask and would otherwise be discovered with the budget already reserved -- CONST-BUDGET-BEFORE-TOKENS
  *       (gates 0 and 0b are not the first two: a one-shot already spent, a skewed wait, an unblessed
- *       backend and a backend floor the docker endpoint does not meet (#278) are refused above them, and
+ *       backend and a backend floor this host is not observed to meet (#278, #345) are refused above them, and
  *       this ladder has never listed those)
  *   1. REFUSE an armed `run.resume` with no session store to persist into (the one fail-CLOSED case)
  *                                                 -- REQ-RESUMABLE-SESSION
@@ -285,13 +295,17 @@ export async function runJob(job, deps) {
 		// AHEAD of the image and egress preflights, not beside them, because both of those talk to the daemon
 		// this gate is about: on a redirected CLI an unreachable daemon made the image inspect throw a retry, and
 		// a reachable one without the image refused as `job-image-missing` with a comment blaming the image --
-		// the right refusal lost behind the wrong one. This read touches only the CLI's local configuration.
+		// the right refusal lost behind the wrong one. Issue #345 adds `isolation` (the daemon observed applying a
+		// container's bounds) and `mountSet` (the runtime observed adding no mounts), read here from the same
+		// cached `docker info` the job user is decided from, so this read now contacts the daemon, once per endpoint.
 		const observed = await observationPreflight(job);
 		if (observed?.refused) {
-			// Fixed text: the endpoint (an internal host name or address) goes to the operator's log, never to a
-			// forge comment. "Not observed" rather than "not on this host", because a CLI that could not be asked
-			// for a determinate reason (no docker on PATH, a context that does not exist) refuses here too.
-			await comment(job, "Refused: this deployment's PI_BACKEND_FLOOR requires a guarantee this host is not observed to provide right now (the docker CLI is not observed sending containers to a daemon on this host, so the job's credentials could cross a network the deployment does not own). Not run.");
+			// Fixed text per observation: the endpoint (an internal host name or address) and the evidence go to the
+			// operator's log, never to a forge comment. "Not observed" rather than "not on this host", because a CLI that
+			// could not be asked for a determinate reason (no docker on PATH, a context that does not exist) refuses too.
+			const missed = Array.isArray(observed.observations) && observed.observations.length > 0 ? observed.observations : [DOCKER_ENDPOINT_LOCAL];
+			const why = missed.map((o) => OBSERVATION_COMMENT[o] ?? OBSERVATION_COMMENT[DOCKER_ENDPOINT_LOCAL]);
+			await comment(job, `Refused: this deployment's PI_BACKEND_FLOOR requires a guarantee this host is not observed to provide right now (${[...new Set(why)].join("; ")}). Not run.`);
 			log("refused_backend_floor_unobserved", { message: observed.message });
 			return {
 				outcome: "policy",
@@ -305,7 +319,7 @@ export async function runJob(job, deps) {
 			};
 		}
 		if (observed?.unavailable) {
-			throw new InfraRetry("docker CLI unavailable, the endpoint observation could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			throw new InfraRetry("docker CLI or daemon unavailable, an observation the floor needs could not run", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 		}
 
 		// The job image must exist on THIS host before anything else happens. Free, determinate and
@@ -772,9 +786,9 @@ export async function runJob(job, deps) {
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
-		const { code, aborted, abortReason, turns, tokens, session, usage, context } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached } = await runContainer({ job, token, prepared, secrets, user: jobUser?.user ?? null, home: jobUser?.home ?? null });
 		containerRan = true;
-		log("container_exit", { exitCode: code, aborted });
+		log("container_exit", { exitCode: code, aborted, ...(detached === true ? { detached: true } : {}) });
 
 		// Record token spend post-run (the check-AFTER half of the lagging token cap). The container ran,
 		// so it spent real tokens on EVERY path that reaches here -- abort, completed, policy, AND the infra
@@ -785,6 +799,14 @@ export async function runJob(job, deps) {
 		const tokensSpent = tokens?.total ?? 0;
 		if (tokenCap !== null && tokenCap !== undefined && tokensSpent > 0) {
 			await recordSpend(redis, tokensSpent, { now }).catch((err) => log("token_spend_error", { reason: err?.message }));
+		}
+
+		// Issue #345: `docker run` exited with a never-started code, but THIS attempt's container was found by its cidfile,
+		// still there, and was stopped and removed (run-container.mjs, measured on Podman with its API service killed
+		// mid-job). It DID start, so this is never refunded as never-started: it keeps its slot and retries as infrastructure,
+		// BEFORE the exit-code switch, where the same code would read as a free never-started exit.
+		if (detached === true) {
+			throw new InfraRetry(`the container outlived its docker run, exit ${code}`, { reason: "container-detached", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session) });
 		}
 
 		// A WORKER-initiated stop (30-min timeout via cancelJob, graceful-shutdown docker stop, or an

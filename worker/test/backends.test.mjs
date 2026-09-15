@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATIONS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
+import { ABSENT, ASSERTED, BACKENDS, BACKEND_NAMES, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, OBSERVATIONS, RUNTIME_ADDS_NO_MOUNTS, PROPERTIES, PROPERTY_NAMES, UNATTRIBUTED_BACKEND, backendFor, declarationOf, effectiveWord, isDeclaration, isProperty, meets, shortfall } from "../src/backends.mjs";
 
 test("the table is a LEAF -- it imports nothing", () => {
 	// `forges.mjs`'s reason, and it is why doctor and the config loader can read a declaration without
@@ -110,7 +110,7 @@ test("credentialTransit is ENFORCED only while the docker endpoint is OBSERVED o
 		assert.equal(effectiveWord("local", "credentialTransit", seen), ASSERTED, `degrades for ${JSON.stringify(seen)}`);
 	}
 	// Properties with no observation keep their declared word whatever is observed.
-	assert.equal(effectiveWord("local", "isolation", {}), ENFORCED);
+	assert.equal(effectiveWord("local", "egress", {}), ENFORCED);
 	assert.equal(effectiveWord("local", "nonRoot", { [DOCKER_ENDPOINT_LOCAL]: true }), ASSERTED);
 	assert.equal(effectiveWord("nope", "egress", {}), undefined);
 	// And secretsCustody keeps ENFORCED only because it no longer asks the network question.
@@ -288,6 +288,20 @@ test("every observedBy names a property and an observation from the closed list 
 		for (const [property, observation] of Object.entries(BACKENDS[name].observedBy)) {
 			assert.ok(isProperty(property), `${name}.observedBy.${property} is a property`);
 			assert.ok(Object.hasOwn(OBSERVATIONS, observation), `${name}.observedBy.${property} names a known observation`);
+		}
+	}
+});
+
+test("isolation and mountSet are ENFORCED only while the runtime is OBSERVED providing them (#345)", () => {
+	assert.deepEqual({ ...BACKENDS.local.observedBy }, { isolation: DAEMON_APPLIES_BOUNDS, mountSet: RUNTIME_ADDS_NO_MOUNTS, credentialTransit: DOCKER_ENDPOINT_LOCAL });
+	assert.deepEqual(Object.keys(OBSERVATIONS), [DOCKER_ENDPOINT_LOCAL, DAEMON_APPLIES_BOUNDS, RUNTIME_ADDS_NO_MOUNTS]);
+	assert.deepEqual(Object.keys(OBSERVATION_FIX), Object.keys(OBSERVATIONS), "every observation has its own remedy, and no remedy names an observation that does not exist");
+	assert.ok(Object.isFrozen(OBSERVATION_FIX));
+	for (const [property, observation] of [["isolation", DAEMON_APPLIES_BOUNDS], ["mountSet", RUNTIME_ADDS_NO_MOUNTS]]) {
+		assert.equal(BACKENDS.local.declares[property], ENFORCED, property);
+		assert.equal(effectiveWord("local", property, { [observation]: true }), ENFORCED, property);
+		for (const seen of [{ [observation]: false }, { [observation]: null }, {}, { [DOCKER_ENDPOINT_LOCAL]: true }]) {
+			assert.equal(effectiveWord("local", property, seen), ASSERTED, `${property} degrades for ${JSON.stringify(seen)}`);
 		}
 	}
 });

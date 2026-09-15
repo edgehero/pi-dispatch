@@ -48,7 +48,7 @@ test("the facts read is one bounded `docker info --format={{json .}}`", () => {
 });
 
 test("parseDaemonFacts reads the Docker shape: OS, rootless and userns markers, pid and memory bounds, never CPU", () => {
-	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null });
+	assert.deepEqual(facts("dockerRootful"), { shape: "docker", podman: false, os: "Alpine Linux v3.21 (containerized)", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, serverVersion: "27.5.1" });
 	assert.equal(facts("dockerRootless").rootless, true);
 	assert.deepEqual(facts("dockerRootless").bounds, { pids: false, memory: false });
 	assert.equal(facts("dockerRemap").userns, true);
@@ -61,7 +61,7 @@ test("a Podman-served body gets no bounds, from ProductLicense alone or from Pod
 	assert.equal(facts("podmanCompatRootful").podman, true);
 	assert.equal(facts("podmanCompatRootful").bounds, null, "Podman hard-codes PidsLimit and derives MemoryLimit from the root controllers");
 	assert.equal(facts("podmanCompatRootless").rootless, true);
-	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock" });
+	assert.deepEqual(facts("shimRootful"), { shape: "podman", podman: true, os: "linux", rootless: false, userns: false, bounds: null, serviceIsRemote: true, remoteSocketPath: "unix:///run/podman/podman.sock", serverVersion: null }, "the trimmed shim fixture carries no version");
 	assert.equal(facts("shimRootless").remoteSocketPath, "/run/user/1234/podman/podman.sock");
 	// Only a unix path is kept, because only a unix path is ever statted.
 	for (const remote of ["ssh://core:hunter2@10.0.0.5:22/run/podman/podman.sock", "tcp://127.0.0.1:8080", "unix://relative", "run/podman.sock", ""]) {
@@ -252,12 +252,14 @@ test("with no endpoint, the resolver takes the socket from Podman's own unix pat
 	assert.deepEqual(seen, ["/var/run/docker.sock"]);
 });
 
-test("the resolver asks no daemon for an endpoint observed on another machine: row 2 decides before any fact", async () => {
+test("an endpoint observed on another machine still decides image before any fact, and the facts are read once for the runtime observations (#345)", async () => {
 	let reads = 0;
 	const resolve = makeJobUserResolver({ readFacts: async () => (reads++, answered("dockerRootful")), platform: "linux", release: "6.8.0", euid: 1234, egid: 1234, stat: () => ({ uid: 0, gid: 2375 }) });
 	const out = await resolve({ endpoint: { ...LOCAL, local: false, endpoint: "tcp://10.0.0.5:2376" }, key: "remote" });
-	assert.equal(reads, 0);
-	assert.deepEqual(out.decision, { mode: "image", user: null, cause: "endpoint-not-local", reason: null });
+	assert.deepEqual(out.decision, { mode: "image", user: null, cause: "endpoint-not-local", reason: null }, "row 2 still decides, whatever the facts say");
+	assert.equal(out.facts.shape, "docker", "and the same read carries the facts the bounds observation needs");
+	await resolve({ endpoint: { ...LOCAL, local: false, endpoint: "tcp://10.0.0.5:2376" }, key: "remote" });
+	assert.equal(reads, 1, "one read per endpoint state, cached");
 });
 
 test("the facts read is bounded longer than the endpoint read, because a busy host's `docker info` is the slow one", () => {
@@ -265,9 +267,28 @@ test("the facts read is bounded longer than the endpoint read, because a busy ho
 	assert.match(makeDaemonFactsReader.toString(), /timeoutMs: DAEMON_FACTS_TIMEOUT_MS/);
 });
 
-test("the resolver never runs docker on macOS or Windows", async () => {
-	let reads = 0;
-	const resolve = makeJobUserResolver({ readFacts: async () => (reads++, answered("desktop")), platform: "darwin", euid: 501, egid: 20 });
-	assert.equal((await resolve({ endpoint: LOCAL, key: "k" })).decision.mode, "image");
-	assert.equal(reads, 0);
+test("on macOS and Windows the decision is still image, and the one facts read is kept only once it answered (#345)", async () => {
+	for (const platform of ["darwin", "win32"]) {
+		let reads = 0;
+		let answer = { answered: false, reason: "daemon-unreachable", transient: true };
+		const resolve = makeJobUserResolver({ readFacts: async () => (reads++, answer), platform, euid: 501, egid: 20 });
+		const early = await resolve({ endpoint: LOCAL, key: "k" });
+		assert.equal(early.decision.mode, "image", platform);
+		assert.deepEqual([early.facts, early.daemon.reason], [null, "daemon-unreachable"]);
+		answer = answered("desktop");
+		const later = await resolve({ endpoint: LOCAL, key: "k" });
+		assert.equal(reads, 2, `${platform}: a daemon still starting is asked again, so Docker Desktop is not left without its bounds facts`);
+		assert.equal(later.facts.bounds.pids, true);
+		await resolve({ endpoint: LOCAL, key: "k" });
+		assert.equal(reads, 2, `${platform}: an answered read is cached`);
+	}
+});
+
+test("the daemon's version is kept for display only, and only as a short run of version characters (#345)", () => {
+	const docker = (ServerVersion) => parseDaemonFacts(JSON.stringify({ ServerVersion, OperatingSystem: "x", SecurityOptions: [] }))?.facts?.serverVersion;
+	assert.equal(docker("27.5.1"), "27.5.1");
+	assert.equal(docker("28.0.0-rc.1+dev"), "28.0.0-rc.1+dev");
+	for (const bad of ["27.5.1 \u001b[2J", "a".repeat(41), "27.5.1\nx"]) assert.equal(docker(bad), null, JSON.stringify(bad));
+	const shim = parseDaemonFacts(JSON.stringify({ host: { os: "linux", security: { rootless: false } }, version: { Version: "5.8.2" } }))?.facts;
+	assert.equal(shim.serverVersion, "5.8.2");
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ASSERTED, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, backendRefusals, floorShortfall, observationRefusals, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "../src/backends.mjs";
+import { ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, ENFORCED, OBSERVATION_FIX, RUNTIME_ADDS_NO_MOUNTS, backendRefusals, floorShortfall, observationRefusalIsTransient, observationRefusals, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "../src/backends.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { backendChecks, runDoctor } from "../src/doctor.mjs";
 
@@ -268,7 +268,7 @@ test("unobservedFloor refuses what capability alone would pass, and degrades to 
 	// An observation nobody made gets no credit.
 	assert.equal(unobservedFloor(["local"], { credentialTransit: ENFORCED }, {}).length, 1);
 	// Not observation-gated: never this function's miss.
-	assert.deepEqual(unobservedFloor(["local"], { isolation: ENFORCED }, off), []);
+	assert.deepEqual(unobservedFloor(["local"], { egress: ENFORCED }, off), []);
 	// Capability misses stay floorShortfall's: nonRoot is asserted by declaration, not by observation.
 	assert.deepEqual(unobservedFloor(["local"], { nonRoot: ENFORCED }, off), []);
 	assert.deepEqual(unobservedFloor(["local", "not-a-backend"], { credentialTransit: ENFORCED }, off).map((m) => m.backend), ["local"]);
@@ -335,11 +335,36 @@ test("doctor renders a redirected docker CLI as credentialTransit ASSERTED by th
 	assert.match(unresolved, /→ nothing shows where job containers \(and the credentials they carry\) would go/);
 
 	const floored = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=enforced" }, '"remote"|"tcp://10.1.2.3:2375"');
-	assert.match(floored, /✗ PI_BACKEND_FLOOR asks for credentialTransit=enforced, which local provides only while this shell's docker CLI resolves an endpoint on this host, and it does not/);
+	assert.match(floored, /✗ PI_BACKEND_FLOOR asks for credentialTransit=enforced \(local provides it only while the docker endpoint this host's docker CLI resolves is on this host, and that is not observed\)/);
+	assert.match(floored, /Point the docker CLI back at this host/);
+	assert.doesNotMatch(floored, /mounts\.conf|pids\.max/, "only the missed observation's remedy");
 	assert.doesNotMatch(floored, /PI_BACKEND_FLOOR holds/);
 
 	const heldLocal = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=enforced" });
 	assert.match(heldLocal, /✓ PI_BACKEND_FLOOR holds \(credentialTransit=enforced\)/);
 	const heldAsserted = await doctorText({ PI_BACKEND_FLOOR: "credentialTransit=asserted" }, '"remote"|"tcp://10.1.2.3:2375"');
 	assert.match(heldAsserted, /✓ PI_BACKEND_FLOOR holds \(credentialTransit=asserted\)/);
+});
+
+test("each observation that a floor misses brings its own remedy, and only its own (#345)", () => {
+	const allTrue = { [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: true, [RUNTIME_ADDS_NO_MOUNTS]: true };
+	const [bounds] = observationRefusals({ backends: ["local"], backendFloor: { isolation: ENFORCED, credentialTransit: ENFORCED }, observations: { ...allTrue, [DAEMON_APPLIES_BOUNDS]: false }, evidence: { [DAEMON_APPLIES_BOUNDS]: "the daemon is Podman" } });
+	assert.match(bounds, /local: isolation=enforced holds only while the daemon reports that it applies a container's pid and memory bounds/);
+	assert.match(bounds, /the daemon is Podman/);
+	assert.ok(bounds.includes(OBSERVATION_FIX[DAEMON_APPLIES_BOUNDS]));
+	assert.ok(!bounds.includes(OBSERVATION_FIX[DOCKER_ENDPOINT_LOCAL]), "a bounds miss is never told to repoint the docker CLI");
+	const [both] = observationRefusals({ backends: ["local"], backendFloor: { mountSet: ENFORCED, credentialTransit: ENFORCED }, observations: { [DAEMON_APPLIES_BOUNDS]: true } });
+	assert.ok(both.includes(OBSERVATION_FIX[DOCKER_ENDPOINT_LOCAL]) && both.includes(OBSERVATION_FIX[RUNTIME_ADDS_NO_MOUNTS]));
+	assert.ok(both.indexOf(OBSERVATION_FIX[DOCKER_ENDPOINT_LOCAL]) < both.indexOf(OBSERVATION_FIX[RUNTIME_ADDS_NO_MOUNTS]), "in the closed list's order");
+	assert.deepEqual(observationRefusals({ backends: ["local"], backendFloor: { isolation: ENFORCED }, observations: { [DOCKER_ENDPOINT_LOCAL]: true }, only: [DOCKER_ENDPOINT_LOCAL] }), [], "a check narrowed to the endpoint does not refuse on an observation not read yet");
+});
+
+test("a floor refusal is transient only when every observation it misses went unanswered (#345)", () => {
+	const floor = { isolation: ENFORCED, credentialTransit: ENFORCED };
+	const args = (observations) => ({ backends: ["local"], backendFloor: floor, observations });
+	assert.equal(observationRefusalIsTransient(args({ [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: null })), true, "a daemon still starting");
+	assert.equal(observationRefusalIsTransient(args({ [DOCKER_ENDPOINT_LOCAL]: true })), true, "an observation never made is unanswered too");
+	assert.equal(observationRefusalIsTransient(args({ [DOCKER_ENDPOINT_LOCAL]: false, [DAEMON_APPLIES_BOUNDS]: null })), false, "one answered miss makes it a refusal for good");
+	assert.equal(observationRefusalIsTransient(args({ [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: false })), false);
+	assert.equal(observationRefusalIsTransient(args({ [DOCKER_ENDPOINT_LOCAL]: true, [DAEMON_APPLIES_BOUNDS]: true })), false, "nothing misses");
 });

@@ -88,6 +88,7 @@ export function parseDaemonFacts(output) {
 				// Only a unix path is kept, because only a unix path is ever statted. Podman fills this from the SERVICE's own
 				// listener (source): `unix://...` or `tcp://...` for a running service, the bare default path in-process.
 				remoteSocketPath: isUnixSocketPath(path) ? path : null,
+				serverVersion: displayVersion(body.version?.Version),
 			} };
 		}
 		if (typeof body.ServerVersion === "string" && body.ServerVersion !== "" && (typeof body.OperatingSystem === "string" || Array.isArray(body.SecurityOptions))) {
@@ -103,10 +104,19 @@ export function parseDaemonFacts(output) {
 				bounds: podman ? null : { pids: body.PidsLimit === true, memory: body.MemoryLimit === true },
 				serviceIsRemote: null,
 				remoteSocketPath: null,
+				serverVersion: displayVersion(body.ServerVersion),
 			} };
 		}
 	}
 	return null;
+}
+
+/**
+ * A version string fit for doctor's display line (issue #345), or `null`. Display only, never a decision: validated to a
+ * short run of version characters so a daemon's answer cannot put anything else on an operator's terminal.
+ */
+function displayVersion(value) {
+	return typeof value === "string" && /^[0-9A-Za-z.+~_-]{1,40}$/.test(value) ? value : null;
 }
 
 /**
@@ -285,10 +295,10 @@ export function makeJobUserResolver({
 		if (cached && cached.key === key) return cached.value;
 		if (inFlight.has(key)) return inFlight.get(key);
 		const work = (async () => {
-			// Not asked where no answer could change the decision: a VM-backed platform, or an endpoint observed on another
-			// machine (row 2 decides `image` before any daemon fact is read, and the read would be a remote round trip).
-			const skip = platform === "darwin" || platform === "win32" || endpoint?.local === false;
-			const daemon = skip ? { answered: false, reason: "not-read", transient: true } : await readFacts();
+			// Asked on EVERY platform and endpoint, although a VM-backed platform or an endpoint on another machine decides
+			// `image` before any daemon fact is read: the same read is where the runtime observations come from (issue
+			// #345), and a Docker Desktop host skipped here would never be credited with the bounds its daemon applies.
+			const daemon = await readFacts();
 			// A local docker endpoint's display form IS its unix path (credentials never ride a unix URL); with no endpoint,
 			// Podman's own shape names the service socket.
 			const socketPath = endpoint?.local === true && typeof endpoint.endpoint === "string" && endpoint.endpoint.startsWith("unix://")
@@ -296,8 +306,10 @@ export function makeJobUserResolver({
 				: daemon?.answered ? daemon.facts.remoteSocketPath : null;
 			const socket = socketFacts(socketPath, { stat });
 			const decision = decideJobUser({ platform, release, euid, egid, endpoint, daemon, socket });
-			const value = { decision, facts: daemon?.answered ? daemon.facts : null, socket };
-			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable") cached = { key, value };
+			const value = { decision, facts: daemon?.answered ? daemon.facts : null, daemon, socket };
+			// Cached only for an ANSWERED read: an `image` decided on a VM-backed platform while its daemon was still starting
+			// must not pin "not read" for the runtime observations until the endpoint changes.
+			if (decision.mode !== "unknown" && decision.cause !== "runtime-unreadable" && daemon?.answered === true) cached = { key, value };
 			return value;
 		})();
 		inFlight.set(key, work);

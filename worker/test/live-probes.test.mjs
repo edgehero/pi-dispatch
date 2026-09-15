@@ -28,6 +28,9 @@ import {
 	liveProbeRunArgs,
 	liveSleepSeconds,
 	localFoldersVerdict,
+	MOUNTINFO_ALLOWED_EXACT,
+	MOUNTINFO_ALLOWED_TREES,
+	mountPointsOf,
 	mountSetVerdict,
 	nonRootVerdict,
 	parseConnectResults,
@@ -81,9 +84,9 @@ test("the probe container is the JOB BUILDER's argv: every isolation flag, no ne
 });
 
 test("the sleep is DERIVED from the step bound, never a literal", () => {
-	assert.equal(liveSleepSeconds(20_000), 90);
-	assert.equal(liveSleepSeconds(40_000), 150);
-	assert.ok(liveSleepSeconds(20_000) * 1000 > 3 * 20_000, "outlives every step that needs the container alive");
+	assert.equal(liveSleepSeconds(20_000), 110);
+	assert.equal(liveSleepSeconds(40_000), 190);
+	assert.ok(liveSleepSeconds(20_000) * 1000 > 4 * 20_000, "outlives every step that needs the container alive: inspect, mountinfo, status, write");
 });
 
 test("names carry the pid and nonce, and sit outside every sweep's namespace", () => {
@@ -181,6 +184,51 @@ test("mountSet is keyed by destination AND read-write flag, so a flip with an eq
 	assert.match(mountSetVerdict(mounts([["/job", false], ["/workspace", true], ["/extra", true]]), { expected: EXPECTED }).detail, /\/extra is mounted and nothing declares it/);
 });
 
+test("mountSet reads /proc/self/mountinfo for what .Mounts does not list: a runtime's own mount fails, its fixed set does not (#345)", () => {
+	const inspect = mounts([["/job", false], ["/workspace", true]]);
+	const held = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"]) });
+	assert.equal(held.ok, true, held.detail);
+	assert.match(held.detail, /in docker inspect and in \/proc\/self\/mountinfo/);
+	// Rootful Podman, measured: its init, .containerenv, /proc/interrupts, and /run/secrets from the default mounts.conf.
+	const podman = mountinfoFor(["/job", "/workspace", "/run/podman-init", "/run/.containerenv", "/proc/interrupts"]);
+	assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: podman }).ok, true, "Podman's own fixed set passes");
+	const secrets = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/secrets"]) });
+	assert.deepEqual([secrets.ok, secrets.warn, secrets.cause], [false, undefined, "runtime-mount"]);
+	assert.match(secrets.detail, /\/run\/secrets is mounted inside the container, and neither docker inspect nor the job lists it/);
+	for (const [label, point, ok] of [
+		["a powercap mask under /sys", "/sys/devices/virtual/powercap", true],
+		["a cgroup v1 controller", "/sys/fs/cgroup/memory", true],
+		["a lookalike of /dev", "/devices", false],
+		["a lookalike of /proc", "/procfs", false],
+		["a path under the root is not the root", "/srv", false],
+		["under an allowed FILE is not allowed", "/etc/hosts/x", false],
+		["a sibling of Podman's .containerenv", "/run/other", false],
+	]) {
+		assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], [point]) }).ok, ok, label);
+	}
+	const escaped = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/with\\040space"]) });
+	assert.match(escaped.detail, /\/run\/with space is mounted/, "the kernel's octal escapes are decoded");
+	const bytes = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/x\\033[2J"]) });
+	assert.match(bytes.detail, /\/run\/x\?\[2J is mounted/, "an escape decoded to a control byte is never printed");
+	assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: null }).warn, true, "a mountinfo read that failed is not read back");
+	assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: "not a mountinfo line\n" }).warn, true, "nor one that has no mount line in it");
+	assert.equal(mountSetVerdict(mounts([["/job", true], ["/workspace", true]]), { expected: EXPECTED, mountinfo: null }).ok, false, "a .Mounts failure still fails without it");
+	assert.deepEqual([...MOUNTINFO_ALLOWED_EXACT], ["/", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", "/usr/sbin/docker-init", "/sbin/docker-init", "/run/podman-init", "/run/.containerenv"]);
+	assert.deepEqual([...MOUNTINFO_ALLOWED_TREES], ["/proc", "/dev", "/sys"]);
+	assert.deepEqual(mountPointsOf("36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue\n"), ["/mnt2"], "the kernel documentation's own example line");
+});
+
+test("a live run reads the mount table inside the reading container with a constant cat, and a runtime mount fails mountSet (#345)", async () => {
+	const docker = fakeDocker();
+	const result = await runLiveProbes(probeArgs(docker));
+	assert.equal(result.verdicts.find((v) => v.property === "mountSet").ok, true);
+	assert.ok(docker.calls.some((a) => a.join(" ") === `exec ${ID} cat /proc/self/mountinfo`));
+	const secrets = fakeDocker({ mountinfo: async (args) => ({ code: 0, stdout: mountinfoFor(docker.calls.find((a) => a[0] === "run" && a.includes("sleep")).flatMap((a, i, all) => (all[i - 1] === "-v" ? [a.split(":")[1]] : [])), ["/run/secrets"]) }) });
+	assert.equal((await runLiveProbes(probeArgs(secrets))).verdicts.find((v) => v.property === "mountSet").cause, "runtime-mount");
+	const unread = fakeDocker({ mountinfo: async () => ({ code: 1, stdout: "" }) });
+	assert.equal((await runLiveProbes(probeArgs(unread))).verdicts.find((v) => v.property === "mountSet").warn, true);
+});
+
 test("mountSet refuses the docker socket, the home directory or an ancestor, and the shared session store", () => {
 	const base = [["/job", false], ["/workspace", true]];
 	const sock = mountSetVerdict(mounts([...base, ["/var/run/docker.sock", true, "/var/run/docker.sock"]]), { expected: EXPECTED });
@@ -257,6 +305,15 @@ test("containerIdOf takes the ID docker run -d printed, and nothing else", () =>
 
 // --- the sequence -----------------------------------------------------------------------------------------------
 
+/**
+ * A `/proc/self/mountinfo` body with the runtime's own mount points (as measured on rootful Docker with the builder's
+ * argv) plus `destinations`, in the kernel's line shape.
+ */
+function mountinfoFor(destinations, extra = []) {
+	const points = ["/", "/proc", "/dev", "/dev/pts", "/dev/mqueue", "/dev/shm", "/sys", "/sys/fs/cgroup", "/proc/kcore", "/usr/sbin/docker-init", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", ...destinations, ...extra];
+	return `${points.map((p, i) => `${100 + i} 99 0:${i} / ${p} rw,relatime - overlay overlay rw`).join("\n")}\n`;
+}
+
 /** A docker CLI that answers like the measured one, recording every argv. `over` replaces one step's answer. */
 function fakeDocker(over = {}, { id = ID } = {}) {
 	const calls = [];
@@ -272,7 +329,7 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 			args[0] === "run"
 				? args.includes("sleep") ? "run" : args.includes(EPHEMERAL_SCRIPT) ? "ephemeral" : args.includes(PEER_SCRIPT) ? "peer" : "pin"
 				: args[0] === "exec"
-					? args.includes(STATUS_SCRIPT) ? "status" : args.includes(CONNECT_SCRIPT) ? (args[1] === peerIds.peer2 ? "control" : "connect") : "write"
+					? args.includes("/proc/self/mountinfo") ? "mountinfo" : args.includes(STATUS_SCRIPT) ? "status" : args.includes(CONNECT_SCRIPT) ? (args[1] === peerIds.peer2 ? "control" : "connect") : "write"
 					: args[0] === "ps"
 						? args.includes("--no-trunc") ? "gone" : "ps"
 						: args[0] === "network"
@@ -330,6 +387,8 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 				};
 			case "status":
 				return { code: 0, stdout: HELD_STATUS, stderr: "" };
+			case "mountinfo":
+				return { code: 0, stdout: mountinfoFor(volumes.map((v) => v.split(":")[1])), stderr: "" };
 			case "write": {
 				// What the constant script does on a host that holds: the nonce into every writable mount a job uses.
 				for (const dest of ["/workspace", "/outbox", "/session"]) {

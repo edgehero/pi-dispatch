@@ -5,7 +5,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { backendChecks, collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -60,7 +61,9 @@ function fakeSpawn(plan, calls = []) {
 			// A FUNCTION outcome answers from the argv (issue #278's --live sequence, where a later step reads what an
 			// earlier one was given); it may also act, as the in-container write does on the host fixture.
 			const resolved = typeof outcome === "function" ? outcome(cmd, args) : outcome;
-			const { code, output } = typeof resolved === "object" && resolved !== null ? resolved : { code: resolved, output: "" };
+			const { code, output, stderr } = typeof resolved === "object" && resolved !== null ? resolved : { code: resolved, output: "" };
+			// stderr FIRST, as podman-docker's banner arrives before the answer (issue #345).
+			if (stderr) child.stderr.handlers.data?.(stderr);
 			if (output) child.stdout.handlers.data?.(output);
 			handlers.close?.(code);
 		});
@@ -3121,6 +3124,8 @@ function liveOk({ uid = "1001" } = {}) {
 		// A readable rootful daemon, so the job user is decided and the probe runs (issue #341).
 		...infoPlan(ROOTFUL_INFO),
 		[`docker exec ${LIVE_ID} sh -c cat /proc/1/status`]: { code: 0, output: LIVE_STATUS(uid) },
+		// Issue #345: the mount table inside the reading container, as rootful Docker shows it for the builder's argv.
+		[`docker exec ${LIVE_ID} cat /proc/self/mountinfo`]: () => ({ code: 0, output: `${["/", "/proc", "/dev", "/sys", "/usr/sbin/docker-init", "/etc/hosts", ...volumes.map((v) => v.split(":")[1])].map((p, i) => `${100 + i} 99 0:${i} / ${p} rw - overlay overlay rw`).join("\n")}\n` }),
 		[`docker exec ${LIVE_ID} sh -c [ -r /job ]`]: (_cmd, args) => {
 			for (const dest of ["/workspace", "/outbox", "/session"]) {
 				const src = volumes.find((v) => v.split(":")[1] === dest).split(":")[0];
@@ -3318,7 +3323,8 @@ test("doctor names who a local job runs as, from the worker's own resolver, and 
 		assert.match(text(), pattern, label);
 		assert.equal(code, 0, `${label}: ${text()}`);
 		assert.ok(!calls.some((c) => c.args[0] === "run" && c.args.some((a) => /^--user/.test(String(a)))), `${label}: no container is started to decide it`);
-		if (ids.platform === "darwin") assert.ok(!calls.some((c) => c.args.includes("--format={{json .}}")), "macOS asks the daemon nothing");
+		// Issue #345: macOS asks the daemon ONCE, for the runtime observations; the job user is still the image's whatever it says.
+		if (ids.platform === "darwin") assert.equal(calls.filter((c) => c.args.includes("--format={{json .}}")).length, 1, "macOS asks the daemon once, and decides nothing from it");
 	}
 });
 
@@ -3584,4 +3590,82 @@ test("doctor --live gives each ephemeral failure its own fix: a survivor, a held
 		if (cause === "name-held") assert.match(failed.fix, /removed whatever held the name/, "the fix does not send the operator to inspect a container the read-back already removed");
 	}
 	assert.equal(fixes.size, 4, "four causes, four fixes, none falling back to a generic one");
+});
+
+// --- issue #345: the runtime observations -------------------------------------------------------------------------
+
+const PODMAN_COMPAT_INFO = JSON.stringify({ ServerVersion: "5.8.2", OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" });
+const DESKTOP_INFO = JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=unconfined"], PidsLimit: true, MemoryLimit: true });
+const SHIM_INFO = JSON.stringify({ host: { os: "linux", security: { rootless: false }, serviceIsRemote: true, remoteSocket: { path: "unix:///run/podman/podman.sock", exists: true } }, version: { Version: "5.8.2" } });
+const noHostFiles = (() => {
+	const missing = (p) => {
+		throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+	};
+	return { statSync: missing, readFileSync: missing, readdirSync: missing };
+})();
+const withOverride = { ...noHostFiles, statSync: (p) => (p === "/etc/containers/mounts.conf" ? { size: 0 } : noHostFiles.statSync(p)) };
+
+test("doctor says isolation and mountSet are ASSERTED where the runtime is not observed providing them, with what was seen (#345)", () => {
+	const endpoint = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock" };
+	const read = (body) => ({ answered: true, facts: parseDaemonFacts(body).facts });
+	const find = (checks, property) => checks.find((c) => c.label.startsWith(`local: ${property} is ASSERTED`));
+	const podman = backendChecks({}, { endpoint, daemon: read(PODMAN_COMPAT_INFO), fs: noHostFiles });
+	const bounds = find(podman, "isolation");
+	assert.deepEqual([bounds.ok, bounds.warn], [false, true]);
+	assert.match(bounds.label, /isolation is ASSERTED by the daemon, not enforced: the daemon is Podman, whose Docker API reports PidsLimit and MemoryLimit/);
+	assert.match(bounds.fix, /doctor --live` reads pids\.max and memory\.max/);
+	assert.match(bounds.fix, /worker_started\.daemonAppliesBounds/);
+	const mounts = find(podman, "mountSet");
+	assert.match(mounts.label, /mountSet is ASSERTED by the container runtime's configuration, not enforced: \/etc\/containers\/mounts\.conf does not exist/);
+	assert.match(mounts.fix, /create an empty \/etc\/containers\/mounts\.conf/);
+	assert.equal(find(backendChecks({}, { endpoint, daemon: read(PODMAN_COMPAT_INFO), fs: withOverride }), "mountSet"), undefined, "the documented override earns mountSet");
+	const docker = backendChecks({}, { endpoint: { local: true, endpoint: "unix:///var/run/docker.sock" }, daemon: read(ROOTFUL_INFO), fs: noHostFiles });
+	assert.equal(find(docker, "isolation") ?? find(docker, "mountSet"), undefined, "a rootful Docker Engine reporting both bounds stays quiet");
+	const unread = backendChecks({}, { endpoint, daemon: { answered: false, reason: "timeout", transient: true }, fs: noHostFiles });
+	assert.match(find(unread, "isolation").label, /the daemon's info was not read \(timeout\)/);
+	assert.match(find(unread, "isolation").fix, /fix what stops the daemon answering/);
+	const down = backendChecks({}, { endpoint, daemon: null, fs: noHostFiles });
+	assert.equal(find(down, "isolation") ?? find(down, "mountSet"), undefined, "no daemon read at all: the daemon line already failed, and these would only repeat it");
+});
+
+test("doctor names each floor miss with the observation it needed and that observation's remedy only (#345)", () => {
+	const endpoint = { local: true, context: "podman", endpoint: "unix:///run/podman/podman.sock" };
+	const daemon = { answered: true, facts: parseDaemonFacts(PODMAN_COMPAT_INFO).facts };
+	const checks = backendChecks({ PI_BACKEND_FLOOR: "isolation=enforced,mountSet=enforced" }, { endpoint, daemon, fs: noHostFiles });
+	const floor = checks.find((c) => /PI_BACKEND_FLOOR asks for/.test(c.label));
+	assert.deepEqual([floor.ok, floor.warn], [false, undefined], "a floor miss is a ✗, as the worker refuses to boot on it");
+	assert.match(floor.label, /isolation=enforced \(local provides it only while the daemon reports that it applies/);
+	assert.match(floor.label, /mountSet=enforced \(local provides it only while the container runtime adds no mounts/);
+	assert.match(floor.fix, /doctor --live` reads pids\.max/);
+	assert.match(floor.fix, /create an empty \/etc\/containers\/mounts\.conf/);
+	assert.doesNotMatch(floor.fix, /Point the docker CLI back/);
+	const held = backendChecks({ PI_BACKEND_FLOOR: "mountSet=enforced" }, { endpoint, daemon, fs: withOverride });
+	assert.ok(held.some((c) => c.ok && /PI_BACKEND_FLOOR holds \(mountSet=enforced\)/.test(c.label)));
+});
+
+test("doctor names the runtime that answered, and warns on podman-docker, where the docker CLI resolves no context (#345)", async () => {
+	for (const [label, body, ids, pattern, warn] of [
+		["Docker Engine", ROOTFUL_INFO, LINUX_ID(1001), /✓ local: the daemon is Docker Engine 27\.5\.1\n/, false],
+		["Docker Desktop", DESKTOP_INFO, { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 }, /✓ local: the daemon is Docker Desktop \(engine 27\.4\.0\)/, false],
+		["Podman's Docker API", PODMAN_COMPAT_INFO, LINUX_ID(1001), /✓ local: the daemon is Podman 5\.8\.2, through its Docker API/, false],
+		["podman-docker", SHIM_INFO, LINUX_ID(1001), /⚠ local: the daemon is Podman 5\.8\.2, reached through podman-docker/, true],
+	]) {
+		const { out, text } = capture();
+		await runDoctor(ghEnv(), { ...ghDeps(out, { ...infoPlan(body), ...green }), jobUserIdentity: ids, stat: socketStat, observationFs: noHostFiles });
+		assert.match(text(), pattern, label);
+		if (warn) assert.match(text(), /docker context create podman --docker host=unix:\/\/\/run\/podman\/podman\.sock/, label);
+	}
+});
+
+test("doctor parses the proxy's state and this host's image id from stdout only, so podman-docker's stderr banner cannot flip them (#345)", async () => {
+	const banner = "Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.\n";
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, egressPlan({ "docker inspect --format={{.State.Running}}": { code: 0, output: "true|healthy\n", stderr: banner }, "gh auth status": { code: 0, output: ghStatusOutput } })));
+	assert.match(text(), /✓ Egress proxy running \(pi-dispatch-egress-proxy\)/);
+	assert.doesNotMatch(text(), /Egress proxy is stopped/);
+
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect --format={{.Id}}": { code: 0, output: "sha256:same\n", stderr: banner }, "docker image": 0 };
+	const same = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: "sha256:same" }] }) }));
+	assert.ok(!same.some((c) => /digest differs/.test(c.label)), "the banner is not read as part of the id");
 });

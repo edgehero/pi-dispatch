@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "../src/container-spec.mjs";
-import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
+import { buildDockerRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, ISOLATION_FLAGS } from "../src/docker-run.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -349,4 +349,21 @@ test("mounts flatten in spec order, and -v stays two argv elements", () => {
 		"/g:/opt/pi-global:ro",
 	]);
 	assert.equal(args.filter((a) => a === "-v").length, flat.length, "one -v per mount, never a fused token");
+});
+
+test("the cidfile is a builder-owned field: its own token before dockerExtra, absent by default, refused in extraFlags, and a plain absolute path (#345)", () => {
+	const before = buildDockerRunArgs({ ...base });
+	assert.deepEqual(buildDockerRunArgs({ ...base, cidFile: null }), before, "no cidfile, byte-identical argv");
+	assert.equal(before.some((a) => a.startsWith("--cidfile")), false);
+	const args = buildDockerRunArgs({ ...base, cidFile: "/srv/jobs/job-abc.cid", extraFlags: ["--entrypoint", "sh"] });
+	assert.ok(args.indexOf("--cidfile=/srv/jobs/job-abc.cid") < args.indexOf("--entrypoint"), "before dockerExtra, where nothing can follow it");
+	assert.equal(containerSpec({ ...base, cidFile: "C:\\jobs\\job-abc.cid" }).cidFile, "C:\\jobs\\job-abc.cid", "a Windows worker's jobs dir");
+	for (const flag of ["--cidfile", "--cidfile=/tmp/x"]) {
+		assert.throws(() => buildDockerRunArgs({ ...base, extraFlags: [flag, "/tmp/x"] }), /would supersede the isolation boundary/, flag);
+	}
+	assert.ok(DOCKER_EXTRA_FORBIDDEN.includes("--cidfile"));
+	for (const bad of ["relative.cid", "/srv/../etc/x.cid", "/srv/jobs/x\n.cid", 42, ""]) {
+		assert.throws(() => containerSpec({ ...base, cidFile: bad }), /refusing a cidfile/, JSON.stringify(bad));
+		assert.throws(() => dockerArgsFromSpec({ ...containerSpec(base), cidFile: bad }), /refusing a cidfile/, `hand-built ${JSON.stringify(bad)}`);
+	}
 });

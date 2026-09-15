@@ -53,7 +53,7 @@ arguments:
 - `outcome` is `failed` (final infrastructure failure) or `policy` (a worker abort or an in-container
   policy stop).
 - `reason` is a fixed token, never a message: `worker-abort`, `runner-policy`,
-  `container-never-started`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
+  `container-never-started`, `container-detached`, `secret-resolver-unreachable`, any other fixed token a failure legitimately
   carries, or `infra` when it carried none. Anything message-shaped is flattened to `infra` before it can
   reach your argv.
 - `host` is the worker's declared name, possibly empty.

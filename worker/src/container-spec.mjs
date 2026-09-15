@@ -59,6 +59,20 @@ export const SHIPPED_IMAGE_UID = 1001;
 // passwd, which is gid 0 for a uid it has no entry for; a name is refused because the image decides what it means.
 const JOB_USER_RE = /^[1-9]\d{0,9}:[1-9]\d{0,9}$/;
 
+/**
+ * The host path `docker run` writes the container's ID to (issue #345), or `null`. Absolute (a POSIX path, or a Windows
+ * drive path for a worker on Windows), no `..` segment and no control byte, because it rides a single
+ * `--cidfile=<path>` token (the CLI splits on the first `=`) and names a file the worker later reads and removes. The worker puts it BESIDE the job
+ * directory, never inside the `/job:ro` mount.
+ */
+export function assertCidFile(cidFile) {
+	if (cidFile === null || cidFile === undefined) return;
+	const absolute = typeof cidFile === "string" && (cidFile.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cidFile));
+	if (!absolute || cidFile.split(/[\\/]/).includes("..") || /[\u0000-\u001f\u007f]/.test(cidFile)) {
+		throw new Error(`docker run: refusing a cidfile that is not a plain absolute path: ${JSON.stringify(cidFile)}`);
+	}
+}
+
 /** Throws unless `user` is null/undefined or a non-root "<uid>:<gid>" (`nonRoot`, issue #341). */
 export function assertJobUser(user) {
 	if (user === null || user === undefined) return;
@@ -112,10 +126,12 @@ export function containerSpec({
 	cpus = "2",
 	network = null,
 	user = null,
+	cidFile = null,
 	extraFlags = [],
 }) {
 	if (!image) throw new Error("docker run: image is required");
 	assertJobUser(user);
+	assertCidFile(cidFile);
 	if (!name) throw new Error("docker run: container name is required");
 	if (!workspace) throw new Error("docker run: workspace mount is required");
 
@@ -150,6 +166,9 @@ export function containerSpec({
 		cpus,
 		network,
 		user,
+		// Issue #345: where the runtime writes the container ID once it creates one, so a CLI that exits as if nothing
+		// started (a lost API connection) can be told apart from a container that runs on without it. null = absent.
+		cidFile,
 		// UNCONDITIONALLY true, and there is deliberately no parameter that can unset it. The boundary is
 		// not a thing a caller opts into -- CONST-ISOLATION-CONTAINER-PER-JOB is why every other flag here
 		// exists -- so the spec is simply unable to describe an unisolated container, and the builder in

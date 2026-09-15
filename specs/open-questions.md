@@ -1389,7 +1389,9 @@ adversarial passes did.
     plain rootless, so it is refused too;
   - **a rootful Podman host that keeps the default subscription mounts** gives every job a `/run/secrets` mount
     carrying the host's subscription files where they exist (`/etc/rhsm` readable, measured) unless
-    `/etc/containers/mounts.conf` is empty.
+    `/etc/containers/mounts.conf` is empty. Since issue #345 this is observed rather than only documented:
+    `mountSet` degrades to `asserted` there, a floor asking `mountSet=enforced` refuses, and `doctor --live` fails
+    it by reading the container's `/proc/self/mountinfo`.
 - **What bounds it meanwhile**:
   - `deploy/worker.service` runs the worker as a dedicated account (`User=pi`), not a login account.
   - A root worker is refused.
@@ -1459,3 +1461,4 @@ adversarial passes did.
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **`OQ-012` AMENDED**: an `anyUid` bullet -- the image's USER stops being the whole story of who runs it on a daemon that enforces bind-mount ownership, so an operator-built image can now also silently lack the capability to run as the worker's uid; the detection is a label plus a verify arm, the `replicas` shape, and the status stays ACCEPTED RISK. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
 | 2026-09-14 | Issue #341, part 2. **NEW `OQ-036`** (ACCEPTED RISK, wants ratification): a job run as the worker's own uid has the worker's reach if it escapes. The row records that files it creates carry the worker's uid and group (setuid and setgid included), that the worker's `0600` files in a mounted folder become readable, that rootless daemons are refused (keep-id Podman included, since it reads like plain rootless), and that rootful Podman's default subscription mounts reach every job without an empty mounts.conf; plus the bounds (dedicated account, root worker refused, the gid rows, nothing trigger-settable moves the uid) and what would close it. **`OQ-012` UNCHANGED, checked**: its `anyUid` bullet from part 1 now has a reader, and the status stays. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
 | 2026-09-15 | Issue #344. **`OQ-012` AMENDED**, one sentence: the read-back now covers `ephemeral` and, with the egress policy armed, `jobToJobIsolation`, off short-lived containers rather than one. Its limits (not a gate, `PI_JOB_IMAGE` only, not the image's contents, not a remote venue) and the status are UNCHANGED, checked. |
+| 2026-09-15 | Issue #345. **`OQ-036` AMENDED**, one sentence under its Podman subscription-mounts bullet: the risk is now observed (`runtimeAddsNoMounts` degrades `mountSet`, a floor refuses, `doctor --live` reads mountinfo) rather than only documented. Its status and every other bullet are UNCHANGED, checked. |

@@ -74,7 +74,11 @@ function fakeHost(overrides = {}) {
 // Drive startWorker with injected fakes and capture the exact object handed to createWorker
 // (deps are nested under `deps`). No real Redis: createWorkerFn is faked. The real ioredis client
 // startWorker constructs via makeRedisClient is torn down so it leaves no dangling handle.
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage } = {}) {
+/** A host filesystem with none of the files the runtime-mounts observation reads. */
+const enoent = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p) => { throw enoent(p); }, readdirSync: (p) => { throw enoent(p); } };
+
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -186,6 +190,8 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			// job-user decision is `worker` with no --user (the shipped image's own uid) unless a test says otherwise.
 			readDaemonFacts: readDaemonFacts ?? (async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Test Linux", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null } })),
 			jobUserIdentity: jobUserIdentity ?? { platform: "linux", release: "6.8.0-test", euid: 1001, egid: 1001 },
+			// Issue #345: never this machine's /etc. A host with none of Podman's files unless a test says otherwise.
+			observationFs: observationFs ?? NO_HOST_FILES,
 			...(makeBackendRegistry ? { makeBackendRegistry } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
@@ -1963,8 +1969,13 @@ test("without a floor a redirected docker CLI boots, logs it once without creden
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
 	const mark = bootLines.length;
 	// The endpoint rides the ok answer (issue #341), so this job's user is decided against the same read.
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer });
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer });
+	const okOf = async () => {
+		const { ok, endpoint, jobUser } = await captured.deps.observationPreflight(job);
+		assert.equal(typeof jobUser?.decision?.mode, "string", "the job user decided from the same read rides along (issue #345), so it is not read twice");
+		return { ok, endpoint };
+	};
+	assert.deepEqual(await okOf(), { ok: true, endpoint: answer });
+	assert.deepEqual(await okOf(), { ok: true, endpoint: answer });
 	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "docker_endpoint_not_local").length, 0, "a standing redirect is one line at boot, not one per job");
 	answer = { local: true, context: "desktop-linux", endpoint: "unix:///x.sock", reason: null, transient: false };
 	await captured.deps.observationPreflight(job);
@@ -1983,7 +1994,8 @@ test("a floor asking only credentialTransit=asserted BOOTS on a redirected CLI a
 	assert.ok(logs.some((l) => l.event === "docker_endpoint_not_local"), "the redirect is still said");
 	assert.equal(logs.find((l) => l.event === "worker_started").dockerEndpointLocal, false);
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: await REMOTE_ENDPOINT() });
+	const { ok, endpoint } = await captured.deps.observationPreflight(job);
+	assert.deepEqual({ ok, endpoint }, { ok: true, endpoint: await REMOTE_ENDPOINT() });
 });
 
 test("with a floor, a context switched AFTER boot refuses the next job before it spends (#278)", { skip }, async () => {
@@ -1995,7 +2007,8 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 		resolveDockerEndpoint: async () => answer,
 	});
 	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
-	assert.deepEqual(await captured.deps.observationPreflight(job), { ok: true, endpoint: answer }, "booted on a local endpoint, so the first job runs");
+	const first = await captured.deps.observationPreflight(job);
+	assert.deepEqual({ ok: first.ok, endpoint: first.endpoint }, { ok: true, endpoint: answer }, "booted on a local endpoint, so the first job runs");
 	const mark = bootLines.length;
 	answer = { local: false, context: "pd-remote", endpoint: "tcp://10.1.2.3:2375", reason: null, transient: false };
 	const refused = await captured.deps.observationPreflight(job);
@@ -2006,6 +2019,7 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 	assert.ok(!logs.some((l) => l.event === "docker_endpoint_not_local"), "and not at boot, where it was local");
 	answer = { local: null, context: null, endpoint: null, reason: "timeout", transient: true };
 	assert.deepEqual(await captured.deps.observationPreflight(job), { unavailable: true, reason: "timeout" }, "a transient read retries rather than refusing");
+	assert.deepEqual(refused.observations, ["dockerEndpointLocal"], "the refusal says which observation it missed, for the forge comment's fixed words");
 });
 
 // --- issue #341: which uid job containers run as ---------------------------------------------------------------
@@ -2058,11 +2072,13 @@ test("an unanswered or unreadable daemon BOOTS, and says what it could not decid
 	}
 });
 
-test("on macOS the job user is the image's and the daemon is never asked", { skip }, async () => {
+test("on macOS the job user is the image's whatever the daemon says, and its one facts read feeds the runtime observations (#345)", { skip }, async () => {
 	let reads = 0;
-	const { logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: async () => (reads++, { answered: false, transient: true }), jobUserIdentity: { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 } });
-	assert.equal(reads, 0);
-	assert.deepEqual(logs.find((l) => l.event === "worker_started").jobUser, { mode: "image", user: null, cause: "desktop-platform" });
+	const { logs } = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), readDaemonFacts: async () => (reads++, { answered: false, reason: "daemon-unreachable", transient: true }), jobUserIdentity: { platform: "darwin", release: "24.6.0", euid: 501, egid: 20 } });
+	assert.equal(reads, 1, "read once, for the observations; the decision needs no fact");
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.deepEqual(started.jobUser, { mode: "image", user: null, cause: "desktop-platform" });
+	assert.deepEqual([started.daemonAppliesBounds, started.runtimeAddsNoMounts], [null, null], "a daemon still starting is not read, never false");
 });
 
 test("the per-job gate: --user with HOME for another uid on an anyUid image, refused without it, nothing for uid 1001", { skip }, async () => {
@@ -2152,4 +2168,102 @@ test("PI_FORWARD_ENV=HOME on a worker that runs jobs under --user is said at boo
 		bootImage: { ok: true, capabilities: ["anyUid"] },
 	});
 	assert.ok(!shipped.logs.some((l) => l.event === "forward_env_home_overridden"));
+});
+
+// --- issue #345: the runtime observations ------------------------------------------------------------------------
+
+const PODMAN_FACTS = (over = {}) => DOCKER_FACTS({ podman: true, bounds: null, ...over });
+const hostFiles = (files) => ({
+	statSync: (p) => {
+		if (files[p] === undefined) throw enoent(p);
+		return { size: Buffer.byteLength(files[p]) };
+	},
+	readFileSync: (p) => {
+		if (files[p] === undefined) throw enoent(p);
+		return files[p];
+	},
+	readdirSync: (p) => {
+		throw enoent(p);
+	},
+});
+
+test("a floor asking isolation=enforced refuses to BOOT on a daemon not observed applying the bounds, tagged, with its own remedy, before anything is built (#345)", { skip: skipNoModule }, async () => {
+	const order = [];
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKEND_FLOOR: "isolation=enforced" }, readDaemonFacts: PODMAN_FACTS(), order, makeReaper: () => (order.push("makeReaper"), async () => ({ reaped: true })) }),
+		(err) => err.piDispatchConfig === true && /local: isolation=enforced holds only while the daemon reports that it applies/.test(err.message) && /the daemon is Podman/.test(err.message) && /doctor --live` reads pids\.max/.test(err.message) && !/Point the docker CLI back/.test(err.message),
+	);
+	assert.deepEqual(order, [], "no reaper and no worker");
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKEND_FLOOR: "isolation=enforced" }, readDaemonFacts: async () => ({ answered: false, reason: "daemon-unreachable", transient: true }) }),
+		(err) => err.piDispatchConfig !== true && /the daemon's info was not read \(daemon-unreachable\)/.test(err.message),
+		"a daemon still starting is retried by the supervisor (exit 1), never a config error that strands the unit",
+	);
+});
+
+test("a floor asking mountSet=enforced boots on Podman only with the empty mounts.conf override, and the observations reach worker_started (#345)", { skip }, async () => {
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKEND_FLOOR: "mountSet=enforced" }, readDaemonFacts: PODMAN_FACTS(), makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() }),
+		(err) => err.piDispatchConfig === true && /mountSet=enforced/.test(err.message) && /mounts\.conf does not exist/.test(err.message) && /create an empty \/etc\/containers\/mounts\.conf/.test(err.message),
+	);
+	const { logs } = await runStart({ env: { PI_BACKEND_FLOOR: "mountSet=enforced" }, readDaemonFacts: PODMAN_FACTS(), observationFs: hostFiles({ "/etc/containers/mounts.conf": "" }), makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const started = logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([started.daemonAppliesBounds, started.runtimeAddsNoMounts], [false, true], "Podman: bounds not credited, mounts credited with the override");
+	const docker = await runStart({ makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const dockerStarted = docker.logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([dockerStarted.daemonAppliesBounds, dockerStarted.runtimeAddsNoMounts], [true, true]);
+});
+
+test("per job: the runtime observations are read from the job user's cached facts, logged on change, and refuse under a floor with which observation missed (#345)", { skip }, async () => {
+	let facts = DOCKER_FACTS();
+	let reads = 0;
+	const endpoint = { local: true, context: "default", endpoint: "unix:///run/pd-test/docker.sock", reason: null, transient: false };
+	let current = endpoint;
+	const { captured } = await runStart({
+		env: { PI_BACKEND_FLOOR: "isolation=enforced" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => (reads++, facts()),
+		resolveDockerEndpoint: async () => current,
+	});
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const readsAtBoot = reads;
+	const held = await captured.deps.observationPreflight(job);
+	assert.equal(held.ok, true);
+	assert.equal(reads, readsAtBoot, "the boot read is cached for the same endpoint: no second docker info");
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: [], observed: held }), { user: null, home: null });
+	assert.equal(reads, readsAtBoot, "and the job-user gate reuses the observation's read");
+
+	facts = PODMAN_FACTS();
+	current = { ...endpoint, endpoint: "unix:///run/podman/podman.sock", context: "podman" };
+	const mark = bootLines.length;
+	const refused = await captured.deps.observationPreflight(job);
+	assert.equal(refused.refused, true);
+	assert.deepEqual(refused.observations, ["daemonAppliesBounds"]);
+	assert.match(refused.message, /the daemon is Podman/);
+	const changed = parseLines(bootLines.slice(mark)).filter((l) => l.event === "runtime_observed");
+	assert.deepEqual(changed.map((l) => [l.daemonAppliesBounds, l.runtimeAddsNoMounts]), [[false, false]], "logged once, when it changed");
+	await captured.deps.observationPreflight(job);
+	assert.equal(parseLines(bootLines.slice(mark)).filter((l) => l.event === "runtime_observed").length, 1, "an unchanged answer logs nothing more");
+
+	facts = async () => ({ answered: false, reason: "timeout", transient: true });
+	current = { ...endpoint, context: "third" };
+	assert.deepEqual(await captured.deps.observationPreflight(job), { unavailable: true, reason: "timeout" }, "an unanswered read retries");
+});
+
+test("per job without a floor: an unanswered facts read is not cached, and the job-user gate reuses the observation's read instead of asking again (#345)", { skip }, async () => {
+	let reads = 0;
+	const { captured } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => (reads++, { answered: false, reason: "timeout", transient: true }),
+		jobUserIdentity: LINUX_ID(1234),
+	});
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	const before = reads;
+	const observed = await captured.deps.observationPreflight(job);
+	assert.equal(observed.ok, true, "no floor: an unanswered read refuses nothing");
+	assert.equal(reads, before + 1, "not cached, so the job asks once");
+	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: [], observed }), { unavailable: true, reason: "timeout" });
+	assert.equal(reads, before + 1, "and the job-user gate decides from that same read, not a second docker info");
 });

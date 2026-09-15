@@ -100,6 +100,14 @@ worth calling out because they are the ones adapters get wrong:
   elsewhere it counts as `asserted`, by you, and doctor says so. The table entry says this with
   `observedBy: { credentialTransit: "dockerEndpointLocal" }`. That observation is a fact about this host's
   docker CLI, so an entry for a remote venue leaves `observedBy` out and declares its own word.
+- **`local`'s `isolation` and `mountSet` are `enforced` only while observed too** (issue #345). `isolation` needs
+  the daemon to report that it applies pid and memory bounds, and to be neither rootless nor Podman, whose Docker
+  API reports those booleans whether or not they apply (`daemonAppliesBounds`). `mountSet` needs the runtime to add
+  no mounts of its own: always on Docker, and on rootful Podman only with an empty `/etc/containers/mounts.conf`
+  and no `volumes` or `mounts` key in containers.conf (`runtimeAddsNoMounts`). Where either is not observed the word
+  counts as `asserted`, doctor prints what it saw, and a floor asking for `enforced` refuses. `pi-dispatch doctor
+  --live` reads what these cannot: `pids.max` and `memory.max` inside a real container, and its
+  `/proc/self/mountinfo`.
 - **`local`'s `nonRoot` and `localFolders` depend on which uid the job runs as** (issue #341). On macOS, Windows
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because

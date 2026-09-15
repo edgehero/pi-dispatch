@@ -65,7 +65,8 @@ import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
-import { ABSENT, ASSERTED, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, PROPERTY_NAMES, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
+import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
+import { observeHost } from "./runtime-observations.mjs";
 import { makeDockerEndpointResolver } from "./backend-local.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
@@ -134,6 +135,8 @@ export async function runDoctor(env = process.env, deps = {}) {
 		stat = statSync,
 		passwd = () => readFileSync("/etc/passwd", "utf8"),
 		readUnit = (path) => readFileSync(path, "utf8"),
+		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
+		observationFs = { statSync, readFileSync, readdirSync },
 		isAlive = defaultIsAlive,
 		pid = process.pid,
 		nonce = randomBytes(6).toString("hex"),
@@ -141,7 +144,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
 	const facts = {};
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, observationFs };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -533,9 +536,11 @@ export async function collectChecks(env, seams) {
 			egress: { armed, results: egress.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack), proxy: proxyState?.proxy ?? egressProxyName(env), proxyRunning: proxyState ? proxyState.running : null },
 		});
 	}
-	checks.push(...backendChecks(env, { endpoint }));
 	// Issue #341: who a local job would run as here, from the facts the worker reads, and what --live runs its probe as.
+	// Read BEFORE the backend lines are built (issue #345): the same `docker info` answer is where `isolation` and
+	// `mountSet` are observed, so the backend section and the job-user section speak from one read. Printed after them.
 	const jobUser = await jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage });
+	checks.push(...backendChecks(env, { endpoint, daemon: jobUser.daemon, fs: seams.observationFs }));
 	checks.push(...jobUser.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
 
@@ -925,7 +930,7 @@ export async function collectChecks(env, seams) {
 	// extra docker call whose answer nothing reads.
 	const imageDigest =
 		peers.length > 0 && imageCode === 0
-			? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage])).output.trim() || null
+			? (await runCmdCapture(spawn, "docker", ["image", "inspect", "--format={{.Id}}", jobImage], { stdoutOnly: true })).output.trim() || null
 			: null;
 	if (peers.length > 0) {
 		const mine = workerNameOf(env);
@@ -2388,7 +2393,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
 	// a boolean nor a health word can contain "|".
-	const state = await runCmdCapture(spawn, "docker", ["inspect", `--format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, proxy]);
+	const state = await runCmdCapture(spawn, "docker", ["inspect", `--format={{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, proxy], { stdoutOnly: true });
 	const [running, health] = state.code === 0 ? state.output.trim().split("|") : [];
 	const up = running === "true";
 	checks.push({
@@ -2705,7 +2710,9 @@ function buildScriptsOf(packageDir, fileExists) {
 }
 
 function runCmdCapture(spawn, cmd, args, opts = {}) {
-	const { timeoutMs = 30000 } = opts;
+	// `stdoutOnly` for a caller that PARSES the answer (issue #345): Podman's docker emulation prints a banner on
+	// stderr ("Emulate Docker CLI using podman ..."), which a merged capture puts in front of the value.
+	const { timeoutMs = 30000, stdoutOnly = false } = opts;
 	return new Promise((resolve) => {
 		let child;
 		try {
@@ -2729,7 +2736,9 @@ function runCmdCapture(spawn, cmd, args, opts = {}) {
 			finish(null);
 		}, timeoutMs);
 		child.stdout?.on("data", (d) => (output += d));
-		child.stderr?.on("data", (d) => (output += d));
+		child.stderr?.on("data", (d) => {
+			if (!stdoutOnly) output += d;
+		});
 		child.on("error", () => finish(null)); // ENOENT etc. — the binary is not available
 		child.on("close", (code) => finish(code));
 	});
@@ -2829,11 +2838,13 @@ async function defaultProbeValkey(url) {
  * Reads the environment directly, like every other check here, and parses through `backends.mjs` so doctor
  * and the worker cannot disagree about what a floor says.
  */
-export function backendChecks(env, { endpoint = null } = {}) {
+export function backendChecks(env, { endpoint = null, daemon = null, fs = { statSync, readFileSync, readdirSync } } = {}) {
 	const checks = [];
-	// What this shell's docker CLI resolves (#278), as the observation map the table's `observedBy` reads. An
-	// endpoint doctor was not given is not observed, which gets no credit -- the same polarity as everywhere.
-	const observations = { [DOCKER_ENDPOINT_LOCAL]: endpoint?.local === true };
+	// What this shell's docker CLI resolves (#278), and what its daemon and this host's files say about bounds and mounts
+	// (#345), as the observation map the table's `observedBy` reads. Anything doctor was not given is not observed, which
+	// gets no credit -- the same polarity as everywhere.
+	const observed = observeHost({ endpoint, daemon, fs });
+	const observations = { ...observed.observations, [DOCKER_ENDPOINT_LOCAL]: endpoint?.local === true };
 	let backends;
 	let floor;
 	try {
@@ -2897,6 +2908,24 @@ export function backendChecks(env, { endpoint = null } = {}) {
 				});
 				continue;
 			}
+			// Not said when no daemon read happened at all (the daemon line above already failed): a floor still refuses on it below.
+			if (d.observedBy && d.observedBy !== DOCKER_ENDPOINT_LOCAL && observations[d.observedBy] !== true && daemon !== null) {
+				// #345: the word holds only while this daemon, or this host's runtime configuration, is observed providing it.
+				// Printed as what it degrades to, with what was seen, and the worker's own boot line named.
+				const unread = observations[d.observedBy] !== false;
+				const bounds = d.observedBy === DAEMON_APPLIES_BOUNDS;
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `${name}: ${property} is ASSERTED by ${bounds ? "the daemon" : "the container runtime's configuration"}, not enforced: ${observed.evidence[d.observedBy] ?? "not observed"}`,
+					fix: unread
+						? `nothing shows whether ${OBSERVATIONS[d.observedBy]}; fix what stops the daemon answering, then re-run doctor. The worker logs its own answer at boot (worker_started.${d.observedBy})`
+						: bounds
+							? `the pid and memory bounds in the job argv are the daemon's to apply, and it is not observed applying them: \`pi-dispatch doctor --live\` reads pids.max and memory.max off a real container on this daemon. The worker logs its own answer at boot (worker_started.${d.observedBy})`
+							: `Podman mounts what its mounts.conf and containers.conf list into every job container, invisible to docker inspect: create an empty /etc/containers/mounts.conf and remove any volumes or mounts key. The worker logs its own answer at boot (worker_started.${d.observedBy})`,
+				});
+				continue;
+			}
 			if (d.word === ASSERTED) {
 				checks.push({ ok: false, warn: true, label: `${name}: ${property} is ASSERTED by ${d.assertedBy ?? "something outside this worker"}, not enforced by it`, fix: `not verifiable from here, so treat it as a claim rather than a control: ${d.question}` });
 				continue;
@@ -2928,7 +2957,10 @@ export function backendChecks(env, { endpoint = null } = {}) {
 	} else if (unarmed.length > 0) {
 		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${unarmed.map((u) => `${u.property}=${u.want}`).join(", ")}, which ${[...new Set(unarmed.map((u) => u.armedBy))].join(", ")} has switched off`, fix: "arm the switch, or lower that entry to `absent` if you did not mean to require it" });
 	} else if (unobserved.length > 0) {
-		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${unobserved.map((u) => `${u.property}=${u.want}`).join(", ")}, which ${[...new Set(unobserved.map((u) => u.backend))].join(", ")} provides only while this shell's docker CLI resolves an endpoint on this host, and it does not`, fix: "point the docker CLI back at this host, or lower that entry to `asserted` if the redirect is deliberate; the worker refuses to boot, and refuses each job, on the same answer" });
+		// One clause per miss, naming the observation it needed (#278, #345), and each observation's own remedy.
+		const needed = unobserved.map((u) => `${u.property}=${u.want} (${u.backend} provides it only while ${OBSERVATIONS[u.observedBy] ?? u.observedBy}, and that is not observed)`);
+		const remedies = Object.keys(OBSERVATION_FIX).filter((o) => unobserved.some((u) => u.observedBy === o)).map((o) => OBSERVATION_FIX[o]);
+		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${needed.join("; ")}`, fix: `${remedies.join(" ")} The worker refuses to boot, and refuses each job, on the same answer.` });
 	} else if (bounding.length === 0) {
 		checks.push({ ok: false, warn: true, label: `PI_BACKEND_FLOOR (${spelled}) requires nothing: every entry asks for "absent", which every backend meets`, fix: "raise an entry to `asserted` or `enforced` for it to bound anything" });
 	} else {
@@ -2952,13 +2984,13 @@ export function backendChecks(env, { endpoint = null } = {}) {
  */
 export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage }) {
 	const { spawn, cwd, home, fileExists, jobUserIdentity: ids = {}, stat, passwd, readUnit = (path) => readFileSync(path, "utf8") } = seams;
-	if (dockerCode !== 0) return { checks: [], forLive: { run: true, user: null } };
+	if (dockerCode !== 0) return { checks: [], forLive: { run: true, user: null }, daemon: null };
 	const platform = ids.platform ?? seams.platform;
 	// The worker's bound, not the endpoint read's 5 s: `docker info` is the slow read on a busy host, and a doctor that
 	// gave up sooner would call undecidable a host the worker decides.
 	const readFacts = makeDaemonFactsReader({ run: dockerRunVia(spawn, DAEMON_FACTS_TIMEOUT_MS) });
 	const resolve = makeJobUserResolver({ readFacts, platform, ...(ids.release !== undefined ? { release: ids.release } : {}), euid: ids.euid, egid: ids.egid, ...(stat ? { stat } : {}) });
-	const { decision, socket } = await resolve({ endpoint, key: "doctor" });
+	const { decision, socket, daemon } = await resolve({ endpoint, key: "doctor" });
 	let defaultIsLocal = true;
 	try {
 		defaultIsLocal = parseBackendList(env.PI_BACKENDS)[0] === DEFAULT_BACKEND;
@@ -2966,6 +2998,11 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 		// the backend section above reports an unparseable PI_BACKENDS
 	}
 	const checks = [];
+	// Issue #345: WHICH runtime answered, display only, from the same read. Podman's docker emulation (podman-docker) is
+	// named as a warning: it resolves no docker context, so credentialTransit is never observed there and --live does not
+	// run; the real docker CLI pointed at Podman's socket is the route that reads everything back.
+	const runtime = runtimeLine(daemon);
+	if (runtime) checks.push(runtime);
 	let forLive = { run: true, user: null };
 	if (decision.mode === "image") {
 		const why = decision.cause === "desktop-platform" ? "a VM-backed daemon that maps file ownership" : "the docker endpoint is not on this host";
@@ -3039,7 +3076,25 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 			}
 		}
 	}
-	return { checks, forLive };
+	return { checks, forLive, daemon };
+}
+
+/** The runtime identity line (issue #345), or `null` when the daemon did not answer: display only, never a decision. */
+function runtimeLine(daemon) {
+	if (!daemon?.answered || !daemon.facts) return null;
+	const { facts } = daemon;
+	const version = facts.serverVersion ? ` ${facts.serverVersion}` : "";
+	if (facts.shape === "podman") {
+		return {
+			ok: false,
+			warn: true,
+			label: `local: the daemon is Podman${version}, reached through podman-docker, Podman's own emulation of the docker command`,
+			fix: "podman-docker resolves no docker context, so credentialTransit is never observed and `doctor --live` does not run: install the real docker CLI and point it at Podman's socket (`docker context create podman --docker host=unix:///run/podman/podman.sock`, then `docker context use podman`)",
+		};
+	}
+	if (facts.podman) return { ok: true, label: `local: the daemon is Podman${version}, through its Docker API` };
+	if (facts.os === "Docker Desktop") return { ok: true, label: `local: the daemon is Docker Desktop (engine${version})` };
+	return { ok: true, label: `local: the daemon is Docker Engine${version}${facts.rootless ? ", rootless" : ""}` };
 }
 
 /** A user name's uid from passwd text, or `null`. Never throws: an unreadable file is simply no answer. */
@@ -3194,6 +3249,7 @@ const LIVE_UNREAD_FIX = "this property was not read back, which is not the same 
 const LIVE_FAIL_FIX = {
 	isolation: "the runtime did not apply a flag the worker passes (on rootless docker, cgroup delegation; otherwise the daemon's security options) -- jobs on this host do not have the boundary the table declares",
 	mountSet: "a container built by the job builder has a mount the contract does not allow -- check the daemon's defaults and any volume plugins before running jobs here",
+	"mountSet:runtime-mount": "the container runtime mounted something into a job-built container that docker inspect does not list (on rootful Podman, /run/secrets from its default mounts.conf, with host subscription files a job can read): create an empty /etc/containers/mounts.conf, remove any volumes or mounts key from containers.conf, and re-run `pi-dispatch doctor --live`",
 	egress: "see the egress lines above: the proxy's allowlist, or the job image's NODE_USE_ENV_PROXY support",
 	imagePinning: "the daemon ran or pulled an image this host does not have -- check for a docker CLI plugin or wrapper that rewrites `docker run`",
 	nonRoot: "PI_JOB_IMAGE runs as root: the root-owned hard-rules floor does not bind a root agent -- use an image with a non-root USER (the shipped pi-job image does)",
