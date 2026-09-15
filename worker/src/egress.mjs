@@ -181,11 +181,20 @@ export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = fals
  * hand-built estate is what is being checked.
  */
 export async function createJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
-	if ((await runDocker(spawnFn, ["network", "create", "--internal", network])).code !== 0) return false;
-	if ((await runDocker(spawnFn, ["network", "connect", network, proxy])).code !== 0) {
+	return createJobNetworkWith((args) => runDocker(spawnFn, args), { network, proxy });
+}
+
+/**
+ * `createJobNetwork` over ANY docker runner, `(args) => Promise<{ code }>` (issue #344). The job path's spawn and
+ * `doctor --live`'s bounded runner are two runners, and a probe that built its networks with a second copy of this
+ * sequence would be reading back a network no job gets. Never throws: a runner that throws is a failed step.
+ */
+export async function createJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY }) {
+	if ((await runWith(docker, ["network", "create", "--internal", network]))?.code !== 0) return false;
+	if ((await runWith(docker, ["network", "connect", network, proxy]))?.code !== 0) {
 		// Roll back rather than leave a network the proxy cannot serve: a half-built policy that admits a
 		// job is worse than one that refuses it.
-		await removeJobNetwork(spawnFn, { network, proxy });
+		await removeJobNetworkWith(docker, { network, proxy });
 		return false;
 	}
 	return true;
@@ -207,8 +216,26 @@ export async function networkExists(spawnFn, network) {
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
 export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
-	await runDocker(spawnFn, ["network", "disconnect", "-f", network, proxy]);
-	await runDocker(spawnFn, ["network", "rm", network]);
+	return removeJobNetworkWith((args) => runDocker(spawnFn, args), { network, proxy });
+}
+
+/**
+ * `removeJobNetwork` over any docker runner (issue #344). Detaches ONLY the proxy, then `network rm` without `-f`, so a
+ * network something else is still attached to stays, rather than being pulled out from under it. Resolves whether
+ * the network is gone.
+ */
+export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY }) {
+	await runWith(docker, ["network", "disconnect", "-f", network, proxy]);
+	return (await runWith(docker, ["network", "rm", network]))?.code === 0;
+}
+
+/** One step through a caller's runner, as `{ code: null }` when it throws. */
+async function runWith(docker, args) {
+	try {
+		return await docker(args);
+	} catch {
+		return { code: null, stdout: "" };
+	}
 }
 
 /**

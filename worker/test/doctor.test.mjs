@@ -3129,6 +3129,14 @@ function liveOk({ uid = "1001" } = {}) {
 			return { code: 0, output: "wrote\n" };
 		},
 		"docker run --name=pi-dispatch-live-pin-": { code: 125, output: "docker: Error response from daemon: No such image: pi-dispatch-live-probe.invalid/absent:x.\n" },
+		// Issue #344: the ephemeral pair. Each run leaves its nonce under its number in the fixture workspace, and is gone
+		// by the first `ps` (it ran with --rm).
+		"docker run --name=pi-dispatch-live-ephemeral-": (_cmd, args) => {
+			const ws = args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : [])).find((v) => v.split(":")[1] === "/workspace").split(":")[0];
+			writeFileSync(join(ws, `.pi-dispatch-live-ephemeral-${args.at(-1)}`), args.at(-2));
+			return { code: 0, output: `${args.at(-1).repeat(64)}\n` };
+		},
+		"docker ps -a --no-trunc --filter id=": { code: 0, output: "" },
 		"docker image inspect pi-dispatch-live-probe.invalid": 1,
 		"docker rm -f": 0,
 	};
@@ -3155,17 +3163,20 @@ test("doctor without --live is byte-identical and spawns no probe; a truthy non-
 	assert.doesNotMatch(texts[0], /read back on local/);
 });
 
-test("doctor --live reads the six back, reports the limits, leaves no fixture, and exits 0 when they hold", async () => {
+test("doctor --live reads the eight back, reports the limits, leaves no fixture, and exits 0 when they hold", async () => {
 	const env = liveEnv();
 	const { out, text } = capture();
 	const calls = [];
 	const code = await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }, calls), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
 	assert.equal(code, 0, text());
 	assert.equal(calls.filter((c) => c.args[0] === "context").length, 2, "the endpoint is read by the collection AND again right before the probe");
-	for (const property of ["isolation", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
+	for (const property of ["isolation", "ephemeral", "mountSet", "imagePinning", "nonRoot", "localFolders"]) {
 		assert.match(text(), new RegExp(`✓ read back on local: ${property} holds`));
 	}
 	assert.match(text(), /⚠ read back on local: egress not read back: PI_EGRESS is off/);
+	assert.match(text(), /⚠ read back on local: jobToJobIsolation not read back: PI_EGRESS is off, so jobs share docker's default bridge by design/);
+	assert.match(text(), /jobToJobIsolation needs PI_EGRESS armed/, "the limits line says why the peers did not run");
+	assert.doesNotMatch(text(), /are not probed/);
 	assert.match(text(), /✓ read back on local: limits of this read-back -- the probe runs `sleep`/);
 	assert.match(text(), /✓ read back on local: the probe ran as the job image's own user \(uid 1001\)/, "issue #341: the uid-1001 shell's probe is the image's user, read back");
 	assert.match(text(), /it ran as the image's own user, decided for this shell \(uid 1001\)/);
@@ -3480,4 +3491,83 @@ test("doctor waits for docker info as long as the worker does: no kill at 5 s, a
 	assert.equal(killed, true, "15 s exactly, the worker's DAEMON_FACTS_TIMEOUT_MS");
 	const result = await pending;
 	assert.match(result.checks[0].label, /could not be decided \(timeout\)/);
+});
+
+// --- issue #344: the ephemeral pair and the peers, through doctor ---------------------------------------------------
+
+const PEER1_ID = "b".repeat(64);
+const PEER2_ID = "c".repeat(64);
+const instantClock = () => {
+	let t = 0;
+	return { now: () => t, delay: async (ms) => (t += ms) };
+};
+/** The peer phase's docker answers: two job networks, two peers, and connection results `reach` decides. */
+function livePeersOk({ reach = () => "enetunreach" } = {}) {
+	let net2 = null;
+	return {
+		"docker run --name=pi-dispatch-live-peer1-": { code: 0, output: `${PEER1_ID}\n` },
+		"docker run --name=pi-dispatch-live-peer2-": (_cmd, args) => {
+			net2 = args.find((a) => a.startsWith("--network=")).slice("--network=".length);
+			return { code: 0, output: `${PEER2_ID}\n` };
+		},
+		"docker inspect --format={{json .NetworkSettings.Networks}}": () => ({ code: 0, output: JSON.stringify({ [net2]: { IPAddress: "10.99.0.3", DNSNames: ["pi-dispatch-live-peer2-1-n"] } }) }),
+		[`docker exec ${PEER1_ID} node --eval`]: (_cmd, args) => ({ code: 0, output: args.slice(6).map((t) => `${t} ${t.includes(":3128") ? "connected" : reach(t)}`).join("\n") }),
+		[`docker exec ${PEER2_ID} node --eval`]: (_cmd, args) => ({ code: 0, output: args.slice(6).map((t) => `${t} reached`).join("\n") }),
+		"docker rm -f": 0,
+	};
+}
+
+test("doctor's facts carry the proxy's name and whether it is up, so --live's peers know without asking again (#344)", async () => {
+	const facts = {};
+	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, { ...collectSeams(green), facts });
+	assert.equal(facts.egress.armed, true);
+	assert.deepEqual([facts.egress.proxy, facts.egress.proxyRunning], ["pi-dispatch-egress-proxy", true]);
+	const stopped = {};
+	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, { ...collectSeams({ ...green, "docker inspect --format={{.State.Running}}": { code: 0, output: "false|none\n" } }), facts: stopped });
+	assert.equal(stopped.egress.proxyRunning, false);
+	const off = {};
+	await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0" }, { ...collectSeams(green), facts: off });
+	assert.deepEqual([off.egress.armed, off.egress.proxyRunning], [false, null], "not read is null, never a guessed false");
+});
+
+test("doctor --live with the policy armed reads jobToJobIsolation back through two peers, and a reach is a hard failure with its own fix (#344)", async () => {
+	const env = liveEnv({ PI_EGRESS: "1" });
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: true, results: [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }], proxy: "pi-dispatch-egress-proxy", proxyRunning: true } };
+	const seams = (plan) => ({ spawn: fakeSpawn({ ...liveOk(), ...livePeersOk(plan), ...green }), liveFs: liveFsAs(1001), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_1001, ...instantClock() });
+	const held = await liveChecks(env, seams({}), facts);
+	assert.ok(held.some((c) => c.ok && /jobToJobIsolation holds \(peer1 reached the proxy and none of peer2's/.test(c.label)), held.map((c) => c.label).join("\n"));
+	assert.match(held.at(-1).label, /jobToJobIsolation tried one pair of peers/);
+
+	const reached = await liveChecks(env, seams({ reach: (t) => (t.startsWith("10.") ? "reached" : "eai_again") }), facts);
+	const failed = reached.find((c) => /jobToJobIsolation does NOT hold/.test(c.label));
+	assert.ok(failed && !failed.warn, reached.map((c) => c.label).join("\n"));
+	assert.match(failed.fix, /reached another's across their own --internal networks/);
+});
+
+test("doctor --live gives each ephemeral failure its own fix: a survivor, a held name, a reused container, residue (#344)", async () => {
+	const env = liveEnv();
+	const facts = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] } };
+	const writeMarker = (args, body) => {
+		const ws = args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : [])).find((v) => v.split(":")[1] === "/workspace").split(":")[0];
+		writeFileSync(join(ws, `.pi-dispatch-live-ephemeral-${args.at(-1)}`), body ?? args.at(-2));
+	};
+	let second = 0;
+	const cases = {
+		survived: { "docker ps -a --no-trunc --filter id=": (_c, args) => ({ code: 0, output: `${args.at(-3).slice(3)} exited\n` }) },
+		"name-held": {
+			"docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (args.at(-1) === "1" ? (writeMarker(args), { code: 0, output: `${"1".repeat(64)}\n` }) : { code: 125, output: "" }),
+			"docker ps -a --filter name=pi-dispatch-live-ephemeral-": (_c, args) => ({ code: 0, output: `${args[3].slice("name=".length)}\n` }),
+		},
+		reused: { "docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (writeMarker(args), { code: 0, output: `${"9".repeat(64)}\n` }) },
+		residue: { "docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (writeMarker(args, args.at(-1) === "2" ? "residue" : undefined), second++, { code: 0, output: `${args.at(-1).repeat(64)}\n` }) },
+	};
+	const fixes = new Set();
+	for (const [cause, over] of Object.entries(cases)) {
+		const checks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk(), ...over, ...green }), liveFs: liveFsAs(1001), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_1001, ...instantClock() }, facts);
+		const failed = checks.find((c) => /ephemeral does NOT hold/.test(c.label));
+		assert.ok(failed, `${cause}: ${checks.map((c) => c.label).join("\n")}`);
+		assert.ok(!failed.warn, cause);
+		fixes.add(failed.fix);
+	}
+	assert.equal(fixes.size, 4, "four causes, four fixes, none falling back to a generic one");
 });

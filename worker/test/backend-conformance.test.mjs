@@ -235,8 +235,10 @@ test("a run with no probes ABSTAINS rather than passing the checks it could not 
 });
 
 test("the harness NAMES what it cannot verify, so a green run is not mistaken for a conformant backend", () => {
-	// Four of the thirteen properties are reached by neither this harness nor a live read-back. Listing them, with
-	// why, is what stops the suite overclaiming.
+	// Two of the thirteen properties are reached by neither this harness nor a live read-back (issue #344 moved
+	// ephemeral and jobToJobIsolation to the read-back). Listing them, with why, is what stops the suite overclaiming.
+	assert.deepEqual(Object.keys(UNVERIFIED_BY_THIS_HARNESS), ["secretsCustody", "credentialTransit"]);
+	assert.deepEqual([...READ_BACK_BY_A_LIVE_PROBE], ["isolation", "ephemeral", "mountSet", "egress", "jobToJobIsolation", "imagePinning", "nonRoot", "localFolders"], "the read-back list in PROPERTY_NAMES order, pinned literally");
 	for (const property of Object.keys(UNVERIFIED_BY_THIS_HARNESS)) {
 		assert.ok(PROPERTY_NAMES.includes(property), `${property} must be a real property`);
 		assert.ok(UNVERIFIED_BY_THIS_HARNESS[property].length > 20, `${property} must say WHY it is unreachable`);

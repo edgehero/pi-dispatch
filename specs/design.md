@@ -787,9 +787,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 - **Decision**: The workspace CLI (`pi-dispatch`, bin of the worker package) is the deployment's
   operator surface, and its subcommands sit on an explicit gate ladder. **Read-only / always safe**:
-  `doctor`, `status`. **Operator-typed, shown, self-removing**: `doctor --live` (issue #278), which starts one
-  probe container and one fixture directory, names both before either exists, removes both, and offers
-  nothing (`INT-LIVE-PROBE-CONTRACT`); it sits beside `sandbox` rather than on the consented tier, because it
+  `doctor`, `status`. **Operator-typed, shown, self-removing**: `doctor --live` (issues #278 and #344), which
+  starts short-lived probe containers, a fixture directory and, with the egress policy armed, two peer networks,
+  names all of them before any exists, removes all of them, and offers nothing (`INT-LIVE-PROBE-CONTRACT`); it
+  sits beside `sandbox` rather than on the consented tier, because it
   leaves nothing behind once it ends, and the next run removes, and names, what an interrupted one left. **Operator-typed, ungated**: `run`, `pause`, `resume`, `cancel`, `sandbox`,
   `import-pi` (each is its own gate — typing it is the approval, `REQ-ADMIN-VIA-PI-EXTENSION`'s ladder
   top; `cancel` names one job id and stops exactly that job, `DES-CANCEL-VIA-REDIS-REQUEST-KEY`).
@@ -2924,6 +2925,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     container start on the money path before every job, converts a determinate gate into a flaky one, and
     means every job on every deployment makes an unauthenticated request to a third party before it starts.
     That belongs in `doctor`, once, when a human asks for it.
+- **Read back** (issue #344): `doctor --live` builds two job-shaped networks with the job path's own
+  `createJobNetworkWith`, puts a peer on each and checks that one cannot reach the other by name or address while
+  it can reach the proxy (`INT-LIVE-PROBE-CONTRACT`), so the adjacency this entry removes is read back on the
+  operator's own daemon, Podman's netavark included, rather than assumed from the Docker measurement.
 - **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
@@ -3264,15 +3269,16 @@ a tunnel.
   the harness runs against is a backend that can be made to clamp an exit code, drop the abort flag, report
   an OOM as a stop, return `true` from a failed enumeration, or copy files while declaring the kernel
   enforced `/job`. A harness only ever run against a conformant backend proves that it can say yes.
-- **THREE of the thirteen are verified against behaviour by the harness, SIX are read back off a live
-  container (#278, below), and FOUR are not.** A backend can still declare all of this and do most of it.
+- **THREE of the thirteen are verified against behaviour by the harness, EIGHT are read back off live
+  containers (#278 and #344, below), and TWO are not.** A backend can still declare all of this and do most of it.
   Only a
   conformance suite that drives a backend's own `runContainer` and reads each property back off what it
   produced closes the rest. **That suite now exists** and reaches `exitCodes`, `abortable` and
   `readOnlyJobInputs`, plus the shape of a bundle and the internal consistency of its declaration -- which
   are checks but not properties, and counting them as properties is how a draft of this bullet said "six".
-  Of the other ten, six need a live container and now have one (`READ_BACK_BY_A_LIVE_PROBE`), and the harness
-  names the remaining four and what each would take rather than passing them in silence. Its PROBES are the adapter's own code, so a probe that
+  Of the other ten, eight need a live container and now have one (`READ_BACK_BY_A_LIVE_PROBE`), and the harness
+  names the remaining two, which are not container properties, and what each would take rather than passing them
+  in silence. Its PROBES are the adapter's own code, so a probe that
   fabricates its answer passes while proving nothing; that limit is stated in the module and on the page
   rather than left to be discovered.
 - **The configuration surface is `PI_BACKENDS` and `PI_BACKEND_FLOOR`, both ENV-ONLY** (issue #227,
@@ -3422,9 +3428,10 @@ a tunnel.
   mounts and `sleep`, read for `CapBnd`/`NoNewPrivs`/cgroup bounds, `.Mounts` by destination and RW, the four
   `Uid` fields, a nonce written in place, and a refused absent image; `egress` comes from the existing canary.
   It runs only on a docker CLI observed local, since on a redirected daemon every path it reads is another
-  machine's. Other venues supply `readBack` to the harness. `UNVERIFIED_BY_THIS_HARNESS` shrinks to four: two
-  a probe could reach and none was built for (`ephemeral`, `jobToJobIsolation`), and two that are not
-  container properties (`secretsCustody`, `credentialTransit`, the latter observed per job from the CLI). The
+  machine's. Other venues supply `readBack` to the harness. `UNVERIFIED_BY_THIS_HARNESS` shrank to four: two
+  a probe could reach and none was built for (`ephemeral`, `jobToJobIsolation`, built by #344, next bullet), and
+  two that are not container properties (`secretsCustody`, `credentialTransit`, the latter observed per job from
+  the CLI). The
   verdict is about a fixture and `PI_JOB_IMAGE`, and the green run says so on its own line. **Rejected**: a
   hand-written probe argv (it would read back a container no job is); `CapEff` as the isolation signal (zero
   for any non-root image with no flags, measured); counting mounts (a flipped RW with an equal count passes);
@@ -3435,6 +3442,21 @@ a tunnel.
   unobserved endpoint, or on one observed only at the start of doctor's run. The egress read-back also exposed
   the canary's deny probe: it asked for a reserved `.example` name no proxy can reach, so an allow-everything
   proxy read as denying it; it now asks for `example.com`, and a probe that did not run is no reading.
+- **`ephemeral` and `jobToJobIsolation` are read back too (#344), which leaves two unverified.** `ephemeral`:
+  two runs under one name from the job builder, each waited on with `docker ps -a --no-trunc --filter id=` until it
+  is gone (a 10 s deadline, over thirty times the slowest removal measured), a `/tmp` marker for residue, and the
+  nonce in the workspace for "it ran". `jobToJobIsolation`, only with the policy armed: two peers each on its own
+  job network, built by the job path's own `createJobNetworkWith` over doctor's runner; peer1 must reach the proxy
+  and none of peer2's names and addresses, and peer2 must answer itself, so a block counts only when the network
+  and the listener are both proven. Every container and network is on one ownership list, removed per phase and
+  in a `finally`, peers before networks, never `network rm -f`, and the sweeps cover every kind. **Rejected**:
+  reading them off real jobs (credentials and untrusted input); `docker wait --condition=removed` (the docker CLI
+  has no such flag); trusting `--rm` without watching the container go (Podman removes through conmon, and a CLI
+  plugin can drop the flag); a fixed sleep instead of polling; reading `jobToJobIsolation` with the policy off
+  (the default bridge's adjacency is the stated behaviour, so it proves nothing and is "not read back"); a
+  second, hand-written network sequence for the peers (it would read back a network no job gets); counting an
+  unreached peer as isolation when the proxy was not reached either (a network that reaches nothing blocks
+  everything); `network rm -f` in the sweep (it would pull a network out from under a live endpoint).
 - **Rejected (#277)**: resolution as a registry METHOD, because the session store is built in `startWorker`
   before any bundle and would reach it through a temporal dead zone. Rejected: stamping the session venue
   after the transcript rename, or invalidating it by deletion, since an absent stamp reads as `local` and a
@@ -3459,7 +3481,9 @@ a tunnel.
   · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
   · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
   `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
-  · `worker/src/live-probes.mjs` -> `runLiveProbes`, `isolationVerdict`, `mountSetVerdict`;
+  · `worker/src/live-probes.mjs` -> `runLiveProbes`, `isolationVerdict`, `mountSetVerdict`, `ephemeralVerdict`,
+  `jobToJobIsolationVerdict`, `awaitRemoved`, `sweepStaleNetworks`; `worker/src/egress.mjs` ->
+  `createJobNetworkWith`, `removeJobNetworkWith` (#344);
   `worker/src/backend-conformance.mjs` -> `READ_BACK_BY_A_LIVE_PROBE`, `checkReadBack`; `worker/src/doctor.mjs`
   -> `liveChecks`; `worker/src/config.mjs` -> `jobsDirPath` (#278)
 
@@ -4047,3 +4071,4 @@ a tunnel.
 | 2026-09-14 | Issue #341, part 2 (the builder and the decision). **NEW `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`**: the job user is decided per daemon from facts (platform, the worker's ids, the observed endpoint, one parsed `docker info --format={{json .}}`, a local socket's owner) and read back only on request. Modes are image, worker, unmappable and unknown. The rule order, the measured rows behind it, the per-image rule (uid 1001 first; `anyUid`; the group rows only on the `--user` path), how a wrong inference surfaces, thirteen rejected alternatives (a boot or per-job probe container above all, which `CONST-ISOLATION-CONTAINER-PER-JOB` rejects) and the residuals are recorded there. The wiring into boot, jobs, the sandbox and doctor lands in the same PR. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the `nonRoot` bullet says the argv can now supply the uid while the word stays `asserted`, and a new `localFolders` bullet says it is enforced by deciding who runs the job. **SLICE 1'S 2026-09-01 ROW ABOVE IS REFUTED IN ONE SENTENCE**: it said "`--user` is deliberately NOT refused: it is the documented Linux-only `uid:gid`". Nothing documented `--user` and no production caller passed it, which is how every job on a native Linux daemon whose worker uid is not 1001 came to run as a uid that cannot read its own inputs. `--user` and `-u` are now on `DOCKER_EXTRA_FORBIDDEN`, because the builder owns the job user as a validated spec field. The same review found the deny-list compared only the text before `=`, so fused short flags (`-u0`, `-iu0`, `-v/:/h`, `-m1g`) walked past it; a single-dash token longer than two characters is now refused. An adversarial pass then found what a deny-list cannot close: a bare token or `--` becomes the image, and `--annotation`, `--uidmap` and `--use-api-socket` were never listed. So `dockerExtra` is now also an ALLOW-list of what the sandbox and the live probes pass (`DOCKER_EXTRA_ALLOWED`: `-i`, `-t`, `-d`, `--entrypoint <command>`, `-p 127.0.0.1:<host>:<container>`). The same pass measured that with no daemon the docker CLI (up to 28.0) exits 0 under `--format` with `ServerErrors`, which the first parser read as a rootful daemon; the entry records that as `unknown`, and records that a podman-docker client over ssh is indistinguishable from this host's rootful shim. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: no new container shape, and `--user` is not an environment. **`DES-WORKER-ON-HOST` UNCHANGED, checked**: its finding (2) about bind mounts stands, and the ownership half is carried by the new entry, not by editing a finding. |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: reserving `HOME` is another narrowing of the file (the entry now also records the narrowings #291 and #314 added without a line: `PI_EXCLUDE_TOOLS`, `run.tools`/`run.noTools` and the near-miss keys, and the provider-steering variables), since a `run.secrets` entry binding it now refuses the whole file in every service, and the receiver's `:latest` refuses one from the merge. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED** with a "Where it is decided" bullet: boot refuses only identity verdicts, only when `local` is the default venue and only when the boot read answers in time, logging `job_user` again when a job's decision changes; the per-job gate runs after the image probe with the endpoint the observation just read; `runContainer` refuses a user without HOME; the sandbox takes the uid from the run's stamp and the daemon rows from its own facts, with deciding from the CLI's own ids rejected. Two residuals (the docker-group row on a loopback TCP endpoint, a routinely slow `docker info`) and the wiring's code evidence join it. **`CONST-BUDGET-BEFORE-TOKENS` and `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the new gate is free and sits before every spend, its refusals return and its undecidable case throws. |
 | 2026-09-14 | Issue #341, part 3 (doctor, `doctor --live` and the CI step). **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**: how a wrong inference surfaces now names what reads the decision back. Plain `doctor` names it for its own shell, failing only where the worker would refuse to boot and warning where a system unit runs the worker as another account. `doctor --live` probes as that user in a job's modes, checks the host owner and reads PID 1's uid back. A required CI step runs the real modules and runner as uid 1234 with negative controls. Code evidence gains the doctor, live-probe, service and script symbols. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the probe is still built by the job builder with no `-e`, its fixture directories are still created empty, and what runs inside is still two constant scripts; `--user` is not an environment. **`DES-CLI-SURFACE` UNCHANGED, checked**: `doctor` adds lines and no mutation. |
+| 2026-09-15 | Issue #344. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the counts become three verified by the harness, eight read back off live containers and two unverified, and a bullet records the `ephemeral` and `jobToJobIsolation` read-backs (two runs under one name watched until gone; two peers on their own job networks, a block counting only with the proxy reached and the listener proven) with nine Rejected entries. **`DES-CLI-SURFACE` AMENDED**: `doctor --live` starts short-lived containers and, armed, two peer networks, all named first and removed. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one bullet: the per-job adjacency it removes is now read back, on Podman too. **`CONST-EGRESS-POLICY-IN-THE-ARGV` and `REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: no job argv, network or policy changes; the job path's network functions delegate to the new runner-agnostic forms with identical commands. |

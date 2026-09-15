@@ -683,9 +683,10 @@ build does not.
   wants is now sharper: it is no longer only "an operator's image is outside our gates" but "a venue's
   runtime may be too".
 - **AMENDED (issue #278, `doctor --live`): the "what bounds it meanwhile" argument can now be READ BACK, for
-  one image on one host, and nothing more.** `pi-dispatch doctor --live` starts a container of `PI_JOB_IMAGE`
-  from the job builder and reads `isolation`, `mountSet`, `imagePinning`, `nonRoot` and `localFolders` off it,
-  folding in the egress canary (`INT-LIVE-PROBE-CONTRACT`). That turns the claim that the argv, not the image,
+  one image on one host, and nothing more.** `pi-dispatch doctor --live` starts short-lived containers of
+  `PI_JOB_IMAGE` from the job builder and reads `isolation`, `ephemeral`, `mountSet`, `jobToJobIsolation` (with the
+  egress policy armed), `imagePinning`, `nonRoot` and `localFolders` off them, folding in the egress canary
+  (`INT-LIVE-PROBE-CONTRACT`; the second and fourth since issue #344). That turns the claim that the argv, not the image,
   is the isolation surface from an assertion into a reading. What it is NOT: a gate (it runs on request, never
   at job start); a check of trigger-named images (it reads `PI_JOB_IMAGE` only, and prints how many others it
   did not read); a check of the image's contents (the runner, the pi version, the guardrails floor and the
@@ -1457,3 +1458,4 @@ adversarial passes did.
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`OQ-012` AMENDED**: a bullet recording that the argv-not-image bound can now be read back off a container of `PI_JOB_IMAGE` (`INT-LIVE-PROBE-CONTRACT`), and precisely what that is not -- a gate, a check of trigger-named images, a check of an image's contents, or a read of a remote venue; the detection paragraph gains a pointer to it. **Status UNCHANGED: ACCEPTED RISK**, checked: nothing here runs at job start or reaches a trigger-named image. |
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **`OQ-012` AMENDED**: an `anyUid` bullet -- the image's USER stops being the whole story of who runs it on a daemon that enforces bind-mount ownership, so an operator-built image can now also silently lack the capability to run as the worker's uid; the detection is a label plus a verify arm, the `replicas` shape, and the status stays ACCEPTED RISK. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
 | 2026-09-14 | Issue #341, part 2. **NEW `OQ-036`** (ACCEPTED RISK, wants ratification): a job run as the worker's own uid has the worker's reach if it escapes. The row records that files it creates carry the worker's uid and group (setuid and setgid included), that the worker's `0600` files in a mounted folder become readable, that rootless daemons are refused (keep-id Podman included, since it reads like plain rootless), and that rootful Podman's default subscription mounts reach every job without an empty mounts.conf; plus the bounds (dedicated account, root worker refused, the gid rows, nothing trigger-settable moves the uid) and what would close it. **`OQ-012` UNCHANGED, checked**: its `anyUid` bullet from part 1 now has a reader, and the status stays. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
+| 2026-09-15 | Issue #344. **`OQ-012` AMENDED**, one sentence: the read-back now covers `ephemeral` and, with the egress policy armed, `jobToJobIsolation`, off short-lived containers rather than one. Its limits (not a gate, `PI_JOB_IMAGE` only, not the image's contents, not a remote venue) and the status are UNCHANGED, checked. |

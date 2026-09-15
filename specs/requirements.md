@@ -1808,14 +1808,15 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: The CLI shall take a fresh machine to a preflighted deployment through **create-only
   scaffolds and per-action consented host mutations** — `pi-dispatch init` (scaffold), `pi-dispatch
-  doctor [--fix] [--live]` (preflight; offered fixes; the backend declarations read back off one real
-  container), `pi-dispatch up [--yes]` (the consented sequence: default-image pull+tag, loopback Valkey start,
+  doctor [--fix] [--live]` (preflight; offered fixes; the backend declarations read back off short-lived real
+  containers), `pi-dispatch up [--yes]` (the consented sequence: default-image pull+tag, loopback Valkey start,
   scaffold, preflight) — and shall never perform an unshown host mutation, never touch an existing config
   value, and never spend a token. **`doctor --live` adds a mutation that is shown rather than consented**
   (issue #278), beside the throwaway network and probe containers plain `doctor`'s egress canary already
-  makes and removes unprompted: typing the flag is the approval, as it is for `sandbox`; the probe container
-  and its fixture directory are named before either exists; and both are removed when the read ends, or by the
-  next `--live` when that run was interrupted, which names what it removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
+  makes and removes unprompted: typing the flag is the approval, as it is for `sandbox`; its containers, the peer
+  networks it makes when the egress policy is armed, and its fixture directory are named before any exists; and
+  all are removed when the read ends, or by the next `--live` when that run was interrupted, which names what it
+  removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
 - **`doctor` says who a local job runs as** (issue #341). From the same facts and the same resolver the worker
   uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
   HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
@@ -1925,9 +1926,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   presence checks. Given the source trees the three services and the runner are built from, when every
   environment variable read in them is collected, then each one is either a key in `.env.example` or
   carries an internal marker at its read site, and neither list is hand-maintained beside the code.
-  Given `doctor --live`, then a line names the probe container, its image and its fixture location before the
-  first docker command, no check it renders carries a fix action, and afterwards neither the container nor the
-  fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and no read-back
+  Given `doctor --live`, then a line names every container, the image, any peer network and the fixture location
+  before the first docker command, no check it renders carries a fix action, and afterwards no container, peer
+  network or fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and no
+  read-back
   line appears. Given a native Linux daemon and a shell uid other than 1001 with an `anyUid` image, then doctor
   names the `<uid>:<gid>` it passes as `--user` and `doctor --live` runs its probe with that `--user` and reads
   that uid back; given a rootless daemon while `local` is the default venue, then doctor fails with the worker's
@@ -2010,6 +2012,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-15 | Issue #344. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, in the Statement and the Acceptance: `doctor --live` reads the declarations back off short-lived real containers rather than one, and what it names before it starts and removes when it ends now includes the peer networks it makes with the egress policy armed. The shown-rather-than-consented tier is UNCHANGED, checked: typing the flag is still the approval, and nothing it makes outlives the run. |
 | 2026-09-14 | Issue #341, part 3. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: a bullet saying `doctor` names who a local job runs as, from the worker's own resolver and with no container, failing only for what stops the worker booting and warning when this shell is not the account a system unit runs the worker as; Acceptance gains the native-Linux and rootless cases, for `doctor` and `doctor --live`. Its no-unshown-mutation clause is UNCHANGED, checked: deciding starts nothing. |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each: the sandbox env they list as exactly `TERM` and `TMOUT` also carries the proxy variables when egress is armed (true since #202 and never written here) and `HOME=/home/pi` beside `--user` when the run had a job user. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. |
 | 2026-09-14 | Issue #341, part 1. **`REQ-UPSTREAM-CONTRACT-TESTS` AMENDED**: the Chromium assertion gains its arbitrary-uid half for an image declaring `anyUid` -- measured in a native-Linux lab, today's image renders as `pi` and fails as uid 4242 with or without `HOME`, so a label claiming the capability without the render would lie about the one tool that fails loudest. `image/verify-image.sh` runs both, and CI's image job runs the script. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: nothing doctor or `up` does moves in this part. |

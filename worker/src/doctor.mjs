@@ -522,7 +522,16 @@ export async function collectChecks(env, seams) {
 		} catch {
 			armed = null; // malformed: the .env check reports it, and the read-back says it was not read
 		}
-		Object.assign(facts, { endpoint, dockerCode, imageCode, jobImage, triggerImages: images.filter((i) => i !== jobImage), egress: { armed, results: egress.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack) } });
+		const proxyState = egress.find((c) => c.proxyState)?.proxyState;
+		Object.assign(facts, {
+			endpoint,
+			dockerCode,
+			imageCode,
+			jobImage,
+			triggerImages: images.filter((i) => i !== jobImage),
+			// `proxyRunning` null means not read (the policy off, docker down): only a proxy SEEN down skips the peer probe.
+			egress: { armed, results: egress.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack), proxy: proxyState?.proxy ?? egressProxyName(env), proxyRunning: proxyState ? proxyState.running : null },
+		});
 	}
 	checks.push(...backendChecks(env, { endpoint }));
 	// Issue #341: who a local job would run as here, from the facts the worker reads, and what --live runs its probe as.
@@ -2386,6 +2395,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		ok: up,
 		label: up ? `Egress proxy running (${proxy})` : state.code === 0 ? `Egress proxy is stopped (${proxy})` : `Egress proxy is not on this host (${proxy})`,
 		fix: "docker compose -f deploy/docker-compose.yml --profile egress up -d  -- the egress policy refuses every job pre-spend while this is down, which costs no budget but runs nothing (PI_EGRESS=0 opts out)",
+		// Not rendered: `--live`'s peer probe (issue #344) needs the proxy's name and whether it is up, and reads them here
+		// rather than asking docker a second time.
+		proxyState: { proxy, running: up },
 	});
 	if (!up) return checks;
 
@@ -3082,13 +3094,13 @@ function dockerRunVia(spawn, timeoutMs = 5000) {
 }
 
 /**
- * `doctor --live`'s checks (issue #278, INT-LIVE-PROBE-CONTRACT): the six declarations a container read can reach,
+ * `doctor --live`'s checks (issues #278 and #344, INT-LIVE-PROBE-CONTRACT): the eight declarations a container read can reach,
  * read back off one real container on this host, rendered as `read back on local: ...`. Exported so the never-tier
  * pin can walk them: like every check doctor has, and on purpose, none carries a `fixAction` -- a failed read-back
  * is a fact about the image or the runtime, and nothing here may guess at changing either.
  */
 export async function liveChecks(env, seams, facts) {
-	const { spawn, out = () => {}, home = safeHomeDir(), liveFs, isAlive = defaultIsAlive, pid = process.pid, nonce = randomBytes(6).toString("hex"), jobUserIdentity: ids = {} } = seams;
+	const { spawn, out = () => {}, home = safeHomeDir(), liveFs, isAlive = defaultIsAlive, pid = process.pid, nonce = randomBytes(6).toString("hex"), jobUserIdentity: ids = {}, now, delay } = seams;
 	// Issue #341: the probe runs as the job user this host decides, or not at all where a local job would be refused.
 	const jobUser = facts.jobUser ?? { run: true, user: null };
 	if (jobUser.run === false) {
@@ -3114,6 +3126,9 @@ export async function liveChecks(env, seams, facts) {
 		user: jobUser.user ?? null,
 		// root can remove whatever a job leaves, and a sudo'd doctor is not the worker, so there is no owner to compare.
 		euid: ids.euid === 0 ? undefined : ids.euid,
+		// The removal wait's clock (issue #344), seamed so a test never waits out a real deadline.
+		...(now ? { now } : {}),
+		...(delay ? { delay } : {}),
 	});
 	const checks = (result.swept ?? []).map((what) => ({ ok: true, label: `read back on local: removed ${what}, left by an interrupted --live run` }));
 	const noteChecks = () => result.notes.map((note) => ({ ok: false, warn: true, label: `read back on local: ${note}`, fix: "remove it by hand now, or let the next `pi-dispatch doctor --live` remove it once this process has exited" }));
@@ -3153,7 +3168,8 @@ export async function liveChecks(env, seams, facts) {
 		`it ran as ${jobUser.user ? `the job user ${jobUser.user}` : "the image's own user"}, decided for this shell${typeof ids.euid === "number" ? ` (uid ${ids.euid})` : ""}, and the worker service may run as another account`,
 		"it wrote to a fixture folder, not to any folder of yours",
 		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
-		"ephemeral and jobToJobIsolation are not probed",
+		"ephemeral ran two short-lived containers under one name, not two real jobs",
+		facts.egress?.armed === true ? "jobToJobIsolation tried one pair of peers on this daemon's job networks, not every pair of jobs" : "jobToJobIsolation needs PI_EGRESS armed, since without it jobs share the default bridge by design",
 		"secretsCustody and credentialTransit are not container properties",
 		...(ids.euid === 0 ? ["the host owner of what the probe wrote was not compared, because doctor ran as root"] : []),
 		...(contentTrust ? ["DOCKER_CONTENT_TRUST=1 resolves a tag through notary, which --pull=never does not govern"] : []),
@@ -3178,6 +3194,11 @@ const LIVE_FAIL_FIX = {
 	"localFolders:job-unreadable": "the job user cannot list a 0700 job directory: the uid the job-user line above names is not the one that owns the jobs directory here (a rootless daemon, userns-remap, NFS root_squash or SELinux can each cause it), so every job on this host fails before it starts",
 	"localFolders:mount-not-writable": "the job user cannot write the outbox or session mount, which a local job and a resumed job write; the same ownership rule as the job directory applies",
 	"localFolders:not-yours": "a job's files land owned by another uid, so the worker cannot remove what a job leaves: run doctor as the worker's own account, and check the job-user line above",
+	"ephemeral:survived": "a container run with --rm was still listed after it exited: the daemon or a wrapper is not removing containers, so every job leaves one behind -- check `docker ps -a` and any docker CLI plugin or alias",
+	"ephemeral:name-held": "a container name stayed taken after its container was gone, so a retried job id cannot start: check the daemon's name reservation and any leftover created containers",
+	"ephemeral:reused": "the daemon handed a second run the first run's container: a job would inherit another job's state -- do not run jobs on this daemon until that is explained",
+	"ephemeral:residue": "a new container found a file the previous one wrote to its own /tmp: a job would inherit another job's filesystem -- check the runtime's storage driver and any volume the image declares",
+	"jobToJobIsolation:reached": "one job's container reached another's across their own --internal networks: the network driver or firewall is not keeping job networks apart (on Podman, check netavark's firewall driver), so a job can talk to a concurrent job",
 	"localFolders:not-visible": "the daemon is not sharing the jobs directory's filesystem with containers as a live bind mount (on Docker Desktop, check its file sharing settings), so a local-folder job's edits would not land in the folder",
 	localFolders: "a bind-mounted host folder did not behave as one a job edits in place",
 };

@@ -183,24 +183,28 @@ const { ok, findings } = await runBackendConformance(myBackend, {
   // Arrange for your reap to run with its enumeration FAILING. This is not `backend.reap()` -- that is the
   // working path, and passing it fails the check with a message about a bug you do not have.
   withBrokenEnumeration: async (backend) => myBackend.reapWith({ listContainers: () => { throw new Error("down"); } }),
-  // Start a container through YOUR runContainer path and read the six READ_BACK_BY_A_LIVE_PROBE properties
-  // off it: { isolation: { ok, warn?, detail }, mountSet: ..., ... }. Leave it out and all six abstain.
+  // Start containers through YOUR runContainer path and read the eight READ_BACK_BY_A_LIVE_PROBE properties
+  // off them: { isolation: { ok, warn?, detail }, ephemeral: ..., ... }. Leave it out and all eight abstain.
   readBack: async (backend) => { /* ... */ },
 });
 ```
 
 It checks the bundle's shape, the declaration's consistency, exit-code fidelity, the abort flag, the
 reaper's tri-state and the transfer downgrade. That is **three of the thirteen properties** plus two
-structural checks. **Six more are read back off a live container** (`READ_BACK_BY_A_LIVE_PROBE`: isolation,
-mountSet, egress, imagePinning, nonRoot, localFolders), but only through the `readBack` probe you write,
-because only your runtime can start your container. A property read back as not holding fails when you
-declare it `enforced` or `asserted`; one your report leaves out, or could not read, abstains. **The
-remaining four it cannot reach at all**, and `UNVERIFIED_BY_THIS_HARNESS` names each one and what it would
-take. Print it beside your findings; nothing prints it for you.
+structural checks. **Eight more are read back off live containers** (`READ_BACK_BY_A_LIVE_PROBE`: isolation,
+ephemeral, mountSet, egress, jobToJobIsolation, imagePinning, nonRoot, localFolders), but only through the
+`readBack` probe you write, because only your runtime can start your containers. A property read back as not
+holding fails when you declare it `enforced` or `asserted`; one your report leaves out, or could not read,
+abstains. **The remaining two it cannot reach at all** (they are not container properties), and
+`UNVERIFIED_BY_THIS_HARNESS` names each one and what it would take. Print it beside your findings; nothing prints
+it for you.
 
-**The `local` backend's read-back is `pi-dispatch doctor --live`.** It starts one container from the job builder
-(no network, no environment, fixture folders, `sleep` in place of the entrypoint), reads the six properties off
-it, folds in the egress canary, and removes it by ID. It runs as the job user a local job on this host gets
+**The `local` backend's read-back is `pi-dispatch doctor --live`.** It starts short-lived containers from the job
+builder (no environment, fixture folders, a constant script in place of the entrypoint): one it reads isolation,
+mountSet, nonRoot and localFolders off, a refused absent image for imagePinning, two runs under one name for
+ephemeral (each must be gone before the next), and, with `PI_EGRESS` armed, two peers on their own job networks
+for jobToJobIsolation (neither may reach the other). It folds in the egress canary and removes every container by
+ID, the peer networks after their peers (issue #344). It runs as the job user a local job on this host gets
 (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the host; where a local job
 would be refused, or the job user cannot be decided, it runs nothing and says so. It runs only when the docker CLI
 is observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own

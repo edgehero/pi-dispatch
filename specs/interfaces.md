@@ -1363,6 +1363,7 @@ contract governs the argv of one container, this governs the estate that argv jo
     |---|---|---|
     | per-job network | `pi-job-<jobId>-net` | `--internal`. Created at job start, removed at job end. Exactly two members: the job container and the proxy. |
     | per-sandbox network | `pi-sandbox-<jobId>-net` | the same, for an operator session (`INT-SANDBOX-CONTRACT`) |
+    | live-probe peer networks | `pi-dispatch-live-peer<n>-<pid>-<nonce>-net` | the same, built by the same `createJobNetworkWith`, for `doctor --live`'s two peers only while it runs (`INT-LIVE-PROBE-CONTRACT`) |
     | upstream network | `pi-dispatch-egress-out` | an ordinary bridge; only the proxy is on it |
     | proxy component | `pi-dispatch-egress-proxy` | squid, `http_port 3128`, **no published port**. Overridable by `PI_EGRESS_PROXY`. |
 
@@ -1570,10 +1571,11 @@ sibling rather than an extension of the GitHub one for the same reason.
 
 ## INT-LIVE-PROBE-CONTRACT
 
-**operator → docker daemon, to read the backend declarations back (issue #278).** A SIBLING of
+**operator → docker daemon, to read the backend declarations back (issues #278 and #344).** A SIBLING of
 `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`, never an amendment to either: the first governs a
 container launched against untrusted input, the second a shell an operator opens on a finished run, and this one
-a container that runs no agent, is given nothing, and exists to be read. `pi-dispatch doctor --live` is its only
+short-lived containers that run no agent, are given nothing, and exist to be read. `pi-dispatch doctor --live` is
+its only
 entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
 
 - **Contract**:
@@ -1598,22 +1600,35 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     mode; nothing is `chmod`ed (issue #341: the fixture used to be `0755` throughout, which is how a read-back
     passed on hosts where every job failed). No workspace a job produced, no session store and no overlay is
     mounted.
+  - **Four kinds of container, one phase each, removed at the end of their phase** (issue #344 added the last two):
+    the READING container above; the PINNING run below; the EPHEMERAL pair, two runs under ONE name
+    (`-d --entrypoint sh` and the constant `EPHEMERAL_SCRIPT` with the nonce and the run's number); and, only when
+    `PI_EGRESS` is armed and the proxy is not seen down, two PEERS (`-d --entrypoint node`, `--eval` the constant
+    `PEER_SCRIPT` with the nonce, a fixed port and the derived seconds), each with `network` set to its own
+    `pi-dispatch-live-peer<n>-<pid>-<nonce>-net`, created by the job path's own `createJobNetworkWith` (`--internal`,
+    then the proxy attached) and removed by `removeJobNetworkWith` (the proxy detached, then `network rm` without
+    `-f`) after its peer. With the policy off, or the proxy down, the peers and their networks are not made at all.
   - **Not run where no local job would run as a decided uid.** Doctor decides the job user first (the worker's
     own resolver and `docker info` bound, from this shell's ids and daemon); when that decision refuses a local
     job (a rootless daemon, a root worker, an image without `anyUid` for this uid, a group row, an unreadable
     answer) or cannot be made at all, one ⚠ says so and no docker command runs.
-  - **Names**: `pi-dispatch-live-probe-<pid>-<nonce>`, `pi-dispatch-live-pin-<pid>-<nonce>`, and a fixture
-    directory `pi-dispatch-live-<pid>-...`: outside `pi-job-`, `pi-sandbox-` and `pi-dispatch-valkey`, and unique
-    per run.
-  - **Shown first, removed by ID.** Doctor prints the probe's name, image and fixture location before the first
-    docker command. A `finally` runs `docker rm -f <the ID docker run -d printed>` whenever one was printed,
-    whatever the exit (a CLI killed or timed out after the create can leave a container that never started, which
-    `--rm` does not remove), falls back to the pid-and-nonce NAME only when no ID came back, does the same for the
-    pinning container, and removes the fixture. A removal BY ID that fails is a ⚠ carrying the command, whether
+  - **Names**: `pi-dispatch-live-<kind>-<pid>-<nonce>` for each container kind (`probe`, `pin`, `ephemeral`,
+    `peer1`, `peer2`, the list the stale-container sweep derives its match from), `<peer name>-net` for a peer's
+    network, and a fixture directory `pi-dispatch-live-<pid>-...`: outside `pi-job-`, `pi-sandbox-` and
+    `pi-dispatch-valkey`, and unique per run.
+  - **Shown first, removed by ID.** Doctor prints every container's name, the image, the peer networks and the proxy
+    they attach when those will be made, and the fixture location before the first docker command. ONE ownership
+    list holds every container and network the run made, and a `finally` removes what is left in it: containers
+    first, by `docker rm -f <the ID docker run -d printed>` whenever one was printed, whatever the exit (a CLI
+    killed or timed out after the create can leave a container that never started, which `--rm` does not remove),
+    by the pid-and-nonce NAME only when no ID came back, never again for a container already SEEN gone; then the
+    networks; then the fixture. A removal BY ID that fails is a ⚠ carrying the command, whether
     or not anything was read back; the name fallback and the sweep are best effort and silent when they fail.
     **What an interrupted run leaves, the next removes, and says so**: fixtures of exactly `mkdtemp`'s shape that
-    are real directories, and probe or pinning containers by name shape, in both cases only for a PID no longer
-    alive, and said on every path. The shape is narrow, not unique: the jobs dir is not a place for anything
+    are real directories, containers of any live-probe kind by name shape, and peer networks by name shape (the
+    configured proxy detached, `network rm` without `-f`, so one anything else is still on stays), in every case
+    only for a PID no longer alive, and said on every path. The shape is narrow, not unique: the jobs dir is not a
+    place for anything
     else. A probe that had
     STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
   - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
@@ -1638,7 +1653,22 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     - `imagePinning`: the builder's argv, detached, against `pi-dispatch-live-probe.invalid/absent:<nonce>`. It
       holds only for a nonzero exit, `No such image`, no `Unable to find image`, and the image still absent
       afterwards; a refusal in other words is not read back.
-    - `egress`: **the one reading this builder does not make.** It needs a job-shaped `--internal` network and
+    - `ephemeral` (issue #344): the first run is waited on with `docker ps -a --no-trunc --filter id=` until it is
+      not listed, polling against a 10 s deadline (over thirty times the slowest removal measured); only then does
+      the second run start under the same name and get the same wait. A run still listed and stopped at the
+      deadline fails `survived`; a second run refused while a container still holds the name after the first was
+      gone fails `name-held`; a second run given the first's ID fails `reused`; a second run that finds the first's
+      marker in its own `/tmp` fails `residue`. A run that did not start, one still running at the deadline, a `ps`
+      that did not answer, or a missing workspace marker is not read back.
+    - `jobToJobIsolation` (issue #344): peer1 runs the constant `CONNECT_SCRIPT` (each target tried at once with a
+      3 s bound, one word per target: `reached` when the nonce came back, `connected` when something accepted
+      without it, else the error code or `timeout`) against the proxy's port and every name and address `docker
+      inspect` gives peer2 on its network; then peer2 runs it against its own addresses. Peer2 reached fails
+      `reached`, whatever else is missing. Otherwise it holds only when peer1 reached the proxy (an unreached peer
+      on a network that reaches nothing proves nothing), every target answered, peer2 reached itself (a listener
+      that never came up proves nothing), and nothing accepted without the nonce. With `PI_EGRESS=0` it is not read
+      back: jobs then share docker's default bridge by design.
+    - `egress`: **the one reading this module does not make.** It needs a job-shaped `--internal` network and
       the proxy, so it is folded in from `doctor`'s egress canary, whose two probe checks carry a non-rendered
       `readBack`. Both readings must be present and must be answers: the deny probe asks for `example.com`, a host
       that resolves (a reserved `.example` name no proxy can reach read as denied behind an allow-everything
@@ -1653,7 +1683,9 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     the report names more than once with any failing reading among them (otherwise a repeat abstains).
 - **Why**: `doctor` printed the declarations and nothing read them back (#278). A probe with its own argv would
   read back a container no job is, which is exactly the second place for the boundary to live that
-  `INT-SANDBOX-CONTRACT` calls its load-bearing sentence.
+  `INT-SANDBOX-CONTRACT` calls its load-bearing sentence. `ephemeral` and `jobToJobIsolation` were container
+  properties a probe could reach and none did (#344); Podman's `--rm` runs through conmon and its networks through
+  netavark, so both are read back there rather than assumed from Docker.
 - **Traces to**: `REQ-DEPLOYMENT-BOOTSTRAP`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `DES-CONTAINER-BACKEND-REGISTRY`, `DES-CLI-SURFACE`, `OQ-012`
 - **Acceptance**: The probe argv contains every member of `ISOLATION_FLAGS` (asserted against the imported
@@ -1673,7 +1705,11 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
   dead PID left, the next run removes it and names it; given a directory that is not of `mkdtemp`'s shape, or a
   symlink, it is not touched. Given an allow-everything proxy, the egress deny probe reads as reached and egress
   fails, even when the provider probe did not run. Given `doctor` without `--live`, no probe container is started and
-  no read-back line appears.
+  no read-back line appears. Given two ephemeral runs that each vanish, ephemeral holds and neither is removed
+  again; given a run started without `--rm`, or one still listed and stopped at the deadline, it fails `survived`;
+  given the policy off or the proxy down, no network is created; given peer1 reaching any of peer2's names or
+  addresses, jobToJobIsolation fails; given peer1 unable to reach the proxy, or peer2 silent to itself, it is not
+  read back; every peer is removed before its network, and no network is removed with `-f`.
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
@@ -4172,3 +4208,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-14 | Issue #341, part 1: the job image works under any non-root uid. **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: the agent-dir bullet becomes a home bullet and is CORRECTED -- an unwritable home does not kill the job with EACCES as it claimed, because pi's `AuthStorage` swallows the lock failure and an env-keyed job carries on (measured in a native-Linux lab: `HOME=/` still reaches "no configured auth"), so the breakage surfaces later inside a tool; the recipe becomes `chown -R pi:pi /home/pi` plus `chmod 0777` on the home and agent dir (not sticky: `fs.protected_symlinks` then refuses a root-owned symlink under it, measured), drops the stale `COPY --chown ... APPEND_SYSTEM.md` line (the floor has lived at `/opt/pi-dispatch` since before this entry), and records why the image sets no `ENV HOME` (images built FROM it run root build steps). `anyUid` joins the capability tokens, with evidence by two uid-4242 runs rather than a grep. Measured behind it: on a native rootful Docker 27.5.1 daemon and on rootful Podman 5.8.2 through its Docker API, a job as the image's uid 1001 cannot traverse a worker-owned `0700` job dir; with `--user=<owner>` every mount works but `HOME` is `/` (Docker) or `/workspace` (Podman, whose injected passwd entry puts `auth.json` in the operator's repository); Chromium renders as an arbitrary uid only on the world-writable-home image with `HOME=/home/pi`. **INT-RUNNER-EXIT-CODE-PROTOCOL AMENDED**: `job-inputs-unreadable` under the existing policy code, from a pre-spend `access(2)` on `/job` beside the mount asserts for EVERY job (a command job never reads `prompt.md`, and the loader's `existsSync` gate would drop its trigger skills silently) and from the prompt read; the session assert names an inaccessible `/session` instead of reporting "did not land"; five advisory log lines that change no exit code. **INT-CONTAINER-JOB-INPUTS UNCHANGED, checked**: no mount, env var or file moved -- the worker that passes `--user` lands with part 2. **INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked**: runner reasons ride the exit line, not the record's reason enum (`command-unregistered` precedent). |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **INT-CONTAINER-RUNTIME-CONTRACT AMENDED**: `HOME` joins the env list (only beside `--user`), and `User: non-root` becomes the job-user bullet. It covers the image's own user on Docker Desktop, the worker's own non-root uid with `HOME=/home/pi` on a daemon that enforces bind-mount ownership (none for uid 1001), the builder and `runContainer` refusals, and the named refusals for rootless daemons, userns-remap, a root worker, Docker Desktop on Linux, a missing `anyUid` and the two group rows. **INT-CONTAINER-JOB-INPUTS AMENDED**: the per-job dir is a `0700` mkdtemp, so the job's uid must be the worker's where ownership is enforced, else the runner refuses `job-inputs-unreadable`. **INT-SANDBOX-CONTRACT AMENDED**: `--user`/HOME when the run had a job user (HOME joins "Env is exactly"), the manifest shape gains `jobUser` with its three meanings, the uid from the manifest's new `jobUser` stamp and the daemon rows from the CLI's own facts, and its refusals (a malformed stamp, an undecidable daemon, an unmappable daemon or group, an image without `anyUid` or not inspectable, a run from before the stamp opened as root), all before a network exists. **INT-RUN-HISTORY-FILE-CONTRACT AMENDED**: `job-user-unmappable` and `job-image-any-uid-unsupported` join the reason enum, both policy, pre-reserve and pre-mint. **INT-SESSION-STORE-CONTRACT and INT-OUTBOX-CONTRACT UNCHANGED, checked**: the files they read are now owned by the worker's own uid where ownership is enforced, which is the reader's own; nothing they check depends on an owner (their `lstat` rules stand). |
 | 2026-09-14 | Issue #341, part 3 (doctor, `doctor --live` and the CI step). **INT-LIVE-PROBE-CONTRACT AMENDED**: the probe runs as the job user doctor decides for this host, through the builder's `user` field and still with no `-e`; the fixture takes a job's modes (`0700` job and session dirs, nothing `chmod`ed, every directory still empty); the probe is not run where a local job would be refused or the job user cannot be decided; `localFolders` now uses every mount a job uses and checks the host owner of what it wrote, with the causes `job-unreadable`, `mount-not-writable` and `not-yours` beside `not-writable` and `not-visible`; the uid PID 1 ran as is read back against the decision. **INT-CONTAINER-RUNTIME-CONTRACT and INT-SANDBOX-CONTRACT UNCHANGED, checked**: no job or sandbox argv changes in this part. |
+| 2026-09-15 | Issue #344. **INT-LIVE-PROBE-CONTRACT AMENDED**: four kinds of container, one phase each, removed at the end of their phase -- the reading container, the pinning run, an ephemeral pair (two runs under one name, each waited on with `ps -a --no-trunc --filter id=` against a 10 s deadline) and, only with the policy armed and the proxy not seen down, two peers each on its own `--internal` job network built and removed by the job path's `createJobNetworkWith` and `removeJobNetworkWith`; names for every kind and the peer networks; one ownership list and a `finally` removing containers, then networks, then the fixture, never a container seen gone; the sweep now covers every container kind and the peer networks (the proxy detached, never `network rm -f`); the `ephemeral` and `jobToJobIsolation` reads with their causes and what is not read back; Acceptance for both. **INT-EGRESS-POLICY-CONTRACT AMENDED**: a row for the live-probe peer networks. **INT-CONTAINER-RUNTIME-CONTRACT and INT-SANDBOX-CONTRACT UNCHANGED, checked**: the job and sandbox paths build their networks through the same functions, delegated, with identical commands. |

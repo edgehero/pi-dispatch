@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import {
 	createJobNetwork,
+	createJobNetworkWith,
 	DEFAULT_EGRESS_PROXY,
 	egressArmed,
 	egressEnv,
@@ -10,6 +11,7 @@ import {
 	makeEgressPreflight,
 	networkNameFor,
 	removeJobNetwork,
+	removeJobNetworkWith,
 } from "../src/egress.mjs";
 
 // No skip guard, deliberately: like image-preflight.mjs this module imports nothing but
@@ -175,4 +177,29 @@ test("a deployment that UPGRADES and does nothing is refused, never silently ope
 	// "believed on while off" failure the whole feature exists to remove. Reversible in one line.
 	const preflight = makeEgressPreflight({ armed: egressArmed({}), spawnFn: fakeSpawn([], { inspect: 1, info: 0 }) });
 	assert.deepEqual(await preflight({}), { proxyMissing: DEFAULT_EGRESS_PROXY });
+});
+
+test("the With forms run the job path's exact sequence over any runner, and a runner that throws is a failed step (#344)", async () => {
+	// The same sequence through the spawn wrapper and through a bare runner: doctor --live's peers get a job's network,
+	// not a second copy of how one is built.
+	const viaSpawn = [];
+	await createJobNetwork(fakeSpawn(viaSpawn, { "network create": 0, "network connect": 0 }), { network: "n", proxy: "p" });
+	await removeJobNetwork(fakeSpawn(viaSpawn, { "network disconnect": 0, "network rm": 0 }), { network: "n", proxy: "p" });
+	const viaRunner = [];
+	const runner = async (args) => (viaRunner.push(args), { code: 0 });
+	assert.equal(await createJobNetworkWith(runner, { network: "n", proxy: "p" }), true);
+	assert.equal(await removeJobNetworkWith(runner, { network: "n", proxy: "p" }), true);
+	assert.deepEqual(viaRunner, viaSpawn.map((c) => c.args));
+	assert.deepEqual(viaRunner[3], ["network", "rm", "n"], "removed without -f, so a network something else is on stays");
+
+	const rolledBack = [];
+	assert.equal(await createJobNetworkWith(async (a) => (rolledBack.push(a), { code: a[1] === "connect" ? 1 : 0 }), { network: "n", proxy: "p" }), false);
+	assert.deepEqual(rolledBack.map((a) => a[1]), ["create", "connect", "disconnect", "rm"], "a network the proxy could not join is torn down");
+
+	const throwing = async () => {
+		throw new Error("spawn EMFILE");
+	};
+	assert.equal(await createJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
+	assert.equal(await removeJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
+	assert.equal(await removeJobNetworkWith(async (a) => ({ code: a[1] === "rm" ? 1 : 0 }), { network: "n", proxy: "p" }), false, "a network that would not go says so");
 });

@@ -5,15 +5,19 @@
  * nothing in this repository asked a running container whether the words were true. This module does, for the
  * `local` backend on this host, and says exactly how far that reaches.
  *
- * ONE CONTAINER, BUILT BY THE SAME BUILDER A JOB IS. `buildDockerRunArgs` with every isolation flag, `--network=none`,
- * an EMPTY environment, fixture directories for every conditional mount, and exactly three added flags (`-d`,
- * `--entrypoint`, `sleep`). A hand-written argv would read back a container nobody runs; this one differs from a
- * job's only in what it executes and what it is given, both of which are stated. The egress canary in `doctor.mjs`
- * is the one reading that does NOT come from this builder (it needs a job-shaped network and a proxy), and its
- * result is folded in from the canary's own `readBack` rather than re-probed here.
+ * EVERY CONTAINER IS BUILT BY THE SAME BUILDER A JOB IS. `buildDockerRunArgs` with every isolation flag, an EMPTY
+ * environment, fixture directories for every conditional mount, and the job user; what each adds through `extraFlags`
+ * is `-d` and an entrypoint. A hand-written argv would read back a container nobody runs; these differ from a job's
+ * only in what they execute and what they are given, both of which are stated. There are four kinds: the READING
+ * container (`sleep`, then the status and write scripts), the PINNING container (an absent image), the EPHEMERAL
+ * pair (two runs under one name, issue #344) and, only with the egress policy armed, two PEERS on their own
+ * `--internal` job networks behind the proxy (issue #344). The egress canary in `doctor.mjs` is the one reading that
+ * does NOT come from this module (its containers need the proxy's allowlist), folded in from its own `readBack`.
  *
- * NO NODE IMPORTS. Every spawn goes through `run(args, { timeoutMs })` and every filesystem call through `fs`, so
- * the whole sequence -- the teardown on every failure path included -- is driven by tests without Docker.
+ * NO SPAWN OF ITS OWN. Every docker step goes through `run(args, { timeoutMs })`, every filesystem call through `fs`,
+ * and every wait through `now`/`delay`, so the whole sequence -- the teardown on every failure path included -- is
+ * driven by tests without Docker. The job networks are built by `egress.mjs`'s own `createJobNetworkWith` over that
+ * same runner, so a peer's network is a job's network, not a second copy of the sequence.
  *
  * WHAT IT PROVES, AND ONLY THAT. The verdicts are about THE FIXTURE on THIS daemon with PI_JOB_IMAGE: not the
  * operator's own folder, not an image a trigger names, not a remote venue (which reads back through the conformance
@@ -24,6 +28,7 @@
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec } from "./container-spec.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
+import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkNameFor, removeJobNetworkWith } from "./egress.mjs";
 
 /**
  * The namespace every live-probe object carries: the two container names and the fixture directory. OUTSIDE the
@@ -48,14 +53,35 @@ export function liveSleepSeconds(stepTimeoutMs = LIVE_STEP_TIMEOUT_MS) {
 	return Math.ceil((STEPS_WHILE_ALIVE * stepTimeoutMs) / 1000) + 30;
 }
 
-/** The names one run uses. `pid` and a random nonce, so two concurrent `--live` runs never share one. */
+/**
+ * How long a container run with `--rm` may take to be gone after it exits before its survival is a finding (issue
+ * #344). Measured removal was at most 286 ms (Docker Desktop, one poll) and 51 ms over twenty runs on rootful Docker
+ * and Podman; 10 s is over thirty times the slowest, so a loaded daemon reads as slow, not as broken.
+ */
+export const LIVE_REMOVAL_DEADLINE_MS = 10_000;
+const LIVE_REMOVAL_POLL_MS = 100;
+
+/** The port a peer listens on. Unprivileged, fixed, and inside a container that has nothing else listening. */
+export const PEER_PORT = 47431;
+
+/**
+ * The names one run uses. `pid` and a random nonce, so two concurrent `--live` runs never share one. Every CONTAINER
+ * kind is a key here, and the stale-container sweep derives its match from these keys, so a kind added here is a
+ * kind the sweep removes.
+ */
 export function liveNames(pid, nonce) {
 	return {
 		probe: `${LIVE_PREFIX}probe-${pid}-${nonce}`,
 		pin: `${LIVE_PREFIX}pin-${pid}-${nonce}`,
+		ephemeral: `${LIVE_PREFIX}ephemeral-${pid}-${nonce}`,
+		peer1: `${LIVE_PREFIX}peer1-${pid}-${nonce}`,
+		peer2: `${LIVE_PREFIX}peer2-${pid}-${nonce}`,
 		fixturePrefix: `${LIVE_PREFIX}${pid}-`,
 	};
 }
+
+/** The container kinds `liveNames` makes, derived from it rather than typed a second time. */
+export const LIVE_CONTAINER_KINDS = Object.freeze(Object.keys(liveNames(0, "0")).filter((k) => k !== "fixturePrefix"));
 
 /** A reference no registry can serve (`.invalid` is reserved, RFC 6761), with the nonce so it is never cached. */
 export function absentImageRef(nonce) {
@@ -90,6 +116,22 @@ export function pinningProbeRunArgs({ name, nonce, fixture, user = null }) {
 }
 
 /**
+ * One ephemeral run's argv (issue #344): the job builder's, detached, running EPHEMERAL_SCRIPT with the nonce and the
+ * run's number. The same NAME both times, because "a job id run twice" is the question.
+ */
+export function ephemeralRunArgs({ image, name, fixture, nonce, run, user = null }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), extraFlags: ["-d", "--entrypoint", "sh"] }), "-c", EPHEMERAL_SCRIPT, "sh", nonce, String(run)];
+}
+
+/**
+ * One peer's argv (issue #344): the job builder's, detached, on its OWN job network, running PEER_SCRIPT, which answers
+ * every connection with the nonce for `seconds`. Built with `network` set exactly as a job with egress armed is.
+ */
+export function peerRunArgs({ image, name, fixture, network, nonce, seconds = liveSleepSeconds(), user = null }) {
+	return [...buildDockerRunArgs({ ...probeOptions({ image, name, fixture, user }), network, extraFlags: ["-d", "--entrypoint", "node"] }), "--eval", PEER_SCRIPT, nonce, String(PEER_PORT), String(seconds)];
+}
+
+/**
  * What the probe runs inside, as ONE constant script: no value from the host is interpolated into it. `cat` rather
  * than `grep`, so a job image without grep still answers, and the cgroup v1 paths are read where v2's are absent.
  */
@@ -110,6 +152,63 @@ export const WRITE_SCRIPT = [
 	'for d in /workspace /outbox /session; do [ -w "$d" ] || { echo "not-writable $d"; exit 0; }; done',
 	'printf %s "$1" > /workspace/.pi-dispatch-live-probe && printf %s "$1" > /outbox/.pi-dispatch-live-probe && printf %s "$1" > /session/.pi-dispatch-live-probe && echo wrote',
 ].join("\n");
+
+/**
+ * The ephemeral run's script (issue #344). A marker in the container's OWN `/tmp` says whether this filesystem was
+ * used before; the nonce, or the word `residue`, lands in the shared fixture workspace under the run's number, so the
+ * host reads both what ran and what it found. Positional values only: nothing from the host is in the text.
+ */
+export const EPHEMERAL_SCRIPT = [
+	'if [ -e /tmp/.pi-dispatch-live-ephemeral ]; then printf residue > "/workspace/.pi-dispatch-live-ephemeral-$2"; exit 0; fi',
+	'printf %s "$1" > /tmp/.pi-dispatch-live-ephemeral',
+	'printf %s "$1" > "/workspace/.pi-dispatch-live-ephemeral-$2"',
+].join("\n");
+
+/**
+ * A peer's program (issue #344), for `node --eval`: a TCP listener on every address that answers each connection with
+ * the nonce, for `seconds`, then exits. `node` because the job image has it and a shell cannot listen portably; its
+ * arguments are `process.argv.slice(1)` under `--eval` (measured in the job image).
+ */
+export const PEER_SCRIPT = [
+	'const [nonce, port, seconds] = process.argv.slice(1);',
+	'const net = require("node:net");',
+	'const listen = (host) => net.createServer((s) => s.end(nonce + "\\n")).on("error", () => host === "::" && listen("0.0.0.0")).listen(Number(port), host);',
+	'listen("::");',
+	'setTimeout(() => process.exit(0), Number(seconds) * 1000);',
+].join("\n");
+
+/**
+ * The connection attempt (issue #344), for `node --eval` inside a peer: `nonce` then `host:port` targets (`[v6]:port`
+ * for an IPv6 literal), each tried at once with a 3 s bound, one output line per target. `reached` means the nonce
+ * came back, `connected` that something accepted without it, and anything else is the error code in lower case or
+ * `timeout`: a word, never a message.
+ */
+export const CONNECT_SCRIPT = [
+	'const [nonce, ...targets] = process.argv.slice(1);',
+	'const net = require("node:net");',
+	'const one = (t) => new Promise((resolve) => {',
+	'  const m = /^\\[(.*)\\]:(\\d+)$/.exec(t) || /^([^:]+):(\\d+)$/.exec(t);',
+	'  if (!m) return resolve(t + " unparsed");',
+	'  let data = ""; let done = false; let s = null;',
+	'  const finish = (r) => { if (done) return; done = true; if (s) s.destroy(); resolve(t + " " + r); };',
+	'  s = net.connect({ host: m[1], port: Number(m[2]) });',
+	'  s.setTimeout(3000, () => finish(data.includes(nonce) ? "reached" : s.connecting ? "timeout" : "connected"));',
+	'  s.on("connect", () => setTimeout(() => finish(data.includes(nonce) ? "reached" : "connected"), 500));',
+	'  s.on("data", (d) => { data += d; if (data.includes(nonce)) finish("reached"); });',
+	'  s.on("error", (e) => finish(String((e && e.code) || "error").toLowerCase()));',
+	'});',
+	'Promise.all(targets.map(one)).then((lines) => console.log(lines.join("\\n")));',
+].join("\n");
+
+/** CONNECT_SCRIPT's output, as a Map of target to result word. Lines it did not print are simply absent. */
+export function parseConnectResults(output) {
+	const results = new Map();
+	for (const line of String(output ?? "").split(/\r?\n/)) {
+		const at = line.trim().lastIndexOf(" ");
+		if (at > 0) results.set(line.trim().slice(0, at), line.trim().slice(at + 1));
+	}
+	return results;
+}
 
 /** The fields of `/proc/1/status` and the cgroup lines the verdicts read, or `null` for each one absent. */
 export function parseStatus(output) {
@@ -274,16 +373,125 @@ export function egressVerdict({ armed, results }) {
 }
 
 /**
- * The whole sequence. Returns `{ ran, reason, verdicts, notes, swept }`: `ran` false with a `reason` when nothing was
- * read back; the verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed, on
+ * EPHEMERAL (issue #344): two runs under ONE name, each detached with `--rm`, each waited on until `docker ps -a` no
+ * longer lists it. `first`/`second` are `{ started, id, removal: { state, ms } }` (`state` one of `gone`, `exited`
+ * (still listed, stopped, past the deadline), `present` (still listed, not stopped), `unanswered`), plus `nameHeld` on
+ * the second when its run was refused while a container held the name; `markers` are what each run left in the
+ * workspace. A finding needs positive evidence; anything that did not run to an answer is not read back.
+ */
+export function ephemeralVerdict({ first, second, markers = {}, nonce }) {
+	const deadline = `${LIVE_REMOVAL_DEADLINE_MS / 1000} s`;
+	const unfinished = (which, run) => {
+		if (run?.removal?.state === "present") return notReadBack("ephemeral", `the ${which} run was still listed and not stopped after ${deadline}, so its removal was not seen`);
+		if (run?.removal?.state === "unanswered") return notReadBack("ephemeral", `docker ps did not answer while the ${which} run was being waited on`);
+		return null;
+	};
+	if (!first?.started) return notReadBack("ephemeral", "the first ephemeral run did not start");
+	if (first.removal?.state === "exited") return verdict("ephemeral", false, `the first run's container was still listed, stopped, ${deadline} after it started: a job's container outlives the job`, { cause: "survived" });
+	const firstUnfinished = unfinished("first", first);
+	if (firstUnfinished) return firstUnfinished;
+	if (second?.nameHeld) return verdict("ephemeral", false, "a second run under the same name was refused because a container still held the name after the first was gone: a job id cannot run twice", { cause: "name-held" });
+	if (second?.started && second.id && first.id && second.id === first.id) return verdict("ephemeral", false, "the second run was given the first run's container", { cause: "reused" });
+	if (markers.second === "residue") return verdict("ephemeral", false, "the second run found the first run's /tmp marker: a container's filesystem outlived it", { cause: "residue" });
+	if (second?.removal?.state === "exited") return verdict("ephemeral", false, `the second run's container was still listed, stopped, ${deadline} after it started: a job's container outlives the job`, { cause: "survived" });
+	const secondUnfinished = unfinished("second", second);
+	if (secondUnfinished) return secondUnfinished;
+	if (!second?.started) return notReadBack("ephemeral", "the second ephemeral run did not start");
+	if (markers.first !== nonce || markers.second !== nonce) return notReadBack("ephemeral", "a run left no marker in the workspace, so whether it ran its script is not known");
+	return verdict("ephemeral", true, `two runs under one name each removed themselves (in ${first.removal.ms} ms and ${second.removal.ms} ms), and the second found nothing of the first`);
+}
+
+/**
+ * JOB-TO-JOB ISOLATION (issue #344): two peers, each on its own `--internal` job network behind the proxy, the way two
+ * concurrent jobs get them. `fromPeer1` is peer1's results for the proxy (`proxyTarget`) and every name and address of
+ * peer2 (`peerTargets`); `control` is peer2's results against itself. A peer reached is a FAILURE, and wins over every
+ * missing control; an unreached peer counts only when peer1 did reach the proxy (else the network proves nothing) and
+ * peer2 answered itself (else a listener that never came up proves nothing).
+ */
+export function jobToJobIsolationVerdict({ armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], fromPeer1 = new Map(), control = new Map() }) {
+	if (armed !== true) return notReadBack("jobToJobIsolation", "PI_EGRESS is off, so jobs share docker's default bridge by design and there is no per-job network to read back");
+	if (proxyRunning === false) return notReadBack("jobToJobIsolation", "the egress proxy is not running, so no job-shaped network could be built");
+	if (networksCreated !== true) return notReadBack("jobToJobIsolation", "the peer networks could not be created");
+	if (peersStarted !== true) return notReadBack("jobToJobIsolation", "a peer container did not start");
+	const reached = peerTargets.filter((t) => fromPeer1.get(t) === "reached");
+	if (reached.length > 0) return verdict("jobToJobIsolation", false, `one job reached another across their own networks, at ${reached.join(", ")}`, { cause: "reached" });
+	if (peerTargets.length === 0 || peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
+	if (!["connected", "reached"].includes(fromPeer1.get(proxyTarget))) return notReadBack("jobToJobIsolation", `peer1 could not reach the proxy (${fromPeer1.get(proxyTarget)}), so an unreached peer proves nothing`);
+	if (control.size === 0 || [...control.values()].some((r) => r !== "reached")) return notReadBack("jobToJobIsolation", "peer2 did not answer its own connection, so a peer that was not reached proves nothing");
+	const answered = peerTargets.filter((t) => fromPeer1.get(t) === "connected");
+	if (answered.length > 0) return notReadBack("jobToJobIsolation", `something accepted a connection at ${answered.join(", ")} without the peer's nonce, which is neither reached nor refused`);
+	return verdict("jobToJobIsolation", true, `peer1 reached the proxy and none of peer2's ${peerTargets.length} name(s) and address(es) (${peerTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")}); peer2 answered itself`);
+}
+
+/**
+ * Wait for a container to be gone (issue #344): `docker ps -a --no-trunc --filter id=` until it lists nothing, or the
+ * deadline passes. `docker wait --condition=removed` would be one call, and the docker CLI has no such flag (checked
+ * on 27.4.0). Returns `{ state, ms }` with `state` `gone`, `exited`, `present` or `unanswered`.
+ */
+export async function awaitRemoved({ step, id, now, delay, deadlineMs = LIVE_REMOVAL_DEADLINE_MS, pollMs = LIVE_REMOVAL_POLL_MS }) {
+	const start = now();
+	for (;;) {
+		const listed = await step(["ps", "-a", "--no-trunc", "--filter", `id=${id}`, "--format", "{{.ID}} {{.State}}"]);
+		if (listed?.code !== 0) return { state: "unanswered", ms: now() - start };
+		const line = String(listed.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith(id));
+		if (!line) return { state: "gone", ms: now() - start };
+		if (now() - start >= deadlineMs) return { state: /^(exited|dead)$/i.test(line.split(/\s+/)[1] ?? "") ? "exited" : "present", ms: now() - start };
+		await delay(pollMs);
+	}
+}
+
+/** The names and addresses a peer answers at on one network, from `docker inspect --format={{json .NetworkSettings.Networks}}`. */
+export function peerTargetsOf(inspectOutput, { network, name }) {
+	let networks;
+	try {
+		networks = JSON.parse(String(inspectOutput ?? "").trim());
+	} catch {
+		return [];
+	}
+	const on = networks?.[network];
+	if (!on || typeof on !== "object") return [];
+	const hosts = new Set([name]);
+	for (const n of [...(Array.isArray(on.DNSNames) ? on.DNSNames : []), ...(Array.isArray(on.Aliases) ? on.Aliases : [])]) if (typeof n === "string" && n) hosts.add(n);
+	const targets = [...hosts].map((h) => `${h}:${PEER_PORT}`);
+	if (typeof on.IPAddress === "string" && on.IPAddress) targets.push(`${on.IPAddress}:${PEER_PORT}`);
+	if (typeof on.GlobalIPv6Address === "string" && on.GlobalIPv6Address) targets.push(`[${on.GlobalIPv6Address}]:${PEER_PORT}`);
+	return targets;
+}
+
+/**
+ * The whole sequence. Returns `{ ran, reason, verdicts, notes, swept, ranAs }`: `ran` false with a `reason` when nothing
+ * was read back; the verdicts in READ_BACK_BY_A_LIVE_PROBE's order otherwise; `notes` for a teardown that failed, on
  * either path; `swept` for what an interrupted earlier run left and this one removed, on either path too.
  *
- * Order: precondition, a FRESH endpoint read, the announcement, the sweep, the fixture, the probe container, the
- * reads, the pinning probe -- and a `finally` that removes each container BY THE ID `run -d` printed (by its
- * pid-and-nonce name only when no ID came back, which a CLI killed or timed out mid-create can leave) and the
- * fixture, whatever happened above it.
+ * Order: precondition, a FRESH endpoint read, the announcement, the sweeps, the fixture, then one PHASE per kind of
+ * container (reading, pinning, ephemeral, peers), each removing what it started before the next begins. ONE ownership
+ * list holds every container and network this run made, and a `finally` removes whatever is left in it: containers
+ * first, BY THE ID `run -d` printed (by the pid-and-nonce name only when no ID came back), then networks, then the
+ * fixture. A container already SEEN gone is never removed again.
  */
-export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, dockerReachable, imagePresent, jobsDir, home = null, sessionsDir = null, egress, pid, nonce, run, fs, isAlive, announce = () => {}, stepTimeoutMs = LIVE_STEP_TIMEOUT_MS, user = null, euid = undefined }) {
+export async function runLiveProbes({
+	image,
+	endpoint,
+	resolveEndpoint = null,
+	dockerReachable,
+	imagePresent,
+	jobsDir,
+	home = null,
+	sessionsDir = null,
+	egress,
+	pid,
+	nonce,
+	run,
+	fs,
+	isAlive,
+	announce = () => {},
+	stepTimeoutMs = LIVE_STEP_TIMEOUT_MS,
+	user = null,
+	euid = undefined,
+	now = () => Date.now(),
+	delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	removalDeadlineMs = LIVE_REMOVAL_DEADLINE_MS,
+}) {
 	const notRun = (reason) => ({ ran: false, reason, verdicts: [], notes: [], swept: [] });
 	const notLocal = notRun("this shell's docker CLI is not observed to point at this host, so bind paths and .Mounts would describe another machine; nothing was run");
 	if (endpoint?.local !== true) return notLocal;
@@ -297,16 +505,59 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 	const names = liveNames(pid, nonce);
 	const notes = [];
 	const step = (args) => run(args, { timeoutMs: stepTimeoutMs });
-	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): the host mutation this makes is named, with where it lives
-	// and that it goes away, before the sweep or the fixture touches anything.
-	announce(`starting ${names.probe} from ${image} (no network, no environment, ${user ? `as the job user ${user}` : "as the image's own user"}) with a fixture under ${jobsDir}; both are removed when the read-back ends, as is anything an interrupted earlier run left`);
-	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive }))];
+	const proxy = typeof egress?.proxy === "string" && egress.proxy ? egress.proxy : DEFAULT_EGRESS_PROXY;
+	// The peers run only where a job would get its own network: the policy armed and its proxy not known to be down.
+	const peersWanted = egress?.armed === true && egress?.proxyRunning !== false;
+	const networkOf = { peer1: networkNameFor(names.peer1), peer2: networkNameFor(names.peer2) };
+	// SHOWN BEFORE IT HAPPENS (REQ-DEPLOYMENT-BOOTSTRAP): every host mutation this makes is named, with where it lives
+	// and that it goes away, before a sweep or the fixture touches anything.
+	announce(
+		`starting ${names.probe}, ${names.pin} and ${names.ephemeral} (twice) from ${image} (no environment, ${user ? `as the job user ${user}` : "as the image's own user"})` +
+			(peersWanted ? `, and ${names.peer1} and ${names.peer2} on their own --internal networks ${networkOf.peer1} and ${networkOf.peer2}, with ${proxy} attached to both` : "") +
+			`, with a fixture under ${jobsDir}; all of them are removed when the read-back ends, as is anything an interrupted earlier run left`,
+	);
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, proxy }))];
+
+	const owned = [];
+	const networks = [];
+	const start = async (what, name, args) => {
+		const entry = { what, name, id: null, done: false };
+		owned.push(entry);
+		const result = await step(args);
+		// The ID is taken whenever one was printed, whatever the exit: a CLI killed or timed out after the create can
+		// leave a container that never started, which `--rm` does not remove.
+		entry.id = containerIdOf(result);
+		return { result, entry };
+	};
+	const release = async (entry) => {
+		if (entry.done) return;
+		entry.done = true;
+		if (entry.id !== null) {
+			const removed = await step(["rm", "-f", entry.id]);
+			if (removed?.code !== 0) notes.push(`the ${entry.what} ${entry.id.slice(0, 12)} could not be removed: docker rm -f ${entry.id}`);
+		} else {
+			// No ID came back. The name carries this run's pid and nonce, so no other run's container can answer to it;
+			// usually there is nothing by that name and docker says so, which is not worth a line.
+			await step(["rm", "-f", entry.name]);
+		}
+	};
+	const dropNetwork = async (entry) => {
+		if (entry.done) return;
+		entry.done = true;
+		if (!(await removeJobNetworkWith(step, { network: entry.name, proxy }))) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
+	};
+	const makeFixture = (base) => {
+		const fixture = liveFixture(base);
+		// A JOB'S MODES, not friendlier ones (issue #341). A job's dir is a `0700` mkdtemp and its session dir `0700`;
+		// this fixture used to chmod every directory `0755`, which is how a probe passed on hosts where every job
+		// failed. The rest take the default mode, as a job's clone and outbox do. Still created EMPTY.
+		for (const [key, dir] of Object.entries(fixture)) {
+			fs.mkdirSync(dir, { recursive: true, ...(key === "jobDir" || key === "sessionDir" ? { mode: 0o700 } : {}) });
+		}
+		return fixture;
+	};
 
 	let root = null;
-	let probeId = null;
-	let pinId = null;
-	let probeTried = false;
-	let pinTried = false;
 	try {
 		// A jobs dir this shell cannot write (another user's, `PI_JOBS_DIR=""`, a path that is a file) is a reason not
 		// to run, said as one, never an exception that takes the rest of doctor's output with it. `root` is set before
@@ -316,25 +567,16 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 			fs.mkdirSync(jobsDir, { recursive: true });
 			root = fs.mkdtempSync(`${jobsDir}/${names.fixturePrefix}`);
 			root = fs.realpathSync(root);
-			fixture = liveFixture(root);
-			// A JOB'S MODES, not friendlier ones (issue #341). A job's dir is a `0700` mkdtemp and its session dir `0700`;
-			// this fixture used to chmod every directory `0755`, which is how a probe passed on hosts where every job
-			// failed. The rest take the default mode, as a job's clone and outbox do. Still created EMPTY.
-			for (const [key, dir] of Object.entries(fixture)) {
-				fs.mkdirSync(dir, { recursive: true, ...(key === "jobDir" || key === "sessionDir" ? { mode: 0o700 } : {}) });
-			}
+			fixture = makeFixture(root);
 		} catch (err) {
 			// The SAME `notes` array the `finally` below pushes into, so a removal that fails there is still reported.
 			return { ran: false, reason: `the fixture could not be created under ${JSON.stringify(jobsDir)} (${err?.code ?? "error"}), so no container was run`, verdicts: [], notes, swept };
 		}
 
-		probeTried = true;
-		const started = await step(liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user }));
-		// The ID is taken whenever one was printed, whatever the exit. A CLI killed or timed out after the create can
-		// leave a container that never started, which `--rm` does not remove; a start the daemon refused with `--rm` set
-		// is removed by the daemon (measured, exit 127), and removing it again is harmless.
-		probeId = containerIdOf(started);
-		if (started?.code !== 0 || probeId === null) {
+		// --- the reading container: mounts, status, writes ---
+		const reading = await start("probe container", names.probe, liveProbeRunArgs({ image, name: names.probe, fixture, sleepSeconds: liveSleepSeconds(stepTimeoutMs), user }));
+		const probeId = reading.entry.id;
+		if (reading.result?.code !== 0 || probeId === null) {
 			return { ran: false, reason: "the probe container did not start, so nothing was read back", verdicts: [], notes, swept };
 		}
 
@@ -348,8 +590,6 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 		const nonRoot = status ? nonRootVerdict(status) : notReadBack("nonRoot", "the status probe did not run in the container");
 
 		const written = await step(["exec", probeId, "sh", "-c", WRITE_SCRIPT, "sh", nonce]);
-		let hostRead = null;
-		let hostOwner = null;
 		const readBack = (dir) => {
 			try {
 				return fs.readFileSync(`${dir}/.pi-dispatch-live-probe`, "utf8");
@@ -361,36 +601,107 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 		// reported is not one the host can see. A read that worked with a stat that did not leaves the owner unchecked.
 		const reads = [["/workspace", readBack(fixture.workspace)], ["/outbox", readBack(fixture.outboxDir)], ["/session", readBack(fixture.sessionDir)]];
 		const unseen = reads.find(([, r]) => r !== nonce)?.[0] ?? "/workspace";
-		hostRead = reads.every(([, r]) => r === nonce) ? nonce : null;
+		const hostRead = reads.every(([, r]) => r === nonce) ? nonce : null;
+		let hostOwner = null;
 		try {
 			hostOwner = fs.statSync(`${fixture.workspace}/.pi-dispatch-live-probe`).uid;
 		} catch {
 			hostOwner = null;
 		}
 		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce, hostOwner, euid, unseen });
+		await release(reading.entry);
 
-		pinTried = true;
-		const pinned = await step(pinningProbeRunArgs({ name: names.pin, nonce, fixture, user }));
-		pinId = containerIdOf(pinned);
+		// --- the pinning container: an image this host does not have ---
+		const pinning = await start("pinning container", names.pin, pinningProbeRunArgs({ name: names.pin, nonce, fixture, user }));
 		const after = await step(["image", "inspect", absentImageRef(nonce)]);
 		const stillAbsent = after?.code === 0 ? false : typeof after?.code === "number" ? true : null;
-		const imagePinning = imagePinningVerdict({ code: pinned?.code, output: `${pinned?.stdout ?? ""}${pinned?.stderr ?? ""}`, stillAbsent });
+		const imagePinning = imagePinningVerdict({ code: pinning.result?.code, output: `${pinning.result?.stdout ?? ""}${pinning.result?.stderr ?? ""}`, stillAbsent });
+		await release(pinning.entry);
 
-		const byProperty = { isolation, mountSet, egress: egressVerdict(egress ?? {}), imagePinning, nonRoot, localFolders };
+		// --- the ephemeral pair (issue #344): one name, two runs, each waited on until it is gone ---
+		const runEphemeral = async (n) => {
+			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user }));
+			const started = result?.code === 0 && entry.id !== null;
+			let nameHeld = false;
+			if (!started && typeof result?.code === "number") {
+				const holders = await step(["ps", "-a", "--filter", `name=${names.ephemeral}`, "--format", "{{.Names}}"]);
+				nameHeld = holders?.code === 0 && String(holders.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).includes(names.ephemeral);
+			}
+			const removal = entry.id === null ? null : await awaitRemoved({ step, id: entry.id, now, delay, deadlineMs: removalDeadlineMs });
+			// SEEN GONE: never removed again, so a later `rm -f` cannot land on a new container that took its ID.
+			if (removal?.state === "gone") entry.done = true;
+			else await release(entry);
+			return { started, id: entry.id, nameHeld, removal };
+		};
+		const first = await runEphemeral(1);
+		const second = first.started && first.removal?.state === "gone" ? await runEphemeral(2) : null;
+		const marker = (n) => {
+			try {
+				return fs.readFileSync(`${fixture.workspace}/.pi-dispatch-live-ephemeral-${n}`, "utf8");
+			} catch {
+				return null;
+			}
+		};
+		const ephemeral = ephemeralVerdict({ first, second, markers: { first: marker(1), second: marker(2) }, nonce });
+
+		// --- the peers (issue #344): two job networks, two peers, one attempt each way ---
+		let jobToJobIsolation = jobToJobIsolationVerdict({ armed: egress?.armed === true, proxyRunning: egress?.proxyRunning });
+		if (peersWanted) {
+			const reading = { armed: true, proxyRunning: egress?.proxyRunning, networksCreated: false, peersStarted: false };
+			const peerNetworks = [];
+			const peers = [];
+			try {
+				for (const key of ["peer1", "peer2"]) {
+					if (!(await createJobNetworkWith(step, { network: networkOf[key], proxy }))) break;
+					const entry = { name: networkOf[key], done: false };
+					networks.push(entry);
+					peerNetworks.push(entry);
+				}
+				reading.networksCreated = peerNetworks.length === 2;
+				if (reading.networksCreated) {
+					const ids = {};
+					for (const key of ["peer1", "peer2"]) {
+						let peerFixture;
+						try {
+							peerFixture = makeFixture(`${root}/${key}`);
+						} catch {
+							break;
+						}
+						const { result, entry } = await start(`${key} container`, names[key], peerRunArgs({ image, name: names[key], fixture: peerFixture, network: networkOf[key], nonce, seconds: liveSleepSeconds(stepTimeoutMs), user }));
+						peers.push(entry);
+						if (result?.code !== 0 || entry.id === null) break;
+						ids[key] = entry.id;
+					}
+					reading.peersStarted = Boolean(ids.peer1 && ids.peer2);
+					if (reading.peersStarted) {
+						const described = await step(["inspect", "--format={{json .NetworkSettings.Networks}}", ids.peer2]);
+						reading.peerTargets = described?.code === 0 ? peerTargetsOf(described.stdout, { network: networkOf.peer2, name: names.peer2 }) : [];
+						reading.proxyTarget = `${proxy}:${EGRESS_PROXY_PORT}`;
+						const attempt = await step(["exec", ids.peer1, "node", "--eval", CONNECT_SCRIPT, nonce, reading.proxyTarget, ...reading.peerTargets]);
+						reading.fromPeer1 = attempt?.code === 0 ? parseConnectResults(attempt.stdout) : new Map();
+						// The control runs AFTER the attempt, against peer2's own addresses: a listener that is still up then was up
+						// during the attempt.
+						const ownTargets = [`127.0.0.1:${PEER_PORT}`, ...reading.peerTargets.filter((t) => /^(\d|\[)/.test(t))];
+						const self = await step(["exec", ids.peer2, "node", "--eval", CONNECT_SCRIPT, nonce, ...ownTargets]);
+						reading.control = self?.code === 0 ? parseConnectResults(self.stdout) : new Map();
+					}
+				}
+			} finally {
+				// Peers first, THEN their networks: a network with a container still on it is not removed without -f, and
+				// this never uses -f.
+				for (const entry of peers) await release(entry);
+				for (const entry of peerNetworks) await dropNetwork(entry);
+			}
+			jobToJobIsolation = jobToJobIsolationVerdict(reading);
+		}
+
+		const byProperty = { isolation, ephemeral, mountSet, egress: egressVerdict(egress ?? {}), jobToJobIsolation, imagePinning, nonRoot, localFolders };
 		// The uid PID 1 actually ran as, for doctor's job-user line: the decision it was given, read back.
 		const ranAs = Array.isArray(status?.uids) && /^\d+$/.test(status.uids[1] ?? "") ? Number(status.uids[1]) : null;
 		return { ran: true, verdicts: READ_BACK_BY_A_LIVE_PROBE.map((p) => byProperty[p]), notes, swept, ranAs };
 	} finally {
-		for (const [what, id, tried, name] of [["probe container", probeId, probeTried, names.probe], ["pinning container", pinId, pinTried, names.pin]]) {
-			if (id !== null) {
-				const removed = await step(["rm", "-f", id]);
-				if (removed?.code !== 0) notes.push(`the ${what} ${id.slice(0, 12)} could not be removed: docker rm -f ${id}`);
-			} else if (tried) {
-				// No ID came back. The name carries this run's pid and nonce, so no other run's container can answer to it;
-				// usually there is nothing by that name and docker says so, which is not worth a line.
-				await step(["rm", "-f", name]);
-			}
-		}
+		for (const entry of owned) await release(entry);
+		for (const entry of networks) await dropNetwork(entry);
 		if (root !== null) {
 			try {
 				fs.rmSync(root, { recursive: true, force: true });
@@ -441,19 +752,40 @@ export function sweepStaleFixtures({ jobsDir, pid, fs, isAlive }) {
 }
 
 /**
- * A probe or pinning container left by a run interrupted before its container STARTED, which `--rm` never removes
- * (measured: a SIGINT during `docker run -d` leaves one in `created`). Only names of exactly this module's shape and
- * a PID no longer alive, removed by ID. Best effort, like the fixture sweep.
+ * A live-probe container left by a run interrupted before its container STARTED, which `--rm` never removes
+ * (measured: a SIGINT during `docker run -d` leaves one in `created`), or one a peer phase never reached the end of.
+ * Only names of exactly one of `liveNames`' container kinds (derived, never retyped) and a PID no longer alive,
+ * removed by ID. Best effort, like the fixture sweep.
  */
 export async function sweepStaleContainers({ step, pid, isAlive }) {
 	const listed = await step(["ps", "-a", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.ID}} {{.Names}}"]);
 	if (listed?.code !== 0) return [];
 	const swept = [];
+	const shape = new RegExp(`^${LIVE_PREFIX}(?:${LIVE_CONTAINER_KINDS.join("|")})-(\\d+)-[0-9a-f]+$`);
 	for (const line of String(listed.stdout ?? "").split(/\r?\n/)) {
 		const [id, name] = line.trim().split(/\s+/);
-		const m = new RegExp(`^${LIVE_PREFIX}(?:probe|pin)-(\\d+)-[0-9a-f]+$`).exec(name ?? "");
+		const m = shape.exec(name ?? "");
 		if (!m || !/^[0-9a-f]{12,64}$/.test(id ?? "") || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
 		if ((await step(["rm", "-f", id]))?.code === 0) swept.push(`container ${name}`);
+	}
+	return swept;
+}
+
+/**
+ * A peer network an interrupted run left (issue #344): only a name of exactly a peer network's shape and a PID no
+ * longer alive. The configured proxy is detached from it and the network is removed WITHOUT `-f`, the job path's own
+ * `removeJobNetworkWith`, so a network anything else is still attached to stays where it is. Best effort.
+ */
+export async function sweepStaleNetworks({ step, pid, isAlive, proxy = DEFAULT_EGRESS_PROXY }) {
+	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
+	if (listed?.code !== 0) return [];
+	const swept = [];
+	const shape = new RegExp(`^${LIVE_PREFIX}peer[12]-(\\d+)-[0-9a-f]+-net$`);
+	for (const line of String(listed.stdout ?? "").split(/\r?\n/)) {
+		const name = line.trim();
+		const m = shape.exec(name);
+		if (!m || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
+		if (await removeJobNetworkWith(step, { network: name, proxy })) swept.push(`network ${name}`);
 	}
 	return swept;
 }

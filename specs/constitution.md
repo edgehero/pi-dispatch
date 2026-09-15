@@ -159,16 +159,23 @@ passing, on the record — issue #80.)
   records them in full. What survives a run is a **directory**, not a container, and it is swept on a
   bounded window that has no keep-forever value.
 
-  **A THIRD CONTAINER SHAPE, the live probe (issue #278), and it meets all four of the carve-out's tests.**
-  `pi-dispatch doctor --live` starts one container to read the backend declarations back
-  (`INT-LIVE-PROBE-CONTRACT`), plus a `docker run` of an absent image that the daemon refuses. It is not a job
-  and runs no agent: its program is `sleep`. It is built by `buildDockerRunArgs`, so every isolation flag
-  reaches it by construction, with `--network=none` and no environment at all. Unlike the sandbox it meets the
-  fourth test as well: it is not a harness invocation (the operator's typed flag, and no trigger, chain request
-  or model tool reaches it), it is operator-present (a doctor run), it holds no credential (no `-e` of any
-  kind), and it **processes no adversarial input** -- its mounts are fixture directories it creates empty, never
-  a workspace a job produced, and what runs inside is two constant scripts. It is removed when the read ends,
-  by the ID `docker run -d` printed, and one an interrupted run left is removed by the next. **Rejected**: reading the declarations back off a real job
+  **A THIRD CONTAINER SHAPE, the live probe (issues #278 and #344), and it meets all four of the carve-out's
+  tests.** `pi-dispatch doctor --live` starts short-lived containers to read the backend declarations back
+  (`INT-LIVE-PROBE-CONTRACT`): a READING container (`sleep`), a `docker run` of an absent image that the daemon
+  refuses, an EPHEMERAL pair (two runs under one name, each a constant `sh` script that exits at once) and, only
+  with the egress policy armed, two PEERS (`node`, a constant listener) each on its own `--internal` job network
+  with the proxy attached. None is a job and none runs an agent. Every one is built by `buildDockerRunArgs`, so
+  every isolation flag reaches it by construction, under the job user a job on that host gets, with no
+  environment at all; the reading, pinning and ephemeral containers take `--network=none`, the peers their own
+  job network. Unlike the sandbox they meet the fourth test as well: they are not a harness invocation (the
+  operator's typed flag, and no trigger, chain request or model tool reaches them), they are operator-present (a
+  doctor run), they hold no credential (no `-e` of any kind), and they **process no adversarial input** -- their
+  mounts are fixture directories the run creates empty, never a workspace a job produced, and what runs inside is
+  constant scripts only (the status and write scripts in the reading container, the ephemeral script, and the
+  peer and connection scripts), given nothing from the host but a nonce, a run number, a port and the peer's
+  own names and addresses. Each is removed when its phase ends, by the ID `docker run -d` printed (a container
+  already seen gone is not removed again), the peer networks after their peers, and what an interrupted run left
+  is removed by the next. **Rejected**: reading the declarations back off a real job
   container (a job holds credentials and untrusted input, and reading inside one is the `docker exec` into a
   live job the sandbox paragraph above already refused); probing at worker boot or per job (a container start
   for every boot or job to re-read what the table states and an operator can read on request).
@@ -210,10 +217,12 @@ passing, on the record — issue #80.)
   `pi-job-`, and no trigger, chain request or model tool can start one. Given
   `PI_SANDBOX_RETENTION_HOURS=0`, no directory outlives a run and every job's argv and teardown are
   byte-identical to one from before that feature existed.
-  **Given a live probe** (`INT-LIVE-PROBE-CONTRACT`) -- not a job either, and asserted separately: its argv
-  carries every member of `ISOLATION_FLAGS`, `--network=none` and no `-e`, its mounts are fixture directories
-  under the jobs directory, its name contains no `pi-job-`, no trigger, chain request or model tool can start
-  one, and it is removed when the read ends (or, if that run was interrupted, by the next).
+  **Given a live probe** (`INT-LIVE-PROBE-CONTRACT`) -- not a job either, and asserted separately: every
+  container's argv carries every member of `ISOLATION_FLAGS` and no `-e`, the reading, pinning and ephemeral
+  containers carry `--network=none` and a peer carries only its own `pi-dispatch-live-peer<n>-...-net`, its mounts
+  are fixture directories under the jobs directory, no name contains `pi-job-`, no trigger, chain request or model
+  tool can start one, and every container and network is removed when the read ends (or, if that run was
+  interrupted, by the next).
   **Given an egress policy** (`CONST-EGRESS-POLICY-IN-THE-ARGV`) -- asserted separately rather than folded
   into the mount enumeration above, because a network is not a mount: the job's network is `--internal` and
   its only other member is the allowlist proxy, so no job container can open a connection to a
@@ -915,6 +924,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-09-15 | Issue #344. **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED**, in the Why's third-shape paragraph and in the Acceptance, NOT in the Statement: the live probe is now four kinds of short-lived container rather than one plus a refused run -- the reading container, the pinning run, an ephemeral pair and, with the egress policy armed, two peers on their own `--internal` job networks behind the proxy -- all from `buildDockerRunArgs`, all under the job user, none with an environment, all running constant scripts given only a nonce, a run number, a port and the peer's own addresses, removed by ID per phase with the networks after their peers. The carve-out's four tests still hold for each: no harness invocation reaches them, a doctor run is operator-present, no `-e` means no credential, and fixture directories created empty plus constant scripts mean no adversarial input. **Rejected**: running the two probes against real job containers (a job holds a credential and untrusted input); giving the peers the default bridge when the policy is off (that adjacency is the stated `PI_EGRESS=0` behaviour, so reading it back proves nothing and the verdict is "not read back"). |
 | 2026-09-14 | Issue #278, part 2: `doctor --live`. **`CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED**, in the Why, the Traces and the Acceptance, and NOT in the Statement: a THIRD container shape (the live probe, `INT-LIVE-PROBE-CONTRACT`) is argued against the carve-out's four tests, and unlike the sandbox it meets all four, because it is given no credential and no input a job produced. Two rejected alternatives recorded (reading back inside a job container; probing at boot or per job). **`CONST-TOKEN-SCOPED-PER-JOB` UNCHANGED, checked**: the probe carries no environment at all. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: it reserves nothing and spends nothing. |
 | 2026-09-09 | Issue #318, the receiver's ~25-second recovery window, found by an adversarial pass on #316. **`CONST-RETRY-INFRA-ONLY` AMENDED**, in the Why only: the paragraph that stated the exit-1 half's bound as a unit property (and deferred the decision to #318) now records the decision. The bound moved INTO the process -- `retryIdentity` (`receiver/src/boot-retry.mjs`) wraps all five hard-fail identity resolutions (four serve arms and the poller's gate) and retries UNTAGGED failures for `RECEIVER_IDENTITY_RETRY_SECONDS` (default 600, floored at 60) with a 5s-doubling-to-30s gap and a 10s ref'd per-attempt fuse, so the recovery window is the same under systemd, launchd, nssm and compose, which is the acceptance the issue stated. The unit's values are UNTOUCHED: the floor at `StartLimitIntervalSec` makes the burst limit unreachable by a retrying boot (starts land at least window + `RestartSec` apart, so each opens a fresh fixed interval), while a genuine crash loop still trips it in ~25s -- the two bounds now cover disjoint failure classes instead of one bound mis-covering both. The tag is still the whole discriminator: `piDispatchConfig` rethrows same-tick with no log line and no sleep, so exit 2 is exactly as fast as before. **And the gate found the exit itself was a fiction for three of the four arms, on main too**: the queue and router are built before the gitlab/forgejo/azure arms, and a refusal there assigned `process.exitCode` that was never delivered -- the live client held the loop, so the unit sat `active (running)` serving nothing and NO supervisor semantics (`Restart=`, `RestartPreventExitStatus=2`) ever engaged. The post-queue region now closes what the boot built and rethrows, so this entry's own boot-consequences paragraph is true in practice, not only in mapping. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: boot identity resolution spends nothing and no gate moves. **`CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked**: the server still never listens before every armed forge's selfId resolved -- the retry sits above `listen`, so no delivery can arrive mid-window. **Code evidence**: receiver/src/boot-retry.mjs -> retryIdentity; receiver/src/config.mjs -> identityRetryWindowMs; receiver/src/start.mjs -> the four wrapped arms; receiver/src/poller.mjs -> the wrapped gate; receiver/test/boot-retry.test.mjs; receiver/test/start.test.mjs -> "an exhausted window is still a refusal that arms NOTHING". |
 | 2026-09-08 | Issue #314, a trigger binding a provider's endpoint variable, found by an adversarial pass on #309. **`CONST-PI-VERSION-PINNED` AMENDED**: two upgrade gates now hang off this entry rather than one. `findEnvKeys` answers which variable a provider's KEY is read from; `PROVIDER_STEERING_VARS` answers which variables STEER a provider, and is derived from the pinned artifacts in both directions rather than written down. Both exist because a pi bump that quietly changes what the runtime reads from the environment is otherwise indistinguishable from nothing happening, and here the failure mode is a trigger choosing the host this deployment's own credential is sent to. **The issue's premise was half wrong and the correction is the substance**: the ANTHROPIC pair it names is inert, but only while `model.baseUrl` is a non-empty string, and the AZURE variables it treats as the same case are LIVE, because every azure model ships `baseUrl: ""` and the environment is therefore the primary source there. Measured with a stubbed fetch and no key: `AZURE_OPENAI_BASE_URL` sends the request to a host of the trigger's choosing carrying `api-key`. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: this refuses at load, before any job exists, so nothing about classification moves. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: a load-time refusal is free by construction and precedes every gate. **Code evidence**: worker/src/provider-steering.mjs -> PROVIDER_STEERING_VARS; worker/src/triggers.mjs -> RESERVED_ENV_NAMES; worker/test/provider-steering.test.mjs; worker/test/env-allowlist.test.mjs. |
