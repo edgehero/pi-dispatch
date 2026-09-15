@@ -120,12 +120,17 @@ assert.ok(local.outboxDir, "the local job has an outbox");
 say(`prepared a forge clone (session ${forge.session.resume ? "resumed" : "cold"}) and a local folder, both under a 0700 job dir`);
 
 // --- 4. every mount, used as the job user, and /job still read-only to its owner ----------------------------------
+// ONE COMMAND PER LINE, deliberately: under `set -e` a failing command that is not the last of an `&&` list does not
+// exit the shell, so `cat x && touch y` on an unreadable x would print mounts-ok (measured, dash).
 const MOUNT_SCRIPT = [
 	"set -e",
-	"cd /job && ls /job >/dev/null && cat /job/prompt.md >/dev/null",
-	'touch /workspace/.pd-e2e && git -C /workspace status --porcelain >/dev/null',
-	'if [ -d /outbox ]; then touch /outbox/.pd-e2e; fi',
-	'if [ -d /session ]; then cat /session/current.jsonl >/dev/null && touch /session/.pd-e2e; fi',
+	"cd /job",
+	"ls /job >/dev/null",
+	"cat /job/prompt.md >/dev/null",
+	"touch /workspace/.pd-e2e",
+	"git -C /workspace status --porcelain >/dev/null",
+	"if [ -d /outbox ]; then touch /outbox/.pd-e2e; fi",
+	"if [ -d /session ]; then cat /session/current.jsonl >/dev/null; touch /session/.pd-e2e; fi",
 	'touch "$HOME/.pd-e2e"',
 	"if touch /job/x 2>/dev/null; then echo job-writable; exit 3; fi",
 	"if chmod 777 /job 2>/dev/null; then echo job-chmod; exit 4; fi",
@@ -142,7 +147,12 @@ for (const [label, prepared] of [["forge", forge], ["local", local]]) {
 	assert.equal(r.status, 0, `${label}: ${r.stdout}${r.stderr}`);
 	assert.match(r.stdout, /mounts-ok/);
 	assert.equal(statSync(join(prepared.workspace, ".pd-e2e")).uid, euid, `${label}: a file the job wrote is owned by the worker on the host`);
+	// Checked on the HOST too, not only by the script's own exit: the outbox and the session land as the worker's.
+	for (const dir of [prepared.outboxDir, prepared.session?.hostDir].filter(Boolean)) {
+		assert.equal(statSync(join(dir, ".pd-e2e")).uid, euid, `${label}: ${dir} was written as the job user`);
+	}
 }
+assert.ok(existsSync(join(forge.session.hostDir, ".pd-e2e")), "the forge job's session mount was used");
 say("every mount was read and written as the job user, git accepted the clone, and /job refused a write and a chmod");
 
 // --- 5. the real runner: as the job user it reaches the auth check; as the image's user it cannot read /job --------

@@ -391,8 +391,9 @@ jobs:
       # the bug: every job mount works for it with no --user at all. So the check runs as a DIFFERENT uid, 1234
       # in its own primary group and in the docker group, against this job's real daemon, which enforces
       # bind-mount ownership. The script drives the real modules (the facts reader and resolver, the preparers
-      # and session store, the builder, the cleanup, doctor's read-back) and the real runner, with no network
-      # and no key, and it refuses to pass unless every negative control ran and failed as it must. RUNNER, not
+      # and session store, the builder, the cleanup, doctor's decision and read-back) and the real runner, with no
+      # network and no key, and it refuses to pass unless its runner and read-back negative controls all ran and
+      # failed as they must. RUNNER, not
       # CORE: it asserts this repository's runner and worker, not what any nameable image must do.
       # PATH and the node binary are carried explicitly, because sudo's secure_path replaces PATH and setup-node's
       # node lives in the tool cache, off it; -H gives pdjob its own HOME, so host git does not read the runner's.

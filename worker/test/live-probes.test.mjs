@@ -525,4 +525,18 @@ test("a live run passes the job user into both probes, checks the host owner, an
 	});
 	const missing = await runLiveProbes(probeArgs(partial));
 	assert.equal(missing.verdicts.find((v) => v.property === "localFolders").cause, "not-visible");
+	for (const skipped of ["/outbox", "/session"]) {
+		const one = fakeDocker({
+			write: (args) => {
+				const runArgs = one.calls.find((a) => a[0] === "run" && a.includes("sleep"));
+				for (const dest of ["/workspace", "/outbox", "/session"].filter((d) => d !== skipped)) {
+					writeFileSync(join(runArgs.find((a) => a.endsWith(`:${dest}`)).split(":")[0], ".pi-dispatch-live-probe"), args.at(-1));
+				}
+				return { code: 0, stdout: "wrote\n", stderr: "" };
+			},
+		});
+		const v = (await runLiveProbes(probeArgs(one))).verdicts.find((x) => x.property === "localFolders");
+		assert.equal(v.cause, "not-visible", skipped);
+		assert.match(v.detail, new RegExp(`inside ${skipped} is not visible`), `${skipped}: the failure names the mount`);
+	}
 });

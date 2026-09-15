@@ -224,18 +224,18 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
  * its own job. The owner check is skipped where there is no uid to compare (`euid` undefined, as on Windows) or the
  * host could not stat the file.
  */
-export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner = null, euid = undefined }) {
+export function localFoldersVerdict({ code, stdout, hostRead, nonce, hostOwner = null, euid = undefined, unseen = "/workspace" }) {
 	if (code !== 0) return notReadBack("localFolders", "the write probe did not run in the container");
 	const said = String(stdout ?? "").trim();
 	if (said === "job-unreadable") return verdict("localFolders", false, "the job user cannot list a 0700 job directory this shell created, so no job here can read its own inputs", { cause: "job-unreadable" });
 	if (said === "not-writable /workspace") return verdict("localFolders", false, "the job user cannot write a bind-mounted host folder, so a local-folder job cannot edit its folder in place", { cause: "not-writable" });
 	if (said === "not-writable /outbox" || said === "not-writable /session") return verdict("localFolders", false, `the job user cannot write ${said.slice("not-writable ".length)}, a mount every job of that kind writes`, { cause: "mount-not-writable" });
 	if (said !== "wrote") return notReadBack("localFolders", "the write probe gave no answer");
-	if (hostRead !== nonce) return verdict("localFolders", false, "a file written inside /workspace, /outbox or /session is not visible on the host, so that mount is not the folder a job edits in place", { cause: "not-visible" });
+	if (hostRead !== nonce) return verdict("localFolders", false, `a file written inside ${unseen} is not visible on the host, so that mount is not the folder a job edits in place`, { cause: "not-visible" });
 	if (typeof euid === "number" && typeof hostOwner === "number" && hostOwner !== euid) {
 		return verdict("localFolders", false, `a file the job wrote is owned by uid ${hostOwner} on the host, not by this shell's uid ${euid}, so the worker could not remove what a job leaves`, { cause: "not-yours" });
 	}
-	return verdict("localFolders", true, `every mount a job uses was used as the job user, and a file written inside /workspace was read back from the host folder${typeof euid === "number" && typeof hostOwner === "number" ? `, owned by this shell's uid ${euid}` : ""}`);
+	return verdict("localFolders", true, `every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host${typeof euid === "number" && typeof hostOwner === "number" ? `, owned by this shell's uid ${euid}` : ""}`);
 }
 
 /**
@@ -359,15 +359,15 @@ export async function runLiveProbes({ image, endpoint, resolveEndpoint = null, d
 		};
 		// The workspace nonce is the check; the outbox's and the session's must match it too, or a write the container
 		// reported is not one the host can see. A read that worked with a stat that did not leaves the owner unchecked.
-		const others = [readBack(fixture.outboxDir), readBack(fixture.sessionDir)];
-		hostRead = readBack(fixture.workspace);
-		if (hostRead !== null && others.some((r) => r !== hostRead)) hostRead = null;
+		const reads = [["/workspace", readBack(fixture.workspace)], ["/outbox", readBack(fixture.outboxDir)], ["/session", readBack(fixture.sessionDir)]];
+		const unseen = reads.find(([, r]) => r !== nonce)?.[0] ?? "/workspace";
+		hostRead = reads.every(([, r]) => r === nonce) ? nonce : null;
 		try {
 			hostOwner = fs.statSync(`${fixture.workspace}/.pi-dispatch-live-probe`).uid;
 		} catch {
 			hostOwner = null;
 		}
-		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce, hostOwner, euid });
+		const localFolders = localFoldersVerdict({ code: written?.code, stdout: written?.stdout, hostRead, nonce, hostOwner, euid, unseen });
 
 		pinTried = true;
 		const pinned = await step(pinningProbeRunArgs({ name: names.pin, nonce, fixture, user }));

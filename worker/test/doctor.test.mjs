@@ -5,7 +5,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { collectChecks, defaultPromptFn, githubProtectionPreflight, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -3098,10 +3098,6 @@ test("doctor: under GITHUB_AUTH_SOURCE=app a redirected CLI does not claim a pro
 const LIVE_ID = "d".repeat(64);
 const LIVE_STATUS = (uid = "1001") => `Name:\tdocker-init\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\ncgroup:v2\npids.max:512\nmemory.max:4294967296\n`;
 
-/**
- * The docker answers a --live pass needs, as function outcomes that read the probe's own argv. Listed FIRST wherever
- * spread, because `green`'s broad "docker image" key would otherwise answer the pinning probe's absent-image inspect.
- */
 // Issue #341: a rootful daemon's `docker info` body and the identities the job-user tests use.
 const ROOTFUL_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin"], PidsLimit: true, MemoryLimit: true });
 const ROOTLESS_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], PidsLimit: false, MemoryLimit: false });
@@ -3110,6 +3106,10 @@ const imageLabels = (capabilities) => ({ "docker image inspect --format={{.Id}}"
 const socketStat = () => ({ uid: 0, gid: 2375 });
 const infoPlan = (body) => ({ "docker info --format={{json .}}": { code: 0, output: `${body}\n` } });
 
+/**
+ * The docker answers a --live pass needs, as function outcomes that read the probe's own argv. Listed FIRST wherever
+ * spread, because `green`'s broad "docker image" key would otherwise answer the pinning probe's absent-image inspect.
+ */
 function liveOk({ uid = "1001" } = {}) {
 	let volumes = [];
 	return {
@@ -3291,10 +3291,7 @@ test("the egress canary carries a non-rendered readBack, so --live folds it in w
 	assert.deepEqual(readBacks, [{ property: "egress", want: true, reached: true }, { property: "egress", want: false, reached: false }]);
 });
 
-
 // --- issue #341: the job-user line, and the probe run as the job user ------------------------------------------
-
-
 
 test("doctor names who a local job runs as, from the worker's own resolver, and never starts a container for it (#341)", async () => {
 	for (const [label, ids, plan, pattern] of [
@@ -3360,8 +3357,13 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	assert.match(await run(unit), /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/, "by name");
 	assert.match(await run(unit.replace("User=pi", "User=4242")), /runs the worker as 4242 \(uid 4242\)/, "numeric");
 	assert.match(await run(unit.replace("User=pi", "User = pi\n  User=4242")), /runs the worker as 4242 \(uid 4242\)/, "systemd's last assignment wins, whitespace allowed");
-	assert.match(await run(unit.replace("User=pi\n", "")), /runs the worker as root \(uid 0, no User= line\)/, "a system unit with no User= is root, which the worker refuses");
-	assert.doesNotMatch(await run(unit.replace("User=pi\n", "DynamicUser=yes\n")), warned, "a DynamicUser uid cannot be named ahead, so nothing is guessed");
+	const rootText = await run(unit.replace("User=pi\n", ""));
+	assert.match(rootText, /runs the worker as root \(uid 0, no User= line\)/, "a system unit with no User= is root, which the worker refuses");
+	assert.match(rootText, /refuses to boot while local is the default venue \(worker-is-root\)/);
+	for (const flag of ["yes", "y", "true", "t", "on", "1"]) {
+		assert.doesNotMatch(await run(unit.replace("User=pi\n", `DynamicUser=${flag}\n`)), warned, `DynamicUser=${flag} with no User=: a uid nobody can name ahead, so nothing is guessed`);
+	}
+	assert.match(await run(unit.replace("User=pi", "DynamicUser=yes\nUser=pi")), /runs the worker as pi \(uid 998\)/, "DynamicUser with an existing User= runs as that account, so it is compared");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: mkdtempSync(join(tmpdir(), "pi-other-deploy-")) }), warned, "a unit serving another deployment is not this one's");
@@ -3422,6 +3424,7 @@ test("doctor --live gives job-unreadable, mount-not-writable and not-yours each 
 	// A sudo'd doctor is not the worker, and root can remove anything: no owner comparison, so no false not-yours.
 	const root = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(999), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: { platform: "darwin", euid: 0, egid: 0 } }, facts);
 	assert.ok(!root.some((c) => /not-yours|owned by another uid/.test(`${c.label} ${c.fix ?? ""}`)));
+	assert.match(root.at(-1).label, /the host owner of what the probe wrote was not compared, because doctor ran as root/, "and the limits line says so");
 });
 
 test("doctor and the worker read ONE set of boot-refusing causes, and doctor waits as long as the worker for docker info (#341)", async () => {
@@ -3435,4 +3438,43 @@ test("doctor and the worker read ONE set of boot-refusing causes, and doctor wai
 	assert.equal(DAEMON_FACTS_TIMEOUT_MS, 15_000);
 	const doctorSource = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	assert.match(doctorSource, /makeDaemonFactsReader\(\{ run: dockerRunVia\(spawn, DAEMON_FACTS_TIMEOUT_MS\) \}\)/, "a shorter doctor bound calls undecidable a host the worker decides");
+});
+
+test("every boot-refusing cause is a ✗ and exit 1 in doctor, through doctor's own severity, never a text match (#341)", async () => {
+	const { BOOT_REFUSING_JOB_USER_CAUSES } = await import("../src/job-user.mjs");
+	const USERNS_INFO = JSON.stringify({ ServerVersion: "27.5.1", OperatingSystem: "Ubuntu 24.04", SecurityOptions: ["name=seccomp,profile=builtin", "name=userns"] });
+	const DESKTOP_INFO = JSON.stringify({ ServerVersion: "27.4.0", OperatingSystem: "Docker Desktop", SecurityOptions: ["name=seccomp,profile=unconfined"] });
+	const fixtures = {
+		rootless: [ROOTLESS_INFO, LINUX_ID(1234)],
+		"userns-remap": [USERNS_INFO, LINUX_ID(1234)],
+		"worker-is-root": [ROOTFUL_INFO, LINUX_ID(0)],
+		"desktop-linux-userns": [DESKTOP_INFO, LINUX_ID(1234)],
+	};
+	assert.deepEqual(Object.keys(fixtures).sort(), [...BOOT_REFUSING_JOB_USER_CAUSES].sort(), "one fixture per cause the worker refuses to boot on");
+	for (const [cause, [body, ids]] of Object.entries(fixtures)) {
+		const { out, text } = capture();
+		const code = await runDoctor(ghEnv(), { ...ghDeps(out, { ...infoPlan(body), ...green }), jobUserIdentity: ids, stat: () => ({ uid: 0, gid: 2375 }) });
+		assert.equal(code, 1, `${cause}: ${text()}`);
+		assert.match(text(), new RegExp(`✗ local: no job can run as a non-root user that owns its files on this daemon \\(${cause}\\)`), cause);
+	}
+});
+
+test("doctor waits for docker info as long as the worker does: no kill at 5 s, a kill at 15 s (#341)", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let killed = false;
+	let asked = false;
+	const hanging = (cmd, args) => {
+		const child = { stdout: { on() {} }, stderr: { on() {} }, on() { return child; }, kill: () => (killed = true) };
+		if (args[0] === "info") asked = true;
+		return child;
+	};
+	const pending = jobUserChecks({}, { spawn: hanging, cwd: "/nowhere", home: "/nowhere", fileExists: () => false, platform: "linux", jobUserIdentity: LINUX_ID(1234) }, { endpoint: { local: true, endpoint: "unix:///run/pd-test.sock" }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest" });
+	for (let i = 0; i < 5 && !asked; i++) await new Promise((r) => setImmediate(r));
+	assert.ok(asked, "the facts read started");
+	t.mock.timers.tick(5_001);
+	assert.equal(killed, false, "the endpoint read's 5 s is not this read's bound");
+	t.mock.timers.tick(10_000);
+	assert.equal(killed, true, "15 s, the worker's DAEMON_FACTS_TIMEOUT_MS");
+	const result = await pending;
+	assert.match(result.checks[0].label, /could not be decided \(timeout\)/);
 });

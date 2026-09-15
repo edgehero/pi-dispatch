@@ -526,9 +526,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   **Reserving `HOME` (issue #341) is one more narrowing, and it is not the fourth.** Others landed after #313
   without a line here, each refusing a file that used to load: #291 reserved `PI_EXCLUDE_TOOLS` in
   `CONTAINER_ENV_NAMES`, refused `run.tools` and `run.noTools` by name, and refused near-miss spellings of the
-  `excludeTools` key through a sweep (cb43dd3); #314 reserved the provider-steering variables (`ANTHROPIC_BASE_URL`, `AZURE_OPENAI_BASE_URL` and the
-  rest of `PROVIDER_STEERING_VARS`) in `run.secrets` (cf8b4fe). Now a `run.secrets` entry binding `HOME` refuses the
-  whole file at parse, in the worker, the receiver and the admin validator alike, because the worker sets
+  `excludeTools` key through a sweep (cb43dd3); #314 reserved the provider-steering variables
+  (`ANTHROPIC_BASE_URL`, `AZURE_OPENAI_BASE_URL` and the rest of `PROVIDER_STEERING_VARS`) in `run.secrets`
+  (cf8b4fe). Now a `run.secrets` entry binding `HOME` refuses the whole file at parse, in the worker, the receiver and the admin validator alike, because the worker sets
   `HOME=/home/pi` beside `--user` and a secret of that name could otherwise have been meant to override it. No
   shipped trigger has a reason to bind any of these. The next release's notes must name it; the receiver image's
   `:latest` refuses such a file from the merge on.

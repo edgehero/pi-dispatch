@@ -252,7 +252,8 @@ export function resolveImageUser(decision, { capabilities = [], euid, egid, sock
  * so doctor cannot show a warning for a cause the worker refuses to boot on. The rest refuse per job: the group rows
  * apply only to a job whose image needs `--user`, and `runtime-unreadable` describes one answer.
  */
-export const BOOT_REFUSING_JOB_USER_CAUSES = Object.freeze(new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]));
+// A plain Set (read with `.has` only); `Object.freeze` would not stop `.add`, so it is not pretended.
+export const BOOT_REFUSING_JOB_USER_CAUSES = new Set(["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
 
 /** The operator-facing refusal for an unmappable decision or cause. */
 export function jobUserRefusal(causeOrDecision) {

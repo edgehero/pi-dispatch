@@ -1491,7 +1491,8 @@ sibling rather than an extension of the GitHub one for the same reason.
     at a terminal, which is the one place a late failure is cheap.
   - **Env is exactly `TERM` and `TMOUT`**, plus the four proxy variables when a policy is armed, plus
     `HOME=/home/pi` beside `--user` when the run had a job user (issue #341). No minted forge token under any
-    forge's variable names, no provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables. `buildContainerEnv`
+    forge's variable names, no provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables.
+    `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
   - **Name**: `pi-sandbox-<sanitizeJobId(jobId)>`. Docker matches `--filter name=` as a **substring**, and
@@ -1513,7 +1514,8 @@ sibling rather than an extension of the GitHub one for the same reason.
     nothing decided one (a bare wiring), so the sandbox decides from the CLI's own ids; `{ "user": null, "home":
     null }` is the image's own user, reopened without `--user`; `{ "user": "<uid>:<gid>", "home": "/home/pi" }`
     reopens as that uid. A stamp that is not an object, has no `user` key, has a `user` that is not a non-root
-    `<uid>:<gid>`, or has a `home` that does not match its `user`, refuses `job-user-stamp-invalid`. A manifest from before the key decides like `null`.
+    `<uid>:<gid>`, or has a `home` that does not match its `user`, refuses `job-user-stamp-invalid`. A manifest
+    from before the key decides like `null`.
     `image` is resolved through `resolveJobImage` — the same function the pre-spend preflight and
     `run-container.mjs` use — so the tag that was checked, the tag that ran and the tag re-opened are one
     answer rather than three call sites that agree by luck. `backend` is resolved through
@@ -1585,8 +1587,8 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     `env: {}`, the job user doctor decided for this host (issue #341: the builder's `user` field, so `--user` where
     a job has it and nothing where it does not, still with no `-e`, not even HOME, since the probe runs no pi) and
     `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. Through `extraFlags`
-    it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and `--cpus` reach
-    it by construction. The sleep is DERIVED from the step bound (the three steps that need the container alive,
+    it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and
+    `--cpus` reach it by construction. The sleep is DERIVED from the step bound (the three steps that need the container alive,
     at 20 seconds each, plus 30), never a literal.
   - **Fixtures, not the operator's folders, in a JOB'S modes.** One directory from `mkdtemp` under `jobsDirPath(env)`,
     the same derivation `loadConfig` reads `jobsDir` from, `realpath`ed, with an EMPTY subdirectory for every
@@ -1623,12 +1625,13 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     - `mountSet`: `docker inspect .Mounts` keyed by destination and read-write flag against the spec's own
       mounts. A mount missing, one extra, one with its RW flipped, the docker socket, the home directory or an
       ancestor of it, or the session store fails.
-    - `localFolders`: one constant script uses every mount a job uses, as the job user: it traverses and lists
-      the `0700` `/job` (else `job-unreadable`), checks `/workspace` (else `not-writable`) and `/outbox` and
-      `/session` (else `mount-not-writable`) with `[ -w ]`, and writes a nonce passed as `$1` into all three. The
-      nonce is read back on the host (else `not-visible`), and the host owner of that file must be this shell's
-      uid (else `not-yours`: a worker could not remove what a job leaves), a comparison skipped where there is
-      no uid (Windows) or the file cannot be stat'ed.
+    - `localFolders`: one constant script uses every mount a job uses, as the job user: it checks the `0700`
+      `/job` with the shell's own `[ -r ]` and `[ -x ]` (else `job-unreadable`), `/workspace` (else
+      `not-writable`) and `/outbox` and `/session` (else `mount-not-writable`) with `[ -w ]`, and writes a nonce
+      passed as `$1` into all three. All three nonces are read back on the host (else `not-visible`, naming the
+      first mount that did not show it), and the host owner of the workspace's must be this shell's uid (else
+      `not-yours`: a worker could not remove what a job leaves), a comparison skipped where there is no uid
+      (Windows), doctor runs as root, or the file cannot be stat'ed.
     - **The job user**, read back beside the verdicts: the uid PID 1 ran as, against the decided `--user`. A
       different uid fails; one that could not be read is not read back.
     - `imagePinning`: the builder's argv, detached, against `pi-dispatch-live-probe.invalid/absent:<nonce>`. It
@@ -1657,7 +1660,8 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
   and no `-e`, and ends with the image then the derived sleep. The fixture's job and session directories are
   `0700`, every fixture directory is empty when the probe starts, and nothing is `chmod`ed. Given a job dir the
   job user cannot list, localFolders fails `job-unreadable`; given a nonce owned on the host by another uid, it
-  fails `not-yours`; given a decision that refuses a local job, no docker command runs. No probe name contains `pi-job-` or `pi-sandbox-`. Given a status reading `CapEff 0` with a nonzero
+  fails `not-yours`; given a decision that refuses a local job, no docker command runs.
+  No probe name contains `pi-job-` or `pi-sandbox-`. Given a status reading `CapEff 0` with a nonzero
   `CapBnd`, isolation fails; given a mount set of the right size with one RW flag flipped, mountSet fails; given
   `Unable to find image`, imagePinning fails; given a root image, nonRoot fails and doctor exits 1. Given a docker
   CLI not observed local, no docker command runs and no fixture is created. Given a step that times out, a
