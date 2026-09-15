@@ -104,8 +104,9 @@ worth calling out because they are the ones adapters get wrong:
   the daemon to report that it applies pid and memory bounds, and to be neither rootless nor Podman, whose Docker
   API reports those booleans whether or not they apply (`daemonAppliesBounds`). `mountSet` needs the runtime to add
   no mounts of its own: always on Docker, and on rootful Podman only with an empty `/etc/containers/mounts.conf`,
-  no `volumes` or `mounts` key in containers.conf or its drop-ins, those files readable, FIPS off, and the service's
-  socket on this host (`runtimeAddsNoMounts`). Where either is not observed the word
+  no `volumes`, `mounts`, `devices` or `hooks_dir` key (in any spelling or letter case) in containers.conf or its
+  drop-ins, no OCI hook installed, those files readable, FIPS off, and the service's socket on this host
+  (`runtimeAddsNoMounts`). Where either is not observed the word
   counts as `asserted`, doctor prints what it saw, and a floor asking for `enforced` refuses. `pi-dispatch doctor
   --live` reads what these cannot: `pids.max` and `memory.max` inside a real container, and its
   `/proc/self/mountinfo`.

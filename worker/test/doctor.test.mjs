@@ -3646,6 +3646,13 @@ test("doctor names each floor miss with the observation it needed and that obser
 	const retried = unread.find((c) => /PI_BACKEND_FLOOR asks for/.test(c.label));
 	assert.match(retried.fix, /exits 1 at boot so the supervisor retries/);
 	assert.doesNotMatch(retried.fix, /refuses to boot|rootful Docker Engine/);
+	// One ANSWERED miss beside an unanswered one: the worker refuses on the answer, so doctor says so.
+	const mixed = backendChecks({ PI_BACKEND_FLOOR: "isolation=enforced,credentialTransit=enforced" }, { endpoint: { local: false, context: "remote", endpoint: "tcp://10.0.0.1:2375" }, daemon: { answered: false, reason: "timeout", transient: true }, fs: noHostFiles });
+	assert.match(mixed.find((c) => /PI_BACKEND_FLOOR asks for/.test(c.label)).fix, /refuses to boot/);
+	// No docker binary is an answer too, as it is for the worker, and it adds no isolation or mountSet line of its own.
+	const noDocker = backendChecks({ PI_BACKEND_FLOOR: "isolation=enforced" }, { endpoint, daemon: { answered: false, reason: "docker-not-found", transient: true }, fs: noHostFiles });
+	assert.match(noDocker.find((c) => /PI_BACKEND_FLOOR asks for/.test(c.label)).fix, /refuses to boot/);
+	assert.equal(noDocker.find((c) => /local: (isolation|mountSet) is ASSERTED/.test(c.label)), undefined);
 });
 
 test("doctor names the runtime that answered, and warns on podman-docker, where the docker CLI resolves no context (#345)", async () => {
@@ -3673,4 +3680,12 @@ test("doctor parses the proxy's state and this host's image id from stdout only,
 	const plan = { ...EGRESS_OK, "docker info": 0, "docker image inspect --format={{.Id}}": { code: 0, output: "sha256:same\n", stderr: banner }, "docker image": 0 };
 	const same = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, collectSeams(plan, { nodeVersion: "22.19.0", readHosts: async () => ({ hosts: [{ name: "mini2", tz, imageDigest: "sha256:same" }] }) }));
 	assert.ok(!same.some((c) => /digest differs/.test(c.label)), "the banner is not read as part of the id");
+});
+
+test("doctor with no docker binary passes that answer to the floor check, so it says the worker refuses rather than retries (#345)", async () => {
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_BACKEND_FLOOR: "isolation=enforced" }), { ...ghDeps(out, { docker: "enoent" }), observationFs: noHostFiles });
+	assert.match(text(), /install Docker/);
+	assert.match(text(), /✗ PI_BACKEND_FLOOR asks for isolation=enforced/);
+	assert.doesNotMatch(text(), /exits 1 at boot so the supervisor retries/);
 });

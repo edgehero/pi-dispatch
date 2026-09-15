@@ -208,7 +208,7 @@ test("mountSet reads /proc/self/mountinfo for what .Mounts does not list: a runt
 	]) {
 		assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], [point]) }).ok, ok, label);
 	}
-	for (const [label, entry] of [["a host directory bound under /dev", ["/dev/secrets", "ext4"]], ["an NFS share under /proc", ["/proc/driver/x", "nfs4"]], ["a Desktop file share under /sys", ["/sys/x", "fakeowner"]], ["a fuse filesystem under /dev", ["/dev/y", "fuse.sshfs"]]]) {
+	for (const [label, entry] of [["a host directory bound under /dev", ["/dev/secrets", "ext4"]], ["an NFS share under /proc", ["/proc/driver/x", "nfs4"]], ["a Desktop file share under /sys", ["/sys/x", "fakeowner"]], ["a fuse filesystem under /dev", ["/dev/y", "fuse.sshfs"]], ["a VM file share under /sys", ["/sys/z", "virtiofs"]], ["a 9p share under /proc", ["/proc/w", "9p"]]]) {
 		const got = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], [entry]) });
 		assert.deepEqual([got.ok, got.cause], [false, "runtime-mount"], label);
 	}

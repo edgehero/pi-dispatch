@@ -56,6 +56,17 @@ import { makeStallGuard } from "./scheduler-stall-guard.mjs";
 const BOOT_IMAGE_TIMEOUT_MS = 5_000;
 
 /**
+ * How long boot waits for the daemon facts read (issues #341 and #345): the image read's 5 s, unless the floor asks for a
+ * word only a DAEMON observation earns (`isolation`, `mountSet`), when it waits the facts read's own bound plus 2 s. A
+ * busy host's `docker info` is the slow read, and a floor this boot met from the table before must not exit 1 on every
+ * restart of a healthy daemon. Exported for its test.
+ */
+export function bootFactsBoundMs({ backends, backendFloor }) {
+	const needsDaemon = unobservedFloor(backends, backendFloor, { [DOCKER_ENDPOINT_LOCAL]: true }).length > 0;
+	return needsDaemon ? DAEMON_FACTS_TIMEOUT_MS + 2_000 : BOOT_IMAGE_TIMEOUT_MS;
+}
+
+/**
  * How long after a failed forge-auth re-resolve before another job is allowed to try again (issue #316).
  *
  * The in-flight promise dedupes concurrent callers; this bounds sequential ones. Thirty seconds is short
@@ -393,10 +404,9 @@ export async function startWorker(
 	// Issue #345: a floor that needs a DAEMON observation waits the facts read's own bound (plus a margin), not the image
 	// read's 5 s: a busy host's `docker info` is the slow read, and a floor this boot met from the table before would
 	// otherwise exit 1 on every restart of a healthy daemon.
-	const floorNeedsDaemon = unobservedFloor(config.backends, config.backendFloor, { [DOCKER_ENDPOINT_LOCAL]: true }).length > 0;
 	const bootJobUser = await settleWithin(
 		resolveJobUser({ endpoint: bootEndpoint, key: endpointSeen }).catch(() => null),
-		floorNeedsDaemon ? DAEMON_FACTS_TIMEOUT_MS + 2_000 : BOOT_IMAGE_TIMEOUT_MS,
+		bootFactsBoundMs(config),
 		null,
 	);
 	const bootDecision = bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" };

@@ -2299,3 +2299,14 @@ test("per job, a floor on the endpoint refuses a redirected CLI BEFORE any daemo
 	assert.deepEqual([refused.refused, refused.observations], [true, ["dockerEndpointLocal"]]);
 	assert.equal(reads, before, "the distrusted daemon is never asked");
 });
+
+test("the boot facts bound: the facts read's own 15 s plus 2 only for a floor that a daemon observation decides (#345)", { skip: skipNoModule }, () => {
+	const bound = (floor) => mod.bootFactsBoundMs({ backends: ["local"], backendFloor: floor });
+	assert.equal(bound({}), 5_000);
+	for (const floor of [{ credentialTransit: "enforced" }, { nonRoot: "asserted" }, { egress: "enforced" }, { isolation: "asserted" }, { mountSet: "absent" }]) {
+		assert.equal(bound(floor), 5_000, JSON.stringify(floor));
+	}
+	for (const floor of [{ isolation: "enforced" }, { mountSet: "enforced" }, { credentialTransit: "enforced", mountSet: "enforced" }]) {
+		assert.equal(bound(floor), 17_000, JSON.stringify(floor));
+	}
+});

@@ -3267,8 +3267,9 @@ a tunnel.
   true on Docker, and on rootful Podman only with the documented empty `/etc/containers/mounts.conf` override, no
   `volumes` or `mounts` key in the containers.conf files and drop-ins this host keeps at their standard paths, those
   files readable, FIPS off and the service's socket on this host. A read that did not answer is `null`, never
-  `false`; a clean `docker info` that parsed to no known shape IS an answer, so it is `false`: under a floor it retries (exit 1 at boot, InfraRetry per job)
-  rather than refusing for good. Each observation has its own remedy (`OBSERVATION_FIX`) and its own fixed forge
+  `false`: under a floor an unanswered read retries (exit 1 at boot, InfraRetry per job) rather than refusing for
+  good. A clean `docker info` that parsed to no known shape, or no docker CLI at all, IS an answer, so it is `false`
+  and refuses (exit 2). Each observation has its own remedy (`OBSERVATION_FIX`) and its own fixed forge
   comment, so a bounds miss is never told to repoint the docker CLI. `doctor` prints the degraded words with what
   was seen, and `doctor --live` reads what the observations cannot: `pids.max` and `memory.max` in a real
   container, and its `/proc/self/mountinfo`. **Residuals**: the containers.conf the service reads through

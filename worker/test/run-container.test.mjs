@@ -408,7 +408,7 @@ function detachedDocker({ runCode, cid = CID, steps = {}, fs, onRun = () => {} }
 	};
 	return { spawnFn, calls };
 }
-const runWith = async ({ runCode, cid, steps, files = {}, abortOnRun = false, neverStartedExits } = {}) => {
+const runWith = async ({ runCode, cid, steps, files = {}, abortOnRun = false, neverStartedExits, detachedCheck = instantCheck() } = {}) => {
 	const fs = cidFs(files);
 	const controller = new AbortController();
 	const signal = controller.signal;
@@ -423,11 +423,16 @@ const runWith = async ({ runCode, cid, steps, files = {}, abortOnRun = false, ne
 			if (abortOnRun) controller.abort();
 		},
 	});
-	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: docker.spawnFn, fs, ...(neverStartedExits ? { neverStartedExits } : {}) });
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: docker.spawnFn, fs, detachedCheck, ...(neverStartedExits ? { neverStartedExits } : {}) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal });
 	return { result, calls: docker.calls, fs, atSpawn };
 };
 const psOf = (state) => ({ code: 0, stdout: `${CID} ${state}\n` });
+/** A clock the detached check's retries advance without waiting. */
+const instantCheck = () => {
+	let t = 0;
+	return { now: () => t, delay: async (ms) => (t += ms) };
+};
 
 test("the job argv writes this attempt's container ID beside the job dir, removing a stale one first and the file afterwards (#345)", { skip }, async () => {
 	const { result, calls, fs, atSpawn } = await runWith({ runCode: 0, files: { "/host/jobs/j1.cid": "stale" } });
@@ -543,4 +548,35 @@ test("a check that meets a refused connection asks again until the service answe
 	t = 0;
 	assert.equal(await mod.stopDetached({ spawnFn: down, cidFile: "/host/jobs/j1.cid", fs: cidFs({ "/host/jobs/j1.cid": CID }), ...clock, timeoutMs: 10_000 }), true, "a service that never comes back is still detached");
 	assert.ok(t <= 10_000 && never <= 3 * 20 + 3, `bounded by the deadline (${never} tries over ${t} ms)`);
+});
+
+test("each step of the detached check is retried while it fails, and every try gets at least its own minimum bound (#345)", { skip }, async () => {
+	const fake = (answers) => {
+		const calls = [];
+		let t = 0;
+		const run = async (_spawn, args, bound) => {
+			calls.push([args[0], bound]);
+			t += 100;
+			const queue = answers[args[0]];
+			return queue.length > 1 ? queue.shift() : queue[0];
+		};
+		return { calls, run, now: () => t, delay: async (ms) => (t += ms) };
+	};
+	const fs = () => cidFs({ "/host/jobs/j1.cid": CID });
+	// stop and rm each refused twice, then answered: three tries of each, not one.
+	const flaky = fake({ ps: [psOf("running")], stop: [{ code: 1, stdout: "" }, { code: 1, stdout: "" }, { code: 0, stdout: "" }], rm: [{ code: 1, stdout: "" }, { code: 1, stdout: "" }, { code: 0, stdout: "" }] });
+	assert.equal(await mod.stopDetached({ spawnFn: null, cidFile: "/host/jobs/j1.cid", fs: fs(), ...flaky }), true);
+	assert.deepEqual(flaky.calls.map(([step]) => step), ["ps", "stop", "stop", "stop", "rm", "rm", "rm"]);
+	const created = fake({ ps: [psOf("created")], rm: [{ code: 1, stdout: "" }, { code: 0, stdout: "" }] });
+	assert.equal(await mod.stopDetached({ spawnFn: null, cidFile: "/host/jobs/j1.cid", fs: fs(), ...created }), false);
+	assert.deepEqual(created.calls.map(([step]) => step), ["ps", "rm", "rm"], "a created container's removal is retried too");
+	// A service that never answers: every try is bounded by what is left, but never below the minimum, and nothing runs
+	// past the deadline except one last stop and one last rm.
+	const down = fake({ ps: [{ code: null, stdout: "" }], stop: [{ code: null, stdout: "" }], rm: [{ code: null, stdout: "" }] });
+	assert.equal(await mod.stopDetached({ spawnFn: null, cidFile: "/host/jobs/j1.cid", fs: fs(), ...down, timeoutMs: 2_000, minStepMs: 1_000, retryMs: 500 }), true);
+	assert.ok(down.calls.every(([, bound]) => bound >= 1_000 && bound <= 2_000), JSON.stringify(down.calls));
+	assert.equal(down.calls[0][1], 2_000, "the first try gets the whole window, not the minimum");
+	assert.equal(down.calls[1][1], 1_400, "a later try gets only what is left of the window (2000 - 100 run - 500 pause)");
+	assert.deepEqual(down.calls.slice(-2).map(([step]) => step), ["stop", "rm"], "once past the deadline, one stop and one rm");
+	assert.deepEqual([mod.DETACHED_CHECK_TIMEOUT_MS, mod.DETACHED_MIN_STEP_MS], [10_000, 5_000]);
 });

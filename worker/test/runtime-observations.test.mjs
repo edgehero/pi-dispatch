@@ -92,6 +92,7 @@ test("runtimeAddsNoMounts: Docker earns it; Podman only with an EMPTY override, 
 		["a hooks directory", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '[engine]\nhooks_dir = ["/srv/hooks"]\n' }), /devices or hooks_dir key/],
 		["an escaped key", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '"volum\\u0065s" = ["/a:/a"]\n' }), /has an escaped key/],
 		["an installed OCI hook", hostFs(empty, { [PODMAN_HOOKS_DIRS[1]]: ["oci-nvidia-hook.json"] }), /hooks\.d holds an OCI hook/],
+		["a hook beside other files", hostFs(empty, { [PODMAN_HOOKS_DIRS[0]]: ["README", "x.json"] }), /hooks\.d holds an OCI hook/],
 		["an unreadable hooks directory", hostFs(empty, { [PODMAN_HOOKS_DIRS[0]]: "EACCES" }), /hooks\.d could not be read/],
 	];
 	for (const [label, fs, evidence] of cases) {
@@ -150,6 +151,15 @@ test("MOUNT_KEY finds a volumes or mounts key in every TOML spelling, and nothin
 		assert.equal(MOUNT_KEY.test(text), false, JSON.stringify(text));
 	}
 	assert.equal(MOUNT_KEY.test('devices = ["/dev/fuse"]') && MOUNT_KEY.test("hooks_dir = []"), true);
+	// Round 2, measured honoured by Podman 5.8.2: any letter case, and a `#` inside a string before the key.
+	for (const text of ["[containers]\nVolumes = [\"/a:/b\"]", "CONTAINERS.VOLUMES = []", "[containers]\nDevices = [\"/dev/fuse\"]", 'containers = { env = ["X=#"], volumes = [] }', "containers={volumes=[]}", "Hooks_Dir = []"]) {
+		assert.equal(MOUNT_KEY.test(text), true, JSON.stringify(text));
+	}
+	assert.equal(ESCAPED_KEY.test('containers = { env = ["X=#"], "volum\\u0065s" = [] }'), true, "an escaped key after a # inside a string");
+	// The stock Fedora containers.conf comments every one of these keys out, so the documented override still earns credit.
+	for (const text of ["#devices = []", "#mounts = []", "#volumes = []", "#hooks_dir = [", "#volumes = [\n#  \"/run/secrets:/run/secrets\",\n#]", "   #Volumes=[]"]) {
+		assert.equal(MOUNT_KEY.test(text) || ESCAPED_KEY.test(text), false, JSON.stringify(text));
+	}
 	assert.equal(ESCAPED_KEY.test('"volum\\u0065s" = []'), true, "an escaped key is refused, not decoded");
 	for (const text of ['label = "a\\b"', '# "x\\y" = 1', 'volumes = ["C:\\x"]']) assert.equal(ESCAPED_KEY.test(text), false, JSON.stringify(text));
 	assert.deepEqual([...PODMAN_HOOKS_DIRS], ["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);

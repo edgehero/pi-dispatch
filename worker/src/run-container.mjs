@@ -50,6 +50,7 @@ export function makeRunContainer({
 	// created anyway; and the host fs the cidfile is read and removed through. Seams for the tests.
 	neverStartedExits = DOCKER_NEVER_STARTED_EXITS,
 	fs = { readFileSync, rmSync },
+	detachedCheck = {}, // the clock and bounds `stopDetached` takes, a seam so a test does not wait out a real 10 s
 }) {
 	// async so a synchronous throw (e.g. buildContainerEnv on an unconfigured provider) surfaces as
 	// a rejection, uniformly awaitable by the processor and by tests.
@@ -214,7 +215,7 @@ export function makeRunContainer({
 			const result = await run;
 			// Issue #345: an exit that says "never started" is checked against the cidfile BEFORE the network goes, so a
 			// container found running is stopped while its network still exists. Only when the worker did not abort it.
-			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs }))) {
+			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, ...detachedCheck }))) {
 				return { ...result, detached: true };
 			}
 			return result;
@@ -231,6 +232,8 @@ export function makeRunContainer({
 
 /** The detached check's whole bound, retries included, so a daemon that stopped answering cannot hold the slot for long. */
 export const DETACHED_CHECK_TIMEOUT_MS = 10_000;
+/** The least time any single step of it is given, so the last one tried at the deadline is not killed before it is sent. */
+export const DETACHED_MIN_STEP_MS = 5_000;
 
 /**
  * Whether THIS attempt created a container that is still there after `docker run` exited "never started" (issue #345), and
@@ -250,9 +253,11 @@ export const DETACHED_CHECK_TIMEOUT_MS = 10_000;
  *
  * A `ps`, `stop` or `rm` that fails is ASKED AGAIN until `timeoutMs` has passed since the check began: measured with
  * Podman's service SIGKILLed, the CLI exits 125 within tens of milliseconds and a single `ps` meets a refused connection,
- * so a restarting service would never be asked to stop the container. After the deadline each step is tried once more.
+ * so a restarting service would never be asked to stop the container. Each try is bounded by what is left of the deadline,
+ * but never below `minStepMs`, so the step that runs at the deadline (a `stop` that waited out its grace period, then the
+ * `rm -f`) still has time to reach the daemon. Worst case: the deadline plus two of those.
  */
-export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), retryMs = 500 }) {
+export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS, minStepMs = DETACHED_MIN_STEP_MS, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), retryMs = 500, run = dockerStep }) {
 	let id;
 	try {
 		id = String(fs.readFileSync(cidFile, "utf8")).trim();
@@ -264,7 +269,7 @@ export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_
 	// One step, asked again while it fails and the check's own deadline has not passed; each try is bounded by what is left.
 	const step = async (args) => {
 		for (;;) {
-			const result = await dockerStep(spawnFn, args, Math.max(1, deadline - now()));
+			const result = await run(spawnFn, args, Math.max(minStepMs, deadline - now()));
 			if (result.code === 0 || now() + retryMs >= deadline) return result;
 			await delay(retryMs);
 		}

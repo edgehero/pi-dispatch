@@ -540,7 +540,9 @@ export async function collectChecks(env, seams) {
 	// Read BEFORE the backend lines are built (issue #345): the same `docker info` answer is where `isolation` and
 	// `mountSet` are observed, so the backend section and the job-user section speak from one read. Printed after them.
 	const jobUser = await jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage });
-	checks.push(...backendChecks(env, { endpoint, daemon: jobUser.daemon, fs: seams.observationFs }));
+	// No docker binary at all is an ANSWER for the observations, as it is for the worker (exit 2 under a floor, not a retry).
+	const daemon = jobUser.daemon ?? (dockerCode === null ? { answered: false, reason: "docker-not-found", transient: true } : null);
+	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs }));
 	checks.push(...jobUser.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
 
@@ -2908,8 +2910,9 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 				});
 				continue;
 			}
-			// Not said when no daemon read happened at all (the daemon line above already failed): a floor still refuses on it below.
-			if (d.observedBy && d.observedBy !== DOCKER_ENDPOINT_LOCAL && observations[d.observedBy] !== true && daemon !== null) {
+			// Not said when no daemon read happened at all, or there is no docker binary (the daemon line above already failed): a
+			// floor still refuses on it below.
+			if (d.observedBy && d.observedBy !== DOCKER_ENDPOINT_LOCAL && observations[d.observedBy] !== true && daemon !== null && daemon.reason !== "docker-not-found") {
 				// #345: the word holds only while this daemon, or this host's runtime configuration, is observed providing it.
 				// Printed as what it degrades to, with what was seen, and the worker's own boot line named.
 				const unread = observations[d.observedBy] !== false;

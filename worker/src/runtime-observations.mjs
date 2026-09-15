@@ -39,19 +39,22 @@ export const PODMAN_CONTAINERS_CONF_DIRS = Object.freeze([
 export const FIPS_ENABLED_PATH = "/proc/sys/crypto/fips_enabled";
 
 /**
- * A key that adds to every container what no argv names, in any TOML spelling on a line that is not a comment: `volumes`,
- * `mounts`, `devices` (host device nodes) and `hooks_dir` (OCI hooks, which can mount). Matched bare or quoted at the start of the
- * bare or quoted at the start of a line, dotted (`containers.volumes = [...]` at the top level), or inside an inline table
- * (`containers = { volumes = [...] }`); all three measured honoured by Podman 5.8.2. Wider than Podman's own reading on
- * purpose: a string value that merely contains `volumes =` also matches, which withholds credit rather than giving it.
+ * A key that adds to every container what no argv names: `volumes`, `mounts`, `devices` (host device nodes) and
+ * `hooks_dir` (OCI hooks, which can mount). Matched in ANY LETTER CASE (Podman's TOML decoding matches keys
+ * case-insensitively: `Volumes` and `CONTAINERS.VOLUMES` both mount, measured on Podman 5.8.2), bare or quoted at the start
+ * of a line, dotted (`containers.volumes = [...]`), or inside an inline table (`containers = { volumes = [...] }`), on any
+ * line that is not a whole-line comment: a `#` inside a string earlier on the line is not a comment (measured, an
+ * `env = ["X=#"]` before the key still mounts). Wider than Podman's own reading on purpose: a string value or a trailing
+ * comment that merely contains `volumes =` also matches, which withholds credit rather than giving it.
  */
-export const MOUNT_KEY = /^[^#\n]*(?:^|[\s.{,"'])["']?(?:volumes|mounts|devices|hooks_dir)["']?\s*=/m;
+export const MOUNT_KEY = /^(?!\s*#).*?(?:^|[\s.{,"'])["']?(?:volumes|mounts|devices|hooks_dir)["']?\s*=/im;
 
 /**
  * A quoted TOML key holding a backslash escape (`"volum\u0065s" = ...`), which TOML reads as the unescaped name and
- * `MOUNT_KEY` cannot see through. Refused outright rather than decoded: no containers.conf needs one.
+ * `MOUNT_KEY` cannot see through, on any line that is not a whole-line comment. Refused outright rather than decoded: no
+ * containers.conf needs one.
  */
-export const ESCAPED_KEY = /^[^#\n]*["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
+export const ESCAPED_KEY = /^(?!\s*#).*?["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
 
 /** OCI hook directories Podman runs every `*.json` hook from (container-libs pkg/config); a hook can mount into a container. */
 export const PODMAN_HOOKS_DIRS = Object.freeze(["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
