@@ -2959,8 +2959,14 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 	} else if (unobserved.length > 0) {
 		// One clause per miss, naming the observation it needed (#278, #345), and each observation's own remedy.
 		const needed = unobserved.map((u) => `${u.property}=${u.want} (${u.backend} provides it only while ${OBSERVATIONS[u.observedBy] ?? u.observedBy}, and that is not observed)`);
-		const remedies = Object.keys(OBSERVATION_FIX).filter((o) => unobserved.some((u) => u.observedBy === o)).map((o) => OBSERVATION_FIX[o]);
-		checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${needed.join("; ")}`, fix: `${remedies.join(" ")} The worker refuses to boot, and refuses each job, on the same answer.` });
+		// True on the failure path too: where nothing it needed was ANSWERED (a daemon down or still starting), the worker
+		// retries rather than refusing, and the remedy is to get an answer, not to change the host.
+		if (unobserved.every((u) => typeof observations[u.observedBy] !== "boolean")) {
+			checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${needed.join("; ")}`, fix: "nothing it needs could be read here; fix what stops the daemon answering and re-run doctor. Until it answers, the worker exits 1 at boot so the supervisor retries, and retries each job." });
+		} else {
+			const remedies = Object.keys(OBSERVATION_FIX).filter((o) => unobserved.some((u) => u.observedBy === o)).map((o) => OBSERVATION_FIX[o]);
+			checks.push({ ok: false, label: `PI_BACKEND_FLOOR asks for ${needed.join("; ")}`, fix: `${remedies.join(" ")} The worker refuses to boot, and refuses each job, on the same answer.` });
+		}
 	} else if (bounding.length === 0) {
 		checks.push({ ok: false, warn: true, label: `PI_BACKEND_FLOOR (${spelled}) requires nothing: every entry asks for "absent", which every backend meets`, fix: "raise an entry to `asserted` or `enforced` for it to bound anything" });
 	} else {

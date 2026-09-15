@@ -2199,6 +2199,11 @@ test("a floor asking isolation=enforced refuses to BOOT on a daemon not observed
 		(err) => err.piDispatchConfig !== true && /the daemon's info was not read \(daemon-unreachable\)/.test(err.message),
 		"a daemon still starting is retried by the supervisor (exit 1), never a config error that strands the unit",
 	);
+	await assert.rejects(
+		() => runStart({ env: { PI_BACKEND_FLOOR: "isolation=enforced" }, readDaemonFacts: async () => ({ answered: false, reason: "unparseable", transient: false }) }),
+		(err) => err.piDispatchConfig === true && /answered in a shape nothing here reads \(unparseable\)/.test(err.message),
+		"an answer nothing reads is determinate: exit 2, not a restart loop",
+	);
 });
 
 test("a floor asking mountSet=enforced boots on Podman only with the empty mounts.conf override, and the observations reach worker_started (#345)", { skip }, async () => {
@@ -2266,4 +2271,31 @@ test("per job without a floor: an unanswered facts read is not cached, and the j
 	assert.equal(reads, before + 1, "not cached, so the job asks once");
 	assert.deepEqual(await captured.deps.jobUserPreflight(job, { capabilities: [], observed }), { unavailable: true, reason: "timeout" });
 	assert.equal(reads, before + 1, "and the job-user gate decides from that same read, not a second docker info");
+});
+
+test("a floor that needs a daemon observation waits the facts read's own bound at boot, so a slow but healthy docker info still boots (#345)", { skip, timeout: 30_000 }, async () => {
+	const slow = async () => {
+		await new Promise((resolve) => setTimeout(resolve, 5_600));
+		return DOCKER_FACTS()();
+	};
+	const { logs } = await runStart({ env: { PI_BACKEND_FLOOR: "isolation=enforced" }, readDaemonFacts: slow, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	assert.equal(logs.find((l) => l.event === "worker_started")?.daemonAppliesBounds, true, "past the 5 s image bound, and still credited");
+});
+
+test("per job, a floor on the endpoint refuses a redirected CLI BEFORE any daemon read (#345)", { skip }, async () => {
+	let reads = 0;
+	let current = { local: true, context: "default", endpoint: "unix:///x.sock", reason: null, transient: false };
+	const { captured } = await runStart({
+		env: { PI_BACKEND_FLOOR: "credentialTransit=enforced,isolation=enforced" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		readDaemonFacts: async () => (reads++, DOCKER_FACTS()()),
+		resolveDockerEndpoint: async () => current,
+	});
+	const job = { kind: "github", repo: "o/r", target: { type: "issue", number: 1 } };
+	current = { local: false, context: "remote", endpoint: "tcp://10.1.2.3:2375", reason: null, transient: false };
+	const before = reads;
+	const refused = await captured.deps.observationPreflight(job);
+	assert.deepEqual([refused.refused, refused.observations], [true, ["dockerEndpointLocal"]]);
+	assert.equal(reads, before, "the distrusted daemon is never asked");
 });

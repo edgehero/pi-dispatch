@@ -28,6 +28,7 @@ import {
 	liveProbeRunArgs,
 	liveSleepSeconds,
 	localFoldersVerdict,
+	mountEntriesOf,
 	MOUNTINFO_ALLOWED_EXACT,
 	MOUNTINFO_ALLOWED_TREES,
 	mountPointsOf,
@@ -190,7 +191,8 @@ test("mountSet reads /proc/self/mountinfo for what .Mounts does not list: a runt
 	assert.equal(held.ok, true, held.detail);
 	assert.match(held.detail, /in docker inspect and in \/proc\/self\/mountinfo/);
 	// Rootful Podman, measured: its init, .containerenv, /proc/interrupts, and /run/secrets from the default mounts.conf.
-	const podman = mountinfoFor(["/job", "/workspace", "/run/podman-init", "/run/.containerenv", "/proc/interrupts"]);
+	// Podman's own, with the types measured on rootful Podman 5.8.2: masks under /proc and /sys come as overlay there.
+	const podman = mountinfoFor(["/job", "/workspace"], [["/run/podman-init", "overlay"], ["/run/.containerenv", "overlay"], ["/proc/interrupts", "tmpfs"], ["/proc/scsi", "overlay"], ["/sys/firmware", "overlay"]]);
 	assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: podman }).ok, true, "Podman's own fixed set passes");
 	const secrets = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/secrets"]) });
 	assert.deepEqual([secrets.ok, secrets.warn, secrets.cause], [false, undefined, "runtime-mount"]);
@@ -206,6 +208,11 @@ test("mountSet reads /proc/self/mountinfo for what .Mounts does not list: a runt
 	]) {
 		assert.equal(mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], [point]) }).ok, ok, label);
 	}
+	for (const [label, entry] of [["a host directory bound under /dev", ["/dev/secrets", "ext4"]], ["an NFS share under /proc", ["/proc/driver/x", "nfs4"]], ["a Desktop file share under /sys", ["/sys/x", "fakeowner"]], ["a fuse filesystem under /dev", ["/dev/y", "fuse.sshfs"]]]) {
+		const got = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], [entry]) });
+		assert.deepEqual([got.ok, got.cause], [false, "runtime-mount"], label);
+	}
+	assert.deepEqual(mountEntriesOf("36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue\n"), [{ point: "/mnt2", fstype: "ext3" }]);
 	const escaped = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/with\\040space"]) });
 	assert.match(escaped.detail, /\/run\/with space is mounted/, "the kernel's octal escapes are decoded");
 	const bytes = mountSetVerdict(inspect, { expected: EXPECTED, mountinfo: mountinfoFor(["/job", "/workspace"], ["/run/x\\033[2J"]) });
@@ -310,8 +317,10 @@ test("containerIdOf takes the ID docker run -d printed, and nothing else", () =>
  * argv) plus `destinations`, in the kernel's line shape.
  */
 function mountinfoFor(destinations, extra = []) {
-	const points = ["/", "/proc", "/dev", "/dev/pts", "/dev/mqueue", "/dev/shm", "/sys", "/sys/fs/cgroup", "/proc/kcore", "/usr/sbin/docker-init", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", ...destinations, ...extra];
-	return `${points.map((p, i) => `${100 + i} 99 0:${i} / ${p} rw,relatime - overlay overlay rw`).join("\n")}\n`;
+	// Each entry is a path, or `[path, fstype]`; the runtime's own mounts carry the types measured on rootful Docker.
+	const own = [["/", "overlay"], ["/proc", "proc"], ["/dev", "tmpfs"], ["/dev/pts", "devpts"], ["/dev/mqueue", "mqueue"], ["/dev/shm", "tmpfs"], ["/sys", "sysfs"], ["/sys/fs/cgroup", "cgroup2"], ["/proc/kcore", "tmpfs"], ["/usr/sbin/docker-init", "overlay"], ["/etc/resolv.conf", "ext4"], ["/etc/hostname", "ext4"], ["/etc/hosts", "ext4"]];
+	const rows = [...own, ...destinations.map((p) => [p, "ext4"]), ...extra.map((e) => (Array.isArray(e) ? e : [e, "overlay"]))];
+	return `${rows.map(([p, type], i) => `${100 + i} 99 0:${i} / ${p} rw,relatime - ${type} ${type} rw`).join("\n")}\n`;
 }
 
 /** A docker CLI that answers like the measured one, recording every argv. `over` replaces one step's answer. */

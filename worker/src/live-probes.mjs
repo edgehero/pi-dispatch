@@ -8,8 +8,9 @@
  * EVERY CONTAINER IS BUILT BY THE SAME BUILDER A JOB IS. `buildDockerRunArgs` with every isolation flag, an EMPTY
  * environment, fixture directories for every conditional mount, and the job user; what each adds through `extraFlags`
  * is `-d` and an entrypoint. A hand-written argv would read back a container nobody runs; these differ from a job's
- * only in what they execute and what they are given, both of which are stated. There are four kinds: the READING
- * container (`sleep`, then the status and write scripts), the PINNING container (an absent image), the EPHEMERAL
+ * only in what they execute and what they are given, both of which are stated, and in the job's `--cidfile` (issue
+ * #345), which only a job's never-started exit reads. There are four kinds: the READING container (`sleep`, then a
+ * `cat /proc/self/mountinfo` and the status and write scripts), the PINNING container (an absent image), the EPHEMERAL
  * pair (two runs under one name, issue #344) and, only with the egress policy armed, two PEERS on their own
  * `--internal` job networks behind the proxy (issue #344). The egress canary in `doctor.mjs` is the one reading that
  * does NOT come from this module (its containers need the proxy's allowlist), folded in from its own `readBack`.
@@ -291,12 +292,6 @@ export function nonRootVerdict(status) {
 }
 
 /**
- * THE MOUNT SET, from `docker inspect .Mounts`, keyed by destination and read-write flag. A COUNT would pass a
- * container whose `/job` became writable while another mount went missing; so each declared destination must be
- * present with its own RW, nothing else may be mounted, and three sources are refused outright wherever they
- * appear: the docker socket, the operator's home directory or any ancestor of it, and the shared session store.
- */
-/**
  * Mount points `/proc/self/mountinfo` may show inside a job container that no `.Mounts` entry lists, because the runtime
  * makes them for every container (issue #345, measured with the builder's argv on Docker Desktop, rootful Docker 27.5.1
  * and rootful Podman 5.8.2): the root, the three files docker writes per container, each runtime's init binary
@@ -313,25 +308,44 @@ export const MOUNTINFO_ALLOWED_EXACT = Object.freeze(["/", "/etc/resolv.conf", "
 export const MOUNTINFO_ALLOWED_TREES = Object.freeze(["/proc", "/dev", "/sys"]);
 
 /**
+ * Filesystem types a mount under those trees must NOT have: a disk or a network filesystem, or a host share, is a host
+ * directory bound there, never one of the runtime's own masks (measured: the masks are `proc`, `tmpfs` and `sysfs` on
+ * Docker, and `overlay` for Podman's `/proc/scsi` and `/sys/firmware`, so an allow-list of kernel types would fail
+ * Podman). A deny-list, so a host path bound under a tree from an `overlay` or `tmpfs` source still passes (a residual).
+ */
+export const MOUNTINFO_HOST_FILESYSTEM = /^(?:ext[234]|xfs|btrfs|zfs|f2fs|vfat|exfat|ntfs3?|nfs4?|cifs|smb3|9p|virtiofs|fakeowner|fuseblk|fuse(?:\..+)?)$/;
+
+/**
  * The mount points in a `/proc/self/mountinfo` body: field five of every line that has the `-` separator, with the
  * kernel's octal escapes (`\040` for a space) decoded. Lines of any other shape are skipped; an empty answer is `[]`.
  */
 export function mountPointsOf(mountinfo) {
-	const points = [];
+	return mountEntriesOf(mountinfo).map((entry) => entry.point);
+}
+
+/** `mountPointsOf` with each point's filesystem type (the field after the `-`), as `{ point, fstype }`. */
+export function mountEntriesOf(mountinfo) {
+	const entries = [];
 	for (const line of String(mountinfo ?? "").split(/\r?\n/)) {
 		const fields = line.trim().split(" ");
-		if (fields.length < 10 || !fields.slice(6).includes("-")) continue;
+		const separator = fields.indexOf("-", 6);
+		if (fields.length < 10 || separator < 0) continue;
 		const point = fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
-		if (point.startsWith("/")) points.push(point);
+		if (point.startsWith("/")) entries.push({ point, fstype: fields[separator + 1] ?? "" });
 	}
-	return points;
+	return entries;
 }
 
 /**
- * THE MOUNT SET. `mountinfo` is what `/proc/self/mountinfo` said inside the container (issue #345): `undefined` when the
- * caller did not read it, `null` when the read failed. `.Mounts` is the daemon's own list, and a runtime can mount things
- * into every container that it never lists there (rootful Podman's `/run/secrets`, measured), so a mount point inside
- * the container that is neither declared nor on the runtime's own short list fails `runtime-mount`.
+ * THE MOUNT SET, from `docker inspect .Mounts`, keyed by destination and read-write flag. A COUNT would pass a
+ * container whose `/job` became writable while another mount went missing; so each declared destination must be
+ * present with its own RW, nothing else may be mounted, and three sources are refused outright wherever they
+ * appear: the docker socket, the operator's home directory or any ancestor of it, and the shared session store.
+ *
+ * `mountinfo` is what `/proc/self/mountinfo` said inside the container (issue #345): `undefined` when the caller did not
+ * read it, `null` when the read failed. `.Mounts` is the daemon's own list, and a runtime can mount things into every
+ * container that it never lists there (rootful Podman's `/run/secrets`, measured), so a mount point inside the container
+ * that is neither declared nor on the runtime's own short list fails `runtime-mount`.
  */
 export function mountSetVerdict(inspectOutput, { expected, home = null, sessionsDir = null, mountinfo = undefined }) {
 	let mounts;
@@ -360,11 +374,12 @@ export function mountSetVerdict(inspectOutput, { expected, home = null, sessions
 	if (failures.length > 0) return verdict("mountSet", false, failures.join("; "));
 	const declaredList = `${expected.map((m) => `${m.container}${m.readOnly ? ":ro" : ""}`).join(", ")} and nothing else`;
 	if (mountinfo === undefined) return verdict("mountSet", true, declaredList);
-	const points = mountinfo === null ? [] : mountPointsOf(mountinfo);
-	if (points.length === 0) return notReadBack("mountSet", `docker inspect lists ${declaredList}, but /proc/self/mountinfo could not be read inside the container, so a mount the runtime adds without listing it was not checked`);
-	const allowed = (point) => declared.has(point) || MOUNTINFO_ALLOWED_EXACT.includes(point) || MOUNTINFO_ALLOWED_TREES.some((tree) => point === tree || point.startsWith(`${tree}/`));
+	const entries = mountinfo === null ? [] : mountEntriesOf(mountinfo);
+	if (entries.length === 0) return notReadBack("mountSet", `docker inspect lists ${declaredList}, but /proc/self/mountinfo could not be read inside the container, so a mount the runtime adds without listing it was not checked`);
+	const underTree = (point) => MOUNTINFO_ALLOWED_TREES.some((tree) => point === tree || point.startsWith(`${tree}/`));
+	const allowed = ({ point, fstype }) => declared.has(point) || MOUNTINFO_ALLOWED_EXACT.includes(point) || (underTree(point) && !MOUNTINFO_HOST_FILESYSTEM.test(fstype));
 	// Printable only: a mount point is the container's text, and a verdict detail reaches the operator's terminal.
-	const extra = [...new Set(points.filter((p) => !allowed(p)))].map((p) => p.replace(/[^\x20-\x7e]/g, "?"));
+	const extra = [...new Set(entries.filter((e) => !allowed(e)).map((e) => e.point))].map((p) => p.replace(/[^\x20-\x7e]/g, "?"));
 	if (extra.length > 0) {
 		return verdict("mountSet", false, `${extra.join(", ")} ${extra.length === 1 ? "is" : "are"} mounted inside the container, and neither docker inspect nor the job lists ${extra.length === 1 ? "it" : "them"}`, { cause: "runtime-mount" });
 	}

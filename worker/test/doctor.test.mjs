@@ -3641,6 +3641,11 @@ test("doctor names each floor miss with the observation it needed and that obser
 	assert.doesNotMatch(floor.fix, /Point the docker CLI back/);
 	const held = backendChecks({ PI_BACKEND_FLOOR: "mountSet=enforced" }, { endpoint, daemon, fs: withOverride });
 	assert.ok(held.some((c) => c.ok && /PI_BACKEND_FLOOR holds \(mountSet=enforced\)/.test(c.label)));
+	// True on the failure path: nothing answered means the worker retries, and the remedy is an answer, not a new host.
+	const unread = backendChecks({ PI_BACKEND_FLOOR: "isolation=enforced" }, { endpoint, daemon: { answered: false, reason: "timeout", transient: true }, fs: noHostFiles });
+	const retried = unread.find((c) => /PI_BACKEND_FLOOR asks for/.test(c.label));
+	assert.match(retried.fix, /exits 1 at boot so the supervisor retries/);
+	assert.doesNotMatch(retried.fix, /refuses to boot|rootful Docker Engine/);
 });
 
 test("doctor names the runtime that answered, and warns on podman-docker, where the docker CLI resolves no context (#345)", async () => {

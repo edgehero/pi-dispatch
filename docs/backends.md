@@ -103,8 +103,9 @@ worth calling out because they are the ones adapters get wrong:
 - **`local`'s `isolation` and `mountSet` are `enforced` only while observed too** (issue #345). `isolation` needs
   the daemon to report that it applies pid and memory bounds, and to be neither rootless nor Podman, whose Docker
   API reports those booleans whether or not they apply (`daemonAppliesBounds`). `mountSet` needs the runtime to add
-  no mounts of its own: always on Docker, and on rootful Podman only with an empty `/etc/containers/mounts.conf`
-  and no `volumes` or `mounts` key in containers.conf (`runtimeAddsNoMounts`). Where either is not observed the word
+  no mounts of its own: always on Docker, and on rootful Podman only with an empty `/etc/containers/mounts.conf`,
+  no `volumes` or `mounts` key in containers.conf or its drop-ins, those files readable, FIPS off, and the service's
+  socket on this host (`runtimeAddsNoMounts`). Where either is not observed the word
   counts as `asserted`, doctor prints what it saw, and a floor asking for `enforced` refuses. `pi-dispatch doctor
   --live` reads what these cannot: `pids.max` and `memory.max` inside a real container, and its
   `/proc/self/mountinfo`.
@@ -178,7 +179,10 @@ The runner's integer must reach the processor unmodified: `0` completed, `1` inf
 surface as `137`, so the code alone cannot say which happened. Report `aborted` independently.
 
 `neverStartedExits` is your runtime's set for "the runner never ran" (Docker's is 125/126/127). Those refund
-the budget slot. If your runtime has no such codes, declare `[]` and normalise to that outcome yourself.
+the budget slot. If your runtime has no such codes, declare `[]` and normalise to that outcome yourself. If your
+runtime can exit one of those codes while the container it created runs on (a lost API connection, measured on
+Podman), stop that container and add `detached: true` to the result: the processor then retries the job as
+`container-detached` and keeps the slot (issue #345).
 
 ## Running the conformance suite
 

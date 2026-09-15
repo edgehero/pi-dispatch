@@ -119,8 +119,9 @@ export function makeRunContainer({
 		// guard then omits the flag entirely, so the argv is byte-identical to one built before this feature.
 		const network = egress ? networkNameFor(name) : null;
 
-		// Issue #345: BESIDE the job directory, never inside the `/job:ro` mount, and removed first, because the docker CLI
-		// refuses to start with an existing cidfile. A stale one left by a crash would otherwise fail every retry of the job.
+		// Issue #345: BESIDE the job directory, never inside the `/job:ro` mount. Removed first because the docker CLI refuses
+		// to start with an existing cidfile; every attempt's job dir is a fresh mkdtemp, so a leftover is not expected, and
+		// this keeps one from turning into a start failure if a caller ever reuses a directory.
 		const cidFile = `${prepared.jobDir}.cid`;
 		try {
 			fs.rmSync(cidFile, { force: true });
@@ -228,7 +229,7 @@ export function makeRunContainer({
 	};
 }
 
-/** Each docker step of the detached check is bounded, so a daemon that stopped answering cannot hold the slot. */
+/** The detached check's whole bound, retries included, so a daemon that stopped answering cannot hold the slot for long. */
 export const DETACHED_CHECK_TIMEOUT_MS = 10_000;
 
 /**
@@ -238,15 +239,20 @@ export const DETACHED_CHECK_TIMEOUT_MS = 10_000;
  *
  * The cidfile is the evidence it was THIS attempt's: the docker CLI writes the ID right after a successful create and
  * removes the file when nothing was created, so a plain name conflict (another attempt's live container) leaves no ID and
- * is never touched. With an ID, `ps -a --no-trunc --filter id=` answers (`--no-trunc`, because `{{.ID}}` prints 12
- * characters and the cidfile holds 64):
+ * is never touched. On Podman the service also deletes the file when it removes the container (measured), which reads
+ * as nothing to check, the same as a container already gone. With an ID, `ps -a --no-trunc --filter id=` answers
+ * (`--no-trunc`, because `{{.ID}}` prints 12 characters and the cidfile holds 64):
  *   - nothing at all: nothing runs on, so never started, as before;
  *   - this ID listed `created`: created and never started, so it is removed and still counts as never started;
  *   - this ID in any other state, any other output (a daemon that ignored `--no-trunc`), or `ps` failing or timing out:
  *     this attempt's container may be running, so it is stopped and removed best effort, and the run is DETACHED (it
  *     did start, so its slot is not refunded).
+ *
+ * A `ps`, `stop` or `rm` that fails is ASKED AGAIN until `timeoutMs` has passed since the check began: measured with
+ * Podman's service SIGKILLed, the CLI exits 125 within tens of milliseconds and a single `ps` meets a refused connection,
+ * so a restarting service would never be asked to stop the container. After the deadline each step is tried once more.
  */
-export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS }) {
+export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_CHECK_TIMEOUT_MS, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), retryMs = 500 }) {
 	let id;
 	try {
 		id = String(fs.readFileSync(cidFile, "utf8")).trim();
@@ -254,16 +260,25 @@ export async function stopDetached({ spawnFn, cidFile, fs, timeoutMs = DETACHED_
 		return false;
 	}
 	if (!/^[0-9a-f]{64}$/.test(id)) return false;
-	const listed = await dockerStep(spawnFn, ["ps", "-a", "--no-trunc", "--filter", `id=${id}`, "--format", "{{.ID}} {{.State}}"], timeoutMs);
+	const deadline = now() + timeoutMs;
+	// One step, asked again while it fails and the check's own deadline has not passed; each try is bounded by what is left.
+	const step = async (args) => {
+		for (;;) {
+			const result = await dockerStep(spawnFn, args, Math.max(1, deadline - now()));
+			if (result.code === 0 || now() + retryMs >= deadline) return result;
+			await delay(retryMs);
+		}
+	};
+	const listed = await step(["ps", "-a", "--no-trunc", "--filter", `id=${id}`, "--format", "{{.ID}} {{.State}}"]);
 	const lines = listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 	if (listed.code === 0 && lines.length === 0) return false;
 	const line = lines.find((l) => l.startsWith(`${id} `));
 	if (listed.code === 0 && lines.length === 1 && line && /^created$/i.test(line.slice(id.length + 1).trim())) {
-		await dockerStep(spawnFn, ["rm", "-f", id], timeoutMs);
+		await step(["rm", "-f", id]);
 		return false;
 	}
-	await dockerStep(spawnFn, ["stop", id], timeoutMs);
-	await dockerStep(spawnFn, ["rm", "-f", id], timeoutMs);
+	await step(["stop", id]);
+	await step(["rm", "-f", id]);
 	return true;
 }
 

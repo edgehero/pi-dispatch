@@ -297,7 +297,8 @@ export async function runJob(job, deps) {
 		// a reachable one without the image refused as `job-image-missing` with a comment blaming the image --
 		// the right refusal lost behind the wrong one. Issue #345 adds `isolation` (the daemon observed applying a
 		// container's bounds) and `mountSet` (the runtime observed adding no mounts), read here from the same
-		// cached `docker info` the job user is decided from, so this read now contacts the daemon, once per endpoint.
+		// `docker info` the job user is decided from, cached per endpoint once it answers, so this read now contacts the
+		// daemon (after the endpoint check, which still refuses without it).
 		const observed = await observationPreflight(job);
 		if (observed?.refused) {
 			// Fixed text per observation: the endpoint (an internal host name or address) and the evidence go to the

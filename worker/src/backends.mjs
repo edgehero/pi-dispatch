@@ -80,8 +80,10 @@
 /**
  * The exit codes a DOCKER-shaped runtime uses for "the runner never ran": 125 is `docker run` itself
  * failing, 126 an entrypoint that is not executable, 127 an entrypoint that was not found. In all three the
- * daemon never handed control to the runner, so nothing was spent -- which is what `container-never-started`
- * means, and why they refund the budget slot instead of keeping it.
+ * daemon normally never handed control to the runner, so nothing was spent -- which is what `container-never-started`
+ * means, and why they refund the budget slot instead of keeping it. NOT always (issue #345, measured): a CLI that lost
+ * the daemon's API mid-run exits 125 while its container runs on, which `run-container.mjs` finds through the cidfile
+ * and reports as `detached`, unrefunded.
  *
  * HERE, in the leaf, rather than in `backend-local.mjs`, so `processor.mjs` can default to them without
  * importing the local adapter and dragging `node:child_process` and the docker CLI machinery into its

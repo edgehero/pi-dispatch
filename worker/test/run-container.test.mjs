@@ -495,3 +495,52 @@ test("the detached check is bounded: a ps that never answers is given up on and 
 	assert.deepEqual(calls.map((a) => a[0]), ["ps", "stop", "rm"]);
 	assert.equal(mod.DETACHED_CHECK_TIMEOUT_MS, 10_000);
 });
+
+test("only a full 64-hex ID in the cidfile is ever acted on: a prefix could name other containers (#345)", { skip }, async () => {
+	for (const cid of [CID.slice(0, 12), `${CID}0`, "D".repeat(64), `${CID.slice(0, 63)}g`]) {
+		const { result, calls } = await runWith({ runCode: 125, cid, steps: { ps: psOf("running") } });
+		assert.equal("detached" in result, false, cid);
+		assert.equal(calls.filter((a) => a[0] !== "run").length, 0, `${cid}: no docker step at all`);
+	}
+});
+
+test("a check that meets a refused connection asks again until the service answers, then stops the container, within its bound (#345)", { skip }, async () => {
+	const fs = cidFs({ "/host/jobs/j1.cid": CID });
+	let t = 0;
+	const calls = [];
+	let psTries = 0;
+	const spawnFn = (cmd, args) => {
+		calls.push(args);
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		queueMicrotask(() => {
+			if (args[0] === "ps") {
+				psTries++;
+				if (psTries < 3) return child.emit("close", 1);
+				child.stdout.emit("data", `${CID} running\n`);
+			}
+			child.emit("close", 0);
+		});
+		return child;
+	};
+	const clock = { now: () => t, delay: async (ms) => (t += ms) };
+	assert.equal(await mod.stopDetached({ spawnFn, cidFile: "/host/jobs/j1.cid", fs, ...clock }), true);
+	assert.deepEqual(calls.map((a) => a[0]), ["ps", "ps", "ps", "stop", "rm"], "two refused tries, then the answer, then stop and remove");
+	assert.equal(t, 1000, "paced, not a spin");
+
+	let never = 0;
+	const down = (cmd, args) => {
+		never++;
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		queueMicrotask(() => child.emit("close", 1));
+		return child;
+	};
+	t = 0;
+	assert.equal(await mod.stopDetached({ spawnFn: down, cidFile: "/host/jobs/j1.cid", fs: cidFs({ "/host/jobs/j1.cid": CID }), ...clock, timeoutMs: 10_000 }), true, "a service that never comes back is still detached");
+	assert.ok(t <= 10_000 && never <= 3 * 20 + 3, `bounded by the deadline (${never} tries over ${t} ms)`);
+});

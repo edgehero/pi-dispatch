@@ -3264,9 +3264,10 @@ a tunnel.
   with host subscription files readable, invisible in `.Mounts`, measured). `daemonAppliesBounds` is true only for
   `PidsLimit` and `MemoryLimit` both true on a daemon neither rootless nor Podman, from the `docker info` read the
   job user already makes (`runtime-observations.mjs`), so no second daemon call exists. `runtimeAddsNoMounts` is
-  true on Docker, and on Podman only with the documented empty `/etc/containers/mounts.conf` override, no
-  `volumes` or `mounts` key in any containers.conf the service reads, those files readable and FIPS off. A read
-  that did not answer is `null`, never `false`: under a floor it retries (exit 1 at boot, InfraRetry per job)
+  true on Docker, and on rootful Podman only with the documented empty `/etc/containers/mounts.conf` override, no
+  `volumes` or `mounts` key in the containers.conf files and drop-ins this host keeps at their standard paths, those
+  files readable, FIPS off and the service's socket on this host. A read that did not answer is `null`, never
+  `false`; a clean `docker info` that parsed to no known shape IS an answer, so it is `false`: under a floor it retries (exit 1 at boot, InfraRetry per job)
   rather than refusing for good. Each observation has its own remedy (`OBSERVATION_FIX`) and its own fixed forge
   comment, so a bounds miss is never told to repoint the docker CLI. `doctor` prints the degraded words with what
   was seen, and `doctor --live` reads what the observations cannot: `pids.max` and `memory.max` in a real
@@ -3274,7 +3275,10 @@ a tunnel.
   `CONTAINERS_CONF`/`CONTAINERS_CONF_OVERRIDE`, root's `$XDG_CONFIG_HOME`, and the hidden `--default-mounts-file`
   flag are not read (only `doctor --live`'s mountinfo catches them); a unix socket that is really `podman machine`'s
   forward reads this host's files, where no override exists, so it gets no credit unless an operator made one
-  here. **Rejected**: reading `CpuCfsQuota` (false on rootful Podman while `--cpus` applies, measured, so it would
+  here; the facts are cached per endpoint state, so a daemon swapped behind an unchanged endpoint (Docker for Podman
+  on one socket path) keeps its old answer until a restart, as the job user does. The containers.conf keys read are
+  `volumes`, `mounts`, `devices` and `hooks_dir` in any TOML spelling, an escaped key withholds credit, and an installed
+  OCI hook (`*.json` in either hooks directory) does too. **Rejected**: reading `CpuCfsQuota` (false on rootful Podman while `--cpus` applies, measured, so it would
   degrade every Podman host); crediting Podman's booleans (hard-coded true by its compat API, source); a per-job
   refusal of the subscription mounts (the sources are several, so a refusal could not be complete, while an
   observation with no credit fails safe); a second `docker info` call for the observations; skipping the read on
@@ -3287,9 +3291,11 @@ a tunnel.
   **Rejected**: looking up the job's exact NAME after a never-started exit (a plain name conflict is another
   attempt's live container, which the lookup would stop); `docker inspect` for presence (its not-found answer
   differs between Docker and Podman, while `ps --filter id=` answers the same on both, measured); refunding a
-  detached run (it started). **Residuals**: a lost-API run whose container already exited reads absent and is
-  refunded; a service still unreachable cannot be told to stop the container, which then holds its name, and the
-  retry's name conflict writes no cidfile and is refunded as never-started.
+  detached run (it started). A `ps`, `stop` or `rm` that fails is asked again for up to 10 s, because a killed service
+  refuses the first one within milliseconds (measured). **Residuals**: a lost-API run whose container already exited
+  reads absent and is refunded (on Podman the service also deletes the cidfile then, measured); a service still
+  unreachable after those 10 s cannot be told to stop the container, which then holds its name, and the retry's name
+  conflict writes no cidfile and is refunded as never-started.
 - **`worker/src/backend-conformance.mjs` is what turns a declaration into something that can be WRONG**, and
   it ships in `src/` rather than `test/` on purpose: a suite beside this repo's own tests could only ever
   check this repo's own backend, while an adapter is written elsewhere by someone who will never run
@@ -3361,8 +3367,9 @@ a tunnel.
   so the three words must stay told apart ON THE SCREEN: `enforced` is quiet, `asserted` renders as a
   warning that NAMES its asserter (`asserts` on the backend entry -- "not us" without "them" leaves an
   operator nothing to go and check), and `absent` renders as a failure. An observation-gated word (#278)
-  renders quietly only while doctor's own read of the docker CLI shows this host; otherwise as `asserted` by
-  the operator, naming THIS SHELL's answer and pointing at the service's own (`worker_started.dockerEndpointLocal`),
+  renders quietly only while doctor's own reads show what the word needs (the docker CLI resolving this host for
+  `credentialTransit`; since #345, the daemon's facts and this host's Podman files for `isolation` and `mountSet`);
+  otherwise as `asserted`, for the endpoint by the operator, naming THIS SHELL's answer and pointing at the service's own (`worker_started.dockerEndpointLocal`),
   since a unit's `EnvironmentFile` or `User=` can resolve differently. Doctor's in-image `gh` probe does not run
   on a CLI not observed local, because it hands the operator's token to `docker run -e`. `absent` OUTRANKS the gate, because
   a control that does not exist is a different fact from one that is unarmed.
@@ -3519,6 +3526,8 @@ a tunnel.
   · `worker/src/backend-registry.mjs` -> `resolveBackendName`, `BACKEND_NOT_REGISTERED` (#277)
   · `worker/src/run-history.mjs` -> `buildRecord`; `worker/src/session-store.mjs` -> `readVenue`,
   `promoteSession`; `worker/src/sandbox.mjs` -> `sandboxVenueRefusal`, `resolveSandbox` (#277)
+  · `worker/src/runtime-observations.mjs` -> `observeBounds`, `observeRuntimeMounts`, `observeHost`;
+  `worker/src/run-container.mjs` -> `stopDetached`; `worker/src/processor.mjs` -> `OBSERVATION_COMMENT` (#345);
   · `worker/src/live-probes.mjs` -> `runLiveProbes`, `isolationVerdict`, `mountSetVerdict`, `ephemeralVerdict`,
   `jobToJobIsolationVerdict`, `awaitRemoved`, `sweepStaleNetworks`; `worker/src/egress.mjs` ->
   `createJobNetworkWith`, `removeJobNetworkWith` (#344);
@@ -4112,4 +4121,4 @@ a tunnel.
 | 2026-09-14 | Issue #341, part 2 (the wiring). **`DES-TRIGGERS-UNIFIED-FILE` AMENDED**: reserving `HOME` is another narrowing of the file (the entry now also records the narrowings #291 and #314 added without a line: `PI_EXCLUDE_TOOLS`, `run.tools`/`run.noTools` and the near-miss keys, and the provider-steering variables), since a `run.secrets` entry binding it now refuses the whole file in every service, and the receiver's `:latest` refuses one from the merge. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED** with a "Where it is decided" bullet: boot refuses only identity verdicts, only when `local` is the default venue and only when the boot read answers in time, logging `job_user` again when a job's decision changes; the per-job gate runs after the image probe with the endpoint the observation just read; `runContainer` refuses a user without HOME; the sandbox takes the uid from the run's stamp and the daemon rows from its own facts, with deciding from the CLI's own ids rejected. Two residuals (the docker-group row on a loopback TCP endpoint, a routinely slow `docker info`) and the wiring's code evidence join it. **`CONST-BUDGET-BEFORE-TOKENS` and `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the new gate is free and sits before every spend, its refusals return and its undecidable case throws. |
 | 2026-09-14 | Issue #341, part 3 (doctor, `doctor --live` and the CI step). **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**: how a wrong inference surfaces now names what reads the decision back. Plain `doctor` names it for its own shell, failing only where the worker would refuse to boot and warning where a system unit runs the worker as another account. `doctor --live` probes as that user in a job's modes, checks the host owner and reads PID 1's uid back. A required CI step runs the real modules and runner as uid 1234 with negative controls. Code evidence gains the doctor, live-probe, service and script symbols. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the probe is still built by the job builder with no `-e`, its fixture directories are still created empty, and what runs inside is still two constant scripts; `--user` is not an environment. **`DES-CLI-SURFACE` UNCHANGED, checked**: `doctor` adds lines and no mutation. |
 | 2026-09-15 | Issue #344. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the counts become three verified by the harness, eight read back off live containers and two unverified, and a bullet records the `ephemeral` and `jobToJobIsolation` read-backs (two runs under one name watched until gone; two peers on their own job networks, a block counting only with the proxy reached and the listener proven) with ten Rejected entries. **`DES-CLI-SURFACE` AMENDED**: `doctor --live` starts short-lived containers and, armed, two peer networks, all named first and removed. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one bullet: the per-job adjacency it removes is now read back, on Podman too. **`CONST-EGRESS-POLICY-IN-THE-ARGV` and `REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: no job argv, network or policy changes; the job path's network functions delegate to the new runner-agnostic forms with identical commands. |
-| 2026-09-15 | Issue #345, runtime observations. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: two bullets. `isolation` and `mountSet` join `credentialTransit` as observation-gated words (`daemonAppliesBounds`, `runtimeAddsNoMounts`), from the job user's cached `docker info` read and this host's Podman files, `null` when unanswered, each with its own remedy and forge comment; five Rejected entries (CpuCfsQuota, Podman's booleans, a per-job subscription-mount refusal, a second daemon call, skipping macOS and Windows). A detached container (a never-started exit whose own container runs on, measured on Podman) fails as `container-detached`, unrefunded, found through the job argv's `--cidfile`; three Rejected entries (an exact-name lookup, `docker inspect` for presence, a refund) and two residuals. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**, one sentence under rule 1: the daemon is read on every platform and endpoint for the observations, and only an answered read is cached. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the observation gate still runs before the image preflight and any reservation. |
+| 2026-09-15 | Issue #345, runtime observations. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: two bullets. `isolation` and `mountSet` join `credentialTransit` as observation-gated words (`daemonAppliesBounds`, `runtimeAddsNoMounts`), from the job user's cached `docker info` read and this host's Podman files, `null` when unanswered, each with its own remedy and forge comment; five Rejected entries (CpuCfsQuota, Podman's booleans, a per-job subscription-mount refusal, a second daemon call, skipping macOS and Windows). A detached container (a never-started exit whose own container runs on, measured on Podman) fails as `container-detached`, unrefunded, found through the job argv's `--cidfile`; three Rejected entries (an exact-name lookup, `docker inspect` for presence, a refund) and two residuals. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**, two sentences under rule 1: the daemon is read on every platform and endpoint for the observations, and only an answered read is cached. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the observation gate still runs before the image preflight and any reservation. |

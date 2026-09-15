@@ -38,15 +38,45 @@ export const PODMAN_CONTAINERS_CONF_DIRS = Object.freeze([
 /** FIPS mode adds the host's crypto policy mounts outside `mounts.conf` (container-libs pkg/subscriptions). */
 export const FIPS_ENABLED_PATH = "/proc/sys/crypto/fips_enabled";
 
-/** An uncommented `volumes` or `mounts` key, bare or quoted, at the start of a TOML line. */
-const MOUNT_KEY = /^\s*["']?(?:volumes|mounts)["']?\s*=/m;
+/**
+ * A key that adds to every container what no argv names, in any TOML spelling on a line that is not a comment: `volumes`,
+ * `mounts`, `devices` (host device nodes) and `hooks_dir` (OCI hooks, which can mount). Matched bare or quoted at the start of the
+ * bare or quoted at the start of a line, dotted (`containers.volumes = [...]` at the top level), or inside an inline table
+ * (`containers = { volumes = [...] }`); all three measured honoured by Podman 5.8.2. Wider than Podman's own reading on
+ * purpose: a string value that merely contains `volumes =` also matches, which withholds credit rather than giving it.
+ */
+export const MOUNT_KEY = /^[^#\n]*(?:^|[\s.{,"'])["']?(?:volumes|mounts|devices|hooks_dir)["']?\s*=/m;
+
+/**
+ * A quoted TOML key holding a backslash escape (`"volum\u0065s" = ...`), which TOML reads as the unescaped name and
+ * `MOUNT_KEY` cannot see through. Refused outright rather than decoded: no containers.conf needs one.
+ */
+export const ESCAPED_KEY = /^[^#\n]*["'][^"'\n]*\\[^"'\n]*["']\s*=/m;
+
+/** OCI hook directories Podman runs every `*.json` hook from (container-libs pkg/config); a hook can mount into a container. */
+export const PODMAN_HOOKS_DIRS = Object.freeze(["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
+
+/**
+ * A daemon read that gave no facts, as an observation: `null` (not answered, so a floor retries) for a transient
+ * failure, and `false` (answered, so a floor refuses) for a determinate one: a clean `docker info` exit that parses to no
+ * known shape (`unparseable`, which the job-user decision likewise treats as determinate), or no docker CLI at all.
+ * `undefined` when there are facts to read.
+ */
+function notAnswered(daemon) {
+	if (daemon?.answered && daemon.facts) return undefined;
+	if (daemon && daemon.answered === false && daemon.transient === false) return { value: false, evidence: `the daemon answered in a shape nothing here reads (${daemon.reason ?? "unparseable"})` };
+	// No docker CLI at all is not a daemon still starting: the endpoint read treats it as determinate, and so does this.
+	if (daemon?.reason === "docker-not-found") return { value: false, evidence: "no docker CLI was found on PATH" };
+	return { value: null, evidence: `the daemon's info was not read (${daemon?.reason ?? "not asked"})` };
+}
 
 /**
  * `daemonAppliesBounds` from a daemon read (`{ answered, facts }` or `{ answered: false, reason }`), as
  * `{ value, evidence }`.
  */
 export function observeBounds(daemon) {
-	if (!daemon?.answered || !daemon.facts) return { value: null, evidence: `the daemon's info was not read (${daemon?.reason ?? "not asked"})` };
+	const unread = notAnswered(daemon);
+	if (unread) return unread;
 	const { facts } = daemon;
 	if (facts.rootless === true) return { value: false, evidence: "the daemon is rootless, where the bounds it reports need cgroup delegation it does not report" };
 	if (facts.podman === true || !facts.bounds) return { value: false, evidence: "the daemon is Podman, whose Docker API reports PidsLimit and MemoryLimit whether or not a container's bounds apply" };
@@ -61,8 +91,11 @@ export function observeBounds(daemon) {
  * socket on this host, not a remote service).
  */
 export function observeRuntimeMounts(daemon, { fs, sameHost }) {
-	if (!daemon?.answered || !daemon.facts) return { value: null, evidence: `the daemon's info was not read (${daemon?.reason ?? "not asked"})` };
+	const unread = notAnswered(daemon);
+	if (unread) return unread;
 	if (daemon.facts.podman !== true) return { value: true, evidence: "the daemon is not Podman, and Docker adds no mounts from a mounts.conf" };
+	// Rootless Podman reads the user's own ~/.config/containers/mounts.conf before these, which a host check does not read.
+	if (daemon.facts.rootless === true) return { value: false, evidence: "the daemon is rootless Podman, which reads the user's own mounts.conf first" };
 	if (sameHost !== true) return { value: false, evidence: "the daemon is Podman on another machine, whose mounts.conf this host cannot read" };
 	const read = (path) => {
 		try {
@@ -96,9 +129,20 @@ export function observeRuntimeMounts(daemon, { fs, sameHost }) {
 		const got = read(file);
 		if (got.missing) continue;
 		if (got.text === undefined) return { value: false, evidence: `${file} could not be read (${got.error})` };
-		if (MOUNT_KEY.test(got.text)) return { value: false, evidence: `${file} sets a volumes or mounts key, which Podman adds to every container` };
+		if (MOUNT_KEY.test(got.text)) return { value: false, evidence: `${file} sets a volumes, mounts, devices or hooks_dir key, which Podman applies to every container` };
+		if (ESCAPED_KEY.test(got.text)) return { value: false, evidence: `${file} has an escaped key, which this check does not decode` };
 	}
-	return { value: true, evidence: `${PODMAN_MOUNTS_CONF} is empty and no containers.conf sets volumes or mounts` };
+	for (const dir of PODMAN_HOOKS_DIRS) {
+		let entries;
+		try {
+			entries = fs.readdirSync(dir);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			return { value: false, evidence: `${dir} could not be read (${error?.code ?? "error"})` };
+		}
+		if ([...entries].some((entry) => String(entry).endsWith(".json"))) return { value: false, evidence: `${dir} holds an OCI hook, which can mount into every container` };
+	}
+	return { value: true, evidence: `${PODMAN_MOUNTS_CONF} is empty, no containers.conf sets volumes, mounts, devices or hooks, and no OCI hook is installed` };
 }
 
 /**

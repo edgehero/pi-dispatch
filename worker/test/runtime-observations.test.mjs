@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DAEMON_APPLIES_BOUNDS, DOCKER_ENDPOINT_LOCAL, RUNTIME_ADDS_NO_MOUNTS } from "../src/backends.mjs";
 import {
+	ESCAPED_KEY,
 	FIPS_ENABLED_PATH,
+	MOUNT_KEY,
+	PODMAN_HOOKS_DIRS,
 	observeBounds,
 	observeHost,
 	observeRuntimeMounts,
@@ -54,6 +57,13 @@ test("daemonAppliesBounds: credit only for a rootful, non-Podman daemon reportin
 	for (const read of [{ answered: false, reason: "timeout", transient: true }, null, undefined, { answered: true, facts: null }]) {
 		assert.equal(observeBounds(read).value, null, JSON.stringify(read));
 	}
+	// A clean docker info that parsed to no known shape is an ANSWER, as the job-user decision treats it: a floor refuses
+	// it (exit 2) rather than restarting forever on it (exit 1).
+	const unparseable = { answered: false, reason: "unparseable", transient: false };
+	assert.deepEqual([observeBounds(unparseable).value, observeRuntimeMounts(unparseable, { fs: hostFs(), sameHost: true }).value], [false, false]);
+	assert.match(observeBounds(unparseable).evidence, /answered in a shape nothing here reads \(unparseable\)/);
+	const noDocker = { answered: false, reason: "docker-not-found", transient: true };
+	assert.deepEqual([observeBounds(noDocker).value, observeRuntimeMounts(noDocker, { fs: hostFs(), sameHost: true }).value], [false, false], "no docker CLI at all is an answer, as the endpoint read treats it, never a restart loop");
 	assert.match(observeBounds({ answered: false, reason: "daemon-unreachable" }).evidence, /\(daemon-unreachable\)/);
 });
 
@@ -61,20 +71,28 @@ test("runtimeAddsNoMounts: Docker earns it; Podman only with an EMPTY override, 
 	const empty = { [PODMAN_MOUNTS_CONF]: "" };
 	assert.equal(observeRuntimeMounts(docker(), { fs: hostFs(), sameHost: true }).value, true, "Docker adds no mounts.conf mounts");
 	assert.equal(observeRuntimeMounts(docker(), { fs: hostFs(), sameHost: false }).value, true, "and the files are not needed to say so");
-	assert.deepEqual(observeRuntimeMounts(podman(), { fs: hostFs(empty), sameHost: true }), { value: true, evidence: `${PODMAN_MOUNTS_CONF} is empty and no containers.conf sets volumes or mounts` });
+	assert.deepEqual(observeRuntimeMounts(podman(), { fs: hostFs(empty, { [PODMAN_HOOKS_DIRS[1]]: [] }), sameHost: true }), { value: true, evidence: `${PODMAN_MOUNTS_CONF} is empty, no containers.conf sets volumes, mounts, devices or hooks, and no OCI hook is installed` }, "an empty hooks.d, as stock Fedora ships it, changes nothing");
 	const cases = [
 		["no override (the stock Fedora host)", hostFs(), /does not exist, so Podman mounts the default list/],
 		["an override with content", hostFs({ [PODMAN_MOUNTS_CONF]: "/usr/share/rhel/secrets:/run/secrets\n" }), /is not empty/],
 		["a comment-only override is not the documented empty file", hostFs({ [PODMAN_MOUNTS_CONF]: "# nothing\n" }), /is not empty/],
 		["an unreadable override", hostFs({ [PODMAN_MOUNTS_CONF]: { error: "EACCES" } }), /could not be read \(EACCES\)/],
-		["volumes in the main file", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: "[containers]\nvolumes = [\"/srv:/srv\"]\n" }), /containers\.conf sets a volumes or mounts key/],
-		["a quoted mounts key in the vendor file", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[0]]: "[containers]\n  \"mounts\" = []\n" }), /sets a volumes or mounts key/],
-		["a key in a rootful drop-in", hostFs({ ...empty, [`${PODMAN_CONTAINERS_CONF_DIRS[3]}/50-site.conf`]: "volumes=[\"/a:/a\"]" }, { [PODMAN_CONTAINERS_CONF_DIRS[3]]: ["50-site.conf"] }), /50-site\.conf sets a volumes or mounts key/],
+		["volumes in the main file", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: "[containers]\nvolumes = [\"/srv:/srv\"]\n" }), /containers\.conf sets a volumes, mounts, devices or hooks_dir key/],
+		["a quoted mounts key in the vendor file", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[0]]: "[containers]\n  \"mounts\" = []\n" }), /sets a volumes, mounts, devices or hooks_dir key/],
+		["a key in a rootful drop-in", hostFs({ ...empty, [`${PODMAN_CONTAINERS_CONF_DIRS[3]}/50-site.conf`]: "volumes=[\"/a:/a\"]" }, { [PODMAN_CONTAINERS_CONF_DIRS[3]]: ["50-site.conf"] }), /50-site\.conf sets a volumes, mounts, devices or hooks_dir key/],
 		["an unreadable drop-in file", hostFs({ ...empty, [`${PODMAN_CONTAINERS_CONF_DIRS[1]}/x.conf`]: { error: "EACCES" } }, { [PODMAN_CONTAINERS_CONF_DIRS[1]]: ["x.conf"] }), /x\.conf could not be read/],
 		["an unreadable drop-in directory", hostFs(empty, { [PODMAN_CONTAINERS_CONF_DIRS[0]]: "EACCES" }), /containers\.conf\.d could not be read/],
 		["an unreadable main file", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: { error: "EACCES" } }), /containers\.conf could not be read/],
 		["FIPS on", hostFs({ ...empty, [FIPS_ENABLED_PATH]: "1\n" }), /FIPS mode is on/],
 		["FIPS unreadable", hostFs({ ...empty, [FIPS_ENABLED_PATH]: { error: "EACCES" } }), /fips_enabled could not be read/],
+		["a dotted key at the top level", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: 'containers.volumes = ["/etc/rhsm:/run/secrets:ro"]\n' }), /sets a volumes, mounts, devices or hooks_dir key/],
+		["a key inside an inline table", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: 'containers = { volumes = ["/a:/a"] }\n' }), /sets a volumes, mounts, devices or hooks_dir key/],
+		["a quoted dotted key", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '"containers"."volumes" = ["/a:/a"]\n' }), /sets a volumes, mounts, devices or hooks_dir key/],
+		["host devices for every container", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '[containers]\ndevices = ["/dev/fuse"]\n' }), /devices or hooks_dir key/],
+		["a hooks directory", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '[engine]\nhooks_dir = ["/srv/hooks"]\n' }), /devices or hooks_dir key/],
+		["an escaped key", hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: '"volum\\u0065s" = ["/a:/a"]\n' }), /has an escaped key/],
+		["an installed OCI hook", hostFs(empty, { [PODMAN_HOOKS_DIRS[1]]: ["oci-nvidia-hook.json"] }), /hooks\.d holds an OCI hook/],
+		["an unreadable hooks directory", hostFs(empty, { [PODMAN_HOOKS_DIRS[0]]: "EACCES" }), /hooks\.d could not be read/],
 	];
 	for (const [label, fs, evidence] of cases) {
 		const got = observeRuntimeMounts(podman(), { fs, sameHost: true });
@@ -84,6 +102,8 @@ test("runtimeAddsNoMounts: Docker earns it; Podman only with an EMPTY override, 
 	const commented = hostFs({ ...empty, [PODMAN_CONTAINERS_CONF_FILES[1]]: "[containers]\n# volumes = [\"/srv:/srv\"]\n", [FIPS_ENABLED_PATH]: "0\n", [`${PODMAN_CONTAINERS_CONF_DIRS[1]}/README`]: "volumes = []" }, { [PODMAN_CONTAINERS_CONF_DIRS[1]]: ["README"] });
 	assert.equal(observeRuntimeMounts(podman(), { fs: commented, sameHost: true }).value, true, "a commented key, FIPS 0 and a non-.conf file in a drop-in dir change nothing");
 	assert.ok(!commented.reads.includes(`${PODMAN_CONTAINERS_CONF_DIRS[1]}/README`), "only *.conf is read from a drop-in dir");
+	const rootless = observeRuntimeMounts(podman({ rootless: true }), { fs: hostFs(empty), sameHost: true });
+	assert.deepEqual([rootless.value, /rootless Podman, which reads the user's own mounts\.conf first/.test(rootless.evidence)], [false, true], "rootless Podman reads ~/.config first, which this check does not");
 	const remote = observeRuntimeMounts(podman(), { fs: hostFs(empty), sameHost: false });
 	assert.deepEqual([remote.value, /another machine/.test(remote.evidence)], [false, true], "a Podman whose files are not this host's gets no credit from this host's files");
 	assert.equal(observeRuntimeMounts({ answered: false, reason: "timeout" }, { fs: hostFs(empty), sameHost: true }).value, null);
@@ -120,4 +140,17 @@ test("observeHost gives every observation the table names, with evidence and the
 	assert.deepEqual([shim.observations[DAEMON_APPLIES_BOUNDS], shim.observations[RUNTIME_ADDS_NO_MOUNTS]], [false, true], "the shim's own files are this host's");
 	assert.equal(runtimeObservationKey(held), "true|true");
 	assert.equal(runtimeObservationKey(down), "null|null");
+});
+
+test("MOUNT_KEY finds a volumes or mounts key in every TOML spelling, and nothing in a comment or a longer key (#345)", () => {
+	for (const text of ["volumes = []", '  "mounts" = []', "'volumes'=[]", "containers.volumes = []", "containers = { volumes = [] }", "[containers]\nmounts=[\"x\"]", 'annotations = ["volumes = x"]']) {
+		assert.equal(MOUNT_KEY.test(text), true, JSON.stringify(text));
+	}
+	for (const text of ["# volumes = []", "  # mounts = []", "x_volumes = []", "devicevolumes = 1", "volumes_extra = 1", "[volumes]", "volumes"]) {
+		assert.equal(MOUNT_KEY.test(text), false, JSON.stringify(text));
+	}
+	assert.equal(MOUNT_KEY.test('devices = ["/dev/fuse"]') && MOUNT_KEY.test("hooks_dir = []"), true);
+	assert.equal(ESCAPED_KEY.test('"volum\\u0065s" = []'), true, "an escaped key is refused, not decoded");
+	for (const text of ['label = "a\\b"', '# "x\\y" = 1', 'volumes = ["C:\\x"]']) assert.equal(ESCAPED_KEY.test(text), false, JSON.stringify(text));
+	assert.deepEqual([...PODMAN_HOOKS_DIRS], ["/usr/share/containers/oci/hooks.d", "/etc/containers/oci/hooks.d"]);
 });

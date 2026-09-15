@@ -21,7 +21,7 @@ import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry } from "./host-registry.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS } from "./index.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
@@ -390,9 +390,13 @@ export async function startWorker(
 	// An unknown answer (a daemon still starting) boots, so a unit with RestartPreventExitStatus=2 is never stranded
 	// by one; so does `runtime-unreadable`, which a later job re-reads.
 	const resolveJobUser = makeJobUserResolver({ readFacts: readDaemonFactsFn, ...jobUserIdentity });
+	// Issue #345: a floor that needs a DAEMON observation waits the facts read's own bound (plus a margin), not the image
+	// read's 5 s: a busy host's `docker info` is the slow read, and a floor this boot met from the table before would
+	// otherwise exit 1 on every restart of a healthy daemon.
+	const floorNeedsDaemon = unobservedFloor(config.backends, config.backendFloor, { [DOCKER_ENDPOINT_LOCAL]: true }).length > 0;
 	const bootJobUser = await settleWithin(
 		resolveJobUser({ endpoint: bootEndpoint, key: endpointSeen }).catch(() => null),
-		BOOT_IMAGE_TIMEOUT_MS,
+		floorNeedsDaemon ? DAEMON_FACTS_TIMEOUT_MS + 2_000 : BOOT_IMAGE_TIMEOUT_MS,
 		null,
 	);
 	const bootDecision = bootJobUser?.decision ?? { mode: "unknown", user: null, cause: null, reason: "boot-read-timeout" };
@@ -1169,6 +1173,20 @@ export async function startWorker(
 				if (state !== endpointSeen) {
 					endpointSeen = state;
 					logDockerEndpoint(log, endpoint, { changed: true });
+				}
+				// The endpoint refusal FIRST, from the CLI's own configuration only, as boot does: a floor that distrusts this
+				// endpoint must not wait on, or send the CLI's own TLS client credentials to, the daemon behind it.
+				const endpointArgs = {
+					backends: [venue],
+					backendFloor: config.backendFloor,
+					observations: { [DOCKER_ENDPOINT_LOCAL]: endpoint.local === true },
+					evidence: { [DOCKER_ENDPOINT_LOCAL]: dockerEndpointEvidence(endpoint) },
+					only: [DOCKER_ENDPOINT_LOCAL],
+				};
+				const [endpointRefusal] = observationRefusals(endpointArgs);
+				if (endpointRefusal) {
+					if (endpoint.local === null && endpoint.transient) return { unavailable: true, reason: endpoint.reason };
+					return { refused: true, message: endpointRefusal, observations: [DOCKER_ENDPOINT_LOCAL] };
 				}
 				const jobUser = await resolveJobUser({ endpoint, key: state });
 				const observed = observeHost({ endpoint, daemon: jobUser.daemon, fs: observationFs });

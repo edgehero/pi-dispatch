@@ -272,12 +272,13 @@ export function jobUserRefusal(causeOrDecision) {
 }
 
 /**
- * `async ({ endpoint, key }) => ({ decision, facts, socket })`, cached by `key` (the endpoint state string the
- * caller already keeps). Concurrent callers for one key share one read.
+ * `async ({ endpoint, key }) => ({ decision, facts, daemon, socket })`, cached by `key` (the endpoint state string the
+ * caller already keeps). Concurrent callers for one key share one read. `daemon` is the raw read result (`{ answered,
+ * facts }` or `{ answered: false, reason, transient }`), which the runtime observations read (issue #345).
  *
- * NOT cached: `unknown`, and `unmappable` `runtime-unreadable`. Both describe an answer rather than a daemon, and a
- * cached one would retry or refuse every later job on that endpoint until the worker restarted, long after the daemon
- * recovered.
+ * NOT cached: `unknown`, `unmappable` `runtime-unreadable`, and any decision made without an answered read (an `image`
+ * decided on macOS while the daemon was still starting). Each describes an answer rather than a daemon, and a cached one
+ * would retry or refuse every later job on that endpoint, or leave the observations unread, until the worker restarted.
  * A cached decision is otherwise kept until the endpoint state changes: a daemon reconfigured behind an unchanged
  * endpoint (rootful to rootless on one socket path) is read again only after a restart, a residual the design entry names.
  */
