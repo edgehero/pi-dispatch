@@ -3011,19 +3011,18 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 				continue;
 			}
 			if (readUnitSeam(text, platform).deployDir !== cwd) continue;
-			// A system unit with no User= runs as root, which the worker refuses (worker-is-root). DynamicUser= with no User=
-			// allocates a uid nobody can name ahead, so it is skipped rather than guessed; with a User= naming an existing
-			// account systemd runs as that account, which is compared as usual.
-			const named = readUnitUser(text, platform);
-			if (named === null && /^[ \t]*DynamicUser[ \t]*=[ \t]*(1|y|yes|t|true|on)[ \t]*\r?$/m.test(text)) continue;
-			const user = named ?? "root";
-			const uid = named === null ? 0 : /^\d+$/.test(named) ? Number(named) : uidOf(named, passwd);
+			// ONLY an explicit User= is compared, and nothing is inferred from its absence: a unit with none (root, or a
+			// DynamicUser= uid) is not guessed at here. The worker's own boot names a root worker (worker-is-root), which is
+			// the one place that answer is certain; guessing it here produced wrong texts for every case the guess missed.
+			const user = readUnitUser(text, platform);
+			if (user === null) continue;
+			const uid = /^\d+$/.test(user) ? Number(user) : uidOf(user, passwd);
 			if (uid !== null && uid !== ids.euid) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}${named === null ? ", no User= line" : ""}), so the job-user line above is this shell's answer, not the service's`,
-					fix: uid === 0 ? `a worker running as root ${defaultIsLocal ? "refuses to boot while local is the default venue" : "has every local job refused"} (worker-is-root): give the unit a User= line naming an unprivileged account` : `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
+					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
+					fix: `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
 		}

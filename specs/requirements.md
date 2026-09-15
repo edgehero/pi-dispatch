@@ -1820,7 +1820,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
   HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
   one by one, and it warns when this shell's uid is not the account a system unit's `User=` runs the worker as
-  (root when the unit names none; drop-ins are not read), since the answer is then this shell's rather than the
+  (an explicit `User=` only; drop-ins are not read), since the answer is then this shell's rather than the
   service's. `doctor --live` reads that decision back.
 - **`doctor` reports a bound that is set and asleep.** A knob an operator sets, doctor stays silent about,
   and nothing enforces is this project's own believed-on-while-off failure by another route, so where a

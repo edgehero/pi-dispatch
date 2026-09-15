@@ -528,8 +528,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `CONTAINER_ENV_NAMES`, refused `run.tools` and `run.noTools` by name, and refused near-miss spellings of the
   `excludeTools` key through a sweep (cb43dd3); #314 reserved the provider-steering variables
   (`ANTHROPIC_BASE_URL`, `AZURE_OPENAI_BASE_URL` and the rest of `PROVIDER_STEERING_VARS`) in `run.secrets`
-  (cf8b4fe). Now a `run.secrets` entry binding `HOME` refuses the whole file at parse, in the worker, the receiver and the admin validator alike, because the worker sets
-  `HOME=/home/pi` beside `--user` and a secret of that name could otherwise have been meant to override it. No
+  (cf8b4fe). Now a `run.secrets` entry binding `HOME` refuses the whole file at parse, in the worker, the
+  receiver and the admin validator alike, because the worker sets `HOME=/home/pi` beside `--user` and a secret of that name could otherwise have been meant to override it. No
   shipped trigger has a reason to bind any of these. The next release's notes must name it; the receiver image's
   `:latest` refuses such a file from the merge on.
 - **Rejected**: a compat union accepting both old shapes (the repo bans backwards-compat shims,
@@ -3911,8 +3911,9 @@ a tunnel.
     primary group is docker is not refused there.
   - A host whose `docker info` routinely takes longer than its 15 s bound retries every local job as `unknown`;
     doctor reads with the same bound, so it says the same.
-  - Doctor's warning that a system unit runs the worker as another account reads the unit's own `User=` (root
-    when it names none) and no drop-in, and skips `DynamicUser=`.
+  - Doctor's warning that a system unit runs the worker as another account compares only the unit's own explicit
+    `User=` (the last one, as systemd reads it) and no drop-in. A unit naming none (root, or a `DynamicUser=` uid)
+    is not compared; the worker's own boot refusal names a root worker.
   - Derived images inherit `anyUid` whether or not their layer keeps the home writable.
   - A container escape that keeps its uid lands as the worker's own account; see `OQ-036`.
 - **Code evidence**: `worker/src/job-user.mjs` -> `parseDaemonFacts`, `makeDaemonFactsReader`, `socketFacts`,

@@ -3357,13 +3357,12 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	assert.match(await run(unit), /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/, "by name");
 	assert.match(await run(unit.replace("User=pi", "User=4242")), /runs the worker as 4242 \(uid 4242\)/, "numeric");
 	assert.match(await run(unit.replace("User=pi", "User = pi\n  User=4242")), /runs the worker as 4242 \(uid 4242\)/, "systemd's last assignment wins, whitespace allowed");
-	const rootText = await run(unit.replace("User=pi\n", ""));
-	assert.match(rootText, /runs the worker as root \(uid 0, no User= line\)/, "a system unit with no User= is root, which the worker refuses");
-	assert.match(rootText, /refuses to boot while local is the default venue \(worker-is-root\)/);
-	for (const flag of ["yes", "y", "true", "t", "on", "1"]) {
-		assert.doesNotMatch(await run(unit.replace("User=pi\n", `DynamicUser=${flag}\n`)), warned, `DynamicUser=${flag} with no User=: a uid nobody can name ahead, so nothing is guessed`);
+	// Only an explicit User= is compared: no guess from its absence (root, or a DynamicUser= uid). The worker's own boot
+	// names a root worker; a guess here was wrong for every case it missed.
+	for (const body of [unit.replace("User=pi\n", ""), unit.replace("User=pi\n", "DynamicUser=Yes\n")]) {
+		assert.doesNotMatch(await run(body), warned, JSON.stringify(body));
 	}
-	assert.match(await run(unit.replace("User=pi", "DynamicUser=yes\nUser=pi")), /runs the worker as pi \(uid 998\)/, "DynamicUser with an existing User= runs as that account, so it is compared");
+	assert.match(await run(unit.replace("User=pi", "DynamicUser=yes\nUser=pi")), /runs the worker as pi \(uid 998\)/, "an explicit User= is compared whatever else the unit says");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: mkdtempSync(join(tmpdir(), "pi-other-deploy-")) }), warned, "a unit serving another deployment is not this one's");
@@ -3425,6 +3424,8 @@ test("doctor --live gives job-unreadable, mount-not-writable and not-yours each 
 	const root = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(999), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: { platform: "darwin", euid: 0, egid: 0 } }, facts);
 	assert.ok(!root.some((c) => /not-yours|owned by another uid/.test(`${c.label} ${c.fix ?? ""}`)));
 	assert.match(root.at(-1).label, /the host owner of what the probe wrote was not compared, because doctor ran as root/, "and the limits line says so");
+	const shell = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk({ uid: "1234" }), ...green }), liveFs: liveFsAs(1234), isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: LINUX_ID(1234) }, facts);
+	assert.doesNotMatch(shell.at(-1).label, /was not compared/, "only a root run says it");
 });
 
 test("doctor and the worker read ONE set of boot-refusing causes, and doctor waits as long as the worker for docker info (#341)", async () => {
@@ -3473,8 +3474,10 @@ test("doctor waits for docker info as long as the worker does: no kill at 5 s, a
 	assert.ok(asked, "the facts read started");
 	t.mock.timers.tick(5_001);
 	assert.equal(killed, false, "the endpoint read's 5 s is not this read's bound");
-	t.mock.timers.tick(10_000);
-	assert.equal(killed, true, "15 s, the worker's DAEMON_FACTS_TIMEOUT_MS");
+	t.mock.timers.tick(9_998);
+	assert.equal(killed, false, "nor anything short of 15 s");
+	t.mock.timers.tick(1);
+	assert.equal(killed, true, "15 s exactly, the worker's DAEMON_FACTS_TIMEOUT_MS");
 	const result = await pending;
 	assert.match(result.checks[0].label, /could not be decided \(timeout\)/);
 });

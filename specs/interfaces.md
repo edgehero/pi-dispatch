@@ -1588,7 +1588,8 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     a job has it and nothing where it does not, still with no `-e`, not even HOME, since the probe runs no pi) and
     `extraFlags: ["-d", "--entrypoint", "sleep"]`, then the sleep seconds after the image. Through `extraFlags`
     it adds exactly those three flags and that argument; every member of `ISOLATION_FLAGS`, `--memory` and
-    `--cpus` reach it by construction. The sleep is DERIVED from the step bound (the three steps that need the container alive,
+    `--cpus` reach it by construction. The sleep is DERIVED from the step bound (the three steps that need the
+    container alive,
     at 20 seconds each, plus 30), never a literal.
   - **Fixtures, not the operator's folders, in a JOB'S modes.** One directory from `mkdtemp` under `jobsDirPath(env)`,
     the same derivation `loadConfig` reads `jobsDir` from, `realpath`ed, with an EMPTY subdirectory for every

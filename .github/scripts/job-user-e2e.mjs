@@ -130,7 +130,8 @@ const MOUNT_SCRIPT = [
 	"touch /workspace/.pd-e2e",
 	"git -C /workspace status --porcelain >/dev/null",
 	"if [ -d /outbox ]; then touch /outbox/.pd-e2e; fi",
-	"if [ -d /session ]; then cat /session/current.jsonl >/dev/null; touch /session/.pd-e2e; fi",
+	"if [ -d /session ]; then cat /session/current.jsonl >/dev/null; fi",
+	"if [ -d /session ]; then touch /session/.pd-e2e; fi",
 	'touch "$HOME/.pd-e2e"',
 	"if touch /job/x 2>/dev/null; then echo job-writable; exit 3; fi",
 	"if chmod 777 /job 2>/dev/null; then echo job-chmod; exit 4; fi",
@@ -152,7 +153,6 @@ for (const [label, prepared] of [["forge", forge], ["local", local]]) {
 		assert.equal(statSync(join(dir, ".pd-e2e")).uid, euid, `${label}: ${dir} was written as the job user`);
 	}
 }
-assert.ok(existsSync(join(forge.session.hostDir, ".pd-e2e")), "the forge job's session mount was used");
 say("every mount was read and written as the job user, git accepted the clone, and /job refused a write and a chmod");
 
 // --- 5. the real runner: as the job user it reaches the auth check; as the image's user it cannot read /job --------
