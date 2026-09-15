@@ -980,7 +980,8 @@ test("a peer network that stays is a note, one that never landed is silent, and 
 		const said = await runLiveProbes(probeArgs(unknown, { egress: LIVE_EGRESS }));
 		assert.equal(said.notes.length, 2, `${label} is no answer, so the network that may still be there is said`);
 	}
-	const podmanAbsent = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": async (a) => ({ code: 125, stdout: "", stderr: `Error: unable to find network with name or ID ${a.at(-1)}: network not found` }) });
+	// The wording MEASURED through Podman 5.8.2's Docker API with the real docker CLI (exit 1).
+	const podmanAbsent = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": async (a) => ({ code: 1, stdout: "[]\n", stderr: `Error response from daemon: unable to find network with name or ID ${a.at(-1)}: network not found\n` }) });
 	assert.deepEqual((await runLiveProbes(probeArgs(podmanAbsent, { egress: LIVE_EGRESS }))).notes, [], "Podman's words for a network that is not there");
 
 	const neverLanded = fakeDocker({ "network-create": async () => ({ code: null, stdout: "" }), "network-rm": async () => ({ code: 1, stdout: "" }) });

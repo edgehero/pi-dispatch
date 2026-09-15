@@ -1637,12 +1637,12 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     container pi-dispatch did not make may be among them), and it is removed without `-f`, and one that stays is a
     ⚠ carrying the command. That protection starts when a peer is attached: a run in another PID
     namespace that has made its network and not yet started its peer can lose the network to this sweep, and that
-    run's `jobToJobIsolation` is then not read back, never held; if its peer attaches between this sweep's inspect and
-    its detach, that run keeps the network and loses only the proxy on it, and its reading stays true or becomes not read back,
-    because the proxy is not what keeps its peers apart. The shape is narrow, not unique: the jobs dir is not a
-    place for anything
-    else. A probe that had
-    STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does not.
+    run's `jobToJobIsolation` is then not read back, never held; if its peer attaches anywhere between this sweep's
+    inspect and its `network rm`, that run keeps the network (the `rm` without `-f` fails and this sweep's ⚠ names
+    it), possibly without the proxy, and its reading stays true or becomes not read back, because the proxy is not
+    what keeps its peers apart. The shape is narrow, not unique: the jobs dir is not a place for anything else. A
+    probe that had STARTED also removes itself when its sleep ends (`--rm`); one interrupted before it started does
+    not.
   - **The reads**, each a verdict `{ property, ok, warn?, detail }`, where `warn` means NOT READ BACK and is never
     a pass:
     - `isolation`: one `docker exec` of a constant script reading `/proc/1/status` and the cgroup files. `CapBnd`
