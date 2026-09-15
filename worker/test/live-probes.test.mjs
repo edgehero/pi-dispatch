@@ -842,7 +842,7 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 		"pi-dispatch-live-peer2-400-bbb222-net",
 	].join("\n");
 	const attached = {
-		"pi-dispatch-live-peer1-100-abc123-net": { e1: { Name: "an-old-proxy-name" } },
+		"pi-dispatch-live-peer1-100-abc123-net": { e1: { Name: "an-old-proxy-name" }, e4: { Name: "some-other-container" } },
 		"pi-dispatch-live-peer2-100-abc123-net": {},
 		// A PID from another namespace reads as dead here; its peer still on the network says the run is not over.
 		"pi-dispatch-live-peer2-400-bbb222-net": { e2: { Name: "pi-dispatch-live-peer2-400-bbb222" }, e3: { Name: "pi-dispatch-egress-proxy" } },
@@ -855,9 +855,10 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 	};
 	const notes = [];
 	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, notes });
-	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching an-old-proxy-name)", "network pi-dispatch-live-peer2-100-abc123-net"], "every endpoint it detached is said: one may be a container this sweep did not make");
+	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching an-old-proxy-name, some-other-container)", "network pi-dispatch-live-peer2-100-abc123-net"], "every endpoint it detached is said: one may be a container this sweep did not make");
 	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
 		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "an-old-proxy-name"],
+		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "some-other-container"],
 		["network", "rm", "pi-dispatch-live-peer1-100-abc123-net"],
 		["network", "rm", "pi-dispatch-live-peer2-100-abc123-net"],
 	], "whatever that run attached is detached, and a network a probe container is still on is not touched");
@@ -967,7 +968,14 @@ test("a peer network that stays is a note, one that never landed is silent, and 
 	const stayed = await runLiveProbes(probeArgs(stays, { egress: LIVE_EGRESS, ...instant() }));
 	assert.deepEqual(stayed.notes, ["peer1", "peer2"].map((k) => `the network pi-dispatch-live-${k}-4242-n0nce-net could not be removed: docker network rm pi-dispatch-live-${k}-4242-n0nce-net`));
 
-	for (const [label, inspect] of [["an inspect that timed out", async () => ({ code: null, stdout: "" })], ["an inspect the daemon failed", async () => ({ code: 1, stdout: "", stderr: "Error response from daemon: context deadline exceeded" })]]) {
+	for (const [label, inspect] of [
+		["an inspect that timed out", async () => ({ code: null, stdout: "" })],
+		["an inspect the daemon failed", async () => ({ code: 1, stdout: "", stderr: "Error response from daemon: context deadline exceeded" })],
+		["a daemon that cannot be reached", async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" })],
+		// Measured on both labs with DOCKER_CONTEXT naming a context that is gone: "not found", about the CLI, not the network.
+		["the CLI's own context not found", async () => ({ code: 1, stdout: "", stderr: 'Failed to initialize: unable to resolve docker endpoint: context "gone": context not found: open /home/op/.docker/contexts/meta/x/meta.json: no such file or directory' })],
+		["a driver plugin not found", async () => ({ code: 1, stdout: "", stderr: "Error response from daemon: network driver: plugin not found" })],
+	]) {
 		const unknown = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": inspect });
 		const said = await runLiveProbes(probeArgs(unknown, { egress: LIVE_EGRESS }));
 		assert.equal(said.notes.length, 2, `${label} is no answer, so the network that may still be there is said`);

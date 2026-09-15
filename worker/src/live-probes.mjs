@@ -572,11 +572,13 @@ export async function runLiveProbes({
 		if (entry.done) return;
 		entry.done = true;
 		if (await removeJobNetworkWith(step, { network: entry.name, proxy })) return;
-		// Silent only when the daemon SAYS the network is not there (a create that never landed, or a rollback that worked):
-		// "not found" in both daemons' words (measured: Docker "network X not found", Podman "unable to find network with
-		// name or ID X: network not found"). An inspect that timed out or failed otherwise is no answer, so it is said.
+		// Silent only when the daemon SAYS the network is not there (a create that never landed, or a rollback that worked),
+		// in both daemons' words for a NETWORK (measured: Docker "network X not found", Podman "unable to find network with
+		// name or ID X: network not found"). Any other answer is said: an inspect that timed out, a daemon that cannot be
+		// reached ("Cannot connect to the Docker daemon"), and the CLI's own "context not found" (measured on both labs),
+		// which is about the CLI, not the network.
 		const inspected = await step(["network", "inspect", entry.name]);
-		const absent = inspected?.code !== 0 && /not found/i.test(`${inspected?.stdout ?? ""}${inspected?.stderr ?? ""}`);
+		const absent = inspected?.code !== 0 && /network (?:\S+ )?not found/i.test(`${inspected?.stdout ?? ""}${inspected?.stderr ?? ""}`);
 		if (!absent) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
 	};
 	const makeFixture = (base) => {

@@ -3544,6 +3544,7 @@ test("doctor --live with the policy armed reads jobToJobIsolation back through t
 	const failed = reached.find((c) => /jobToJobIsolation does NOT hold/.test(c.label));
 	assert.ok(failed && !failed.warn, reached.map((c) => c.label).join("\n"));
 	assert.match(failed.fix, /reached another's across their own --internal networks/);
+	assert.match(reached.at(-1).label, /jobToJobIsolation tried one pair of peers/, "a reach needed both peers started, so the limit still applies to it");
 
 	const noAddress = await liveChecks(env, { ...seams({}), spawn: fakeSpawn({ ...liveOk(), ...livePeersOk({}), "docker inspect --format={{json .NetworkSettings.Networks}}": { code: 1, output: "" }, ...green }) }, facts);
 	assert.ok(noAddress.some((c) => c.warn && /jobToJobIsolation not read back/.test(c.label)));
