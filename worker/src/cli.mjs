@@ -14,7 +14,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
   pi-dispatch doctor [--fix] [--live]
                            preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
-                           --live reads the backend declarations back off one real container (shown in docker ps while it runs)
+                           --live reads the backend declarations back off short-lived real containers (shown in docker ps while they run)
   pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here

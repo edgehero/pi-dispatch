@@ -31,7 +31,7 @@ import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkNameFor, removeJobNetworkWith } from "./egress.mjs";
 
 /**
- * The namespace every live-probe object carries: the two container names and the fixture directory. OUTSIDE the
+ * The namespace every live-probe object carries: every container name, the peer networks and the fixture directory. OUTSIDE the
  * boot reapers' `pi-job-` filter, the sandbox tooling's `pi-sandbox-` and the loopback `pi-dispatch-valkey`, so no
  * sweep of theirs can touch a probe and no probe name can be mistaken for one of theirs.
  */
@@ -40,7 +40,11 @@ export const LIVE_PREFIX = "pi-dispatch-live-";
 /** Each docker step's bound. A seam for the tests; the sleep below is derived from it, never typed twice. */
 export const LIVE_STEP_TIMEOUT_MS = 20_000;
 
-/** The docker steps that run while the probe container must still be alive: inspect, status exec, write exec. */
+/**
+ * The docker steps that run while a container must still be alive: three, for the reading container (inspect, status
+ * exec, write exec) and for the peers (the control before, the attempt, the control after; peer2's inspect runs while
+ * peer1 is already waiting, well inside one step's bound).
+ */
 const STEPS_WHILE_ALIVE = 3;
 
 /**
@@ -55,8 +59,10 @@ export function liveSleepSeconds(stepTimeoutMs = LIVE_STEP_TIMEOUT_MS) {
 
 /**
  * How long a container run with `--rm` may take to be gone after it exits before its survival is a finding (issue
- * #344). Measured removal was at most 286 ms (Docker Desktop, one poll) and 51 ms over twenty runs on rootful Docker
- * and Podman; 10 s is over thirty times the slowest, so a loaded daemon reads as slow, not as broken.
+ * #344). Measured removal: at most 51 ms over twenty runs on rootful Docker and 32 ms on rootful Podman, polled every
+ * 10 ms; 278 ms on Docker Desktop and about 120 ms on both rootful daemons through this module's own 100 ms polls.
+ * 10 s is over thirty times the slowest. A container still listed at the deadline FAILS only when it is stopped
+ * (`exited`, `dead`, or Podman's `stopped`), and is not read back while it is still running or being removed.
  */
 export const LIVE_REMOVAL_DEADLINE_MS = 10_000;
 const LIVE_REMOVAL_POLL_MS = 100;
@@ -94,7 +100,8 @@ export function liveFixture(root) {
 }
 
 /**
- * The builder options both probe containers share: the fixture mounts, no network, no environment at all, and the
+ * The builder options every live-probe container shares: the fixture mounts, no network (a peer sets its own), no
+ * environment at all, and the
  * job user a job on this host would get (issue #341). `user` rides the builder's own field, so the probe is `--user`
  * exactly where a job is; there is still no `-e`, not even HOME, because the probe runs no pi and reads no home.
  */
@@ -160,8 +167,9 @@ export const WRITE_SCRIPT = [
  */
 export const EPHEMERAL_SCRIPT = [
 	'if [ -e /tmp/.pi-dispatch-live-ephemeral ]; then printf residue > "/workspace/.pi-dispatch-live-ephemeral-$2"; exit 0; fi',
-	'printf %s "$1" > /tmp/.pi-dispatch-live-ephemeral',
-	'printf %s "$1" > "/workspace/.pi-dispatch-live-ephemeral-$2"',
+	// ONE list, so a /tmp this user cannot write leaves NO workspace marker, which is "not read back", rather than a
+	// marker that says a residue check ran when it could not have.
+	'printf %s "$1" > /tmp/.pi-dispatch-live-ephemeral && printf %s "$1" > "/workspace/.pi-dispatch-live-ephemeral-$2"',
 ].join("\n");
 
 /**
@@ -200,12 +208,16 @@ export const CONNECT_SCRIPT = [
 	'Promise.all(targets.map(one)).then((lines) => console.log(lines.join("\\n")));',
 ].join("\n");
 
-/** CONNECT_SCRIPT's output, as a Map of target to result word. Lines it did not print are simply absent. */
+/**
+ * CONNECT_SCRIPT's output, as a Map of target to result word. Lines it did not print are simply absent, and so is a
+ * line whose word is not a plain lower-case word: the image's `node` prints these, and nothing else reaches a verdict.
+ */
 export function parseConnectResults(output) {
 	const results = new Map();
 	for (const line of String(output ?? "").split(/\r?\n/)) {
-		const at = line.trim().lastIndexOf(" ");
-		if (at > 0) results.set(line.trim().slice(0, at), line.trim().slice(at + 1));
+		const trimmed = line.trim();
+		const at = trimmed.lastIndexOf(" ");
+		if (at > 0 && /^[a-z0-9_]{1,40}$/.test(trimmed.slice(at + 1))) results.set(trimmed.slice(0, at), trimmed.slice(at + 1));
 	}
 	return results;
 }
@@ -404,23 +416,30 @@ export function ephemeralVerdict({ first, second, markers = {}, nonce }) {
 /**
  * JOB-TO-JOB ISOLATION (issue #344): two peers, each on its own `--internal` job network behind the proxy, the way two
  * concurrent jobs get them. `fromPeer1` is peer1's results for the proxy (`proxyTarget`) and every name and address of
- * peer2 (`peerTargets`); `control` is peer2's results against itself. A peer reached is a FAILURE, and wins over every
- * missing control; an unreached peer counts only when peer1 did reach the proxy (else the network proves nothing) and
- * peer2 answered itself (else a listener that never came up proves nothing).
+ * peer2 (`peerTargets`, `peerAddresses` the address subset); `controlBefore` and `controlAfter` are peer2's results
+ * against its own addresses, run BEFORE and AFTER peer1's attempt. A peer reached is a FAILURE, and wins over every
+ * missing reading. A block counts only when: at least one ADDRESS was tried (a name alone proves DNS scoping, not
+ * routing); peer1 reached the proxy (a network that reaches nothing blocks everything); and peer2 answered itself
+ * both before the attempt (else a refused connection may be a listener not yet up, which is the opposite of a block)
+ * and after it (so it stayed up throughout).
  */
-export function jobToJobIsolationVerdict({ armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], fromPeer1 = new Map(), control = new Map() }) {
+export function jobToJobIsolationVerdict({ armed, proxyRunning, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
+	if (armed === null) return notReadBack("jobToJobIsolation", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("jobToJobIsolation", "PI_EGRESS is off, so jobs share docker's default bridge by design and there is no per-job network to read back");
 	if (proxyRunning === false) return notReadBack("jobToJobIsolation", "the egress proxy is not running, so no job-shaped network could be built");
 	if (networksCreated !== true) return notReadBack("jobToJobIsolation", "the peer networks could not be created");
 	if (peersStarted !== true) return notReadBack("jobToJobIsolation", "a peer container did not start");
 	const reached = peerTargets.filter((t) => fromPeer1.get(t) === "reached");
 	if (reached.length > 0) return verdict("jobToJobIsolation", false, `one job reached another across their own networks, at ${reached.join(", ")}`, { cause: "reached" });
-	if (peerTargets.length === 0 || peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
+	if (peerAddresses.length === 0) return notReadBack("jobToJobIsolation", "docker inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing");
+	if (peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
 	if (!["connected", "reached"].includes(fromPeer1.get(proxyTarget))) return notReadBack("jobToJobIsolation", `peer1 could not reach the proxy (${fromPeer1.get(proxyTarget)}), so an unreached peer proves nothing`);
-	if (control.size === 0 || [...control.values()].some((r) => r !== "reached")) return notReadBack("jobToJobIsolation", "peer2 did not answer its own connection, so a peer that was not reached proves nothing");
-	const answered = peerTargets.filter((t) => fromPeer1.get(t) === "connected");
-	if (answered.length > 0) return notReadBack("jobToJobIsolation", `something accepted a connection at ${answered.join(", ")} without the peer's nonce, which is neither reached nor refused`);
-	return verdict("jobToJobIsolation", true, `peer1 reached the proxy and none of peer2's ${peerTargets.length} name(s) and address(es) (${peerTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")}); peer2 answered itself`);
+	const answered = (control) => control.size > 0 && [...control.values()].every((r) => r === "reached");
+	if (!answered(controlBefore)) return notReadBack("jobToJobIsolation", "peer2 did not answer its own addresses before the attempt, so a refused connection may be a listener not yet up");
+	if (!answered(controlAfter)) return notReadBack("jobToJobIsolation", "peer2 did not answer its own addresses after the attempt, so its listener was not up throughout");
+	const accepted = peerTargets.filter((t) => fromPeer1.get(t) === "connected");
+	if (accepted.length > 0) return notReadBack("jobToJobIsolation", `something accepted a connection at ${accepted.join(", ")} without the peer's nonce, which is neither reached nor refused`);
+	return verdict("jobToJobIsolation", true, `peer1 reached the proxy and none of peer2's ${peerTargets.length} name(s) and address(es) (${peerTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")}); peer2 answered itself before and after`);
 }
 
 /**
@@ -435,27 +454,33 @@ export async function awaitRemoved({ step, id, now, delay, deadlineMs = LIVE_REM
 		if (listed?.code !== 0) return { state: "unanswered", ms: now() - start };
 		const line = String(listed.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith(id));
 		if (!line) return { state: "gone", ms: now() - start };
-		if (now() - start >= deadlineMs) return { state: /^(exited|dead)$/i.test(line.split(/\s+/)[1] ?? "") ? "exited" : "present", ms: now() - start };
+		// Stopped, in either daemon's words: Docker's `exited` and `dead`, and Podman's `stopped` for a container that
+		// exited and was never cleaned up (measured on rootful Podman 5.8.2 as the state before `exited`).
+		if (now() - start >= deadlineMs) return { state: /^(exited|dead|stopped)$/i.test(line.split(/\s+/)[1] ?? "") ? "exited" : "present", ms: now() - start };
 		await delay(pollMs);
 	}
 }
 
-/** The names and addresses a peer answers at on one network, from `docker inspect --format={{json .NetworkSettings.Networks}}`. */
+/**
+ * The names and addresses a peer answers at on one network, from `docker inspect --format={{json .NetworkSettings.Networks}}`:
+ * `{ targets, addresses }`, where `addresses` are the `IPAddress` and `GlobalIPv6Address` targets only, taken from
+ * those FIELDS rather than recognised by shape (a short container ID that starts with a digit is a name).
+ */
 export function peerTargetsOf(inspectOutput, { network, name }) {
 	let networks;
 	try {
 		networks = JSON.parse(String(inspectOutput ?? "").trim());
 	} catch {
-		return [];
+		return { targets: [], addresses: [] };
 	}
 	const on = networks?.[network];
-	if (!on || typeof on !== "object") return [];
+	if (!on || typeof on !== "object") return { targets: [], addresses: [] };
 	const hosts = new Set([name]);
 	for (const n of [...(Array.isArray(on.DNSNames) ? on.DNSNames : []), ...(Array.isArray(on.Aliases) ? on.Aliases : [])]) if (typeof n === "string" && n) hosts.add(n);
-	const targets = [...hosts].map((h) => `${h}:${PEER_PORT}`);
-	if (typeof on.IPAddress === "string" && on.IPAddress) targets.push(`${on.IPAddress}:${PEER_PORT}`);
-	if (typeof on.GlobalIPv6Address === "string" && on.GlobalIPv6Address) targets.push(`[${on.GlobalIPv6Address}]:${PEER_PORT}`);
-	return targets;
+	const addresses = [];
+	if (typeof on.IPAddress === "string" && on.IPAddress) addresses.push(`${on.IPAddress}:${PEER_PORT}`);
+	if (typeof on.GlobalIPv6Address === "string" && on.GlobalIPv6Address) addresses.push(`[${on.GlobalIPv6Address}]:${PEER_PORT}`);
+	return { targets: [...[...hosts].map((h) => `${h}:${PEER_PORT}`), ...addresses], addresses };
 }
 
 /**
@@ -516,7 +541,7 @@ export async function runLiveProbes({
 			(peersWanted ? `, and ${names.peer1} and ${names.peer2} on their own --internal networks ${networkOf.peer1} and ${networkOf.peer2}, with ${proxy} attached to both` : "") +
 			`, with a fixture under ${jobsDir}; all of them are removed when the read-back ends, as is anything an interrupted earlier run left`,
 	);
-	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, proxy }))];
+	const swept = [...sweepStaleFixtures({ jobsDir, pid, fs, isAlive }), ...(await sweepStaleContainers({ step, pid, isAlive })), ...(await sweepStaleNetworks({ step, pid, isAlive, notes }))];
 
 	const owned = [];
 	const networks = [];
@@ -544,7 +569,9 @@ export async function runLiveProbes({
 	const dropNetwork = async (entry) => {
 		if (entry.done) return;
 		entry.done = true;
-		if (!(await removeJobNetworkWith(step, { network: entry.name, proxy }))) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
+		if (await removeJobNetworkWith(step, { network: entry.name, proxy })) return;
+		// Silent only when the network is not there at all (a create that never landed, or a rollback that worked).
+		if ((await step(["network", "inspect", entry.name]))?.code === 0) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
 	};
 	const makeFixture = (base) => {
 		const fixture = liveFixture(base);
@@ -622,11 +649,10 @@ export async function runLiveProbes({
 		const runEphemeral = async (n) => {
 			const { result, entry } = await start(`ephemeral container (run ${n})`, names.ephemeral, ephemeralRunArgs({ image, name: names.ephemeral, fixture, nonce, run: n, user }));
 			const started = result?.code === 0 && entry.id !== null;
-			let nameHeld = false;
-			if (!started && typeof result?.code === "number") {
-				const holders = await step(["ps", "-a", "--filter", `name=${names.ephemeral}`, "--format", "{{.Names}}"]);
-				nameHeld = holders?.code === 0 && String(holders.stdout ?? "").split(/\r?\n/).map((l) => l.trim()).includes(names.ephemeral);
-			}
+			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
+			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
+			// seen gone, the only container listed under this run's name is this run's own failed one.
+			const nameHeld = !started && typeof result?.code === "number" && /already in use/i.test(`${result?.stdout ?? ""}${result?.stderr ?? ""}`);
 			const removal = entry.id === null ? null : await awaitRemoved({ step, id: entry.id, now, delay, deadlineMs: removalDeadlineMs });
 			// SEEN GONE: never removed again, so a later `rm -f` cannot land on a new container that took its ID.
 			if (removal?.state === "gone") entry.done = true;
@@ -652,12 +678,14 @@ export async function runLiveProbes({
 			const peers = [];
 			try {
 				for (const key of ["peer1", "peer2"]) {
-					if (!(await createJobNetworkWith(step, { network: networkOf[key], proxy }))) break;
+					// OWNED BEFORE THE CREATE, as a container is before its run: a create that timed out may still have made it.
 					const entry = { name: networkOf[key], done: false };
 					networks.push(entry);
 					peerNetworks.push(entry);
+					if (!(await createJobNetworkWith(step, { network: networkOf[key], proxy }))) break;
+					entry.created = true;
 				}
-				reading.networksCreated = peerNetworks.length === 2;
+				reading.networksCreated = peerNetworks.length === 2 && peerNetworks.every((e) => e.created);
 				if (reading.networksCreated) {
 					const ids = {};
 					for (const key of ["peer1", "peer2"]) {
@@ -675,15 +703,21 @@ export async function runLiveProbes({
 					reading.peersStarted = Boolean(ids.peer1 && ids.peer2);
 					if (reading.peersStarted) {
 						const described = await step(["inspect", "--format={{json .NetworkSettings.Networks}}", ids.peer2]);
-						reading.peerTargets = described?.code === 0 ? peerTargetsOf(described.stdout, { network: networkOf.peer2, name: names.peer2 }) : [];
+						const { targets, addresses } = described?.code === 0 ? peerTargetsOf(described.stdout, { network: networkOf.peer2, name: names.peer2 }) : { targets: [], addresses: [] };
+						reading.peerTargets = targets;
+						reading.peerAddresses = addresses;
 						reading.proxyTarget = `${proxy}:${EGRESS_PROXY_PORT}`;
-						const attempt = await step(["exec", ids.peer1, "node", "--eval", CONNECT_SCRIPT, nonce, reading.proxyTarget, ...reading.peerTargets]);
+						// The control brackets the attempt: peer2 answering its own addresses BEFORE proves a refused connection is
+						// not a listener still starting, and AFTER proves it stayed up.
+						const control = async () => {
+							if (addresses.length === 0) return new Map();
+							const self = await step(["exec", ids.peer2, "node", "--eval", CONNECT_SCRIPT, nonce, ...addresses]);
+							return self?.code === 0 ? parseConnectResults(self.stdout) : new Map();
+						};
+						reading.controlBefore = await control();
+						const attempt = await step(["exec", ids.peer1, "node", "--eval", CONNECT_SCRIPT, nonce, reading.proxyTarget, ...targets]);
 						reading.fromPeer1 = attempt?.code === 0 ? parseConnectResults(attempt.stdout) : new Map();
-						// The control runs AFTER the attempt, against peer2's own addresses: a listener that is still up then was up
-						// during the attempt.
-						const ownTargets = [`127.0.0.1:${PEER_PORT}`, ...reading.peerTargets.filter((t) => /^(\d|\[)/.test(t))];
-						const self = await step(["exec", ids.peer2, "node", "--eval", CONNECT_SCRIPT, nonce, ...ownTargets]);
-						reading.control = self?.code === 0 ? parseConnectResults(self.stdout) : new Map();
+						reading.controlAfter = await control();
 					}
 				}
 			} finally {
@@ -772,20 +806,35 @@ export async function sweepStaleContainers({ step, pid, isAlive }) {
 }
 
 /**
- * A peer network an interrupted run left (issue #344): only a name of exactly a peer network's shape and a PID no
- * longer alive. The configured proxy is detached from it and the network is removed WITHOUT `-f`, the job path's own
- * `removeJobNetworkWith`, so a network anything else is still attached to stays where it is. Best effort.
+ * A peer network an interrupted run left (issue #344): only a name of exactly a peer network's shape (the peer kinds
+ * of `liveNames`, derived) and a PID no longer alive. What is attached to it decides what happens: a live-probe
+ * CONTAINER still on it means a run that is not over (a PID from another namespace reads as dead here), so nothing is
+ * touched; otherwise every endpoint still attached (a proxy, whatever `PI_EGRESS_PROXY` named when that run started)
+ * is detached and the network is removed WITHOUT `-f`. One that stays is a note carrying the command, never silence.
  */
-export async function sweepStaleNetworks({ step, pid, isAlive, proxy = DEFAULT_EGRESS_PROXY }) {
+export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
 	if (listed?.code !== 0) return [];
 	const swept = [];
-	const shape = new RegExp(`^${LIVE_PREFIX}peer[12]-(\\d+)-[0-9a-f]+-net$`);
+	const peerKinds = LIVE_CONTAINER_KINDS.filter((k) => k.startsWith("peer"));
+	const shape = new RegExp(`^${LIVE_PREFIX}(?:${peerKinds.join("|")})-(\\d+)-[0-9a-f]+-net$`);
+	const probeContainer = new RegExp(`^${LIVE_PREFIX}(?:${LIVE_CONTAINER_KINDS.join("|")})-\\d+-`);
 	for (const line of String(listed.stdout ?? "").split(/\r?\n/)) {
 		const name = line.trim();
 		const m = shape.exec(name);
 		if (!m || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
-		if (await removeJobNetworkWith(step, { network: name, proxy })) swept.push(`network ${name}`);
+		const inspected = await step(["network", "inspect", "--format", "{{json .Containers}}", name]);
+		if (inspected?.code !== 0) continue;
+		let attached = [];
+		try {
+			attached = Object.values(JSON.parse(String(inspected.stdout ?? "").trim() || "{}") ?? {}).map((c) => String(c?.Name ?? "")).filter(Boolean);
+		} catch {
+			continue;
+		}
+		if (attached.some((n) => probeContainer.test(n))) continue;
+		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
+		if ((await step(["network", "rm", name]))?.code === 0) swept.push(`network ${name}`);
+		else notes.push(`the stale network ${name} could not be removed: docker network rm ${name}`);
 	}
 	return swept;
 }

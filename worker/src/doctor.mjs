@@ -44,9 +44,9 @@
  * about severity: a --fix run still exits by the same failed/ok logic, warns stay warns, and the fix pass
  * happens at most once (check, fix, re-check -- never a loop).
  *
- * `doctor --live` (issue #278, INT-LIVE-PROBE-CONTRACT) reads the backend declarations back off one real container
- * (`live-probes.mjs`), ONCE, after any fix pass, from the facts the final collection gathered. Its container and
- * fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
+ * `doctor --live` (issue #278, INT-LIVE-PROBE-CONTRACT) reads the backend declarations back off short-lived real
+ * containers (`live-probes.mjs`), ONCE, after any fix pass, from the facts the final collection gathered. Its
+ * containers, networks and fixture are named before they exist and removed when it ends; it is judged by the same failed/ok rule and carries
  * no fixAction, because what a failed read-back points at is the image or the runtime.
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
@@ -122,7 +122,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 		// without uninstalling a dependency. Threaded like every other seam: a seam collectChecks honours
 		// and runDoctor silently drops is a seam that cannot pin an EXIT CODE, only a check object.
 		providerOracle = defaultProviderOracle,
-		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off one real container.
+		// --live (issue #278, INT-LIVE-PROBE-CONTRACT): read the backend declarations back off short-lived real containers.
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
 		live = false,
@@ -3095,7 +3095,7 @@ function dockerRunVia(spawn, timeoutMs = 5000) {
 
 /**
  * `doctor --live`'s checks (issues #278 and #344, INT-LIVE-PROBE-CONTRACT): the eight declarations a container read can reach,
- * read back off one real container on this host, rendered as `read back on local: ...`. Exported so the never-tier
+ * read back off short-lived real containers on this host, rendered as `read back on local: ...`. Exported so the never-tier
  * pin can walk them: like every check doctor has, and on purpose, none carries a `fixAction` -- a failed read-back
  * is a fact about the image or the runtime, and nothing here may guess at changing either.
  */
@@ -3163,13 +3163,18 @@ export async function liveChecks(env, seams, facts) {
 	// env-internal DOCKER_CONTENT_TRUST: the docker CLI's own variable, read here only to say that it changes what
 	// --pull=never governs; pi-dispatch sets nothing with it, so it is not a key of ours to document.
 	const contentTrust = env.DOCKER_CONTENT_TRUST === "1";
+	// Each sentence says only what DID happen: a probe that was not read back has its own line above saying why, and
+	// a sentence here claiming it ran would contradict that line.
+	const answered = (property) => result.verdicts.some((v) => v.property === property && v.warn !== true);
 	const unread = [
-		"the probe runs `sleep` in place of the job image's entrypoint",
+		"every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint",
 		`it ran as ${jobUser.user ? `the job user ${jobUser.user}` : "the image's own user"}, decided for this shell${typeof ids.euid === "number" ? ` (uid ${ids.euid})` : ""}, and the worker service may run as another account`,
 		"it wrote to a fixture folder, not to any folder of yours",
 		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
-		"ephemeral ran two short-lived containers under one name, not two real jobs",
-		facts.egress?.armed === true ? "jobToJobIsolation tried one pair of peers on this daemon's job networks, not every pair of jobs" : "jobToJobIsolation needs PI_EGRESS armed, since without it jobs share the default bridge by design",
+		...(answered("ephemeral") ? ["ephemeral ran two short-lived containers under one name, not two real jobs"] : []),
+		...(answered("jobToJobIsolation") ? ["jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs"] : []),
+		...(facts.egress?.armed === false ? ["jobToJobIsolation needs PI_EGRESS armed, since without it jobs share the default bridge by design"] : []),
+		...(facts.egress?.armed === true && facts.egress?.proxyRunning === false ? ["jobToJobIsolation needs the egress proxy running, since a job network is built around it"] : []),
 		"secretsCustody and credentialTransit are not container properties",
 		...(ids.euid === 0 ? ["the host owner of what the probe wrote was not compared, because doctor ran as root"] : []),
 		...(contentTrust ? ["DOCKER_CONTENT_TRUST=1 resolves a tag through notary, which --pull=never does not govern"] : []),
@@ -3194,7 +3199,7 @@ const LIVE_FAIL_FIX = {
 	"localFolders:job-unreadable": "the job user cannot list a 0700 job directory: the uid the job-user line above names is not the one that owns the jobs directory here (a rootless daemon, userns-remap, NFS root_squash or SELinux can each cause it), so every job on this host fails before it starts",
 	"localFolders:mount-not-writable": "the job user cannot write the outbox or session mount, which a local job and a resumed job write; the same ownership rule as the job directory applies",
 	"localFolders:not-yours": "a job's files land owned by another uid, so the worker cannot remove what a job leaves: run doctor as the worker's own account, and check the job-user line above",
-	"ephemeral:survived": "a container run with --rm was still listed after it exited: the daemon or a wrapper is not removing containers, so every job leaves one behind -- check `docker ps -a` and any docker CLI plugin or alias",
+	"ephemeral:survived": "a container run with --rm was still listed after it exited: the daemon or a wrapper is not removing containers, so every job leaves one behind -- check `docker ps -a` and any docker wrapper or alias",
 	"ephemeral:name-held": "a container name stayed taken after its container was gone, so a retried job id cannot start: check the daemon's name reservation and any leftover created containers",
 	"ephemeral:reused": "the daemon handed a second run the first run's container: a job would inherit another job's state -- do not run jobs on this daemon until that is explained",
 	"ephemeral:residue": "a new container found a file the previous one wrote to its own /tmp: a job would inherit another job's filesystem -- check the runtime's storage driver and any volume the image declares",

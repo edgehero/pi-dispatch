@@ -1927,7 +1927,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   environment variable read in them is collected, then each one is either a key in `.env.example` or
   carries an internal marker at its read site, and neither list is hand-maintained beside the code.
   Given `doctor --live`, then a line names every container, the image, any peer network and the fixture location
-  before the first docker command, no check it renders carries a fix action, and afterwards no container, peer
+  before the first docker command after the endpoint re-read, no check it renders carries a fix action, and afterwards no container, peer
   network or fixture remains; given `doctor` without `--live`, or `up`, then no probe container is started and no
   read-back
   line appears. Given a native Linux daemon and a shell uid other than 1001 with an `anyUid` image, then doctor

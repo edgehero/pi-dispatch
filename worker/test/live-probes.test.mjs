@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { READ_BACK_BY_A_LIVE_PROBE } from "../src/backend-conformance.mjs";
 import { JOB_NAME_PREFIX } from "../src/backend-local.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
@@ -48,6 +48,18 @@ import {
 const FIXTURE = liveFixture("/tmp/pi-dispatch-live-1-abc");
 const ID = "a".repeat(64);
 const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
+
+// Every directory a test here makes is removed when the file ends: the OS temp dir is not this suite's to fill, and a
+// fixture a test leaves behind is exactly what the sweeps under test are there to stop.
+const madeDirs = [];
+const tempDir = (prefix) => {
+	const dir = mkdtempSync(join(tmpdir(), prefix));
+	madeDirs.push(dir);
+	return dir;
+};
+after(() => {
+	for (const dir of madeDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 // What the shipped image reads under the builder's flags (measured on docker 27.4 / Docker Desktop), and what the
 // same image reads WITHOUT them. The second is the non-vacuity fixture: CapEff is 0 in both.
@@ -352,7 +364,7 @@ const probeArgs = (docker, over = {}) => ({
 	endpoint: LOCAL,
 	dockerReachable: true,
 	imagePresent: true,
-	jobsDir: mkdtempSync(join(tmpdir(), "pi-live-jobs-")),
+	jobsDir: tempDir("pi-live-jobs-"),
 	egress: { armed: false, results: [] },
 	pid: 4242,
 	nonce: "n0nce",
@@ -360,6 +372,8 @@ const probeArgs = (docker, over = {}) => ({
 	fs: nodeFs,
 	isAlive: () => false,
 	stepTimeoutMs: 1000,
+	// A clock no test waits on: a mutant that leaves a container listed runs into the deadline at once, not in 10 s.
+	...instant(),
 	...over,
 });
 
@@ -489,7 +503,7 @@ test("a thrown step still removes the container and the fixture", async () => {
 });
 
 test("two concurrent runs never remove each other's container or fixture", async () => {
-	const jobsDir = mkdtempSync(join(tmpdir(), "pi-live-jobs-"));
+	const jobsDir = tempDir("pi-live-jobs-");
 	const a = fakeDocker({}, { id: "a".repeat(64) });
 	const b = fakeDocker({}, { id: "b".repeat(64) });
 	await Promise.all([
@@ -516,8 +530,8 @@ test("a pinning container that WAS created is removed by its own ID and pinning 
 });
 
 test("the stale-fixture sweep removes only a dead PID's fixture of mkdtemp's exact shape, never a live run's, its own, or a lookalike", () => {
-	const jobsDir = mkdtempSync(join(tmpdir(), "pi-live-sweep-"));
-	const target = mkdtempSync(join(tmpdir(), "pi-live-sweep-target-"));
+	const jobsDir = tempDir("pi-live-sweep-");
+	const target = tempDir("pi-live-sweep-target-");
 	writeFileSync(join(target, "keep.txt"), "x");
 	for (const d of [`${LIVE_PREFIX}100-aB3xYz`, `${LIVE_PREFIX}200-bbbbbb`, `${LIVE_PREFIX}300-cccccc`, `${LIVE_PREFIX}98765-notes`, "some-job-dir"]) mkdirSync(join(jobsDir, d));
 	writeFileSync(join(jobsDir, `${LIVE_PREFIX}101-fil3ab`), "a file, not a fixture");
@@ -669,36 +683,49 @@ test("ephemeralVerdict: a survivor, a held name, a reused container or residue f
 	assert.equal(v({ first: { ...ok, removal: { state: "present", ms: 10_000 } }, second: { started: false, id: null, nameHeld: true, removal: null } }).warn, true);
 });
 
-test("jobToJobIsolationVerdict: a peer reached fails before any missing control; an unproven block is not read back", () => {
+test("jobToJobIsolationVerdict: a peer reached fails before any missing reading; an unproven block is not read back", () => {
 	const peerTargets = ["pi-dispatch-live-peer2-1-n:47431", "10.99.0.3:47431"];
-	const base = { armed: true, proxyRunning: true, networksCreated: true, peersStarted: true, proxyTarget: "pi-dispatch-egress-proxy:3128", peerTargets };
+	const base = { armed: true, proxyRunning: true, networksCreated: true, peersStarted: true, proxyTarget: "pi-dispatch-egress-proxy:3128", peerTargets, peerAddresses: ["10.99.0.3:47431"] };
 	const fromPeer1 = (over = {}) => new Map([["pi-dispatch-egress-proxy:3128", "connected"], ["pi-dispatch-live-peer2-1-n:47431", "eai_again"], ["10.99.0.3:47431", "enetunreach"], ...Object.entries(over)]);
-	const control = new Map([["127.0.0.1:47431", "reached"], ["10.99.0.3:47431", "reached"]]);
-	const held = jobToJobIsolationVerdict({ ...base, fromPeer1: fromPeer1(), control });
+	const answered = new Map([["10.99.0.3:47431", "reached"]]);
+	const held = jobToJobIsolationVerdict({ ...base, fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: answered });
 	assert.equal(held.ok, true);
-	assert.match(held.detail, /none of peer2's 2 name\(s\) and address\(es\)/);
-	const reached = jobToJobIsolationVerdict({ ...base, fromPeer1: fromPeer1({ "10.99.0.3:47431": "reached" }), control: new Map() });
-	assert.deepEqual([reached.ok, reached.warn, reached.cause], [false, undefined, "reached"], "a reach fails even with no control and no proxy line");
+	assert.match(held.detail, /none of peer2's 2 name\(s\) and address\(es\).*answered itself before and after/);
+	// A reach fails with NOTHING else there: no controls, no proxy line, not even an address list.
+	for (const bare of [{ fromPeer1: new Map([["10.99.0.3:47431", "reached"]]) }, { fromPeer1: new Map([["10.99.0.3:47431", "reached"], ["pi-dispatch-egress-proxy:3128", "timeout"]]), peerAddresses: [] }]) {
+		const reached = jobToJobIsolationVerdict({ ...base, ...bare });
+		assert.deepEqual([reached.ok, reached.warn, reached.cause], [false, undefined, "reached"], JSON.stringify([...bare.fromPeer1]));
+	}
 	for (const [label, over] of [
 		["policy off", { armed: false }],
+		["policy unreadable", { armed: null }],
 		["proxy down", { proxyRunning: false }],
 		["no networks", { networksCreated: false }],
 		["no peers", { peersStarted: false }],
-		["proxy unreached", { fromPeer1: fromPeer1({ "pi-dispatch-egress-proxy:3128": "timeout" }), control }],
-		["a line missing", { fromPeer1: new Map([["pi-dispatch-egress-proxy:3128", "connected"]]), control }],
-		["control silent", { fromPeer1: fromPeer1(), control: new Map([["127.0.0.1:47431", "econnrefused"]]) }],
-		["accepted without the nonce", { fromPeer1: fromPeer1({ "10.99.0.3:47431": "connected" }), control }],
+		["names only, no address", { peerAddresses: [], peerTargets: ["pi-dispatch-live-peer2-1-n:47431"], fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: answered }],
+		["proxy unreached", { fromPeer1: fromPeer1({ "pi-dispatch-egress-proxy:3128": "timeout" }), controlBefore: answered, controlAfter: answered }],
+		["a line missing", { fromPeer1: new Map([["pi-dispatch-egress-proxy:3128", "connected"]]), controlBefore: answered, controlAfter: answered }],
+		["listener not up before the attempt", { fromPeer1: fromPeer1({ "10.99.0.3:47431": "econnrefused" }), controlBefore: new Map([["10.99.0.3:47431", "econnrefused"]]), controlAfter: answered }],
+		["no control before", { fromPeer1: fromPeer1(), controlBefore: new Map(), controlAfter: answered }],
+		["listener gone after", { fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: new Map() }],
+		["accepted without the nonce", { fromPeer1: fromPeer1({ "10.99.0.3:47431": "connected" }), controlBefore: answered, controlAfter: answered }],
 	]) {
-		assert.equal(jobToJobIsolationVerdict({ ...base, ...over }).warn, true, label);
+		const got = jobToJobIsolationVerdict({ ...base, ...over });
+		assert.deepEqual([got.ok, got.warn], [false, true], label);
 	}
+	assert.match(jobToJobIsolationVerdict({ ...base, armed: null }).detail, /PI_EGRESS could not be read/, "a malformed PI_EGRESS is not reported as off");
 });
 
 test("parseConnectResults and peerTargetsOf read what the scripts and inspect print, and nothing else", () => {
-	assert.deepEqual([...parseConnectResults("a:1 reached\n[fd00::3]:47431 enetunreach\n\ngarbage\n")], [["a:1", "reached"], ["[fd00::3]:47431", "enetunreach"]]);
-	const inspect = JSON.stringify({ net: { IPAddress: "10.99.0.3", GlobalIPv6Address: "fd00::3", DNSNames: ["peer2", "abc"], Aliases: ["alias"] }, other: { IPAddress: "172.17.0.2" } });
-	assert.deepEqual(peerTargetsOf(inspect, { network: "net", name: "peer2" }), ["peer2:47431", "abc:47431", "alias:47431", "10.99.0.3:47431", "[fd00::3]:47431"]);
-	assert.deepEqual(peerTargetsOf(inspect, { network: "missing", name: "p" }), []);
-	assert.deepEqual(peerTargetsOf("not json", { network: "net", name: "p" }), []);
+	assert.deepEqual([...parseConnectResults("a:1 reached\n[fd00::3]:47431 enetunreach\n\ngarbage\nb:2 \u001b[31mreached\nc:3 Reached\n")], [["a:1", "reached"], ["[fd00::3]:47431", "enetunreach"]], "a result that is not a plain lower-case word is dropped");
+	const inspect = JSON.stringify({ net: { IPAddress: "10.99.0.3", GlobalIPv6Address: "fd00::3", DNSNames: ["peer2", "35b76264799a"], Aliases: ["alias"] }, other: { IPAddress: "172.17.0.2" } });
+	assert.deepEqual(peerTargetsOf(inspect, { network: "net", name: "peer2" }), {
+		targets: ["peer2:47431", "35b76264799a:47431", "alias:47431", "10.99.0.3:47431", "[fd00::3]:47431"],
+		addresses: ["10.99.0.3:47431", "[fd00::3]:47431"],
+	}, "addresses come from the address FIELDS: a short ID that starts with a digit is still a name");
+	assert.deepEqual(peerTargetsOf(JSON.stringify({ net: { IPAddress: "", GlobalIPv6Address: "", DNSNames: ["peer2"] } }), { network: "net", name: "peer2" }), { targets: ["peer2:47431"], addresses: [] });
+	assert.deepEqual(peerTargetsOf(inspect, { network: "missing", name: "p" }), { targets: [], addresses: [] });
+	assert.deepEqual(peerTargetsOf("not json", { network: "net", name: "p" }), { targets: [], addresses: [] });
 });
 
 test("awaitRemoved polls until the container is gone, and gives up at the deadline without a real clock", async () => {
@@ -738,9 +765,13 @@ test("ephemeral: two runs under one name, each seen gone and never removed again
 	assert.equal(survived.cause, "survived");
 	assert.ok(noRm.calls.some((a) => a[0] === "rm" && a[2] === "7".repeat(64)), "a survivor is removed by its ID");
 	assert.equal(noRm.calls.filter((a) => a[0] === "run" && a.includes(EPHEMERAL_SCRIPT)).length, 1, "no second run into a name the first still holds");
+	const armed = fakeDocker({ ephemeral: async () => ({ code: 0, stdout: `${"7".repeat(64)}\n`, stderr: "" }) });
+	await runLiveProbes(probeArgs(armed, { egress: LIVE_EGRESS }));
+	const survivorGone = armed.calls.findIndex((a) => a[0] === "rm" && a[2] === "7".repeat(64));
+	assert.ok(survivorGone > 0 && survivorGone < armed.calls.findIndex((a) => a[0] === "network" && a[1] === "create"), "and removed in its own phase, before the peers' networks exist");
 });
 
-test("jobToJobIsolation, armed: two job networks, two peers, one attempt and a control, then peers BEFORE networks", async () => {
+test("jobToJobIsolation, armed: two job networks, two peers, a control before and after the attempt, then peers BEFORE networks", async () => {
 	const docker = fakeDocker();
 	const args = probeArgs(docker, { egress: LIVE_EGRESS, ...instant() });
 	const result = await runLiveProbes(args);
@@ -749,17 +780,23 @@ test("jobToJobIsolation, armed: two job networks, two peers, one attempt and a c
 	const creates = docker.calls.filter((a) => a[0] === "network" && a[1] === "create");
 	assert.deepEqual(creates, [["network", "create", "--internal", "pi-dispatch-live-peer1-4242-n0nce-net"], ["network", "create", "--internal", "pi-dispatch-live-peer2-4242-n0nce-net"]]);
 	assert.ok(docker.calls.some((a) => a.join(" ") === "network connect pi-dispatch-live-peer1-4242-n0nce-net pi-dispatch-egress-proxy"));
-	const attempt = docker.calls.find((a) => a[0] === "exec" && a.includes(CONNECT_SCRIPT) && a[1] === "b".repeat(64));
-	assert.deepEqual(attempt.slice(attempt.indexOf(CONNECT_SCRIPT) + 1), ["n0nce", "pi-dispatch-egress-proxy:3128", "pi-dispatch-live-peer2-4242-n0nce:47431", "cccccccccccc:47431", "10.99.0.3:47431"]);
+	const execs = docker.calls.filter((a) => a[0] === "exec" && a.includes(CONNECT_SCRIPT));
+	assert.deepEqual(execs.map((a) => a[1]), ["c".repeat(64), "b".repeat(64), "c".repeat(64)], "peer2's control, peer1's attempt, peer2's control again");
+	const argvOf = (a) => a.slice(a.indexOf(CONNECT_SCRIPT) + 1);
+	assert.deepEqual(argvOf(execs[1]), ["n0nce", "pi-dispatch-egress-proxy:3128", "pi-dispatch-live-peer2-4242-n0nce:47431", "cccccccccccc:47431", "10.99.0.3:47431"]);
+	for (const control of [execs[0], execs[2]]) assert.deepEqual(argvOf(control), ["n0nce", "10.99.0.3:47431"], "the control tries peer2's own ADDRESSES, never a name");
+	const peerRuns = docker.calls.filter((a) => a[0] === "run" && a.includes(PEER_SCRIPT));
+	assert.deepEqual(peerRuns.map((a) => a.filter((x) => x.startsWith("--network"))), [["--network=pi-dispatch-live-peer1-4242-n0nce-net"], ["--network=pi-dispatch-live-peer2-4242-n0nce-net"]], "each peer's ONLY network is its own");
 	const at = (pred) => docker.calls.findIndex(pred);
-	const control = at((a) => a[0] === "exec" && a.includes(CONNECT_SCRIPT) && a[1] === "c".repeat(64));
-	assert.ok(control > docker.calls.indexOf(attempt), "the control runs after the attempt");
 	const peersGone = Math.max(at((a) => a[0] === "rm" && a[2] === "b".repeat(64)), at((a) => a[0] === "rm" && a[2] === "c".repeat(64)));
 	const firstNetworkRm = at((a) => a[0] === "network" && a[1] === "rm");
 	assert.ok(peersGone > 0 && firstNetworkRm > peersGone, "peers are removed before their networks");
 	assert.ok(docker.calls.filter((a) => a[0] === "network" && a[1] === "rm").every((a) => !a.includes("-f")), "never network rm -f");
 	assert.deepEqual(readdirSync(args.jobsDir), []);
 	assert.deepEqual(result.notes, []);
+	for (const name of [...Object.values(liveNames(4242, "n0nce")), "pi-dispatch-live-peer1-4242-n0nce-net", "pi-dispatch-live-peer2-4242-n0nce-net"]) {
+		assert.ok(!name.includes(JOB_NAME_PREFIX) && !name.includes("pi-sandbox-"), `${name} sits outside the job and sandbox reapers' names`);
+	}
 });
 
 test("jobToJobIsolation: a reach fails; the policy off or the proxy down builds no network; a half-built phase is torn down", async () => {
@@ -789,20 +826,46 @@ test("jobToJobIsolation: a reach fails; the policy off or the proxy down builds 
 	assert.ok(noNet.calls.some((a) => a.join(" ") === "network rm pi-dispatch-live-peer1-4242-n0nce-net"), "the network that was made is removed");
 });
 
-test("sweepStaleNetworks removes only a dead run's peer networks, detaching only the proxy and never forcing the removal", async () => {
+test("sweepStaleNetworks removes only a dead run's peer networks: never one a probe container is on, never with -f, and says when one stays", async () => {
 	const calls = [];
-	const listing = ["pi-dispatch-live-peer1-100-abc123-net", "pi-dispatch-live-peer2-100-abc123-net", "pi-dispatch-live-peer1-200-def456-net", "pi-dispatch-live-peer1-300-aaa111-net", "pi-job-x-net", "pi-dispatch-live-probe-100-abc123-net"].join("\n");
-	const step = async (args) => (calls.push(args), args[1] === "ls" ? { code: 0, stdout: listing } : { code: 0, stdout: "" });
-	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, proxy: "my-proxy" });
+	const listing = [
+		"pi-dispatch-live-peer1-100-abc123-net",
+		"pi-dispatch-live-peer2-100-abc123-net",
+		"pi-dispatch-live-peer1-200-def456-net",
+		"pi-dispatch-live-peer1-300-aaa111-net",
+		"pi-job-x-net",
+		"pi-dispatch-live-probe-100-abc123-net",
+		"pi-dispatch-live-peer2-400-bbb222-net",
+	].join("\n");
+	const attached = {
+		"pi-dispatch-live-peer1-100-abc123-net": { e1: { Name: "an-old-proxy-name" } },
+		"pi-dispatch-live-peer2-100-abc123-net": {},
+		// A PID from another namespace reads as dead here; its peer still on the network says the run is not over.
+		"pi-dispatch-live-peer2-400-bbb222-net": { e2: { Name: "pi-dispatch-live-peer2-400-bbb222" }, e3: { Name: "pi-dispatch-egress-proxy" } },
+	};
+	const step = async (args) => {
+		calls.push(args);
+		if (args[1] === "ls") return { code: 0, stdout: listing };
+		if (args[1] === "inspect") return { code: 0, stdout: JSON.stringify(attached[args.at(-1)] ?? {}) };
+		return { code: 0, stdout: "" };
+	};
+	const notes = [];
+	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, notes });
 	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net", "network pi-dispatch-live-peer2-100-abc123-net"]);
-	assert.deepEqual(calls.filter((a) => a[1] !== "ls"), [
-		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "my-proxy"],
+	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
+		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "an-old-proxy-name"],
 		["network", "rm", "pi-dispatch-live-peer1-100-abc123-net"],
-		["network", "disconnect", "-f", "pi-dispatch-live-peer2-100-abc123-net", "my-proxy"],
 		["network", "rm", "pi-dispatch-live-peer2-100-abc123-net"],
-	]);
-	const busy = async (args) => (args[1] === "ls" ? { code: 0, stdout: listing } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
-	assert.deepEqual(await sweepStaleNetworks({ step: busy, pid: 300, isAlive: () => false }), [], "a network still in use is left and not reported as removed");
+	], "whatever that run attached is detached, and a network a probe container is still on is not touched");
+	assert.deepEqual(notes, []);
+	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: "{}" } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
+	const stayNotes = [];
+	assert.deepEqual(await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes: stayNotes }), [], "a network that would not go is not reported as removed");
+	assert.deepEqual(stayNotes, ["the stale network pi-dispatch-live-peer1-100-abc123-net could not be removed: docker network rm pi-dispatch-live-peer1-100-abc123-net"]);
+	const unreadable = async (args) => (calls.push(args), args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : { code: 1, stdout: "" });
+	const before = calls.length;
+	assert.deepEqual(await sweepStaleNetworks({ step: unreadable, pid: 300, isAlive: () => false }), []);
+	assert.deepEqual(calls.slice(before).map((a) => a[1]), ["ls", "inspect"], "a network whose attachments cannot be read is left alone");
 });
 
 test("the container sweep matches every kind liveNames makes, and still only a dead run's", async () => {
@@ -812,4 +875,184 @@ test("the container sweep matches every kind liveNames makes, and still only a d
 	const swept = await sweepStaleContainers({ step, pid: 1, isAlive: () => false });
 	assert.deepEqual(swept, LIVE_CONTAINER_KINDS.map((k) => `container pi-dispatch-live-${k}-100-abc123`));
 	assert.deepEqual(await sweepStaleContainers({ step, pid: 1, isAlive: () => true }), []);
+});
+
+test("ephemeral: a held name is the daemon's own words; a second run that printed its ID and failed is not a held name (#344)", async () => {
+	// The first run holds (gone at once, its marker written); the second answers as `second` says.
+	const pair = (second) => {
+		let runs = 0;
+		const docker = fakeDocker({
+			ephemeral: async (args) => {
+				runs++;
+				if (runs === 2) return second(args);
+				const ws = args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : [])).find((v) => v.split(":")[1] === "/workspace").split(":")[0];
+				writeFileSync(join(ws, ".pi-dispatch-live-ephemeral-1"), args.at(-2));
+				return { code: 0, stdout: `${"d".repeat(64)}\n`, stderr: "" };
+			},
+			gone: async (args) => ({ code: 0, stdout: args.includes(`id=${"f".repeat(64)}`) ? `${"f".repeat(64)} created\n` : "" }),
+		});
+		return docker;
+	};
+	const ephemeralOf = async (docker) => (await runLiveProbes(probeArgs(docker, { ...instant() }))).verdicts.find((v) => v.property === "ephemeral");
+	const dockerSays = 'docker: Error response from daemon: Conflict. The container name "/pi-dispatch-live-ephemeral-4242-n0nce" is already in use by container "0123". You have to remove (or rename) that container to be able to reuse that name.';
+	const podmanSays = 'Error: creating container storage: the container name "pi-dispatch-live-ephemeral-4242-n0nce" is already in use by 0123. You have to remove that container to be able to reuse that name: that name is already in use';
+	for (const stderr of [dockerSays, podmanSays]) {
+		assert.equal((await ephemeralOf(pair(async () => ({ code: 125, stdout: "", stderr })))).cause, "name-held", stderr.slice(0, 20));
+	}
+	const own = pair(async () => ({ code: 125, stdout: `${"f".repeat(64)}\n`, stderr: "Error: unable to start container: OCI runtime error" }));
+	const ownVerdict = await ephemeralOf(own);
+	assert.deepEqual([ownVerdict.ok, ownVerdict.warn], [false, true], "its own container failing to start is not a held name");
+	assert.ok(own.calls.some((a) => a[0] === "rm" && a[2] === "f".repeat(64)), "and it is removed by the ID it printed");
+	const refusedOtherwise = await ephemeralOf(pair(async () => ({ code: 125, stdout: "", stderr: "docker: Error response from daemon: No such image" })));
+	assert.deepEqual([refusedOtherwise.ok, refusedOtherwise.warn], [false, true], "a refusal in other words is not read back");
+});
+
+test("awaitRemoved counts Podman's stopped as stopped, matches only the container it was given, and a stopped survivor fails (#344)", async () => {
+	const id = "a".repeat(64);
+	const stateAfterDeadline = async (state) => (await awaitRemoved({ step: async () => ({ code: 0, stdout: `${id} ${state}\n` }), id, ...instant(), deadlineMs: 300 })).state;
+	for (const state of ["exited", "Exited", "dead", "stopped"]) assert.equal(await stateAfterDeadline(state), "exited", state);
+	for (const state of ["running", "created", "removing", "paused", "stopping", ""]) assert.equal(await stateAfterDeadline(state), "present", state);
+	assert.equal((await awaitRemoved({ step: async () => ({ code: 0, stdout: `${"b".repeat(64)} exited\n` }), id, ...instant() })).state, "gone", "another container's line is not this one");
+	const stuck = fakeDocker({ gone: async (args) => ({ code: 0, stdout: `${args.find((a) => a.startsWith("id=")).slice(3)} stopped\n` }) });
+	assert.equal((await runLiveProbes(probeArgs(stuck, { removalDeadlineMs: 300 }))).verdicts.find((v) => v.property === "ephemeral").cause, "survived");
+	assert.equal(stuck.calls.filter((a) => a[0] === "ps" && a.includes("--no-trunc")).length, 4, "polled every 100 ms up to the deadline it was GIVEN, and no longer");
+});
+
+test("jobToJobIsolation: a listener not up yet cannot pass for a block, no address reads nothing, and the proxy is the configured one (#344)", async () => {
+	const j2jOf = async (docker, egress = LIVE_EGRESS) => (await runLiveProbes(probeArgs(docker, { egress, ...instant() }))).verdicts.find((v) => v.property === "jobToJobIsolation");
+	const answer = (a, word) => ({ code: 0, stdout: a.slice(a.indexOf(CONNECT_SCRIPT) + 2).map((t) => `${t} ${word(t)}`).join("\n") });
+	// Isolation BROKEN and peer2 slow to listen: the attempt is refused at its address, and the listener is up only later.
+	let controls = 0;
+	const slow = fakeDocker({
+		control: async (a) => (controls++, answer(a, () => (controls === 1 ? "econnrefused" : "reached"))),
+		connect: async (a) => answer(a, (t) => (t.startsWith("10.") ? "econnrefused" : t.endsWith(":3128") ? "connected" : "eai_again")),
+	});
+	const late = await j2jOf(slow);
+	assert.deepEqual([late.ok, late.warn], [false, true]);
+	assert.match(late.detail, /before the attempt/);
+
+	for (const [label, over] of [
+		["inspect gave no address", { "peer-inspect": async () => ({ code: 0, stdout: JSON.stringify({ elsewhere: { IPAddress: "10.1.1.1" } }) }) }],
+		["inspect failed", { "peer-inspect": async () => ({ code: 1, stdout: "" }) }],
+		["the control never reached peer2", { control: async (a) => answer(a, () => "econnrefused") }],
+		["the control printed nothing", { control: async () => ({ code: 0, stdout: "" }) }],
+		["the control failed", { control: async () => ({ code: 1, stdout: "" }) }],
+	]) {
+		const docker = fakeDocker(over);
+		const got = await j2jOf(docker);
+		assert.deepEqual([got.ok, got.warn], [false, true], label);
+	}
+	const noAddress = fakeDocker({ "peer-inspect": async () => ({ code: 0, stdout: "{}" }) });
+	await j2jOf(noAddress);
+	assert.ok(!noAddress.calls.some((a) => a[0] === "exec" && a[1] === "c".repeat(64)), "with no address there is no control to run");
+
+	const named = fakeDocker({ connect: async (a) => answer(a, (t) => (t.startsWith("my-proxy:") ? "connected" : "enetunreach")) });
+	assert.equal((await j2jOf(named, { ...LIVE_EGRESS, proxy: "my-proxy" })).ok, true);
+	for (const net of ["pi-dispatch-live-peer1-4242-n0nce-net", "pi-dispatch-live-peer2-4242-n0nce-net"]) {
+		assert.ok(named.calls.some((a) => a.join(" ") === `network connect ${net} my-proxy`), `PI_EGRESS_PROXY's name is the one attached to ${net}`);
+		assert.ok(named.calls.some((a) => a.join(" ") === `network disconnect -f ${net} my-proxy`), "and the one detached");
+	}
+	const attempt = named.calls.find((a) => a[0] === "exec" && a[1] === "b".repeat(64));
+	assert.equal(attempt[attempt.indexOf(CONNECT_SCRIPT) + 2], "my-proxy:3128", "and the one tried");
+});
+
+test("a peer network that stays is a note, one that never landed is silent, and a throw mid-phase removes peers, networks and fixture (#344)", async () => {
+	const stays = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": async () => ({ code: 0, stdout: "" }) });
+	const stayed = await runLiveProbes(probeArgs(stays, { egress: LIVE_EGRESS, ...instant() }));
+	assert.deepEqual(stayed.notes, ["peer1", "peer2"].map((k) => `the network pi-dispatch-live-${k}-4242-n0nce-net could not be removed: docker network rm pi-dispatch-live-${k}-4242-n0nce-net`));
+
+	const neverLanded = fakeDocker({ "network-create": async () => ({ code: null, stdout: "" }), "network-rm": async () => ({ code: 1, stdout: "" }) });
+	const quiet = await runLiveProbes(probeArgs(neverLanded, { egress: LIVE_EGRESS, ...instant() }));
+	assert.deepEqual(quiet.notes, [], "a create that timed out and left nothing is not a leak to report");
+	assert.ok(neverLanded.calls.some((a) => a.join(" ") === "network rm pi-dispatch-live-peer1-4242-n0nce-net"), "its removal is still tried: a create that timed out may have landed");
+	assert.ok(!neverLanded.calls.some((a) => a.join(" ").includes("peer2-4242-n0nce-net")), "and the second network is never started");
+
+	const throwing = fakeDocker({
+		connect: async () => {
+			throw new Error("spawn EMFILE");
+		},
+	});
+	const args = probeArgs(throwing, { egress: LIVE_EGRESS, ...instant() });
+	await assert.rejects(() => runLiveProbes(args), /EMFILE/);
+	const at = (pred) => throwing.calls.findIndex(pred);
+	const peer1Gone = at((a) => a[0] === "rm" && a[2] === "b".repeat(64));
+	const peer2Gone = at((a) => a[0] === "rm" && a[2] === "c".repeat(64));
+	assert.ok(peer1Gone > 0 && peer2Gone > 0, "both peers removed by ID");
+	assert.deepEqual(throwing.calls.filter((a) => a[0] === "network" && a[1] === "rm").map((a) => a[2]), ["pi-dispatch-live-peer1-4242-n0nce-net", "pi-dispatch-live-peer2-4242-n0nce-net"]);
+	assert.ok(at((a) => a[0] === "network" && a[1] === "rm") > Math.max(peer1Gone, peer2Gone), "then the networks");
+	assert.deepEqual(readdirSync(args.jobsDir), [], "then the fixture");
+});
+
+test("the peer and connect scripts do what the verdicts read, run by this node on loopback (#344)", async () => {
+	const { execFile, spawn } = await import("node:child_process");
+	const net = await import("node:net");
+	const listening = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+	const answering = net.createServer((s) => s.end("n0nce\n"));
+	const silent = net.createServer(() => {});
+	const [answerPort, silentPort] = [await listening(answering), await listening(silent)];
+	// Port 1 for the refusal: nothing unprivileged can listen there, so no other test's socket can take it mid-run.
+	const closedPort = 1;
+	try {
+		const out = await new Promise((resolve, reject) => execFile(process.execPath, ["--eval", CONNECT_SCRIPT, "n0nce", `127.0.0.1:${answerPort}`, `127.0.0.1:${silentPort}`, `127.0.0.1:${closedPort}`, "[::1]:x", "no-port"], { timeout: 15_000 }, (err, stdout) => (err ? reject(err) : resolve(stdout))));
+		assert.deepEqual([...parseConnectResults(out)], [[`127.0.0.1:${answerPort}`, "reached"], [`127.0.0.1:${silentPort}`, "connected"], [`127.0.0.1:${closedPort}`, "econnrefused"], ["[::1]:x", "unparsed"], ["no-port", "unparsed"]]);
+	} finally {
+		answering.close();
+		silent.close();
+	}
+
+	// A free port is found by binding and closing one, and on a loaded suite another socket can take it before the peer
+	// binds (PEER_SCRIPT swallows that error by design and simply never answers). So a peer that has not answered
+	// within its window is replaced on a fresh port, rather than waited on forever or failed on the first race.
+	const answeredOn = async () => {
+		const free = net.createServer();
+		const port = await listening(free);
+		await new Promise((resolve) => free.close(resolve));
+		const peer = spawn(process.execPath, ["--eval", PEER_SCRIPT, "n0nce", String(port), "60"], { stdio: ["ignore", "ignore", "pipe"] });
+		let stderr = "";
+		peer.stderr.on("data", (d) => (stderr += d));
+		const started = performance.now();
+		try {
+			let said = "";
+			while (!said.includes("n0nce") && peer.exitCode === null && performance.now() - started < 15_000) {
+				said = await new Promise((resolve) => {
+					const s = net.connect({ host: "127.0.0.1", port });
+					let data = "";
+					// Bounded whichever way it goes, and paced when nothing came back, so a port something else took
+					// neither hangs this loop nor spins it.
+					const done = () => {
+						s.destroy();
+						setTimeout(() => resolve(data), data ? 0 : 100);
+					};
+					s.setTimeout(2000, done);
+					s.on("data", (d) => (data += d));
+					s.on("end", done);
+					s.on("error", done);
+				});
+			}
+			return { said, detail: `port ${port}, ${Math.round(performance.now() - started)} ms, peer exit ${peer.exitCode}, stderr ${JSON.stringify(stderr)}` };
+		} finally {
+			peer.kill();
+		}
+	};
+	const attempts = [];
+	for (let i = 0; i < 3 && !attempts.at(-1)?.said.includes("n0nce"); i++) attempts.push(await answeredOn());
+	assert.equal(attempts.at(-1).said, "n0nce\n", `every connection is answered with the nonce (${attempts.map((a) => a.detail).join("; ")})`);
+});
+
+test("when the peer phase's own teardown throws, the outer finally still removes the other peer, THEN the networks, then the fixture (#344)", async () => {
+	const docker = fakeDocker({
+		rm: async (args) => {
+			if (args[2] === "b".repeat(64)) throw new Error("spawn EMFILE");
+			return { code: 0, stdout: `${args.at(-1)}\n`, stderr: "" };
+		},
+	});
+	const args = probeArgs(docker, { egress: LIVE_EGRESS });
+	await assert.rejects(() => runLiveProbes(args), /EMFILE/);
+	const at = (pred) => docker.calls.findIndex(pred);
+	const peer2Gone = at((a) => a[0] === "rm" && a[2] === "c".repeat(64));
+	assert.ok(peer2Gone > 0, "peer2 removed by the outer finally");
+	assert.deepEqual(docker.calls.filter((a) => a[0] === "network" && a[1] === "rm").map((a) => a[2]), ["pi-dispatch-live-peer1-4242-n0nce-net", "pi-dispatch-live-peer2-4242-n0nce-net"]);
+	assert.ok(at((a) => a[0] === "network" && a[1] === "rm") > peer2Gone, "networks only after every container");
+	assert.equal(docker.calls.filter((a) => a[0] === "rm" && a[2] === "b".repeat(64)).length, 1, "a removal already tried is not tried again");
+	assert.deepEqual(readdirSync(args.jobsDir), []);
 });

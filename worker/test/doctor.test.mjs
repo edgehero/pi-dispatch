@@ -3177,7 +3177,9 @@ test("doctor --live reads the eight back, reports the limits, leaves no fixture,
 	assert.match(text(), /⚠ read back on local: jobToJobIsolation not read back: PI_EGRESS is off, so jobs share docker's default bridge by design/);
 	assert.match(text(), /jobToJobIsolation needs PI_EGRESS armed/, "the limits line says why the peers did not run");
 	assert.doesNotMatch(text(), /are not probed/);
-	assert.match(text(), /✓ read back on local: limits of this read-back -- the probe runs `sleep`/);
+	assert.match(text(), /✓ read back on local: limits of this read-back -- every probe container runs a constant program \(`sleep`, `sh` or `node`\)/);
+	assert.match(text(), /ephemeral ran two short-lived containers under one name/);
+	assert.doesNotMatch(text(), /tried one pair of peers/, "no sentence claims the peers ran when they did not");
 	assert.match(text(), /✓ read back on local: the probe ran as the job image's own user \(uid 1001\)/, "issue #341: the uid-1001 shell's probe is the image's user, read back");
 	assert.match(text(), /it ran as the image's own user, decided for this shell \(uid 1001\)/);
 	assert.ok(text().indexOf("read back on local: starting pi-dispatch-live-probe-7-n from pi-job:latest") < text().indexOf("✓ read back on local: isolation"), "shown before its results");
@@ -3542,6 +3544,12 @@ test("doctor --live with the policy armed reads jobToJobIsolation back through t
 	const failed = reached.find((c) => /jobToJobIsolation does NOT hold/.test(c.label));
 	assert.ok(failed && !failed.warn, reached.map((c) => c.label).join("\n"));
 	assert.match(failed.fix, /reached another's across their own --internal networks/);
+
+	const noAddress = await liveChecks(env, { ...seams({}), spawn: fakeSpawn({ ...liveOk(), ...livePeersOk({}), "docker inspect --format={{json .NetworkSettings.Networks}}": { code: 1, output: "" }, ...green }) }, facts);
+	assert.ok(noAddress.some((c) => c.warn && /jobToJobIsolation not read back/.test(c.label)));
+	assert.doesNotMatch(noAddress.at(-1).label, /tried one pair of peers/, "peers that were not read back are not claimed as tried");
+	const proxyDown = await liveChecks(env, seams({}), { ...facts, egress: { ...facts.egress, proxyRunning: false } });
+	assert.match(proxyDown.at(-1).label, /jobToJobIsolation needs the egress proxy running/);
 });
 
 test("doctor --live gives each ephemeral failure its own fix: a survivor, a held name, a reused container, residue (#344)", async () => {
@@ -3555,8 +3563,7 @@ test("doctor --live gives each ephemeral failure its own fix: a survivor, a held
 	const cases = {
 		survived: { "docker ps -a --no-trunc --filter id=": (_c, args) => ({ code: 0, output: `${args.at(-3).slice(3)} exited\n` }) },
 		"name-held": {
-			"docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (args.at(-1) === "1" ? (writeMarker(args), { code: 0, output: `${"1".repeat(64)}\n` }) : { code: 125, output: "" }),
-			"docker ps -a --filter name=pi-dispatch-live-ephemeral-": (_c, args) => ({ code: 0, output: `${args[3].slice("name=".length)}\n` }),
+			"docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (args.at(-1) === "1" ? (writeMarker(args), { code: 0, output: `${"1".repeat(64)}\n` }) : { code: 125, output: 'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "0123".' }),
 		},
 		reused: { "docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (writeMarker(args), { code: 0, output: `${"9".repeat(64)}\n` }) },
 		residue: { "docker run --name=pi-dispatch-live-ephemeral-": (_c, args) => (writeMarker(args, args.at(-1) === "2" ? "residue" : undefined), second++, { code: 0, output: `${args.at(-1).repeat(64)}\n` }) },
@@ -3567,6 +3574,7 @@ test("doctor --live gives each ephemeral failure its own fix: a survivor, a held
 		const failed = checks.find((c) => /ephemeral does NOT hold/.test(c.label));
 		assert.ok(failed, `${cause}: ${checks.map((c) => c.label).join("\n")}`);
 		assert.ok(!failed.warn, cause);
+		assert.ok(typeof failed.fix === "string" && failed.fix.length > 0, `${cause}: a fix of its own, never undefined`);
 		fixes.add(failed.fix);
 	}
 	assert.equal(fixes.size, 4, "four causes, four fixes, none falling back to a generic one");

@@ -59,8 +59,9 @@ bridge and the proxy is a container, so it blocks the very path this design depe
 network per job makes job-to-job traffic **structurally impossible** instead. Two job containers on
 docker's default bridge can reach each other by IP today, so this removes an adjacency rather than adding
 one. It costs about 190 ms to build and 260 ms to tear down, against a container run of minutes.
-`pi-dispatch doctor --live` reads this back on your own daemon: two peers, each on its own job network, must
-reach the proxy and not each other, by name or by address (`jobToJobIsolation`).
+`pi-dispatch doctor --live` reads this back on your own daemon: a peer on its own job network must reach the
+proxy and none of the names and addresses of a second peer on another, while that second peer answers itself
+before and after the attempt (`jobToJobIsolation`, one direction, one pair).
 
 **TLS is never terminated.** The proxy sees the name a client asks for and no byte inside the tunnel, so it
 cannot read a credential and cannot count a token. A proxy that decrypts provider traffic is `OQ-011`'s
