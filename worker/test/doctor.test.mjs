@@ -3550,6 +3550,9 @@ test("doctor --live with the policy armed reads jobToJobIsolation back through t
 	assert.doesNotMatch(noAddress.at(-1).label, /tried one pair of peers/, "peers that were not read back are not claimed as tried");
 	const proxyDown = await liveChecks(env, seams({}), { ...facts, egress: { ...facts.egress, proxyRunning: false } });
 	assert.match(proxyDown.at(-1).label, /jobToJobIsolation needs the egress proxy running/);
+	const unreadable = await liveChecks(env, seams({}), { ...facts, egress: { ...facts.egress, armed: null } });
+	assert.ok(unreadable.some((c) => c.warn && /jobToJobIsolation not read back: PI_EGRESS could not be read/.test(c.label)), unreadable.map((c) => c.label).join("\n"));
+	assert.doesNotMatch(unreadable.at(-1).label, /needs PI_EGRESS armed|tried one pair of peers/, "a malformed PI_EGRESS is not said to be off, and no peers are claimed");
 });
 
 test("doctor --live gives each ephemeral failure its own fix: a survivor, a held name, a reused container, residue (#344)", async () => {
@@ -3575,7 +3578,9 @@ test("doctor --live gives each ephemeral failure its own fix: a survivor, a held
 		assert.ok(failed, `${cause}: ${checks.map((c) => c.label).join("\n")}`);
 		assert.ok(!failed.warn, cause);
 		assert.ok(typeof failed.fix === "string" && failed.fix.length > 0, `${cause}: a fix of its own, never undefined`);
+		assert.doesNotMatch(checks.at(-1).label, /ephemeral ran two short-lived containers/, `${cause}: the limits line does not claim two runs held`);
 		fixes.add(failed.fix);
+		if (cause === "name-held") assert.match(failed.fix, /removed whatever held the name/, "the fix does not send the operator to inspect a container the read-back already removed");
 	}
 	assert.equal(fixes.size, 4, "four causes, four fixes, none falling back to a generic one");
 });

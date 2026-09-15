@@ -3165,14 +3165,16 @@ export async function liveChecks(env, seams, facts) {
 	const contentTrust = env.DOCKER_CONTENT_TRUST === "1";
 	// Each sentence says only what DID happen: a probe that was not read back has its own line above saying why, and
 	// a sentence here claiming it ran would contradict that line.
-	const answered = (property) => result.verdicts.some((v) => v.property === property && v.warn !== true);
+	const verdictOf = (property) => result.verdicts.find((v) => v.property === property);
 	const unread = [
 		"every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint",
 		`it ran as ${jobUser.user ? `the job user ${jobUser.user}` : "the image's own user"}, decided for this shell${typeof ids.euid === "number" ? ` (uid ${ids.euid})` : ""}, and the worker service may run as another account`,
 		"it wrote to a fixture folder, not to any folder of yours",
 		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
-		...(answered("ephemeral") ? ["ephemeral ran two short-lived containers under one name, not two real jobs"] : []),
-		...(answered("jobToJobIsolation") ? ["jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs"] : []),
+		// Only a HELD ephemeral read ran both runs: a first run that survived, or a name held against the second, ran one.
+		...(verdictOf("ephemeral")?.ok === true ? ["ephemeral ran two short-lived containers under one name, not two real jobs"] : []),
+		// Any jobToJobIsolation ANSWER, held or reached, needed both peers started.
+		...(verdictOf("jobToJobIsolation") && verdictOf("jobToJobIsolation").warn !== true ? ["jobToJobIsolation tried one pair of peers on this daemon's job networks, from the first to the second only, not every pair of jobs"] : []),
 		...(facts.egress?.armed === false ? ["jobToJobIsolation needs PI_EGRESS armed, since without it jobs share the default bridge by design"] : []),
 		...(facts.egress?.armed === true && facts.egress?.proxyRunning === false ? ["jobToJobIsolation needs the egress proxy running, since a job network is built around it"] : []),
 		"secretsCustody and credentialTransit are not container properties",
@@ -3200,7 +3202,7 @@ const LIVE_FAIL_FIX = {
 	"localFolders:mount-not-writable": "the job user cannot write the outbox or session mount, which a local job and a resumed job write; the same ownership rule as the job directory applies",
 	"localFolders:not-yours": "a job's files land owned by another uid, so the worker cannot remove what a job leaves: run doctor as the worker's own account, and check the job-user line above",
 	"ephemeral:survived": "a container run with --rm was still listed after it exited: the daemon or a wrapper is not removing containers, so every job leaves one behind -- check `docker ps -a` and any docker wrapper or alias",
-	"ephemeral:name-held": "a container name stayed taken after its container was gone, so a retried job id cannot start: check the daemon's name reservation and any leftover created containers",
+	"ephemeral:name-held": "a container name stayed taken after its container was seen gone, so a retried job id cannot start. The read-back removed whatever held the name when it ended, so re-run `pi-dispatch doctor --live`; if it recurs, check the daemon for a stale name reservation (on Podman, `podman ps -a --external` also lists storage containers another tool made)",
 	"ephemeral:reused": "the daemon handed a second run the first run's container: a job would inherit another job's state -- do not run jobs on this daemon until that is explained",
 	"ephemeral:residue": "a new container found a file the previous one wrote to its own /tmp: a job would inherit another job's filesystem -- check the runtime's storage driver and any volume the image declares",
 	"jobToJobIsolation:reached": "one job's container reached another's across their own --internal networks: the network driver or firewall is not keeping job networks apart (on Podman, check netavark's firewall driver), so a job can talk to a concurrent job",

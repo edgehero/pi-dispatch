@@ -434,7 +434,9 @@ export function jobToJobIsolationVerdict({ armed, proxyRunning, networksCreated,
 	if (peerAddresses.length === 0) return notReadBack("jobToJobIsolation", "docker inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing");
 	if (peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
 	if (!["connected", "reached"].includes(fromPeer1.get(proxyTarget))) return notReadBack("jobToJobIsolation", `peer1 could not reach the proxy (${fromPeer1.get(proxyTarget)}), so an unreached peer proves nothing`);
-	const answered = (control) => control.size > 0 && [...control.values()].every((r) => r === "reached");
+	// Keyed by the addresses peer1 was given, never by whatever the control printed: a control that answered one of
+	// two addresses says nothing about the one peer1 was refused on.
+	const answered = (control) => peerAddresses.every((address) => control.get(address) === "reached");
 	if (!answered(controlBefore)) return notReadBack("jobToJobIsolation", "peer2 did not answer its own addresses before the attempt, so a refused connection may be a listener not yet up");
 	if (!answered(controlAfter)) return notReadBack("jobToJobIsolation", "peer2 did not answer its own addresses after the attempt, so its listener was not up throughout");
 	const accepted = peerTargets.filter((t) => fromPeer1.get(t) === "connected");
@@ -570,8 +572,12 @@ export async function runLiveProbes({
 		if (entry.done) return;
 		entry.done = true;
 		if (await removeJobNetworkWith(step, { network: entry.name, proxy })) return;
-		// Silent only when the network is not there at all (a create that never landed, or a rollback that worked).
-		if ((await step(["network", "inspect", entry.name]))?.code === 0) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
+		// Silent only when the daemon SAYS the network is not there (a create that never landed, or a rollback that worked):
+		// "not found" in both daemons' words (measured: Docker "network X not found", Podman "unable to find network with
+		// name or ID X: network not found"). An inspect that timed out or failed otherwise is no answer, so it is said.
+		const inspected = await step(["network", "inspect", entry.name]);
+		const absent = inspected?.code !== 0 && /not found/i.test(`${inspected?.stdout ?? ""}${inspected?.stderr ?? ""}`);
+		if (!absent) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
 	};
 	const makeFixture = (base) => {
 		const fixture = liveFixture(base);
@@ -652,7 +658,8 @@ export async function runLiveProbes({
 			// A HELD NAME is the daemon refusing the create for the name, in its own words (measured: Docker "Conflict. ...
 			// is already in use", Podman "that name is already in use"). Not a listed container: after the first run was
 			// seen gone, the only container listed under this run's name is this run's own failed one.
-			const nameHeld = !started && typeof result?.code === "number" && /already in use/i.test(`${result?.stdout ?? ""}${result?.stderr ?? ""}`);
+			// A run that printed an ID made its own container, so whatever failed after that was not the name.
+			const nameHeld = !started && entry.id === null && /already in use/i.test(`${result?.stdout ?? ""}${result?.stderr ?? ""}`);
 			const removal = entry.id === null ? null : await awaitRemoved({ step, id: entry.id, now, delay, deadlineMs: removalDeadlineMs });
 			// SEEN GONE: never removed again, so a later `rm -f` cannot land on a new container that took its ID.
 			if (removal?.state === "gone") entry.done = true;
@@ -671,7 +678,7 @@ export async function runLiveProbes({
 		const ephemeral = ephemeralVerdict({ first, second, markers: { first: marker(1), second: marker(2) }, nonce });
 
 		// --- the peers (issue #344): two job networks, two peers, one attempt each way ---
-		let jobToJobIsolation = jobToJobIsolationVerdict({ armed: egress?.armed === true, proxyRunning: egress?.proxyRunning });
+		let jobToJobIsolation = jobToJobIsolationVerdict({ armed: egress?.armed, proxyRunning: egress?.proxyRunning });
 		if (peersWanted) {
 			const reading = { armed: true, proxyRunning: egress?.proxyRunning, networksCreated: false, peersStarted: false };
 			const peerNetworks = [];
@@ -810,7 +817,8 @@ export async function sweepStaleContainers({ step, pid, isAlive }) {
  * of `liveNames`, derived) and a PID no longer alive. What is attached to it decides what happens: a live-probe
  * CONTAINER still on it means a run that is not over (a PID from another namespace reads as dead here), so nothing is
  * touched; otherwise every endpoint still attached (a proxy, whatever `PI_EGRESS_PROXY` named when that run started)
- * is detached and the network is removed WITHOUT `-f`. One that stays is a note carrying the command, never silence.
+ * is detached, each one named in what is reported, and the network is removed WITHOUT `-f`. One that stays is a note
+ * carrying the command, never silence.
  */
 export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 	const listed = await step(["network", "ls", "--filter", `name=${LIVE_PREFIX}`, "--format", "{{.Name}}"]);
@@ -833,8 +841,10 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 		}
 		if (attached.some((n) => probeContainer.test(n))) continue;
 		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
-		if ((await step(["network", "rm", name]))?.code === 0) swept.push(`network ${name}`);
-		else notes.push(`the stale network ${name} could not be removed: docker network rm ${name}`);
+		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.
+		const detached = attached.length > 0 ? ` (after detaching ${attached.join(", ")})` : "";
+		if ((await step(["network", "rm", name]))?.code === 0) swept.push(`network ${name}${detached}`);
+		else notes.push(`the stale network ${name}${detached} could not be removed: docker network rm ${name}`);
 	}
 	return swept;
 }

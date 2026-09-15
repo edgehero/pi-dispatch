@@ -346,6 +346,8 @@ function fakeDocker(over = {}, { id = ID } = {}) {
 				return { code: 0, stdout: `${args.at(-1)}\n`, stderr: "" };
 			case "network-ls":
 				return { code: 0, stdout: "", stderr: "" };
+			case "network-inspect":
+				return { code: 1, stdout: "", stderr: `Error response from daemon: network ${args.at(-1)} not found\n` };
 			case "network-create":
 			case "network-connect":
 			case "network-disconnect":
@@ -708,6 +710,8 @@ test("jobToJobIsolationVerdict: a peer reached fails before any missing reading;
 		["listener not up before the attempt", { fromPeer1: fromPeer1({ "10.99.0.3:47431": "econnrefused" }), controlBefore: new Map([["10.99.0.3:47431", "econnrefused"]]), controlAfter: answered }],
 		["no control before", { fromPeer1: fromPeer1(), controlBefore: new Map(), controlAfter: answered }],
 		["listener gone after", { fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: new Map() }],
+		["a control that answered one of two addresses", { peerAddresses: ["10.99.0.3:47431", "[fd00::3]:47431"], peerTargets: [...peerTargets, "[fd00::3]:47431"], fromPeer1: fromPeer1({ "[fd00::3]:47431": "econnrefused" }), controlBefore: answered, controlAfter: answered }],
+		["a control that answered only targets peer1 never tried", { fromPeer1: fromPeer1(), controlBefore: new Map([["127.0.0.1:47431", "reached"]]), controlAfter: new Map([["127.0.0.1:47431", "reached"]]) }],
 		["accepted without the nonce", { fromPeer1: fromPeer1({ "10.99.0.3:47431": "connected" }), controlBefore: answered, controlAfter: answered }],
 	]) {
 		const got = jobToJobIsolationVerdict({ ...base, ...over });
@@ -717,7 +721,7 @@ test("jobToJobIsolationVerdict: a peer reached fails before any missing reading;
 });
 
 test("parseConnectResults and peerTargetsOf read what the scripts and inspect print, and nothing else", () => {
-	assert.deepEqual([...parseConnectResults("a:1 reached\n[fd00::3]:47431 enetunreach\n\ngarbage\nb:2 \u001b[31mreached\nc:3 Reached\n")], [["a:1", "reached"], ["[fd00::3]:47431", "enetunreach"]], "a result that is not a plain lower-case word is dropped");
+	assert.deepEqual([...parseConnectResults("a:1 reached\n[fd00::3]:47431 enetunreach\n\ngarbage\nb:2 \u001b[31mreached\nc:3 Reached\nd:4 enetunreach\u001b[2J\n")], [["a:1", "reached"], ["[fd00::3]:47431", "enetunreach"]], "a result that is not a plain lower-case word is dropped");
 	const inspect = JSON.stringify({ net: { IPAddress: "10.99.0.3", GlobalIPv6Address: "fd00::3", DNSNames: ["peer2", "35b76264799a"], Aliases: ["alias"] }, other: { IPAddress: "172.17.0.2" } });
 	assert.deepEqual(peerTargetsOf(inspect, { network: "net", name: "peer2" }), {
 		targets: ["peer2:47431", "35b76264799a:47431", "alias:47431", "10.99.0.3:47431", "[fd00::3]:47431"],
@@ -851,17 +855,17 @@ test("sweepStaleNetworks removes only a dead run's peer networks: never one a pr
 	};
 	const notes = [];
 	const swept = await sweepStaleNetworks({ step, pid: 300, isAlive: (p) => p === 200, notes });
-	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net", "network pi-dispatch-live-peer2-100-abc123-net"]);
+	assert.deepEqual(swept, ["network pi-dispatch-live-peer1-100-abc123-net (after detaching an-old-proxy-name)", "network pi-dispatch-live-peer2-100-abc123-net"], "every endpoint it detached is said: one may be a container this sweep did not make");
 	assert.deepEqual(calls.filter((a) => a[1] === "disconnect" || a[1] === "rm"), [
 		["network", "disconnect", "-f", "pi-dispatch-live-peer1-100-abc123-net", "an-old-proxy-name"],
 		["network", "rm", "pi-dispatch-live-peer1-100-abc123-net"],
 		["network", "rm", "pi-dispatch-live-peer2-100-abc123-net"],
 	], "whatever that run attached is detached, and a network a probe container is still on is not touched");
 	assert.deepEqual(notes, []);
-	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: "{}" } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
+	const stays = async (args) => (args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : args[1] === "inspect" ? { code: 0, stdout: JSON.stringify({ e9: { Name: "some-other-container" } }) } : { code: args[1] === "rm" ? 1 : 0, stdout: "" });
 	const stayNotes = [];
 	assert.deepEqual(await sweepStaleNetworks({ step: stays, pid: 300, isAlive: () => false, notes: stayNotes }), [], "a network that would not go is not reported as removed");
-	assert.deepEqual(stayNotes, ["the stale network pi-dispatch-live-peer1-100-abc123-net could not be removed: docker network rm pi-dispatch-live-peer1-100-abc123-net"]);
+	assert.deepEqual(stayNotes, ["the stale network pi-dispatch-live-peer1-100-abc123-net (after detaching some-other-container) could not be removed: docker network rm pi-dispatch-live-peer1-100-abc123-net"]);
 	const unreadable = async (args) => (calls.push(args), args[1] === "ls" ? { code: 0, stdout: "pi-dispatch-live-peer1-100-abc123-net" } : { code: 1, stdout: "" });
 	const before = calls.length;
 	assert.deepEqual(await sweepStaleNetworks({ step: unreadable, pid: 300, isAlive: () => false }), []);
@@ -899,6 +903,8 @@ test("ephemeral: a held name is the daemon's own words; a second run that printe
 	for (const stderr of [dockerSays, podmanSays]) {
 		assert.equal((await ephemeralOf(pair(async () => ({ code: 125, stdout: "", stderr })))).cause, "name-held", stderr.slice(0, 20));
 	}
+	const ownWords = pair(async () => ({ code: 125, stdout: `${"f".repeat(64)}\n`, stderr: "Error: unable to start container: listen tcp: bind: address already in use" }));
+	assert.notEqual((await ephemeralOf(ownWords)).cause, "name-held", "a run that printed its own ID made its container: whatever is 'already in use' after that is not the name");
 	const own = pair(async () => ({ code: 125, stdout: `${"f".repeat(64)}\n`, stderr: "Error: unable to start container: OCI runtime error" }));
 	const ownVerdict = await ephemeralOf(own);
 	assert.deepEqual([ownVerdict.ok, ownVerdict.warn], [false, true], "its own container failing to start is not a held name");
@@ -960,6 +966,14 @@ test("a peer network that stays is a note, one that never landed is silent, and 
 	const stays = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": async () => ({ code: 0, stdout: "" }) });
 	const stayed = await runLiveProbes(probeArgs(stays, { egress: LIVE_EGRESS, ...instant() }));
 	assert.deepEqual(stayed.notes, ["peer1", "peer2"].map((k) => `the network pi-dispatch-live-${k}-4242-n0nce-net could not be removed: docker network rm pi-dispatch-live-${k}-4242-n0nce-net`));
+
+	for (const [label, inspect] of [["an inspect that timed out", async () => ({ code: null, stdout: "" })], ["an inspect the daemon failed", async () => ({ code: 1, stdout: "", stderr: "Error response from daemon: context deadline exceeded" })]]) {
+		const unknown = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": inspect });
+		const said = await runLiveProbes(probeArgs(unknown, { egress: LIVE_EGRESS }));
+		assert.equal(said.notes.length, 2, `${label} is no answer, so the network that may still be there is said`);
+	}
+	const podmanAbsent = fakeDocker({ "network-rm": async () => ({ code: 1, stdout: "" }), "network-inspect": async (a) => ({ code: 125, stdout: "", stderr: `Error: unable to find network with name or ID ${a.at(-1)}: network not found` }) });
+	assert.deepEqual((await runLiveProbes(probeArgs(podmanAbsent, { egress: LIVE_EGRESS }))).notes, [], "Podman's words for a network that is not there");
 
 	const neverLanded = fakeDocker({ "network-create": async () => ({ code: null, stdout: "" }), "network-rm": async () => ({ code: 1, stdout: "" }) });
 	const quiet = await runLiveProbes(probeArgs(neverLanded, { egress: LIVE_EGRESS, ...instant() }));
@@ -1055,4 +1069,24 @@ test("when the peer phase's own teardown throws, the outer finally still removes
 	assert.ok(at((a) => a[0] === "network" && a[1] === "rm") > peer2Gone, "networks only after every container");
 	assert.equal(docker.calls.filter((a) => a[0] === "rm" && a[2] === "b".repeat(64)).length, 1, "a removal already tried is not tried again");
 	assert.deepEqual(readdirSync(args.jobsDir), []);
+});
+
+test("the constant ephemeral script is pinned literally: its && list is what makes an unwritable /tmp read as not read back (#344)", () => {
+	assert.deepEqual(EPHEMERAL_SCRIPT.split("\n"), [
+		'if [ -e /tmp/.pi-dispatch-live-ephemeral ]; then printf residue > "/workspace/.pi-dispatch-live-ephemeral-$2"; exit 0; fi',
+		'printf %s "$1" > /tmp/.pi-dispatch-live-ephemeral && printf %s "$1" > "/workspace/.pi-dispatch-live-ephemeral-$2"',
+	]);
+});
+
+test("jobToJobIsolation reads a malformed PI_EGRESS as unreadable, not off, and runs its peers when the proxy's state was not read (#344)", async () => {
+	const unreadable = fakeDocker();
+	const verdict = (await runLiveProbes(probeArgs(unreadable, { egress: { armed: null, results: [] } }))).verdicts.find((v) => v.property === "jobToJobIsolation");
+	assert.match(verdict.detail, /PI_EGRESS could not be read/);
+	assert.doesNotMatch(verdict.detail, /is off/);
+	assert.ok(!unreadable.calls.some((a) => a[0] === "network" && a[1] === "create"), "and builds nothing");
+
+	const unknownProxy = fakeDocker();
+	const ran = (await runLiveProbes(probeArgs(unknownProxy, { egress: { ...LIVE_EGRESS, proxyRunning: null } }))).verdicts.find((v) => v.property === "jobToJobIsolation");
+	assert.equal(ran.ok, true, "a proxy state doctor did not read is not a proxy seen down");
+	assert.ok(unknownProxy.calls.some((a) => a.includes(PEER_SCRIPT)));
 });
