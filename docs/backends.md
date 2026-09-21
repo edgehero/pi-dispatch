@@ -121,8 +121,10 @@ ones adapters get wrong:
   sets are named here rather than one:
 
   <!-- BACKENDS-JOB-USER-TIMING -->
-  - **Stops the boot**: `rootless`, `userns-remap`, `worker-is-root`, `desktop-linux-userns`. No uid on such
-    a host can serve a job, so the worker exits rather than picking up work it could only refuse. That exit
+  - **Stops the boot**: `rootless`, `userns-remap`, `worker-is-root`, `desktop-linux-userns`. Nothing a job
+    may run as works, so the worker exits rather than picking up work it could only refuse. Three of these
+    are facts about the daemon; the root-worker case is a fact about the account the worker itself runs as,
+    and is fixed by changing that account rather than the host. That exit
     is conditional, and the condition is real rather than decorative: it happens while `local` is the default
     venue (`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs`, read by `jobUserBootRefusal` in
     `start.mjs`), and a deployment whose default venue was elsewhere would boot and refuse each local job
@@ -131,13 +133,13 @@ ones adapters get wrong:
     worker boots, and each local job returns a policy refusal naming the cause. The last three are on the
     `--user` path only, so a worker that is already uid 1001, the image's own uid, meets none of them:
     nothing is passed, and its primary group is not compared.
-  <!-- /BACKENDS-JOB-USER-TIMING -->
 
   A daemon that does not answer is in neither set. The decision is `unknown`, it is never cached and never a
   boot exit, so a unit carrying `RestartPreventExitStatus=2` is not stranded by a daemon that is still
   starting. A job picked up while the answer is still unknown is an infrastructure **retry**, not a refusal
   (`CONST-RETRY-INFRA-ONLY`): the processor throws, so the queue tries again once the daemon answers, where a
   policy refusal returns and is final.
+  <!-- /BACKENDS-JOB-USER-TIMING -->
 
   `pi-dispatch doctor` names the answer for the shell it runs in, and `pi-dispatch doctor --live` runs its
   probe as that user and reads it back. An adapter for another runtime answers the same question in its own
@@ -281,9 +283,13 @@ declaration is what an operator reads, so a venue that runs jobs without one wou
 reason about. An adapter that already has to land a declaration here loses nothing by registering here too.
 The code itself can still live anywhere.
 
-What would reopen it is a venue whose adapter cannot be in this repository at all. A `podman` backend is the
-live example: in-tree it needs no export, out-of-tree it needs exactly the published entry point this
-decision declines, so issue #354 is where that lands rather than here.
+Issue #342 asked for this to be decided alongside the Podman route rather than after it, and it is: issue
+#354's `podman` backend is specified in-tree, declaring its own words in the backend table and implementing
+the adapter contract on this page, so it needs no export and nothing here blocks it.
+
+What would reopen the question is an operator who installs this package from npm and wants to register an
+adapter without a checkout of this repository at all. That is the case an export would serve, and nobody has
+asked for it yet.
 
 `startWorker` builds the registry itself:
 
