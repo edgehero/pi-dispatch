@@ -74,7 +74,7 @@ import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, decideJobUser, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
@@ -3375,22 +3375,27 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 			// DynamicUser= uid) is not guessed at here, because guessing produced wrong texts for every case the guess
 			// missed. What covers the gap is not universal and the comment used to say it was: a root worker refuses to
 			// BOOT only while `local` is the default venue (`BOOT_REFUSING_JOB_USER_CAUSES`); otherwise it boots and
-			// refuses each local job with `worker-is-root`. An explicit `User=0` is the case doctor CAN be certain about,
-			// and it gets that cause's own fix text below rather than an instruction to go and read it elsewhere.
+			// refuses each local job with `worker-is-root`. An explicit `User=` IS compared, and for uid 0 the fix
+			// below states the refusal instead of sending the operator to find it.
 			const user = readUnitUser(text, platform);
 			if (user === null) continue;
 			const uid = /^\d+$/.test(user) ? Number(user) : uidOf(user, passwd);
 			if (uid !== null && uid !== ids.euid) {
+				// UID 0 gets the ANSWER instead of the instruction (issue #348): "re-run doctor as that account" is
+				// true for any other uid and roundabout for this one, since doctor as root would only print a refusal
+				// this line can state outright. What it must NOT do is assume that refusal is `worker-is-root`. That
+				// row is the LAST in `decideJobUser`, so a Mac, a docker endpoint that is not on this host, a rootless
+				// or userns-remapped daemon and Docker Desktop on Linux all answer for uid 0 BEFORE it is reached, and
+				// the first two are not refusals at all. So ask the same function, with the same facts this shell has
+				// already read, what uid 0 gets HERE. A refusal prints that cause's own `JOB_USER_FIX` text, so the
+				// two can never drift; anything else keeps the instruction, because there is then nothing to state.
+				const asRoot = uid === 0 ? decideJobUser({ platform, ...(ids.release !== undefined ? { release: ids.release } : {}), euid: 0, egid: 0, endpoint, daemon, socket }) : null;
+				const rootFix = asRoot?.mode === "unmappable" ? JOB_USER_FIX[asRoot.cause] : null;
 				checks.push({
 					ok: false,
 					warn: true,
 					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
-					// UID 0 gets the ANSWER instead of the instruction (issue #348). "Re-run as that account"
-					// is true for any other uid and roundabout for this one: running doctor as root would just
-					// print the same refusal this fix can state outright, and the refusal is the whole point.
-					// The text is `JOB_USER_FIX`'s own, so the two cannot drift into saying different things
-					// about the same cause.
-					fix: uid === 0 ? JOB_USER_FIX["worker-is-root"] : `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
+					fix: rootFix ?? `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
 		}

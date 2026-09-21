@@ -208,7 +208,9 @@ test("every cause has fixed text, and a refusal carries no CLI output", () => {
 	assert.deepEqual(Object.keys(JOB_USER_FIX).sort(), ["any-uid-unsupported", "desktop-linux-userns", "docker-group", "root-group", "rootless", "runtime-unreadable", "userns-remap", "worker-is-root"]);
 	assert.match(jobUserRefusal("docker-group"), /log out and back in rather than `newgrp docker`/);
 	assert.match(jobUserRefusal("any-uid-unsupported"), /does not declare `anyUid`/);
-	// No text points at a document that does not exist yet.
+	// No text points at `docs/podman.md`. Written when that page did not exist yet; it does now (`dad1f1d`), and the
+	// rule is kept for the reason it still holds: a fix an operator reads in a refusal has to be actionable where they
+	// are standing, not a pointer to a page that then has to be found, and doctor's own fix strings are unconstrained.
 	for (const [cause, text] of Object.entries(JOB_USER_FIX)) assert.ok(!/docs\/podman\.md/.test(text), cause);
 	assert.match(jobUserRefusal({ cause: "rootless" }), /^Refused: /);
 });

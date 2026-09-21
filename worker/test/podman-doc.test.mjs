@@ -12,15 +12,22 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../
 // and its word is capped by `effectiveWord` under them -- a word the worker could never print on that host now fails
 // here. What stays unpinned is the rest of a cell's sentence, which is prose about a measurement.
 //
-// WHAT THIS FILE DELIBERATELY DOES NOT PIN, and it is a measurement rather than a preference: prose about WHEN a
-// job-user refusal fires. The page got that subtly wrong three review rounds running under #345, and each round's
-// answer was a wider regex over the same sentences. A regex over prose pins a claim's SHAPE, never its truth, so
-// every widening bought one more way to be wrong in the same place. Commit `9cb2bce` took the simpler rule instead:
-// the page stopped describing timing at all and handed it to what owns it (`docs/backends.md`,
-// `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and `BOOT_REFUSING_JOB_USER_CAUSES` for the list itself). So the
-// answer to the NEXT recurrence is FEWER SUCH SENTENCES, not a bigger regex: bolt the claim to what a function
-// returns, the way every test below is bolted, or move it off this page. Widening `REFUSED_ENTRY_POINT` to admit a
-// fourth wording would be a fourth round of the thing that already failed three times.
+// WHAT THIS FILE DELIBERATELY DOES NOT PIN, and the history is worth the lines because it keeps recurring: prose
+// about WHEN a job-user refusal fires. The page got that subtly wrong three review rounds running under #345
+// (`9cb2bce`'s own message says so), and the eventual answer was NOT a bigger regex here. Nothing in this file was
+// ever widened to chase it: `REFUSED_ENTRY_POINT` below was written once and has been byte-identical since, and it
+// governs the ENTRY-POINTS table anyway, while the refusal block's own test reads only the `Refused:` lines. The
+// timing clauses were never in range of either. `9cb2bce` moved the timing PARAGRAPHS off the page instead, onto
+// what owns them (`docs/backends.md`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and
+// `BOOT_REFUSING_JOB_USER_CAUSES` for the list itself), and that is the shape of the answer.
+//
+// It did not end there, which is the part to remember: the page still carries a timing clause in each of its eight
+// refusal headings, and the very next commit (`0335146`) had to correct one of them from "(at boot)" to "(at boot
+// when local is the default venue, else per job)" -- a fourth round of the same defect, after the round that was
+// supposed to have settled it. Those headings are unpinned on purpose, because a regex over them would pin their
+// SHAPE and never their truth, and a green regex over a false sentence is worse than no test. So the answer to the
+// next recurrence is to DERIVE the claim from what a function returns, the way every test below is derived, or to
+// delete the sentence. Adding a regex over prose here would be repeating what has already failed four times.
 
 const doc = readFileSync(new URL("../../docs/podman.md", import.meta.url), "utf8");
 

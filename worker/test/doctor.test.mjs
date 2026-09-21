@@ -3503,10 +3503,10 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	const unitPath = "/etc/systemd/system/pi-dispatch-worker.service";
 	const unit = `[Service]\nUser=pi\nWorkingDirectory=${deployDir}\n`;
 	const PASSWD = () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\nop:x:1234:1234::/home/op:/bin/sh\n";
-	const run = async (body, { passwd = PASSWD, path = unitPath, cwd = deployDir } = {}) => {
+	const run = async (body, { passwd = PASSWD, path = unitPath, cwd = deployDir, info = ROOTFUL_INFO } = {}) => {
 		const { out, text } = capture();
 		await runDoctor(ghEnv(), {
-			...ghDeps(out, { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }),
+			...ghDeps(out, { ...infoPlan(info), ...imageLabels("anyUid"), ...green }),
 			cwd,
 			home,
 			platform: "linux",
@@ -3536,15 +3536,30 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	// the line is about is that the worker runs as an account whose JOB USER decision differs from this
 	// shell's, and for root it differs the most: `worker-is-root` refuses every local job.
 	for (const spelling of ["User=root", "User=0"]) {
+		// The unit's OWN spelling is echoed back, so the expectation is derived from it rather than written as
+		// an alternation: `/(root|0)/` matched both spellings for either input, which let a build that printed
+		// `0` for `User=root` -- no longer the line the operator can find in their unit file -- stay green.
+		const name = spelling.slice("User=".length);
 		const text = await run(unit.replace("User=pi", spelling));
-		assert.match(text, /runs the worker as (root|0) \(uid 0\)/, spelling);
+		assert.match(text, new RegExp(`runs the worker as ${name} \\(uid 0\\)`), spelling);
 		assert.match(text, warned, spelling);
-		// And uid 0 gets the ANSWER rather than the instruction (item 3). "Re-run as that account" is true
-		// for any other uid and roundabout for this one: doctor as root would print the same refusal this
-		// line can state outright. The text is `JOB_USER_FIX`'s own, so the two cannot drift.
-		assert.ok(text.includes(JOB_USER_FIX["worker-is-root"]), spelling);
+		// And uid 0 gets the ANSWER rather than the instruction (item 3). Asserted on the line UNDER the label
+		// rather than anywhere in the output: `worker-is-root`'s text is also what the `local:` check prints
+		// when the shell itself is root, so a whole-output search would pass for the wrong reason the day this
+		// fixture's uid changes, while proving nothing about this check.
+		const lines = text.split("\n");
+		const at = lines.findIndex((line) => /runs the worker as/.test(line));
+		assert.ok(lines[at + 1].includes(JOB_USER_FIX["worker-is-root"]), `${spelling}: ${lines[at + 1]}`);
 		assert.doesNotMatch(text, /sudo -u (root|0) pi-dispatch doctor/, `${spelling}: not the roundabout version`);
 	}
+	// And the fix is what THIS HOST would tell uid 0, never `worker-is-root` assumed. `decideJobUser` reaches
+	// that row last, so a rootless daemon answers for uid 0 several rows earlier: the fix must be that cause's
+	// text, and naming a root worker here would be advice for a refusal this deployment does not get.
+	const rootless = await run(unit.replace("User=pi", "User=root"), { info: ROOTLESS_INFO });
+	const rootlessLines = rootless.split("\n");
+	const rootlessAt = rootlessLines.findIndex((line) => /runs the worker as root/.test(line));
+	assert.ok(rootlessLines[rootlessAt + 1].includes(JOB_USER_FIX["rootless"]), rootlessLines[rootlessAt + 1]);
+	assert.ok(!rootlessLines[rootlessAt + 1].includes(JOB_USER_FIX["worker-is-root"]), "not a cause this daemon gives uid 0");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");

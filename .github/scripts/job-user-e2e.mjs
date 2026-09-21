@@ -78,7 +78,7 @@ assert.deepEqual(doctored.forLive, { run: true, user: jobUser.user }, JSON.strin
 assert.ok(doctored.checks.some((c) => c.ok && c.label.includes(`uid:gid ${jobUser.user}`)), doctored.checks.map((c) => c.label).join("\n"));
 say(`decided --user=${jobUser.user} with HOME=${jobUser.home} (socket gid ${socket?.gid ?? "unread"}), and doctor decides the same`);
 
-// --- 3. real workspaces: a forge clone with a staged (cold) session, and a local folder ----------------------------
+// --- 3. real workspaces: a forge clone cold and then resumed, and a local folder ----------------------------------
 const scratch = mkdtempSync(join(tmpdir(), "pd-e2e-"));
 // A failed assertion exits without reaching the removal at the end; the scratch repos go either way.
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
@@ -104,7 +104,7 @@ const prepareWorkspace = makePrepareWorkspace({
 	preparers: makeForgePreparers({ prepareForge: (job, token, opts) => prepareGithubWorkspace(job, token, { ...opts, remoteUrlFor: () => `file://${bare}` }) }),
 });
 const forgeJob = { kind: "github", repo: "owner/name", resume: true, target: { type: "issue", number: 7, title: "e2e", body: "e2e" }, provider: "anthropic" };
-const forge = await prepareWorkspace(forgeJob, "unused-token", { queueJobId: "gh-e2e", jobUser });
+const forge = await prepareWorkspace(forgeJob, "unused-token", { queueJobId: "gh-e2e", jobUser, piVersion: img.piVersion });
 assert.ok(forge.jobDir && forge.session?.hostDir, `the forge job prepared a session: ${JSON.stringify(Object.keys(forge))}`);
 assert.equal(statSync(forge.jobDir).mode & 0o777, 0o700, "a job dir is a 0700 mkdtemp");
 assert.deepEqual(forge.sandbox.jobUser, jobUser, "the retention stamp carries the job user");
@@ -113,12 +113,17 @@ assert.deepEqual(forge.sandbox.jobUser, jobUser, "the retention stamp carries th
 // prepare above staged a 0-byte transcript; writing a real one into it and promoting it is exactly how a
 // `completed` run ends, so the second prepare below reads what a second trigger on this issue would read.
 const RESUMED_MARKER = "pd-e2e-resumed-transcript";
-writeFileSync(join(forge.session.hostDir, "current.jsonl"), `${JSON.stringify({ type: "session", version: 3, id: RESUMED_MARKER, cwd: "/workspace" })}\n`);
+// `timestamp` is not optional dressing: `readCanonical`'s conversation-age gate fails CLOSED on a header it
+// cannot read one, so a header without it is a transcript no deployment setting `PI_SESSION_MAX_AGE_DAYS`
+// would resume. This store leaves that bound off, so the fixture would pass either way, which is exactly
+// why it is worth spending one field to make the shape a real one.
+writeFileSync(join(forge.session.hostDir, "current.jsonl"), `${JSON.stringify({ type: "session", version: 3, id: RESUMED_MARKER, timestamp: new Date().toISOString(), cwd: "/workspace" })}\n`);
 assert.ok(img.piVersion, `${image} declares no pi version, so nothing could ever resume on it`);
 const promoted = store.promoteSession(forge.session, { piVersion: img.piVersion });
 assert.equal(promoted.promoted, true, JSON.stringify(promoted));
-// `piVersion` is handed in HERE and not to the cold prepare above, which is what keeps the two shapes distinct:
-// the store cold-starts an image that declares no version, so the first call could not have resumed anyway.
+// Both prepares are handed `piVersion`, exactly as the wired worker does, so the only difference between the
+// two shapes is the one under test. The first cold-starts because the store is EMPTY (`readCanonical` answers
+// `absent` on its first gate), not because anything was withheld from it.
 const resumed = await prepareWorkspace(forgeJob, "unused-token", { queueJobId: "gh-e2e-resumed", jobUser, piVersion: img.piVersion });
 assert.equal(resumed.session?.resume, true, `the second prepare must resume: ${JSON.stringify(resumed.session)}`);
 assert.equal(statSync(resumed.session.hostDir).mode & 0o777, 0o700, "a staged session dir is 0700");
@@ -131,7 +136,7 @@ git(folder, "add", "notes.md");
 git(folder, "commit", "-q", "-m", "local");
 const local = await prepareWorkspace({ kind: "local", folder, task: "e2e" }, null, { queueJobId: "local-e2e", jobUser });
 assert.ok(local.outboxDir, "the local job has an outbox");
-say(`prepared a forge clone (session ${forge.session.resume ? "resumed" : "cold"}) and a local folder, both under a 0700 job dir`);
+say(`prepared a forge clone cold (${forge.session.reason}), the same job resumed (${resumed.session.reason}), and a local folder, each under its own 0700 job dir`);
 
 // --- 4. every mount, used as the job user, and /job still read-only to its owner ----------------------------------
 // ONE COMMAND PER LINE, deliberately: under `set -e` a failing command that is not the last of an `&&` list does not
@@ -176,9 +181,12 @@ const readAsJobUser = readTranscript(`pd-e2e-resumed-${process.pid}`, jobUser.us
 assert.equal(readAsJobUser.status, 0, `${readAsJobUser.stdout}${readAsJobUser.stderr}`);
 assert.ok(readAsJobUser.stdout.includes(RESUMED_MARKER), `the job user read the resumed transcript back: ${readAsJobUser.stdout}`);
 // NEGATIVE CONTROL: the same read as the image's own uid, which owns neither the 0700 session directory nor the
-// transcript the worker copied into it. A mode that let this one through would hand every image the store.
+// transcript the worker copied into it. A mode that let this one through would hand the image a transcript the
+// host staged for another account. The REASON is asserted, not just the exit code, on the runner control's own
+// precedent below: a container that never started also exits non-zero and would otherwise pass this.
 const readAsImage = readTranscript(`pd-e2e-resumed-control-${process.pid}`, null);
 assert.notEqual(readAsImage.status, 0, `the image's own user must not read the transcript: ${readAsImage.stdout}${readAsImage.stderr}`);
+assert.match(`${readAsImage.stdout}${readAsImage.stderr}`, /permission denied/i, `refused for the mode, not for failing to start: ${readAsImage.stdout}${readAsImage.stderr}`);
 assert.ok(!readAsImage.stdout.includes(RESUMED_MARKER), `the image's own user read the transcript anyway: ${readAsImage.stdout}`);
 controls.ran++;
 say("a resumed transcript was staged into the 0700 session dir, read there by the job user, and refused to the image's own user");
@@ -206,7 +214,7 @@ for (const prepared of [forge, resumed, local]) {
 	await cleanup(prepared);
 	assert.equal(existsSync(prepared.jobDir), false, `${prepared.jobDir} was removed by the real cleanup`);
 }
-say("the real cleanup removed both job dirs, including what the job wrote");
+say("the real cleanup removed all three job dirs, including what the job wrote");
 
 // --- 7. the same under umask 077, the tightest a service account is given ----------------------------------------
 process.umask(0o077);
