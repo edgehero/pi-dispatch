@@ -41,6 +41,7 @@ Three parts of the system decide on this path independently, and only one of the
 | **The worker**, the only thing that actually defers a job | nothing: **the feature is off**, no windows are loaded |
 | `pi-dispatch init` | **scaffolds** `./pause-windows.json` and leaves the variable **commented out** in `.env` |
 | **The `/dispatch` panel** (and the `dispatch_pause_*` tools) | defaults to `./pause-windows.json` in **the panel's own cwd**, so it works from a deployment folder with no env wiring |
+| `pi-dispatch up` | **sets the variable** in `.env` to the `pause-windows.json` in the folder it runs in, if `.env` does not already give it a value |
 
 Each is defensible alone. Together they compose into one silent trap: run `init`, then manage quiet hours
 through the panel, and you are editing a file **the worker never reads**. The panel answers
@@ -49,9 +50,19 @@ through the panel, and you are editing a file **the worker never reads**. The pa
 So set the variable, to an **absolute** path, in the worker's own environment, and make sure the panel
 resolves the same file (export it there too, or let `/dispatch setup` write a **deployment pointer**:
 `PI_PAUSE_WINDOWS_FILE` is on the pointer's env allowlist precisely so a panel started anywhere can find the
-worker's files). `pi-dispatch doctor` **warns on this exact mismatch**, a `pause-windows.json` in its cwd
+worker's files). `pi-dispatch up` does the same thing for a deployment folder, and the
+row above says so; the warning below is what an `init`-without-`up` deployment still sees.
+
+`pi-dispatch doctor` **warns on this exact mismatch**, a `pause-windows.json` in its cwd
 while the variable is unset, and says the worker ignores it so scoped pauses are off. It warns rather than
 fails, and offers no `--fix`, because only you know which path was meant.
+
+One softening is worth knowing about, because otherwise it reads as the check going quiet. Doctor reads the
+`.env` **in its own working directory** for this one key. If the file sets it while your shell does not, the
+line changes to say that the service reads it and this command does not, and points at
+`set -a; . ./.env; set +a` for a look with the environment the service actually gets. It is still a warning:
+in the shell you typed it in, the feature genuinely is off. That read is narrowed to the keys these two
+checks name and decides only what doctor **says**; nothing in this project loads `.env` into a process.
 
 ## The window schema
 

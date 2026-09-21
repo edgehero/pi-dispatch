@@ -92,8 +92,10 @@ The same setup as plain commands. No clone needed:
 ```bash
 mkdir my-dispatch && cd my-dispatch
 npx @edgehero/pi-dispatch up   # one consented pass: pulls the job image, starts Valkey,
-                               #   scaffolds the config files, runs the doctor preflight.
-                               #   Every docker action shows its command and asks first.
+                               #   scaffolds the config files, fills in the .env lines that have
+                               #   no value yet, runs the doctor preflight.
+                               #   Every docker action shows its command and asks first; the .env
+                               #   lines are filled without a prompt, and never overwritten.
 #  edit .env and set your provider key. Already logged into pi with an API key? Leave it blank.
 
 npx @edgehero/pi-dispatch worker                                          # terminal 1: drain the queue

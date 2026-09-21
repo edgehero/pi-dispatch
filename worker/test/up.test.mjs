@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { defaultPrompt, runUp } from "../src/up.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -80,6 +81,11 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 		probeTcp: async () => listening,
 		cwd: "/deploy",
 		randomHex: () => SECRET,
+		// Resolved defaults, pinned rather than read off this host: `logsDirPath` calls the real
+		// `homedir()`, so without these the byte-exact `.env` assertions below would assert whose account
+		// ran the suite (issue #357).
+		logsDirPathFn: () => "/home/op/.pi-dispatch/logs",
+		settingsFilePathFn: () => "/home/op/.pi-dispatch/settings.json",
 		runInitFn: (cwd) => {
 			initCalls.push(cwd);
 			return 0;
@@ -197,15 +203,99 @@ test("up: init and doctor always run, even when every docker action was declined
 test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER reaches output", async () => {
 	const h = harness({ plan: green, files: { "/deploy/.env": "A=1\nWEBHOOK_SECRET=\n" } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), `A=1\nWEBHOOK_SECRET=${SECRET}\n`, "the key was filled, other lines untouched");
+	// The four path keys land beside it (issue #357), which four other files have promised for a year.
+	assert.equal(
+		h.store.get("/deploy/.env"),
+		`A=1\nWEBHOOK_SECRET=${SECRET}\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\n`,
+		"the key was filled, the four paths appended, other lines untouched",
+	);
 	assert.ok(!h.text().includes(SECRET), "the secret value must never be printed");
 	assert.match(h.text(), /generated WEBHOOK_SECRET/);
+});
+
+test("up and the deployment pointer agree on the two basenames they share, and only those two (#357)", async () => {
+	// Two surfaces write paths for one deployment: `up` into the `.env` the WORKER reads, and the setup
+	// wizard into the pointer the PANEL reads. Where they overlap they must not drift, because a panel
+	// writing quiet hours into one file while the worker loads another is the exact trap both exist to
+	// close. They overlap in two keys, and the overlap is checked here rather than assumed.
+	//
+	// The other two `up` writes are NOT comparable and must not be added to this list. `PI_LOGS_DIR` and
+	// `PI_SETTINGS_FILE` are deliberately absent from what the wizard emits (they are allowlisted and left
+	// unwritten, `INT-DEPLOYMENT-POINTER-CONTRACT`), because the pointer moves only the panel; and `up`
+	// writes those two as the resolved ACCOUNT DEFAULT rather than a deployment path, so even the shape
+	// would not match.
+	const wizard = readFileSync(new URL("../../admin/src/setup-wizard.ts", import.meta.url), "utf8");
+	const h = harness({ plan: green, files: { "/deploy/.env": "" } });
+	await h.run();
+	const written = Object.fromEntries(
+		h.store
+			.get("/deploy/.env")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => l.split("=")),
+	);
+	for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]) {
+		const basename = written[key].split("/").pop();
+		assert.ok(wizard.includes(`${key}: join(dir, "${basename}")`), `${key}: up writes ${basename}, and the wizard's pointer must name the same file`);
+	}
+	for (const key of ["PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
+		assert.ok(!new RegExp(`${key}:\\s*join\\(dir`).test(wizard), `${key} is deliberately not in the pointer, so there is nothing to compare`);
+	}
+});
+
+test("up: the two FILE keys get this folder and the two DURABLE ones get the account default (#357)", async () => {
+	// The split is the sharpest edge in this change. `makeLogReaper` unlinks every `.log` and `.json` in
+	// PI_LOGS_DIR past the window with no name shape and no ownership check, so a deployment folder there
+	// would eat triggers.json and its siblings thirty days in, silently, and the worker would then run
+	// nothing while reporting success. A pinned resolved default changes no behaviour and makes the value
+	// explicit, which is what stops a worker under another `User=` and the panel resolving two directories.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" } });
+	await h.run();
+	const written = Object.fromEntries(
+		h.store
+			.get("/deploy/.env")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => l.split("=")),
+	);
+	assert.equal(written.PI_PAUSE_WINDOWS_FILE, "/deploy/pause-windows.json");
+	assert.equal(written.PI_SCOPED_LIMITS_FILE, "/deploy/scoped-limits.json");
+	assert.equal(written.PI_LOGS_DIR, "/home/op/.pi-dispatch/logs");
+	assert.equal(written.PI_SETTINGS_FILE, "/home/op/.pi-dispatch/settings.json");
+	for (const key of Object.keys(written)) assert.notEqual(written[key], "/deploy", `${key} must never be the deployment folder itself`);
+	assert.notEqual(written.PI_LOGS_DIR, "/deploy/logs", "nor the directory the service installer already owns");
+});
+
+test("up hands its OWN doctor call what it just wrote, or it warns about what it just fixed (#357)", async () => {
+	// Nothing in this project loads `.env` into an environment (docs/secrets.md), so the lines above
+	// configure the SERVICE and not this process. Unlayered, `up` would write both file paths and then warn
+	// three lines later that they are unset, which is the defect issue #357 reported from the other end.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic" } });
+	await h.run();
+	assert.equal(h.doctorCalls.length, 1);
+	assert.equal(h.doctorCalls[0].PI_PAUSE_WINDOWS_FILE, "/deploy/pause-windows.json");
+	assert.equal(h.doctorCalls[0].PI_SCOPED_LIMITS_FILE, "/deploy/scoped-limits.json");
+	assert.equal(h.doctorCalls[0].PI_LOGS_DIR, "/home/op/.pi-dispatch/logs");
+	assert.equal(h.doctorCalls[0].PI_PROVIDER, "anthropic", "and the layer adds, it does not replace the environment");
+});
+
+test("up leaves every one of the four alone when the operator already set it (#357)", async () => {
+	const mine = ["PI_PAUSE_WINDOWS_FILE=/elsewhere/windows.json", "PI_SCOPED_LIMITS_FILE=/elsewhere/limits.json", "PI_LOGS_DIR=/var/log/pi", "PI_SETTINGS_FILE=/etc/pi/settings.json"].join("\n");
+	const h = harness({ plan: green, files: { "/deploy/.env": `${mine}\nWEBHOOK_SECRET=x\n` } });
+	await h.run();
+	assert.equal(h.store.get("/deploy/.env"), `${mine}\nWEBHOOK_SECRET=x\n`, "four keys, four chances to clobber, none taken");
+	// And the layer must not put back what the operator overrode: `wrote` holds only keys that were empty.
+	assert.equal(h.doctorCalls[0].PI_LOGS_DIR, undefined, "an operator value stays the environment's business");
+	for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
+		assert.match(h.text(), new RegExp(`${key}\\s+already set`), `${key} says it was left alone`);
+	}
+	assert.doesNotMatch(h.text(), /written into \.env/, "and nothing claims a write that did not happen");
 });
 
 test("up: an operator's existing WEBHOOK_SECRET is never touched", async () => {
 	const h = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=operator-chose-this\n" } });
 	await h.run();
-	assert.equal(h.store.get("/deploy/.env"), "WEBHOOK_SECRET=operator-chose-this\n");
+	assert.match(h.store.get("/deploy/.env"), /^WEBHOOK_SECRET=operator-chose-this\n/, "the operator's line is the first line still, byte for byte");
 	assert.match(h.text(), /already set/);
 	assert.ok(!h.text().includes("operator-chose-this"), "existing values are secrets too");
 });

@@ -56,6 +56,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { readEnvKeys } from "./env-file.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -135,6 +136,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		stat = statSync,
 		passwd = () => readFileSync("/etc/passwd", "utf8"),
 		readUnit = (path) => readFileSync(path, "utf8"),
+		// The deployment's own `.env`, read for exactly the keys two checks below NAME, and for nothing
+		// else (issue #357). See `envFileKeys` for why this is allowed to exist at all.
+		readEnvFile = (path) => readFileSync(path, "utf8"),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
 		isAlive = defaultIsAlive,
@@ -147,7 +151,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// `isAlive` and `pid` ride the SHARED seams since issue #350, not just the `--live` spread below: the egress
 	// canary names its network after the doctor PROCESS and now sweeps what a doctor that did not finish left,
 	// so it needs both, and a test cannot drive that sweep while the names come from `process.pid` directly.
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, observationFs, isAlive, pid };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile, observationFs, isAlive, pid };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -249,6 +253,31 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
 }
 
 /**
+ * The values `<cwd>/.env` sets for NAMED keys, or `{}`. The only place in this project that reads a `.env`
+ * file's contents at all (issue #357), and the narrowing is what makes it an addition rather than a
+ * reversal:
+ *
+ *   - it reads to decide WHAT DOCTOR SAYS, never to configure anything. No value from here reaches a
+ *     config, an argv, a container env, or a fix that writes;
+ *   - the caller passes the exact keys its own message names, so this cannot grow into "load .env";
+ *   - it is best effort. A missing, unreadable or malformed file is `{}`, which restores the unsoftened
+ *     warning, because the worse failure is a deployment told it is fine when nobody could check.
+ *
+ * `docs/secrets.md` opens with "the worker parses no `.env` file" and that stays true: doctor is not the
+ * worker, and `worker/test/service.test.mjs` still pins that a `PI_ENV_SETUP` line in `./.env` is not
+ * honoured. Parsing is `readEnvKeys`, shared with the writer `up` uses, so a key one can set is a key the
+ * other reads back the same way.
+ */
+export function envFileKeys(path, keys, { fileExists, readEnvFile }) {
+	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
+	try {
+		return readEnvKeys(readEnvFile(path), keys);
+	} catch {
+		return {};
+	}
+}
+
+/**
  * Run every probe and return the check list without rendering -- runDoctor renders it, and under --fix
  * collects it a second time for the converge re-check. Exported for the never-tier doctrine pin in the
  * tests (githubProtectionPreflight's precedent): the test walks the returned array and fails on any check
@@ -256,7 +285,7 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -1551,16 +1580,41 @@ export async function collectChecks(env, seams) {
 	// (admin/src/read-model.mjs) -- so with the variable unset the one component that cares already finds the
 	// scaffolded file. There is no second reader to disagree with, hence no trap, hence no warn: a line that
 	// fires where nothing is broken teaches operators to skim past the ones that matter.
+	//
+	// AND ONE NARROWING, added with `pi-dispatch up`'s four env lines (issue #357). Both checks above fire
+	// on the PROCESS environment, which is the only thing the worker reads. But `up` writes these two keys
+	// into `<cwd>/.env`, which configures the SERVICE through `EnvironmentFile=` and the wrappers and
+	// configures nothing about a shell an operator later types `pi-dispatch doctor` into. Unqualified, the
+	// warning then cries wolf at a correctly configured deployment, and this module's own rule is that a
+	// check nobody can silence must never do that.
+	//
+	// So doctor reads `<cwd>/.env` for EXACTLY the key each check names, and uses it to decide WHAT TO SAY,
+	// never to configure anything. That narrowing is the whole licence: the project's stance is that nothing
+	// parses `.env` (`docs/secrets.md`), and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP` line
+	// in `./.env` is deliberately NOT honoured. Both stay true. The softened line is still a warning, still
+	// carries the file it read, and says plainly which process would honour it, because the operator running
+	// this shell genuinely does have the feature off in THIS environment.
+	const envFile = envFileKeys(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists, readEnvFile });
 	{
 		const pauseWindowsFile = env.PI_PAUSE_WINDOWS_FILE;
 		const scaffolded = join(cwd, "pause-windows.json");
 		if ((typeof pauseWindowsFile !== "string" || pauseWindowsFile.trim() === "") && fileExists(scaffolded)) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `${scaffolded} exists but PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it, so scoped pauses are OFF`,
-				fix: `set PI_PAUSE_WINDOWS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker loads no windows at all, while the admin panel defaults to this same file and reports each window it writes as applied live; delete the file if this deployment has no quiet hours`,
-			});
+			const inFile = envFile.PI_PAUSE_WINDOWS_FILE;
+			checks.push(
+				inFile
+					? {
+							ok: false,
+							warn: true,
+							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker`,
+							fix: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
+						}
+					: {
+							ok: false,
+							warn: true,
+							label: `${scaffolded} exists but PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it, so scoped pauses are OFF`,
+							fix: `set PI_PAUSE_WINDOWS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker loads no windows at all, while the admin panel defaults to this same file and reports each window it writes as applied live; delete the file if this deployment has no quiet hours`,
+						},
+			);
 		}
 	}
 
@@ -1571,12 +1625,22 @@ export async function collectChecks(env, seams) {
 		const scopedLimitsFile = env.PI_SCOPED_LIMITS_FILE;
 		const scaffolded = join(cwd, "scoped-limits.json");
 		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
-				fix: `set PI_SCOPED_LIMITS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker enforces no scoped limits at all, while the admin panel defaults to this same file and reports each limit it writes as applied live; delete the file if this deployment has no scoped limits`,
-			});
+			const inFile = envFile.PI_SCOPED_LIMITS_FILE;
+			checks.push(
+				inFile
+					? {
+							ok: false,
+							warn: true,
+							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker`,
+							fix: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
+						}
+					: {
+							ok: false,
+							warn: true,
+							label: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
+							fix: `set PI_SCOPED_LIMITS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker enforces no scoped limits at all, while the admin panel defaults to this same file and reports each limit it writes as applied live; delete the file if this deployment has no scoped limits`,
+						},
+			);
 		}
 	}
 

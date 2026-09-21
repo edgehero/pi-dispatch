@@ -43,6 +43,25 @@ assume you might, which is the closest this project came to documenting it befor
 - `pi-dispatch up` says `no .env here — skipped (set it wherever your env lives)` rather than writing
   one.
 
+**One reader exists, and it is worth knowing exactly how narrow it is**, because the sentence above is
+the kind that quietly stops being true. `pi-dispatch doctor` reads the `.env` in its own working
+directory for **two keys**, `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the reason is that
+`pi-dispatch up` writes them there. Writing a line into `.env` configures the **service**, through the
+slots in the table above, and configures nothing about a shell you later type `pi-dispatch doctor` into.
+Without the read, doctor would warn that those two features are off at exactly the deployments that had
+just been set up correctly.
+
+The narrowing is the whole of the licence, and each half is load-bearing:
+
+- it reads to decide **what doctor says about a file**, never to configure anything. No value read this
+  way reaches a config, an argv, a container environment, or any fix that writes;
+- it reads only the keys the message itself names, so it cannot grow into "load `.env`";
+- a missing, unreadable or malformed file restores the full warning, because a deployment told it is fine
+  when nobody could check is the worse failure;
+- **doctor is not the worker**. The sentence at the top of this page is about the process that runs jobs,
+  and it is still exactly true: `loadConfig` reads the environment, there is still no dotenv dependency,
+  and `PI_ENV_SETUP` inside a `./.env` is still deliberately **not** honoured, which the test suite pins.
+
 ## What actually holds a secret
 
 Everything else in `.env.example` is a dial, and dials are fine in plain sight.

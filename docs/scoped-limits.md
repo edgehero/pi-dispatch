@@ -48,11 +48,14 @@ The same trap quiet hours documents, scoped-limits edition:
 | **The worker**, the only thing that enforces | nothing: **no scoped caps or concurrency are loaded** |
 | `pi-dispatch init` | **scaffolds** `./scoped-limits.json` and leaves the variable **commented out** in `.env` |
 | **The `/dispatch` panel** (and the `dispatch_limit_*` tools) | defaults to `./scoped-limits.json` in **the panel's own cwd** |
+| `pi-dispatch up` | **sets the variable** in `.env` to the `scoped-limits.json` in the folder it runs in, if `.env` does not already give it a value |
 
 Run `init`, manage limits through the panel, and you are editing a file the worker never reads — the
 panel answers `scoped limit added (live)` while the worker enforces nothing. `pi-dispatch doctor` warns
 about exactly this state, and the wizard's deployment pointer carries the path so a pointed panel and the
-worker agree.
+worker agree. `pi-dispatch up` sets the variable for you in a deployment folder, and doctor softens its
+line (rather than going quiet) when the `.env` in its own cwd names the key while the shell does not:
+the same softening `docs/pause-windows.md` describes, for the same reason.
 
 ## The limit schema
 

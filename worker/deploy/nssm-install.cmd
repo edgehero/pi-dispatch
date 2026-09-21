@@ -27,7 +27,9 @@ REM
 REM SET BOTH EXPLICITLY via `.env` (the wrapper), not a change here. The default is per USER, and a
 REM service running as LocalSystem resolves it under the system profile, not yours -- so the worker and
 REM your /dispatch panel would read different directories, the run list would show nothing, and caps set
-REM from the panel would land where the worker never looks. `pi-dispatch up` writes both into `.env`.
+REM from the panel would land where the worker never looks. `pi-dispatch up` writes both into `.env`,
+REM as the account default resolved by whoever ran it; a service running as LocalSystem is very likely
+REM NOT that account, so check it can write there.
 REM Keep PI_LOGS_DIR away from the nssm LOGDIR worker.out log set below: the retention sweep deletes
 REM every .log and .json past its window. Both are worker-owned and never belong in the container env
 REM allowlist.

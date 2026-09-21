@@ -37,7 +37,7 @@ pi install npm:@edgehero/pi-dispatch-admin      # then, in pi:  /dispatch
 
 With nothing configured, `/dispatch` walks the whole setup with a consent per step. For servers and
 headless hosts, `npx @edgehero/pi-dispatch up` in a fresh folder does the host half of it (pull and tag the
-job image, start Valkey, scaffold config, run doctor); the worker service, the trigger edge and your first
+job image, start Valkey, scaffold config, fill in the `.env` lines that have no value yet, run doctor); the worker service, the trigger edge and your first
 trigger stay separate commands.
 
 ---
@@ -78,7 +78,7 @@ pi-dispatch is the operational layer that closes them, and nothing else:
 Setup is the panel's job too. `pi install npm:@edgehero/pi-dispatch-admin`, then `/dispatch`:
 with nothing configured it walks the whole deployment with a consent per step, and lands you in
 the panel. Servers and headless hosts do the host half as plain commands
-(`npx @edgehero/pi-dispatch up`: image, Valkey, config, doctor), with the worker service, the
+(`npx @edgehero/pi-dispatch up`: image, Valkey, config, the `.env` lines with no value yet, doctor), with the worker service, the
 trigger edge and the first trigger as their own commands.
 
 I've tried to be honest about the threat model rather than hand-wave it: the whole thing runs

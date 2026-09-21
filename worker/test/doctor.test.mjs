@@ -5,7 +5,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_PROBE_SLUGS, backendChecks, collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_PROBE_SLUGS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { egressCanaryProbe } from "../src/egress.mjs";
 import { parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
@@ -1293,6 +1293,78 @@ test("doctor: with PI_PAUSE_WINDOWS_FILE set, the scaffolded file is not mention
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: join(cwd, "pause-windows.json") }), scaffoldDeps(out, cwd));
 	assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE/, "a wired deployment gets no line -- the worker and the panel agree");
+});
+
+test("doctor: a .env that NAMES the key softens the warning instead of crying wolf (#357)", async () => {
+	// `pi-dispatch up` writes these keys into `<cwd>/.env`, which configures the SERVICE through
+	// EnvironmentFile= and the wrappers and configures nothing about the shell doctor runs in. Unqualified,
+	// the warning would fire on every correctly converged deployment, and this module's own rule is that a
+	// check nobody can silence must never cry wolf.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}   # written by up\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.ok(text().includes(`PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) but not in this shell`), "it says which process would honour the file, and quotes the VALUE");
+	assert.doesNotMatch(text(), /written by up/, "the inline comment .env.example documents each key with is not part of the value");
+	assert.doesNotMatch(text(), /scoped pauses are OFF/, "and drops the claim that the feature is off, because for the service it is not");
+	assert.match(text(), /set -a; \. \.\/\.env; set \+a/, "the fix is how to look with the service's own environment");
+	// Still a warning rather than a pass: in THIS shell the feature really is unconfigured, and a softened
+	// line that pretended otherwise would be the same lie in the other direction.
+	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is set in/);
+});
+
+test("doctor: a .env that does NOT name the key gets the full warning, unchanged (#357)", async () => {
+	// The narrowing has to run both ways, or the read becomes "a .env exists, so stop warning", which is
+	// exactly the wrong lesson and would silence the deployment this check was written for.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "WEBHOOK_SECRET=abc\n# PI_PAUSE_WINDOWS_FILE=   # still commented out\n");
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.ok(text().includes(`⚠ ${join(cwd, "pause-windows.json")} exists but PI_PAUSE_WINDOWS_FILE is unset`), "a commented line is not a value");
+	assert.match(text(), /scoped pauses are OFF/);
+});
+
+test("doctor: the .env read is narrowed to the two keys these checks name, and never configures (#357)", async () => {
+	// The new precedent, pinned as a boundary rather than described in a comment. `service.test.mjs` pins
+	// that a PI_ENV_SETUP line in ./.env is deliberately NOT honoured, and that has to stay true: this read
+	// decides what doctor SAYS about two named keys, and nothing else in the file may reach anything.
+	const cwd = scaffoldedCwd();
+	const asked = [];
+	writeFileSync(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE=/from/env-file/windows.json", "PI_SCOPED_LIMITS_FILE=/from/env-file/limits.json", "PI_JOB_IMAGE=never-read:from-env-file", "PI_PROVIDER=openai", "PI_ENV_SETUP=/tmp/evil.sh", "VALKEY_URL=redis://from-env-file:6379"].join("\n"));
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), readEnvFile: (path) => (asked.push(path), readFileSync(path, "utf8")) });
+	assert.deepEqual(asked, [join(cwd, ".env")], "one file, read once");
+	for (const leaked of ["never-read:from-env-file", "openai", "/tmp/evil.sh", "redis://from-env-file:6379"]) {
+		assert.ok(!text().includes(leaked), `${leaked} came out of .env and must reach nothing`);
+	}
+	assert.match(text(), /PI_PAUSE_WINDOWS_FILE is set in/, "only the two keys the checks name are read back");
+});
+
+test("doctor: the .env reader hands back only the keys it was asked for (#357)", async () => {
+	// The boundary itself, pinned directly. Widening the doctor call's key LIST alone is an equivalent
+	// mutant today, because nothing consumes a key these two checks do not name, and that is the safety
+	// property rather than an accident: the read is a message decision. What must never drift is the
+	// helper's contract, so it is asserted here rather than inferred from the absence of output.
+	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "PI_JOB_IMAGE=never:read", "PI_ENV_SETUP=/tmp/evil.sh", "export PI_SCOPED_LIMITS_FILE=/l.json", "# PI_SCOPED_LIMITS_FILE=/commented.json", "PI_PAUSE_WINDOWS_FILE=/a-later-duplicate.json"].join("\n");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists: () => true, readEnvFile: () => text }), { PI_PAUSE_WINDOWS_FILE: "/w.json" });
+	// `export KEY=` is a shell-ism a loader would honour and this deliberately does not, which is the line
+	// between reading a file and loading one.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], { fileExists: () => true, readEnvFile: () => text }), { PI_JOB_IMAGE: "never:read" }, "and it is the CALLER's key list that narrows, so that list is the thing to review");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text }), {}, "no file, no evidence");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: null }), {}, "no seam, no evidence");
+});
+
+test("doctor: an unreadable .env restores the full warning rather than softening on no evidence (#357)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=/whatever\n");
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), {
+		...scaffoldDeps(out, cwd),
+		readEnvFile: () => {
+			throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+		},
+	});
+	assert.ok(text().includes(`⚠ ${join(cwd, "pause-windows.json")} exists but PI_PAUSE_WINDOWS_FILE is unset`), "told-it-is-fine when nobody could check is the worse failure");
 });
 
 test("doctor: no scaffolded file, no line -- the feature-off deployment is not told about a file it has not got", async () => {

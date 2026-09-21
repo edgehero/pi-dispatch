@@ -22,7 +22,9 @@
 # is per USER, and User= below is very likely not the account you run `/dispatch` from: leave them
 # unset and the worker writes ~pi/.pi-dispatch while your panel reads ~you/.pi-dispatch, so the run
 # list shows nothing and every cap you set from the panel lands in a file this worker never opens.
-# `pi-dispatch up` writes both into `.env` for you, pointing at the deployment folder. Set via `.env`
+# `pi-dispatch up` writes both into `.env` for you, as the ACCOUNT DEFAULT resolved by whoever ran it,
+# never a path inside the deployment folder: the retention sweep below is why. If the service runs as
+# another account than the one that ran `up`, check that account can write there. Set via `.env`
 # (EnvironmentFile), no unit change needed; both are worker-owned and never belong in the container
 # env allowlist. Do not point PI_LOGS_DIR at the daemon's own logs/ directory: the retention sweep
 # deletes every .log and .json past its window and would eat worker.out.log.

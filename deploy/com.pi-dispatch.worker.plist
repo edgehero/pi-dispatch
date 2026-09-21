@@ -42,7 +42,9 @@
   so they must be writable by the account the daemon runs as. SET BOTH EXPLICITLY via `.env` (the
   wrapper), not a plist change: the default is per USER, so a daemon running as another account writes
   a different directory than the panel reads, and the run list then shows nothing while panel-set caps
-  land where the worker never looks. `pi-dispatch up` writes both into `.env` for you. Keep PI_LOGS_DIR
+  land where the worker never looks. `pi-dispatch up` writes both into `.env` for you, as the account
+  default resolved by whoever ran it; if this daemon runs as another account, check it can write there.
+  Keep PI_LOGS_DIR
   distinct from the StandardOutPath worker.out.log below: the retention sweep would delete it.
 -->
 <plist version="1.0">

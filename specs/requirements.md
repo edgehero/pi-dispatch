@@ -521,7 +521,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   correct outcome and is present after a worker restart; the record contains no issue or comment body,
   title, or username (`target` is `repo#issue`, `project!iid` for a GitLab merge request, or `local:<basename>` — no other shape); the raw `logs/<jobId>.log`
   exists only when `PI_CAPTURE_JOB_LOGS` is set and is gitignored. Given a host on which nothing sets
-  `PI_LOGS_DIR` or `PI_SETTINGS_FILE`, when the host reboots and the OS sweeps its temp directory, then
+  `PI_LOGS_DIR` or `PI_SETTINGS_FILE` (which after issue #357 means a deployment where `pi-dispatch up`
+  has not run, since `up` writes both as the resolved account default: the same answer, made explicit),
+  when the host reboots and the OS sweeps its temp directory, then
   the records and the settings overlay are still readable at the same paths — or `pi-dispatch doctor`
   names, on one line, the path that will not survive and why (issue #290; "survive a worker restart" was
   the weaker claim this entry made while both defaulted under the OS temp dir).
@@ -1823,7 +1825,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   doctor [--fix] [--live]` (preflight; offered fixes; the backend declarations read back off short-lived real
   containers), `pi-dispatch up [--yes]` (the consented sequence: default-image pull+tag, loopback Valkey start,
   scaffold, preflight) — and shall never perform an unshown host mutation, never touch an existing config
-  value, and never spend a token. **`doctor --live` adds a mutation that is shown rather than consented**
+  value, and never spend a token. **`up` also fills EMPTY keys in an existing `.env`** (issue #357), which
+  is the one mutation it makes without a prompt and is bounded to exactly that: the file must already
+  exist, so `init`'s create-only rule is untouched; a key with any value is left alone, so "never touch an
+  existing config value" holds key by key; and no value it writes is a capability, a credential or a
+  policy. Today that is `WEBHOOK_SECRET` and the four paths four shipped files have promised for a year
+  (`PI_PAUSE_WINDOWS_FILE`, `PI_SCOPED_LIMITS_FILE`, `PI_LOGS_DIR`, `PI_SETTINGS_FILE`). The first two get
+  this folder, which is where `init` scaffolds them and where the panel looks; the last two get the
+  RESOLVED ACCOUNT DEFAULT and never a deployment path, because `makeLogReaper` unlinks every `.log` and
+  `.json` in `PI_LOGS_DIR` past the window with no name shape and no ownership check, so a deployment
+  folder there would eat `triggers.json` and its siblings a month in, silently. Writing the default makes
+  the value explicit rather than changing it, which is the whole point: a worker under another `User=` and
+  the panel can no longer resolve two different directories without anyone saying so. **`doctor --live` adds a mutation that is shown rather than consented**
   (issue #278), beside the throwaway network and probe containers plain `doctor`'s egress canary already
   makes and removes unprompted -- and which, since issue #350, also cover **what an EARLIER canary left when
   its own run did not finish**, removed on the next run and reported in a line naming what went: still the
@@ -1833,6 +1846,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   networks it makes when the egress policy is armed, and its fixture directory are named before any exists; and
   all are removed when the read ends, or by the next `--live` when that run was interrupted, which names what it
   removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
+- **`doctor` reads the deployment's `.env` for two named keys, to decide what to SAY** (issue #357). The
+  new precedent in this entry, and it is narrow on purpose because the project's stance is that nothing
+  parses `.env`. `up` writes `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE` into `<cwd>/.env`, which
+  configures the SERVICE through `EnvironmentFile=` and the wrappers and configures nothing about a shell
+  an operator later runs `doctor` in; unqualified, the two warnings would then fire hardest at the
+  deployments that had just been converged, and this module's own rule is that a check nobody can silence
+  must never cry wolf. So doctor reads that file for exactly the keys those two checks name, uses it only
+  to reword the line, and still warns: in that shell the feature really is unconfigured. Nothing read this
+  way reaches a config, an argv, a container env or a fix that writes; a missing or unreadable file
+  restores the full warning; and `PI_ENV_SETUP` inside a `./.env` is still deliberately not honoured,
+  which is what keeps `docs/secrets.md`'s opening sentence true. **Doctor is not the worker.**
 - **`doctor` says who a local job runs as** (issue #341). From the same facts and the same resolver the worker
   uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
   HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
@@ -2028,6 +2052,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-21 | Issue #357, item 2: the four env lines four shipped files promised and `up` never wrote. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED TWICE.** (1) The Statement's ladder gains `up` filling EMPTY keys in an EXISTING `.env`, the one mutation it makes without a prompt, bounded so it cannot destroy anything an operator chose: the file must already exist (`init`'s create-only rule untouched), a key with any value is left alone (never-clobber at key granularity), and no value written is a capability, a credential or a policy. `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE` get this folder; `PI_LOGS_DIR` and `PI_SETTINGS_FILE` get the RESOLVED ACCOUNT DEFAULT and never a deployment path, because `makeLogReaper` unlinks every `.log` and `.json` in `PI_LOGS_DIR` past the window with no name shape and no ownership check, so a deployment folder there eats `triggers.json` and its siblings a month in, silently. Writing the default makes the value explicit rather than changing it. (2) A NEW BULLET for the precedent this sets: **doctor reads the deployment's `.env` for two named keys, to decide what to SAY.** The premise the issue stated was false and verification found it: nothing in this project loads `.env` into an environment, so writing a line configures the SERVICE and silences nothing in the shell doctor runs in, including `up`'s own doctor step (fixed by layering what was written over `env` for that call). Unqualified, the two warnings would fire hardest at deployments that had just been converged. The read is to reword a message, never to configure; it covers only the keys those checks name; a missing or unreadable file restores the full warning; and `PI_ENV_SETUP` in a `./.env` is still not honoured, which is what keeps `docs/secrets.md`'s opening sentence true. **`REQ-DURABLE-RUN-HISTORY` AMENDED**, one clause of its Acceptance: "a host on which nothing sets `PI_LOGS_DIR` or `PI_SETTINGS_FILE`" now means a deployment where `up` has not run. **`REQ-SCOPED-PAUSE-WINDOWS` and `REQ-TRIGGER-SECRETS` UNCHANGED, checked**: no window, limit, secret or refusal rule moved, and the worker's fail-closed default for both files is deliberately untouched. **Code evidence**: worker/src/up.mjs -> runUp; worker/src/env-file.mjs -> readEnvKeys, trailingComment; worker/src/doctor.mjs -> envFileKeys, collectChecks. |
 | 2026-09-21 | Issue #337, item 1: the session network nothing swept. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, in its retention bullet and its Acceptance: the window now bounds the run's session NETWORK as well as its directory, and the same reaper removes a `pi-sandbox-<id>-net` whose id is absent from the retained directories, is not running, carries no `pi-sandbox-` container, and has no container of its own in any state but `exited` or `dead`. Retained means re-openable, and an open is what the network is for, so the network is kept as long as the directory is and then one pass longer, because the pass that deletes a directory still counts that run as retained. **That is a deliberate NARROWING of the issue's own acceptance line**, which asks for a leftover "with no sandbox attached" to be swept: a leftover on a run that is still re-openable survives its window, and until then the next open of that run refuses with `egress-network-exists` and the two commands, which is shipped behaviour unchanged. The stricter reading is what reopens the #277 race the refusal exists for. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: no job network, no argv, no proxy and no pre-spend gate moved; a session network is `INT-SANDBOX-CONTRACT`'s object. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: no doctor check and no `up` step. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: two new log events, no run-record field. **Code evidence**: worker/src/sandbox.mjs -> makeSandboxNetworkSweeper; worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/start.mjs -> startWorker. |
 | 2026-09-21 | Issues #357 and #350, the networks nothing removed. **`REQ-EGRESS-ALLOWLIST` AMENDED** (Acceptance): "the network is removed when the container exits" gains the crash path, which is the only path the boot reaper's sweep exists for and the one it was silently failing. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the Statement's canary already named the throwaway network and probe containers `doctor` makes and removes unprompted; it now also covers removing what an EARLIER canary left when its run did not finish, and doctor saying which it removed. That is the same unprompted tier, not a new one: the objects are doctor's own, named after the doctor PROCESS, and only a dead pid's are touched. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: session networks are `INT-SANDBOX-CONTRACT`'s and are not swept here. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: two new log events, no run-record field. **Code evidence**: worker/src/backend-local.mjs -> reapNetwork; worker/src/doctor.mjs -> sweepStaleCanaryNetworks, egressChecks. |
 | 2026-09-21 | Issue #345, while verifying the Podman page. **`REQ-EGRESS-ALLOWLIST` AMENDED**, three words in the Statement: the bound is "listed hosts by name and nothing else **beyond this host**". An `--internal` network's gateway is the host, so a host service bound to `0.0.0.0` answers a job container while one bound to `127.0.0.1` does not, measured on Docker 27.5.1 and rootful Podman 5.8.2 alike; `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` carries the residual and `docs/egress.md` now says what bounds it. No behaviour changes: the requirement is scoped to what it always did. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor's checks and their tiers are untouched by the Podman route. |

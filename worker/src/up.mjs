@@ -24,6 +24,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { join } from "node:path";
+import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { egressArmed as egressArmedFn } from "./egress.mjs";
 import { updateEnvFile } from "./env-file.mjs";
 
@@ -101,6 +102,11 @@ export async function runUp(argv = [], deps = {}) {
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
 		// the written file. 32 bytes hex, matching doctor's `openssl rand -hex 32` fix line.
 		randomHex = () => randomBytes(32).toString("hex"),
+		// The two resolved defaults `up` pins, injected for the same reason the clock is elsewhere: they
+		// read the real `homedir()`, so a test asserting the written `.env` byte for byte would otherwise
+		// assert whichever account ran it.
+		logsDirPathFn = logsDirPath,
+		settingsFilePathFn = settingsFilePath,
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
@@ -187,6 +193,13 @@ export async function runUp(argv = [], deps = {}) {
 	// never-clobber contract at key granularity: a value the operator set survives. The value itself
 	// is NEVER printed — a webhook secret in a scrollback is a webhook secret in a pastebin.
 	const envPath = join(cwd, ".env");
+	// What `up` wrote, layered over `env` for its OWN doctor step below. Writing a line into `.env`
+	// configures the SERVICE (through `EnvironmentFile=` and the wrappers) and configures nothing about the
+	// process running right now, because NOTHING in this project loads `.env` into an environment -- see
+	// `docs/secrets.md`, and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP` line in `./.env` is
+	// deliberately not honoured. Without this layer, `up` would write the two files' paths and then, three
+	// lines later, warn that they are unset (issue #357).
+	const wrote = {};
 	if (fs.existsSync(envPath)) {
 		if (updateEnvFile(envPath, "WEBHOOK_SECRET", randomHex(), { fs }).changed) {
 			out("\n✓ generated WEBHOOK_SECRET into .env (32 random bytes, hex — value not shown)\n");
@@ -195,8 +208,43 @@ export async function runUp(argv = [], deps = {}) {
 			out("\n✓ WEBHOOK_SECRET already set in .env — left untouched\n");
 			summary.push(["WEBHOOK_SECRET", "already set — left untouched"]);
 		}
+		// (e1) the four paths four separate files already promise `up` writes, and it never did
+		// (`deploy/worker.service`, `deploy/com.pi-dispatch.worker.plist`, `deploy/nssm-install.cmd`,
+		// `.env.example`). Same never-clobber discipline as WEBHOOK_SECRET, at key granularity: a value the
+		// operator set survives untouched.
+		//
+		// TWO get the deployment folder and TWO get the RESOLVED ACCOUNT DEFAULT, and the split is the
+		// sharpest edge in this change rather than an inconsistency. `pause-windows.json` and
+		// `scoped-limits.json` are scaffolded by `init` into this folder, and the panel defaults to this
+		// folder, so pointing the worker here is what makes the three agree. `PI_LOGS_DIR` and
+		// `PI_SETTINGS_FILE` are different in kind: `makeLogReaper` unlinks EVERY `.log` and `.json` in
+		// `PI_LOGS_DIR` past the window with no name shape and no ownership check, so a deployment folder
+		// there would eat `triggers.json`, `pause-windows.json`, `scoped-limits.json` and
+		// `subscriptions.json` thirty days in, silently, and the worker would then run nothing while
+		// reporting success. `<deployment>/logs` is no better: `service.mjs` creates exactly that directory
+		// at install time and the plist puts `worker.out.log` in it. So these two get what
+		// `logsDirPath`/`settingsFilePath` would have resolved anyway: behaviour byte-unchanged, the value
+		// simply made explicit, which is the whole point -- a worker under another `User=` and the panel
+		// then cannot silently resolve two different directories.
+		for (const [key, value] of [
+			["PI_PAUSE_WINDOWS_FILE", join(cwd, "pause-windows.json")],
+			["PI_SCOPED_LIMITS_FILE", join(cwd, "scoped-limits.json")],
+			["PI_LOGS_DIR", logsDirPathFn(env)],
+			["PI_SETTINGS_FILE", settingsFilePathFn(env)],
+		]) {
+			if (updateEnvFile(envPath, key, value, { fs }).changed) {
+				wrote[key] = value;
+				out(`✓ ${key}=${value} written into .env\n`);
+				summary.push([key, `written into .env (${value})`]);
+			} else {
+				summary.push([key, "already set — left untouched"]);
+			}
+		}
 	} else {
 		summary.push(["WEBHOOK_SECRET", "no .env here — skipped (set it wherever your env lives)"]);
+		for (const key of ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE"]) {
+			summary.push([key, "no .env here — skipped (set it wherever your env lives)"]);
+		}
 	}
 
 	// (e2) the egress policy's proxy, and ONLY when the operator has already armed it. up never invents
@@ -235,13 +283,17 @@ export async function runUp(argv = [], deps = {}) {
 	// (provider key, forge env, overlay …), and its verdict is up's exit code.
 	out("\ndoctor:\n");
 	runDoctorFn ??= (await import("./doctor.mjs")).runDoctor;
-	const doctorCode = await runDoctorFn(env, { out });
+	// Layered, per the note at step (e1): the lines just written configure the service and not this
+	// process, so an unlayered call would warn about exactly what `up` had converged a moment earlier.
+	// `env` still wins where the operator had already set a value, because `wrote` only ever holds keys
+	// that were EMPTY.
+	const doctorCode = await runDoctorFn({ ...env, ...wrote }, { out });
 
 	// (g) the summary: what ran, what was skipped, what was already there — then the two commands
 	// that actually start work, so "up is green" flows straight into the first job.
 	out("\nup: summary\n");
 	for (const [name, note] of summary) {
-		out(`  ${name.padEnd(15)} ${note}\n`);
+		out(`  ${name.padEnd(21)} ${note}\n`);
 	}
 	out(`
 Next:

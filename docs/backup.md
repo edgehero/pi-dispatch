@@ -136,9 +136,12 @@ your old records are turns itself off once you have moved on.
 
 Two more things worth knowing:
 
-- **`pi-dispatch up` does not migrate anything.** It scaffolds and checks; it never moves a file.
+- **`pi-dispatch up` does not migrate anything.** It scaffolds, checks, and fills in `.env` lines that
+  have no value yet; it never moves a file and never replaces a value you set.
 - **If your worker runs as a different account than your `/dispatch` panel**, set `PI_LOGS_DIR` and
-  `PI_SETTINGS_FILE` explicitly in the deployment's `.env`. The default sits under a home directory, so
+  `PI_SETTINGS_FILE` explicitly in the deployment's `.env`. `pi-dispatch up` now writes both, as the
+  account default resolved by whoever ran it, which is the same answer you would have typed and is
+  worth checking against the account the service runs as. The default sits under a home directory, so
   two accounts resolve two different directories, and the symptom is not an error: the panel shows an
   empty run list and reports no spend, while caps set from the panel land in a file the worker never
   opens. Everything `pi-dispatch service install` sets up runs the worker as the account that installed

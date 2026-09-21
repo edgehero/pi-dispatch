@@ -33,15 +33,45 @@ import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from "no
  * the cost of wrongly leaving a key alone (operator sets it by hand) is a fraction of the cost of
  * wrongly overwriting one.
  */
+/**
+ * The trailing `# ...` of a line being replaced, or `""`. `.env.example` documents most keys INLINE
+ * (`# PI_LOGS_DIR=   # where per-job status records land`), and both transforms replace a line whole, so
+ * without this an `up` that fills four commented keys silently deletes four lines of the operator's own
+ * reference and leaves the indented continuation comments below them dangling under a now-set key.
+ *
+ * Only a `#` preceded by WHITESPACE counts, which is dotenv's own trailing-comment shape. A `#` with no
+ * space in front of it is part of the old value (`#KEY=some#thing`), and that line is being replaced, so
+ * turning half of it into a comment would be inventing one.
+ */
+function trailingComment(afterEquals) {
+	return /\s(#.*)$/.exec(afterEquals)?.[1] ?? "";
+}
+
+/**
+ * `KEY=value` plus the inline comment the replaced line carried, kept at ITS OWN COLUMN where the new text
+ * still fits. `.env.example` lines the comments up at a fixed column and a file that keeps half of them
+ * lined up and half not reads worse than one that lost them, so short values hold the column and long ones
+ * (an absolute path, usually) fall back to a plain gap.
+ */
+function withKeptComment(key, value, bare) {
+	const kept = trailingComment(bare.slice(bare.indexOf("=") + 1));
+	if (kept === "") return `${key}=${value}`;
+	const head = `${key}=${value}`;
+	const column = bare.indexOf(kept);
+	return `${head}${" ".repeat(Math.max(3, column - head.length))}${kept}`;
+}
+
 export function setEnvKeyIfEmpty(text, key, value) {
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const setRe = new RegExp(`^\\s*${escaped}\\s*=(.*)$`);
 	const commentRe = new RegExp(`^\\s*#\\s*${escaped}\\s*=`);
 
 	const lines = text.split("\n");
-	// Replace a line wholesale, keeping a CRLF file's trailing \r so the file stays one convention.
+	// Replace a line wholesale, keeping a CRLF file's trailing \r so the file stays one convention, and
+	// keeping any inline `# ...` documentation the line carried (see `trailingComment`).
 	const replaceLine = (i) => {
-		lines[i] = `${key}=${value}${lines[i].endsWith("\r") ? "\r" : ""}`;
+		const bare = lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
+		lines[i] = `${withKeptComment(key, value, bare)}${lines[i].endsWith("\r") ? "\r" : ""}`;
 		return lines.join("\n");
 	};
 
@@ -95,7 +125,8 @@ export function setEnvKey(text, key, value) {
 
 	const lines = text.split("\n");
 	const replaceLine = (i) => {
-		lines[i] = `${key}=${value}${lines[i].endsWith("\r") ? "\r" : ""}`;
+		const bare = lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
+		lines[i] = `${withKeptComment(key, value, bare)}${lines[i].endsWith("\r") ? "\r" : ""}`;
 		return lines.join("\n");
 	};
 
@@ -150,4 +181,37 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	}
 	fs.renameSync(tmp, path);
 	return { changed: true };
+}
+
+/**
+ * The values of NAMED keys in .env TEXT, as a plain object holding only the keys that are actually set.
+ *
+ * Deliberately NOT a dotenv loader, and the distinction is the whole reason this is allowed to exist
+ * (issue #357). Nothing in this project loads `.env` into a process environment: `docs/secrets.md` opens
+ * with "the worker parses no `.env` file", and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP`
+ * line inside `./.env` is deliberately NOT honoured. This reader exists so `doctor` can decide WHAT TO SAY
+ * about a file, never what to configure, and the caller passes the exact keys its own message names. It
+ * returns strings verbatim; no interpolation, no `export ` prefix, no quote stripping, because every one of
+ * those is a loader feature and a loader is what this must not become.
+ *
+ * Same line grammar as the writers above, so a key this can read is a key those can set: a commented line
+ * is not a value, a later duplicate does not win over an earlier one, and an empty or whitespace-only value
+ * is absent rather than `""`.
+ */
+export function readEnvKeys(text, keys) {
+	const want = new Set(keys);
+	const found = {};
+	for (const raw of String(text ?? "").split("\n")) {
+		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+		const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
+		if (!m) continue;
+		const [, key, rest] = m;
+		if (!want.has(key) || key in found) continue;
+		// The same inline comment the writers above preserve has to come back OFF here, or a caller comparing
+		// a path would compare it against the path plus a paragraph. Dotenv's own trailing-comment shape:
+		// a `#` preceded by whitespace. A `#` with no space in front of it is part of the value.
+		const value = rest.replace(/\s#.*$/, "").trim();
+		if (value !== "") found[key] = value;
+	}
+	return found;
 }
