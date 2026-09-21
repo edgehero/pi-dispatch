@@ -219,8 +219,9 @@ builder (no environment, fixture folders, a constant script in place of the entr
 mountSet, nonRoot and localFolders off, a refused absent image for imagePinning, two runs under one name for
 ephemeral (each must be gone before the next), and, with `PI_EGRESS` armed, two peers on their own job networks
 for jobToJobIsolation (the first must reach the proxy and not the second, which must answer itself before and
-after the attempt). It folds in the egress canary and removes every container by
-ID, the peer networks after their peers (issue #344). It runs as the job user a local job on this host gets
+after the attempt). It folds in the egress canary and removes every container it
+started, the peer networks after their peers (issue #344): its own by ID, and the canary's probes by the name
+that carries the doctor process's pid, which is what lets a later run clear what a killed one left (issue #350). It runs as the job user a local job on this host gets
 (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the host; where a local job
 would be refused, or the job user cannot be decided, it runs nothing and says so. It runs only when the docker CLI
 is observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own

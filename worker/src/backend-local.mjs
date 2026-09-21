@@ -24,6 +24,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
+import { networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
@@ -179,6 +180,55 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
  */
 export function makeReaper({ log, exec = execDocker }) {
+	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both
+	// are load-bearing. It is the shape `networkEndpoints` and `removeNetworkOrSay` need -- the "not found" rule
+	// reads both streams, and with `--format` the daemon puts that wording on stderr with stdout empty (measured
+	// on docker 27.4.0). And because it cannot throw, the network phase can no longer reach the outer catch,
+	// so nothing here can flip the tri-state a scope claim is spent on.
+	const step = async (args) => {
+		try {
+			const { stdout, stderr } = await exec("docker", args);
+			return { code: 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") };
+		} catch (err) {
+			// `promisify(execFile)` rejects with the exit code on `.code` and what the CLI printed on
+			// `.stdout`/`.stderr`. Both streams are MATCHED against and NEITHER is ever logged (issue #339).
+			return { code: typeof err?.code === "number" ? err.code : null, stdout: String(err?.stdout ?? ""), stderr: String(err?.stderr ?? "") };
+		}
+	};
+
+	/**
+	 * One leftover network. The old body was a bare `network rm` in a `try {} catch {}` whose comment said an
+	 * in-use network "belongs to something else" -- and on the path this sweep exists for, it does not: the
+	 * worker died mid-job, its container is reaped three lines above, and the only thing still holding the
+	 * network is this worker's OWN long-lived egress proxy, which nothing detached when the process died. So
+	 * the network survived every later boot, silently, because the failure had nowhere to go (issue #357).
+	 *
+	 * DETACH WHAT IS ATTACHED, never a proxy named from configuration. That needs no `env` seam here, and it
+	 * is right where a configured name would be wrong: a network left before a `PI_EGRESS_PROXY` change holds
+	 * the OLD proxy, and on a deployment with the policy off it holds nothing at all. Inspecting is also the
+	 * only way to see the one case that must be left alone.
+	 *
+	 * THE ONE THING THIS MUST NOT TOUCH is a network a `pi-job-` container is still on. Detaching there would
+	 * sever a live job's only route out: it keeps running, spends its slot and dies at its first turn, which is
+	 * strictly worse than the network it would have cleaned up. It should be unreachable -- the container loop
+	 * `rm -f`'d every one of them, and a failure there throws to the outer catch -- so the ways in are a
+	 * container started between the `ps` and this inspect, or the two-workers-per-daemon configuration
+	 * `DES-CONCURRENCY-3` already calls catastrophic and unsupported. Left alone, and said.
+	 */
+	async function reapNetwork(network) {
+		const { ok, names, absent } = await networkEndpoints(step, network);
+		// Gone between the `ls` and now. Nothing was left behind, so there is nothing to say: the ONE silence
+		// this sweep allows, and only in the daemon's own words for a network.
+		if (absent) return;
+		if (!ok) return log("network_not_reaped", { network, reason: "unreadable" });
+		if (names.some((n) => n.startsWith(JOB_NAME_PREFIX))) return log("network_not_reaped", { network, reason: "job-container-attached" });
+		const outcome = await removeNetworkOrSay(step, { network, detach: names });
+		if (outcome.absent) return;
+		// `detached` is named rather than counted: one of them may be something this worker never attached.
+		if (outcome.removed) return log("reaped_network", { network, detached: outcome.detached });
+		log("network_not_reaped", { network, reason: "rm-failed", detached: outcome.detached });
+	}
+
 	return async function reap() {
 		try {
 			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
@@ -197,15 +247,8 @@ export function makeReaper({ log, exec = execDocker }) {
 			//
 			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
-			// A network still in use by something else fails to remove and is skipped, which is correct: this
-			// is a best-effort sweep and never a reason not to boot.
 			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
-			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) {
-				try {
-					await exec("docker", ["network", "rm", net]);
-					log("reaped_network", { network: net });
-				} catch {} // still in use, or already gone -- either way not this boot's problem
-			}
+			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) await reapNetwork(net);
 			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
 			// claim naming this host once this host has actually established that it holds no containers.
 			return { reaped: true };

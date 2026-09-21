@@ -29,7 +29,7 @@
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec } from "./container-spec.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
-import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkNameFor, removeJobNetworkWith } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
 
 /**
  * The namespace every live-probe object carries: every container name, the peer networks and the fixture directory. OUTSIDE the
@@ -633,15 +633,13 @@ export async function runLiveProbes({
 	const dropNetwork = async (entry) => {
 		if (entry.done) return;
 		entry.done = true;
-		if (await removeJobNetworkWith(step, { network: entry.name, proxy })) return;
-		// Silent only when the daemon SAYS the network is not there (a create that never landed, or a rollback that worked),
-		// in both daemons' words for a NETWORK (measured: Docker "network X not found", Podman "unable to find network with
-		// name or ID X: network not found"). Any other answer is said: an inspect that timed out, a daemon that cannot be
-		// reached ("Cannot connect to the Docker daemon"), and the CLI's own "context not found" (measured on both labs),
-		// which is about the CLI, not the network.
-		const inspected = await step(["network", "inspect", entry.name]);
-		const absent = inspected?.code !== 0 && /network (?:\S+ )?not found/i.test(`${inspected?.stdout ?? ""}${inspected?.stderr ?? ""}`);
-		if (!absent) notes.push(`the network ${entry.name} could not be removed: docker network rm ${entry.name}`);
+		// The wording rule this used to carry inline now lives in `egress.mjs` beside the proxy name and the
+		// network suffix, because three more sweeps needed the same rule and a second copy is the one nobody
+		// updates when a third runtime words it differently. The call sequence is byte-for-byte what it was:
+		// disconnect the proxy, `network rm` without `-f`, and on a failure one `network inspect` whose answer
+		// decides between silence and a note.
+		const outcome = await removeNetworkOrSay(step, { network: entry.name, detach: [proxy] });
+		if (!outcome.removed) notes.push(`the network ${entry.name} could not be removed: ${outcome.command}`);
 	};
 	const makeFixture = (base) => {
 		const fixture = liveFixture(base);

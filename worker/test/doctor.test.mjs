@@ -699,7 +699,7 @@ test("doctor: a host where pi will not load warns instead of guessing a variable
 
 // GITHUB_AUTH_SOURCE=gh (the default) forwards the operator's full gh login into every token-carrying job
 // container (CONST-TOKEN-SCOPED-PER-JOB) — doctor surfaces the trade-off as a warning, never a failure.
-const ghDeps = (out, plan, calls) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0" });
+const ghDeps = (out, plan, calls, extra = {}) => ({ out, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", ...extra });
 const ghEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...extra });
 
 test("doctor: default source gh warns with the login's scopes and names the broad ones", async () => {
@@ -3689,4 +3689,79 @@ test("doctor with no docker binary passes that answer to the floor check, so it 
 	assert.match(text(), /install Docker/);
 	assert.match(text(), /✗ PI_BACKEND_FLOOR asks for isolation=enforced/);
 	assert.doesNotMatch(text(), /exits 1 at boot so the supervisor retries/);
+});
+
+// --- the egress canary's own leftovers (issue #350) --------------------------------------------------
+//
+// The defect: `runCmdCapture`'s 30 s bound kills the docker CLI, which is not the container it started, so a
+// wedged proxy leaves a probe running on the canary network; the `finally`'s `network rm` then fails because
+// a member is still attached, and nothing inspected either result. The network survived every later run.
+
+/** A canary plan whose `unlisted` probe never finishes, which is the wedged-proxy shape #350 measured. */
+const wedgedProbe = { ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": { code: null, output: "" } };
+
+test("doctor: a canary probe whose CLI never finished is removed BY NAME, and only that one (#350)", async () => {
+	const calls = [];
+	const { out } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, { ...wedgedProbe, "gh auth status": { code: 0, output: ghStatusOutput } }, calls));
+	const rms = calls.filter((c) => c.args[0] === "rm").map((c) => c.args.join(" "));
+	assert.deepEqual(rms, [`rm -f pi-dispatch-egress-probe-unlisted-${process.pid}`], "only the probe whose CLI did not finish");
+});
+
+test("doctor: a probe name TAKEN by another doctor (125) is never removed -- it is not ours to kill (#350)", async () => {
+	// 125 is a name clash, so the container under that name belongs to a doctor that is still running.
+	const calls = [];
+	const { out } = capture();
+	await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, { ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": 125, "gh auth status": { code: 0, output: ghStatusOutput } }, calls),
+	);
+	assert.deepEqual(calls.filter((c) => c.args[0] === "rm"), [], "a clash means someone else owns that name");
+});
+
+test("doctor: a canary network that will not go is a WARNING carrying the command (#350)", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, { "docker network rm": 1, "docker network inspect": { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } }),
+	);
+	assert.equal(code, 0, "a leftover warns, it does not fail doctor");
+	assert.match(text(), new RegExp(`⚠ Egress canary: the network pi-dispatch-egress-doctor-${process.pid} could not be removed: docker network rm pi-dispatch-egress-doctor-${process.pid}`));
+	assert.match(text(), /remove it by hand now, or let the next `pi-dispatch doctor` remove it/);
+});
+
+test("doctor: a canary network the daemon says is gone is not a line at all (#350)", async () => {
+	const { out, text } = capture();
+	await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, { "docker network rm": 1, "docker network inspect": { code: 1, output: "", stderr: "Error response from daemon: network pi-dispatch-egress-doctor-1 not found" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } }),
+	);
+	assert.doesNotMatch(text(), /could not be removed/, "the one silence this allows, in the daemon's own words");
+});
+
+test("doctor: a DEAD doctor's canary network is swept, its probe removed and the network taken without -f (#350)", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\npi-dispatch-egress-doctor-4242-extra\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"},"b":{"Name":"pi-dispatch-egress-proxy"}}' },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242, detaching pi-dispatch-egress-proxy\), left by a doctor run that did not finish/);
+	const touched = calls.map((c) => c.args.join(" "));
+	assert.ok(touched.includes("rm -f pi-dispatch-egress-probe-unlisted-4242"), "the dead run's own probe IS the leak, so it is removed");
+	assert.ok(touched.includes("network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy"), "the shared proxy is detached, never removed");
+	assert.ok(!touched.some((t) => t.startsWith("network rm -f")), "never `network rm -f`");
+	assert.ok(!touched.some((t) => t.includes("4242-extra")), "the name shape is ANCHORED: a longer name is not this namespace");
+});
+
+test("doctor: a canary network whose pid is still ALIVE is left entirely alone (#350)", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	const plan = { "docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } };
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => true, pid: 1 }));
+	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
+	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "a live doctor's network is its own business");
 });

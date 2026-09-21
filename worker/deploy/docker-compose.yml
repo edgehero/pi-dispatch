@@ -77,7 +77,8 @@ services:
   #
   # It sits on ONE network here, the upstream one. The networks that matter are created by the WORKER, one
   # per job, `--internal`, and this container is attached to each for the life of that job and detached
-  # after (worker/src/egress.mjs). Per-job rather than one shared network because a shared network is a
+  # after (worker/src/egress.mjs), or by the next boot's reaper when a worker died before it could detach
+  # (issue #357). Per-job rather than one shared network because a shared network is a
   # shared L2 segment: at DES-CONCURRENCY-3 that is three mutually-untrusting issue authors who can reach
   # each other. `enable_icc=false` cannot fix that -- ICC governs every container pair on the bridge and
   # this proxy is a container, so it would block the very path the design depends on.

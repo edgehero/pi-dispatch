@@ -48,7 +48,7 @@ than everything else combined.
 
 | | |
 |---|---|
-| One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. |
+| One `--internal` network **per job** | `pi-job-<id>-net`, created at job start and removed at job end. Holds exactly two endpoints: the container and the proxy. If the worker dies before it can remove one, the next boot removes it, detaching whatever is still on it first, and says so in the log if it cannot. |
 | One long-lived proxy | `pi-dispatch-egress-proxy`, squid, hostname filtering on `CONNECT` to port 443. Publishes no port. |
 | One upstream network | `pi-dispatch-egress-out`. Only the proxy is on it. |
 
@@ -98,7 +98,12 @@ deployment. `doctor` does it once, when you ask.
 ✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
 ```
 
-The last two each run a throwaway container on a throwaway network, using **your job image's own node**, so
+You may also see a line saying a leftover network was removed, or one naming a network that could not be:
+those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>` and its two probe containers. A doctor
+run that was killed, or one whose proxy accepted a connection and never answered, can leave them behind; the
+next run sweeps whatever belongs to a process that is no longer alive.
+
+The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node**, so
 they prove the path your jobs actually take. They cost nothing: `api.anthropic.com` answers `401` to an
 unauthenticated request, so reaching the provider and being refused for the key proves the whole path
 without spending a token. The deny probe asks for `example.com`, a host that resolves and answers, so a proxy
@@ -107,7 +112,9 @@ finding. A probe container that does not run at all is reported as not run, neve
 
 An absent proxy is a **hard failure** in doctor, because every job is refused while it is down. Everything
 that needs the network to answer is a **warning**, because a custom provider base URL or a transient blip
-would each make a red there a false alarm.
+would each make a red there a false alarm. So is a leftover the canary could not remove: it is a warning
+carrying the exact `docker network rm` to run, since a network nobody is using costs nothing but disk and a
+doctor that failed over one would be crying wolf.
 
 ## The trap that was not one
 

@@ -68,7 +68,7 @@ import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
 import { observeHost } from "./runtime-observations.mjs";
 import { makeDockerEndpointResolver } from "./backend-local.mjs";
-import { egressArmed, egressProxyName } from "./egress.mjs";
+import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
@@ -144,7 +144,10 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// The facts a --live pass needs from the collection it follows (the endpoint read, docker and the image, the
 	// egress canary's readings), filled by collectChecks rather than re-probed.
 	const facts = {};
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, observationFs };
+	// `isAlive` and `pid` ride the SHARED seams since issue #350, not just the `--live` spread below: the egress
+	// canary names its network after the doctor PROCESS and now sweeps what a doctor that did not finish left,
+	// so it needs both, and a test cannot drive that sweep while the names come from `process.pid` directly.
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, observationFs, isAlive, pid };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -2366,8 +2369,64 @@ function triggersPath(env, cwd) {
  * job inside a paid container". It is also not one argv but a compose profile and a file that must already
  * exist, and doctor "never guesses a semantic env value".
  */
+/**
+ * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
+ * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
+ */
+/**
+ * Canary networks a doctor run that did not finish left behind (issue #350), for a PID no longer alive.
+ *
+ * UNLIKE `sweepStaleNetworks` in live-probes.mjs, an attached PROBE here is not a run in progress, and that
+ * inversion is the whole of this function. There, a live-probe container on a peer network means a read-back
+ * that has not ended, so the network is left alone. Here the process that would have been watching it is
+ * already dead, so a probe still on the network IS the leak: the measured shape is a wedged proxy holding the
+ * probe past the 30 s bound, the bound killing the docker CLI rather than the container, and the container
+ * keeping the network alive forever after.
+ *
+ * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
+ * pid is still alive belongs to a doctor that is still running.
+ */
+async function sweepStaleCanaryNetworks({ docker, pid, isAlive, proxy }) {
+	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
+	if (listed?.code !== 0) return [];
+	const shape = new RegExp(`^${EGRESS_CANARY_NET_PREFIX}(\\d+)$`);
+	const probeOf = (name) => new RegExp(`^${EGRESS_CANARY_PROBE_PREFIX}\\S+-${name}$`);
+	const checks = [];
+	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
+		const m = shape.exec(name);
+		if (!m) continue;
+		const owner = Number(m[1]);
+		if (owner === pid || isAlive(owner)) continue;
+		const { ok, names, absent } = await networkEndpoints(docker, name);
+		if (absent) continue;
+		if (!ok) {
+			checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be read: docker network rm ${name}`, fix: CANARY_LEFTOVER_FIX });
+			continue;
+		}
+		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
+		// long-lived, and a stranger on a network in this namespace is not ours to delete.
+		const removed = [];
+		for (const endpoint of names.filter((n) => probeOf(String(owner)).test(n))) {
+			await docker(["rm", "-f", endpoint]);
+			removed.push(endpoint);
+		}
+		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
+		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
+		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by a doctor run that did not finish` });
+		else if (!outcome.removed) checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
+	}
+	return checks;
+}
+
+const CANARY_STEP_TIMEOUT_MS = 10_000;
+
+/** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
+const CANARY_LEFTOVER_FIX = "remove it by hand now, or let the next `pi-dispatch doctor` remove it once that process has exited";
+
 async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
-	const { spawn } = seams;
+	// `pid` and `isAlive` default here as well as riding the seams, so a caller that predates issue #350 still
+	// gets the process's own answer rather than a name ending in `undefined`.
+	const { spawn, pid = process.pid, isAlive = defaultIsAlive } = seams;
 	// The SAME parse the worker boots with (egress.mjs), never a second `=== "1"`: doctor reporting a
 	// policy that is off, or nothing about one that is on, is worse than doctor not checking at all.
 	// A malformed value is the worker's boot failure to report, not doctor's to guess at, so it reads as
@@ -2391,6 +2450,17 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		});
 		return checks;
 	}
+
+	// What a doctor run that did NOT finish left behind (issue #350). BEFORE the proxy read on purpose: a host
+	// whose proxy has since been stopped or removed still has leftovers to clear, and neither the proxy's state
+	// nor the image's presence is a reason to leave a network on the daemon.
+	//
+	// THE CANARY OWNS THIS, not `doctor --live`. The module that makes an object sweeps it, which is
+	// `live-probes.mjs`'s own arrangement rather than "--live sweeps everything"; and this runs on EVERY doctor
+	// on an armed deployment, where `--live` is opt-in by typing a flag, so putting it there would let the
+	// operators who never ask for a container read-back accumulate networks forever. The accepted cost, stated:
+	// a deployment that turns egress OFF returns above and never sweeps its old canary networks.
+	checks.push(...(await sweepStaleCanaryNetworks({ docker: (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS }), pid, isAlive, proxy })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -2431,9 +2501,23 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	// reaching the provider and being refused for the key proves the entire path and costs nothing. That is
 	// docs/egress.md's own method, promoted from prose to a check.
 	if (imageCode !== 0) return checks;
-	const net = `pi-dispatch-egress-doctor-${process.pid}`;
-	if ((await runCmd(spawn, "docker", ["network", "create", "--internal", net])) !== 0) return checks;
+	const net = egressCanaryNetwork(pid);
+	// A runner that captures BOTH streams and is bounded: `runCmd` answers with an exit code only and `stdio:
+	// "ignore"`, so the "network is not there" rule -- whose wording the daemon puts on stderr with stdout
+	// empty when `--format` is passed -- could not read it. `liveRunVia` is already exactly this shape in this
+	// file; a fourth runner would be a fourth place for the bound to be wrong.
+	const docker = (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS });
+	// Probe containers this run may have left BEHIND its CLI, see the `code === null` branch below.
+	const unfinished = [];
+	let created = false;
 	try {
+		// OWNED BEFORE THE CREATE, and inside the try, which is the change issue #350 asked for: the create used
+		// to sit above the `try`, so a create that timed out having actually landed skipped the teardown
+		// entirely. `checks` is returned by reference on every early path here, so a line pushed in the
+		// `finally` still reaches the operator -- including on the `network connect` failure below, where the
+		// network exists and nothing else would say so.
+		created = true;
+		if ((await runCmd(spawn, "docker", ["network", "create", "--internal", net])) !== 0) return checks;
 		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
 		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
@@ -2470,6 +2554,12 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 			]);
 			// The script exits 0 (reached) or 3 (blocked). Anything else is the container not running it -- a name clash,
 			// the image, the daemon -- which is no reading at all, and must not pass for a deny.
+			// `code === null` is the ONE case where a container may still be RUNNING under a name we chose: the
+			// bound killed the docker CLI, which is not the container it started (that is the whole of #350), or
+			// the CLI never launched. 125 is the OPPOSITE case -- the name is taken by ANOTHER doctor's probe --
+			// and removing that one would kill a live doctor's read. 0, 3, 126 and 127 all mean the container ran,
+			// so `--rm` has already disposed of it.
+			if (probe.code === null) unfinished.push(egressCanaryProbe(slug, pid));
 			if (probe.code !== 0 && probe.code !== 3) {
 				checks.push({
 					ok: false,
@@ -2500,8 +2590,17 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 			});
 		}
 	} finally {
-		await runCmd(spawn, "docker", ["network", "disconnect", "-f", net, proxy]);
-		await runCmd(spawn, "docker", ["network", "rm", net]);
+		// The probes FIRST, by the name carrying this pid, then the network: a member still attached is exactly
+		// why the old `network rm` failed, and it failed silently. `rm -f` of a name that is not there is docker
+		// saying so, which is not worth a line (measured: exit 0).
+		for (const name of unfinished) await runCmd(spawn, "docker", ["rm", "-f", name]);
+		if (created) {
+			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy] });
+			// The COMMAND lives in the label and the generic advice in the fix, which is the shape `--live`'s own
+			// leftover notes already use: `render` prints a fix line only when a check is not ok, and an ok check
+			// never prints one at all.
+			if (!outcome.removed) checks.push({ ok: false, warn: true, label: `Egress canary: the network ${net} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
+		}
 	}
 	return checks;
 }

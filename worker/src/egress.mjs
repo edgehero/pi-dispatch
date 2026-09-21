@@ -104,6 +104,29 @@ export function networkNameFor(containerName) {
 }
 
 /**
+ * `pi-dispatch doctor`'s canary objects: one throwaway network per doctor PROCESS, and one probe container per
+ * direction on it. NAMED HERE rather than spelled inline in `doctor.mjs`, because after issue #350 the name has
+ * three consumers in that module -- the create, the teardown, and the anchored regex of the dead-pid sweep --
+ * and one outside it, `INT-EGRESS-POLICY-CONTRACT`'s object table.
+ *
+ * Both stay OUTSIDE `pi-job-` and `pi-sandbox-`, for the reason `NETWORK_SUFFIX` above already gives: the boot
+ * reaper and the sandbox sweep match their namespaces as SUBSTRINGS, so a canary name that fell inside one
+ * would be swept by a reaper that knows nothing about doctor.
+ */
+export const EGRESS_CANARY_NET_PREFIX = "pi-dispatch-egress-doctor-";
+export const EGRESS_CANARY_PROBE_PREFIX = "pi-dispatch-egress-probe-";
+
+/** The canary network for one doctor process. */
+export function egressCanaryNetwork(pid) {
+	return `${EGRESS_CANARY_NET_PREFIX}${pid}`;
+}
+
+/** One canary probe container, per direction and per doctor process. */
+export function egressCanaryProbe(slug, pid) {
+	return `${EGRESS_CANARY_PROBE_PREFIX}${slug}-${pid}`;
+}
+
+/**
  * How a container reaches the proxy: by NAME, resolved by docker's embedded DNS on the user-defined
  * network. `docs/sandbox.md`'s recipe had to write a bare gateway IP because the DEFAULT bridge has no
  * name resolution; a user-defined network does, which is what removes the host-specific literal.
@@ -227,6 +250,79 @@ export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRES
 export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EGRESS_PROXY }) {
 	await runWith(docker, ["network", "disconnect", "-f", network, proxy]);
 	return (await runWith(docker, ["network", "rm", network]))?.code === 0;
+}
+
+/**
+ * "The daemon says this network is not there", in BOTH daemons' words for a NETWORK (measured: Docker
+ * `network X not found`, Podman `unable to find network with name or ID X: network not found`). The CLI's own
+ * `context not found` must NOT match -- that is about the CLI, not the network -- and neither may an inspect
+ * that timed out or a daemon that could not be reached. `code === null` is NO ANSWER and therefore never absence.
+ *
+ * ONE COPY, because this classifies ANOTHER TOOL'S PROSE across two runtimes. The rule was earned over three
+ * review rounds in `live-probes.mjs` (issue #344), and a second copy is the one nobody updates when a third
+ * runtime words it differently. That is this file's own argument for owning the proxy name and the network
+ * suffix: a rename that lands in the producer and not in the reaper is the failure mode.
+ *
+ * Measured 2026-09-21 on docker 27.4.0: `network inspect` and `network rm` word a missing network
+ * IDENTICALLY, and with `--format` the wording is on STDERR with stdout empty. So a caller must hand in a
+ * runner that captures BOTH streams; `runDocker` below captures neither by default.
+ */
+export function networkAbsentInDaemonWords(result) {
+	if (!result || result.code === 0 || result.code === null) return false;
+	return /network (?:\S+ )?not found/i.test(`${result.stdout ?? ""}${result.stderr ?? ""}`);
+}
+
+/**
+ * The endpoint NAMES attached to a network, as `{ ok, names, absent }`. `.Name` reads on Docker AND Podman
+ * (measured, issue #344).
+ *
+ * WHAT "ATTACHED" MEANS HERE, measured end to end on docker 27.4.0 rather than assumed, because a review
+ * round got it backwards: this lists RUNNING endpoints only, and that is exactly aligned with what blocks a
+ * removal. A running member is listed and `network rm` fails "has active endpoints"; the SAME member stopped
+ * is absent from this map AND the `rm` succeeds. So "listed" and "holds the network" agree, and a stopped
+ * container is not something a sweep needs to reason about. Unmeasured on Podman's netavark.
+ */
+export async function networkEndpoints(docker, network) {
+	const inspected = await runWith(docker, ["network", "inspect", "--format", "{{json .Containers}}", network]);
+	if (inspected?.code !== 0) return { ok: false, names: [], absent: networkAbsentInDaemonWords(inspected) };
+	try {
+		const parsed = JSON.parse(String(inspected.stdout ?? "").trim() || "{}") ?? {};
+		return { ok: true, absent: false, names: Object.values(parsed).map((c) => String(c?.Name ?? "")).filter(Boolean) };
+	} catch {
+		return { ok: false, names: [], absent: false };
+	}
+}
+
+/**
+ * Detach what the CALLER names, then `network rm` WITHOUT `-f`, and SAY what happened rather than return a
+ * boolean a caller can drop: `{ removed, absent, detached, command }`.
+ *
+ * A SIBLING of `removeJobNetworkWith`, deliberately NOT its replacement and not built on top of it, and the
+ * direction matters both ways. Building this on that one would force-detach the proxy BEFORE anything
+ * inspected the endpoint list, which is exactly the harm a sweep's guard exists to prevent. Building that one
+ * on this would add an inspect to the job's own teardown path, which `worker/test/egress.test.mjs:146` pins
+ * as exactly two calls. So the job path keeps its two-call shape and the sweeps get their own primitive.
+ *
+ * `detach` is an EXPLICIT list because every caller decides it differently: the boot reaper detaches what it
+ * saw and nothing while a job container is still on the network, `doctor`'s canary detaches its own proxy,
+ * and a sandbox sweep leaves a session alone. A helper whose parameters ARE the decision would hide it.
+ *
+ * `command` is the one an operator would type, and it is the ONLY string a caller may print: the CLI's own
+ * error text is never surfaced, because a docker error can repeat a `DOCKER_HOST` with credentials in it
+ * (issue #339).
+ */
+export async function removeNetworkOrSay(docker, { network, detach = [] }) {
+	const detached = [];
+	for (const endpoint of detach) {
+		await runWith(docker, ["network", "disconnect", "-f", network, endpoint]);
+		detached.push(endpoint);
+	}
+	if ((await runWith(docker, ["network", "rm", network]))?.code === 0) return { removed: true, absent: false, detached, command: null };
+	// Silent ONLY when the daemon says it is not there. Anything else -- a timeout, an unreachable daemon, a
+	// race that attached something between the inspect and the rm -- is said, with the command.
+	const inspected = await runWith(docker, ["network", "inspect", network]);
+	if (networkAbsentInDaemonWords(inspected)) return { removed: true, absent: true, detached, command: null };
+	return { removed: false, absent: false, detached, command: `docker network rm ${network}` };
 }
 
 /** One step through a caller's runner, as `{ code: null }` when it throws. */

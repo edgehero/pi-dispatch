@@ -1,18 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import {
-	createJobNetwork,
-	createJobNetworkWith,
-	DEFAULT_EGRESS_PROXY,
-	egressArmed,
-	egressEnv,
-	egressProxyUrl,
-	makeEgressPreflight,
-	networkNameFor,
-	removeJobNetwork,
-	removeJobNetworkWith,
-} from "../src/egress.mjs";
+import { DEFAULT_EGRESS_PROXY, createJobNetwork, createJobNetworkWith, egressArmed, egressEnv, egressProxyUrl, makeEgressPreflight, networkAbsentInDaemonWords, networkEndpoints, networkNameFor, removeJobNetwork, removeJobNetworkWith, removeNetworkOrSay } from "../src/egress.mjs";
 
 // No skip guard, deliberately: like image-preflight.mjs this module imports nothing but
 // node:child_process, and it decides whether a budget slot is spent. A money gate must not have
@@ -202,4 +191,62 @@ test("the With forms run the job path's exact sequence over any runner, and a ru
 	assert.equal(await createJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
 	assert.equal(await removeJobNetworkWith(throwing, { network: "n", proxy: "p" }), false);
 	assert.equal(await removeJobNetworkWith(async (a) => ({ code: a[1] === "rm" ? 1 : 0 }), { network: "n", proxy: "p" }), false, "a network that would not go says so");
+});
+
+// --- the shared network-removal rule (issues #357, #352) ---------------------------------------------
+
+test("a network is 'not there' ONLY in the daemon's own words, and only on a non-zero exit (#352)", () => {
+	// The three mutants #352 recorded as surviving `dropNetwork`'s own tests. They survived because every
+	// fixture there happened to be non-zero, stderr-only and lower case, so each mutation was equivalent
+	// under the wording measured on Docker 27.5.1 and Podman 5.8.2. Each gets its own case here.
+	const absent = networkAbsentInDaemonWords;
+	// (1) the code !== 0 guard. A successful inspect whose OUTPUT happens to carry the words is not absence:
+	// a container named `network-x-not-found` would otherwise delete its own network from the record.
+	assert.equal(absent({ code: 0, stdout: "network pi-job-x-net not found", stderr: "" }), false, "exit 0 is never absence");
+	// (2) stdout only. Docker puts it on stderr, but a runtime that answers on stdout must read the same.
+	assert.equal(absent({ code: 1, stdout: "network pi-job-x-net not found", stderr: "" }), true);
+	// (3) case. Nothing measured answers in title case; nothing should have to.
+	assert.equal(absent({ code: 1, stdout: "", stderr: "Error: Network pi-job-x-net Not Found" }), true);
+	// Both daemons' measured wording, which is the rule's whole reason for existing.
+	assert.equal(absent({ code: 1, stdout: "", stderr: "Error response from daemon: network pi-job-x-net not found" }), true, "docker");
+	assert.equal(absent({ code: 1, stdout: "", stderr: "Error: unable to find network with name or ID pi-job-x-net: network not found" }), true, "podman");
+	// NOT absence: no answer at all, and the CLI talking about ITSELF rather than about a network.
+	assert.equal(absent({ code: null, stdout: "", stderr: "" }), false, "a timeout is no answer");
+	assert.equal(absent(undefined), false);
+	assert.equal(absent({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }), false);
+	assert.equal(absent({ code: 1, stdout: "", stderr: 'context "foo" not found' }), false, "the CLI's own context, not a network");
+});
+
+test("removeNetworkOrSay detaches what the CALLER names, never -f, and says what stayed (#357)", async () => {
+	const calls = [];
+	const run = async (args) => {
+		calls.push(args.join(" "));
+		if (args[1] === "rm") return { code: 1, stdout: "", stderr: "has active endpoints" };
+		if (args[1] === "inspect") return { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" };
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const out = await removeNetworkOrSay(run, { network: "n", detach: ["p1", "p2"] });
+	assert.deepEqual(out, { removed: false, absent: false, detached: ["p1", "p2"], command: "docker network rm n" });
+	assert.deepEqual(calls, ["network disconnect -f n p1", "network disconnect -f n p2", "network rm n", "network inspect n"]);
+	assert.ok(!calls.some((c) => c === "network rm -f n"), "never `network rm -f`: it would pull a network out from under a live endpoint");
+});
+
+test("removeNetworkOrSay is silent when the daemon says the network is gone (#357)", async () => {
+	const run = async (args) => (args[1] === "rm" ? { code: 1, stdout: "", stderr: "network n not found" } : { code: 1, stdout: "", stderr: "Error response from daemon: network n not found" });
+	assert.deepEqual(await removeNetworkOrSay(run, { network: "n" }), { removed: true, absent: true, detached: [], command: null });
+});
+
+test("networkEndpoints reads the Name field, and an unreadable answer is not an empty one (#357)", async () => {
+	// "no endpoints" and "could not ask" must not arrive as the same empty array: the first lets a sweep
+	// remove, the second must not.
+	const ok = await networkEndpoints(async () => ({ code: 0, stdout: '{"id0":{"Name":"pi-job-a"},"id1":{"Name":"pi-dispatch-egress-proxy"}}', stderr: "" }), "n");
+	assert.deepEqual(ok, { ok: true, absent: false, names: ["pi-job-a", "pi-dispatch-egress-proxy"] });
+	const empty = await networkEndpoints(async () => ({ code: 0, stdout: "{}", stderr: "" }), "n");
+	assert.deepEqual(empty, { ok: true, absent: false, names: [] });
+	const torn = await networkEndpoints(async () => ({ code: 0, stdout: "{not json", stderr: "" }), "n");
+	assert.equal(torn.ok, false, "a torn answer is not an empty network");
+	const gone = await networkEndpoints(async () => ({ code: 1, stdout: "", stderr: "network n not found" }), "n");
+	assert.deepEqual(gone, { ok: false, names: [], absent: true });
+	const down = await networkEndpoints(async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }), "n");
+	assert.deepEqual(down, { ok: false, names: [], absent: false });
 });

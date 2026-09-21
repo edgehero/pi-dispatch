@@ -220,3 +220,136 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 	assert.equal(exit.code, 1);
 	assert.equal(Object.hasOwn(exit, "stderr"), false, "stderr repeats an unparseable DOCKER_HOST with its credentials, and is not handed on as its own field");
 });
+
+// --- makeReaper's network half (issue #357) ----------------------------------------------------------
+//
+// The first direct tests this function has ever had: before #357 it was imported here and never called,
+// so nothing pinned the `docker ps` filter, the `network ls` filter, `reaped_container`, `reaped_network`
+// or the bare `catch {}` the sweep used to hide a leak behind.
+//
+// The fake MODELS THE DAEMON rather than replaying a script, because the behaviour under test is a
+// conversation with it: `network rm` REJECTS while a network still has endpoints, exactly as docker does
+// (measured on 27.4.0), and `network disconnect` empties one. A replayed script would pass whatever order
+// the code used.
+function fakeDockerExec({ containers = [], nets = {}, fail = {} } = {}) {
+	const calls = [];
+	const state = new Map(Object.entries(nets).map(([n, members]) => [n, [...members]]));
+	const reject = (code, stderr) => Promise.reject(Object.assign(new Error(`Command failed: docker`), { code, stdout: "", stderr }));
+	const exec = async (_cmd, args) => {
+		calls.push(args.join(" "));
+		const key = args.slice(0, 2).join(" ");
+		if (fail[key]) return reject(1, fail[key]);
+		if (key === "ps --filter") return { stdout: containers.join("\n"), stderr: "" };
+		if (key === "rm -f") return { stdout: "", stderr: "" };
+		if (key === "network ls") return { stdout: [...state.keys()].join("\n"), stderr: "" };
+		if (key === "network inspect") {
+			const net = args.at(-1);
+			if (!state.has(net)) return reject(1, `Error response from daemon: network ${net} not found`);
+			if (!args.includes("--format")) return { stdout: "[]", stderr: "" };
+			const members = state.get(net);
+			return { stdout: JSON.stringify(Object.fromEntries(members.map((m, i) => [`id${i}`, { Name: m }]))), stderr: "" };
+		}
+		if (key === "network disconnect") {
+			const [net, endpoint] = args.slice(-2);
+			state.set(net, (state.get(net) ?? []).filter((m) => m !== endpoint));
+			return { stdout: "", stderr: "" };
+		}
+		if (key === "network rm") {
+			const net = args.at(-1);
+			if (!state.has(net)) return reject(1, `Error response from daemon: network ${net} not found`);
+			if ((state.get(net) ?? []).length > 0) return reject(1, `Error response from daemon: error while removing network: network ${net} has active endpoints`);
+			state.delete(net);
+			return { stdout: net, stderr: "" };
+		}
+		return { stdout: "", stderr: "" };
+	};
+	return { exec, calls, state };
+}
+
+const reaperLog = () => {
+	const lines = [];
+	return { log: (event, fields) => lines.push([event, fields]), lines };
+};
+
+test("the boot reaper detaches what a dead job's network still holds, this worker's own proxy included, then removes it (#357)", async () => {
+	// The measured case: kill -9 the worker mid-job with PI_EGRESS=1 and restart. The container is reaped,
+	// but nothing detached the long-lived proxy, so `network rm` failed and the old `catch {}` ate it.
+	const { exec, calls, state } = fakeDockerExec({ nets: { "pi-job-a-net": ["pi-dispatch-egress-proxy"] } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true });
+	assert.deepEqual(lines, [["reaped_network", { network: "pi-job-a-net", detached: ["pi-dispatch-egress-proxy"] }]]);
+	assert.equal(state.has("pi-job-a-net"), false, "the network is gone");
+	const net = calls.filter((c) => c.startsWith("network "));
+	assert.deepEqual(net, [
+		"network ls --filter name=pi-job- --format {{.Name}}",
+		"network inspect --format {{json .Containers}} pi-job-a-net",
+		"network disconnect -f pi-job-a-net pi-dispatch-egress-proxy",
+		"network rm pi-job-a-net",
+	], "inspect FIRST, then detach what it saw, then rm");
+	assert.ok(!calls.some((c) => c.includes("network rm") && c.includes("-f")), "never `network rm -f`");
+});
+
+test("a job network a job container is still on is LEFT ALONE, and said (#357)", async () => {
+	// Detaching here would sever a live job's only route out: it keeps running, spends its slot and dies at
+	// its first turn. Worse than the network it would have cleaned up.
+	const { exec, calls, state } = fakeDockerExec({ nets: { "pi-job-b-net": ["pi-job-b", "pi-dispatch-egress-proxy"] } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true });
+	assert.deepEqual(lines.map((l) => l[0]), ["network_not_reaped"]);
+	assert.deepEqual(lines[0][1], { network: "pi-job-b-net", reason: "job-container-attached" });
+	assert.ok(!calls.some((c) => c.startsWith("network disconnect")), "nothing is detached from a live job's network");
+	assert.ok(state.has("pi-job-b-net"), "and the network stays");
+});
+
+test("a network that will not go is a line naming it, never silence (#357)", async () => {
+	// The defect this closes: the failure had nowhere to go, so the network survived every later boot with
+	// nothing in the log to say so.
+	const { exec } = fakeDockerExec({ nets: { "pi-job-c-net": [] }, fail: { "network rm": "Cannot connect to the Docker daemon" } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true });
+	assert.deepEqual(lines, [["network_not_reaped", { network: "pi-job-c-net", reason: "rm-failed", detached: [] }]]);
+});
+
+test("a network the daemon says is not there is not a line at all (#357)", async () => {
+	// The one silence this sweep allows, and only in the daemon's own words for a NETWORK.
+	const { exec } = fakeDockerExec({ nets: { "pi-job-d-net": [] } });
+	const { log, lines } = reaperLog();
+	// `network ls` listed it, then it vanished before the inspect: the race a best-effort sweep must not shout about.
+	const racing = async (cmd, args) => (args.slice(0, 2).join(" ") === "network inspect" ? Promise.reject(Object.assign(new Error("x"), { code: 1, stdout: "", stderr: "Error response from daemon: network pi-job-d-net not found" })) : exec(cmd, args));
+	assert.deepEqual(await makeReaper({ log, exec: racing })(), { reaped: true });
+	assert.deepEqual(lines, []);
+});
+
+test("the network phase can NEVER flip the tri-state a scope claim is spent on (#357)", async () => {
+	// `makeScopeClaimSweeper` may only delete a claim naming this host once the host has established it holds
+	// no containers. A network fault is not evidence about containers, so it must not reach the outer catch.
+	const { exec } = fakeDockerExec({ containers: ["pi-job-e"], nets: { "pi-job-e-net": ["x"] }, fail: { "network inspect": "boom", "network disconnect": "boom", "network rm": "boom" } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true }, "containers WERE enumerated");
+	assert.ok(!lines.some((l) => l[0] === "reaper_skipped"), "a network fault is not a skipped reaper");
+});
+
+test("a docker ps that fails is {reaped:false} and one reaper_skipped (#357)", async () => {
+	// The money-critical half, untested before now: unproven means unproven.
+	const { exec } = fakeDockerExec({ fail: { "ps --filter": "daemon down" } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: false });
+	assert.deepEqual(lines.map((l) => l[0]), ["reaper_skipped"]);
+});
+
+test("nothing the reaper logs about a network carries the CLI's own text (#339, #357)", async () => {
+	// A docker error can repeat a DOCKER_HOST with credentials in it. The network lines carry object names and
+	// a token from a closed set, never `err.message`. A guard rail rather than a behaviour pin.
+	const { exec } = fakeDockerExec({ nets: { "pi-job-f-net": ["some-proxy"] }, fail: { "network rm": "Failed to initialize: parse \"ssh://bob:pa?ss@remote\"" } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed"]);
+	for (const [event, fields] of lines) {
+		if (event === "reaper_skipped") continue;
+		for (const [key, value] of Object.entries(fields)) {
+			const values = Array.isArray(value) ? value : [value];
+			for (const v of values) assert.ok(key === "reason" ? reasons.has(v) : /^[A-Za-z0-9._-]+$/.test(String(v)), `${event}.${key} must be an object name or a closed token, got ${JSON.stringify(v)}`);
+		}
+	}
+	assert.ok(!JSON.stringify(lines).includes("ssh://"), "the CLI's text never reaches a log line");
+});
