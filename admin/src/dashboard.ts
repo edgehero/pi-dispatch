@@ -91,9 +91,22 @@ function scrubReason(reason: any): string {
 }
 
 /**
- * The control-byte class itself, shared rather than copied (issue #337). C0 + DEL only, matching the
- * project's one such class (`triggers.mjs`'s validator): the C1 range is left alone there too, a
- * convention shared rather than widened in one renderer.
+ * The control-byte class for text this pane renders, C0 + DEL + C1 (issue #337).
+ *
+ * WHICH CLASS, because the project has two and the first version of this picked the wrong one. The
+ * narrow one is `triggers.mjs`'s VALIDATOR, C0 + DEL, which decides whether an operator-authored file
+ * is acceptable. The wider one is `panel.mjs`'s `CONTROL_CHARS`, C0 + DEL + C1, whose own comment calls
+ * it a "defensive strip of C0/C1 control chars from untrusted input" and which already backs `clip`,
+ * so the PLAIN and ASCII render paths have stripped C1 out of these same rows all along. A themed row
+ * and a plain row of the same record going through two different classes is the drift this must not be,
+ * and the wider one is the right one for the job: this is text on its way to a terminal, not a file
+ * being accepted.
+ *
+ * That also settles what issue #337 asked, and settles it by matching code rather than by arguing about
+ * terminals. The argument was available -- a JavaScript C1 code point leaves Node as two UTF-8 bytes and
+ * most modern terminals do not read that back as CSI -- but "most" is doing work there (xterm has
+ * `allowC1Printable` precisely because it does read them), and the project had already answered the
+ * question in `panel.mjs` years earlier.
  *
  * `scrubReason` applies it in the DEPS layer to one field, which is where it started and where
  * `DES-ADMIN-VIA-PI-EXTENSION` argues the injection boundary holds by placement. RUN_DETAIL applies it
@@ -107,7 +120,7 @@ function scrubReason(reason: any): string {
  * with it.
  */
 function scrubControl(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ");
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
 /** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
@@ -631,7 +644,12 @@ export function makeDashboard({
         if ((data === "y" || data === "Y") && typeof deps?.copyText === "function") {
           const text = data === "y" ? detailRun?.jobId : targetUrl(detailRun);
           if (!text) return; // nothing to copy: inert, no note
-          deps.copyText(String(text));
+          // SCRUBBED on the way OUT, and this is the one path where that is not about the terminal
+          // (issue #337). `copyText` base64s into OSC-52, which the payload cannot break, but the
+          // terminal decodes it into the operator's system CLIPBOARD: a carriage return inside a job id
+          // then SUBMITS a line when it is pasted at a shell prompt. The bytes leave the panel here, so
+          // this is the last place that can decline to hand them over.
+          deps.copyText(scrubControl(String(text)));
           copiedNote = `copied ${data === "y" ? "job id" : "target url"}`;
           tui?.requestRender?.();
           return;
@@ -1000,7 +1018,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   if (view === "RUN_DETAIL") {
     // The pane's own TITLE is built from a record id and reaches the terminal through `frame`, whose
     // `clipPlain` CLIPS but does not strip. Scrubbed for the same reason every line under it is.
-    const detailTitle = `run ${scrubControl(String(detailRun?.jobId ?? "-"))}`;
+    const detailTitle = `run ${detailRun?.jobId ?? "-"}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const allRuns = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
     const canOpen = Boolean(sandboxAvailable && detailSandbox?.retained);
@@ -1120,7 +1138,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   for (const section of sections) plain.push(section.title, ...section.lines);
   // The degraded path carries the same armed question / outcome note the framed footer does -- a narrow
   // terminal must not hide that a y is about to stop a paid job. Unarmed and noteless stays byte-identical.
-  plain.push(pendingCancel ? `cancel active job ${pendingCancel.jobId}? y/n` : actionNote ? `${actionNote}\n${KEY_HINTS}` : KEY_HINTS);
+  plain.push(pendingCancel ? `cancel active job ${scrubControl(String(pendingCancel.jobId ?? "-"))}? y/n` : actionNote ? `${actionNote}\n${KEY_HINTS}` : KEY_HINTS);
   return plain.join("\n\n").split("\n");
 }
 
@@ -1294,7 +1312,7 @@ function heldListHints(inner: number, styler: any, pendingCancel: any, actionNot
 function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: any): string {
   const k = (key: string, label: string) => styler.fg("accent", key) + " " + styler.fg("dim", label);
   if (pendingCancel) {
-    return fitLine(styler.fg("warning", `cancel active job ${pendingCancel.jobId}?`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), inner, styler);
+    return fitLine(styler.fg("warning", `cancel active job ${scrubControl(String(pendingCancel.jobId ?? "-"))}?`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")), inner, styler);
   }
   if (actionNote) return fitLine(styler.fg("warning", actionNote), inner, styler);
   return keyHints(inner, styler);
@@ -1721,21 +1739,21 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${hint}`, inner, styler);
   }
   const r = row.record ?? {};
+  // The LIST pane renders the same stored fields as the drill-in and into the same terminal, so it holds
+  // the same property (issue #337). The issue named RUN_DETAIL, but a belt that stops at one pane while
+  // the row above it prints the same field raw is a belt the next reader will assume covers both.
+  const cell = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
   const tree = r.chainDepth > 0 ? styler.fg("dim", "└ ") : "";
   // The replica badge sits beside the chain glyph because it answers the same question the glyph does --
   // "is this run one of a set, and which one" -- and a row that is silently one of two racing jobs is the
   // one misreading this list can produce. Absent on an unreplicated run, so today's rows are unchanged.
-  const rep = r.replica > 0 ? styler.fg("warning", `r${r.replica}/${r.replicas ?? "?"} `) : "";
+  const rep = r.replica > 0 ? styler.fg("warning", `r${cell(r.replica)}/${cell(r.replicas ?? "?")} `) : "";
   const sep = styler.fg("dim", " · ");
   // The target cell is an OSC-8 hyperlink when the record yields a URL. PLAIN_THEME's `link` is a
   // byte-identical passthrough, so the monochrome path and every width test are untouched by
   // construction; under a real theme, stripAnsi/visibleLen already strip OSC-8, so the linked cell still
   // measures exactly its text width and fitLine stays honest.
   const url = targetUrl(r);
-  // The LIST pane renders the same stored fields as the drill-in and into the same terminal, so it holds
-  // the same property (issue #337). The issue named RUN_DETAIL, but a belt that stops at one pane while
-  // the row above it prints the same field raw is a belt the next reader will assume covers both.
-  const cell = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
   const targetCell = styler.fg("muted", cell(r.target));
   const cells = [
     styler.fg("text", cell(r.jobId)),
@@ -2214,8 +2232,14 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // a record STRING and goes through `show` like every other one; the enum comparisons below read
   // `r.outcome` directly, so a scrubbed display value cannot change a colour or a glyph.
   const oc = show(r.outcome ?? "-");
-  const outcomeColor = oc === "completed" ? "success" : oc === "policy" ? "warning" : "error";
-  const glyph = oc === "completed" ? "✔" : oc === "policy" ? "⚠" : "✘";
+  // Compared RAW and rendered SCRUBBED. The two readings happen to be equivalent for this class, since
+  // scrubbing replaces a control byte with a space and can never turn a dirty value INTO one of the two
+  // enum words, so no mutation distinguishes them; the split is here because a comparison is a decision
+  // and a decision should read the stored value, which is what the comment beside it has claimed since
+  // the first draft.
+  const outcome = r.outcome;
+  const outcomeColor = outcome === "completed" ? "success" : outcome === "policy" ? "warning" : "error";
+  const glyph = outcome === "completed" ? "✔" : outcome === "policy" ? "⚠" : "✘";
   let head = styler.bold(styler.fg(outcomeColor, `${glyph} ${oc}`));
   if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}`);
   out.push(fitLine(head, inner, styler));
@@ -2313,16 +2337,24 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     // wraps; `retained · 19h left · egress on (this shell, not the deployment)` is 64 and would lose its
     // own point silently. The caveat gets its own budget under a blank label.
     if (sandbox.retained && sandbox.egress) {
-      // The proxy name is OPERATOR-SET and unbounded, so it is capped here rather than left to `fitLine`,
-      // which truncates silently: a line that loses its own point without saying so is the failure the
-      // two-line split exists to avoid, and it would be odd to guard the caveat and not this.
+      // NO HAND-CAP on the name, and that is a measured retraction rather than an omission. One was
+      // written, on the reasoning that an operator-set name is unbounded and `fitLine` truncates
+      // silently. It is a no-op: `kv` leaves 53 columns and `egress on via ` is 14, so the budget is 39,
+      // and `styler.cell` already clips to 38 plus an ellipsis -- byte-identical at every width the pane
+      // can take, across 568 renders. Worse, the hand-cap hardcoded the ellipsis while `fitLine` swaps it
+      // under `PI_DISPATCH_ASCII`, so it pushed a non-ASCII glyph into the one mode that exists to avoid
+      // them.
+      //
       // `egressProxyName` falls back with `||`, so an EMPTY `PI_EGRESS_PROXY` gets the default and a
-      // whitespace one does not: without this the line reads `egress on via` and then stops, naming a
+      // whitespace one does not: unsaid, the line reads `egress on via` and then stops, naming a
       // container whose name is three spaces. Said rather than hidden, because that value is what `b`
-      // will actually look for.
-      const proxy = show(sandbox.egress.proxy).trim();
-      const named = proxy === "" ? "a proxy whose name is blank" : proxy.length > 39 ? `${proxy.slice(0, 38)}…` : proxy;
-      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off";
+      // will actually look for, and shown WITHOUT trimming for the same reason: `openSandbox` reads the
+      // variable itself and does not trim, so `" myproxy "` is a container called `" myproxy "`.
+      const proxy = show(sandbox.egress.proxy);
+      const named = /^\s*$/.test(proxy) ? "a proxy whose name is blank or spaces" : proxy;
+      // "egress off" alone reads as "no network at all", and it is the opposite: `PI_EGRESS=0` omits
+      // `--network` entirely, so the shell lands on docker's default bridge with the whole internet.
+      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off (docker's default bridge)";
       out.push(kv("", posture, sandbox.egress.malformed ? "error" : "text"));
       out.push(kv("", "read from this shell, not the deployment", "dim"));
     }

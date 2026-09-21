@@ -1759,6 +1759,19 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
     const named = typeof manifest.backend === "string" && manifest.backend !== "";
     return { retained: false, reason: named ? `not reopenable here (ran on ${manifest.backend})` : "not reopenable (no venue recorded)" };
   }
+  // The other two SYNCHRONOUS refusals `resolveSandbox` makes, asked here for the reason the venue one
+  // already is: so the panel never advertises `b` for a run this host cannot re-open. Until issue #337
+  // it stopped at the venue, so a run whose manifest names no image, or whose local folder moved, was
+  // offered the key, given two lines of egress detail about the session it would get, and then refused
+  // the moment it was pressed. Nobody reads two lines of detail about a door they are also told is shut.
+  //
+  // The third refusal `openSandbox` can make is NOT asked here and cannot be: a proxy that is not running
+  // fails at network creation, which needs docker, and this read is synchronous by design so RUN_DETAIL
+  // can do it once on entry inside a key handler. That residual is `OQ-038`'s, not this function's.
+  if (!manifest.image) return { retained: false, reason: "not reopenable (the manifest names no image)" };
+  if (!manifest.workspace || !nodeFs.existsSync(manifest.workspace)) {
+    return { retained: false, reason: "not reopenable (the workspace has moved or been deleted)" };
+  }
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");
   const until = Number.isFinite(keepUntil) ? keepUntil : createdAt + paths.sandboxRetentionHours * 3600000;
@@ -1850,46 +1863,36 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     write(`\ncould not start docker: ${result.error.message}\n`);
     await pause();
   }
-  // A 125, which used to redraw over itself in silence (#337 item 4). The panel suspended pi's TUI to hand
-  // the terminal over, so without a pause the whole failure is one line that `tui.start()` paints over
-  // before anyone reads it: the operator presses `b` at a run that never opens and no screen says why.
+  // THE THREE CODES A RUNTIME USES TO REFUSE, which used to redraw over themselves in silence (#337
+  // item 4). The panel suspended pi's TUI to hand the terminal over, so without a pause the whole
+  // failure is one line that `tui.start()` paints over before anyone reads it: the operator presses `b`
+  // at a run that never opens and no screen says why.
   //
-  // 125 AND NOT EVERY NON-ZERO CODE, and the reason is that no other code can carry the claim. The
-  // sandbox runs `--entrypoint bash -i`, so `docker run` returns BASH's status: an operator whose last
-  // command failed, or who types `exit 1`, would be told the sandbox never opened and made to read a
-  // pause for it. 126 and 127 are worse than ambiguous, because bash returns exactly those for a last
-  // command that was not executable or not found, so a hint about the IMAGE would fire on a healthy
-  // session. 125 is the code a runtime reserves for its own pre-start refusal, and a shell that returns
-  // it deliberately is rare enough to be worth the false positive. Issue #337 asked for the 125; this is
-  // that and deliberately not more.
+  // WORDED SO THE CODE CAN CARRY IT, which took two goes. The sandbox runs `--entrypoint bash -i`, so
+  // `docker run` returns BASH's status, and 125, 126 and 127 are each used by both sides: the runtime
+  // for "I refused before the container ran", and bash for its own last command. The first draft claimed
+  // the sandbox "never opened", which is false for an operator who typed `exit 1`; the second narrowed
+  // to 125 alone, which made a genuine `exec bash failed: No such file or directory` (127) silent again,
+  // and a mistyped flag on `timeout` (which documents 125 as its own failure) still spoke. No exit code
+  // separates the two, so the line states the code and offers the runtime reading CONDITIONALLY. Both
+  // readings are then true, and the redraw is stopped for all three.
   //
-  // NO `detached` GUARD, and its absence is the honest version. The first draft had one and justified it
-  // as insurance against a runtime that someday detaches with a non-zero code; that insurance cannot pay
-  // out, because `openSandbox` sets `detached` only inside `if (network && !error && code === 0)`, so
-  // such a session arrives here as `detached: false` and gets the message regardless. A guard that cannot
-  // do the job it is kept for is worse than none: it reads as a handled case. `result.code` is null when
-  // the spawn itself failed, which `result.error` above already said.
-  //
-  // The third cause in the message is the one an earlier draft omitted and a review pass measured: an
-  // unreachable `DOCKER_HOST` also exits 125, and sending the operator to inspect container names and
-  // images when they are talking to the wrong daemon is the expensive kind of wrong hint. It is also the
-  // variable `OQ-038` names as the sharpest thing this panel cannot see.
-  // Worded around the CODE and not around the runtime's message, because Podman uses the same convention
-  // with different text and that message is on the operator's screen already through the inherited
-  // `stdio`.
-  if (result.code === SANDBOX_REFUSED_BY_RUNTIME) {
-    write(`\nthe sandbox did not start (exit ${SANDBOX_REFUSED_BY_RUNTIME}): the runtime refused before the container ran -- the name may be taken by a container that is still around, the image may be missing under --pull=never, or DOCKER_HOST in this shell may not be the daemon you think it is\n`);
+  // Telling them apart properly needs a docker read (whether a container by that name exists after the
+  // exit, or a `--cidfile`), which is a second round trip in a key handler and belongs with `OQ-038`'s
+  // other unanswerable-without-docker question rather than here.
+  if (SANDBOX_RUNTIME_REFUSAL_CODES.has(result.code)) {
+    write(`\nthe sandbox exited ${result.code}. If no shell opened, the runtime refused before the container ran: the name may be taken by a container that is still around, the image may be missing under --pull=never, or DOCKER_HOST in this shell may not be the daemon you think it is\n`);
     await pause();
   }
 }
 
 /**
- * The exit code a container runtime reserves for "I refused before the container ran"; docker and Podman
- * both use it. Every other non-zero code from this launch is the SHELL's own status, because the sandbox
- * runs `--entrypoint bash -i`, so none of them can carry a claim about whether a shell opened.
+ * The exit codes a container runtime uses to refuse before the container runs. Docker and Podman both
+ * use all three: 125 for the runtime's own refusal, 126 and 127 from the exec of the entrypoint. Bash
+ * uses the same three for its own last command, which is why the message above offers rather than
+ * asserts the runtime reading.
  */
-const SANDBOX_REFUSED_BY_RUNTIME = 125;
-
+const SANDBOX_RUNTIME_REFUSAL_CODES = new Set([125, 126, 127]);
 /**
  * Hold the suspended terminal open long enough to read a refusal, then return.
  *

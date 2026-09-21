@@ -240,9 +240,21 @@ function padVisible(styler, line, width) {
   return line + " ".repeat(width - vis);
 }
 
-/** Plain clip to `width` columns with an ellipsis (used for the title only; content is pre-sized). */
+/**
+ * Plain clip to `width` columns with an ellipsis (used for the title only; content is pre-sized).
+ *
+ * The title is STRIPPED of control bytes here rather than at each call site (issue #337). Two of the five
+ * frame titles are built from a record's job id, this function clips without stripping, and fixing one
+ * caller left the other carrying what the lines inside the frame no longer did. `panel.mjs`'s own `box`
+ * already titles through `clip`, which strips; this is the same property in the other frame builder, so
+ * the two agree instead of differing by which file a pane happens to use. C0 + DEL + C1, matching
+ * `panel.mjs`'s `CONTROL_CHARS`, which is the project's class for untrusted text on its way to a terminal.
+ */
+// eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
+const TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
 function clipPlain(s, width, ellipsis = "…") {
-  const plain = String(s ?? "");
+  const plain = String(s ?? "").replace(TITLE_CONTROL_CHARS, " ");
   if (plain.length <= width) return plain;
   return width <= ellipsis.length ? plain.slice(0, width) : plain.slice(0, width - ellipsis.length) + ellipsis;
 }

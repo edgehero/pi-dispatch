@@ -112,22 +112,51 @@ test("a sandbox that exits non-zero without opening a shell PAUSES, rather than 
   let pauses = 0;
   const { io, written } = panelIo({ launch: async () => ({ code: 125 }), pause: async () => void pauses++ });
   await mod.openSandboxSession(RETAINED, "gh-1", io);
-  assert.match(written.join(""), /the sandbox did not start \(exit 125\)/);
-  assert.match(written.join(""), /the name may be taken/, "and it names what a runtime refusal usually is");
+  assert.match(written.join(""), /the sandbox exited 125\. If no shell opened, the runtime refused/);
+  assert.match(written.join(""), /DOCKER_HOST in this shell may not be the daemon/, "and it names all three causes, the daemon included");
   assert.equal(pauses, 1, "the operator reads it before the panel comes back");
 
-  // 125 AND ONLY 125. The sandbox runs `--entrypoint bash -i`, so every other code is the SHELL's own
-  // status: an operator who types `exit 1`, or whose last command was not found, would otherwise be told
-  // the sandbox never opened and made to read a pause for it. 126 and 127 are the sharp case, because
-  // bash returns exactly those for a last command that was not executable or not found, so a hint about
-  // the IMAGE would fire on a perfectly healthy session.
-  for (const code of [1, 2, 126, 127, 130]) {
+  // THREE CODES, and the wording is what makes that safe. The sandbox runs `--entrypoint bash -i`, so
+  // 125, 126 and 127 each belong to both sides: the runtime's own refusal, and bash's last command. An
+  // earlier version asserted the sandbox "never opened" and was false for `exit 1`; the next narrowed to
+  // 125 and made a genuine `exec bash failed` (127) silent again. Offering the runtime reading
+  // conditionally is true either way.
+  for (const code of [126, 127]) {
     let p2 = 0;
-    const shell = panelIo({ launch: async () => ({ code }), pause: async () => void p2++ });
-    await mod.openSandboxSession(RETAINED, "gh-1", shell.io);
-    assert.doesNotMatch(shell.written.join(""), /did not start/, `exit ${code} is the shell's own status`);
-    assert.equal(p2, 0, `exit ${code} must not stop the panel`);
+    const runtime = panelIo({ launch: async () => ({ code }), pause: async () => void p2++ });
+    await mod.openSandboxSession(RETAINED, "gh-1", runtime.io);
+    assert.match(runtime.written.join(""), new RegExp(`the sandbox exited ${code}\\. If no shell opened`), `exit ${code} is also a runtime refusal code`);
+    assert.doesNotMatch(runtime.written.join(""), /never opened|did not start/, "and it does not assert which of the two happened");
+    assert.equal(p2, 1);
   }
+
+  // Everything else is the shell's own status and says nothing, because nothing can be said about it.
+  for (const code of [1, 2, 130]) {
+    let p3 = 0;
+    const shell = panelIo({ launch: async () => ({ code }), pause: async () => void p3++ });
+    await mod.openSandboxSession(RETAINED, "gh-1", shell.io);
+    assert.doesNotMatch(shell.written.join(""), /the sandbox exited/, `exit ${code} is the shell's own status`);
+    assert.equal(p3, 0, `exit ${code} must not stop the panel`);
+  }
+});
+
+test("the panel does not offer `b`, or describe a session, for a run it cannot actually open (#337)", async () => {
+  // `readSandboxInfo` stopped at the venue refusal, so a run whose manifest names no image, or whose
+  // local folder moved, was advertised with the key AND given two lines of egress detail about the
+  // session it would get -- and then refused the moment `b` was pressed. Nobody reads two lines of
+  // detail about a door they are also being told is shut. These are the other two SYNCHRONOUS refusals
+  // `resolveSandbox` makes; the third (a proxy that is not running) needs docker and stays `OQ-038`'s.
+  const noImage = { sandboxDir: retainedRoot({ backend: "local", image: null }), sandboxRetentionHours: 24 };
+  const a = mod.readSandboxInfo(noImage, "gh-1", { now: () => NOW, env: {} });
+  assert.equal(a.retained, false, "no image, no offer");
+  assert.match(a.reason, /names no image/);
+  assert.equal(a.egress, undefined, "and no posture for a session that cannot exist");
+
+  const gone = { sandboxDir: retainedRoot({ backend: "local", workspace: "/definitely/not/here" }), sandboxRetentionHours: 24 };
+  const b = mod.readSandboxInfo(gone, "gh-1", { now: () => NOW, env: {} });
+  assert.equal(b.retained, false, "no workspace, no offer");
+  assert.match(b.reason, /moved or been deleted/);
+  assert.equal(b.egress, undefined);
 });
 
 test("a DETACHED session exits 0 and must not also report a failure (#337)", async () => {

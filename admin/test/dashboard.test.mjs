@@ -928,19 +928,20 @@ test("RUN_DETAIL says what egress a sandbox opened HERE would get, and whose env
   assert.match(out, /egress on via pi-dispatch-egress-proxy/);
   assert.match(out, /read from this shell, not the deployment/);
 
-  // An operator-set proxy name is unbounded, and `fitLine` truncates SILENTLY: capping it here is what
-  // keeps the line from losing its own point without saying so, which is the failure the two-line split
-  // exists to avoid in the first place.
+  // An operator-set proxy name is unbounded. It is NOT hand-capped: `fitLine` already shortens it with
+  // the pane's own ellipsis, at the same column, and a hand-cap would hardcode a glyph the ascii mode
+  // deliberately swaps. What this pins is the property that matters, which is that the CAVEAT keeps its
+  // own budget and survives whole however long the name is -- the whole reason the block is two lines.
   const long = await openRunDetail({
     sandboxInfo: () => ({ retained: true, expiresIn: "19h", egress: { armed: true, proxy: "an-extremely-long-egress-proxy-network-name-that-will-not-fit", source: "this shell" } }),
     launchSandbox: async () => {},
   });
   const longOut = stripAnsi(long.render(80).join("\n"));
   await long.dispose();
-  assert.match(longOut, /egress on via an-extremely-long-egress-proxy-network…/, "shortened by us, with a mark, rather than clipped by the frame");
+  assert.match(longOut, /egress on via an-extremely-long-egress-proxy-network/, "the name is there, as far as the budget reaches");
   assert.ok(
     longOut.split("\n").some((l) => l.includes("read from this shell, not the deployment")),
-    "and the caveat still survives whole beneath it",
+    "and the caveat survives whole beneath it, which is what the split is for",
   );
   // The budget is why it is two lines: `kv` leaves 53 columns for a value that `fitLine` CLIPS, not wraps,
   // and the one-line form is 64. A clipped caveat loses exactly the half that matters.
@@ -958,8 +959,23 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
   const off = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: false, proxy: "pi-dispatch-egress-proxy", source: "this shell" } }), launchSandbox: async () => {} });
   const offOut = stripAnsi(off.render(80).join("\n"));
   await off.dispose();
-  assert.match(offOut, /egress off/);
+  assert.match(offOut, /egress off \(docker's default bridge\)/, "off means the default bridge, not no network at all, and saying only `off` reads as the opposite");
   assert.doesNotMatch(offOut, /egress on/);
+
+  // A blank or whitespace-only PI_EGRESS_PROXY: `egressProxyName` falls back with `||`, so an empty one
+  // gets the default and a whitespace one does not. Unsaid, the line read `egress on via` and stopped.
+  const blank = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: "   ", source: "this shell" } }), launchSandbox: async () => {} });
+  const blankOut = stripAnsi(blank.render(80).join("\n"));
+  await blank.dispose();
+  assert.match(blankOut, /egress on via a proxy whose name is blank or spaces/);
+
+  // And a name with padding is shown WITH it, because the sentence beneath only means something if the
+  // name shown is the name `b` will look for: `openSandbox` reads the variable itself and does not trim,
+  // so `" myproxy "` is a container called `" myproxy "`.
+  const padded = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: " myproxy ", source: "this shell" } }), launchSandbox: async () => {} });
+  const paddedOut = stripAnsi(padded.render(80).join("\n"));
+  await padded.dispose();
+  assert.match(paddedOut, /egress on via {2}myproxy/, "the padding is part of the name, so it is part of what is shown");
 
   // `egressArmed` THROWS on a PI_EGRESS it cannot parse, and `openSandbox` refuses rather than opening a
   // shell on the open network. Rendering that as "off" would be the one reading that is wrong in the
@@ -978,7 +994,7 @@ test("RUN_DETAIL scrubs control bytes out of every record string it prints (#337
   // because the styler emits ESC and OSC-8 of its own and a naive "no ESC anywhere" check is both wrong
   // and green.
   const ESC = String.fromCharCode(27);
-  const nasty = (s) => `${s}${String.fromCharCode(13)}${ESC}[2J${ESC}]8;;http://evil${String.fromCharCode(7)}`;
+  const nasty = (s) => `${s}${String.fromCharCode(13)}${ESC}[2J${ESC}]8;;http://evil${String.fromCharCode(7)}${String.fromCharCode(155)}`;
   const comp = makeDashboard({
     paths: {},
     done() {},
@@ -1025,11 +1041,63 @@ test("RUN_DETAIL scrubs control bytes out of every record string it prints (#337
   const plain = stripAnsi(comp.render(80).join("\n"));
   await comp.dispose();
   // `stripAnsi` removes the styler's escapes; what survives is what the record contributed.
-  for (const [name, code] of [["NUL", 0], ["BEL", 7], ["CR", 13], ["ESC", 27], ["DEL", 127]]) {
+  for (const [name, code] of [["NUL", 0], ["BEL", 7], ["CR", 13], ["ESC", 27], ["DEL", 127], ["CSI", 155], ["C1-SOS", 152]]) {
     assert.ok(!plain.includes(String.fromCharCode(code)), `${name} from a record field reached the pane`);
   }
   assert.match(plain, /host/, "and the readable part of the value still renders");
   assert.match(plain, /run j1/, "including in the frame's own title");
+});
+
+test("nothing carries a control byte out of the panel: the armed question, the title, the clipboard (#337)", async () => {
+  // Three routes the pane-by-pane sweep missed, each reached differently. The armed cancel question
+  // prints a job id into the FOOTER; the frame TITLE goes through `clipPlain`, which clips without
+  // stripping; and the clipboard is the one path where this is not about the terminal at all -- OSC-52
+  // hands the bytes to the operator's system clipboard, and a carriage return inside a job id SUBMITS a
+  // line when it is pasted at a shell prompt.
+  const ESC = String.fromCharCode(27);
+  const CR = String.fromCharCode(13);
+  const dirty = `gh-9${CR}${ESC}[2J`;
+  // The armed question, on the ACTIVE row of its own component.
+  const active = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: dirty, active: [{ jobId: dirty }] }), sandboxInfo: () => null }),
+  });
+  await flush();
+  active.handleInput("x");
+  await flush();
+  const footer = stripAnsi(active.render(80).join("\n"));
+  await active.dispose();
+  assert.match(footer, /cancel active job gh-9/, "the question is armed");
+  for (const code of [13, 27]) assert.ok(!footer.includes(String.fromCharCode(code)), `char ${code} reached the armed question`);
+
+  // The frame title and the clipboard, in RUN_DETAIL on a finished run.
+  const copied = [];
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], jobId: dirty }] }),
+      sandboxInfo: () => null,
+      copyText: (t) => copied.push(t),
+    }),
+  });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const detail = stripAnsi(comp.render(80).join("\n"));
+  assert.match(detail, /run gh-9/, "the title names the run");
+  for (const code of [13, 27]) assert.ok(!detail.includes(String.fromCharCode(code)), `char ${code} reached the pane`);
+  comp.handleInput("y");
+  await flush();
+  await comp.dispose();
+  assert.equal(copied.length, 1);
+  for (const code of [13, 27]) assert.ok(!copied[0].includes(String.fromCharCode(code)), `char ${code} was handed to the system clipboard`);
+  assert.match(copied[0], /gh-9/, "and the id is still copyable");
 });
 
 test("the LIST rows hold the same property as the drill-in (#337)", async () => {
@@ -1044,7 +1112,7 @@ test("the LIST rows hold the same property as the drill-in (#337)", async () => 
     tui: fakeTui(),
     intervalMs: 100000,
     deps: cannedDeps({
-      fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], jobId: nasty("j1"), target: nasty("o/r"), flow: nasty("tidy"), outcome: "failed", reason: nasty("why") }] }),
+      fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], jobId: nasty("j1"), target: nasty("o/r"), flow: nasty("tidy"), outcome: "failed", reason: nasty("why"), replica: 1, replicas: `2${String.fromCharCode(13)}` }] }),
     }),
   });
   await flush();
@@ -1123,6 +1191,23 @@ test("the outcome word is a record string and is scrubbed like the rest (#337)",
   await comp.dispose();
   assert.ok(!plain.includes(ESC), "the outcome word reached the pane with an escape in it");
   assert.match(plain, /✘ failed/, "and it still renders as the failure it is");
+
+  // The comparisons must read the RAW value, not the scrubbed one, or a control byte in the field
+  // silently changes which glyph and colour a run gets. `scrubControl` is identity on a clean enum, so
+  // this is the only shape that can tell the two readings apart.
+  const dirtyEnum = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], outcome: `${String.fromCharCode(1)}completed`, reason: null }] }), sandboxInfo: () => null }),
+  });
+  await flush();
+  dirtyEnum.handleInput("\r");
+  await flush();
+  const dirtyPlain = stripAnsi(dirtyEnum.render(80).join("\n"));
+  await dirtyEnum.dispose();
+  assert.match(dirtyPlain, /✘ {2}completed/, "a byte in front of the word is not the word, so it is NOT the clean-completion glyph");
 });
 
 test("RUN_DETAIL shows a run's retention state, and offers `b` only when there is something to open", async () => {

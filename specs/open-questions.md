@@ -1370,13 +1370,19 @@ adversarial passes did.
   the record's fields are a fixed enum written by the worker. That is still true and is still why this is
   belt-and-braces rather than a boundary: what changed is the judgement that a terminal-controlling byte
   should not depend on every future write site holding the enum, when one scrub inside one `show()` holds
-  it structurally. The class is unchanged (C0 + DEL, C1 left alone) and so is the `failedReason` cap.
-  **Issue #337 asked whether C1 needs to be in it, so here is the answer rather than the convention**:
-  on a UTF-8 terminal, which is what every surface here assumes, a JavaScript `\u009b` is emitted as the
-  two bytes `C2 9B` and is not read as CSI; the 8-bit C1 controls only act as controls in an 8-bit
-  encoding the panel never selects. So widening the class would change no terminal's behaviour and would
-  mangle legitimate text in Latin-1-adjacent content. If a surface here ever writes bytes rather than
-  UTF-8 text, that is the change that reopens this.
+  it structurally. The `failedReason` cap is unchanged.
+  **Issue #337 asked whether the class needs C1, and the answer turned out to be already written down.**
+  This project has TWO control-byte classes, not one: `triggers.mjs`'s VALIDATOR is C0 + DEL and decides
+  whether an operator-authored file is acceptable, while `panel.mjs`'s `CONTROL_CHARS` is C0 + DEL + C1,
+  calls itself "a defensive strip of C0/C1 control chars from untrusted input", and already backs `clip`
+  -- so the PLAIN and ASCII render paths have been stripping C1 out of these same rows all along. The
+  renderer's own scrub was therefore the outlier rather than the convention, and a themed row and a plain
+  row of the same record went through different classes depending on which file the pane used. It is now
+  the wider one, and `style.mjs`'s frame titles with it. The terminal argument for leaving C1 alone was
+  available and is not what this rests on: a JavaScript C1 code point leaves Node as two UTF-8 bytes and
+  most modern terminals do not read that back as CSI, but "most" is doing real work there (xterm has
+  `allowC1Printable` precisely because it does), and matching code the project already shipped is a
+  better answer than a claim about terminals nobody here has measured.
 - **Position**: the FAILED panel section renders `failedReason` -- the message of the error the WORKER
   itself threw. The known payload-bearing sources were fixed at their sites in the same slice
   (`branch.mjs` answers with a type instead of the forge-payload value; `prepare-local.mjs` basenames
@@ -1490,7 +1496,11 @@ adversarial passes did.
     is an ordinary absolute path, the same shape as the six the pointer already carries, and it is absent
     from `POINTER_ENV_ALLOWLIST` only because nobody added it. Closing that half is an allowlist review
     rather than a new interface, which is a much cheaper close than the one below and should not be
-    hidden behind it. `PI_SANDBOX_RETENTION_HOURS` and `PI_SANDBOX_IDLE_MINUTES` are numbers rather than
+    hidden behind it. **And it is not hypothetical**: `PI_LOGS_DIR` IS on that allowlist and
+    `PI_SANDBOX_DIR` is not, while `read-model.mjs` resolves both. So a wizard-pointed panel already
+    reads the DEPLOYMENT's run history beside its OWN sandbox directory, the two are guaranteed to
+    disagree, and every retained run in that list reports itself swept with no `b` offered. That is a
+    live defect today, and it is the cheapest possible case for the review. `PI_SANDBOX_RETENTION_HOURS` and `PI_SANDBOX_IDLE_MINUTES` are numbers rather than
     paths, so they would be a genuine widening of what the file's shape carries.
 - **Out of scope here, and named so it does not disappear with #337**: the sandbox launcher is hard-wired
   to the docker CLI and `sandboxVenueRefusal` reopens only the `local` adapter by name, which belongs to
