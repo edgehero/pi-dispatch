@@ -2467,7 +2467,7 @@ const CANARY_FOREIGN_FIX = "check whether that process is still running on the h
 const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it";
 
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
-const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network; or leave it and the next `pi-dispatch doctor` on this host will take it once that process has exited";
+const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network. A later `pi-dispatch doctor` on this host clears a leftover whose process has exited, but not one a container is still holding: that one waits for you";
 
 /**
  * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
@@ -2516,12 +2516,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// `gh` probe already refuses on exactly this test, and `live-probes.mjs`'s sibling sweep -- which keeps a
 	// second guard this one deliberately inverts -- records the same PID-namespace caveat.
 	//
-	// THREE ANSWERS, NOT TWO, and the third is why this is not a bare `if`. `local === false` is a daemon
-	// somewhere else, and a leftover there belongs to the doctor that owns it: nothing to say. `local === null`
-	// is UNKNOWN, which is measured to be Podman through the docker shim -- `docker context inspect` prints
-	// nothing at all there (docs/podman.md) -- and on a supported runtime a sweep that silently never runs is
-	// how leftovers accumulate forever with no line saying why. So it says so, exactly as the `gh` probe does
-	// rather than refusing in silence.
+	// ONE QUESTION, TWO ANSWERS: can this shell show the daemon is on this host? Only `local === true` can, and
+	// that is the only thing `isAlive` needs, so remote and unknown take the same branch and get the same line.
+	// An earlier draft split them and said so in three places; the code never did.
 	const canaryDocker = (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS });
 	checks.push(...(await sweepStaleCanaryNetworks({ docker: canaryDocker, pid, isAlive, owned: endpoint?.local === true })));
 

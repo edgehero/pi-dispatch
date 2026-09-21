@@ -3861,9 +3861,9 @@ test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going qu
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("rm") && c.args.join(" ").includes("4242")), "but removes nothing there");
 });
 
-test("doctor: a REMOTE daemon sweeps nothing and says nothing (#350)", async () => {
-	// The other half of the three-way answer: a leftover there belongs to the doctor that owns that daemon,
-	// and there is nothing for this operator to do about it.
+test("doctor: a REMOTE daemon is named and left, exactly as an unknown one is (#350)", async () => {
+	// Remote and unknown take the SAME branch and emit the SAME line, deliberately: in both cases this
+	// shell cannot show the daemon is on this host, which is the only question `isAlive` needs answered.
 	const { out, text } = capture();
 	const plan = {
 		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
@@ -3872,7 +3872,9 @@ test("doctor: a REMOTE daemon sweeps nothing and says nothing (#350)", async () 
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
-	assert.doesNotMatch(text(), /are not swept/, "a remote daemon is not this doctor's business to report on");
+	// The needle must be a string the code can actually emit: `are not swept` appears in no doctor output,
+	// so this assertion passed against anything at all until it was proven vacuous.
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is left over from an interrupted doctor, and is not swept/, "a leftover there is named, not silently skipped");
 	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
 });
 
