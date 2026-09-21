@@ -115,12 +115,18 @@ test("the entry-points table covers the same six setups, and a refused column on
 	assert.match(separator.join(""), /^-+$/);
 	assert.equal(header[0], "Entry point");
 	assert.deepEqual(header.slice(1), SETUPS.map((setup) => setup.header));
-	assert.ok(body.length >= 5, "one row per entry point");
+	assert.ok(body.length >= 6, "one row per entry point");
 	for (const row of body) {
 		for (const [index, setup] of SETUPS.entries()) {
-			if (!setup.refusal) continue;
 			const cell = row[index + 1];
+			if (!setup.refusal) {
+				// The rule has to run both ways, or a supported column can quietly claim it is refused.
+				assert.doesNotMatch(cell, /refused|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
+				continue;
+			}
 			assert.match(cell, REFUSED_ENTRY_POINT, `${row[0]} on ${setup.header}: ${cell}`);
+			// "not run" and "unmeasured" carry a tail, and the tail must not put back what the cell just denied.
+			assert.doesNotMatch(cell.replace(/^(not run|unmeasured)/, ""), /\bruns?\b|\bopens\b|\breads\b/, `${row[0]} on ${setup.header} claims a run anyway`);
 			if (/`[a-z-]+`/.test(cell)) assert.ok(cell.includes(`\`${setup.refusal}\``), `${row[0]} on ${setup.header} names another cause`);
 		}
 	}

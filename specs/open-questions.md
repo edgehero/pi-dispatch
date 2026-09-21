@@ -1425,8 +1425,9 @@ adversarial passes did.
   - **OrbStack and Colima.** Unmeasured VM-backed daemons that the job-user decision treats like Docker Desktop.
     *Closes when* measured with `doctor --live`.
   - **A rootful Podman configured with `userns = "auto"`.** It never reports `name=userns`, so it is not refused by
-    name and the worker passes `--user`. Whether the container then fails to create (125, refunded) or starts and
-    stops at the runner's `/job` check (exit 2, slot kept) is unmeasured, and the two differ in what a job costs.
+    name and the worker passes `--user`. Whether the container then fails to create (refunded only if the CLI
+    reports that as never-started) or stops at the runner's `/job` check (exit 2, slot kept) is unmeasured, and the
+    two differ in what a job costs.
     *Closes when* measured on a host configured that way, with the exit code and the run record recorded.
 - **What bounds it meanwhile**: an unmeasured daemon still gets every refusal the facts support, the runner's `/job`
   check stops a job whose inputs are unreadable before it spends, and `doctor --live` reads the declarations back on
