@@ -21,7 +21,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { join, posix, win32 } from "node:path";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
@@ -114,7 +114,11 @@ export async function runUp(argv = [], deps = {}) {
 		spawn = nodeSpawn,
 		out = (s) => process.stdout.write(s),
 		prompt = defaultPrompt,
-		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync },
+		// `realpathSync` is in this list for a reason worth keeping: `updateEnvFile` resolves the path so a
+		// `.env` symlinked at a shared env file is edited THROUGH the link rather than replaced by a
+		// regular file. It calls it optionally, so leaving it out here made that repair dead code in the
+		// only production caller, and the test that covered it attached the method to its own fake.
+		fs = { existsSync, readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync },
 		probeTcp = defaultProbeTcp,
 		cwd = process.cwd(),
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
@@ -213,6 +217,11 @@ export async function runUp(argv = [], deps = {}) {
 	// never-clobber contract at key granularity: a value the operator set survives. The value itself
 	// is NEVER printed — a webhook secret in a scrollback is a webhook secret in a pastebin.
 	const envPath = join(cwd, ".env");
+	// Windows takes forward slashes everywhere Node does, and writing them is what keeps these four values
+	// inside the BARE set: `deploy/worker-env-wrapper.cmd` says "Values MUST be UNQUOTED -- cmd's `set`
+	// keeps surrounding quotes as part of the value", so a quoted `C:\pi\deploy\logs` there is a
+	// directory that does not exist, behind a ✓. `config.mjs`'s own defaults are already spelled this way.
+	const forEnvFile = (value) => (platform === "win32" ? String(value).replace(/\\/g, "/") : value);
 	// What `up` wrote, layered over `env` for its OWN doctor step below. Writing a line into `.env`
 	// configures the SERVICE (through `EnvironmentFile=` and the wrappers) and configures nothing about the
 	// process running right now, because NOTHING in this project loads `.env` into an environment -- see
@@ -221,12 +230,20 @@ export async function runUp(argv = [], deps = {}) {
 	// lines later, warn that they are unset (issue #357).
 	const wrote = {};
 	if (fs.existsSync(envPath)) {
-		if (updateEnvFile(envPath, "WEBHOOK_SECRET", randomHex(), { fs }).changed) {
-			out("\n✓ generated WEBHOOK_SECRET into .env (32 random bytes, hex — value not shown)\n");
-			summary.push(["WEBHOOK_SECRET", "generated into .env (value not shown; the receiver verifies deliveries with it)"]);
-		} else {
-			out("\n✓ WEBHOOK_SECRET already set in .env — left untouched\n");
-			summary.push(["WEBHOOK_SECRET", "already set — left untouched"]);
+		// Wrapped like the four below it, and for the same reasons: a read-only deployment directory, a full
+		// disk, a `.env` this account does not own. Unwrapped, `up` died with a raw stack trace where a
+		// summary row was the whole point.
+		try {
+			if (updateEnvFile(envPath, "WEBHOOK_SECRET", randomHex(), { fs, quotable: platform !== "win32" }).changed) {
+				out("\n✓ generated WEBHOOK_SECRET into .env (32 random bytes, hex — value not shown)\n");
+				summary.push(["WEBHOOK_SECRET", "generated into .env (value not shown; the receiver verifies deliveries with it)"]);
+			} else {
+				out("\n✓ WEBHOOK_SECRET already set in .env — left untouched\n");
+				summary.push(["WEBHOOK_SECRET", "already set — left untouched"]);
+			}
+		} catch (err) {
+			out(`\n✗ WEBHOOK_SECRET could not be written: ${err?.message}\n`);
+			summary.push(["WEBHOOK_SECRET", `NOT written: ${err?.message}`]);
 		}
 		// (e1) the four paths four separate files already promise `up` writes, and it never did
 		// (`deploy/worker.service`, `deploy/com.pi-dispatch.worker.plist`, `deploy/nssm-install.cmd`,
@@ -246,12 +263,13 @@ export async function runUp(argv = [], deps = {}) {
 		// `logsDirPath`/`settingsFilePath` would have resolved anyway: behaviour byte-unchanged, the value
 		// simply made explicit, which is the whole point -- a worker under another `User=` and the panel
 		// then cannot silently resolve two different directories.
-		for (const [key, value, durable] of [
+		for (const [key, raw, durable] of [
 			["PI_PAUSE_WINDOWS_FILE", join(cwd, "pause-windows.json"), false],
 			["PI_SCOPED_LIMITS_FILE", join(cwd, "scoped-limits.json"), false],
 			["PI_LOGS_DIR", logsDirPathFn(env), true],
 			["PI_SETTINGS_FILE", settingsFilePathFn(env), true],
 		]) {
+			const value = forEnvFile(raw);
 			// `logsDirPath` and `settingsFilePath` RESOLVE rather than default: `env.PI_LOGS_DIR || <default>`.
 			// So on a shell that already exports one of them at the deployment folder -- which three shipped
 			// files told operators to do for a year, before this change made the promise true -- `up` would
@@ -297,7 +315,7 @@ export async function runUp(argv = [], deps = {}) {
 			// and systemd's parser does not understand.
 			let changed;
 			try {
-				({ changed } = updateEnvFile(envPath, key, value, { fs }));
+				({ changed } = updateEnvFile(envPath, key, value, { fs, quotable: platform !== "win32" }));
 			} catch (err) {
 				out(`✗ ${key} could not be written: ${err?.message}\n`);
 				summary.push([key, `NOT written: ${err?.message}. Set it by hand, or move the deployment somewhere without that character in its path`]);

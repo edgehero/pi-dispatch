@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { defaultPrompt, runUp } from "../src/up.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
@@ -100,7 +102,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			return doctorCode;
 		},
 	};
-	return { run: () => runUp(argv, deps), calls, promptCalls, initCalls, doctorCalls, doctorOpts, store, text: () => buf.join("") };
+	return { run: () => runUp(argv, deps), deps, calls, promptCalls, initCalls, doctorCalls, doctorOpts, store, text: () => buf.join("") };
 }
 
 const green = { "docker version": 0, "docker image inspect": 0, "docker ps": { code: 0, output: "pi-dispatch-valkey\n" } };
@@ -332,6 +334,70 @@ test("up: the inside-the-folder compare folds case on Windows and does not on PO
 	await otherDrive.run();
 	assert.match(otherDrive.store.get("C:/pi/deploy/.env"), /^PI_LOGS_DIR=D:\/pi-history$/m, "another drive is absolute, and is not inside this folder");
 	assert.doesNotMatch(otherDrive.text(), /not an absolute path/);
+});
+
+test("up writes Windows paths with forward slashes, so the cmd loader reads them bare (#357)", async () => {
+	// `deploy/worker-env-wrapper.cmd` states its own contract: "Values MUST be UNQUOTED -- cmd's `set`
+	// keeps surrounding quotes as part of the value." A backslash is outside the bare set, so quoting one
+	// there produces four directories that do not exist, behind four ✓. Forward slashes are accepted
+	// everywhere Node accepts a path on Windows, and `config.mjs` already spells its own defaults that way.
+	const h = harness({
+		plan: green,
+		files: { "C:/pi/deploy/.env": "" },
+		env: { PI_PROVIDER: "anthropic" },
+		// Forward slashes in `cwd` because `join` here is this host's, not win32's; what the win32 branch
+		// has to convert is the RESOLVER output below, which is where a real Windows path comes from.
+		cwd: "C:/pi/deploy",
+		platform: "win32",
+		logsDirPathFn: () => "C:\\Users\\op\\.pi-dispatch\\logs",
+		settingsFilePathFn: () => "C:\\Users\\op\\.pi-dispatch\\settings.json",
+	});
+	await h.run();
+	const written = h.store.get("C:/pi/deploy/.env") ?? "";
+	assert.doesNotMatch(written, /'/, "no value is quoted, because cmd's `set` would keep the quotes");
+	assert.doesNotMatch(written, /\\\\/, "and none carries a backslash, which the bare set excludes for the shells");
+	assert.match(written, /^PI_LOGS_DIR=C:\/Users\/op\/\.pi-dispatch\/logs$/m);
+});
+
+test("up edits a symlinked .env through the link, with the REAL fs seam (#357)", async () => {
+	// The one test here that uses no fs fake, because the defect it pins is a fake's shape rather than a
+	// behaviour: `updateEnvFile` resolves the path with an OPTIONAL call, so a seam missing
+	// `realpathSync` makes the resolution silently inert. It shipped that way, and the test that covered
+	// it attached the method to its own fake. A deployment whose `.env` points at a shared env file is an
+	// ordinary layout, and replacing the link orphans every later edit to the shared file.
+	const dir = tempDir("pi-up-link-");
+	const shared = join(dir, "shared.env");
+	writeFileSync(shared, "WEBHOOK_SECRET=\n");
+	symlinkSync(shared, join(dir, ".env"));
+	const buf = [];
+	await runUp(["--yes"], {
+		env: { PI_PROVIDER: "anthropic" },
+		cwd: dir,
+		out: (s) => buf.push(s),
+		spawn: fakeSpawn(green, []),
+		prompt: async () => "n",
+		probeTcp: async () => true,
+		randomHex: () => SECRET,
+		runInitFn: () => 0,
+		runDoctorFn: () => 0,
+	});
+	assert.ok(lstatSync(join(dir, ".env")).isSymbolicLink(), "the link survives a real up");
+	assert.match(readFileSync(shared, "utf8"), /^WEBHOOK_SECRET=/m, "and the shared file is what was edited");
+});
+
+test("up reports a .env it cannot write at all, rather than dying with a stack trace (#357)", async () => {
+	// A read-only deployment directory, a full disk, or a `.env` this account does not own. The
+	// WEBHOOK_SECRET write is the first one and used to be the unwrapped one.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" } });
+	h.store.set("/deploy/.env", "");
+	const original = h.deps.fs.writeFileSync;
+	h.deps.fs.writeFileSync = () => {
+		throw Object.assign(new Error("EACCES: permission denied, open '/deploy/.env.tmp'"), { code: "EACCES" });
+	};
+	assert.equal(await h.run(), 0, "a .env it cannot write is reported, not fatal");
+	h.deps.fs.writeFileSync = original;
+	assert.match(h.text(), /WEBHOOK_SECRET could not be written: EACCES/);
+	assert.match(h.text(), /PI_LOGS_DIR could not be written: EACCES/);
 });
 
 test("up refuses a value this .env cannot represent, rather than writing one nothing reads back (#357)", async () => {

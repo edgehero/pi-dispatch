@@ -301,6 +301,10 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		const withExport = readEnvKeys(text, allowed, { acceptExport: true });
 		const exported = {};
 		for (const key of allowed) {
+			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
+			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling
+			// it export-only would print a value systemd never sees and advise dropping a prefix, which
+			// would change which file the worker loads.
 			if (!(key in plain) && key in withExport) exported[key] = withExport[key];
 		}
 		return { ...plain, exported };

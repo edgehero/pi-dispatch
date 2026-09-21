@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { readEnvKeys, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
 
 // -- setEnvKeyIfEmpty: pure transform, table-driven over the text shapes it must handle ---------------
@@ -252,6 +255,28 @@ test("readEnvKeys agrees with the shell about duplicates, including an empty one
 	assert.deepEqual(readEnvKeys(text, ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]), { PI_SCOPED_LIMITS_FILE: "/srv/limits.json" }, "the later empty line is what the service gets, so the key is absent");
 });
 
+test("readEnvKeys models one consumer per call, and an export line never cancels a bare one", () => {
+	// The hybrid this replaced was wrong in the direction that matters. Letting an export line CANCEL a
+	// plain one made `KEY=/systemd.json` followed by `export KEY=/wrapper.json` look like a key systemd
+	// does not honour, and the advice that follows -- drop the prefix -- would have changed which file the
+	// worker loads. systemd's `EnvironmentFile=` grammar is bare `VAR=VALUE` (measured on 257.13), so an
+	// export line is not an assignment there at all.
+	const both = "PI_PAUSE_WINDOWS_FILE=/systemd.json\nexport PI_PAUSE_WINDOWS_FILE=/wrapper.json";
+	assert.deepEqual(readEnvKeys(both, ["PI_PAUSE_WINDOWS_FILE"]), { PI_PAUSE_WINDOWS_FILE: "/systemd.json" }, "what EnvironmentFile= sees");
+	assert.deepEqual(readEnvKeys(both, ["PI_PAUSE_WINDOWS_FILE"], { acceptExport: true }), { PI_PAUSE_WINDOWS_FILE: "/wrapper.json" }, "what `set -a; . ./.env` sees");
+	const cleared = "PI_PAUSE_WINDOWS_FILE=/a.json\nexport PI_PAUSE_WINDOWS_FILE=";
+	assert.deepEqual(readEnvKeys(cleared, ["PI_PAUSE_WINDOWS_FILE"]), { PI_PAUSE_WINDOWS_FILE: "/a.json" }, "systemd never saw the export line, so nothing cancelled");
+	assert.deepEqual(readEnvKeys(cleared, ["PI_PAUSE_WINDOWS_FILE"], { acceptExport: true }), {}, "the wrapper did, and an empty assignment cancels");
+});
+
+test("readEnvKeys strips a trailing comment before deciding a quoted value is empty", () => {
+	// `KEY="" # cleared while debugging` kept the two quote characters, read as non-empty, and softened a
+	// warning about a deployment where both the shells and systemd see an empty value.
+	assert.deepEqual(readEnvKeys('K=""   # cleared while debugging', ["K"]), {});
+	assert.deepEqual(readEnvKeys("K='/srv/a b.json'   # a note", ["K"]), { K: "/srv/a b.json" });
+	assert.deepEqual(readEnvKeys('K="/srv/x # y"', ["K"]), { K: "/srv/x # y" }, "and a hash INSIDE the quotes is still part of the value");
+});
+
 test("readEnvKeys reads a value back exactly as the shell does, quotes and comments included", () => {
 	// Measured in sh, bash and zsh against every shape below, and the quoted rows were measured too rather
 	// than reasoned about, which is where an earlier version of this table was wrong: it kept the quote
@@ -280,6 +305,22 @@ test("renderEnvValue writes what both consumers read back, and refuses what neit
 	assert.equal(renderEnvValue("/x$HOME/y"), "'/x$HOME/y'");
 	assert.throws(() => renderEnvValue("/srv/it's/c.json"), /single quote/, "no rendering is read identically by both consumers, so it is refused rather than escaped");
 	assert.throws(() => renderEnvValue("/srv/a\nb"), /newline/);
+	// The one character every Windows path contains, and the row that forces the question of WHICH
+	// consumer reads the quotes. Bare, all three shells eat the backslashes
+	// (`C:\\Users\\op\\logs` comes back `C:Usersoplogs`), so it must be quoted for them.
+	assert.equal(renderEnvValue("C:\\pi\\deploy\\logs"), "'C:\\pi\\deploy\\logs'");
+	// And `%` is cmd's expansion character, so it is outside the bare set too.
+	assert.equal(renderEnvValue("C:/pi/100%/logs"), "'C:/pi/100%/logs'");
+});
+
+test("renderEnvValue refuses to quote for the Windows loader, which keeps the quotes", () => {
+	// `deploy/worker-env-wrapper.cmd` states this in its own header: "Values MUST be UNQUOTED -- cmd's
+	// `set` keeps surrounding quotes as part of the value." A quoted value there is a directory that does
+	// not exist, behind a ✓, which is the POSIX defect this rendering exists to prevent, reintroduced on
+	// the one platform none of the shell measurements covered.
+	assert.equal(renderEnvValue("C:/pi/deploy/logs", { quotable: false }), "C:/pi/deploy/logs", "forward slashes keep a Windows path inside the bare set");
+	assert.throws(() => renderEnvValue("C:\\pi\\deploy\\logs", { quotable: false }), /cmd's `set` keeps the quotes/);
+	assert.throws(() => renderEnvValue("C:/pi/my deploy/logs", { quotable: false }), /cmd's `set` keeps the quotes/);
 });
 
 test("a value that needs quoting round-trips through the writer and back out of the reader", () => {
@@ -372,6 +413,35 @@ test("updateEnvFile: EVERY mode is carried onto the tmp, not just 0600", () => {
 	}
 });
 
+test("updateEnvFile: a file this process does not own is refused, not rewritten under its owner", () => {
+	// `renameSync` makes a new inode owned by whoever runs this, so a root- or `pi`-owned `.env` at 0640
+	// that the service reads through its group comes back owned by the operator: the service account loses
+	// read access, and `deploy/worker.service` uses a bare `EnvironmentFile=` (fatal, not `-`), so the unit
+	// stops starting. Widening the mode to compensate would publish a file holding WEBHOOK_SECRET.
+	const { fs, files, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n", 0o640);
+	fs.statSync = (p) => {
+		ops.push(["stat", p]);
+		return { mode: 0o100640, uid: (process.getuid?.() ?? 0) + 1 };
+	};
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /owned by uid .* and this process is uid/);
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n", "and nothing was written on the way to finding out");
+	assert.equal(ops.filter(([op]) => op === "write").length, 0);
+});
+
+test("updateEnvFile: the DEFAULT fs can resolve a link, or the repair above is dead code", () => {
+	// The resolution is an optional call (`fs.realpathSync?.()`), so leaving the method out of a default
+	// makes it silently inert. That is exactly what happened: the fix shipped, its test attached the method
+	// to its own fake, and the only production caller did not carry it. Driven against a real link here.
+	const dir = tempDir("pi-envlink-");
+	const shared = join(dir, "shared.env");
+	const link = join(dir, ".env");
+	writeFileSync(shared, "WEBHOOK_SECRET=\n");
+	symlinkSync(shared, link);
+	assert.deepEqual(updateEnvFile(link, "WEBHOOK_SECRET", "abc123"), { changed: true });
+	assert.ok(lstatSync(link).isSymbolicLink(), "the link survives");
+	assert.equal(readFileSync(shared, "utf8"), "WEBHOOK_SECRET=abc123\n", "and what it points at is what changed");
+});
+
 test("updateEnvFile: a symlinked .env is edited THROUGH the link, never replaced by one", () => {
 	// A deployment whose `.env` points at a shared env file is an ordinary layout. Renaming over the link
 	// replaces it with a regular file, and every later edit to the shared file -- a rotated
@@ -382,14 +452,17 @@ test("updateEnvFile: a symlinked .env is edited THROUGH the link, never replaced
 	fs.realpathSync = (p) => (p === "/deploy/.env" ? "/shared/pi.env" : p);
 	updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs });
 	assert.deepEqual(
-		ops.filter(([op]) => op !== "read"),
+		ops.filter(([op]) => op !== "read" && op !== "stat"),
 		[
 			["write", "/shared/pi.env.tmp", "WEBHOOK_SECRET=abc123\n"],
-			["stat", "/shared/pi.env"],
 			["chmod", "/shared/pi.env.tmp", 0o644],
 			["rename", "/shared/pi.env.tmp", "/shared/pi.env"],
 		],
 		"the link is read, and everything after it goes to what the link points at",
+	);
+	assert.ok(
+		ops.filter(([op]) => op === "stat").every(([, path]) => path === "/shared/pi.env"),
+		"including every stat: the mode and owner that matter are the target's",
 	);
 	assert.equal(files.get("/shared/pi.env"), "WEBHOOK_SECRET=abc123\n");
 	// And a link that cannot be resolved still edits the path it was given, rather than failing an edit

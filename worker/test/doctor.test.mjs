@@ -1385,7 +1385,11 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	// claims the service reads what systemd does not; called unset, it tells the operator to write a line
 	// that is already there, moments after `up` reported that key as already set.
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" } });
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/later.json" } }, "a later export overrides an earlier plain line in the shell, so the plain value is not what the service sees");
+	// A bare assignment ANYWHERE means the key is not export-only, however many export lines follow it.
+	// systemd's `EnvironmentFile=` reads `/plain.json` and nothing else, so calling this export-only would
+	// print a value systemd never sees and advise dropping a prefix, which would change which file the
+	// worker loads on a wrapper deployment.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {} });
 	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
 	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
 	// licence for reading a `.env`, and a convention would not have held it.
