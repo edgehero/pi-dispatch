@@ -3728,7 +3728,7 @@ test("doctor: a canary network that will not go is a WARNING carrying the comman
 	);
 	assert.equal(code, 0, "a leftover warns, it does not fail doctor");
 	assert.match(text(), new RegExp(`⚠ Egress canary: the network pi-dispatch-egress-doctor-${process.pid} could not be removed: docker network rm pi-dispatch-egress-doctor-${process.pid}`));
-	assert.match(text(), /remove it by hand now, or let the next `pi-dispatch doctor` remove it/);
+	assert.match(text(), /remove whatever is still on it first \(a probe container under `pi-dispatch-egress-probe-`\), then the network/);
 });
 
 test("doctor: a canary network the daemon says is gone is not a line at all (#350)", async () => {
@@ -3856,9 +3856,9 @@ test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going qu
 	};
 	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.equal(code, 0, "an unswept leftover warns, it never fails doctor");
-	assert.match(text(), /⚠ Egress canary: leftovers from an interrupted doctor are not swept, because this shell's docker CLI did not say which daemon it uses/);
-	assert.match(text(), /docker network ls --filter name=pi-dispatch-egress-doctor-/, "and names the command that lists them");
-	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "nothing is touched while the daemon is unknown");
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say the daemon is on this host/);
+	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network ls"), "it LOOKS on any daemon: reading a list says nothing about a process table");
+	assert.ok(!calls.some((c) => c.args.join(" ").includes("rm") && c.args.join(" ").includes("4242")), "but removes nothing there");
 });
 
 test("doctor: a REMOTE daemon sweeps nothing and says nothing (#350)", async () => {
@@ -3890,8 +3890,11 @@ test("doctor: a probe the sweep could NOT remove is never reported as removed (#
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.doesNotMatch(text(), /after removing pi-dispatch-egress-probe-unlisted-4242/, "it did not go, so it is not claimed");
-	const detached = calls.filter((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.includes("pi-dispatch-egress-doctor-4242")).map((c) => c.args.at(-1));
-	assert.deepEqual(detached, ["pi-dispatch-egress-probe-unlisted-4242"], "and it falls back to being detached rather than between the two");
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 could not be removed and the network is the only way left to find it: docker rm -f pi-dispatch-egress-probe-unlisted-4242/);
+	// The network is the ONLY handle: nothing in this project enumerates probe containers, so removing it
+	// would orphan a running container permanently, and detaching it first is no better.
+	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm" && c.args.at(-1) === "pi-dispatch-egress-doctor-4242"), "the network is not removed");
+	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.at(-1) === "pi-dispatch-egress-probe-unlisted-4242"), "nor is the probe cut loose from it");
 });
 
 test("doctor: a canary create that could not be LAUNCHED leaves no teardown line either (#350)", async () => {
@@ -3958,4 +3961,55 @@ test("doctor: a canary that cannot START says so instead of leaving no egress re
 		assert.match(text(), /the policy itself may be fine, but nothing here has shown that it is/, `${what}: and says what is missing`);
 		assert.doesNotMatch(text(), /Egress policy reaches the provider/, `${what}: nothing may read as proved`);
 	}
+});
+
+test("doctor: a host with no leftovers says nothing at all, on any daemon (#350)", async () => {
+	// The first draft warned about leftovers on an unknown daemon WITHOUT ever listing them, so a spotless
+	// podman-docker host got an unsilenceable line about a category of object that was not there. This file's
+	// own doctrine: a check nobody can silence must never cry wolf, and "could not ask" is not "misconfigured".
+	for (const [what, ctx] of [
+		["unknown daemon", { code: 0, output: "" }],
+		["remote daemon", { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' }],
+		["local daemon", { code: 0, output: '"default"|"unix:///var/run/docker.sock"\n' }],
+	]) {
+		const { out, text } = capture();
+		const plan = {
+			"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "" },
+			...green,
+			"docker context inspect": ctx,
+			"gh auth status": { code: 0, output: ghStatusOutput },
+		};
+		await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+		assert.doesNotMatch(text(), /Egress canary:/, `${what}: nothing to say about leftovers that are not there`);
+	}
+});
+
+test("doctor: the slug list is pinned as LITERALS, because order is part of the name (#350)", async () => {
+	// The drift pin beside this is arity-only by construction: it derives `expected` from the same list, so a
+	// REVERSAL moves both sides together. Order matters here -- reversing it names the provider probe
+	// `-unlisted-<pid>` while it fetches api.anthropic.com, defeating the whole point of a name someone reads
+	// off `ps` to find out what a wedged probe was doing.
+	assert.deepEqual([...CANARY_PROBE_SLUGS], ["provider", "unlisted"]);
+});
+
+test("doctor: a listing that FAILS is said, never taken as 'no leftovers' (#350)", async () => {
+	// The whole point of looking first is that silence then means "there are none". A `network ls` that could
+	// not run must not borrow that meaning.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.equal(code, 0, "it warns, it never fails doctor");
+	assert.match(text(), /⚠ Egress canary: leftovers from an interrupted doctor could not be listed: docker network ls --filter name=pi-dispatch-egress-doctor-/);
+});
+
+test("doctor: `endpoint` defaults to unknown, so a caller that omits it sweeps nothing (#350)", async () => {
+	// A source pin, like the canary bound above: the parameter has one call site today, so no behavioural test
+	// can reach the default, and the safe answer and the SPOKEN answer are the same one. A future caller that
+	// forgets it must not silently inherit the owned-daemon behaviour.
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	assert.match(src, /endpoint = \{ local: null, reason: "not resolved" \}/, "unknown, which this sweep says out loud rather than acting on");
 });

@@ -2382,9 +2382,14 @@ function triggersPath(env, cwd) {
  * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
  * pid is still alive belongs to a doctor that is still running.
  */
-async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
+async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
-	if (listed?.code !== 0) return [];
+	// THE LISTING ALWAYS RUNS, on any daemon. The reason the sweep is confined to a daemon this host owns is
+	// `isAlive`, whose answer is about THIS process table -- reading a list is not. Asking first is what lets
+	// this say nothing at all on the overwhelmingly common case of a host with no leftovers, instead of a
+	// warning about a category of object it never looked for. `doctor`'s own doctrine: a check nobody can
+	// silence must never cry wolf, and "could not ask" is not "misconfigured".
+	if (listed?.code !== 0) return [{ ok: false, warn: true, label: `Egress canary: leftovers from an interrupted doctor could not be listed: docker network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`, fix: CANARY_LEFTOVER_FIX }];
 	const shape = new RegExp(`^${EGRESS_CANARY_NET_PREFIX}(\\d+)$`);
 	// The slug is a CLOSED set, not free text: accepting `\\S+` there would `rm -f` any container under this
 	// prefix that happened to end in the dead pid. Escaped into the pattern because the pid reached it as a
@@ -2401,6 +2406,12 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
 		// a different string on the way to a regex.
 		const ownerText = m[1];
 		const owner = Number(ownerText);
+		// Not ours to judge: `isAlive` would be answering about a different machine's process table. Say what
+		// is there, once something IS there, and leave it to the doctor that owns that daemon.
+		if (!owned) {
+			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} is left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say the daemon is on this host, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
+			continue;
+		}
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
 		//
 		// OUR OWN PID IS SWEPT, and that is not a contradiction. This runs BEFORE the canary creates anything,
@@ -2422,8 +2433,19 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
 		// probe was removed while it is still running is worse than no line. One that did NOT go stays in the
 		// detach list, so it is at least taken off the network rather than falling between the two.
 		const removed = [];
+		const stuck = [];
 		for (const endpoint of names.filter((n) => probeOf(ownerText).test(n))) {
 			if ((await docker(["rm", "-f", endpoint]))?.code === 0) removed.push(endpoint);
+			else stuck.push(endpoint);
+		}
+		// THE NETWORK IS THE ONLY HANDLE. Nothing in this project ever enumerates `pi-dispatch-egress-probe-`
+		// containers -- the name exists to be built and matched, not searched for -- so removing the network
+		// out from under a probe we could not kill orphans that container permanently, and an earlier draft
+		// did exactly that behind a ✓. Detaching it first is no better: it is still running, and now nothing
+		// points at it. So the network stays, and the line names the container to remove by hand.
+		if (stuck.length > 0) {
+			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} is kept, because the probe ${stuck.join(", ")} could not be removed and the network is the only way left to find it: docker rm -f ${stuck.join(" ")}`, fix: CANARY_LEFTOVER_FIX });
+			continue;
 		}
 		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
 		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
@@ -2438,11 +2460,14 @@ export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
 
 const CANARY_STEP_TIMEOUT_MS = 10_000;
 
+/** A leftover on a daemon this host cannot show it owns: the operator decides, because only they know the estate. */
+const CANARY_FOREIGN_FIX = "check whether that process is still running on the host that daemon belongs to, and remove the network there once it is not: `docker network rm <name>`";
+
 /** One fixed text for a canary that could not start. The policy may be fine; what is missing is the PROOF. */
 const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it";
 
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
-const CANARY_LEFTOVER_FIX = "remove it by hand now, or let the next `pi-dispatch doctor` remove it once that process has exited";
+const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network; or leave it and the next `pi-dispatch doctor` on this host will take it once that process has exited";
 
 /**
  * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
@@ -2498,15 +2523,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// how leftovers accumulate forever with no line saying why. So it says so, exactly as the `gh` probe does
 	// rather than refusing in silence.
 	const canaryDocker = (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS });
-	if (endpoint?.local === true) checks.push(...(await sweepStaleCanaryNetworks({ docker: canaryDocker, pid, isAlive })));
-	else if (endpoint?.local !== false) {
-		checks.push({
-			ok: false,
-			warn: true,
-			label: `Egress canary: leftovers from an interrupted doctor are not swept, because this shell's docker CLI did not say which daemon it uses (${endpoint?.reason ?? "no answer"}), and a pid that is dead here may be alive there`,
-			fix: `list them with \`docker network ls --filter name=${EGRESS_CANARY_NET_PREFIX}\` and remove any whose process has exited`,
-		});
-	}
+	checks.push(...(await sweepStaleCanaryNetworks({ docker: canaryDocker, pid, isAlive, owned: endpoint?.local === true })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -2564,9 +2581,15 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// network exists and nothing else would say so.
 		// From the create's OWN answer, not set blindly: `true` first meant the flag could never be false, so the
 		// teardown also ran for a create that cleanly refused and emitted a `could not be removed` instruction
-		// for a network that never existed. Exit 0 ONLY: `runCmd` has no timeout, so its `null` means the CLI
-		// could not be LAUNCHED (its own docblock says so), not that it started and did not finish -- and a
-		// create that never launched created nothing.
+		// for a network that never existed.
+		//
+		// Exit 0 ONLY, and the residual is stated rather than implied. `runCmd` resolves `null` for a CLI that
+		// could not be LAUNCHED -- the common case, and nothing was created -- but `close` also reports `null`
+		// for a child killed by a SIGNAL, which could land after the daemon had already made the network. That
+		// one leaks a network this run will not clean. Accepted because the alternative cries wolf on every
+		// unlaunchable docker, and because it is bounded: the leftover carries THIS pid, and the sweep above
+		// reclaims a network carrying our own pid on the next run.
+		
 		const createCode = await runCmd(spawn, "docker", ["network", "create", "--internal", net]);
 		created = createCode === 0;
 		// SAID, not returned into silence. Both of these used to leave `doctor` with no egress reading at all
