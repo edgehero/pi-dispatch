@@ -11,6 +11,16 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../
 // enforced` in every Podman column passed. So each Podman column also names the OBSERVATIONS that column describes,
 // and its word is capped by `effectiveWord` under them -- a word the worker could never print on that host now fails
 // here. What stays unpinned is the rest of a cell's sentence, which is prose about a measurement.
+//
+// WHAT THIS FILE DELIBERATELY DOES NOT PIN, and it is a measurement rather than a preference: prose about WHEN a
+// job-user refusal fires. The page got that subtly wrong three review rounds running under #345, and each round's
+// answer was a wider regex over the same sentences. A regex over prose pins a claim's SHAPE, never its truth, so
+// every widening bought one more way to be wrong in the same place. Commit `9cb2bce` took the simpler rule instead:
+// the page stopped describing timing at all and handed it to what owns it (`docs/backends.md`,
+// `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and `BOOT_REFUSING_JOB_USER_CAUSES` for the list itself). So the
+// answer to the NEXT recurrence is FEWER SUCH SENTENCES, not a bigger regex: bolt the claim to what a function
+// returns, the way every test below is bolted, or move it off this page. Widening `REFUSED_ENTRY_POINT` to admit a
+// fourth wording would be a fourth round of the thing that already failed three times.
 
 const doc = readFileSync(new URL("../../docs/podman.md", import.meta.url), "utf8");
 

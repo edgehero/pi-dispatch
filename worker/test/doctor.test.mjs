@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { egressCanaryProbe } from "../src/egress.mjs";
-import { parseDaemonFacts } from "../src/job-user.mjs";
+import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -3522,12 +3522,29 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	assert.match(await run(unit), /this shell is uid 1234, but .* runs the worker as pi \(uid 998\)/, "by name");
 	assert.match(await run(unit.replace("User=pi", "User=4242")), /runs the worker as 4242 \(uid 4242\)/, "numeric");
 	assert.match(await run(unit.replace("User=pi", "User = pi\n  User=4242")), /runs the worker as 4242 \(uid 4242\)/, "systemd's last assignment wins, whitespace allowed");
-	// Only an explicit User= is compared: no guess from its absence (root, or a DynamicUser= uid). The worker's own boot
-	// names a root worker; a guess here was wrong for every case it missed.
+	// Only an explicit User= is compared: no guess from its absence (root, or a DynamicUser= uid), because a
+	// guess here was wrong for every case it missed. What covers the gap is conditional, and this comment
+	// used to say it was not: a root worker refuses to BOOT only while `local` is the default venue;
+	// otherwise it boots and refuses each local job (#348).
 	for (const body of [unit.replace("User=pi\n", ""), unit.replace("User=pi\n", "DynamicUser=Yes\n")]) {
 		assert.doesNotMatch(await run(body), warned, JSON.stringify(body));
 	}
 	assert.match(await run(unit.replace("User=pi", "DynamicUser=yes\nUser=pi")), /runs the worker as pi \(uid 998\)/, "an explicit User= is compared whatever else the unit says");
+	// UID 0, by name and by number, left untested under #347's round cap (issue #348 item 1). The code
+	// warns because 0 is not this shell's uid, but a change that skipped uid 0 -- on the reasoning that
+	// root can read anything, which is true of FILES and beside the point here -- passed every test. What
+	// the line is about is that the worker runs as an account whose JOB USER decision differs from this
+	// shell's, and for root it differs the most: `worker-is-root` refuses every local job.
+	for (const spelling of ["User=root", "User=0"]) {
+		const text = await run(unit.replace("User=pi", spelling));
+		assert.match(text, /runs the worker as (root|0) \(uid 0\)/, spelling);
+		assert.match(text, warned, spelling);
+		// And uid 0 gets the ANSWER rather than the instruction (item 3). "Re-run as that account" is true
+		// for any other uid and roundabout for this one: doctor as root would print the same refusal this
+		// line can state outright. The text is `JOB_USER_FIX`'s own, so the two cannot drift.
+		assert.ok(text.includes(JOB_USER_FIX["worker-is-root"]), spelling);
+		assert.doesNotMatch(text, /sudo -u (root|0) pi-dispatch doctor/, `${spelling}: not the roundabout version`);
+	}
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");
@@ -3733,7 +3750,14 @@ test("doctor --live gives each ephemeral failure its own fix: a survivor, a held
 		assert.ok(typeof failed.fix === "string" && failed.fix.length > 0, `${cause}: a fix of its own, never undefined`);
 		assert.doesNotMatch(checks.at(-1).label, /ephemeral ran two short-lived containers/, `${cause}: the limits line does not claim two runs held`);
 		fixes.add(failed.fix);
-		if (cause === "name-held") assert.match(failed.fix, /removed whatever held the name/, "the fix does not send the operator to inspect a container the read-back already removed");
+		if (cause === "name-held") {
+			assert.match(failed.fix, /removed whatever held the name/, "the fix does not send the operator to inspect a container the read-back already removed");
+			// The Podman half, unpinned until issue #352: `podman ps -a --external` is the only listing that
+			// shows a storage container another tool made, and a name reservation left by one is exactly what
+			// this cause means on that runtime. Checked on Podman 5.8.2. Without it the line sends an
+			// operator to `ps -a`, which shows nothing, and the reservation looks like a daemon bug.
+			assert.match(failed.fix, /podman ps -a --external/, "the Podman listing that actually shows the holder");
+		}
 	}
 	assert.equal(fixes.size, 4, "four causes, four fixes, none falling back to a generic one");
 });

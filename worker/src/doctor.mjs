@@ -3372,8 +3372,11 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 			}
 			if (readUnitSeam(text, platform).deployDir !== cwd) continue;
 			// ONLY an explicit User= is compared, and nothing is inferred from its absence: a unit with none (root, or a
-			// DynamicUser= uid) is not guessed at here. The worker's own boot names a root worker (worker-is-root), which is
-			// the one place that answer is certain; guessing it here produced wrong texts for every case the guess missed.
+			// DynamicUser= uid) is not guessed at here, because guessing produced wrong texts for every case the guess
+			// missed. What covers the gap is not universal and the comment used to say it was: a root worker refuses to
+			// BOOT only while `local` is the default venue (`BOOT_REFUSING_JOB_USER_CAUSES`); otherwise it boots and
+			// refuses each local job with `worker-is-root`. An explicit `User=0` is the case doctor CAN be certain about,
+			// and it gets that cause's own fix text below rather than an instruction to go and read it elsewhere.
 			const user = readUnitUser(text, platform);
 			if (user === null) continue;
 			const uid = /^\d+$/.test(user) ? Number(user) : uidOf(user, passwd);
@@ -3382,7 +3385,12 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 					ok: false,
 					warn: true,
 					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
-					fix: `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
+					// UID 0 gets the ANSWER instead of the instruction (issue #348). "Re-run as that account"
+					// is true for any other uid and roundabout for this one: running doctor as root would just
+					// print the same refusal this fix can state outright, and the refusal is the whole point.
+					// The text is `JOB_USER_FIX`'s own, so the two cannot drift into saying different things
+					// about the same cause.
+					fix: uid === 0 ? JOB_USER_FIX["worker-is-root"] : `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
 		}

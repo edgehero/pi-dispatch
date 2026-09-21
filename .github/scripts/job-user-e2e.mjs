@@ -12,8 +12,8 @@
  * the cleanup, doctor's decision and read-back) and the REAL runner. Nothing spends: `--network=none`, no provider
  * key, no secret. The runner and read-back negative controls are counted, and the script refuses to pass unless every
  * one of them ran and failed the way it must, so deleting a control's call turns this red rather than vacuously green.
- * What it does NOT exercise: a RESUMED session (the store stages a cold, empty transcript here; a resumed one is the
- * canonical file copied into the same `0700` directory, owned by the same uid).
+ * Both session shapes run: a COLD start, where the store stages an empty transcript, and a RESUMED one, where the
+ * canonical transcript is copied into the same `0700` directory and has to be readable out of it by the job user.
  */
 
 import assert from "node:assert/strict";
@@ -48,7 +48,7 @@ const { makeSessionStore } = await load("worker/src/session-store.mjs");
 const { jobUserChecks, liveChecks } = await load("worker/src/doctor.mjs");
 
 const say = (line) => console.log(`OK: ${line}`);
-const controls = { expected: 3, ran: 0 };
+const controls = { expected: 4, ran: 0 };
 const euid = process.geteuid();
 const egid = process.getegid();
 
@@ -109,6 +109,20 @@ assert.ok(forge.jobDir && forge.session?.hostDir, `the forge job prepared a sess
 assert.equal(statSync(forge.jobDir).mode & 0o777, 0o700, "a job dir is a 0700 mkdtemp");
 assert.deepEqual(forge.sandbox.jobUser, jobUser, "the retention stamp carries the job user");
 
+// A RESUMED session, which is the shape the canonical file is COPIED for rather than created empty. The cold
+// prepare above staged a 0-byte transcript; writing a real one into it and promoting it is exactly how a
+// `completed` run ends, so the second prepare below reads what a second trigger on this issue would read.
+const RESUMED_MARKER = "pd-e2e-resumed-transcript";
+writeFileSync(join(forge.session.hostDir, "current.jsonl"), `${JSON.stringify({ type: "session", version: 3, id: RESUMED_MARKER, cwd: "/workspace" })}\n`);
+assert.ok(img.piVersion, `${image} declares no pi version, so nothing could ever resume on it`);
+const promoted = store.promoteSession(forge.session, { piVersion: img.piVersion });
+assert.equal(promoted.promoted, true, JSON.stringify(promoted));
+// `piVersion` is handed in HERE and not to the cold prepare above, which is what keeps the two shapes distinct:
+// the store cold-starts an image that declares no version, so the first call could not have resumed anyway.
+const resumed = await prepareWorkspace(forgeJob, "unused-token", { queueJobId: "gh-e2e-resumed", jobUser, piVersion: img.piVersion });
+assert.equal(resumed.session?.resume, true, `the second prepare must resume: ${JSON.stringify(resumed.session)}`);
+assert.equal(statSync(resumed.session.hostDir).mode & 0o777, 0o700, "a staged session dir is 0700");
+
 const folder = join(scratch, "folder");
 mkdirSync(folder);
 git(folder, "init", "-q", "-b", "main");
@@ -138,13 +152,13 @@ const MOUNT_SCRIPT = [
 	"echo mounts-ok",
 ].join("\n");
 const docker = (args) => spawnSync("docker", args, { encoding: "utf8" });
-const mountArgs = (prepared, name, user) => [
+const shellArgs = (prepared, name, user, script) => [
 	...buildDockerRunArgs({ image, name, workspace: prepared.workspace, jobDir: prepared.jobDir, outboxDir: prepared.outboxDir, sessionDir: prepared.session?.hostDir, network: "none", user, env: user ? { HOME: CONTAINER_HOME } : {}, extraFlags: ["--entrypoint", "sh"] }),
 	"-c",
-	MOUNT_SCRIPT,
+	script,
 ];
-for (const [label, prepared] of [["forge", forge], ["local", local]]) {
-	const r = docker(mountArgs(prepared, `pd-e2e-mounts-${label}-${process.pid}`, jobUser.user));
+for (const [label, prepared] of [["forge", forge], ["resumed", resumed], ["local", local]]) {
+	const r = docker(shellArgs(prepared, `pd-e2e-mounts-${label}-${process.pid}`, jobUser.user, MOUNT_SCRIPT));
 	assert.equal(r.status, 0, `${label}: ${r.stdout}${r.stderr}`);
 	assert.match(r.stdout, /mounts-ok/);
 	assert.equal(statSync(join(prepared.workspace, ".pd-e2e")).uid, euid, `${label}: a file the job wrote is owned by the worker on the host`);
@@ -154,6 +168,20 @@ for (const [label, prepared] of [["forge", forge], ["local", local]]) {
 	}
 }
 say("every mount was read and written as the job user, git accepted the clone, and /job refused a write and a chmod");
+
+// The one thing the cold shape cannot show: the CONTENT the host copied in. Asserted on the bytes rather than on
+// the exit code, because `cat` of the empty file every cold start stages also exits 0.
+const readTranscript = (name, user) => docker(shellArgs(resumed, name, user, "cat /session/current.jsonl"));
+const readAsJobUser = readTranscript(`pd-e2e-resumed-${process.pid}`, jobUser.user);
+assert.equal(readAsJobUser.status, 0, `${readAsJobUser.stdout}${readAsJobUser.stderr}`);
+assert.ok(readAsJobUser.stdout.includes(RESUMED_MARKER), `the job user read the resumed transcript back: ${readAsJobUser.stdout}`);
+// NEGATIVE CONTROL: the same read as the image's own uid, which owns neither the 0700 session directory nor the
+// transcript the worker copied into it. A mode that let this one through would hand every image the store.
+const readAsImage = readTranscript(`pd-e2e-resumed-control-${process.pid}`, null);
+assert.notEqual(readAsImage.status, 0, `the image's own user must not read the transcript: ${readAsImage.stdout}${readAsImage.stderr}`);
+assert.ok(!readAsImage.stdout.includes(RESUMED_MARKER), `the image's own user read the transcript anyway: ${readAsImage.stdout}`);
+controls.ran++;
+say("a resumed transcript was staged into the 0700 session dir, read there by the job user, and refused to the image's own user");
 
 // --- 5. the real runner: as the job user it reaches the auth check; as the image's user it cannot read /job --------
 const RUNNER_ENV = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-4-5-20250929", PI_MAX_TURNS: "1" };
@@ -174,7 +202,7 @@ say("the runner reached `no configured auth` as the job user, and refused `job-i
 
 // --- 6. what the job left is the worker's, and the worker's own cleanup removes it --------------------------------
 const cleanup = makeCleanup();
-for (const prepared of [forge, local]) {
+for (const prepared of [forge, resumed, local]) {
 	await cleanup(prepared);
 	assert.equal(existsSync(prepared.jobDir), false, `${prepared.jobDir} was removed by the real cleanup`);
 }
@@ -184,7 +212,7 @@ say("the real cleanup removed both job dirs, including what the job wrote");
 process.umask(0o077);
 const tight = await prepareWorkspace({ kind: "local", folder, task: "e2e" }, null, { queueJobId: "local-e2e-077", jobUser });
 runnerRows(tight, "umask077");
-const tightMounts = docker(mountArgs(tight, `pd-e2e-mounts-077-${process.pid}`, jobUser.user));
+const tightMounts = docker(shellArgs(tight, `pd-e2e-mounts-077-${process.pid}`, jobUser.user, MOUNT_SCRIPT));
 assert.equal(tightMounts.status, 0, `umask 077: ${tightMounts.stdout}${tightMounts.stderr}`);
 await cleanup(tight);
 assert.equal(existsSync(tight.jobDir), false);
