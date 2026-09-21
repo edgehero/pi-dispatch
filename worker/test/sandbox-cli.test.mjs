@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { runSandbox } from "../src/sandbox-cli.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * `pi-dispatch sandbox`, driven through its injected seams. Nothing here reaches docker or a terminal:
@@ -14,7 +15,7 @@ import { runSandbox } from "../src/sandbox-cli.mjs";
 
 /** A retention root with one retained run in it, on a real temp dir (readManifest reads it for real). */
 function retained({ jobId = "gh-1", image = "pi-job:latest", workspace, keepUntil = null, backend } = {}) {
-	const root = mkdtempSync(join(tmpdir(), "sbx-"));
+	const root = tempDir("sbx-");
 	const dir = join(root, jobId);
 	mkdirSync(dir, { recursive: true });
 	const ws = workspace ?? join(dir, "workspace");
@@ -81,11 +82,11 @@ test("without a terminal it refuses in words, rather than letting docker say 'th
 
 test("a swept run names the window that expired; retention off names the variable", async () => {
 	const c1 = capture();
-	assert.equal(await runSandbox(["gh-404"], { env: envWith(mkdtempSync(join(tmpdir(), "sbx-"))), deps: c1.deps }), 1);
+	assert.equal(await runSandbox(["gh-404"], { env: envWith(tempDir("sbx-")), deps: c1.deps }), 1);
 	assert.match(c1.errText(), /swept after 24h/);
 
 	const c2 = capture();
-	assert.equal(await runSandbox(["gh-404"], { env: envWith(mkdtempSync(join(tmpdir(), "sbx-")), { PI_SANDBOX_RETENTION_HOURS: "0" }), deps: c2.deps }), 1);
+	assert.equal(await runSandbox(["gh-404"], { env: envWith(tempDir("sbx-"), { PI_SANDBOX_RETENTION_HOURS: "0" }), deps: c2.deps }), 1);
 	assert.match(c2.errText(), /PI_SANDBOX_RETENTION_HOURS/);
 });
 
@@ -186,7 +187,7 @@ test("--list shows what is left, how long it has, and what is running", async ()
 
 test("--list says so when retention is off, rather than showing an empty table", async () => {
 	const c = capture();
-	const root = mkdtempSync(join(tmpdir(), "sbx-"));
+	const root = tempDir("sbx-");
 	assert.equal(await runSandbox(["--list"], { env: envWith(root, { PI_SANDBOX_RETENTION_HOURS: "0" }), deps: c.deps }), 0);
 	assert.match(c.text(), /retention is off/);
 });

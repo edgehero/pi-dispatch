@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInit } from "../src/init.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "pi-init-"));
+const tmp = () => tempDir("pi-init-");
 function capture() {
 	const buf = [];
 	return { out: (s) => buf.push(s), text: () => buf.join("") };

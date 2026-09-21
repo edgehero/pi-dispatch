@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImportPi, findLiteralSecret } from "../src/import-pi.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 function capture() {
 	const buf = [];
@@ -18,7 +19,7 @@ function capture() {
  * real to find (issue #102).
  */
 function hostAgent({ models, withAuth = true, withExtensions = false, settings, installed = [] } = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const dir = tempDir("pi-agent-");
 	if (settings !== undefined) writeFileSync(join(dir, "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings));
 	for (const pkg of installed) {
 		const target = join(dir, "npm", "node_modules", pkg.name);
@@ -40,7 +41,7 @@ function hostAgent({ models, withAuth = true, withExtensions = false, settings, 
 	}
 	return dir;
 }
-const overlayDir = () => mkdtempSync(join(tmpdir(), "pi-overlay-"));
+const overlayDir = () => tempDir("pi-overlay-");
 const run = (from, to, extra = [], out, deps = {}) => runImportPi(["--from", from, "--to", to, ...extra], { out, ...deps });
 
 test("import-pi copies models/skills/persona and NEVER auth.json", async () => {
@@ -62,7 +63,7 @@ test("a symlinked skill directory is NOT staged (it was, BY CONTENT, before the 
 	// permanently false: the link's TARGET was walked and its contents copied into an overlay that is
 	// :ro-mounted into every adversarial-input container. This is the regression test for that.
 	const from = hostAgent();
-	const secretDir = mkdtempSync(join(tmpdir(), "pi-host-secret-"));
+	const secretDir = tempDir("pi-host-secret-");
 	writeFileSync(join(secretDir, "SKILL.md"), "HOST-TREE-SENTINEL");
 	symlinkSync(secretDir, join(from, "skills", "aliased"));
 	const to = overlayDir();
@@ -82,7 +83,7 @@ test("a symlinked skill directory is NOT staged (it was, BY CONTENT, before the 
 
 test("import-pi refuses a models.json with a literal key and writes nothing", async () => {
 	const from = hostAgent({ models: JSON.stringify({ providers: { custom: { name: "Custom", apiKey: "sk-live-literal" } } }) });
-	const to = join(mkdtempSync(join(tmpdir(), "pi-overlay-")), "out"); // does not exist yet
+	const to = join(tempDir("pi-overlay-"), "out"); // does not exist yet
 	const { out, text } = capture();
 
 	const code = await run(from, to, [], out);
@@ -168,7 +169,7 @@ const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, 
 
 /** Write a `pi-packages.json` somewhere and return its path. */
 function packagesFile(packages) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-pkgs-")), "pi-packages.json");
+	const path = join(tempDir("pi-pkgs-"), "pi-packages.json");
 	writeJson(path, { packages });
 	return path;
 }

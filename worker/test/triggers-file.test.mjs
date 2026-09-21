@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
 import { findDuplicateKey } from "../src/json-duplicates.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // In-memory fs modelled on the admin read-model tests' fake (files + mtimes + openSync "wx"/EEXIST +
 // statSync mtimeMs) but defined HERE, not imported: worker tests do not reach into admin test helpers,
@@ -651,7 +652,7 @@ test("cross-writer race on a real file: both disarms land, the file stays loadab
 	//   - each disarm: { ok } or { already } after its retries -- a LOST disarm (invalid/timeout) is
 	//     the one outcome this test exists to refuse;
 	//   - the final file must load through parseTriggers and carry BOTH disarm marks.
-	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-triggers-race-"));
+	const dir = tempDir("pi-dispatch-triggers-race-");
 	try {
 		const path = join(dir, "triggers.json");
 		const lock = `${path}.lock`;
@@ -701,7 +702,7 @@ test("cross-writer race on a real file: both disarms land, the file stays loadab
 test("the stale-lock threshold: at LOCK_STALE_MS the holder is LIVE, one ms past it is taken over", async () => {
 	// Pinning this used to mean a ten-second sleep, so nothing pinned it. With an injected clock it is
 	// two assertions, and the bound stops being decorative.
-	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-lock-stale-"));
+	const dir = tempDir("pi-dispatch-lock-stale-");
 	try {
 		const path = join(dir, "triggers.json");
 		const lock = `${path}.lock`;

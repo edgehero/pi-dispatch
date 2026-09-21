@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 import { backendChecks, collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
 // itself reaches it through `await import` for exactly that reason, and a STATIC import here would undo
@@ -194,7 +195,7 @@ test("doctor: a missing .env is a warning, not a hard failure", async () => {
 // carries `stage: false` (the manifest-names-a-dir-that-is-gone case). `packagesNoManifest` creates the
 // packages/ dir with no packages.json in it — staged bytes nothing knows the names of.
 function overlay({ auth = false, models, extensions = false, packages, packagesNoManifest = false, skills } = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-overlay-"));
+	const dir = tempDir("pi-overlay-");
 	if (auth) writeFileSync(join(dir, "auth.json"), "{}");
 	if (models !== undefined) writeFileSync(join(dir, "models.json"), models);
 	if (extensions) mkdirSync(join(dir, "extensions", "x"), { recursive: true });
@@ -231,7 +232,7 @@ function overlay({ auth = false, models, extensions = false, packages, packagesN
 // validates — a stub `{triggers:[{run:{packages:true}}]}` would be swallowed by the never-throw guard and
 // silently count 0, making every ARMED assertion pass for the wrong reason.
 function triggersFile(packages, image, extra = {}) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-"), "triggers.json");
 	const run = { kind: "local", folder: "/srv/repo", flow: "review", task: "nightly review", ...(packages === undefined ? {} : { packages }), ...(image === undefined ? {} : { image }), ...extra };
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] }));
 	return path;
@@ -464,7 +465,7 @@ test("doctor: a deployment with no packages and no trigger flag prints no packag
 
 // PI_AUTH_FROM_PI: the provider key may live in pi's auth.json, not the env — doctor reads it (real fs).
 function agentDirWith(cred) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const dir = tempDir("pi-agent-");
 	writeFileSync(join(dir, "auth.json"), JSON.stringify({ anthropic: cred }));
 	return dir;
 }
@@ -794,7 +795,7 @@ test("doctor: GITHUB_AUTH_SOURCE=app skips the in-image probe (mints per-job)", 
 
 const KEY_BODY = "sk-app-key-body-distinctive"; // planted so no-contents-in-output is a grep, not a hope
 function appKeyFile({ content = `-----BEGIN PRIVATE KEY-----\n${KEY_BODY}\n-----END PRIVATE KEY-----\n`, mode = 0o600 } = {}) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-app-key-")), "github-app-test.pem");
+	const path = join(tempDir("pi-app-key-"), "github-app-test.pem");
 	writeFileSync(path, content);
 	chmodSync(path, mode);
 	return path;
@@ -955,7 +956,7 @@ test("doctor: the app-auth block only fires for source app", async () => {
 const SETUP_BODY = "export INFISICAL_TOKEN=st.setup-body-distinctive\n"; // planted: must never be echoed
 
 function setupScript({ mode = 0o755, dirMode = 0o755, name = "setup-env.sh" } = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-env-setup-"));
+	const dir = tempDir("pi-env-setup-");
 	const path = join(dir, name);
 	writeFileSync(path, SETUP_BODY);
 	chmodSync(path, mode);
@@ -976,7 +977,7 @@ const darwinUnit = (deployDir, setup) =>
 	`\t</dict>\n</dict>\n`;
 
 /** Plant a unit in a temp home, in the location `pi-dispatch service install` writes it to. */
-function installUnit({ platform, home = mkdtempSync(join(tmpdir(), "pi-unit-home-")), deployDir, setup, which = "worker" }) {
+function installUnit({ platform, home = tempDir("pi-unit-home-"), deployDir, setup, which = "worker" }) {
 	const rel =
 		platform === "darwin"
 			? join("Library", "LaunchAgents", `com.pi-dispatch.${which}.plist`)
@@ -991,7 +992,7 @@ const seamEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: 
 const seamDeps = (out, extra = {}) => ({
 	out,
 	cwd: tmpdir(),
-	home: mkdtempSync(join(tmpdir(), "pi-empty-home-")),
+	home: tempDir("pi-empty-home-"),
 	platform: "linux",
 	spawn: fakeSpawn(green),
 	probeValkey: async () => true,
@@ -1009,7 +1010,7 @@ test("doctor: with no unit and no PI_ENV_SETUP, the seam adds not one line", asy
 
 test("doctor: a systemd unit for THIS deployment names its env-setup script, and doctor says which unit", async () => {
 	const setup = setupScript();
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home, path } = installUnit({ platform: "linux", deployDir, setup });
 	const { out, text } = capture();
 	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, platform: "linux" }));
@@ -1020,7 +1021,7 @@ test("doctor: a systemd unit for THIS deployment names its env-setup script, and
 
 test("doctor: a launchd plist carries the same seam, read out of its EnvironmentVariables dict", async () => {
 	const setup = setupScript();
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home, path } = installUnit({ platform: "darwin", deployDir, setup });
 	const { out, text } = capture();
 	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, platform: "darwin" }));
@@ -1062,7 +1063,7 @@ test("doctor: a unit belonging to ANOTHER deployment on this host is not doctor'
 	const setup = setupScript();
 	const { home } = installUnit({ platform: "linux", deployDir: "/srv/some-other-deployment", setup });
 	const { out, text } = capture();
-	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: mkdtempSync(join(tmpdir(), "pi-deploy-")), home }));
+	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: tempDir("pi-deploy-"), home }));
 	assert.equal(code, 0);
 	assert.doesNotMatch(text(), /env-setup/, "a host running two deployments must not hear about the neighbour's unit forever");
 });
@@ -1078,7 +1079,7 @@ test("doctor: with no unit, PI_ENV_SETUP in doctor's own environment answers -- 
 test("doctor: the unit outranks PI_ENV_SETUP -- the file that boots is the answer", async () => {
 	const fromUnit = setupScript({ name: "unit-setup.sh" });
 	const fromEnv = setupScript({ name: "env-setup.sh" });
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home } = installUnit({ platform: "linux", deployDir, setup: fromUnit });
 	const { out, text } = capture();
 	await runDoctor(seamEnv({ PI_ENV_SETUP: fromEnv }), seamDeps(out, { cwd: deployDir, home }));
@@ -1088,7 +1089,7 @@ test("doctor: the unit outranks PI_ENV_SETUP -- the file that boots is the answe
 
 test("doctor: worker and receiver naming the same script produce one set of lines, not two", async () => {
 	const setup = setupScript();
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	// The receiver unit is written FIRST, so "the worker names it" below is about the scan order and
 	// not about which file happened to land first.
 	const { path: receiver } = installUnit({ platform: "linux", deployDir, setup, which: "receiver" });
@@ -1103,7 +1104,7 @@ test("doctor: worker and receiver naming the same script produce one set of line
 test("doctor: a unit naming a script that is gone warns, names it, and still exits 0", async () => {
 	const setup = setupScript();
 	rmSync(dirname(setup), { recursive: true, force: true });
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home, path } = installUnit({ platform: "linux", deployDir, setup });
 	const { out, text } = capture();
 	const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
@@ -1116,7 +1117,7 @@ test("doctor: a unit naming a script that is gone warns, names it, and still exi
 test("doctor: a group- or world-writable env-setup script warns -- it is EXECUTED, so writability is the risk", async () => {
 	for (const mode of [0o775, 0o757]) {
 		const setup = setupScript({ mode });
-		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const deployDir = tempDir("pi-deploy-");
 		const { home } = installUnit({ platform: "linux", deployDir, setup });
 		const { out, text } = capture();
 		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
@@ -1129,7 +1130,7 @@ test("doctor: a group- or world-writable env-setup script warns -- it is EXECUTE
 
 test("doctor: a world-READABLE script is fine -- it holds no secret, only the commands that fetch them", async () => {
 	const setup = setupScript({ mode: 0o644 });
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home } = installUnit({ platform: "linux", deployDir, setup });
 	const { out, text } = capture();
 	await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
@@ -1142,7 +1143,7 @@ test("doctor: a world-writable directory warns, and a STICKY one does not", asyn
 		[0o1777, false],
 	]) {
 		const setup = setupScript({ dirMode });
-		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const deployDir = tempDir("pi-deploy-");
 		const { home } = installUnit({ platform: "linux", deployDir, setup });
 		const { out, text } = capture();
 		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
@@ -1155,7 +1156,7 @@ test("doctor: a world-writable directory warns, and a STICKY one does not", asyn
 
 test("doctor: an env-setup script in a work tree that does not ignore it warns, with the path and no contents", async () => {
 	const setup = setupScript();
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home } = installUnit({ platform: "linux", deployDir, setup });
 	const calls = [];
 	const { out, text } = capture();
@@ -1176,7 +1177,7 @@ test("doctor: an ignored script, a non-repo, and a git that will not launch are 
 		["git missing", "enoent"],
 	]) {
 		const setup = setupScript();
-		const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+		const deployDir = tempDir("pi-deploy-");
 		const { home } = installUnit({ platform: "linux", deployDir, setup });
 		const { out, text } = capture();
 		const code = await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home, spawn: fakeSpawn({ ...green, "git ": outcome }) }));
@@ -1186,7 +1187,7 @@ test("doctor: an ignored script, a non-repo, and a git that will not launch are 
 });
 
 test("doctor: a unit rendered WITHOUT the flag reads as no seam, and an unparseable one does not guess", async () => {
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-deploy-"));
+	const deployDir = tempDir("pi-deploy-");
 	const { home, path } = installUnit({ platform: "linux", deployDir, setup: null });
 	const { out, text } = capture();
 	await runDoctor(seamEnv(), seamDeps(out, { cwd: deployDir, home }));
@@ -1201,7 +1202,7 @@ test("doctor: a unit rendered WITHOUT the flag reads as no seam, and an unparsea
 
 /** A triggers file with one github label trigger, optionally carrying `run.replicas`. */
 function replicaTriggersFile(replicas) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-rep-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-rep-"), "triggers.json");
 	const run = { kind: "github", flow: "fix", ...(replicas === undefined ? {} : { replicas }) };
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run }] }));
 	return path;
@@ -1233,7 +1234,7 @@ test("doctor: a deployment with no run.replicas anywhere prints no replica line 
  *  rejects would be swallowed by readTriggerFacts' never-throw guard and silently count 0, making the
  *  advisory assertion below pass for the wrong reason (the catch-zeroes-counts trap named at triggersFile). */
 function commandTriggersFile() {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-cmd-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-cmd-"), "triggers.json");
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", command: "wf run" } }] }));
 	return path;
 }
@@ -1263,7 +1264,7 @@ test("doctor: a deployment with no command triggers prints no command line at al
  * either file, and must not start.
  */
 function scaffoldedCwd() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-scaffold-"));
+	const dir = tempDir("pi-scaffold-");
 	writeFileSync(join(dir, "pause-windows.json"), "[]\n");
 	writeFileSync(join(dir, "subscriptions.json"), JSON.stringify({ version: 1, subscriptions: [] }));
 	return dir;
@@ -1295,7 +1296,7 @@ test("doctor: with PI_PAUSE_WINDOWS_FILE set, the scaffolded file is not mention
 
 test("doctor: no scaffolded file, no line -- the feature-off deployment is not told about a file it has not got", async () => {
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), scaffoldDeps(out, mkdtempSync(join(tmpdir(), "pi-bare-"))));
+	await runDoctor(imgEnv(), scaffoldDeps(out, tempDir("pi-bare-")));
 	assert.doesNotMatch(text(), /pause-windows/, "nothing exists to be ignored");
 });
 
@@ -1326,7 +1327,7 @@ test("doctor: the pause-windows mismatch is NEVER tier -- doctor cannot guess wh
 /** A triggers file with one forge label trigger of `kind`. Azure carries the `run.repository` its label
  *  triggers require. Validates through the shared parseTriggers for triggersFile's reason above. */
 function forgeTriggersFile(kind) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-forge-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-forge-"), "triggers.json");
 	const run = { kind, flow: "fix", ...(kind === "azure" ? { repository: "webapp" } : {}) };
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run }] }));
 	return path;
@@ -1538,7 +1539,7 @@ function promptRecorder(answer = false) {
  * swallows the refusal to zeroes and every resume assertion here passes for the wrong reason.
  */
 function resumeTriggersFile() {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-resume-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-resume-"), "triggers.json");
 	const run = { kind: "github", flow: "review", resume: true };
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:review"] }, run }] }));
 	return path;
@@ -1747,7 +1748,7 @@ test("doctor --fix: the declared-but-absent session store is created silently --
 });
 
 test("doctor --fix: a missing .env is delegated to init's create-only scaffolds, silently", async () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-fix-init-"));
+	const cwd = tempDir("pi-fix-init-");
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
 	const code = await runDoctor(
@@ -1764,7 +1765,7 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 
 test("doctor --fix: accepting the overlay auth.json offer deletes the file and converges credential-free", async () => {
 	const dir = overlay({ auth: true });
-	const cwd = mkdtempSync(join(tmpdir(), "pi-fix-auth-"));
+	const cwd = tempDir("pi-fix-auth-");
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
 	const { out, text } = capture();
 	const code = await runDoctor(overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat" }), {
@@ -1786,7 +1787,7 @@ test("doctor --fix: accepting the overlay auth.json offer deletes the file and c
 
 test("doctor --fix: accepting the restage offer re-runs import-pi as a child through the injected spawn", async () => {
 	const dir = overlay({ packages: [pkg(), pkg({ name: "pi-lint", version: "0.4.0", dir: "pi-lint", stage: false })] });
-	const cwd = mkdtempSync(join(tmpdir(), "pi-fix-restage-"));
+	const cwd = tempDir("pi-fix-restage-");
 	const calls = [];
 	const env = overlayEnv(dir, { GITHUB_AUTH_SOURCE: "pat" });
 	const { fn: promptFn, calls: prompts } = promptRecorder(true);
@@ -1905,7 +1906,7 @@ function assertFixActionDoctrine(checks) {
 }
 
 const collectSeams = (plan, extra = {}) => ({
-	cwd: mkdtempSync(join(tmpdir(), "pi-fix-doctrine-")),
+	cwd: tempDir("pi-fix-doctrine-"),
 	out: () => {},
 	spawn: fakeSpawn(plan),
 	probeValkey: async () => false,
@@ -1919,7 +1920,7 @@ const collectSeams = (plan, extra = {}) => ({
 
 /** One validating triggers file that names every forge, a custom image, resume, and replicas. */
 function fullyBrokenTriggersFile() {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-broken-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-broken-"), "triggers.json");
 	const triggers = [
 		{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", image: "custom-img:1" } },
 		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", replicas: 2 } },
@@ -1947,7 +1948,7 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 	});
 	// A scoped-limits file wrong in the boot-blocking way (issue #242), plus a dead-folder row route:
 	// without one, none of the three new scoped checks enters this walk and the never-tier pin hollows.
-	const scopedLimitsDir = mkdtempSync(join(tmpdir(), "pi-doctrine-sl-"));
+	const scopedLimitsDir = tempDir("pi-doctrine-sl-");
 	writeFileSync(join(scopedLimitsDir, "scoped-limits.json"), JSON.stringify({ version: 1, limits: [{ scope: "/srv/never-runs", day: 1 }] }));
 	const env = {
 		PI_PROVIDER: "anthropic",
@@ -1956,14 +1957,14 @@ test("doctor --fix doctrine: from a fully-broken env, no check outside the allow
 		PI_SCOPED_LIMITS_FILE: join(scopedLimitsDir, "scoped-limits.json"),
 		PI_GLOBAL_PI_DIR: dir,
 		PI_GLOBAL_ALLOW_EXTENSIONS: "maybe",
-		PI_SESSIONS_DIR: join(mkdtempSync(join(tmpdir(), "pi-sessions-parent-")), "absent"),
+		PI_SESSIONS_DIR: join(tempDir("pi-sessions-parent-"), "absent"),
 		RECEIVER_PORT: "http",
 		AZURE_WEBHOOK_MODE: "hmac",
 	};
 	// A configured --env-setup seam, wrong in all three ways at once (issue #216). Without a unit that
 	// names one, envSetupChecks returns [] and this pin would walk straight past the new checks -- the
 	// same hollowing-out the triggers-parse guard below exists to prevent.
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-doctrine-deploy-"));
+	const deployDir = tempDir("pi-doctrine-deploy-");
 	const loose = setupScript({ mode: 0o777, dirMode: 0o777 });
 	const { home } = installUnit({ platform: "linux", deployDir, setup: loose });
 	const checks = await collectChecks(
@@ -2088,7 +2089,7 @@ test("doctor: a flow resolving in NO visible tier is a ⚠ naming checked vs not
 });
 
 test("doctor: a flow resolving only in run.skillsDir is a ✓ naming the injected tier", async () => {
-	const skillsDir = mkdtempSync(join(tmpdir(), "pi-skills-"));
+	const skillsDir = tempDir("pi-skills-");
 	mkdirSync(join(skillsDir, "review"), { recursive: true });
 	writeFileSync(join(skillsDir, "review", "SKILL.md"), "---\ndescription: injected\n---\n");
 	const { out, text } = capture();
@@ -2255,7 +2256,7 @@ test("doctor: a triggers file the loader refuses FAILS, names the reason, and sa
 	// PI_TRIGGERS_FILE is set, so a receiver-only host got no loud failure anywhere -- while the zeroes
 	// disarmed the WEBHOOK_SECRET, per-forge credential, per-image and flow-tier checks. doctor came back
 	// GREENER than a healthy deployment, which is the one direction a preflight must never fail in.
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-bad-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-bad-"), "triggers.json");
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix", replicas: 99 } }] }));
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
@@ -2272,7 +2273,7 @@ test("doctor: a duplicate key is reported through the SAME check, with no new on
 	// and the fail-tier check prints it, so a new refusal in parseTriggers reaches doctor for nothing. The
 	// point of asserting it is that "for nothing" is a claim about a seam, and a seam that stopped working
 	// would leave the operator finding out from the first delivery instead.
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-dup-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-dup-"), "triggers.json");
 	writeFileSync(path, '{"triggers":[{"on":{"type":"label","any":["pi:fix"]},"run":{"kind":"github","flow":"safe","flow":"evil"}}]}');
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path }), imgDeps(out, green));
@@ -2297,7 +2298,7 @@ test("doctor: a VALID triggers file says nothing about parsing -- the check is s
  * -- the trap the resume fixture above documents.
  */
 function secretsTriggersFile({ profile, kind = "github", folder, names = ["STRIPE_KEY"] } = {}) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-secrets-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-secrets-"), "triggers.json");
 	const secrets = Object.fromEntries(names.map((n) => [n, `op://ci/${n.toLowerCase()}/value`]));
 	const run = { kind, flow: "deploy", secrets, ...(profile ? { secretsProfile: profile } : {}) };
 	const on = kind === "local" ? { type: "cron", id: "nightly", pattern: "0 3 * * *" } : { type: "label", any: ["pi:deploy"] };
@@ -2436,7 +2437,7 @@ test("doctor: a deployment that binds no secrets is told nothing about them at a
  * every count below would then pass for the wrong reason. Written into `dir` when given, so the
  * PI_TRIGGERS_FILE-unset case can plant it at the injected cwd's ./triggers.json.
  */
-function onceTriggersFile(dir = mkdtempSync(join(tmpdir(), "pi-triggers-once-")), { armed = true, spent = true } = {}) {
+function onceTriggersFile(dir = tempDir("pi-triggers-once-"), { armed = true, spent = true } = {}) {
 	const triggers = [];
 	if (armed) triggers.push({ on: { type: "issue", action: ["closed"], number: 40, once: true }, run: { kind: "github", flow: "deploy" } });
 	if (spent) triggers.push({ on: { type: "issue", action: ["closed"], number: 41, once: true, disarmed: { at: "2026-08-01T00:00:00.000Z", jobId: "gh-old" } }, run: { kind: "github", flow: "deploy" } });
@@ -2451,7 +2452,7 @@ test("doctor: the armed one-shot line counts from the raw file and WARNS only wh
 	// Unset PI_TRIGGERS_FILE: doctor resolves ./triggers.json against the injected cwd, and the armed
 	// line warns about the split-file hazard -- a worker service whose WorkingDirectory differs from
 	// the receiver's disarms a file nobody matches against, and no mechanism can detect that.
-	const dir = mkdtempSync(join(tmpdir(), "pi-once-doctor-"));
+	const dir = tempDir("pi-once-doctor-");
 	onceTriggersFile(dir);
 	const unset = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, onceSeams({ cwd: dir }));
 	const armedUnset = unset.find((c) => /one-shot trigger\(s\) armed/.test(c.label));
@@ -2495,7 +2496,7 @@ test("doctor: zero once triggers means NEITHER one-shot line -- non-adopters hea
 // ── scoped limits (issue #242): the trap check, the boot-blocker line, the membership advisory ──────────
 
 function scopedScaffoldCwd(limits) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-scaffold-"));
+	const dir = tempDir("pi-sl-scaffold-");
 	writeFileSync(join(dir, "scoped-limits.json"), JSON.stringify({ version: 1, limits: limits ?? [] }));
 	return dir;
 }
@@ -2524,7 +2525,7 @@ test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY
 });
 
 test("doctor: a configured scoped-limits file that will not load is a FAILURE naming the boot refusal, never-tier", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-bad-"));
+	const dir = tempDir("pi-sl-bad-");
 	const path = join(dir, "scoped-limits.json");
 	writeFileSync(path, JSON.stringify({ version: 2, limits: [] }));
 	const checks = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
@@ -2541,7 +2542,7 @@ test("doctor: a configured scoped-limits file that will not load is a FAILURE na
 });
 
 test("doctor: the dead-scope advisory flags folder-only shapes not in the canonicalized facts; repo shapes stay silent", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-adv-"));
+	const dir = tempDir("pi-sl-adv-");
 	const folder = join(dir, "site");
 	writeFileSync(
 		join(dir, "triggers.json"),
@@ -2581,7 +2582,7 @@ test("doctor: the dead-scope advisory flags folder-only shapes not in the canoni
 });
 
 test("doctor: the dead-scope advisory stays SILENT when the triggers facts are unreadable -- zeroed counts make no claims", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-noclaim-"));
+	const dir = tempDir("pi-sl-noclaim-");
 	const limitsPath = join(dir, "scoped-limits.json");
 	writeFileSync(limitsPath, JSON.stringify({ version: 1, limits: [{ scope: "/srv/never", day: 1 }] }));
 	// Unparseable triggers file: doctor already says the file does not parse; asserting "no trigger
@@ -2590,7 +2591,7 @@ test("doctor: the dead-scope advisory stays SILENT when the triggers facts are u
 	const broken = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_SCOPED_LIMITS_FILE: limitsPath }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
 	assert.ok(!broken.find((x) => /name a folder no trigger runs in/.test(x.label)), "unparseable triggers: no advisory");
 	// Absent triggers file entirely: same rule.
-	const bare = mkdtempSync(join(tmpdir(), "pi-sl-bare-"));
+	const bare = tempDir("pi-sl-bare-");
 	const limits2 = join(bare, "scoped-limits.json");
 	writeFileSync(limits2, JSON.stringify({ version: 1, limits: [{ scope: "/srv/never", day: 1 }] }));
 	const absent = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: limits2 }), collectSeams(green, { cwd: bare, nodeVersion: "22.19.0", probeValkey: async () => true }));
@@ -2600,7 +2601,7 @@ test("doctor: the dead-scope advisory stays SILENT when the triggers facts are u
 // --- run.waitFor (issue #230) --------------------------------------------------------------------------
 
 function waitTriggersFile({ profiles = ["jira"], after } = {}) {
-	const path = join(mkdtempSync(join(tmpdir(), "pi-triggers-wait-")), "triggers.json");
+	const path = join(tempDir("pi-triggers-wait-"), "triggers.json");
 	const waitFor = [...(after ? [{ after }] : []), ...profiles.map((profile) => ({ profile }))];
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:deploy"] }, run: { kind: "github", flow: "deploy", waitFor } }] }));
 	return path;
@@ -2620,7 +2621,7 @@ test("doctor: a waiting trigger whose profile is NOT declared FAILS, naming the 
 });
 
 test("doctor: a declared profile is STAT'd -- a path that cannot run is a check that can never answer", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-wait-checks-"));
+	const dir = tempDir("pi-wait-checks-");
 	const good = join(dir, "wait.sh");
 	writeFileSync(good, "#!/bin/sh\nexit 0\n");
 	chmodSync(good, 0o755);
@@ -2736,7 +2737,7 @@ test("doctor: an `after` beyond PI_WAIT_AFTER_MAX_MS FAILS -- every delivery ref
 test("doctor: a broken profile NO trigger names only warns -- nothing refuses today", async () => {
 	// The missing-profile check is trigger-driven; the stat loop is declaration-driven. Failing the whole
 	// command on a retired entry no job looks up is the same over-reporting the `waiting > 0` gate prevents.
-	const dir = mkdtempSync(join(tmpdir(), "pi-wait-unused-"));
+	const dir = tempDir("pi-wait-unused-");
 	const good = join(dir, "wait.sh");
 	writeFileSync(good, "#!/bin/sh\nexit 0\n");
 	chmodSync(good, 0o755);
@@ -2760,7 +2761,7 @@ test("doctor's stat probe follows SYMLINKS, exactly as the gate's does", async (
 	// spawn. `realpathSync` is the half with no other pin: drop it and every test above stays green while a
 	// release-directory layout (`current -> releases/<date>/wait.sh`), which the gate runs happily, reads here
 	// as a check that can never answer. Asserted against the REAL checker, not against a restatement of it.
-	const dir = mkdtempSync(join(tmpdir(), "pi-wait-symlink-"));
+	const dir = tempDir("pi-wait-symlink-");
 	const real = join(dir, "wait-2026-08-30.sh");
 	writeFileSync(real, "#!/bin/sh\nexit 0\n");
 	chmodSync(real, 0o755);
@@ -2947,8 +2948,8 @@ test("no home directory on disk warns about the SILENT record loss the move intr
 });
 
 test("the migration hint fires ONLY while the old path holds records and the new one does not", async () => {
-	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-migrate-home-"));
+	const tmp = tempDir("pi-migrate-");
+	const home = tempDir("pi-migrate-home-");
 	const env = { TMPDIR: tmp };
 	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
 	writeFileSync(join(tmp, "pi-dispatch", "logs", "gh-1.json"), "{}");
@@ -2981,8 +2982,8 @@ test("a world-writable legacy dir gets no one-line adopt command, because that f
 	// local account can create files there. An overlay OUTRANKS .env for every spend cap, so a copy-paste
 	// `mv` would let a stranger install their dailyCap on this deployment. The records half is softened the
 	// same way, because adopting them corrupts the history the panel and dispatch_costs fold over.
-	const tmp = mkdtempSync(join(tmpdir(), "pi-shared-legacy-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-shared-home-"));
+	const tmp = tempDir("pi-shared-legacy-");
+	const home = tempDir("pi-shared-home-");
 	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
 	writeFileSync(join(tmp, "pi-dispatch", "logs", "gh-1.json"), "{}");
 	writeFileSync(join(tmp, "pi-dispatch", "settings.json"), JSON.stringify({ dailyCap: 100000 }));
@@ -3003,8 +3004,8 @@ test("a world-writable legacy dir gets no one-line adopt command, because that f
 });
 
 test("a legacy directory holding only non-records has nothing to migrate", async () => {
-	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-junk-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-migrate-junk-home-"));
+	const tmp = tempDir("pi-migrate-junk-");
+	const home = tempDir("pi-migrate-junk-home-");
 	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
 	writeFileSync(join(tmp, "pi-dispatch", "logs", "README.txt"), "x");
 	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
@@ -3012,8 +3013,8 @@ test("a legacy directory holding only non-records has nothing to migrate", async
 });
 
 test("the migration hint's remedy is in the FIX, which renders because the check is ok:false", async () => {
-	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-label-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-migrate-label-home-"));
+	const tmp = tempDir("pi-migrate-label-");
+	const home = tempDir("pi-migrate-label-home-");
 	mkdirSync(join(tmp, "pi-dispatch", "logs"), { recursive: true });
 	writeFileSync(join(tmp, "pi-dispatch", "logs", "gh-1.log"), "x"); // the reaper's OTHER extension
 	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
@@ -3026,8 +3027,8 @@ test("the migration hint's remedy is in the FIX, which renders because the check
 });
 
 test("the settings hint names the CONSEQUENCE, not just the path", async () => {
-	const tmp = mkdtempSync(join(tmpdir(), "pi-migrate-settings-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-migrate-settings-home-"));
+	const tmp = tempDir("pi-migrate-settings-");
+	const home = tempDir("pi-migrate-settings-home-");
 	mkdirSync(join(tmp, "pi-dispatch"), { recursive: true });
 	writeFileSync(join(tmp, "pi-dispatch", "settings.json"), "{}");
 	const checks = await collectChecks({ TMPDIR: tmp }, stateSeams({ home }));
@@ -3046,7 +3047,7 @@ test("a home UNDER the OS temp dir is swept, and the line does NOT claim two uns
 	// this -- and the message must then describe the DEFAULT, because naming PI_LOGS_DIR here would assert
 	// something false about an operator who never set it, and "unset falls back to..." would advise the
 	// very state being warned about.
-	const home = mkdtempSync(join(tmpdir(), "pi-home-in-temp-"));
+	const home = tempDir("pi-home-in-temp-");
 	const checks = await collectChecks({}, stateSeams({ home, underTemp: underOsTempDir }));
 	assert.equal(checks.filter((c) => /^Durable state:/.test(c.label)).length, 0);
 	const warns = checks.filter((c) => /OS temp dir/.test(c.label));
@@ -3152,7 +3153,7 @@ const liveFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, read
 const LINUX_1001 = { platform: "linux", release: "6.8.0-test", euid: 1001, egid: 1001 };
 // The host owner the probe's write reads as, for that identity: the fake container writes as THIS test process.
 const liveFsAs = (uid) => ({ ...liveFs, statSync: (p) => Object.assign(statSync(p), { uid }) });
-const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: mkdtempSync(join(tmpdir(), "pi-live-doctor-")), ...extra });
+const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: tempDir("pi-live-doctor-"), ...extra });
 
 test("doctor without --live is byte-identical and spawns no probe; a truthy non-boolean `live` runs nothing either", async () => {
 	const env = liveEnv();
@@ -3239,7 +3240,7 @@ test("doctor --live gives each localFolders failure its own fix, and names what 
 });
 
 test("doctor --fix --live reads back ONCE, after the fix pass, from the re-collected facts", async () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-live-fix-")); // no .env, so the silent `init` fix runs and forces a re-collect
+	const cwd = tempDir("pi-live-fix-"); // no .env, so the silent `init` fix runs and forces a re-collect
 	const { out, text } = capture();
 	const calls = [];
 	await runDoctor(liveEnv(), { ...ghDeps(out, { ...liveOk(), ...green }, calls), fileExists: existsSync, cwd, fix: true, promptFn: async () => false, live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
@@ -3253,7 +3254,7 @@ test("doctor --fix --live reads back ONCE, after the fix pass, from the re-colle
 });
 
 test("doctor --live with PI_JOBS_DIR unset builds its fixture under the injected TMPDIR, as loadConfig would", async () => {
-	const tmp = mkdtempSync(join(tmpdir(), "pi-live-tmpdir-"));
+	const tmp = tempDir("pi-live-tmpdir-");
 	const { out, text } = capture();
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", TMPDIR: tmp };
 	await runDoctor(env, { ...ghDeps(out, { ...liveOk(), ...green }), live: true, liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
@@ -3352,8 +3353,8 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	await runDoctor(ghEnv({ PI_FORWARD_ENV: "FOO,HOME" }), { ...ghDeps(forwarded.out, { ...infoPlan(ROOTFUL_INFO), ...imageLabels("anyUid"), ...green }), jobUserIdentity: LINUX_ID(1234), stat: socketStat });
 	assert.match(forwarded.text(), /⚠ PI_FORWARD_ENV names HOME, which a job run as --user never receives/);
 
-	const deployDir = mkdtempSync(join(tmpdir(), "pi-unit-user-"));
-	const home = mkdtempSync(join(tmpdir(), "pi-unit-home-"));
+	const deployDir = tempDir("pi-unit-user-");
+	const home = tempDir("pi-unit-home-");
 	const unitPath = "/etc/systemd/system/pi-dispatch-worker.service";
 	const unit = `[Service]\nUser=pi\nWorkingDirectory=${deployDir}\n`;
 	const PASSWD = () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\nop:x:1234:1234::/home/op:/bin/sh\n";
@@ -3384,7 +3385,7 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	assert.match(await run(unit.replace("User=pi", "DynamicUser=yes\nUser=pi")), /runs the worker as pi \(uid 998\)/, "an explicit User= is compared whatever else the unit says");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
-	assert.doesNotMatch(await run(unit, { cwd: mkdtempSync(join(tmpdir(), "pi-other-deploy-")) }), warned, "a unit serving another deployment is not this one's");
+	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");
 	assert.doesNotMatch(await run(unit, { path: "/etc/systemd/system/pi-dispatch-receiver.service" }), warned, "the receiver runs no job, so its account is not compared");
 });
 

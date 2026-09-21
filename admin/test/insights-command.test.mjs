@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * The insights command (REQ-INSIGHTS-HTML-EXPORT): the bare `/dispatch insights` writes the
@@ -14,15 +15,15 @@ import { join } from "node:path";
  * temp logs dir, and an unparseable VALKEY_URL that degrades synchronously (a dead PORT would leak
  * an async error event into the suite).
  */
-process.env.PI_LOGS_DIR = mkdtempSync(join(tmpdir(), "admin-insights-cmd-"));
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "admin-insights-cmd-agent-"));
+process.env.PI_LOGS_DIR = tempDir("admin-insights-cmd-");
+process.env.PI_CODING_AGENT_DIR = tempDir("admin-insights-cmd-agent-");
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const mod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
 
-const fixtureDir = mkdtempSync(join(tmpdir(), "admin-insights-cmd-fixture-"));
+const fixtureDir = tempDir("admin-insights-cmd-fixture-");
 const triggersPath = join(fixtureDir, "triggers.json");
 writeFileSync(
   triggersPath,
@@ -219,7 +220,7 @@ test("the page carries the budget panel: unreachable canned queue stated as a ba
 });
 
 test("the budget slice carries the scoped rows from the limits file; a dead queue leaves used as ? not 0", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "admin-insights-sl-"));
+  const dir = tempDir("admin-insights-sl-");
   const slPath = join(dir, "scoped-limits.json");
   writeFileSync(slPath, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 10, concurrent: 2 }] }));
   const sink = [];

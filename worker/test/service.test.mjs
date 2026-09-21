@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installedUnitPaths, readUnitSeam, readUnitUser, runService, TEMPLATE_PINS } from "../src/service.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // The deploy/ copy the render actually reads: worker/deploy, shipped in the npm tarball and kept
@@ -355,7 +356,7 @@ const SYSTEMD = process.platform === "linux" && spawnSync("systemd-analyze", ["-
 test("render linux --env-setup: systemd itself parses the composed unit", { skip: !SYSTEMD }, async () => {
 	const h = harness({ platform: "linux", argv: ["render", "--env-setup", ENV_SETUP], files: ENV_SETUP_FILES });
 	assert.equal(await h.run(), 0);
-	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-unit-"));
+	const dir = tempDir("pi-dispatch-unit-");
 	const unitPath = join(dir, "pi-dispatch-worker.service");
 	// The first line is the render's "# → <path>" header, which is output, not unit content.
 	writeFileSync(unitPath, h.text().split("\n").slice(1).join("\n"));
@@ -493,7 +494,7 @@ test("status reads the seam out of a plist, and out of nssm on win32", async () 
 // ---------------------------------------------------------------------------------------------------
 
 function npmLayout() {
-	const dep = mkdtempSync(join(tmpdir(), "pi-dispatch-npmdep-"));
+	const dep = tempDir("pi-dispatch-npmdep-");
 	const pkg = join(dep, "node_modules", "@edgehero", "pi-dispatch");
 	mkdirSync(join(pkg, "src"), { recursive: true });
 	writeFileSync(join(pkg, "src", "cli.mjs"), "// stands in for the packed cli.mjs\n");
@@ -865,7 +866,7 @@ const POSIX = process.platform === "linux" || process.platform === "darwin";
 const REAL_WRAPPER = join(REPO_ROOT, "deploy", "worker-env-wrapper.sh");
 
 function wrapperDir(nodeStub, { env = true } = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-wrapper-"));
+	const dir = tempDir("pi-dispatch-wrapper-");
 	if (env) writeFileSync(join(dir, ".env"), "PI_WRAPPER_TEST=1\n");
 	mkdirSync(join(dir, "bin"));
 	writeFileSync(join(dir, "bin", "node"), nodeStub);

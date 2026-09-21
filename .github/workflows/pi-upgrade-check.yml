@@ -276,6 +276,12 @@ jobs:
       - name: No dated fixture rides a default clock (issue #293)
         run: node .github/scripts/dated-fixture-check.mjs
 
+      # The other half of issue #351's pair. This one is the fast hint: it sees a CALL SHAPE, so it
+      # names the file and the fix in a second. It cannot see a missing cleanup at all -- delete an
+      # after() hook and it stays green -- which is what the $TMPDIR count below is for.
+      - name: No test makes an OS temp directory it never removes (issue #351)
+        run: node .github/scripts/temp-dir-check.mjs
+
       # The scariest assertions in this project are FREE: every trap lives at the resource-loader
       # boundary (pure) or at before_agent_start (which fires strictly before any provider HTTP
       # call). No API key, no tokens, no flake, no excuse not to run them on every build.
@@ -295,7 +301,37 @@ jobs:
           PI_DISPATCH_REQUIRE_WORKER_TESTS: "1"
           PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
           VALKEY_TEST_URL: "redis://127.0.0.1:6379"
-        run: npm test
+        run: |
+          # Issue #351's ORACLE, and the reason the grep guard one step up is not enough: that one sees
+          # a call shape, this one measures the defect. A test file that makes a temp directory and never
+          # removes it leaves entries here whatever the call looked like, so a helper that forgets to
+          # register, or an after() hook someone deletes, fails HERE and nowhere else. Measured before
+          # this was armed: one local run left 954 entries, and this job runs the suite three times.
+          #
+          # ON ITS OWN TMPDIR, and that is not tidiness. The bare runner default is /tmp, which npm,
+          # docker and the runner's own tooling also write to while the suite runs, so counting there
+          # would make a REQUIRED check flake on entries no test made. A fresh directory the suite alone
+          # writes to makes the count exact and the failure honest.
+          #
+          # A FAILING SUITE SKIPS THIS COUNT, deliberately and unavoidably: the default shell is `bash -e`,
+          # so a non-zero `npm test` ends the step before the count runs. The build is red either way, and
+          # counting leftovers from a run that did not finish would say nothing about cleanup.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-tmpdir"
+          rm -rf "$TMPDIR"
+          mkdir -p "$TMPDIR"
+          npm test
+          # Two fixed-name caches are made by TOOLING rather than by any test: `node-compile-cache` is
+          # Node's own, and `jiti` is the transpiler pi's node_modules brings in for the admin tests.
+          # Excluded by EXACT NAME, which is why this is not the kind of allowlist `test-count-check.mjs`
+          # warns erodes: `mkdtemp` always appends random characters, so no test directory can ever
+          # match one of these, and the list cannot grow to cover test output by accident.
+          left=$(ls -A "$TMPDIR" | grep -vxE 'jiti|node-compile-cache' | wc -l)
+          echo "entries left in the suite's own TMPDIR: $left"
+          if [ "$left" -gt 0 ]; then
+            ls -A "$TMPDIR" | grep -vxE 'jiti|node-compile-cache' | head -20
+            echo "::error::The suite left $left entries in its own TMPDIR. Every test directory must come from the workspace helper (import { tempDir } from \"./helpers/temp-dir.mjs\"), which removes them in an after() hook. See issue #351."
+            exit 1
+          fi
 
       # The suite above can report success while silently losing tests, which is the failure issue #266
       # was: `fail 0`, exit 0, and three tests missing from the output entirely. This compares what

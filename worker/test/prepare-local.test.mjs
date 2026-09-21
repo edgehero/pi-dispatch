@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { PI_LIMITS } from "../src/materialize.mjs";
 import { prepareLocalWorkspace } from "../src/prepare-local.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 function git(dir, args) {
 	return execFileSync("git", ["-C", dir, ...args], {
@@ -19,7 +20,7 @@ function git(dir, args) {
 
 /** A local git repo with a .pi/ persona and skill, plus a working-tree file to "edit". */
 function localRepo() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-local-"));
+	const dir = tempDir("pi-local-");
 	git(dir, ["init", "-q"]);
 	git(dir, ["config", "core.autocrlf", "false"]);
 	const blob = (c) => execFileSync("git", ["-C", dir, "hash-object", "-w", "--stdin"], { input: c, encoding: "utf8" }).trim();
@@ -38,7 +39,7 @@ function localRepo() {
 
 test("prepares a local git folder: materialises .pi/ from HEAD, writes the task, folder is /workspace", async () => {
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder, task: "please tidy the imports", jobDir });
 
 	assert.equal(result.workspace, folder, "the folder itself is the workspace (edited in place)");
@@ -52,7 +53,7 @@ test("prepares a local git folder: materialises .pi/ from HEAD, writes the task,
 test("a .pi/ over a materialiser cap refuses the local job, writing no prompt.md (issue #60)", async () => {
 	// Driven with a real oversized blob rather than a fake, because prepareLocalWorkspace calls the
 	// materialiser directly and has no seam for it. One file past maxFileBytes is the cheapest breach.
-	const dir = mkdtempSync(join(tmpdir(), "pi-local-big-"));
+	const dir = tempDir("pi-local-big-");
 	git(dir, ["init", "-q"]);
 	git(dir, ["config", "core.autocrlf", "false"]);
 	const blob = (c) => execFileSync("git", ["-C", dir, "hash-object", "-w", "--stdin"], { input: c, encoding: "utf8" }).trim();
@@ -60,7 +61,7 @@ test("a .pi/ over a materialiser cap refuses the local job, writing no prompt.md
 	git(dir, ["update-index", "--add", "--cacheinfo", `100644,${blob("x".repeat(PI_LIMITS.maxFileBytes + 1))},.pi/skills/tidy/huge.md`]);
 	git(dir, ["commit", "-qm", "x"]);
 
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder: dir, task: "tidy", jobDir });
 
 	assert.deepEqual(result, { outcome: "policy", reason: "pi-file-too-large" });
@@ -71,7 +72,7 @@ test("a .pi/ over a materialiser cap refuses the local job, writing no prompt.md
 
 test("creates a writable /outbox host dir and returns its path (the container's chain-request channel)", async () => {
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder, task: "x", jobDir });
 	assert.equal(result.outboxDir, join(jobDir, "outbox"), "outboxDir is <jobDir>/outbox");
 	assert.ok(existsSync(result.outboxDir), "the outbox dir must exist on disk for the bind mount");
@@ -80,14 +81,14 @@ test("creates a writable /outbox host dir and returns its path (the container's 
 test("no GitHub anything: a local job needs no token, no repo, no network", async () => {
 	// This test passing at all -- with no octokit, no token, no clone URL -- IS the assertion.
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder, task: "x", jobDir });
 	assert.ok(result.sha.match(/^[0-9a-f]{40}$/), "resolved HEAD locally, offline");
 });
 
 test("writes /job/event.json unconditionally: read-only, parseable, defaulting to the manual shape", async () => {
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const result = await prepareLocalWorkspace({ folder, task: "x", jobDir });
 
 	const path = join(jobDir, "event.json");
@@ -102,7 +103,7 @@ test("writes /job/event.json unconditionally: read-only, parseable, defaulting t
 
 test("event.json carries the folder BASENAME only -- the full path (OS account name) never lands in /job", async () => {
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	await prepareLocalWorkspace({ folder, task: "x", jobDir });
 
 	const bytes = readFileSync(join(jobDir, "event.json"), "utf8");
@@ -112,7 +113,7 @@ test("event.json carries the folder BASENAME only -- the full path (OS account n
 
 test("a cron-shaped event lands as the full frozen cron shape with nulls preserved", async () => {
 	const folder = localRepo();
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-job-"));
+	const jobDir = tempDir("pi-job-");
 	const trigger = { id: "nightly-tidy", pattern: "0 3 * * *" };
 	const result = await prepareLocalWorkspace({
 		folder,
@@ -138,9 +139,9 @@ test("a cron-shaped event lands as the full frozen cron shape with nulls preserv
 });
 
 test("a non-git folder is a clear config error, not a crash", async () => {
-	const plain = mkdtempSync(join(tmpdir(), "pi-plain-"));
+	const plain = tempDir("pi-plain-");
 	await assert.rejects(
-		() => prepareLocalWorkspace({ folder: plain, task: "x", jobDir: mkdtempSync(join(tmpdir(), "j-")) }),
+		() => prepareLocalWorkspace({ folder: plain, task: "x", jobDir: tempDir("j-") }),
 		(e) => e.piDispatchConfig === true && /not a git repository/.test(e.message),
 	);
 });

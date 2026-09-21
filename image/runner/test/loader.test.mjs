@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 // Static import: packages.mjs is pure -- no pi, no fs -- so it needs none of the gating below.
 import { findShadowedSkills } from "../src/packages.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * REQ-UPSTREAM-CONTRACT-TESTS -- the assertions that catch the failures nothing else will.
@@ -65,7 +66,7 @@ const HOSTILE_SENTINEL = "HOSTILE-WORKSPACE-TREE-SENTINEL-f26b";
  * single leak cannot be mistaken for one of the loads we now want.
  */
 function fixture({ adminExtensions = false } = {}) {
-	const root = mkdtempSync(join(tmpdir(), "pi-dispatch-test-"));
+	const root = tempDir("pi-dispatch-test-");
 	const workspace = join(root, "workspace");
 	const jobPi = join(root, "job", "pi");
 	mkdirSync(workspace, { recursive: true });
@@ -376,7 +377,7 @@ test("a hostile skill in the workspace tree is NOT loaded -- noSkills holds", { 
 
 test("no project instructions is fine -- guardrails still apply", { skip }, async () => {
 	// A repo with no .pi/ at all must still get the floor, not an empty prompt.
-	const empty = mkdtempSync(join(tmpdir(), "pi-dispatch-empty-"));
+	const empty = tempDir("pi-dispatch-empty-");
 	const { loader } = await load({ jobPiDir: join(empty, "nonexistent") });
 	assert.ok(loader.getAppendSystemPrompt().join("\n\n").includes(GUARDRAIL_SENTINEL));
 });
@@ -384,7 +385,7 @@ test("no project instructions is fine -- guardrails still apply", { skip }, asyn
 test("the outbox protocol layers in when /outbox is mounted (local job)", { skip }, async () => {
 	// A local job carries a writable /outbox; its presence composes the protocol into the
 	// prompt AFTER the guardrails. The guardrails still come first.
-	const outboxMount = mkdtempSync(join(tmpdir(), "pi-dispatch-outbox-"));
+	const outboxMount = tempDir("pi-dispatch-outbox-");
 	const { loader } = await load({ outboxMount });
 	const appended = loader.getAppendSystemPrompt().join("\n\n");
 	assert.ok(appended.includes(OUTBOX_SENTINEL), "outbox protocol missing when /outbox is mounted");
@@ -406,7 +407,7 @@ test("the outbox protocol is absent when /outbox is not mounted (github job)", {
 
 test("guardrails precede outbox precede persona when all three are present", { skip }, async () => {
 	// The full local-job stack: floor first, then the outbox protocol, then the project persona.
-	const outboxMount = mkdtempSync(join(tmpdir(), "pi-dispatch-outbox-"));
+	const outboxMount = tempDir("pi-dispatch-outbox-");
 	const { loader } = await load({ outboxMount });
 	const appended = loader.getAppendSystemPrompt().join("\n\n");
 	assert.ok(
@@ -426,7 +427,7 @@ const GLOBAL_BUGFIX_SENTINEL = "GLOBAL-BUGFIX-SENTINEL-f37a"; // a global "bug-f
 
 /** A /opt/pi-global overlay: a global-only skill, a colliding "bug-fix" skill, and a global persona. */
 function globalOverlay() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-global-"));
+	const dir = tempDir("pi-global-");
 	mkdirSync(join(dir, "skills", "global-only"), { recursive: true });
 	writeFileSync(join(dir, "skills", "global-only", "SKILL.md"), `---\nname: global-only\ndescription: ${GLOBAL_SKILL_SENTINEL} a house rule\n---\n\nApply everywhere.\n`);
 	mkdirSync(join(dir, "skills", "bug-fix"), { recursive: true });
@@ -483,7 +484,7 @@ const OVERLAY_EXT_SENTINEL = "OVERLAY-EXT-SENTINEL-e8cf";
  * like this project's own -- a staged package is third-party by definition.
  */
 function fixturePackage({ skillName = "pkg-skill", nestedDep = false } = {}) {
-	const dir = join(mkdtempSync(join(tmpdir(), "staged-pkg-")), "fixture-pi-pkg");
+	const dir = join(tempDir("staged-pkg-"), "fixture-pi-pkg");
 	mkdirSync(join(dir, "ext"), { recursive: true });
 	mkdirSync(join(dir, "skills", skillName), { recursive: true });
 
@@ -531,7 +532,7 @@ function fixturePackage({ skillName = "pkg-skill", nestedDep = false } = {}) {
 
 /** A .pi-shaped dir whose extensions/ loads one extension, for asserting path ORDER. */
 function fixtureExtensionDir(prefix, commandName) {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
+	const dir = tempDir(prefix);
 	mkdirSync(join(dir, "extensions"), { recursive: true });
 	// index.js, not a loose foo.js: pi adds the DIRECTORY itself as the extension source, so a
 	// directory of loose files resolves to nothing. That is a property of the mount shape, not of
@@ -791,7 +792,7 @@ test("run.command's dispatch contract at the pin: headless commands, swallowed t
 		guardrailsPath: f.guardrailsPath,
 		outboxProtocolPath: f.outboxProtocolPath,
 	});
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const agentDir = tempDir("pi-agent-");
 	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
 	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	const settingsManager = pi.SettingsManager.inMemory({});
@@ -856,7 +857,7 @@ test("run.excludeTools' enforcement contract at the pin: structural removal, rea
 		guardrailsPath: f.guardrailsPath,
 		outboxProtocolPath: f.outboxProtocolPath,
 	});
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-agent-"));
+	const agentDir = tempDir("pi-agent-");
 	const authStorage = pi.AuthStorage.create(join(agentDir, "auth.json"));
 	const modelRegistry = pi.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	const settingsManager = pi.SettingsManager.inMemory({});
@@ -994,7 +995,7 @@ const INJECTED_GLOBALONLY_SENTINEL = "INJECTED-GLOBALONLY-SENTINEL-2b8f";
  * both sides -- the repo must beat it, and it must beat the overlay.
  */
 function injectedSkills() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-injected-"));
+	const dir = tempDir("pi-injected-");
 	mkdirSync(join(dir, "injected-only"), { recursive: true });
 	writeFileSync(join(dir, "injected-only", "SKILL.md"), `---\nname: injected-only\ndescription: ${INJECTED_SENTINEL} a per-trigger skill\n---\n\nDo the thing.\n`);
 	mkdirSync(join(dir, "bug-fix"), { recursive: true });
@@ -1088,7 +1089,7 @@ test("overlay prompt templates load, and the repo's beats an overlay one of the 
 	// what the enforcement consults before any package is considered.
 	const pkg = fixturePackage(); // packages staged, so enforcement is live
 	const f = fixture();
-	const overlay = mkdtempSync(join(tmpdir(), "pi-overlay-prompts-"));
+	const overlay = tempDir("pi-overlay-prompts-");
 	mkdirSync(join(overlay, "prompts"), { recursive: true });
 	writeFileSync(join(overlay, "prompts", "deploy-notes.md"), "OVERLAY-PROMPT-SENTINEL /deploy-notes\n");
 	writeFileSync(join(overlay, "prompts", "review.md"), "OVERLAY-REVIEW the overlay copy\n");

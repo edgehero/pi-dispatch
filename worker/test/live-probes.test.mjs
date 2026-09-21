@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { READ_BACK_BY_A_LIVE_PROBE } from "../src/backend-conformance.mjs";
 import { JOB_NAME_PREFIX } from "../src/backend-local.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
@@ -52,18 +53,6 @@ import {
 const FIXTURE = liveFixture("/tmp/pi-dispatch-live-1-abc");
 const ID = "a".repeat(64);
 const nodeFs = { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync };
-
-// Every directory a test here makes is removed when the file ends: the OS temp dir is not this suite's to fill, and a
-// fixture a test leaves behind is exactly what the sweeps under test are there to stop.
-const madeDirs = [];
-const tempDir = (prefix) => {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
-	madeDirs.push(dir);
-	return dir;
-};
-after(() => {
-	for (const dir of madeDirs) rmSync(dir, { recursive: true, force: true });
-});
 
 // What the shipped image reads under the builder's flags (measured on docker 27.4 / Docker Desktop), and what the
 // same image reads WITHOUT them. The second is the non-vacuity fixture: CapEff is 0 in both.

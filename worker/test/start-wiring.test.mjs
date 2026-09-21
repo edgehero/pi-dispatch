@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -745,7 +746,7 @@ test("runtime settings: a boot overlay sets the constructed concurrency, and wor
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
 	// A real settings.json whose concurrency (7) differs from the env default (3), so the boot-effective
 	// value is distinguishable from config.concurrency in both the constructor arg and the log.
-	const dir = mkdtempSync(join(tmpdir(), "pi-settings-"));
+	const dir = tempDir("pi-settings-");
 	const settingsFile = join(dir, "settings.json");
 	writeFileSync(settingsFile, JSON.stringify({ concurrency: 7 }));
 	try {
@@ -822,7 +823,7 @@ test("sandbox: retention off still wires a cleanup, and it is the delete-only on
 // but holds no packages.json -- the shape of every deployment that never opted into staged packages.
 test("staged packages: an overlay with no packages.json boots to packagePaths [] and logs it -- never a boot failure", { skip }, async () => {
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
-	const overlay = mkdtempSync(join(tmpdir(), "pi-global-"));
+	const overlay = tempDir("pi-global-");
 	try {
 		const { captured, logs, runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
 
@@ -864,7 +865,7 @@ function whileCapturingLogs(fn) {
 // routine act, so a re-stage that only lands after a restart is a stale set nobody asked for.
 test("staged packages: a re-stage after boot reaches the NEXT job, with no worker restart", { skip }, async () => {
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
-	const overlay = mkdtempSync(join(tmpdir(), "pi-global-"));
+	const overlay = tempDir("pi-global-");
 	try {
 		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
 		const resolve = runContainerCalls[0].packagePaths;
@@ -889,7 +890,7 @@ test("staged packages: a re-stage after boot reaches the NEXT job, with no worke
 // would run WITHOUT its tools and still exit 0 -- the silent no-op, arrived at by a different road.
 test("staged packages: a manifest that goes unreadable after boot keeps the last-known-good set and says so", { skip }, async () => {
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
-	const overlay = mkdtempSync(join(tmpdir(), "pi-global-"));
+	const overlay = tempDir("pi-global-");
 	try {
 		mkdirSync(join(overlay, "packages"), { recursive: true });
 		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] }));
@@ -1067,7 +1068,7 @@ const onceEntry = (number, disarmed) => ({ on: { type: "issue", action: ["closed
 const onceEffectiveJob = (number) => ({ kind: "github", repo: "o/r", flow: "deploy", target: { type: "issue", number }, trigger: { matched: { index: 0, type: "issue", action: "closed", number, once: true } } });
 
 test("once wiring: deps.checkOnceSpent reads PI_TRIGGERS_FILE when set, and excuses only this delivery's own id", { skip }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-once-path-"));
+	const dir = tempDir("pi-once-path-");
 	try {
 		const triggersPath = join(dir, "triggers.json");
 		writeFileSync(triggersPath, JSON.stringify({ triggers: [onceEntry(40, { at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" })] }));
@@ -1096,7 +1097,7 @@ test("once wiring: with PI_TRIGGERS_FILE unset the fallback is <cwd>/triggers.js
 	// can neither disarm nor pre-spend-check. No factory seam exists, so the pin is behavioural: chdir
 	// into a temp dir whose ./triggers.json holds a foreign mark, boot with an env that never names the
 	// file, and the wired check must still find the mark.
-	const dir = mkdtempSync(join(tmpdir(), "pi-once-cwd-"));
+	const dir = tempDir("pi-once-cwd-");
 	const prevCwd = process.cwd();
 	try {
 		writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [onceEntry(40, { at: "2026-08-28T09:00:00.000Z", jobId: "gh-first" })] }));
@@ -1122,7 +1123,7 @@ test("once wiring: writeRecord lands strictly BEFORE the disarm, for all three r
 	// has three recordRun call sites -- success, catch, and the settings-overlay-invalid refusal -- and
 	// all of them funnel through this one start.mjs closure; driving the closure with each shape proves
 	// the ordering holds wherever it is invoked from.
-	const dir = mkdtempSync(join(tmpdir(), "pi-once-order-"));
+	const dir = tempDir("pi-once-order-");
 	try {
 		const triggersPath = join(dir, "triggers.json");
 		writeFileSync(triggersPath, JSON.stringify({ triggers: [onceEntry(40), onceEntry(41), onceEntry(42)] }));
@@ -1173,7 +1174,7 @@ test("once wiring: writeRecord lands strictly BEFORE the disarm, for all three r
 // ── scoped limits wiring (issue #242) ───────────────────────────────────────────────────────────────
 
 test("scoped limits: a valid file boot-loads into a top-level closure, arms the watcher, and rides worker_started", { skip }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	const dir = tempDir("pi-sl-");
 	try {
 		const file = join(dir, "scoped-limits.json");
 		writeFileSync(file, `${JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3, concurrent: 1 }] })}\n`);
@@ -1201,7 +1202,7 @@ test("scoped limits: unset means [] from the closure, no watcher, and null in wo
 });
 
 test("scoped limits: an invalid file refuses BOOT fail-loud (configError), with the operator present", { skip }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	const dir = tempDir("pi-sl-");
 	try {
 		const file = join(dir, "scoped-limits.json");
 		writeFileSync(file, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 0 }] }));
@@ -1215,7 +1216,7 @@ test("scoped limits: an invalid file refuses BOOT fail-loud (configError), with 
 });
 
 test("reloadScopedLimits keeps LAST-GOOD on a bad edit and hot-swaps on a good one", { skip }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-sl-"));
+	const dir = tempDir("pi-sl-");
 	try {
 		const file = join(dir, "scoped-limits.json");
 		const config = { scopedLimitsFile: file };
@@ -1252,7 +1253,7 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 	// write is also the right provocation: it passes the basename filter on both platforms this runs on,
 	// where removing the DIRECTORY does not -- Linux names the file in that event and macOS names the
 	// directory, which is why every leak here was reachable in CI and unreachable on a laptop.
-	const dir = mkdtempSync(join(tmpdir(), "pi-watch-close-"));
+	const dir = tempDir("pi-watch-close-");
 	try {
 		const triggersPath = join(dir, "triggers.json");
 		const pausePath = join(dir, "pause-windows.json");
@@ -1353,8 +1354,8 @@ test("a boot that refuses AFTER the handoff still drains what it opened", { skip
 	// the last statements before `startWorker` returns, so no refused boot can leave one armed. Found while
 	// closing #295 and fixed here because the drain it protects is the same drain.
 	const { makeHostRegistry } = await import("../src/host-registry.mjs");
-	const dir = mkdtempSync(join(tmpdir(), "pi-boot-refuse-"));
-	const folder = mkdtempSync(join(tmpdir(), "pi-boot-refuse-f-"));
+	const dir = tempDir("pi-boot-refuse-");
+	const folder = tempDir("pi-boot-refuse-f-");
 	try {
 		const triggersPath = join(dir, "triggers.json");
 		// A cron trigger, because the boot reconcile is what reads the peer list -- a triggers file with no
@@ -1408,7 +1409,7 @@ test("a refusal from a DIFFERENT post-handoff point stops the worker too -- the 
 	// A pause-windows file rides along so a live-edit WATCHER is armed inside the region before the
 	// refusal: armed-then-refused is the interaction neither test exercised, and this file's own
 	// silence canaries watch what a leaked watch would write. The harness drains the closers either way.
-	const dir = mkdtempSync(join(tmpdir(), "pi-sweep-refuse-"));
+	const dir = tempDir("pi-sweep-refuse-");
 	const pausePath = join(dir, "pause-windows.json");
 	writeFileSync(pausePath, `${JSON.stringify({ windows: [] })}\n`);
 	const stops = [];
@@ -1497,8 +1498,8 @@ test("an unreachable Valkey cannot hang boot, and a HANG is what unreachable mea
 
 	// A triggers file with a cron entry, so the boot RECONCILE runs too: `reconcileGated` awaits publish and
 	// livePeers two hops below the deliberately un-awaited `start()`, and those were the second hang.
-	const dir = mkdtempSync(join(tmpdir(), "pi-boot-hang-"));
-	const folder = mkdtempSync(join(tmpdir(), "pi-boot-folder-"));
+	const dir = tempDir("pi-boot-hang-");
+	const folder = tempDir("pi-boot-folder-");
 	const triggersFile = join(dir, "triggers.json");
 	writeFileSync(triggersFile, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder, flow: "tidy", task: "tidy up" } }] }));
 
@@ -1899,10 +1900,9 @@ test("a terminal LOCAL failure comments into the log fallthrough with the fixed 
 test("a real err.reason token rides the hook's argv end to end, through a REAL script (review finding)", { skip }, async () => {
 	// The unit suite pins the shape guard; this drives the whole seam -- listener -> fire -> spawn -- with
 	// a real executable, so the token's verbatim passage is proven where it actually travels.
-	const { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } = await import("node:fs");
-	const { tmpdir } = await import("node:os");
+	const { writeFileSync, chmodSync, readFileSync, existsSync } = await import("node:fs");
 	const { join } = await import("node:path");
-	const dir = mkdtempSync(join(tmpdir(), "on-failure-"));
+	const dir = tempDir("on-failure-");
 	const script = join(dir, "notify.sh");
 	const out = join(dir, "args.txt");
 	// The script also echoes an env marker: the hook must inherit the WORKER'S injected env, not the

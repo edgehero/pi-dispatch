@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { entryExitCode } from "../src/cli.mjs";
 import { resolveGitLabSelfId } from "@edgehero/pi-dispatch/gitlab-identity";
 import { startReceiver } from "../src/start.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The committed unified triggers file, addressed absolutely so loadReceiverConfig's real fs reads
 // succeed regardless of the test runner's cwd. Every side-effecting collaborator (gh, Valkey, socket) is
@@ -34,7 +35,7 @@ const stubQueue = () => ({ add: async () => {}, close: async () => {} });
  * so no `/` endpoint, so no webhook secret to supply and no `gh` CLI to install.
  */
 const GITLAB_ONLY_TRIGGERS_PATH = (() => {
-	const dir = mkdtempSync(join(tmpdir(), "receiver-start-gitlab-only-"));
+	const dir = tempDir("receiver-start-gitlab-only-");
 	const path = join(dir, "triggers.json");
 	writeFileSync(path, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } }] }), "utf8");
 	return path;
@@ -313,7 +314,7 @@ test("the github closer resolver is built over the boot auth object's OWN mintTo
 	// unreachable in a wired receiver. The factory is injected (the DI convention every resolver build in
 	// start.mjs follows) and handed a minter; the test proves that minter is the boot auth object's, by
 	// watching the mint land there when a signed close delivery drives the handler startReceiver built.
-	const dir = mkdtempSync(join(tmpdir(), "receiver-start-close-"));
+	const dir = tempDir("receiver-start-close-");
 	const triggersPath = join(dir, "triggers.json");
 	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "issue", action: ["closed"], number: 40 }, run: { kind: "github", flow: "deploy" } }] }), "utf8");
 
@@ -362,7 +363,7 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 	// Driven as a SUBPROCESS because an exit code is the whole assertion: the entry guard only runs when
 	// this module is argv[1], which is exactly the path the unit takes and the path no in-process test
 	// can reach. A refusal is answered before any socket or queue connection, so this costs no network.
-	const dir = mkdtempSync(join(tmpdir(), "pi-recv-exit-"));
+	const dir = tempDir("pi-recv-exit-");
 	const triggers = join(dir, "triggers.json");
 	writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["x"] }, run: { kind: "gitlab", flow: "f", replicas: 99 } }] }));
 
@@ -438,7 +439,7 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// knowing when reading the assertions: `reloadTriggers` is SYNCHRONOUS, so the receiver has no
 	// in-flight-reload window -- the closer's silence here comes from the closed FSWatcher and the
 	// cancelled debounce, and `reloadLog`'s own gate is pinned by the worker's unit test.
-	const dir = mkdtempSync(join(tmpdir(), "receiver-watch-close-"));
+	const dir = tempDir("receiver-watch-close-");
 	const triggersPath = join(dir, "triggers.json");
 	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "gitlab", flow: "gl-f" } }] }));
 
@@ -564,7 +565,7 @@ test("the retry wraps EACH arm: a gitlab retry re-resolves gitlab alone and rebu
 	// router (two live connections leaked per retry) and re-run arms that already answered. This pins the
 	// grain: one github resolution, one queue build, two gitlab attempts -- and the operator-visible
 	// order, where github's outcome still lands before gitlab's first failure.
-	const dir = mkdtempSync(join(tmpdir(), "receiver-retry-arms-"));
+	const dir = tempDir("receiver-retry-arms-");
 	const triggersPath = join(dir, "triggers.json");
 	writeFileSync(
 		triggersPath,

@@ -108,6 +108,14 @@ Two consequences worth internalising before you design anything:
   run in `contract-tests`: `.github/scripts/dated-fixture-check.mjs` flags the pairing in a second, and
   the suite is re-run with `Date` shifted 399 days forward, which is the oracle. They catch different
   things on purpose and neither subsumes the other. Pass `now`; never move the fixture date forward.
+- **A test directory comes from the workspace helper, always** (issue #351):
+  `import { tempDir } from "./helpers/temp-dir.mjs"`, which removes every directory the file made in an
+  `after()` hook. A bare `mkdtempSync(join(tmpdir(), ...))` in a test file is refused by
+  `.github/scripts/temp-dir-check.mjs`, and the same job runs the suite under a `TMPDIR` of its own and
+  fails if anything is left in it (two fixed-name tooling caches, `jiti` and `node-compile-cache`, are
+  excluded by exact name; `mkdtemp` always appends random characters, so no test directory can match one). Same fast-hint-plus-oracle pairing as the clock guards above, and for
+  the same reason: the grep sees a call shape, only the count sees a missing cleanup. A directory rooted
+  somewhere the helper already made (`join(jobsDir, "job-")`) is fine and is not matched.
 - `admin/dist/` is gitignored and built by `node admin/build.mjs`. Never commit it.
 - Two mirrors must stay **byte-identical**, pinned by tests: `worker/.env.example` to the root
   `.env.example`, and `worker/deploy/*` to `deploy/*`. Edit both.

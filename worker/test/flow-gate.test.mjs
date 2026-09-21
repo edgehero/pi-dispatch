@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SKILL_NAME_RE, readFlowGate } from "../src/flow-gate.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // git is NEVER faked in this suite: readFlowGate's object-store discipline is only meaningfully
 // tested against a REAL repo with REAL tree modes (a genuine 120000 symlink, a real prior commit).
@@ -17,7 +18,7 @@ function git(dir, args) {
 }
 
 function initRepo() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-gate-"));
+	const dir = tempDir("pi-gate-");
 	git(dir, ["init", "-q"]);
 	git(dir, ["config", "core.autocrlf", "false"]);
 	return dir;
@@ -122,7 +123,7 @@ test("CRLF frontmatter with a quoted value -> allow (CRLF normalised, quote opti
 });
 
 test("never throws even when the folder is not a git repo at all -> deny", async () => {
-	const notRepo = mkdtempSync(join(tmpdir(), "pi-notrepo-"));
+	const notRepo = tempDir("pi-notrepo-");
 	assert.deepEqual(await readFlowGate({ folder: notRepo, flow: "tidy", sha: "0".repeat(40) }), { gate: "deny" });
 });
 

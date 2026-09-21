@@ -7,6 +7,7 @@ import { test } from "node:test";
 // unconditionally and the gate below applies only to pi itself.
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * THE PROOF for issue #58 (REQ-TOKEN-ACCOUNTING-AND-CAPS, CONST-BUDGET-BEFORE-TOKENS).
@@ -73,7 +74,7 @@ const FAKE_KEY = "pi-dispatch-fake-key-sentinel";
  * what keeps one test's meter out of the next test's dispatch chain.
  */
 function fixture(api) {
-	const root = mkdtempSync(join(tmpdir(), "pi-dispatch-meter-"));
+	const root = tempDir("pi-dispatch-meter-");
 	const modelsPath = join(root, "models.json");
 	writeFileSync(
 		modelsPath,

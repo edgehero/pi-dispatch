@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ENTRY_NAME_RE, INJECT_LIMITS, copySkillTree } from "../src/copy-tree.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /** A host skills dir: `<root>/<name>/SKILL.md`, the `~/.pi/agent/skills` layout. */
 function skillsDir({ skills = { tidy: { "SKILL.md": "---\nname: tidy\n---\nTidy.\n" } } } = {}) {
-	const root = mkdtempSync(join(tmpdir(), "pi-inject-"));
+	const root = tempDir("pi-inject-");
 	for (const [name, files] of Object.entries(skills)) {
 		for (const [rel, body] of Object.entries(files)) {
 			const p = join(root, name, rel);
@@ -18,7 +19,7 @@ function skillsDir({ skills = { tidy: { "SKILL.md": "---\nname: tidy\n---\nTidy.
 	return root;
 }
 
-const destDir = () => mkdtempSync(join(tmpdir(), "pi-inject-dest-"));
+const destDir = () => tempDir("pi-inject-dest-");
 const flat = (d) => JSON.stringify(readdirSync(d, { recursive: true }));
 
 test("a skill directory is copied whole, and the receipt counts what landed", () => {
@@ -54,7 +55,7 @@ test("mode null preserves the source mode, which is what import-pi needs to re-s
 
 test("a symlinked SKILL.md is skipped, and no host file content reaches the destination", () => {
 	const src = skillsDir();
-	const secret = join(mkdtempSync(join(tmpdir(), "pi-secret-")), "env");
+	const secret = join(tempDir("pi-secret-"), "env");
 	writeFileSync(secret, "HOST-SECRET-SENTINEL");
 	symlinkSync(secret, join(src, "tidy", "stolen.md"));
 
@@ -76,7 +77,7 @@ test("a symlinked DIRECTORY is skipped -- statSync would have FOLLOWED it, which
 	// resolves the link, so the expression was permanently false and the target's CONTENTS were copied.
 	// A directory symlink pointing at / would have walked the host filesystem into a job container.
 	const src = skillsDir();
-	const elsewhere = mkdtempSync(join(tmpdir(), "pi-elsewhere-"));
+	const elsewhere = tempDir("pi-elsewhere-");
 	writeFileSync(join(elsewhere, "secret.md"), "HOST-TREE-SENTINEL");
 	symlinkSync(elsewhere, join(src, "tidy", "linked"));
 
@@ -90,7 +91,7 @@ test("a symlinked DIRECTORY is skipped -- statSync would have FOLLOWED it, which
 
 test("a symlinked TOP-LEVEL skill directory is skipped and reported to the caller", () => {
 	const src = skillsDir();
-	const elsewhere = mkdtempSync(join(tmpdir(), "pi-elsewhere-"));
+	const elsewhere = tempDir("pi-elsewhere-");
 	writeFileSync(join(elsewhere, "SKILL.md"), "---\nname: sneaky\n---\nx\n");
 	symlinkSync(elsewhere, join(src, "sneaky"));
 
@@ -173,7 +174,7 @@ test("limits null lifts every cap, which is how import-pi stages an overlay", ()
 test("an empty or absent source refuses rather than silently copying nothing", () => {
 	// A trigger that named a skills dir and got a job with no skills is the silent no-op this project
 	// treats as the worst outcome available.
-	assert.equal(copySkillTree(mkdtempSync(join(tmpdir(), "pi-empty-")), destDir()).refused, "skills-dir-empty");
+	assert.equal(copySkillTree(tempDir("pi-empty-"), destDir()).refused, "skills-dir-empty");
 	assert.equal(copySkillTree(join(tmpdir(), "pi-absent-xyz-123"), destDir()).refused, "skills-dir-unreadable");
 });
 

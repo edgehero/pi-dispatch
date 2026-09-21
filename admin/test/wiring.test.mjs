@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * Wiring discipline for the admin extension: it registers exactly the dispatch command, reaches ONLY the
@@ -16,10 +17,10 @@ import { join } from "node:path";
  * so the fs-backed paths (`runs`, `logs`) resolve offline; the network-backed paths (status/budget/
  * triggers) are covered in read-model.test.mjs, not here.
  */
-process.env.PI_LOGS_DIR = mkdtempSync(join(tmpdir(), "admin-wiring-"));
+process.env.PI_LOGS_DIR = tempDir("admin-wiring-");
 // Hermeticity for the setup detection/nudge paths: pointerPath() and the nudge marker derive from
 // PI_CODING_AGENT_DIR, and no test run may ever read (or write!) the real ~/.pi/agent.
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "admin-wiring-agent-"));
+process.env.PI_CODING_AGENT_DIR = tempDir("admin-wiring-agent-");
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
@@ -150,7 +151,7 @@ test("bare /dispatch with nothing configured lands in the wizard select; Cancel 
   // into the DEVELOPER'S OWN run history rather than the empty temp path it used to. Redirect HOME
   // instead, which os.homedir() honours: unset stays unset, and the default resolves inside scratch.
   const savedHome = process.env.HOME;
-  process.env.HOME = mkdtempSync(join(tmpdir(), "pi-wiring-home-"));
+  process.env.HOME = tempDir("pi-wiring-home-");
   const agentDirBefore = readdirSync(process.env.PI_CODING_AGENT_DIR);
   try {
     const { calls, def } = await loadRegistered();
@@ -213,7 +214,7 @@ test("bare /dispatch on a pointed-at deployment: version skew notifies once, sil
   const { def } = await loadRegistered();
   const pinned = wizard.RUNTIME_VERSION;
   const prev = process.env.PI_DISPATCH_DEPLOYMENT_FILE;
-  const home = mkdtempSync(join(tmpdir(), "admin-skew-"));
+  const home = tempDir("admin-skew-");
   const pointerFile = join(home, "pointer.json");
   const deploymentDir = join(home, "deploy");
   const runtimeDir = join(deploymentDir, "node_modules", "@edgehero", "pi-dispatch");
@@ -362,7 +363,7 @@ test("dispatch_runs advertises that raw logs are off-limits, and its params are 
  */
 test("dispatch_runs.execute returns run records as JSON and never any .log content", async () => {
   const prevLogsDir = process.env.PI_LOGS_DIR;
-  const dir = mkdtempSync(join(tmpdir(), "admin-runtool-"));
+  const dir = tempDir("admin-runtool-");
   const record = {
     jobId: "j-log",
     target: "o/r#1",
@@ -447,7 +448,7 @@ test("bare insights writes the artifact through the real deps, and the headless 
   // this suite never opens real connections), a triggers file whose folder does not exist (the
   // enumeration degrades, the page still renders), and SSH_CONNECTION set so the browser spawn is
   // skipped AND SAID on any box this suite runs on.
-  const dir = mkdtempSync(join(tmpdir(), "admin-insights-wiring-"));
+  const dir = tempDir("admin-insights-wiring-");
   const triggersPath = join(dir, "triggers.json");
   writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: join(dir, "absent"), flow: "tidy", task: "t" } }] }));
   const graphDir = join(dir, "artifacts");
@@ -501,7 +502,7 @@ test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {
 test("dispatch_costs.execute returns the typed fold as JSON, class on every dollar, flow-filterable", async () => {
   const prevLogsDir = process.env.PI_LOGS_DIR;
   const prevSubs = process.env.PI_SUBSCRIPTIONS_FILE;
-  const dir = mkdtempSync(join(tmpdir(), "admin-coststool-"));
+  const dir = tempDir("admin-coststool-");
   // One metered, ledgered run an hour ago -- inside any window, and no UTC-month-boundary hazard because
   // the test asks for the 7d window.
   const endedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
@@ -663,7 +664,7 @@ test("argument completion offers the known settings keys for `set`/`unset`", asy
  * and exercising them here would depend on a live Valkey.
  */
 function withSettingsFile() {
-  const file = join(mkdtempSync(join(tmpdir(), "admin-settings-")), "settings.json");
+  const file = join(tempDir("admin-settings-"), "settings.json");
   process.env.PI_SETTINGS_FILE = file;
   return file;
 }

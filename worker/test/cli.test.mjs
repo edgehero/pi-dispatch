@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { main } from "../src/cli.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // cli.mjs dynamic-imports bullmq/ioredis (in the `run` enqueue and `worker` paths), so the
 // VALIDATION paths -- which return before any enqueue -- run everywhere. That is exactly the safety
@@ -45,12 +46,12 @@ test("run with a missing folder fails before touching the queue", async () => {
 });
 
 test("run with no --task fails", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "cli-"));
+	const dir = tempDir("cli-");
 	assert.equal(await main(["run", dir, "--flow", "tidy"], env), 1);
 });
 
 function gitRepo({ dirty }) {
-	const dir = mkdtempSync(join(tmpdir(), "cli-git-"));
+	const dir = tempDir("cli-git-");
 	const g = (args) =>
 		execFileSync("git", ["-C", dir, ...args], {
 			env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * WIRE FIDELITY: installing the meter must not change the request a provider sends.
@@ -106,7 +107,7 @@ function splitAuth(capture) {
 test("installing the meter does not change the request that reaches the provider", { skip }, async () => {
 	const captures = [];
 	const endpoint = await startCapturingServer(captures);
-	const root = mkdtempSync(join(tmpdir(), "pi-dispatch-fidelity-"));
+	const root = tempDir("pi-dispatch-fidelity-");
 	let installed;
 	try {
 		// Override-only models.json config: no `models` key, so the BUILTIN catalog entries survive and

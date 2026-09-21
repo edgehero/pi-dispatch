@@ -6,6 +6,7 @@ import * as realFs from "node:fs";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * The `/dispatch setup` wizard (setup-wizard.ts): the detection tree, the pinned npm shapes, the
@@ -16,7 +17,7 @@ import { join } from "node:path";
 
 // Hermeticity, BEFORE the module graph loads: pointerPath() and the nudge marker derive from
 // PI_CODING_AGENT_DIR, and no test may ever read (or write!) the real ~/.pi/agent.
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "admin-setup-agent-"));
+process.env.PI_CODING_AGENT_DIR = tempDir("admin-setup-agent-");
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
@@ -29,7 +30,7 @@ const mustNotProbe = async () => {
 };
 
 /** An empty temp dir (no scaffold files), for cwd arguments. */
-const emptyDir = () => mkdtempSync(join(tmpdir(), "admin-setup-empty-"));
+const emptyDir = () => tempDir("admin-setup-empty-");
 
 /** A canned-answer, recording ctx.ui in the crud.test.mjs shape, plus (title/message) capture. */
 function wizardUi({ select = [], input = [], confirm = [] } = {}) {
@@ -69,10 +70,10 @@ function wizardDeps(overrides = {}) {
   const order = [];
   const dashboards = [];
   const deps = {
-    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(mkdtempSync(join(tmpdir(), "admin-setup-ptr-")), "pointer.json") },
+    env: { PI_DISPATCH_DEPLOYMENT_FILE: join(tempDir("admin-setup-ptr-"), "pointer.json") },
     platform: "linux",
     execPath: "/usr/bin/node-under-test",
-    homedirFn: () => mkdtempSync(join(tmpdir(), "admin-setup-home-")),
+    homedirFn: () => tempDir("admin-setup-home-"),
     detectFn: async () => ({ state: "none", detail: "canned detection" }),
     probeDockerFn: () => ({ ok: true }),
     runAttachedFn: async (_ctx, opts) => {
@@ -112,7 +113,7 @@ const cliPathOf = (dir) => join(dir, "node_modules", "@edgehero", "pi-dispatch",
 // ── the detection tree: one test per branch, in trust order ──────────────────────────────────────
 
 test("detect: a valid pointer file wins, and the probe is never consulted", async () => {
-  const pfile = join(mkdtempSync(join(tmpdir(), "admin-det-")), "pointer.json");
+  const pfile = join(tempDir("admin-det-"), "pointer.json");
   writeFileSync(pfile, JSON.stringify({ version: 1, deploymentDir: "/srv/deploy", env: {} }));
   const det = await mod.detectDeployment({
     env: { PI_DISPATCH_DEPLOYMENT_FILE: pfile },
@@ -124,7 +125,7 @@ test("detect: a valid pointer file wins, and the probe is never consulted", asyn
 });
 
 test("detect: a stale/invalid pointer file falls through to the later branches", async () => {
-  const pfile = join(mkdtempSync(join(tmpdir(), "admin-det-")), "pointer.json");
+  const pfile = join(tempDir("admin-det-"), "pointer.json");
   // A future-version pointer is readPointer's { ignored } -- detection must degrade exactly like
   // /dispatch itself does, not stop at a file it cannot honor.
   writeFileSync(pfile, JSON.stringify({ version: 99, deploymentDir: "/srv/deploy", env: {} }));
@@ -782,13 +783,13 @@ test("wizard: the trigger-edge step offers exactly the three shapes plus Skip", 
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, seen } = wizardUi(edgeAnswers(dir, "Skip"));
   const { deps } = wizardDeps();
-  await mod.runSetupWizard({}, tuiCtx(ui, mkdtempSync(join(tmpdir(), "admin-setup-repo-"))), ui.notify, deps);
+  await mod.runSetupWizard({}, tuiCtx(ui, tempDir("admin-setup-repo-")), ui.notify, deps);
   const edge = seen.select.find((s) => s.title === EDGE_TITLE);
   assert.deepEqual(edge.options, [EDGE_SERVICE, EDGE_COMPOSE, EDGE_POLL, "Skip"]);
 });
 
 test("wizard: the edge's service answer installs the PINNED receiver, then the --receiver unit", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, seen } = wizardUi(edgeAnswers(dir, EDGE_SERVICE, [true])); // + the receiver install confirm
@@ -826,7 +827,7 @@ test("wizard: the edge's service answer installs the PINNED receiver, then the -
 });
 
 test("wizard: a receiver version mismatch skips the UNIT and the wizard CONTINUES (unlike the runtime's)", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, notes, seen } = wizardUi(edgeAnswers(dir, EDGE_SERVICE, [true]));
@@ -848,7 +849,7 @@ test("wizard: a receiver version mismatch skips the UNIT and the wizard CONTINUE
 });
 
 test("wizard: a declined receiver confirm spawns nothing and names both commands for later", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, notes, seen } = wizardUi(edgeAnswers(dir, EDGE_SERVICE, [false]));
@@ -860,7 +861,7 @@ test("wizard: a declined receiver confirm spawns nothing and names both commands
 });
 
 test("wizard: the edge's compose answer copies the runtime's compose file CREATE-ONLY, then runs it", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   const runtimeDir = plantRuntime(dir, mod.RUNTIME_VERSION);
   mkdirSync(join(runtimeDir, "deploy"), { recursive: true });
@@ -895,7 +896,7 @@ test("wizard: the edge's compose answer copies the runtime's compose file CREATE
 });
 
 test("wizard: the edge's compose answer degrades when the runtime ships no compose file", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION); // no deploy/ inside it: the install was declined earlier
   const { ui, notes, seen } = wizardUi(edgeAnswers(dir, EDGE_COMPOSE, [true]));
@@ -908,7 +909,7 @@ test("wizard: the edge's compose answer degrades when the runtime ships no compo
 });
 
 test("wizard: the edge's polling answer PRINTS both commands and spawns nothing", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, notes, seen } = wizardUi(edgeAnswers(dir, EDGE_POLL));
@@ -924,7 +925,7 @@ test("wizard: the edge's polling answer PRINTS both commands and spawns nothing"
 });
 
 test("wizard: the edge's Skip says one line naming all three options, and spawns nothing", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, notes, seen } = wizardUi(edgeAnswers(dir, "Skip"));
@@ -967,7 +968,7 @@ function recordingFs() {
 }
 
 test("wizard: the first trigger targets ctx.cwd, lists real repo skills, and writes only the deploy dir", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   // One offerable skill, one gate-refused name (uppercase+space fails SKILL_NAME_RE), one without SKILL.md.
   mkdirSync(join(repo, ".pi", "skills", "nightly-tidy"), { recursive: true });
   writeFileSync(join(repo, ".pi", "skills", "nightly-tidy", "SKILL.md"), "# tidy\n");
@@ -1014,7 +1015,7 @@ test("wizard: the first trigger targets ctx.cwd, lists real repo skills, and wri
 });
 
 test("wizard: an invalid cron id refuses at the dialog and skips the trigger", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-repo-"));
+  const repo = tempDir("admin-setup-repo-");
   const dir = emptyDir();
   plantRuntime(dir, mod.RUNTIME_VERSION);
   const { ui, notes } = wizardUi({
@@ -1058,7 +1059,7 @@ test("wizard: no first-trigger offer when ctx.cwd is unset or missing on disk", 
 });
 
 test("listRepoSkills: filters by SKILL_NAME_RE and SKILL.md presence; [] on any error", () => {
-  const repo = mkdtempSync(join(tmpdir(), "admin-setup-skills-"));
+  const repo = tempDir("admin-setup-skills-");
   mkdirSync(join(repo, ".pi", "skills", "fix"), { recursive: true });
   writeFileSync(join(repo, ".pi", "skills", "fix", "SKILL.md"), "");
   mkdirSync(join(repo, ".pi", "skills", "review"), { recursive: true });
@@ -1074,8 +1075,8 @@ test("listRepoSkills: filters by SKILL_NAME_RE and SKILL.md presence; [] on any 
 
 /** Register the nudge against a crud-style pi Proxy and capture the session_start handler. */
 function nudgeSetup({ env = {}, scaffoldCwd = false } = {}) {
-  const agentDir = mkdtempSync(join(tmpdir(), "admin-nudge-agent-"));
-  const cwd = mkdtempSync(join(tmpdir(), "admin-nudge-cwd-"));
+  const agentDir = tempDir("admin-nudge-agent-");
+  const cwd = tempDir("admin-nudge-cwd-");
   if (scaffoldCwd) {
     for (const f of [".env", "triggers.json", "pause-windows.json", "subscriptions.json"]) writeFileSync(join(cwd, f), "");
   }

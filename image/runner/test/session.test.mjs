@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { assertSessionMountReady } from "../src/config.mjs";
 import { openSessionManager } from "../src/session.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Real pi, real files. The whole point of this file is the behaviour of pi's OWN setSessionFile on
 // inputs an agent can produce, so a fake SessionManager would test the fake.
@@ -12,7 +13,7 @@ const mod = await import("@earendil-works/pi-coding-agent").catch(() => null);
 const skip = mod ? false : `pi not installed (node ${process.version} < 22.19.0); CI runs these`;
 
 function stage(contents) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-session-"));
+	const dir = tempDir("pi-session-");
 	const file = join(dir, "current.jsonl");
 	writeFileSync(file, contents);
 	return { dir, file };

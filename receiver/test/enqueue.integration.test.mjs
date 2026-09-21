@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { makeReceiver } from "../src/receiver.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Integration against a real Valkey: the receiver's verify->filter->enqueue path must land a real job
 // in Valkey under its exact-per-delivery GUID jobId (REQ-DEDUP-BY-DELIVERY-GUID). The fake-queue tests
@@ -146,8 +147,7 @@ test("a post-queue identity refusal EXITS, code intact: the queue's live connect
 	// stomped the 2. Only a REAL BullMQ against a real Valkey can regress either half -- the fake
 	// queues in start.test.mjs cannot -- which is why this pin lives in the integration file.
 	const { createServer } = await import("node:http");
-	const { mkdtempSync, writeFileSync } = await import("node:fs");
-	const { tmpdir } = await import("node:os");
+	const { writeFileSync } = await import("node:fs");
 	const { join } = await import("node:path");
 	const { spawn } = await import("node:child_process");
 	const { fileURLToPath } = await import("node:url");
@@ -158,7 +158,7 @@ test("a post-queue identity refusal EXITS, code intact: the queue's live connect
 	});
 	await new Promise((resolve) => gl.listen(0, "127.0.0.1", resolve));
 	try {
-		const dir = mkdtempSync(join(tmpdir(), "postqueue-exit-"));
+		const dir = tempDir("postqueue-exit-");
 		const triggers = join(dir, "triggers.json");
 		writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "gitlab", flow: "f" } }] }));
 		// Async spawn, NOT spawnSync: spawnSync blocks this process's event loop, and the 401 server

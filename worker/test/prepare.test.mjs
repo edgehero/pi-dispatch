@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeForgePreparers, makePrepareWorkspace } from "../src/prepare.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /** A fresh real jobsDir under os.tmpdir, plus a cleanup fn — mkdtempSync(join(jobsDir,"job-")) needs it real. */
 function withJobsDir() {
-	const jobsDir = mkdtempSync(join(tmpdir(), "pi-jobs-"));
+	const jobsDir = tempDir("pi-jobs-");
 	return { jobsDir, cleanup: () => rmSync(jobsDir, { recursive: true, force: true }) };
 }
 

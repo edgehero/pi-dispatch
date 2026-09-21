@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";
 import { sessionKeyFor } from "../src/session-key.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 const HEADER = `${JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/workspace" })}\n`;
 const PI = "0.80.7";
@@ -17,7 +18,7 @@ const daysAgo = (n) => NOW - n * 86400000;
 const ghIssue = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
 
 function fixture({ ttlDays = 14, maxBytes = 1_000_000, maxAgeDays = 0, maxResumeChain = 0, maxContextPct = null, defaultBackend = "local", now = () => NOW, fs } = {}) {
-	const root = mkdtempSync(join(tmpdir(), "pi-store-"));
+	const root = tempDir("pi-store-");
 	const sessionsDir = join(root, "sessions");
 	mkdirSync(sessionsDir, { recursive: true });
 	const logs = [];

@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { gitDirty } from "../src/git-dirty.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // --- against a REAL git repo: the dirty/clean/not-a-repo contract ---
 
 function gitRepo({ dirty }) {
-	const dir = mkdtempSync(join(tmpdir(), "gd-git-"));
+	const dir = tempDir("gd-git-");
 	const g = (args) =>
 		execFileSync("git", ["-C", dir, ...args], {
 			env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
@@ -33,7 +34,7 @@ test("a dirty working tree -> true", () => {
 });
 
 test("a non-git folder -> null", () => {
-	assert.equal(gitDirty(mkdtempSync(join(tmpdir(), "gd-plain-"))), null);
+	assert.equal(gitDirty(tempDir("gd-plain-")), null);
 });
 
 // --- injected exec unit cases: no real git needed ---

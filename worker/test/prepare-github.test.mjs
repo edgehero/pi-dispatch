@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { prepareGithubWorkspace } from "../src/prepare-github.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 const TOKEN = "ghs_SUPERSECRETTOKENvalue1234567890";
 const SHA = "a".repeat(40);
@@ -91,7 +92,7 @@ function fakeMaterialize(record, outcome) {
 
 /** Set up a real jobDir under tmp plus the standard fakes; return everything a test may assert on. */
 function harness({ git, materializeRecord = [], materializeOutcome } = {}) {
-	const jobDir = mkdtempSync(join(tmpdir(), "pi-ghjob-"));
+	const jobDir = tempDir("pi-ghjob-");
 	const shaCalls = [];
 	return {
 		jobDir,

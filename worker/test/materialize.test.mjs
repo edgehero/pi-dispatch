@@ -15,6 +15,7 @@ import {
 	selectEntries,
 } from "../src/materialize.mjs";
 import { ENTRY_NAME_RE } from "../src/import-pi.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // --- pure selection logic: runs everywhere ---
 
@@ -258,7 +259,7 @@ function countingGit(lsTreeZ) {
 
 test("the size comes from ls-tree -l, so a cap breach costs no cat-file", async () => {
 	const { git, calls } = countingGit(rec("100644", "blob", "a", 1, ".pi/skills/good/SKILL.md"));
-	await materializePiDir({ gitDir: "/x", sha: "s", destDir: mkdtempSync(join(tmpdir(), "pi-dest-")), git });
+	await materializePiDir({ gitDir: "/x", sha: "s", destDir: tempDir("pi-dest-"), git });
 	assert.ok(calls.lsTreeArgs.includes("-l"), "ls-tree must ask for the size column");
 	assert.ok(calls.lsTreeArgs.includes("-z") && calls.lsTreeArgs.includes("-r"));
 });
@@ -266,7 +267,7 @@ test("the size comes from ls-tree -l, so a cap breach costs no cat-file", async 
 test("over a cap the job is REFUSED, and not a single blob is read or written", async () => {
 	const big = [rec("100644", "blob", "a", 1, ".pi/skills/good/SKILL.md"), rec("100644", "blob", "b", PI_LIMITS.maxFileBytes + 1, ".pi/skills/good/huge.md")].join("\0");
 	const { git, calls } = countingGit(big);
-	const dest = mkdtempSync(join(tmpdir(), "pi-dest-"));
+	const dest = tempDir("pi-dest-");
 	const result = await materializePiDir({ gitDir: "/x", sha: "s", destDir: dest, git });
 	assert.deepEqual(result, { outcome: "policy", reason: "pi-file-too-large" });
 	assert.equal(calls.catFile, 0, "a blob was read despite the refusal");
@@ -300,7 +301,7 @@ function git(dir, args) {
 
 /** A repo whose .pi/ contains genuine symlink objects and gitlinks, plus real files. */
 function hostileRepo() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-mat-"));
+	const dir = tempDir("pi-mat-");
 	git(dir, ["init", "-q"]);
 	git(dir, ["config", "user.email", "t@t"]);
 	git(dir, ["config", "user.name", "t"]);
@@ -340,7 +341,7 @@ function hostileRepo() {
 
 test("materialize writes real files and NEVER the symlink or submodule", async () => {
 	const { dir, sha } = hostileRepo();
-	const dest = mkdtempSync(join(tmpdir(), "pi-dest-"));
+	const dest = tempDir("pi-dest-");
 
 	const { written } = await materializePiDir({ gitDir: dir, sha, destDir: dest });
 
@@ -370,13 +371,13 @@ test("an executable blob inside a skill is dropped, not written -- the documente
 	// and writing 0444 would accept the mode and silently strip it; writing 0555 would have the worker
 	// grant execve on repo bytes. The drop is loud (the file is absent) rather than silent.
 	const { dir, sha } = hostileRepo();
-	const dest = mkdtempSync(join(tmpdir(), "pi-dest-"));
+	const dest = tempDir("pi-dest-");
 	const { written } = await materializePiDir({ gitDir: dir, sha, destDir: dest });
 	assert.ok(!written.some((p) => p.endsWith("build.sh")), "an executable blob was materialised");
 });
 
 test("a repo with no .pi/ materialises nothing (guardrails-only job), no error", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-empty-"));
+	const dir = tempDir("pi-empty-");
 	git(dir, ["init", "-q"]);
 	git(dir, ["config", "user.email", "t@t"]);
 	git(dir, ["config", "user.name", "t"]);
@@ -384,7 +385,7 @@ test("a repo with no .pi/ materialises nothing (guardrails-only job), no error",
 		env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
 	});
 	const sha = git(dir, ["rev-parse", "HEAD"]).trim();
-	const dest = mkdtempSync(join(tmpdir(), "pi-dest-"));
+	const dest = tempDir("pi-dest-");
 	const result = await materializePiDir({ gitDir: dir, sha, destDir: dest });
 	assert.deepEqual(result, { written: [], skipped: 0 });
 });

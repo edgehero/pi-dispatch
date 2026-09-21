@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * The panel's sandbox entry point, loaded through pi's own jiti exactly as the extension is (#277).
@@ -14,7 +15,7 @@ import { join } from "node:path";
  * `resolveSandbox`. Both have to refuse a run from another venue, or the panel offers a key the worker's own
  * choke point then refuses -- or, before #277, opens it.
  */
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "admin-sandbox-agent-"));
+process.env.PI_CODING_AGENT_DIR = tempDir("admin-sandbox-agent-");
 
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
@@ -23,7 +24,7 @@ const mod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.me
 
 /** A retention root holding one run, written the way `retainJobDir` writes it. */
 function retainedRoot(extra) {
-  const sandboxDir = mkdtempSync(join(tmpdir(), "admin-sbx-"));
+  const sandboxDir = tempDir("admin-sbx-");
   mkdirSync(join(sandboxDir, "gh-1"), { recursive: true });
   const workspace = join(sandboxDir, "gh-1", "workspace");
   mkdirSync(workspace, { recursive: true });

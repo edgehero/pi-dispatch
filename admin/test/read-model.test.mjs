@@ -791,7 +791,7 @@ test("readStagedPackages lists the staged manifest as name@version", () => {
 });
 
 test("readStagedPackages reads a real manifest through the worker's own reader", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-dispatch-overlay-"));
+  const dir = tempDir("pi-dispatch-overlay-");
   mkdirSync(join(dir, "packages"), { recursive: true });
   writeFileSync(
     join(dir, "packages", "packages.json"),
@@ -1027,7 +1027,7 @@ function dispatchFakes(overrides = {}) {
 
 /** A real temp folder nested under a (realpath'd) root, so the allowlist's realpath+containment resolves. */
 function tempRootAndFolder(tag) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), tag)));
+  const root = realpathSync(tempDir(tag));
   const folder = join(root, "repo");
   mkdirSync(folder);
   return { root, folder };
@@ -1949,6 +1949,7 @@ test("readFolderSkills attaches the prose-loop hints from the SKILL.md body", ()
 // ── scoped limits (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT) ──────────────────────────────────────
 
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 test("readScopedLimits: valid file, missing file, invalid file (incl. a NEWER version, fail-loud)", () => {
   const fs = memFs({ "sl.json": JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 3 }] }) });
@@ -2206,7 +2207,7 @@ const mirrorRedis = (records) => ({
 });
 
 test("the merged list shows other hosts' runs alongside this host's files", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  const dir = tempDir("merged-runs-");
   writeFileSync(join(dir, "local-1.json"), JSON.stringify({ jobId: "local-1", host: "mini1", endedAt: "2026-08-30T10:00:00.000Z" }));
   const res = await mergedRunsOn(mirrorRedis([{ jobId: "far-1", host: "mini2", endedAt: "2026-08-30T11:00:00.000Z" }]), { logsDir: dir, limit: 10 });
   assert.deepEqual(res.runs.map((r) => r.jobId), ["far-1", "local-1"], "newest first, across both sources");
@@ -2217,7 +2218,7 @@ test("the merged list shows other hosts' runs alongside this host's files", asyn
 test("a mirror this panel cannot read degrades the VIEW, never this host's own history", async () => {
   // The local files are the truth. A Valkey outage must cost the fleet view and nothing else, and it has to
   // SAY so rather than silently presenting one host's runs as the deployment's.
-  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  const dir = tempDir("merged-runs-");
   writeFileSync(join(dir, "local-1.json"), JSON.stringify({ jobId: "local-1", host: "mini1", endedAt: "2026-08-30T10:00:00.000Z" }));
   const dead = { async zrevrangebyscore() { throw new Error("ECONNREFUSED"); }, on() {}, disconnect() {} };
   const res = await mergedRunsOn(dead, { logsDir: dir, limit: 10 });
@@ -2236,7 +2237,7 @@ test("a local read that FAILED is never papered over by the mirror", async () =>
 test("the one-shot wrapper closes its own client; the core never closes a borrowed one", async () => {
   // The panel holds its clients for the life of the overlay, so a reader that disconnected the client it
   // was handed would tear down the whole dashboard's Valkey connection on its first tick.
-  const dir = mkdtempSync(join(tmpdir(), "merged-runs-"));
+  const dir = tempDir("merged-runs-");
   let disconnects = 0;
   const client = { ...mirrorRedis([]), disconnect() { disconnects++; } };
   await mergedRunsOn(client, { logsDir: dir, limit: 5 });
@@ -2248,7 +2249,7 @@ test("the one-shot wrapper closes its own client; the core never closes a borrow
 test("a foreign run's log is NAMED rather than reported as absent", async () => {
   // A bare "no captured log" is a lie by omission when the bytes are sitting on another machine. The
   // answer is on the record, which the caller already holds, so this costs no new I/O.
-  const dir = mkdtempSync(join(tmpdir(), "foreign-log-"));
+  const dir = tempDir("foreign-log-");
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini2", self: "mini1" }), { missing: true, elsewhere: "mini2" });
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1", host: "mini1", self: "mini1" }), { missing: true }, "our own missing log is still just missing");
   assert.deepEqual(readLogTail({ logsDir: dir, jobId: "j1" }), { missing: true }, "and a single-host deployment is unchanged");

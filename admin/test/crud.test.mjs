@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The command-side CRUD driver (index.ts `handleDashboardAction`) runs pi's ctx.ui dialogs and calls the
 // validated/atomic writeTriggers/writeSettings. Loaded through pi's jiti (the extension is erasable TS).
@@ -52,7 +53,7 @@ function mockUi({ select = [], input = [], confirm = [] } = {}) {
 }
 
 function tmpTriggers(initial) {
-  const dir = mkdtempSync(join(tmpdir(), "pi-crud-"));
+  const dir = tempDir("pi-crud-");
   const path = join(dir, "triggers.json");
   writeFileSync(path, JSON.stringify(initial));
   return path;
@@ -135,7 +136,7 @@ test("deleteTrigger: an overlay-confirmed delete skips the dialog and still writ
 });
 
 test("editSettings: pick a key + value writes the overlay; blank unsets", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-crud-"));
+  const dir = tempDir("pi-crud-");
   const settingsFile = join(dir, "settings.json");
   writeFileSync(settingsFile, JSON.stringify({ dailyCap: 25 }));
   await handleDashboardAction({ action: "editSettings" }, { settingsFile }, { ui: mockUi({ select: ["dailyCap"], input: ["50"] }) });
@@ -165,7 +166,7 @@ test("a build without the dialog primitives degrades to a notice, no write", asy
  * out-of-range guard. Each tool reads its paths from process.env, so the temp files are wired through it.
  */
 function withSettings(initial) {
-  const settingsFile = join(mkdtempSync(join(tmpdir(), "pi-set-")), "settings.json");
+  const settingsFile = join(tempDir("pi-set-"), "settings.json");
   writeFileSync(settingsFile, JSON.stringify(initial));
   process.env.PI_SETTINGS_FILE = settingsFile;
   return settingsFile;
@@ -313,7 +314,7 @@ test("the extension advertises the operate-pi-dispatch skill via resources_disco
 
 // ── scoped pause windows (REQ-SCOPED-PAUSE-WINDOWS): same confirm-gated CRUD as triggers ─────────────────
 function tmpPauses(initial) {
-  const path = join(mkdtempSync(join(tmpdir(), "pi-pw-")), "pause-windows.json");
+  const path = join(tempDir("pi-pw-"), "pause-windows.json");
   writeFileSync(path, JSON.stringify(initial));
   process.env.PI_PAUSE_WINDOWS_FILE = path;
   return path;
@@ -500,7 +501,7 @@ test("a profile name carrying a list separator is refused -- it could not round-
 
 // ── scoped limits (issue #242, INT-SCOPED-LIMITS-FILE-CONTRACT): the pause trio's twin ───────────────────
 function tmpLimits(initial) {
-  const path = join(mkdtempSync(join(tmpdir(), "pi-sl-")), "scoped-limits.json");
+  const path = join(tempDir("pi-sl-"), "scoped-limits.json");
   writeFileSync(path, JSON.stringify(initial));
   process.env.PI_SCOPED_LIMITS_FILE = path;
   return path;

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { discoverHostPackages, extensionEntryPaths, hostExtensionState, isEnabledByPatterns, parseHostSettings, parsePackageSource, readHostPi } from "../src/host-pi.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * host-pi.mjs mirrors private details of the pinned pi, so these tests pin the MIRROR. What they do not do
@@ -13,7 +14,7 @@ import { discoverHostPackages, extensionEntryPaths, hostExtensionState, isEnable
  * global lookup is under test.
  */
 
-const agentDir = () => mkdtempSync(join(tmpdir(), "pi-agent-"));
+const agentDir = () => tempDir("pi-agent-");
 
 /** A host agent dir with a settings.json and, optionally, packages installed under npm/node_modules. */
 function hostSetup({ settings, installed = [] } = {}) {
@@ -232,7 +233,7 @@ test("discoverHostPackages discovers nothing from malformed settings, and never 
 // --- the legacy global fallback, and its precedence ---------------------------------------------------
 
 test("discoverHostPackages falls back to the global npm root ONLY when the managed path is absent", async () => {
-	const globalRoot = mkdtempSync(join(tmpdir(), "npm-global-"));
+	const globalRoot = tempDir("npm-global-");
 	mkdirSync(join(globalRoot, "legacy", "skills"), { recursive: true });
 	writeFileSync(join(globalRoot, "legacy", "package.json"), JSON.stringify({ name: "legacy", version: "0.9.0" }));
 
@@ -247,7 +248,7 @@ test("discoverHostPackages falls back to the global npm root ONLY when the manag
 });
 
 test("discoverHostPackages asks pnpm the pnpm way when the host configured it", async () => {
-	const pnpmRoot = mkdtempSync(join(tmpdir(), "pnpm-global-"));
+	const pnpmRoot = tempDir("pnpm-global-");
 	mkdirSync(join(pnpmRoot, "skills"), { recursive: true });
 	writeFileSync(join(pnpmRoot, "package.json"), JSON.stringify({ name: "viapnpm", version: "2.0.0" }));
 
