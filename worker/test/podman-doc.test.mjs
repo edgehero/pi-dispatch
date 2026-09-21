@@ -103,6 +103,9 @@ test("the page quotes every refusal the worker can print, verbatim (#345)", () =
 // claims to run something there would be a page that contradicts its own property table.
 const REFUSED_ENTRY_POINT = /^(refused `[a-z-]+`|✗ `[a-z-]+`|not run\b.*|as doctor|unmeasured\b.*)$/;
 
+// The rows, by name, so a row cannot be dropped, renamed or invented while the count stays right.
+const ENTRY_POINTS = Object.freeze(["worker", "`pi-dispatch doctor`", "`pi-dispatch doctor --live`", "`pi-dispatch sandbox`", "`pi-dispatch up`", "`docker compose --profile egress`"]);
+
 test("the entry-points table covers the same six setups, and a refused column only refuses (#345)", () => {
 	const start = doc.indexOf("## Entry points");
 	const end = doc.indexOf("##", start + 3);
@@ -115,18 +118,20 @@ test("the entry-points table covers the same six setups, and a refused column on
 	assert.match(separator.join(""), /^-+$/);
 	assert.equal(header[0], "Entry point");
 	assert.deepEqual(header.slice(1), SETUPS.map((setup) => setup.header));
-	assert.ok(body.length >= 6, "one row per entry point");
+	assert.deepEqual(body.map((row) => row[0]), [...ENTRY_POINTS]);
 	for (const row of body) {
 		for (const [index, setup] of SETUPS.entries()) {
 			const cell = row[index + 1];
 			if (!setup.refusal) {
 				// The rule has to run both ways, or a supported column can quietly claim it is refused.
-				assert.doesNotMatch(cell, /refused|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
+				assert.doesNotMatch(cell, /refus|✗/, `${row[0]} on ${setup.header} claims a refusal it does not get`);
 				continue;
 			}
 			assert.match(cell, REFUSED_ENTRY_POINT, `${row[0]} on ${setup.header}: ${cell}`);
 			// "not run" and "unmeasured" carry a tail, and the tail must not put back what the cell just denied.
-			assert.doesNotMatch(cell.replace(/^(not run|unmeasured)/, ""), /\bruns?\b|\bopens\b|\breads\b/, `${row[0]} on ${setup.header} claims a run anyway`);
+			assert.doesNotMatch(cell.replace(/^(not run|unmeasured)/, ""), /\bruns?\b|\bopens\b|\breads\b|\bstarts\b/, `${row[0]} on ${setup.header} claims a run anyway`);
+			// "as doctor" says "whatever the doctor row says", which is only true of the row that really does that.
+			if (cell === "as doctor") assert.equal(row[0], "`pi-dispatch up`", `${row[0]} cannot defer to doctor`);
 			if (/`[a-z-]+`/.test(cell)) assert.ok(cell.includes(`\`${setup.refusal}\``), `${row[0]} on ${setup.header} names another cause`);
 		}
 	}

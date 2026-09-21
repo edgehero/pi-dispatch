@@ -1430,8 +1430,8 @@ adversarial passes did.
     two differ in what a job costs.
     *Closes when* measured on a host configured that way, with the exit code and the run record recorded.
 - **What bounds it meanwhile**: an unmeasured daemon still gets every refusal the facts support, the runner's `/job`
-  check stops a job whose inputs are unreadable before it spends, and `doctor --live` reads the declarations back on
-  request.
+  check stops a job whose inputs are unreadable before any provider spend, and `doctor --live` reads the
+  declarations back on request.
 
 ## Revision History
 

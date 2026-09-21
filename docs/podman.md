@@ -61,7 +61,7 @@ Refused: the worker's primary group is the docker socket's group, and a job runs
 # a job image without anyUid, and a worker that is not uid 1001 (per job)
 Refused: the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which this host's container runtime requires; rebuild it from a release that has this feature, or run the worker as uid 1001 (issue #341).
 
-# Docker Desktop on Linux outside WSL (at boot)
+# Docker Desktop on Linux outside WSL (at boot when local is the default venue, else per job)
 Refused: Docker Desktop on Linux maps container uids like a rootless daemon, so no uid a job may run as can read the worker's 0700 job dir; use Docker Engine on this host (WSL2 is not affected) (issue #341).
 
 # a daemon whose answer no rule reads (per job)
@@ -76,7 +76,8 @@ fixed comment instead, because a comment's reader may not be the operator, and n
 endpoint or CLI output.
 
 Which of them is a ✗ and which a ⚠ is one list in the code, `BOOT_REFUSING_JOB_USER_CAUSES`: a cause no job on this
-venue can get past fails doctor and refuses the boot, and the rest warn and refuse each local job. Five of the eight
+venue can get past fails doctor, and the rest warn. What each does to a worker and to a job is the job-user rule's
+and is written down there, not here. Five of the eight
 were seen on a terminal in the lab (`rootless`, `worker-is-root`, `root-group`, `docker-group` and the missing
 `anyUid`); the other three are that same list, not a separate claim.
 
@@ -211,8 +212,8 @@ How each column is known:
 | `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured |
 
 None of this is Podman's: which refusals stop a worker booting, which refuse each job, and what a job that cannot
-be decided yet does instead are the job-user rule's, the same on every daemon, and `docs/backends.md` and
-`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` own them. What holds here whatever the timing: no refused job spends,
+be decided yet does instead are the job-user rule's, the same on every daemon, and
+`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` owns them. What holds here whatever the timing: no refused job spends,
 because the decision is read before the budget slot is reserved, and `pi-dispatch doctor` on your own host tells you
 which of these you are in.
 
@@ -267,8 +268,8 @@ In nested labs on a Mac: a privileged `docker:27-dind` for Docker Engine, and a 
 running rootful and rootless Podman services, the real docker CLI and `podman-docker`. The job image, the worker and
 `doctor --live` ran inside them as an unprivileged account (uid 1234), against the worker at commit a69b9a6, the
 last commit before this page and the one that carries every line of worker code it describes (this PR changes no
-worker code). Rows that nesting can distort (rootless
-cgroup bounds) were labelled lab-limited and not relied on. The
+worker code). Rows that nesting can distort (rootless cgroup bounds) were labelled lab-limited and not relied on.
+The
 lab was configured with netavark's iptables firewall driver, because the LinuxKit kernel rejects its nftables rules,
 and with `cgroup_manager = "cgroupfs"` and a file event logger, because it has no systemd; a real Fedora host uses
 nftables, systemd cgroups and journald, which is `OQ-037`'s unmeasured row. Those three settings are carried over
