@@ -91,6 +91,28 @@ const VENUE_FILE = "venue";
  * build knows to it), so a key left holding this cold-starts on every venue until a promotion completes.
  */
 const VENUE_PENDING = "(pending)";
+
+/**
+ * Per-promotion suffix for the transcript's in-flight copy, paired with the pid.
+ *
+ * The tmp name USED to be a fixed `<canonical>.incoming`, which was self-cleaning and harmless while the
+ * per-key lock guaranteed one writer. The stale-lock takeover concedes a window with two, and a SHARED tmp
+ * path voids exactly the atomicity the swap exists for: B's unlink removes A's in-flight copy, B's copy
+ * replaces it, and whichever renames second can put the other's half-written file at the canonical path --
+ * an agent handed a truncated conversation with no gate able to see it. `triggers-file.mjs` learned this
+ * on `triggers.json` and its `tmpPathFor` says the same thing.
+ *
+ * A pid plus a counter gives each promotion its own inode, so every rename moves a WHOLE transcript no
+ * matter who else is mid-write. The cost is that a crash between the copy and the rename leaves a uniquely
+ * named straggler instead of one the next promotion overwrites; the reaper's recursive sweep of the key
+ * takes it with everything else.
+ *
+ * The SIDECAR temps keep the shared name deliberately, and the asymmetry is the point rather than an
+ * oversight: a sidecar's worst case under a concurrent writer is a missing or half-written sidecar, and
+ * every one of those reads back as `null` and produces a cold start, which this store already treats as
+ * the safe outcome. The transcript's worst case is a corrupt transcript, which it does not.
+ */
+let tmpSeq = 0;
 /** Every sidecar format is a handful of bytes. Generous, and still nowhere near a job's wall clock. */
 const SIDECAR_MAX_BYTES = 4096;
 /**
@@ -285,7 +307,10 @@ export function makeSessionStore({
 			}
 			try {
 				// Atomic swap: a reader either sees the old file or the new one, never a half-written one.
-				const tmp = `${canonicalFile(session.key)}.incoming`;
+				// PER WRITER (see `tmpSeq`), not the fixed `.incoming` this shared before the lock could be taken
+				// over. The pid is readable and the counter starts at zero, so the name is still precomputable by
+				// a local attacker, which is why the unlink below stays exactly as it was.
+				const tmp = `${canonicalFile(session.key)}.${process.pid}.${tmpSeq++}.incoming`;
 				try {
 					// `copyFileSync` follows a link at the DESTINATION, so a link planted at this name would
 					// receive the whole transcript and leave the canonical path pointing at it. The key

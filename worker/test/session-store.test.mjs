@@ -961,6 +961,41 @@ test("a promotion that knows no pi version INVALIDATES the stamp rather than lea
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "pi-version-changed", "so the next job cold-starts");
 });
 
+test("the transcript's in-flight copy is named PER WRITER, so two promotions never share one tmp (#336)", () => {
+	// WHAT THIS PINS, and no more: the NAME. Two promotions produce two different tmp paths, and the fixed
+	// `.incoming` this replaced produced one.
+	//
+	// WHAT IT CANNOT PIN: the interleaving the per-writer name protects against. `copyFileSync` is
+	// synchronous, so two writers inside ONE process can never be mid-copy at the same time -- a seam that
+	// fires before or after a copy is not a seam in the middle of one. The hazard is two PROCESSES sharing a
+	// store, which this suite cannot create, and it is reachable at all only because the stale-lock takeover
+	// concedes a second writer. So the name is what is testable here, and the corruption it prevents is
+	// argued in the source rather than demonstrated.
+	const seen = [];
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (from, to) => {
+				if (String(to).includes(".incoming")) seen.push(String(to));
+				return realFs.copyFileSync(from, to);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+
+	for (const body of ["one", "two"]) {
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}${body}\n`);
+		assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+	}
+
+	assert.equal(seen.length, 2, "both promotions copied through a tmp");
+	assert.notEqual(seen[0], seen[1], "and the two tmp paths differ, so neither can unlink or overwrite the other's");
+	for (const p of seen) assert.match(p, /\.\d+\.\d+\.incoming$/, "the name carries the pid and a counter");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("two"), true, "and the last promotion is what landed");
+});
+
 test("a SAME-venue promotion that lands between the gate and the copy cold-starts rather than resuming unjudged (#336)", () => {
 	// The race the venue stamp cannot see: the promoting job shares this venue, so the stamp matches before and
 	// after and only the transcript moved. Before the identity re-check this job resumed a transcript no gate
