@@ -139,6 +139,7 @@ const SESSION_REASONS = new Set([
 	"not-a-regular-file",
 	"venue-changed",
 	"pi-version-changed",
+	"transcript-replaced",
 	"locked",
 	"promote-failed",
 	"disabled",

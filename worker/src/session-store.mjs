@@ -180,19 +180,40 @@ export function makeSessionStore({
 			const staged = join(hostDir, SESSION_FILE_NAME);
 			fs.mkdirSync(hostDir, { recursive: true, mode: 0o700 });
 
-			let verdict = readCanonical(key, piVersion, modelId, venue);
+			// The identity is split off the verdict rather than carried on it: this return is spread onto the
+			// session object the processor holds for the WHOLE run, and an inode number is bookkeeping for the
+			// next few lines, not state a promotion an hour later should be able to read.
+			const { ident: judged = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
+			let verdict = judgedVerdict;
 			if (verdict.resume) {
 				fs.copyFileSync(canonicalFile(key), staged);
-				// The read above and this copy are not under the promotion lock, so a promotion from ANOTHER venue
-				// can land between them and the copy would stage that venue's transcript. Every promotion writes
-				// the pending sentinel before it swaps and its own venue after, so a stamp that no longer names this
-				// venue after the copy -- pending, or another venue outright -- means the file just copied may not
-				// be the one that was judged. Cold start, and empty the staged copy so the container is handed
-				// nothing of it -- the 0-byte shape every cold start gets. If emptying fails, the catch below
-				// removes the staged directory rather than leave the copy behind.
-				if (readVenue(key) !== venue) {
+				// The read above and this copy are not under the promotion lock, so a promotion can land between
+				// them and the copy would stage a transcript no gate judged. TWO re-checks, and neither subsumes
+				// the other.
+				//
+				// The VENUE stamp catches a promotion that wrote its sentinel and then did NOT swap: the
+				// transcript is unchanged, so no identity moved. Every promotion writes the pending sentinel
+				// before it swaps and its own venue after, so a stamp that no longer names this venue after the
+				// copy -- pending, or another venue outright -- means the file just copied may not be the one
+				// that was judged.
+				//
+				// The IDENTITY catches a promotion that DID swap, which the stamp cannot see when the promoting
+				// job shares this venue, and which it also cannot see across the A, B, A round trip that leaves
+				// the stamp matching again (a residual this contract used to state). Every swap renames a fresh
+				// inode into place, so the identity moves whether or not the stamp does.
+				//
+				// VENUE FIRST, deliberately: a cross-venue promotion trips BOTH, and `venue-changed` is the more
+				// useful of the two answers there, because it names WHY and sends an operator to the venue docs
+				// where `transcript-replaced` would only say that something moved. The first miss naming itself
+				// is the same rule the gate ladder above runs on.
+				//
+				// Either way, empty the staged copy so the container is handed nothing of it -- the 0-byte shape
+				// every cold start gets. If emptying fails, the catch below removes the staged directory rather
+				// than leave the copy behind.
+				const raced = readVenue(key) !== venue ? "venue-changed" : readIdentity(canonicalFile(key)) !== judged ? "transcript-replaced" : null;
+				if (raced !== null) {
 					fs.writeFileSync(staged, "");
-					verdict = COLD("venue-changed");
+					verdict = COLD(raced);
 				}
 			} else {
 				// A 0-BYTE FILE, not an absent one. pi's setSessionFile then takes its empty-file branch and
@@ -547,7 +568,7 @@ export function makeSessionStore({
 			if (!Number.isFinite(started)) return COLD("conversation-too-old");
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
-		return { resume: true, reason: "resumed", bytes: check.bytes };
+		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident };
 	}
 
 	/**
@@ -634,6 +655,33 @@ export function makeSessionStore({
 	 * (`fs.readFile` off the clone following a symlink into a worker-host file). The repo's own habit is
 	 * the wrong one here: makeLogReaper uses statSync, which follows.
 	 */
+	/**
+	 * The canonical file's IDENTITY as one comparable token: device, inode, size, mtime.
+	 *
+	 * ONE STRING RATHER THAN FOUR FIELDS, so the comparison is one `!==` and there is no partial compare to
+	 * get wrong. `ino` is the field that does the work: a promotion renames a freshly created `.incoming`
+	 * file into place, so the inode behind the canonical path is a DIFFERENT one after every completed swap
+	 * -- including the A, B, A round trip whose venue stamp matches again, which is why this catches what the
+	 * venue re-check cannot. `dev` is what makes `ino` meaningful, since an inode number is unique per
+	 * device. `size` and `mtimeMs` narrow the inode-REUSE residual and nothing else: the swapped-away inode
+	 * is freed by its own rename and its number may be handed straight back to the next `.incoming` file.
+	 */
+	function identityOf(st) {
+		return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
+	}
+
+	/**
+	 * The identity now at a path, or `null` when there is nothing readable there -- which compares unequal to
+	 * every real identity, so a transcript that VANISHED between the gate and the copy cold-starts too.
+	 */
+	function readIdentity(file) {
+		try {
+			return identityOf(fs.lstatSync(file));
+		} catch {
+			return null;
+		}
+	}
+
 	function inspectFile(file) {
 		let st;
 		try {
@@ -644,7 +692,7 @@ export function makeSessionStore({
 		if (!st.isFile()) return { ok: false, reason: "not-a-regular-file" };
 		if (st.size === 0) return { ok: false, reason: "absent" }; // a staged-but-unwritten transcript
 		if (maxBytes > 0 && st.size > maxBytes) return { ok: false, reason: "too-large" };
-		return { ok: true, bytes: st.size, mtimeMs: st.mtimeMs };
+		return { ok: true, bytes: st.size, mtimeMs: st.mtimeMs, ident: identityOf(st) };
 	}
 
 	/**

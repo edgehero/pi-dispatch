@@ -961,6 +961,76 @@ test("a promotion that knows no pi version INVALIDATES the stamp rather than lea
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "pi-version-changed", "so the next job cold-starts");
 });
 
+test("a SAME-venue promotion that lands between the gate and the copy cold-starts rather than resuming unjudged (#336)", () => {
+	// The race the venue stamp cannot see: the promoting job shares this venue, so the stamp matches before and
+	// after and only the transcript moved. Before the identity re-check this job resumed a transcript no gate
+	// had judged -- it could be past its TTL, past the age bound, chain-exhausted, or written by another pi.
+	//
+	// A TABLE over three replacements, each isolating a different field of the identity, so this pins WHICH
+	// fields are compared and not merely that something is. The renamed case is the load-bearing one: it is
+	// what a real promotion does, and only `dev:ino` differs.
+	const key = sessionKeyFor(ghIssue);
+	// A whole second, and inside the fixture clock's TTL window so the age gate stays out of this.
+	const STEADY = new Date(NOW - 1000);
+	const cases = {
+		// The mtime is normalised to a whole second on BOTH sides, before the gate reads it and after the
+		// replacement, because a filesystem mtime carries sub-millisecond precision that `utimesSync` cannot
+		// round-trip: restoring it from the stat's own Date left `mtimeMs` slightly different, and the case
+		// then isolated nothing. A mutation dropping `dev:ino` from the identity SURVIVED against the first
+		// version of this fixture, which is how that was found.
+		"renamed over, byte-identical and same mtime": (canonical, root) => {
+			const before = realFs.statSync(canonical);
+			const sibling = join(root, "sibling.jsonl");
+			realFs.writeFileSync(sibling, realFs.readFileSync(canonical));
+			realFs.renameSync(sibling, canonical);
+			realFs.utimesSync(canonical, STEADY, STEADY);
+			const after = realFs.statSync(canonical);
+			assert.equal(after.size, before.size, "the fixture must keep the size, or it is not isolating the inode");
+			assert.equal(after.mtimeMs, before.mtimeMs, "and the mtime, or it is not isolating the inode");
+		},
+		"rewritten in place, different bytes": (canonical) => realFs.writeFileSync(canonical, `${HEADER}{"type":"message"}\n`),
+	};
+
+	for (const [name, replace] of Object.entries(cases)) {
+		let ref;
+		const { store, jobDir, sessionsDir, root } = fixture({
+			fs: {
+				...realFs,
+				copyFileSync: (from, to) => {
+					if (String(from).startsWith(ref) && String(to).includes(join("session", SESSION_FILE_NAME))) replace(String(from), root);
+					return realFs.copyFileSync(from, to);
+				},
+			},
+		});
+		ref = sessionsDir;
+		seed(sessionsDir, key, { venue: "local" });
+		realFs.utimesSync(join(sessionsDir, key, SESSION_FILE_NAME), STEADY, STEADY);
+
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		assert.equal(s.reason, "transcript-replaced", name);
+		assert.equal(s.resume, false, `${name}: an unjudged transcript is never resumed`);
+		assert.equal(s.bytes, null, `${name}: a cold start reports no bytes`);
+		assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, `${name}: the container is handed nothing of it`);
+	}
+});
+
+test("an untouched transcript still RESUMES: the re-check must not fire on the quiet path (#336)", () => {
+	// The false-positive guard, and the most important test in this set. A re-check that fired spuriously would
+	// turn every resume into a silent cold start -- the feature never resuming again, with nothing in the log
+	// that looks wrong. Two consecutive deliveries, both of which must resume.
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(first.reason, "resumed", "nothing touched the transcript, so it resumes");
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message"}\n`);
+	assert.equal(store.promoteSession(first, { piVersion: PI }).promoted, true);
+
+	const second = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(second.reason, "resumed", "and a promotion this job's OWN run completed is not a race either");
+});
+
 test("a promotion from another venue that COMPLETES between the gate and the copy is caught too", () => {
 	// The stamp then names the other venue outright rather than the sentinel. A re-check that only looked for
 	// the sentinel would resume that venue's transcript.

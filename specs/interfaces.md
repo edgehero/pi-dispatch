@@ -3079,7 +3079,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|venue-changed|pi-version-changed|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
     "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
@@ -3141,7 +3141,7 @@ validator rather than a second copy of it.
 
   | Producer | Tokens |
   |---|---|
-  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed` |
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed`, `transcript-replaced` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
   | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
 
@@ -3423,9 +3423,14 @@ validator rather than a second copy of it.
   `null` resolve leaves nothing readable under the job dir unless that removal fails too. What `venue-changed` does not distinguish is stated rather
   than hidden: it also names a leftover sentinel from an interrupted promotion, an unreadable stamp, and a
   SAME-venue promotion whose sentinel is in place when another job reads or re-checks the stamp (that job
-  cold-starts once), exactly as `pi-version-changed` already covers an unreadable version stamp. A
-  same-venue promotion that lands ENTIRELY between another job's read and its copy is not caught: that job
-  resumes the newer transcript, which no gate judged -- the unguarded race `pi-version` has always had.
+  cold-starts once), exactly as `pi-version-changed` already covers an unreadable version stamp. **The resolve path also re-checks the transcript's IDENTITY after its copy** (issue #336), against the
+  `lstat` the gates were computed from: device, inode, size and mtime as one token. The venue stamp cannot
+  see a promotion by a job on the SAME venue, because the stamp matches before and after and only the
+  transcript moved; that job used to resume a newer transcript no gate had judged, which could be past its
+  TTL, past the age bound, chain-exhausted or written by another pi. It cold-starts as `transcript-replaced`
+  instead. A promotion renames a freshly created file into place, so the inode moves on every completed
+  swap. The venue re-check runs FIRST, because a cross-venue promotion trips both and `venue-changed` names
+  why where the identity only says that something moved.
   **A process killed inside the promotion lock** leaks the lock, as any kill there always has, so later
   promotions report `locked` until the reaper sweeps the key. Killed between the sentinel and the real stamp,
   it also leaves the sentinel, and the key cold-starts on every venue meanwhile; killed after the stamp, the
@@ -3434,9 +3439,13 @@ validator rather than a second copy of it.
   before any transcript landed; those stay locked until the lock file is removed. **Two
   triggers on one key that name different venues** replace each other's transcript and so cold-start on
   every alternation; that is the cost of keeping the venue out of the key, and it is the right way round,
-  since the alternative resumes one venue's conversation in the other. Three residuals: two complete
-  promotions from different venues inside one copy window (A, B, A) leave the stamp matching again and the
-  re-check cannot see the round trip; the reaper takes no lock and removes a key in one recursive walk, so a
+  since the alternative resumes one venue's conversation in the other. Three residuals, one of them narrowed: two complete promotions from
+  different venues inside one copy window (A, B, A) leave the STAMP matching again, and the venue re-check
+  cannot see the round trip, but the identity re-check does, because each swap renames a fresh inode into
+  place. What survives is narrower and is stated rather than claimed closed: an inode NUMBER can be reused,
+  since the swapped-away inode is freed by its own rename, so two promotions inside one copy window whose
+  second lands on a recycled number with the same size and mtime compare equal. The sidecars are each read
+  at their own instant and the identity covers the transcript only. The reaper takes no lock and removes a key in one recursive walk, so a
   promotion landing on an EXPIRED key during its own sweep could, for a moment, leave that transcript
   without its stamp, which reads as `local`; and a worker older than #277 sharing a `PI_SESSIONS_DIR`
   neither reads nor writes the stamp, so every worker on a shared store must run a release carrying it
@@ -4393,3 +4402,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-21 | Issue #337, items 2, 3 and 4. **`INT-SANDBOX-CONTRACT` AMENDED**, one clause: its statement that both the CLI and the panel read the egress posture from their own process environment is unchanged in substance and now records that the panel SAYS so, on the RUN_DETAIL line, before `b` is pressed. No launcher, argv, refusal or retention rule moved. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no record field was added, renamed or re-typed; the two new lines are read from the panel's own environment and the scrub is a render-time property of the terminal, not of the file. **Code evidence**: admin/src/index.ts -> readSandboxInfo, sandboxEgressPosture; admin/src/dashboard.ts -> renderRunDetail. |
 | 2026-09-21 | Issue #348, item 4, and nothing else in this file. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: its opening paragraph carried an 8-character fragment (`its only`) on a line of its own, left by an earlier mid-paragraph edit, and those three lines are re-wrapped by hand into two. A word-level diff of every entry in this file against `origin/main`, this history table excepted, reports ZERO word changes, which is the check rather than a claim about it: no contract bullet, Acceptance line or Code evidence entry moves, and the rendered page is identical. **No other `INT-` entry changes, checked.** |
 | 2026-09-21 | Issue #336, part 1: the `pi-version` write. **`INT-SESSION-STORE-CONTRACT` AMENDED**, two bullets, and both amendments DELETE a stated residual rather than adding a rule. The lstat/rename bullet said "every sidecar write but one goes through a rename" and named the exception in the next sentence: the `pi-version` write was plain, so it followed a link planted at that name, and the key directory's name is derived rather than random, so that path is precomputable by anyone who knows the repository and the branch. It now goes through `writeSidecar` like every other sidecar, which makes it link-safe (temp plus rename replaces the link with a regular file and never opens its target) and non-fatal in one change, because those were the same exception. The write-path bullet's parenthetical "(the `pi-version` write excepted, above)" is gone with it, and in its place the bullet now states WHY the venue stamp needs a sentinel and this one does not: a failed version stamp is safe in both directions, since with no prior stamp the next read cold-starts, and with a prior one the survivor is still true, because a job resumes only if that stamp already matched its own image's pi and a job runs one image. Also recorded, because it is the obvious simplification and it is wrong: a promotion that knows no version writes an EMPTY stamp rather than skipping the write, and `readSidecar`'s size check refuses an empty file, so the key cold-starts; skipping would leave a previous version beside a transcript an unknown pi wrote, and the next job on that version would resume it. The post-swap ORDER is unchanged and its reason is restated rather than assumed: the venue stamp stays first because it is the only post-swap write whose absence misattributes rather than cold-starts. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: no token is added or removed, and `promote-failed` keeps its producer; what changes is that it can no longer be produced by a promotion that landed. **Code evidence**: worker/src/session-store.mjs -> promoteSession. |
+| 2026-09-21 | Issue #336, part 2. **`INT-SESSION-STORE-CONTRACT` AMENDED**: the venue bullet gains the post-copy IDENTITY re-check (device, inode, size and mtime as one token, compared against the `lstat` the gates were computed from) and loses the sentence stating the same-venue race as uncaught. A promotion renames a freshly created file into place, so the inode moves on every completed swap, which is what lets this see a swap the stamp cannot. The venue re-check runs FIRST because a cross-venue promotion trips both and `venue-changed` names WHY, where the identity only says that something moved; that ordering also leaves every existing venue-race case reporting exactly what it reported before. One of the three stated residuals NARROWS rather than closing: the A, B, A round trip leaves the stamp matching again and is now caught by the identity, while inode-number REUSE is not, since the swapped-away inode is freed by its own rename, and the sidecars are each read at their own instant. Stated rather than claimed closed. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `transcript-replaced` joins the closed `session.reason` enum and the resolve path's producer row. It is deliberately NOT given to the runner or the promote path: the runner cannot observe it and `promoteSession` does not produce it, so an older runner against a newer worker is unaffected. Reusing `pi-version-changed` was rejected -- `docs/sessions.md` tells an operator that token means the image ships a different pi, so a concurrency event wearing it sends them to check an image label and teaches them to distrust the token. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: the container still sees only `/session/current.jsonl`, and an inode number never crosses the boundary -- it is read, compared and discarded within a few lines, and deliberately split off the verdict so it cannot ride the session object a promotion reads an hour later. |
