@@ -511,18 +511,14 @@ export function makeSessionStore({
 	}
 
 	/**
-	 * `writeSidecar`'s link-safe temp-and-rename, and it THROWS. For the one write whose failure must stop a
-	 * promotion rather than be logged past it: the venue sentinel, which runs before the swap (#277).
-	 */
-	/**
 	 * Remove whatever is at a temp path, whatever SHAPE it has, before anything writes there.
 	 *
 	 * ONE RULE BECAUSE CHOOSING BETWEEN THE TWO CALLS WAS GOT WRONG TWICE, in opposite directions.
 	 * `unlinkSync` alone cannot remove a DIRECTORY planted at the name, and at the venue sentinel -- the one
 	 * sidecar write that is fatal -- that wedged every promotion on the key forever. `rmSync` alone does not
 	 * remove a DANGLING SYMLINK: it resolves the path, finds nothing, and with `force` reports success while
-	 * leaving the link (measured, and it is the same measurement the reaper's own guard records three
-	 * functions down). The next write then follows the surviving link and creates a file at its target, which
+	 * leaving the link (measured, and it is the same measurement the reaper's own guard records further down
+	 * this file -- measured there for the reaper, and not carried here until it had cost a round). The next write then follows the surviving link and creates a file at its target, which
 	 * is the write-through-a-link hole this whole series exists to close, and if that target is unreachable
 	 * the write throws and the key is wedged again.
 	 *
@@ -540,10 +536,18 @@ export function makeSessionStore({
 		try {
 			fs.rmSync(path, { recursive: true, force: true });
 		} catch {
-			// Nothing further to try. The write that follows fails and is reported as itself.
+			// Nothing further to try HERE, and the honest bound is worth stating: if both calls fail, anything
+			// left at the name is still there and the write that follows may go THROUGH it. The only way both
+			// fail is a key directory this process cannot write, and `takeLock`'s own exclusive create fails
+			// first in that state, so a promotion never reaches here with it -- which is why this is a bound
+			// rather than a hole.
 		}
 	}
 
+	/**
+	 * `writeSidecar`'s link-safe temp-and-rename, and it THROWS. For the one write whose failure must stop a
+	 * promotion rather than be logged past it: the venue sentinel, which runs before the swap (#277).
+	 */
 	function replaceSidecar(dir, name, value) {
 		const file = join(dir, name);
 		const tmp = `${file}.incoming`;

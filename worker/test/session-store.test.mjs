@@ -1168,6 +1168,28 @@ test("every temp is REMOVED before it is written, so a link planted at one recei
 });
 
 test("a temp name carrying ANY shape is cleared, and nothing is written through it (#336)", () => {
+	// Arms a fixture whose injected `unlinkSync` plants `shape` at the TRANSCRIPT temp the first time the
+	// store reaches for it, so the plant is in place exactly when the removal runs.
+	const fixture0 = (shape, plant) => {
+		let armed = false;
+		let root;
+		const made = fixture({
+			fs: {
+				...realFs,
+				unlinkSync: (p, ...rest) => {
+					const path = String(p);
+					if (!armed && /current\.jsonl\.\d+\.\d+\.[0-9a-f]{12}\.incoming$/.test(path)) {
+						armed = true;
+						plant(path, join(root, "victim-transcript"));
+					}
+					return realFs.unlinkSync(p, ...rest);
+				},
+			},
+		});
+		root = made.root;
+		return made;
+	};
+
 	// The three shapes a temp name can be left in, and each was got wrong by a different version of this
 	// rule. A DANGLING link is the sharp one: `rmSync` resolves the path, finds nothing, and reports success
 	// while LEAVING the link, so the write that follows creates a file at the link's target -- the
@@ -1178,11 +1200,33 @@ test("a temp name carrying ANY shape is cleared, and nothing is written through 
 	// The sidecar temp names are FIXED and precomputable, which is the threat model this module already
 	// states; the transcript temp now carries random bytes, so it is covered by the shared rule rather than
 	// by a plantable name.
-	for (const [shape, plant] of [
+	const shapes = [
 		["a dangling link", (at, victim) => symlinkSync(victim, at)],
 		["a link to an existing file", (at, victim) => (writeFileSync(victim, "PRECIOUS"), symlinkSync(victim, at))],
 		["a directory", (at) => (mkdirSync(at, { recursive: true }), writeFileSync(join(at, "inside"), "x"))],
-	]) {
+	];
+
+	// SITE 2, the TRANSCRIPT temp, and it needs the seam rather than a path: its name carries random bytes,
+	// so a test cannot plant at it any more than an attacker can guess it. Planting from inside the injected
+	// `unlinkSync` puts the shape there at the instant the removal runs, which is the real ordering. Without
+	// this site the transcript call site is unpinned, and reverting IT alone to either single call -- the two
+	// rules that actually shipped -- passes.
+	for (const [shape, plant] of shapes) {
+		const { store, jobDir, sessionsDir, root } = fixture0(shape, plant);
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key, { venue: "local" });
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}${shape}\n`);
+		const p = store.promoteSession(s, { piVersion: PI });
+
+		assert.equal(p.promoted, true, `transcript temp, ${shape}: a planted temp must not wedge the key`);
+		assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes(shape), true, `transcript temp, ${shape}: the transcript lands`);
+		const victim = join(root, "victim-transcript");
+		if (shape === "a dangling link") assert.equal(existsSync(victim), false, `transcript temp, ${shape}: nothing may be created at the link's target`);
+		if (shape === "a link to an existing file") assert.equal(readFileSync(victim, "utf8"), "PRECIOUS", `transcript temp, ${shape}: the target is untouched`);
+	}
+
+	for (const [shape, plant] of shapes) {
 		const { store, jobDir, sessionsDir, root } = fixture();
 		const key = sessionKeyFor(ghIssue);
 		seed(sessionsDir, key, { venue: "local" });
