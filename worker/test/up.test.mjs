@@ -48,7 +48,7 @@ const SECRET = "cafef00d".repeat(8);
 
 // Everything injected, everything recorded. `files` seeds the in-memory fs (path → text); the fake
 // init deliberately creates nothing, so a test that wants a .env after init seeds it up front.
-function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" } } = {}) {
+function harness({ plan = {}, listening = true, answers = [], files = {}, doctorCode = 0, argv = [], env = { PI_PROVIDER: "anthropic" }, cwd = "/deploy", platform = "linux", logsDirPathFn, settingsFilePathFn } = {}) {
 	const calls = [];
 	const promptCalls = [];
 	const initCalls = [];
@@ -79,7 +79,8 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			chmodSync: () => {},
 		},
 		probeTcp: async () => listening,
-		cwd: "/deploy",
+		cwd,
+		platform,
 		randomHex: () => SECRET,
 		// Resolved defaults, pinned rather than read off this host: `logsDirPath` calls the real
 		// `homedir()`, so without these the byte-exact `.env` assertions below would assert whose account
@@ -87,8 +88,8 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 		// The real ones RESOLVE rather than default (`env.PI_LOGS_DIR || <account default>`), and these
 		// mirror that shape exactly: a fake that ignored the environment would hide the one case where
 		// `up` can persist a path it must never persist.
-		logsDirPathFn: (e) => e.PI_LOGS_DIR || "/home/op/.pi-dispatch/logs",
-		settingsFilePathFn: (e) => e.PI_SETTINGS_FILE || "/home/op/.pi-dispatch/settings.json",
+		logsDirPathFn: logsDirPathFn ?? ((e) => e.PI_LOGS_DIR || "/home/op/.pi-dispatch/logs"),
+		settingsFilePathFn: settingsFilePathFn ?? ((e) => e.PI_SETTINGS_FILE || "/home/op/.pi-dispatch/settings.json"),
 		runInitFn: (cwd) => {
 			initCalls.push(cwd);
 			return 0;
@@ -281,7 +282,7 @@ test("up REFUSES to pin a durable path that resolves inside this folder, and say
 	const written = h.store.get("/deploy/.env");
 	assert.doesNotMatch(written, /^PI_LOGS_DIR=/m, "the deployment folder itself is refused");
 	assert.doesNotMatch(written, /^PI_SETTINGS_FILE=/m, "and so is anything under it");
-	assert.match(h.text(), /PI_LOGS_DIR would be \/deploy, which is inside this deployment folder/);
+	assert.match(h.text(), /PI_LOGS_DIR is \/deploy in this shell, which is inside this deployment folder/, "and it names where the value came from, or the operator looks in .env and finds nothing to change");
 	assert.match(h.text(), /NOT written/);
 	// The two FOLDER keys are unaffected: they are meant to be here, and nothing sweeps them.
 	assert.match(written, /^PI_PAUSE_WINDOWS_FILE=\/deploy\/pause-windows\.json$/m);
@@ -298,6 +299,48 @@ test("up REFUSES a RELATIVE durable path, which is the same harm reached the sho
 		assert.doesNotMatch(h.store.get("/deploy/.env"), /^PI_LOGS_DIR=/m, relative);
 		assert.match(h.text(), /is not an absolute path/, relative);
 	}
+});
+
+test("up does NOT refuse a computed default that happens to sit under this folder (#357)", async () => {
+	// A deployment folder that IS the service account's home is an ordinary layout, and the account default
+	// is then `<home>/.pi-dispatch/logs`, which is "inside" it. Nothing is at risk there: that directory
+	// holds run records only, `triggers.json` is a sibling of `.pi-dispatch` rather than inside it, and the
+	// worker resolves that same path anyway. Refusing would reject the path already chosen and blame the
+	// operator for a layout that is fine, so only a value THIS SHELL supplied is checked.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic" }, logsDirPathFn: () => "/deploy/.pi-dispatch/logs", settingsFilePathFn: () => "/deploy/.pi-dispatch/settings.json" });
+	await h.run();
+	assert.match(h.store.get("/deploy/.env"), /^PI_LOGS_DIR=\/deploy\/\.pi-dispatch\/logs$/m);
+	assert.doesNotMatch(h.text(), /NOT written/);
+});
+
+test("up: the inside-the-folder compare folds case on Windows and does not on POSIX (#357)", async () => {
+	// `nssm-install.cmd` is a supported deployment. Windows paths are case-insensitive and accept either
+	// separator, so a byte compare misses `c:\\pi\\deploy\\logs` against `C:/pi/deploy` and writes exactly
+	// the value this guard exists to refuse. POSIX is case-sensitive, where folding would refuse a
+	// different directory that merely looks alike.
+	const win = harness({ plan: green, files: { "C:/pi/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: "c:\\pi\\deploy\\logs" }, cwd: "C:/pi/deploy", platform: "win32" });
+	await win.run();
+	assert.doesNotMatch(win.store.get("C:/pi/deploy/.env"), /^PI_LOGS_DIR=/m, "the same folder in another spelling is still this folder");
+
+	const posix = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: "/DEPLOY/logs" }, cwd: "/deploy", platform: "linux" });
+	await posix.run();
+	assert.match(posix.store.get("/deploy/.env"), /^PI_LOGS_DIR=\/DEPLOY\/logs$/m, "and a differently-cased path on POSIX is a different directory");
+
+	// And the absolute check has to use the same platform, or a perfectly good drive-letter path reads as
+	// relative and is refused with a message about a `WorkingDirectory` that has nothing to do with it.
+	const otherDrive = harness({ plan: green, files: { "C:/pi/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: "D:/pi-history" }, cwd: "C:/pi/deploy", platform: "win32" });
+	await otherDrive.run();
+	assert.match(otherDrive.store.get("C:/pi/deploy/.env"), /^PI_LOGS_DIR=D:\/pi-history$/m, "another drive is absolute, and is not inside this folder");
+	assert.doesNotMatch(otherDrive.text(), /not an absolute path/);
+});
+
+test("up refuses a value this .env cannot represent, rather than writing one nothing reads back (#357)", async () => {
+	// `renderEnvValue` throws on a single quote: the shells want it escaped as `'\\''` and systemd's parser
+	// does not understand that, so no one rendering is read identically by both consumers.
+	const h = harness({ plan: green, files: { "/it's/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic" }, cwd: "/it's/deploy" });
+	await h.run();
+	assert.match(h.text(), /PI_PAUSE_WINDOWS_FILE could not be written: .*single quote/);
+	assert.match(h.text(), /NOT written/);
 });
 
 test("up: a sibling folder with the same prefix is not 'inside' this one (#357)", async () => {

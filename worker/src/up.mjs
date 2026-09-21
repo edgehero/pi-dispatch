@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { isAbsolute, join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { egressArmed as egressArmedFn } from "./egress.mjs";
 import { updateEnvFile } from "./env-file.mjs";
@@ -94,10 +94,18 @@ const EGRESS_RUN_ARGS = [
  * Whether `p` is `folder` itself or sits inside it, compared on the separator rather than on a prefix so
  * `/srv/deploy-old` is not read as being inside `/srv/deploy`.
  */
-function underFolder(p, folder) {
-	const a = String(p).replace(/[\\/]+$/, "");
-	const b = String(folder).replace(/[\\/]+$/, "");
-	return a === b || a.startsWith(`${b}/`) || a.startsWith(`${b}\\`);
+function underFolder(p, folder, platform) {
+	const norm = (x) => {
+		const slashed = String(x).replace(/\\/g, "/").replace(/\/+$/, "");
+		// Windows paths are case-insensitive and accept either separator, and `nssm-install.cmd` is a
+		// supported deployment: a byte compare there misses `c:\pi\deploy\logs` against `C:/pi/deploy`
+		// and writes exactly the value this guard exists to refuse. POSIX is case-SENSITIVE, so folding
+		// there would refuse a different directory that merely looks alike.
+		return platform === "win32" ? slashed.toLowerCase() : slashed;
+	};
+	const a = norm(p);
+	const b = norm(folder);
+	return a === b || a.startsWith(`${b}/`);
 }
 
 export async function runUp(argv = [], deps = {}) {
@@ -112,6 +120,8 @@ export async function runUp(argv = [], deps = {}) {
 		// Injected so tests can assert the secret never reaches output without fishing it back out of
 		// the written file. 32 bytes hex, matching doctor's `openssl rand -hex 32` fix line.
 		randomHex = () => randomBytes(32).toString("hex"),
+		// Injected for the path compare below, which has to fold case on Windows and must not on POSIX.
+		platform = process.platform,
 		// The two resolved defaults `up` pins, injected for the same reason the clock is elsewhere: they
 		// read the real `homedir()`, so a test asserting the written `.env` byte for byte would otherwise
 		// assert whichever account ran it.
@@ -261,13 +271,39 @@ export async function runUp(argv = [], deps = {}) {
 			// The refusals live here and not in the resolver, because the resolver is right for the worker:
 			// an exported path SHOULD be honoured at run time. What must never happen is `up` copying one
 			// into the deployment's permanent config, where it outlives the shell that set it.
-			const why = durable && !isAbsolute(value) ? "is not an absolute path, and a relative one resolves against the service's WorkingDirectory, which is this folder" : durable && underFolder(value, cwd) ? "is inside this deployment folder" : null;
+			// Only a value THIS SHELL supplied is checked, and that narrowing matters both ways. The hazard
+			// is the pass-through: `logsDirPath` is `env.PI_LOGS_DIR || <default>`, so an exported value
+			// lands in the deployment's permanent config where it outlives the shell that set it. The
+			// computed default is never a hazard even when it sits under `cwd` -- a deployment folder that
+			// IS the service account's home makes `<home>/.pi-dispatch/logs` "inside" it, and refusing
+			// there would reject the very path the worker resolves anyway, with a message blaming the
+			// operator for a layout that is fine.
+			const fromShell = typeof env[key] === "string" && env[key].trim() !== "";
+			// Both checks follow the INJECTED platform, not this process's. `node:path`'s default export is
+			// already the right one in production, but a drive-letter path is "relative" to the posix
+			// implementation, so a test running on POSIX would see the absolute check short-circuit and
+			// never reach the folder compare it meant to exercise. Choosing explicitly makes the Windows
+			// half of both rules reachable from a test on any host, which is the only way `nssm-install.cmd`
+			// gets covered at all.
+			const isAbsoluteOn = platform === "win32" ? win32.isAbsolute : posix.isAbsolute;
+			const why = !durable || !fromShell ? null : !isAbsoluteOn(value) ? "is not an absolute path, and a relative one resolves against the service's WorkingDirectory, which is this folder" : underFolder(value, cwd, platform) ? "is inside this deployment folder" : null;
 			if (why) {
-				out(`✗ ${key} would be ${value}, which ${why} — not written\n`);
-				summary.push([key, `NOT written: the resolved value (${value}) ${why}, and the log retention sweep deletes every .log and .json there past its window. Set it by hand somewhere the worker owns`]);
+				out(`✗ ${key} is ${value} in this shell, which ${why} — not written into .env\n`);
+				summary.push([key, `NOT written: ${key} is set to ${value} in the environment you ran up from, and that ${why}. The log retention sweep deletes every .log and .json there past its window, so this would be persisted for the service. Unset it here, or set it by hand to a directory the worker owns`]);
 				continue;
 			}
-			if (updateEnvFile(envPath, key, value, { fs }).changed) {
+			// A path this file cannot represent so that BOTH consumers read it back is refused rather than
+			// mangled: `renderEnvValue` throws on a single quote, which the shells want escaped as `'\''`
+			// and systemd's parser does not understand.
+			let changed;
+			try {
+				({ changed } = updateEnvFile(envPath, key, value, { fs }));
+			} catch (err) {
+				out(`✗ ${key} could not be written: ${err?.message}\n`);
+				summary.push([key, `NOT written: ${err?.message}. Set it by hand, or move the deployment somewhere without that character in its path`]);
+				continue;
+			}
+			if (changed) {
 				wrote[key] = value;
 				out(`✓ ${key}=${value} written into .env\n`);
 				summary.push([key, `written into .env (${value})`]);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readEnvKeys, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { readEnvKeys, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
 
 // -- setEnvKeyIfEmpty: pure transform, table-driven over the text shapes it must handle ---------------
 //
@@ -252,20 +252,40 @@ test("readEnvKeys agrees with the shell about duplicates, including an empty one
 	assert.deepEqual(readEnvKeys(text, ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]), { PI_SCOPED_LIMITS_FILE: "/srv/limits.json" }, "the later empty line is what the service gets, so the key is absent");
 });
 
-test("readEnvKeys strips an inline comment exactly where a shell does, and not inside quotes", () => {
-	// Measured in sh, bash and zsh against every shape below: a `#` preceded by whitespace starts a
-	// comment, a `#` with nothing in front of it is part of the value, and inside quotes neither is true.
-	// The quoted case is the one that matters in practice: truncating it would have doctor print a path
-	// the deployment does not use.
-	const text = ["A=/a/path   # some comment", "B=/b/path\t# tab before the hash", "C=/c/pa#th", "D=value#", 'E="/e/path   # not a comment"', "F='/f/path # also not'"].join("\n");
-	assert.deepEqual(readEnvKeys(text, ["A", "B", "C", "D", "E", "F"]), {
+test("readEnvKeys reads a value back exactly as the shell does, quotes and comments included", () => {
+	// Measured in sh, bash and zsh against every shape below, and the quoted rows were measured too rather
+	// than reasoned about, which is where an earlier version of this table was wrong: it kept the quote
+	// characters in the value, which no shell does. One matched surrounding pair comes off, and it comes
+	// off BEFORE the empty test, or `KEY=""` reads as set while every consumer sets the key to nothing.
+	const text = ["A=/a/path   # some comment", "B=/b/path\t# tab before the hash", "C=/c/pa#th", "D=value#", 'E="/e/path   # not a comment"', "F='/f/path # also not'", 'G=""', "H='   '"].join("\n");
+	assert.deepEqual(readEnvKeys(text, ["A", "B", "C", "D", "E", "F", "G", "H"]), {
 		A: "/a/path",
 		B: "/b/path",
 		C: "/c/pa#th",
 		D: "value#",
-		E: '"/e/path   # not a comment"',
-		F: "'/f/path # also not'",
+		E: "/e/path   # not a comment",
+		F: "/f/path # also not",
+		H: "   ",
 	});
+	assert.ok(!("G" in readEnvKeys(text, ["G"])), "a quoted EMPTY value is empty, and empty is absent");
+});
+
+test("renderEnvValue writes what both consumers read back, and refuses what neither can", () => {
+	// A deployment folder with a space is ordinary on macOS, whose wrapper sources this file: bare, the
+	// shell splits the assignment, the key ends up empty, and the tail RUNS as the service account.
+	assert.equal(renderEnvValue("/srv/pi/pause-windows.json"), "/srv/pi/pause-windows.json", "an ordinary path is written bare");
+	assert.equal(renderEnvValue("/srv/a b/c.json"), "'/srv/a b/c.json'");
+	assert.equal(renderEnvValue("/srv/a #2/c.json"), "'/srv/a #2/c.json'");
+	// Single quotes and not double: `"/x$HOME/y"` is EXPANDED by the shell, measured in all three.
+	assert.equal(renderEnvValue("/x$HOME/y"), "'/x$HOME/y'");
+	assert.throws(() => renderEnvValue("/srv/it's/c.json"), /single quote/, "no rendering is read identically by both consumers, so it is refused rather than escaped");
+	assert.throws(() => renderEnvValue("/srv/a\nb"), /newline/);
+});
+
+test("a value that needs quoting round-trips through the writer and back out of the reader", () => {
+	const written = setEnvKeyIfEmpty("# PI_PAUSE_WINDOWS_FILE=   # quiet hours\n", "PI_PAUSE_WINDOWS_FILE", "/srv/a b #2/pause-windows.json");
+	assert.equal(written, "# PI_PAUSE_WINDOWS_FILE=   # quiet hours\nPI_PAUSE_WINDOWS_FILE='/srv/a b #2/pause-windows.json'\n");
+	assert.deepEqual(readEnvKeys(written, ["PI_PAUSE_WINDOWS_FILE"]), { PI_PAUSE_WINDOWS_FILE: "/srv/a b #2/pause-windows.json" });
 });
 
 test("setEnvKey: the already-exact case returns the same string object (identity, not just equality)", () => {
@@ -339,10 +359,47 @@ test("updateEnvFile: a 0600 .env stays 0600 — chmod on the tmp BEFORE the rena
 	assert.ok(chmodIdx < ops.findIndex(([op]) => op === "rename"), "no window where the renamed file is wider than 0600");
 });
 
-test("updateEnvFile: any other mode is left alone (no chmod call at all)", () => {
-	const { fs, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n", 0o644);
+test("updateEnvFile: EVERY mode is carried onto the tmp, not just 0600", () => {
+	// A rename from a fresh tmp lands at the process umask, so a 0640 or 0400 `.env` came back 0644 --
+	// world-readable, on the one file this project says must never reach a scrollback. `up` now performs
+	// this five times a run rather than once, which is what turned a latent widening into a real one.
+	for (const mode of [0o600, 0o640, 0o400, 0o660]) {
+		const { fs, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n", mode);
+		updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs });
+		const chmodIdx = ops.findIndex(([op]) => op === "chmod");
+		assert.deepEqual(ops[chmodIdx], ["chmod", "/deploy/.env.tmp", mode], `mode ${mode.toString(8)}`);
+		assert.ok(chmodIdx < ops.findIndex(([op]) => op === "rename"), "and before the rename, so no window is wider");
+	}
+});
+
+test("updateEnvFile: a symlinked .env is edited THROUGH the link, never replaced by one", () => {
+	// A deployment whose `.env` points at a shared env file is an ordinary layout. Renaming over the link
+	// replaces it with a regular file, and every later edit to the shared file -- a rotated
+	// WEBHOOK_SECRET included -- silently stops reaching this deployment.
+	// A fake cannot model an inode, so what is asserted is the thing that matters: every write and the
+	// rename land on the RESOLVED path, so the link itself is never the rename target.
+	const { fs, files, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n");
+	fs.realpathSync = (p) => (p === "/deploy/.env" ? "/shared/pi.env" : p);
 	updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs });
-	assert.equal(ops.filter(([op]) => op === "chmod").length, 0);
+	assert.deepEqual(
+		ops.filter(([op]) => op !== "read"),
+		[
+			["write", "/shared/pi.env.tmp", "WEBHOOK_SECRET=abc123\n"],
+			["stat", "/shared/pi.env"],
+			["chmod", "/shared/pi.env.tmp", 0o644],
+			["rename", "/shared/pi.env.tmp", "/shared/pi.env"],
+		],
+		"the link is read, and everything after it goes to what the link points at",
+	);
+	assert.equal(files.get("/shared/pi.env"), "WEBHOOK_SECRET=abc123\n");
+	// And a link that cannot be resolved still edits the path it was given, rather than failing an edit
+	// that is otherwise sound.
+	const dangling = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n");
+	dangling.fs.realpathSync = () => {
+		throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	};
+	updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs: dangling.fs });
+	assert.equal(dangling.files.get("/deploy/.env"), "WEBHOOK_SECRET=abc123\n");
 });
 
 // -- updateEnvFile { overwrite }: which transform runs is the ONLY difference — atomicity is shared ----

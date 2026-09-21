@@ -289,7 +289,21 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 	const allowed = keys.filter((k) => ENV_FILE_READABLE_KEYS.includes(k));
 	if (allowed.length === 0) return {};
 	try {
-		return readEnvKeys(readEnvFile(path), allowed);
+		const text = readEnvFile(path);
+		// TWO readings, because there are three states to tell apart and not two. A key can be assigned
+		// plainly (every consumer reads it), assigned only with an `export ` prefix (the wrapper scripts
+		// source this file and honour it; systemd's `EnvironmentFile=` grammar is bare `VAR=VALUE` and does
+		// not, measured on systemd 257.13), or not assigned at all. Collapsing the middle case into either
+		// neighbour makes doctor wrong in one direction or the other: called set, it claims the service
+		// reads something systemd does not; called unset, it tells an operator to write a line already
+		// there, three lines after `up` said the key was already set.
+		const plain = readEnvKeys(text, allowed);
+		const withExport = readEnvKeys(text, allowed, { acceptExport: true });
+		const exported = {};
+		for (const key of allowed) {
+			if (!(key in plain) && key in withExport) exported[key] = withExport[key];
+		}
+		return { ...plain, exported };
 	} catch {
 		return {};
 	}
@@ -1618,8 +1632,16 @@ export async function collectChecks(env, seams) {
 		const scaffolded = join(cwd, "pause-windows.json");
 		if ((typeof pauseWindowsFile !== "string" || pauseWindowsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_PAUSE_WINDOWS_FILE;
+			const onlyExported = envFile.exported?.PI_PAUSE_WINDOWS_FILE;
 			checks.push(
-				inFile
+				onlyExported
+					? {
+							ok: false,
+							warn: true,
+							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} as \`export PI_PAUSE_WINDOWS_FILE=${onlyExported}\`, which a wrapper script reads and systemd's EnvironmentFile= does not`,
+							fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through deploy/worker-env-wrapper.sh or the nssm wrapper, which source the file`,
+						}
+					: inFile
 					? {
 							ok: false,
 							warn: true,
@@ -1644,8 +1666,16 @@ export async function collectChecks(env, seams) {
 		const scaffolded = join(cwd, "scoped-limits.json");
 		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_SCOPED_LIMITS_FILE;
+			const onlyExported = envFile.exported?.PI_SCOPED_LIMITS_FILE;
 			checks.push(
-				inFile
+				onlyExported
+					? {
+							ok: false,
+							warn: true,
+							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} as \`export PI_SCOPED_LIMITS_FILE=${onlyExported}\`, which a wrapper script reads and systemd's EnvironmentFile= does not`,
+							fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through deploy/worker-env-wrapper.sh or the nssm wrapper, which source the file`,
+						}
+					: inFile
 					? {
 							ok: false,
 							warn: true,

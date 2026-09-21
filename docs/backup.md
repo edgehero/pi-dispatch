@@ -141,7 +141,9 @@ Two more things worth knowing:
 - **If your worker runs as a different account than your `/dispatch` panel**, set `PI_LOGS_DIR` and
   `PI_SETTINGS_FILE` explicitly in the deployment's `.env`. `pi-dispatch up` now writes both, as the
   account default resolved by whoever ran it, which is the same answer you would have typed and is
-  worth checking against the account the service runs as. The default sits under a home directory, so
+  worth checking against the account the service runs as. It refuses, and says so, if your own shell
+  already sets either to a relative path or to one inside the deployment folder: the retention sweep
+  would then delete the deployment's own files. The default sits under a home directory, so
   two accounts resolve two different directories, and the symptom is not an error: the panel shows an
   empty run list and reports no spend, while caps set from the panel land in a file the worker never
   opens. Everything `pi-dispatch service install` sets up runs the worker as the account that installed

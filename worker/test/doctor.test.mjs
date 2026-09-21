@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1313,6 +1314,22 @@ test("doctor: a .env that NAMES the key softens the warning instead of crying wo
 	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is set in/);
 });
 
+test("doctor: an `export`ed key is neither set nor unset, and says which reader honours it (#357)", async () => {
+	// Measured on systemd 257.13: `EnvironmentFile=` parses bare `VAR=VALUE` and does not strip an
+	// `export ` prefix, while `deploy/worker-env-wrapper.sh` sources the file and does. So the same line is
+	// live on launchd and nssm and inert under systemd, and `up` -- which must never clobber it -- reports
+	// that key as already set. Without this third sentence, doctor tells the operator, three lines later in
+	// the same `up` output, to write a line that is already there.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `export PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /as `export PI_PAUSE_WINDOWS_FILE=.*`, which a wrapper script reads and systemd's EnvironmentFile= does not/);
+	assert.doesNotMatch(text(), /is unset -- the worker ignores it/, "not the unset warning: the line is there and one of the two readers honours it");
+	assert.doesNotMatch(text(), /but not in this shell/, "and not the set one either, because systemd would read nothing");
+	assert.match(text(), /drop the `export ` prefix if this deployment runs under systemd/);
+});
+
 test("doctor: a .env that does NOT name the key gets the full warning, unchanged (#357)", async () => {
 	// The narrowing has to run both ways, or the read becomes "a .env exists, so stop warning", which is
 	// exactly the wrong lesson and would silence the deployment this check was written for.
@@ -1340,6 +1357,18 @@ test("doctor: the .env read is narrowed to the two keys these checks name, and n
 	assert.match(text(), /PI_PAUSE_WINDOWS_FILE is set in/, "only the two keys the checks name are read back");
 });
 
+test("doctor: a .env that is a FIFO does not hang the command, through the DEFAULT seam (#357)", async () => {
+	// The guard that matters is the one `collectChecks` actually gets: every other assertion here injects
+	// its own `statFile`, so the production default was unpinned and a named pipe would have hung
+	// `pi-dispatch doctor` forever, with no output and no check to point at.
+	const cwd = tempDir("pi-fifo-");
+	const fifo = join(cwd, ".env");
+	execFileSync("mkfifo", [fifo]);
+	assert.deepEqual(envFileKeys(fifo, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), {}, "not a regular file, so not read at all");
+	// A directory is the other shape, and it throws rather than blocking; both must be silent.
+	assert.deepEqual(envFileKeys(cwd, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), {});
+});
+
 test("doctor: the .env reader hands back only the keys it was asked for (#357)", async () => {
 	// The boundary itself, pinned directly. Widening the doctor call's key LIST alone is an equivalent
 	// mutant today, because nothing consumes a key these two checks do not name, and that is the safety
@@ -1349,7 +1378,14 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	const seams = (readEnvFile) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }) });
 	// The later duplicate wins, because the shell and `EnvironmentFile=` both take the last assignment and
 	// this has to report what the SERVICE sees.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json" });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" } });
+	// THREE states, not two. A key assigned only with an `export ` prefix is read by the wrapper scripts
+	// and not by systemd's `EnvironmentFile=` (measured on systemd 257.13), so it is neither "set" nor
+	// "unset" and gets a sentence of its own. Collapsing it either way makes doctor wrong: called set, it
+	// claims the service reads what systemd does not; called unset, it tells the operator to write a line
+	// that is already there, moments after `up` reported that key as already set.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" } });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/later.json" } }, "a later export overrides an earlier plain line in the shell, so the plain value is not what the service sees");
 	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
 	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
 	// licence for reading a `.env`, and a convention would not have held it.
@@ -1357,7 +1393,7 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	assert.deepEqual([...ENV_FILE_READABLE_KEYS], ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], "adding to this list IS the review");
 	// `export KEY=` is a shell-ism a loader would honour and this deliberately does not, which is the line
 	// between reading a file and loading one.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/shell-ism.json")), {}, "an `export ` prefix is a loader feature and a loader is what this must not become");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], seams(() => "export PI_JOB_IMAGE=shell-ism")), {}, "and a key outside the frozen set is not reported as exported either");
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text }), {}, "no file, no evidence");
 	// A named pipe is the one shape that would not fail: a synchronous read of it never returns, and doctor
 	// would hang with no output and no check to point at. A directory throws and lands in the catch below.

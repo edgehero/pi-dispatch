@@ -54,7 +54,36 @@ import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from "no
  * whose own docblock warns it will happily overwrite a live credential.
  */
 function replacementLines(key, value, bare, wasComment) {
-	return wasComment ? [bare, `${key}=${value}`] : [`${key}=${value}`];
+	const rendered = renderEnvValue(value);
+	return wasComment ? [bare, `${key}=${rendered}`] : [`${key}=${rendered}`];
+}
+
+/**
+ * A value rendered so that BOTH consumers of this file read back exactly what was written.
+ *
+ * Measured rather than assumed, in `/bin/sh`, `/bin/bash` and `/bin/zsh` through the same
+ * `set -a; . ./.env; set +a` the wrapper scripts use:
+ *
+ *   - bare `KEY=/a b/c.json`   -> the shell splits at the space, the key ends up EMPTY, and the tail is
+ *     RUN as a command by the service account. A deployment folder with a space in its name is ordinary
+ *     on macOS, which is exactly the platform whose wrapper sources this file.
+ *   - bare `KEY=/a #2/c.json`  -> truncated at the `#`, and a path that does not exist is written with a ✓.
+ *   - `KEY="/x$HOME/y"`        -> the shell EXPANDS `$HOME`; double quotes are not enough.
+ *   - `KEY='/x$HOME/y'`        -> exact, in all three, and systemd's `EnvironmentFile=` parser has a
+ *     single-quote state too.
+ *
+ * So anything outside a conservative unquoted set is single-quoted. A value containing a single quote is
+ * REFUSED rather than escaped: the shells want `'\''` and systemd's parser does not understand it, so no
+ * one rendering is read identically by both, and inventing one would be the kind of cleverness that ships
+ * a path nobody can read back.
+ */
+const UNQUOTED_SAFE = /^[A-Za-z0-9_@%+=:,./-]*$/;
+
+export function renderEnvValue(value) {
+	const v = String(value);
+	if (UNQUOTED_SAFE.test(v)) return v;
+	if (v.includes("'") || /[\n\r]/.test(v)) throw new Error(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
+	return `'${v}'`;
 }
 
 export function setEnvKeyIfEmpty(text, key, value) {
@@ -99,7 +128,7 @@ export function setEnvKeyIfEmpty(text, key, value) {
 
 	// Pass 3: no trace of the key — append at the end, on its own line.
 	const base = text === "" || text.endsWith("\n") ? text : `${text}\n`;
-	return `${base}${key}=${value}\n`;
+	return `${base}${key}=${renderEnvValue(value)}\n`;
 }
 
 /**
@@ -140,7 +169,7 @@ export function setEnvKey(text, key, value) {
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
 		if (!setRe.test(line)) continue;
-		if (line === `${key}=${value}`) return text;
+		if (line === `${key}=${renderEnvValue(value)}`) return text;
 		return replaceLine(i);
 	}
 
@@ -152,7 +181,7 @@ export function setEnvKey(text, key, value) {
 
 	// Pass 3: no trace of the key — append at the end, on its own line.
 	const base = text === "" || text.endsWith("\n") ? text : `${text}\n`;
-	return `${base}${key}=${value}\n`;
+	return `${base}${key}=${renderEnvValue(value)}\n`;
 }
 
 /**
@@ -176,15 +205,28 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	const text = fs.readFileSync(path, "utf8");
 	const next = (overwrite ? setEnvKey : setEnvKeyIfEmpty)(text, key, value);
 	if (next === text) return { changed: false };
-	const tmp = `${path}.tmp`;
+	// Through the SYMLINK, not over it. A deployment whose `.env` points at a shared env file is an
+	// ordinary layout, and rename-over-the-link replaces it with a regular file: every later edit to the
+	// shared file, a rotated WEBHOOK_SECRET included, silently stops reaching this deployment. Resolving
+	// first edits what the operator meant. Optional on the seam because the test fakes do not model links.
+	let target = path;
+	try {
+		target = fs.realpathSync?.(path) ?? path;
+	} catch {
+		// Not resolvable (a dangling link, a fs without the call): edit the path we were given.
+	}
+	const tmp = `${target}.tmp`;
 	fs.writeFileSync(tmp, next);
 	try {
-		if ((fs.statSync(path).mode & 0o777) === 0o600) fs.chmodSync(tmp, 0o600);
+		// The operator's mode, whatever it is, not just 0600. `.env` holds WEBHOOK_SECRET and provider
+		// keys, and a rename from a fresh tmp lands at the process umask: 0640 and 0400 both came back
+		// 0644, world-readable, on the one file this project says must never reach a scrollback.
+		fs.chmodSync(tmp, fs.statSync(target).mode & 0o7777);
 	} catch {
 		// The file vanished between read and write, or the fs cannot stat: leave the tmp's default
 		// mode rather than failing an edit that is otherwise sound.
 	}
-	fs.renameSync(tmp, path);
+	fs.renameSync(tmp, target);
 	return { changed: true };
 }
 
@@ -202,19 +244,34 @@ export function updateEnvFile(path, key, value, deps = {}) {
  * A commented line is not a value, and an empty or whitespace-only one is absent rather than `""`. Two
  * rules differ from the writers above, each on purpose. The LAST occurrence wins and an empty one counts,
  * because that is what `set -a; . ./.env` and `EnvironmentFile=` do, and this must report what the service
- * SEES rather than where a value belongs. And `export KEY=` is NOT read, because honouring a shell prefix
- * is a loader feature; missing a value here only costs a fuller warning, which is the safe direction,
- * while missing one in the writers would cost the operator's value itself.
+ * SEES rather than where a value belongs. And an `export`-prefixed line is recognised as an assignment but
+ * its value is never taken, because the consumers disagree about that prefix: the wrapper scripts honour
+ * it and systemd's `EnvironmentFile=` does not. Recognising it is what lets it CANCEL an earlier value,
+ * which is the safe direction; trusting it would let one consumer's reading be reported as the service's.
+ * `acceptExport` exists for the one caller that needs to tell "no assignment" from "an assignment only a
+ * wrapper would read", which is a different sentence to print rather than a different value to trust.
  */
-export function readEnvKeys(text, keys) {
+export function readEnvKeys(text, keys, { acceptExport = false } = {}) {
 	const want = new Set(keys);
 	const found = {};
 	for (const raw of String(text ?? "").split("\n")) {
 		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-		const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
+		const m = /^\s*(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
 		if (!m) continue;
-		const [, key, rest] = m;
+		const [, exported, key, rest] = m;
 		if (!want.has(key)) continue;
+		// An `export`-prefixed line is RECOGNISED and never TRUSTED, which is not a hedge: the three things
+		// that consume this file disagree about it. `set -a; . ./.env` in the wrapper scripts honours it,
+		// and systemd's `EnvironmentFile=` grammar is bare `VAR=VALUE`, so such a line sets nothing there.
+		// A value two consumers read and one does not must never be reported as "the service reads it".
+		// Recognising the LINE still matters, because ignoring it outright was worse than missing a value:
+		// with last-wins, `KEY=/old` followed by `export KEY=/new` would have reported `/old` as what the
+		// service reads, and a trailing `export KEY=` would have failed to cancel. Both now fall to absent,
+		// which is the direction that warns rather than reassures.
+		if (exported && !acceptExport) {
+			delete found[key];
+			continue;
+		}
 		// An inline comment comes OFF, or a caller comparing a path would compare it against the path plus a
 		// paragraph. The rule is the shell's, measured in sh, bash and zsh against every shape in this file:
 		// a `#` preceded by whitespace starts a comment, a `#` with nothing in front of it is part of the
@@ -222,7 +279,12 @@ export function readEnvKeys(text, keys) {
 		// than left as a rounding error: a quoted value holding ` #` is legal, the shells keep it whole, and
 		// truncating it would report a path this deployment does not use.
 		const trimmed = rest.trim();
-		const value = /^["']/.test(trimmed) ? trimmed : trimmed.replace(/\s#.*$/, "").trim();
+		// One matched surrounding pair comes off, and it has to come off BEFORE the empty test: the shells
+		// and `EnvironmentFile=` both read `KEY=""` as setting the key to nothing, so leaving the two quote
+		// characters in place would make an empty value look set and let a warning soften about a
+		// deployment where the feature really is off.
+		const unquoted = /^(["'])(.*)\1$/.exec(trimmed);
+		const value = unquoted ? unquoted[2] : trimmed.replace(/\s#.*$/, "").trim();
 		// The LAST occurrence wins, and an empty one counts as an occurrence, because that is what every
 		// actual consumer of this file does: `set -a; . ./.env` and `EnvironmentFile=` both take the last
 		// assignment. Taking the first instead would let this report a value the service never sees, and on
