@@ -190,18 +190,35 @@ const SWEEPABLE_CONTAINER_STATES = new Set(["exited", "dead"]);
 
 /**
  * Whether `docker ps -a`'s output holds a container of OURS for `id` in a state that is not finished.
- * `--filter name=` is a substring match here exactly as it is for networks, so an operator's own
- * `my-pi-sandbox-notes` comes back from a filter on `pi-sandbox-notes` and must never be sliced into the id
- * vocabulary: the comparison is against the whole name the producer builds.
+ * `--filter name=` is as loose here as it is for networks, so an operator's own `my-pi-sandbox-notes` comes
+ * back from a filter on `pi-sandbox-notes` and must never be sliced into the id vocabulary: the comparison
+ * is against the whole name the producer builds.
  */
 function containerHolds(stdout, id) {
 	const mine = `${SANDBOX_NAME_PREFIX}${id}`;
 	for (const line of String(stdout ?? "").split("\n")) {
 		const [name, state] = line.trim().split("\t");
+		// WHOLE name, never a prefix. `--filter name=` is not even a substring match, it is an UNANCHORED
+		// REGEX (measured: `name=pi-sandbox-a.c` returns `pi-sandbox-abc`, and `sanitizeJobId` permits `.`),
+		// so on this daemon `name=pi-sandbox-abc` comes back with an operator's `my-pi-sandbox-abc` AND with
+		// another run's `pi-sandbox-abcdef`, which is not an invented id shape (`gh-1` beside `gh-12` collides
+		// exactly so). Comparing the whole name the producer builds is what makes all of that harmless.
 		if (name !== mine) continue;
-		if (!SWEEPABLE_CONTAINER_STATES.has(String(state ?? "").trim())) return true;
+		// Lowercased for the reason `networkAbsentInDaemonWords` is case-insensitive: this reads ANOTHER
+		// tool's rendering, and a runtime that capitalised it would hold every leftover back forever.
+		if (!SWEEPABLE_CONTAINER_STATES.has(String(state ?? "").trim().toLowerCase())) return true;
 	}
 	return false;
+}
+
+/**
+ * The default `retained`, and it THROWS rather than answering "nothing is retained". Its sibling default in
+ * `sandbox-store.mjs` can be a no-op because a missing sweeper means no sweep, which is safe; a missing
+ * directory listing means a sweep that ignores every retained run, which is the #277 harm with no log line.
+ * A caller that has no listing to give must say so by handing in `() => []`.
+ */
+function missingRetained() {
+	throw new Error("sweepSandboxNetworks: `retained` is required, and an empty listing must be passed deliberately");
 }
 
 /**
@@ -232,7 +249,7 @@ function containerHolds(stdout, id) {
  * pure-ish function over its runner.
  */
 export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
-	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = () => [] } = {}) {
+	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained } = {}) {
 		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
 		// accident of writing: a network is created BEFORE the container that joins it and AFTER the directory
 		// that made the open legal, so evidence read before this listing can be older than the thing it is
@@ -291,7 +308,9 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 			// rather than of the whole pass.
 			const held = await run(["ps", "-a", "--filter", `name=${SANDBOX_NAME_PREFIX}${id}`, "--format", "{{.Names}}\t{{.State}}"]);
 			if (held?.code !== 0) {
-				notes.push({ network: name, reason: "unreadable" });
+				// Its own token: the two failed reads here have different causes and different fixes, and an
+				// operator grepping the log should not have to guess which one did not answer.
+				notes.push({ network: name, reason: "containers-unreadable" });
 				continue;
 			}
 			// Only a FINISHED container frees the network: `--rm` means an exited sandbox is normally gone

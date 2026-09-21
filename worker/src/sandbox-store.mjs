@@ -237,8 +237,11 @@ export function makeSandboxReaper({
 			// to the network sweep below (issue #337): a host whose sandbox root was never created or was
 			// removed by hand is exactly the host most likely to be holding orphaned `pi-sandbox-` networks,
 			// and skipping there would mean the sweep never fires on it at all. It is also safe rather than
-			// merely convenient: with no root, `resolveSandbox` refuses EVERY run, so no open can be in
-			// flight for the sweep to race. Any other error (a permission wall, an I/O fault) is a read that
+			// merely convenient: with no root, `resolveSandbox` refuses every run that resolves the SAME
+			// root, so no open can be in flight for the sweep to race. An opener computing a DIFFERENT
+			// root (its own environment, which `docs/sandbox.md` says routinely differs) is the residual,
+			// and it is bounded: the next open just creates the network again, and one in flight is still
+			// held by the sweeper's own container look. Any other error (a permission wall, an I/O fault) is a read that
 			// failed and still skips the pass.
 			if (err?.code !== "ENOENT") {
 				log("sandbox_reaper_skipped", { reason: err?.message });

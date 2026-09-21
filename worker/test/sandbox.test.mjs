@@ -552,7 +552,7 @@ test("the sweep takes only a session network whose run is neither running nor re
 			"pi-sandbox-x-net-backup": ["someone-elses-app"],
 		},
 	});
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(["live"]), keep: new Set(["retained", "live"]) });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(["live"]), keep: new Set(["retained", "live"]), retained: () => [] });
 	assert.deepEqual(out.swept, [{ network: "pi-sandbox-gone-net", detached: ["pi-dispatch-egress-proxy"] }]);
 	assert.ok(d.state.has("pi-sandbox-retained-net") && d.state.has("pi-sandbox-live-net"), "a retained run and a live shell keep theirs");
 	const foreign = { "pi-job-someones-net": ["a-job"], "my-pi-sandbox-notes": ["someone-elses-app"], "my-pi-sandbox-notes-net": ["someone-elses-app"], "pi-sandbox-x-net-backup": ["someone-elses-app"] };
@@ -568,7 +568,7 @@ test("a session container attached blocks the DETACH, not just the removal (#337
 	// survived would pass on docker's refusal alone. The harm issue #277 withdrew a fix for is stripping the
 	// proxy off a live session, so what must be asserted is that NO disconnect is issued.
 	const d = fakeNetDaemon({ nets: { "pi-sandbox-open-net": ["pi-sandbox-open", "pi-dispatch-egress-proxy"] } });
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set() });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set(), retained: () => [] });
 	assert.deepEqual(out.swept, []);
 	assert.deepEqual(out.notes, [{ network: "pi-sandbox-open-net", reason: "sandbox-attached" }]);
 	assert.ok(!d.calls.some((c) => c.startsWith("network disconnect")), "the proxy is never stripped off a session that may be open");
@@ -577,18 +577,18 @@ test("a session container attached blocks the DETACH, not just the removal (#337
 
 test("a network that will not go is a note, one already gone is silent (#337)", async () => {
 	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [] }, fail: { "network rm": "Cannot connect to the Docker daemon", "network inspect": "Cannot connect to the Docker daemon" } });
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({});
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => [] });
 	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "unreadable" }]);
 
 	const gone = fakeNetDaemon({ nets: {} });
-	const empty = await makeSandboxNetworkSweeper({ run: gone.run })({});
+	const empty = await makeSandboxNetworkSweeper({ run: gone.run })({ retained: () => [] });
 	assert.deepEqual(empty, { swept: [], notes: [] }, "no leftovers, nothing to say");
 
 	// A look that did not answer is the sweep's own fault, so it comes back as `failed` rather than as a
 	// note about a network nobody saw. The reaper logs the two under different names deliberately
 	// (`OQ-007`), so a note here would put a fault into the per-network vocabulary.
 	const listFailed = fakeNetDaemon({ nets: {}, fail: { "network ls": "daemon down" } });
-	const failed = await makeSandboxNetworkSweeper({ run: listFailed.run })({});
+	const failed = await makeSandboxNetworkSweeper({ run: listFailed.run })({ retained: () => [] });
 	assert.deepEqual(failed, { swept: [], notes: [], failed: "network-list-failed" }, "a failed look must not read as 'there are none'");
 });
 
@@ -621,12 +621,25 @@ test("a sandbox being LAUNCHED keeps its network, which no other guard here can 
 	// is a substring match on this call too, and slicing the prefix off `my-pi-sandbox-notes` yields the
 	// garbage id `ox-notes`, which would shield some other run's network from ever being swept.
 	const d = fakeNetDaemon({
-		nets: { "pi-sandbox-opening-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-ox-notes-net": ["pi-dispatch-egress-proxy"] },
-		containers: { "pi-sandbox-opening": "created", "my-pi-sandbox-notes": "created" },
+		nets: { "pi-sandbox-opening-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-ox-notes-net": ["pi-dispatch-egress-proxy"], "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] },
+		// Three containers, and only the first is a reason to keep anything. `my-pi-sandbox-notes` is the
+		// noise on the LEFT that a filter on `pi-sandbox-ox-notes` would not even return; `pi-sandbox-abcdef`
+		// is the noise on the RIGHT, which it does: measured, `--filter name=pi-sandbox-a` comes back with
+		// every id that merely starts with `a`, and `gh-1` beside `gh-12` is that shape in real job ids. A
+		// prefix comparison instead of a whole-name one lets one run's container shield another run's network
+		// for as long as it exists.
+		containers: { "pi-sandbox-opening": "created", "my-pi-sandbox-notes": "created", "pi-sandbox-abcdef": "created" },
 	});
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set() });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set(), retained: () => [] });
 	assert.deepEqual(out.notes, [{ network: "pi-sandbox-opening-net", reason: "sandbox-present" }], "a launch in flight is not a leftover, and unlike a retained run it is SAID");
-	assert.deepEqual(out.swept, [{ network: "pi-sandbox-ox-notes-net", detached: ["pi-dispatch-egress-proxy"] }], "and a foreign container name shields nothing");
+	assert.deepEqual(
+		out.swept,
+		[
+			{ network: "pi-sandbox-ox-notes-net", detached: ["pi-dispatch-egress-proxy"] },
+			{ network: "pi-sandbox-a-net", detached: ["pi-dispatch-egress-proxy"] },
+		],
+		"and neither a foreign container name nor another run's longer id shields a network",
+	);
 	assert.ok(!d.calls.some((c) => /^network (disconnect|rm)\b/.test(c) && c.includes("pi-sandbox-opening-net")), "nothing is taken off the launching one");
 	assert.deepEqual(d.state.get("pi-sandbox-opening-net"), ["pi-dispatch-egress-proxy"], "the proxy stays where the launch expects it");
 	// The order is the finding it came from: this look must be the LAST call before the removal, not the
@@ -640,9 +653,14 @@ test("a sandbox being LAUNCHED keeps its network, which no other guard here can 
 test("only a FINISHED container frees a session network, and an unknown state never does (#337)", async () => {
 	// An allowlist, so a state a future daemon adds is hands off by default. `--rm` means an exited sandbox is
 	// normally gone already, so one still listed is abnormal and its network is a leftover either way.
-	for (const [state, swept] of [["exited", true], ["dead", true], ["created", false], ["running", false], ["paused", false], ["restarting", false], ["hibernating", false]]) {
+	// The capitalised pair are here because this parses ANOTHER tool's rendering, which is why the sibling
+	// classifier `networkAbsentInDaemonWords` is case-insensitive too. Docker renders `{{.State}}` lowercase
+	// (measured, and note it is `.State` rather than `.Status`, which would render "Exited (0) 2 minutes ago"
+	// and match nothing, holding every leftover back forever); a runtime that does not is not a reason to
+	// leak a network.
+	for (const [state, swept] of [["exited", true], ["dead", true], ["Exited", true], ["DEAD", true], ["created", false], ["running", false], ["paused", false], ["restarting", false], ["hibernating", false]]) {
 		const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [] }, containers: { "pi-sandbox-a": state } });
-		const out = await makeSandboxNetworkSweeper({ run: d.run })({});
+		const out = await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => [] });
 		assert.equal(out.swept.length, swept ? 1 : 0, state);
 		assert.deepEqual(out.notes, swept ? [] : [{ network: "pi-sandbox-a-net", reason: "sandbox-present" }], state);
 	}
@@ -653,8 +671,10 @@ test("a container look that did not answer leaves THAT network alone, and says s
 	// of the look is that nothing else on the daemon reports that state. One network's unreadable answer is
 	// not a reason to abandon the others, which is why it is a note rather than a `failed`.
 	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [] }, fail: { "ps -a": "Cannot connect to the Docker daemon" } });
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({});
-	assert.deepEqual(out, { swept: [], notes: [{ network: "pi-sandbox-a-net", reason: "unreadable" }] });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => [] });
+	// Its own token, not the network inspect's: the two reads fail for different reasons and are fixed
+	// differently, and an operator grepping the log should not have to guess which one went quiet.
+	assert.deepEqual(out, { swept: [], notes: [{ network: "pi-sandbox-a-net", reason: "containers-unreadable" }] });
 	assert.ok(!d.calls.some((c) => c.startsWith("network rm")), "and nothing is removed on an answer we did not get");
 });
 
@@ -679,6 +699,15 @@ test("the retained listing is read by the SWEEPER, after its candidates, and a t
 	);
 });
 
+test("a caller with no retained listing has to SAY so, rather than get the unsafe answer (#337)", async () => {
+	// The sibling default in `sandbox-store.mjs` can be a no-op, because a missing sweeper means no sweep and
+	// that is safe. A missing directory listing means a sweep that ignores every retained run, which is the
+	// #277 harm with no log line, so the default here throws instead of answering "nothing is retained".
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] } });
+	await assert.rejects(makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set() }), /retained/);
+	assert.deepEqual(d.state.get("pi-sandbox-a-net"), ["pi-dispatch-egress-proxy"], "and nothing was touched on the way to finding out");
+});
+
 test("the sweep yields between networks, so it is never one uninterruptible block (#337)", async () => {
 	// `retention-sweep.mjs` records why this matters and `retention-sweep.test.mjs` pins the sibling yield
 	// the same way: this loop runs on a timer beside draining jobs, `index.mjs` runs with
@@ -691,7 +720,7 @@ test("the sweep yields between networks, so it is never one uninterruptible bloc
 		if (args[0] === "network" && args[1] === "rm") order.push(args.at(-1));
 		return out;
 	};
-	const sweeping = makeSandboxNetworkSweeper({ run })({});
+	const sweeping = makeSandboxNetworkSweeper({ run })({ retained: () => [] });
 	setImmediate(() => order.push("<loop got a turn>"));
 	await sweeping;
 	assert.deepEqual(order, ["pi-sandbox-a-net", "<loop got a turn>", "pi-sandbox-b-net"], "the event loop runs between networks, not only after all of them");
@@ -703,7 +732,7 @@ test("a shell that is OPEN keeps its network even with no retained directory lef
 	// session whose folder went another way, is running and NOT kept. Stripping the proxy off that session is
 	// exactly the #277 harm, so the liveness answer has to stand on its own.
 	const d = fakeNetDaemon({ nets: { "pi-sandbox-orphaned-net": ["pi-dispatch-egress-proxy"] } });
-	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(["orphaned"]), keep: new Set() });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(["orphaned"]), keep: new Set(), retained: () => [] });
 	assert.deepEqual(out, { swept: [], notes: [] }, "nothing swept and nothing to report");
 	assert.ok(!d.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), "and it is not even inspected");
 	assert.deepEqual(d.state.get("pi-sandbox-orphaned-net"), ["pi-dispatch-egress-proxy"]);
