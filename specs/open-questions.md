@@ -1403,6 +1403,31 @@ adversarial passes did.
   owns the job dirs), or rootless isolation that keeps a non-root container uid mapped to a dedicated host uid
   (Podman keep-id through a native `podman` backend). Neither is built.
 
+## OQ-037: Podman and the other daemons beyond the rootful Docker API route
+
+- **Status**: **OPEN** (issue #345).
+- **Position**: rootful Podman through its Docker API is supported and measured (`DES-PODMAN-THROUGH-ITS-DOCKER-API`).
+  What is not settled, each with what would close it:
+  - **Rootless Podman.** Refused, because the only uid that can use the job's `0700` directories there is container
+    root. `--userns=keep-id` would map the worker's uid into the container and does work through the podman CLI
+    (measured), but the docker CLI refuses the flag and a containers.conf `userns = "keep-id"` is invisible in
+    `docker info`. *Closes when* a native `podman` backend passes `--userns=keep-id` per container and its
+    conformance harness reads the job user back (issue #354 carries the measurements).
+  - **SELinux in enforcing mode, netavark's nftables firewall driver, and health checks under systemd.** Unmeasured
+    together (issue #355), because each needs a real host rather than a nested lab: a bind mount without a `:z` or
+    `:Z` label may be unreadable in the container; the lab's kernel refuses netavark's nft rules, so every network
+    reading here is from the iptables driver; and with no systemd a container's health check never runs on its own,
+    so the proxy's status stays `starting` until `podman healthcheck run` is asked for by hand. *Closes when* each is
+    measured on an enforcing Fedora or RHEL host with systemd, with the argv changed if it must be.
+  - **`podman machine` and Podman Desktop** on macOS and Windows. Unmeasured: the daemon runs in a VM and the bind
+    sources are the host's, as on Docker Desktop, but whether ownership is mapped is not known. *Closes when*
+    measured with `doctor --live` on each.
+  - **OrbStack and Colima.** Unmeasured VM-backed daemons that the job-user decision treats like Docker Desktop.
+    *Closes when* measured with `doctor --live`.
+- **What bounds it meanwhile**: an unmeasured daemon still gets every refusal the facts support, the runner's `/job`
+  check stops a job whose inputs are unreadable before it spends, and `doctor --live` reads the declarations back on
+  request.
+
 ## Revision History
 
 | Date | Change |
@@ -1462,3 +1487,4 @@ adversarial passes did.
 | 2026-09-14 | Issue #341, part 2. **NEW `OQ-036`** (ACCEPTED RISK, wants ratification): a job run as the worker's own uid has the worker's reach if it escapes. The row records that files it creates carry the worker's uid and group (setuid and setgid included), that the worker's `0600` files in a mounted folder become readable, that rootless daemons are refused (keep-id Podman included, since it reads like plain rootless), and that rootful Podman's default subscription mounts reach every job without an empty mounts.conf; plus the bounds (dedicated account, root worker refused, the gid rows, nothing trigger-settable moves the uid) and what would close it. **`OQ-012` UNCHANGED, checked**: its `anyUid` bullet from part 1 now has a reader, and the status stays. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
 | 2026-09-15 | Issue #344. **`OQ-012` AMENDED**, one sentence: the read-back now covers `ephemeral` and, with the egress policy armed, `jobToJobIsolation`, off short-lived containers rather than one. Its limits (not a gate, `PI_JOB_IMAGE` only, not the image's contents, not a remote venue) and the status are UNCHANGED, checked. |
 | 2026-09-15 | Issue #345. **`OQ-036` AMENDED**, one sentence under its Podman subscription-mounts bullet: the risk is now observed (`runtimeAddsNoMounts` degrades `mountSet`, a floor refuses, `doctor --live` reads mountinfo) rather than only documented. Its status and every other bullet are UNCHANGED, checked. |
+| 2026-09-21 | Issue #345, the Podman route. **NEW `OQ-037`** (OPEN): rootless Podman (closes with a native `podman` backend using keep-id, issue #354); SELinux enforcing, netavark's nftables driver and systemd health checks, which need a real host (issue #355); `podman machine` and Podman Desktop; OrbStack and Colima. Each carries its close condition, and the entry states what bounds them meanwhile. |

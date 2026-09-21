@@ -2930,6 +2930,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   while it can reach the proxy, and that the second answers its own addresses before and after the attempt
   (`INT-LIVE-PROBE-CONTRACT`), so the adjacency this entry removes is read back on the
   operator's own daemon, Podman's netavark included, rather than assumed from the Docker measurement.
+- **Residual, measured rather than reasoned (issue #345)**: `--internal` bounds where the network routes, not who
+  the host is. The network's gateway IS this host, so a service listening on `0.0.0.0` here answers a job that
+  dials the gateway address, while one bound to `127.0.0.1` does not. Measured on Docker 27.5.1 and rootful Podman
+  5.8.2 with the job path's own `createJobNetworkWith` and the builder's argv: `0.0.0.0:9999` answered from inside
+  a job, `127.0.0.1:9997` and an unused port both gave `ECONNREFUSED`. The loopback binding is what bounds it, which
+  is why `deploy/docker-compose.yml` publishes Valkey on `127.0.0.1` and why `docs/egress.md` now says so where it
+  used to say "no route anywhere except an allowlist proxy". The `DOCKER-USER` appendix is the layer that would
+  close it, and shipping that recipe as code is already Rejected above.
 - **Traces to**: `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
@@ -3169,7 +3177,8 @@ a tunnel.
 - **Decision** (issue #227): where a job's container is built is a NAMED backend, declared in a table
   (`worker/src/backends.mjs`) that is separate from the code implementing it (`worker/src/backend-local.mjs`).
   Today there is exactly one, `local`, the Docker daemon on the worker's own host, which is what every
-  deployment has always run. The table exists so a second can be added without reading the worker's source,
+  deployment has always run. Rootful Podman reached through its Docker API is that same `local` venue, not a second
+  backend (`DES-PODMAN-THROUGH-ITS-DOCKER-API`). The table exists so a second can be added without reading the worker's source,
   and so that adding one cannot quietly weaken a control.
 - **Why the table declares and does not construct**: the obvious shape is one entry per backend carrying its
   own `make()`, and it cannot work. `backends.mjs` imports NOTHING on purpose, because `doctor`, the config
@@ -4008,6 +4017,74 @@ a tunnel.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
   `DES-WORKER-ON-HOST`, `DES-CONTAINER-BACKEND-REGISTRY`, `OQ-012`
 
+## DES-PODMAN-THROUGH-ITS-DOCKER-API
+
+- **Decision** (issue #345): Podman is supported as the `local` backend's daemon when it is ROOTFUL and reached
+  through its Docker API by the real docker CLI, preferably through a docker context. Rootless Podman is refused by
+  name (the job-user rules' `rootless`), and `podman-docker`, Podman's own emulation of the `docker` command, runs
+  jobs but is not a supported route. There is no `podman` entry in the backend table: the same adapter, argv and
+  verdicts serve both daemons, and what differs is observed, not declared (`runtime-observations.mjs`).
+  `docs/podman.md` is the operator page, with a property table bolted to the backend table.
+- **Why**: the issue asked to measure first, land the supported route, and never run a job with less than the table
+  says. Measured in nested labs (Podman 5.8.2 with netavark 1.17.2, aardvark-dns 1.17.1, crun 1.27.1 and conmon
+  2.2.1 on Fedora 42; Docker Engine 27.5.1 as the reference):
+  - **The job argv runs unchanged.** Every isolation flag applies: `pids.max` 512 and `memory.max` 4 GiB in a job
+    container, a 700-child fork run capped at the bound (504 spawned), a memory hog past a hand-set 64 MiB killed with
+    137; `CapBnd` 0, `NoNewPrivs` 1; PID 1 is `/run/podman-init`. `--rm` removes a quick exit within about 150 ms
+    (`doctor --live` watched eight of them go in 121 to 147 ms), the name is reusable as soon as it is gone, ten
+    back-to-back runs under one name never conflict, and `rm -f` of a removed ID exits 0.
+  - **The job user decides the same way.** `docker info` through the compat socket gives a Docker-shaped body with
+    `ProductLicense: "Apache-2.0"` (hard-coded since Podman v2), and rootful Podman decides `worker` mode; every job
+    mount works as `--user=<worker uid>` with `HOME=/home/pi` (a uid without it gets `HOME=/workspace`, which would put
+    `auth.json` in the repo).
+  - **Networks hold.** `--internal` networks, the proxy by name through aardvark, an external name refused at once
+    (`ENOTFOUND`, where Docker gives `EAI_AGAIN`), a peer on another job network unreachable by name and by address.
+    `doctor --live` reads `ephemeral` and `jobToJobIsolation` back there.
+  - **Three differences, each handled rather than assumed away.** The bounds booleans in `docker info` are
+    hard-coded, so `isolation` gets no credit (`daemonAppliesBounds`); `/run/secrets` is mounted into every container
+    from the default `mounts.conf` and `.Mounts` does not show it, so `mountSet` is credited only with the empty
+    override and read back from mountinfo (`runtimeAddsNoMounts`); and a lost API service leaves a container running
+    while the CLI exits 125, so the run's cidfile finds and stops it (`container-detached`).
+  - **The compose file's egress profile** (Valkey and the squid proxy) runs unchanged through the real docker CLI.
+- **Rejected**:
+  - **`podman-docker` as a supported route.** It resolves no docker context, so the endpoint observation that gates
+    `credentialTransit` never holds and `doctor --live` never runs; it prints a banner on stderr that a merged parser
+    misreads (doctor's parsers now read stdout only); and it renders Podman's own `docker info` shape. Named by
+    doctor as a warning with the context fix.
+  - **A native `podman` backend with `--userns=keep-id` this round** (Route C). It is the only way rootless Podman can
+    serve a non-root job that owns its files (measured: keep-id through the podman CLI works), but it is a second
+    adapter with its own argv, reaper and read-back, and nothing it adds is needed for rootful Podman. Filed as
+    issue #354 with the measurements.
+  - **A `podman` table entry declaring the same words as `local`**: two names for one adapter would be two claims to
+    keep true, and the differences above are facts about a host, which observations already carry.
+  - **World-readable job directories so a rootless user namespace can read them**: every job's inputs, and its
+    session transcript, would be readable to every host user (`CONST-ISOLATION-CONTAINER-PER-JOB`).
+  - **`--user=0` under rootless Podman** (container root maps to the worker's uid there): `nonRoot` forbids it, and
+    the image's guardrails do not bind a root agent.
+  - **A boot probe container to tell keep-id apart from plain rootless** (`userns = "keep-id"` in containers.conf
+    changes nothing `docker info` shows): `CONST-ISOLATION-CONTAINER-PER-JOB` rejects probing at boot or per job.
+- **Residuals**:
+  - SELinux in enforcing mode, netavark's nftables driver, systemd-run health checks, `podman machine`, Podman
+    Desktop, OrbStack and Colima are unmeasured (`OQ-037`; issues #354 and #355 carry what would close each).
+  - On Podman's attached path a container that cannot start arrives as exit 1 rather than 126 or 127 (measured for a
+    missing and a non-executable entrypoint, with and without `--init`: `--init` only changes the message from
+    `unable to upgrade to tcp, received 500` to catatonit's), so it is retried as an infrastructure failure rather
+    than refunded as never-started.
+  - Podman schedules health checks with a transient systemd timer, which a host without systemd never runs (measured:
+    a compose Valkey six days up reports `starting` with an empty log, while the proxy beside it reports `healthy`
+    off one hand-run check). doctor prints the stored status, so there it is the last answer rather than a live one.
+    The worker's egress gate reads only `Running`, so no job is refused for it (issue #355).
+  - A rootful Podman with `userns = "auto"` never reports `name=userns` (its compat info lists apparmor, seccomp,
+    rootless and selinux only), so it decides `worker` and every job stops at the runner's `/job` check
+    (`job-inputs-unreadable`, exit 2) before any provider spend. That container ran, so the job keeps the budget slot
+    it reserved: nothing refunds it.
+- **Code evidence**: `worker/src/runtime-observations.mjs` -> `observeBounds`, `observeRuntimeMounts`,
+  `podmanOnThisHost`; `worker/src/job-user.mjs` -> `parseDaemonFacts` (`PODMAN_PRODUCT_LICENSE`);
+  `worker/src/run-container.mjs` -> `stopDetached`; `worker/src/doctor.mjs` -> the runtime line;
+  `worker/src/live-probes.mjs` -> `MOUNTINFO_ALLOWED_EXACT`; `docs/podman.md`; `worker/test/podman-doc.test.mjs`
+- **Traces to**: `DES-CONTAINER-BACKEND-REGISTRY`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`, `OQ-036`, `OQ-037`
+
 ## Revision History
 
 | Date | Change |
@@ -4123,3 +4200,4 @@ a tunnel.
 | 2026-09-14 | Issue #341, part 3 (doctor, `doctor --live` and the CI step). **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**: how a wrong inference surfaces now names what reads the decision back. Plain `doctor` names it for its own shell, failing only where the worker would refuse to boot and warning where a system unit runs the worker as another account. `doctor --live` probes as that user in a job's modes, checks the host owner and reads PID 1's uid back. A required CI step runs the real modules and runner as uid 1234 with negative controls. Code evidence gains the doctor, live-probe, service and script symbols. **`CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked**: the probe is still built by the job builder with no `-e`, its fixture directories are still created empty, and what runs inside is still two constant scripts; `--user` is not an environment. **`DES-CLI-SURFACE` UNCHANGED, checked**: `doctor` adds lines and no mutation. |
 | 2026-09-15 | Issue #344. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: the counts become three verified by the harness, eight read back off live containers and two unverified, and a bullet records the `ephemeral` and `jobToJobIsolation` read-backs (two runs under one name watched until gone; two peers on their own job networks, a block counting only with the proxy reached and the listener proven) with ten Rejected entries. **`DES-CLI-SURFACE` AMENDED**: `doctor --live` starts short-lived containers and, armed, two peer networks, all named first and removed. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one bullet: the per-job adjacency it removes is now read back, on Podman too. **`CONST-EGRESS-POLICY-IN-THE-ARGV` and `REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: no job argv, network or policy changes; the job path's network functions delegate to the new runner-agnostic forms with identical commands. |
 | 2026-09-15 | Issue #345, runtime observations. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**: two bullets. `isolation` and `mountSet` join `credentialTransit` as observation-gated words (`daemonAppliesBounds`, `runtimeAddsNoMounts`), from the job user's cached `docker info` read and this host's Podman files, `null` when unanswered, each with its own remedy and forge comment; five Rejected entries (CpuCfsQuota, Podman's booleans, a per-job subscription-mount refusal, a second daemon call, skipping macOS and Windows). A detached container (a never-started exit whose own container runs on, measured on Podman) fails as `container-detached`, unrefunded, found through the job argv's `--cidfile`; three Rejected entries (an exact-name lookup, `docker inspect` for presence, a refund) and two residuals. **`DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` AMENDED**, two sentences under rule 1: the daemon is read on every platform and endpoint for the observations, and only an answered read is cached. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: the observation gate still runs before the image preflight and any reservation. |
+| 2026-09-21 | Issue #345, the Podman route. **NEW `DES-PODMAN-THROUGH-ITS-DOCKER-API`**: rootful Podman through its Docker API, by the real docker CLI through a docker context, is the supported Podman route and the same `local` venue; rootless Podman is refused by name, and `podman-docker` runs but is not supported. The Why lists the measurements (the argv, the job user, networks, the three handled differences, compose). Six Rejected entries: podman-docker as supported, a native `podman` backend this round (filed as issue #354), a `podman` table entry, world-readable job dirs, `--user=0` under rootless, a boot probe for keep-id. Four residuals: the unmeasured hosts and drivers (`OQ-037`, issues #354 and #355), exit 1 from Podman's own init, health checks that need a systemd timer, and `userns = "auto"`, whose jobs stop at the runner's `/job` check with the budget slot spent. **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, one sentence: Podman is the `local` venue, cross-referenced. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, one residual, measured on both runtimes while verifying the Podman page: an `--internal` network's gateway is the host, so a host service bound to `0.0.0.0` answers a job container and one bound to `127.0.0.1` does not; `docs/egress.md` said "no route anywhere except an allowlist proxy" and now says what was measured. |

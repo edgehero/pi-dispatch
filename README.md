@@ -67,8 +67,8 @@ that actually changes what all of this costs:
 
 ## Quickstart
 
-You need **Docker**, **Node 22.19 or newer**, and a provider API key (Anthropic, OpenAI, and about 30
-others).
+You need **Docker** (or rootful Podman, [`docs/podman.md`](docs/podman.md)), **Node 22.19 or newer**, and a
+provider API key (Anthropic, OpenAI, and about 30 others).
 
 ### From pi (the default route)
 
@@ -480,7 +480,7 @@ are yours to list and nothing here can know what your own flows reach, so read
 (subagent sessions included),
 and the per-job token budget is enforced against that same total. Where that container gets built is a
 named backend, and what each one guarantees is declared rather than assumed:
-[`docs/backends.md`](docs/backends.md) is the contract, `pi-dispatch doctor` prints the declaration, and `pi-dispatch doctor --live` reads eight of those properties back off short-lived real containers on this host.
+[`docs/backends.md`](docs/backends.md) is the contract, `pi-dispatch doctor` prints the declaration, and `pi-dispatch doctor --live` reads eight of those properties back off short-lived real containers on this host. Rootful Podman works through its Docker API, and [`docs/podman.md`](docs/podman.md) says what it gets.
 
 ### What is inside the container while a job runs
 

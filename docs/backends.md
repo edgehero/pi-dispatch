@@ -88,7 +88,7 @@ operator nothing to go and check, and `pi-dispatch doctor` prints the source bes
 `isolation`, `ephemeral`, `mountSet`, `egress`, `jobToJobIsolation`, `imagePinning`, `exitCodes`,
 `abortable`, `readOnlyJobInputs`, `nonRoot`, `secretsCustody`, `credentialTransit`, `localFolders`.
 
-Each carries the question an operator is actually asking; read them in `worker/src/backends.mjs`. Two are
+Each carries the question an operator is actually asking; read them in `worker/src/backends.mjs`. Six are
 worth calling out because they are the ones adapters get wrong:
 
 - **`egress` and `jobToJobIsolation` carry `armedBy: "PI_EGRESS"`.** A declaration is a **capability**, not a
@@ -100,6 +100,8 @@ worth calling out because they are the ones adapters get wrong:
   elsewhere it counts as `asserted`, by you, and doctor says so. The table entry says this with
   `observedBy: { credentialTransit: "dockerEndpointLocal" }`. That observation is a fact about this host's
   docker CLI, so an entry for a remote venue leaves `observedBy` out and declares its own word.
+- **Podman**: rootful Podman through its Docker API is the `local` backend, with the differences
+  [`docs/podman.md`](podman.md) measures. Rootless Podman is refused.
 - **`local`'s `isolation` and `mountSet` are `enforced` only while observed too** (issue #345). `isolation` needs
   the daemon to report that it applies pid and memory bounds, and to be neither rootless nor Podman, whose Docker
   API reports those booleans whether or not they apply (`daemonAppliesBounds`). `mountSet` needs the runtime to add

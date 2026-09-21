@@ -5,8 +5,8 @@ open an issue against. For a year it also had the whole internet in front of it,
 plainly.
 
 Not any more. Egress is **denied by default**: every job runs on **its own
-`--internal` Docker network** with no route anywhere except an allowlist proxy, and a job whose policy
-cannot serve it is **refused before it costs anything**.
+`--internal` Docker network** whose only other member is an allowlist proxy, with no route off this host,
+and a job whose policy cannot serve it is **refused before it costs anything**.
 
 What you have to do, once:
 
@@ -147,6 +147,14 @@ It also accounts for nothing. A staged package that spawns a `pi` subprocess spe
 host, which is on the allowlist by necessity, and a proxy that does not decrypt cannot count tokens
 (`OQ-011`).
 
+And it does not hide **this host** from the job. `--internal` stops the network routing anywhere beyond
+itself, but its gateway is still the host, so a service listening on `0.0.0.0` there answers a job container
+that dials the gateway address. Measured on Docker 27.5.1 and on rootful Podman 5.8.2 alike: a listener on
+`0.0.0.0:9999` answered from inside a job, while one bound to `127.0.0.1` gave `ECONNREFUSED`, as did a port
+with nothing behind it. That loopback binding, not `--internal`, is what keeps a job out of your queue, which
+is why `deploy/docker-compose.yml` publishes Valkey on `127.0.0.1:6379` and never on `0.0.0.0`. Bind your own
+host services the same way, or put the firewall layer in the appendix below them.
+
 ## How this was verified
 
 All of it was run. The method costs nothing and is worth repeating on your own host.
@@ -160,6 +168,14 @@ All of it was run. The method costs nothing and is worth repeating on your own h
 - **`enable_icc=false` blocks job-to-job traffic and also job-to-proxy traffic** — the reason this design is
   per-job networks rather than one shared one. Verified against a control network with ICC left at its
   default, where the same connection succeeds.
+- **The gateway is reachable from an `--internal` network, on both runtimes**, and a `0.0.0.0` host service with
+  it. See "What this does not buy you" above: measured with a listener on `0.0.0.0:9999` (answered) and one on
+  `127.0.0.1:9997` (`ECONNREFUSED`), on Docker 27.5.1 and rootful Podman 5.8.2.
+- **On rootful Podman 5.8.2** (netavark and aardvark-dns, issue #345) the same shape holds through its Docker API:
+  the compose profile starts the proxy unchanged, the proxy resolves by name from a job network, an external name
+  fails at once with `ENOTFOUND` where Docker gives `EAI_AGAIN` (aardvark answers NXDOMAIN for a source on an
+  internal network; both refusals were immediate in the lab, so this is a different error, not a faster one), and a
+  peer on another job network is unreachable by name and by address. See `docs/podman.md`.
 - **A denied host fails in about 20 ms, not on a DNS timeout**, because the client hands the name to the
   proxy in a `CONNECT` and never resolves it locally. An external name resolved *directly* from an internal
   network takes about 10 seconds to fail, which is the cost you would pay if a client bypassed the proxy.
