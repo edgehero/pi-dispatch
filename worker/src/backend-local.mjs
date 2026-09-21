@@ -24,7 +24,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { NETWORK_SUFFIX, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
@@ -179,6 +179,12 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * for containers that may still be running and let another host start more alongside them. That is a spend
  * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
  */
+/**
+ * A network THIS project made for a job: the exact shape the producer builds, derived from both constants.
+ * `docker`'s `--filter name=` is a substring match, so the listing alone is not a namespace (issue #357).
+ */
+const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.+${NETWORK_SUFFIX}$`);
+
 export function makeReaper({ log, exec = execDocker }) {
 	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both
 	// are load-bearing. It is the shape `networkEndpoints` and `removeNetworkOrSay` need -- the "not found" rule
@@ -232,10 +238,14 @@ export function makeReaper({ log, exec = execDocker }) {
 	return async function reap() {
 		try {
 			const { stdout } = await exec("docker", ["ps", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Names}}"]);
+			// ANCHORED, because `--filter name=` is a SUBSTRING match: it also returns an operator's own
+			// `my-pi-job-notes`, which this sweep would then `rm -f`. Measured on docker 27.4.0 by creating
+			// exactly that name and watching it come back in the listing. The filter stays as the cheap
+			// server-side narrowing; the namespace decision is made here, on the name, where a test can pin it.
 			const names = stdout
 				.split("\n")
 				.map((n) => n.trim())
-				.filter(Boolean);
+				.filter((n) => n.startsWith(JOB_NAME_PREFIX));
 			for (const name of names) {
 				await exec("docker", ["rm", "-f", name]);
 				log("reaped_container", { name });
@@ -248,7 +258,11 @@ export function makeReaper({ log, exec = execDocker }) {
 			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
 			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
-			for (const net of nets.split("\n").map((n) => n.trim()).filter(Boolean)) await reapNetwork(net);
+			// Same substring hazard, and worse here: this sweep DETACHES before it removes, so a foreign
+			// network that merely contains `pi-job-` would have its endpoints stripped. The shape is the one
+			// the producer builds (`networkNameFor(jobContainerName(id))`), derived from both constants rather
+			// than spelled again, so a rename cannot leave the sweep matching the old form.
+			for (const net of nets.split("\n").map((n) => n.trim()).filter((n) => JOB_NETWORK_SHAPE.test(n))) await reapNetwork(net);
 			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
 			// claim naming this host once this host has actually established that it holds no containers.
 			return { reaped: true };

@@ -353,3 +353,26 @@ test("nothing the reaper logs about a network carries the CLI's own text (#339, 
 	}
 	assert.ok(!JSON.stringify(lines).includes("ssh://"), "the CLI's text never reaches a log line");
 });
+
+test("the sweep's namespace is the NAME, not the filter: a foreign network is never touched (#357)", async () => {
+	// `docker network ls --filter name=pi-job-` is a SUBSTRING match. Measured on docker 27.4.0 by creating a
+	// network called `my-pi-job-notes` and watching it come back in that listing. Before the anchor it would
+	// have been inspected, had its endpoints DETACHED and then been removed, which is an operator's own object
+	// destroyed by a sweep that was only ever meant to own `pi-job-<id>-net`. The container half has the same
+	// hazard from the same filter and the same fix.
+	const { exec, calls, state } = fakeDockerExec({
+		containers: ["pi-job-mine", "my-pi-job-notes-runner"],
+		// The third and fourth cover the two anchors separately: one has the prefix in the MIDDLE, the other
+		// has our exact shape plus a SUFFIX, which is what a `-backup` or `-old` copy of a real name looks like.
+		nets: { "pi-job-mine-net": ["pi-dispatch-egress-proxy"], "my-pi-job-notes": ["someone-elses-app"], "robtest-staging-pi-job-queue-net": ["their-worker"], "pi-job-mine-net-backup": ["their-worker"] },
+	});
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	const touched = calls.join(" | ");
+	assert.ok(!touched.includes("my-pi-job-notes"), "a name that merely CONTAINS the prefix is not ours");
+	assert.ok(!touched.includes("robtest-staging"), "nor one that contains it in the middle");
+	assert.ok(!touched.includes("pi-job-mine-net-backup"), "nor our own shape with something appended");
+	assert.ok(state.has("my-pi-job-notes") && state.has("robtest-staging-pi-job-queue-net") && state.has("pi-job-mine-net-backup"), "every foreign network survives intact");
+	assert.deepEqual(state.get("my-pi-job-notes"), ["someone-elses-app"], "and keep every endpoint they had");
+	assert.deepEqual(lines, [["reaped_container", { name: "pi-job-mine" }], ["reaped_network", { network: "pi-job-mine-net", detached: ["pi-dispatch-egress-proxy"] }]], "only ours is swept");
+});
