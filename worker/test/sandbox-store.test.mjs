@@ -297,3 +297,121 @@ test("the sweep NEVER throws: a missing root, an unreadable entry, an unlink fai
 	// And with no root configured at all it is simply inert.
 	await makeSandboxReaper({ sandboxDir: null, retentionHours: 24, now: () => at })();
 });
+
+// --- the session networks the reaper now sweeps (issue #337) -----------------------------------------
+
+const AT = Date.parse("2026-08-02T00:00:00Z");
+const hoursAgo = (h) => new Date(AT - h * HOUR).toISOString();
+
+test("the network sweep is keyed on the listing the pass STARTED with, not on what survived it (#337)", async () => {
+	// Issue #277 withdrew removing a session network at OPEN time because two opens race. This sweep is a
+	// different mechanism, and this is the pin that keeps it one: an entry this pass EXPIRES must still be in
+	// `keep`, or an open that passed `resolveSandbox` while the directory existed loses its network between
+	// `createJobNetwork` and `launch` -- the same harm, reached the long way round.
+	const seen = [];
+	const fs = sandboxDirWith({ old: { createdAt: hoursAgo(50) }, fresh: { createdAt: hoursAgo(1) } });
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => {
+			seen.push({ running: [...arg.running].sort(), keep: [...arg.keep].sort() });
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.deepEqual(fs.calls.removed, ["/sbx/old"], "the expired directory is still removed");
+	assert.deepEqual(seen, [{ running: [], keep: ["fresh", "old"] }], "and its id is STILL in keep");
+});
+
+test("a RUNNING sandbox reaches the network sweep through both sets (#337)", async () => {
+	const seen = [];
+	const fs = sandboxDirWith({ live: { createdAt: hoursAgo(50) } });
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		listRunning: async () => ["live"],
+		sweepNetworks: async (arg) => {
+			seen.push({ running: [...arg.running], keep: [...arg.keep] });
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.deepEqual(seen, [{ running: ["live"], keep: ["live"] }], "a shell an operator is in is protected twice over");
+});
+
+test("a docker lookup that FAILS skips the network sweep too, not just the directories (#337)", async () => {
+	let called = false;
+	const fs = sandboxDirWith({ old: { createdAt: hoursAgo(50) } });
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		listRunning: async () => {
+			throw new Error("daemon down");
+		},
+		sweepNetworks: async () => {
+			called = true;
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.equal(called, false, "without an answer nothing can be called unclaimed");
+});
+
+test("a throwing network sweep is one log line, never a rejection out of the reaper (#337)", async () => {
+	const fs = sandboxDirWith({});
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		log: (e, d) => logged.push([e, d]),
+		listRunning: async () => [],
+		sweepNetworks: async () => {
+			throw new Error("boom");
+		},
+	})();
+	// The FAULT keeps the family name, on OQ-007's property that one grep covers boot and every tick; only
+	// the per-network verdicts get new names.
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "boom" }]]);
+});
+
+test("the sweep's verdicts are logged under their own names (#337)", async () => {
+	const fs = sandboxDirWith({});
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		log: (e, d) => logged.push([e, d]),
+		listRunning: async () => [],
+		sweepNetworks: async () => ({ swept: [{ network: "pi-sandbox-a-net", detached: ["p"] }], notes: [{ network: "pi-sandbox-b-net", reason: "sandbox-attached" }] }),
+	})();
+	assert.deepEqual(logged, [
+		["reaped_sandbox_network", { network: "pi-sandbox-a-net", detached: ["p"] }],
+		["sandbox_network_not_reaped", { network: "pi-sandbox-b-net", reason: "sandbox-attached" }],
+	]);
+});
+
+test("a listing that did not answer is the sweep's FAULT, not a verdict about a network (#337)", async () => {
+	// The sweeper cannot throw (its runner never does), so the case a `network ls` failure has to reach is
+	// this one: `failed` rather than a note. A note would read as "one network was not reaped" about a look
+	// that saw none, and it would put a fault outside the `sandbox_reaper_skipped` grep OQ-007 names.
+	const fs = sandboxDirWith({});
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		log: (e, d) => logged.push([e, d]),
+		listRunning: async () => [],
+		sweepNetworks: async () => ({ swept: [], notes: [], failed: "network-list-failed" }),
+	})();
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "network-list-failed" }]]);
+});

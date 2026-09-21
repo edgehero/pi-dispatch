@@ -161,7 +161,10 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   construction, holding **no credential of any kind**, started by an operator at a keyboard and never by
   a trigger, an agent or a model tool. What it re-mounts is the run's workspace, retained on the host for
   a bounded window (`PI_SANDBOX_RETENTION_HOURS`, 24h by default, `0` to disable). Its container name is
-  outside the `pi-job-*` namespace the boot reaper clears, so a worker restart cannot kill it.
+  outside the `pi-job-*` namespace the boot reaper clears, so a worker restart cannot kill it. The
+  sandbox retention reaper does reach into the `pi-sandbox-*` namespace since issue #337, and only for the
+  run's egress NETWORK, never a container: it takes one whose retained directory is already gone, and never
+  one a `pi-sandbox-` container is attached to.
 - **Credential scope.** A repo-scoped, short-lived token minted per job — a GitHub App installation
   token, or a single-owner fine-grained PAT. Its narrow scope and short expiry bound **where** and for
   **how long** an injected agent can act within that repo. See *What is NOT defended*.

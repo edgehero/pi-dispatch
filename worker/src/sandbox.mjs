@@ -2,14 +2,14 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { release as osRelease } from "node:os";
 import { promisify } from "node:util";
-import { makeDockerEndpointResolver } from "./backend-local.mjs";
+import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
 import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { buildDockerRunArgs } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, resolveImageUser, socketFacts } from "./job-user.mjs";
-import { createJobNetwork, egressArmed, egressEnv, egressProxyName, networkExists, networkNameFor, removeJobNetwork } from "./egress.mjs";
+import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { readManifest } from "./sandbox-store.mjs";
 
@@ -154,6 +154,88 @@ export async function listRunningSandboxes({ execFn = exec } = {}) {
 		.map((n) => n.trim())
 		.filter((n) => n.startsWith(SANDBOX_NAME_PREFIX))
 		.map((n) => n.slice(SANDBOX_NAME_PREFIX.length));
+}
+
+/**
+ * The sweep's docker runner: bounded, both streams, never throws. `execDockerBounded` already settles on its
+ * own timer and kills with SIGKILL, which matters here for the reason `retention-sweep.mjs` records -- this
+ * loop runs on a timer beside draining jobs, and `execFile`'s own `timeout` only signals and then still waits
+ * for `close`, so a CLI wedged on a dead socket never settles. Its rejection carries `stderr` on the error,
+ * which the "network is not there" rule needs and the bounded shape does not surface on its own.
+ */
+async function boundedDocker(args) {
+	const { code, stdout, error } = await execDockerBounded(args, { timeoutMs: 10_000 });
+	return { code, stdout: String(stdout ?? ""), stderr: String(error?.stderr ?? "") };
+}
+
+/**
+ * A network THIS project made for an operator session: the exact shape the producer builds. `docker`'s
+ * `--filter name=` is a SUBSTRING match, so the listing alone is not a namespace -- measured on 27.4.0 while
+ * fixing the same defect in the boot reaper (issue #357), where it returns an operator's own
+ * `my-pi-job-notes`. The capture is the sanitised job id, which is also what the retained directories and
+ * `listRunningSandboxes` are keyed by, so the three compare without a second grammar.
+ */
+const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NETWORK_SUFFIX}$`);
+
+/**
+ * Remove session networks whose run is gone (issue #337).
+ *
+ * WHAT THIS IS NOT. Issue #277 withdrew removing a network at OPEN time: two opens of the same run overlap
+ * more easily than that check assumed, and the second removed the first's network after the first had
+ * created it, disconnecting the proxy from a live shell. That decision stands. This is a different mechanism
+ * with a different input -- a background sweep on the retention reaper, keyed on the directory listing the
+ * pass STARTED with, which no open in progress can be absent from because `resolveSandbox` refuses a job
+ * whose directory is gone. Nothing here runs while an operator is opening anything.
+ *
+ * THE DANGEROUS VERB IS `detach`, NOT `rm`, and the guard is placed accordingly. Measured on docker 27.4.0:
+ * a `network rm` of a network a live container is on FAILS ("has active endpoints"), so docker itself is the
+ * backstop for the removal. What docker will not stop is stripping the proxy off a live session's network,
+ * which is exactly the #277 harm. So the session-container check gates what goes into the DETACH list, and
+ * the test asserts no `network disconnect` is issued rather than asserting the network survived -- the
+ * weaker assertion would pass on docker's refusal alone.
+ *
+ * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
+ * pure-ish function over its runner.
+ */
+export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
+	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set() } = {}) {
+		const listed = await run(["network", "ls", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Name}}"]);
+		// A listing that did not answer is a FAULT, not a verdict about any network, and the two carry
+		// different names on `OQ-007`'s property: the reaper turns `failed` into its family's
+		// `sandbox_reaper_skipped` line, while `notes` are per-network outcomes of a pass that ran. Reporting
+		// this as a note would say "one network was not reaped" about a look that saw none.
+		if (listed?.code !== 0) return { swept: [], notes: [], failed: "network-list-failed" };
+		const swept = [];
+		const notes = [];
+		for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
+			const m = SANDBOX_NETWORK_SHAPE.exec(name);
+			if (!m) continue; // the filter is not the namespace
+			const id = m[1];
+			// Either means the run is still reachable: a shell is open on it, or its workspace is still
+			// retained and the next open will want this network's name free anyway.
+			if (running.has(id) || keep.has(id)) continue;
+			const { ok, names, absent } = await networkEndpoints(run, name);
+			if (absent) continue;
+			if (!ok) {
+				notes.push({ network: name, reason: "unreadable" });
+				continue;
+			}
+			// The guard, and it gates the DETACH: a session container attached means an operator may be
+			// inside it, and `listRunningSandboxes` cannot see one in `created` state.
+			if (names.some((n) => n.startsWith(SANDBOX_NAME_PREFIX))) {
+				notes.push({ network: name, reason: "sandbox-attached" });
+				continue;
+			}
+			const outcome = await removeNetworkOrSay(run, { network: name, detach: names });
+			if (outcome.absent) continue;
+			if (outcome.removed) swept.push({ network: name, detached: outcome.detached });
+			else notes.push({ network: name, reason: "rm-failed", detached: outcome.detached });
+			// Between networks, for `retention-sweep.mjs`'s reason: this loop runs on a timer beside draining
+			// jobs, and `index.mjs` runs with `maxStalledCount: 0` against BullMQ's 30s lock.
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		return { swept, notes };
+	};
 }
 
 /**

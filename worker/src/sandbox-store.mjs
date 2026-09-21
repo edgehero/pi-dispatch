@@ -210,6 +210,12 @@ export function makeSandboxReaper({
 	log = () => {},
 	now = () => Date.now(),
 	listRunning = async () => [],
+	// Issue #337: the session NETWORKS, swept after the directories and keyed on them. INJECTED rather than
+	// imported, and that is not style: `sandbox.mjs` imports `readManifest` from this module, so importing the
+	// sweeper here would make a cycle. It also keeps this file docker-free in its own tests, which its header
+	// gives as the reason the two modules are acyclic in the first place. Defaults to a real no-op so every
+	// existing construction is byte-unchanged.
+	sweepNetworks = async () => ({ swept: [], notes: [] }),
 }) {
 	return async function reapSandboxes() {
 		if (!sandboxDir) return;
@@ -233,6 +239,12 @@ export function makeSandboxReaper({
 
 		const at = now();
 		const cutoff = at - retentionHours * HOUR_MS;
+		// The listing this pass STARTED with, captured before anything is removed. Keying the network sweep on
+		// the survivors instead would reopen the race issue #277 withdrew a fix for: an open that passed
+		// `resolveSandbox` while its directory existed, whose directory this same pass then expires, would lose
+		// its network between `createJobNetwork` and `launch`. No open in progress can be absent from this list,
+		// because `resolveSandbox` refuses a job whose directory is gone.
+		const keep = new Set(names);
 		for (const name of names) {
 			const dir = join(sandboxDir, name);
 			try {
@@ -257,6 +269,21 @@ export function makeSandboxReaper({
 			} catch (err) {
 				log("sandbox_reaper_skipped", { entry: name, reason: err?.message });
 			}
+		}
+
+		// The session networks, after the directories and keyed on the listing above. Reached only when
+		// `listRunning` ANSWERED and the directory listing was read, which is the same precondition the
+		// directory pass has: without either, nothing here can be called unclaimed.
+		//
+		// Its own fault keeps the `sandbox_reaper_skipped` name on `OQ-007`'s stated property, that one grep
+		// covers boot and every tick; only the per-network VERDICTS get new names.
+		try {
+			const { swept, notes, failed } = await sweepNetworks({ running, keep });
+			for (const s of swept) log("reaped_sandbox_network", s);
+			for (const n of notes) log("sandbox_network_not_reaped", n);
+			if (failed) log("sandbox_reaper_skipped", { reason: failed });
+		} catch (err) {
+			log("sandbox_reaper_skipped", { reason: err?.message ?? "network-sweep-failed" });
 		}
 	};
 }

@@ -25,7 +25,7 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal,
 import { makeCollectChain } from "./outbox.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
-import { listRunningSandboxes } from "./sandbox.mjs";
+import { listRunningSandboxes, makeSandboxNetworkSweeper } from "./sandbox.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
@@ -311,6 +311,7 @@ export async function startWorker(
 		makeRunMirror: makeRunMirrorFn = makeRunMirror,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
+		makeSandboxNetworkSweeper: makeSandboxNetworkSweeperFn = makeSandboxNetworkSweeper,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		makeSecretsResolver: makeSecretsResolverFn = makeSecretsResolver,
@@ -644,6 +645,11 @@ export async function startWorker(
 			sandboxDir: config.sandboxDir,
 			retentionHours: config.sandboxRetentionHours,
 			listRunning: listRunningSandboxes,
+			// Issue #337: the session networks a died-mid-session process left. Unconditional on `PI_EGRESS`,
+			// on the boot reaper's own precedent (it lists `pi-job-` networks whatever the posture) and for a
+			// sharper reason: a deployment that has turned the policy OFF is exactly where the leftovers are
+			// guaranteed dead, since nothing is making new ones.
+			sweepNetworks: makeSandboxNetworkSweeperFn(),
 			log,
 		});
 		await reapSandboxes();

@@ -1632,7 +1632,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   themselves inside the shell.
 - **Bounded, and swept like every other artifact.** `PI_SANDBOX_RETENTION_HOURS` (default 24) with a
   sweep at boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker runs (`0` = boot-only), `--pin`
-  extending ONE run to `now + PI_SANDBOX_PIN_DAYS`. A pin is a timestamp, never a
+  extending ONE run to `now + PI_SANDBOX_PIN_DAYS`. **The window bounds the run's session NETWORK as well
+  as its directory** (issue #337): the same sweep removes a `pi-sandbox-<id>-net` whose id was absent from
+  the directory listing that pass began with, is not running, and carries no `pi-sandbox-` container. Until
+  then the network is retained with the directory, because a retained run is re-openable and an open is what
+  the network is for. A pin is a timestamp, never a
   boolean: there is no keep-forever value, because a repository clone per run with no ceiling is
   unbounded growth wearing a feature's clothing. `0` means the feature is OFF — the OPPOSITE of
   `PI_LOG_RETENTION_DAYS` and `PI_SESSIONS_TTL_DAYS`, where `0` means keep forever — and it sweeps what
@@ -1652,7 +1656,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `capsh --print` shows no capabilities. Given `--publish 3000`, the port is reachable at `127.0.0.1`
   and an explicit non-loopback bind is refused. Given a worker restart while a sandbox runs, the
   container survives (`docker ps --filter name=pi-job-` never matches it) and its directory is not
-  swept. Given a run whose window has closed, the refusal names the window. Given a job that persisted a
+  swept. Given a run whose window has closed, the refusal names the window, and once the next sweep has run,
+  `docker network ls` no longer lists that run's session network. Given a job that persisted a
   session, no transcript exists anywhere under the retention root. Given a run whose manifest names a venue
   other than `local`, both the CLI and the panel refuse to open it, naming the venue, and `--list` does not
   show it as re-openable; given a run retained before venues were recorded, it opens as before.
@@ -2018,6 +2023,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-21 | Issue #337, item 1: the session network nothing swept. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, in its retention bullet and its Acceptance: the window now bounds the run's session NETWORK as well as its directory, and the same reaper removes a `pi-sandbox-<id>-net` whose id was absent from the directory listing that pass began with, is not running, and carries no `pi-sandbox-` container. Retained means re-openable, and an open is what the network is for, so the network is kept exactly as long as the directory is. **That is a deliberate NARROWING of the issue's own acceptance line**, which asks for a leftover "with no sandbox attached" to be swept: a leftover on a run that is still re-openable survives its window, and until then the next open of that run refuses with `egress-network-exists` and the two commands, which is shipped behaviour unchanged. The stricter reading is what reopens the #277 race the refusal exists for. **`REQ-EGRESS-ALLOWLIST` UNCHANGED, checked**: no job network, no argv, no proxy and no pre-spend gate moved; a session network is `INT-SANDBOX-CONTRACT`'s object. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: no doctor check and no `up` step. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: two new log events, no run-record field. **Code evidence**: worker/src/sandbox.mjs -> makeSandboxNetworkSweeper; worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/start.mjs -> startWorker. |
 | 2026-09-21 | Issues #357 and #350, the networks nothing removed. **`REQ-EGRESS-ALLOWLIST` AMENDED** (Acceptance): "the network is removed when the container exits" gains the crash path, which is the only path the boot reaper's sweep exists for and the one it was silently failing. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the Statement's canary already named the throwaway network and probe containers `doctor` makes and removes unprompted; it now also covers removing what an EARLIER canary left when its run did not finish, and doctor saying which it removed. That is the same unprompted tier, not a new one: the objects are doctor's own, named after the doctor PROCESS, and only a dead pid's are touched. **`REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked**: session networks are `INT-SANDBOX-CONTRACT`'s and are not swept here. **`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked**: two new log events, no run-record field. **Code evidence**: worker/src/backend-local.mjs -> reapNetwork; worker/src/doctor.mjs -> sweepStaleCanaryNetworks, egressChecks. |
 | 2026-09-21 | Issue #345, while verifying the Podman page. **`REQ-EGRESS-ALLOWLIST` AMENDED**, three words in the Statement: the bound is "listed hosts by name and nothing else **beyond this host**". An `--internal` network's gateway is the host, so a host service bound to `0.0.0.0` answers a job container while one bound to `127.0.0.1` does not, measured on Docker 27.5.1 and rootful Podman 5.8.2 alike; `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` carries the residual and `docs/egress.md` now says what bounds it. No behaviour changes: the requirement is scoped to what it always did. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor's checks and their tiers are untouched by the Podman route. |
 | 2026-09-15 | Issue #344. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, in the Statement and the Acceptance: `doctor --live` reads the declarations back off short-lived real containers rather than one, and what it names before it starts and removes when it ends now includes the peer networks it makes with the egress policy armed. The shown-rather-than-consented tier is UNCHANGED, checked: typing the flag is still the approval, and nothing it makes outlives the run. |

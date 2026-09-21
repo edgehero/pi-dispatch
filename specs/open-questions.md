@@ -278,6 +278,16 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   `extraClosers` beside the queues, the registry and the three watches, because
   `DES-WATCHERS-CLOSE-WITH-THE-WORKER` established that **unref'd is not cleaned up** and this handle
   holds an `rmSync`.
+- **AMENDED (issue #337, 2026-09-21), and it is the one-grep property above that constrained the naming.**
+  The sandbox reaper now sweeps a second kind of object, the session network of a run whose retained
+  directory is gone, and the obvious name for its per-network outcome would have been a
+  `*_reaper_skipped`. It is not: a per-network verdict is `reaped_sandbox_network` or
+  `sandbox_network_not_reaped`, and only the sweep's own FAULT keeps `sandbox_reaper_skipped`. The
+  distinction is exactly what this row's grep needs. `sandbox_reaper_skipped` means this pass established
+  nothing, which is the line an operator greps for across boot and every tick; a network that stayed
+  behind is a verdict from a pass that ran, and letting it wear the fault's name would make the grep
+  report an outage on a healthy worker. The sweep is also the last thing `reapSandboxes` does, inside its
+  own `try`, so it can never turn a completed directory pass into a skipped one.
 - **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
   A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound
@@ -1493,3 +1503,4 @@ adversarial passes did.
 | 2026-09-15 | Issue #344. **`OQ-012` AMENDED**, one sentence: the read-back now covers `ephemeral` and, with the egress policy armed, `jobToJobIsolation`, off short-lived containers rather than one. Its limits (not a gate, `PI_JOB_IMAGE` only, not the image's contents, not a remote venue) and the status are UNCHANGED, checked. |
 | 2026-09-15 | Issue #345. **`OQ-036` AMENDED**, one sentence under its Podman subscription-mounts bullet: the risk is now observed (`runtimeAddsNoMounts` degrades `mountSet`, a floor refuses, `doctor --live` reads mountinfo) rather than only documented. Its status and every other bullet are UNCHANGED, checked. |
 | 2026-09-21 | Issue #345, the Podman route. **NEW `OQ-037`** (OPEN): rootless Podman (closes with a native `podman` backend using keep-id, issue #354); SELinux enforcing, netavark's nftables driver and systemd health checks, which need a real host (issue #355); `podman machine` and Podman Desktop; OrbStack and Colima; and a rootful Podman with `userns = "auto"`, where the two possible outcomes cost a job differently. Each carries its close condition, and the entry states what bounds them meanwhile. |
+| 2026-09-21 | Issue #337, item 1. **`OQ-007` AMENDED**, and it is that row's own stated property that constrained the naming: the sandbox reaper now sweeps a second kind of object, and its per-network outcomes are `reaped_sandbox_network` and `sandbox_network_not_reaped` rather than a third `*_reaper_skipped`. Only the sweep's FAULT keeps `sandbox_reaper_skipped`, because that name means this pass established nothing, which is what an operator greps for across boot and every tick, and a network left behind is a verdict from a pass that ran. **`OQ-016` UNCHANGED, checked**: the panel's suspend-and-hand-over pair is untouched, and nothing here runs while a shell is open. **Code evidence**: worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/sandbox.mjs -> makeSandboxNetworkSweeper. |

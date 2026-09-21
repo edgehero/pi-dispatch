@@ -109,8 +109,11 @@ sandboxes, run a version that carries #277.)
 
 If you detach from a sandbox shell (Ctrl-P Ctrl-Q), it keeps running with its network, and the network is left
 in place after it exits. A network left that way, or by a terminal closed mid-session, makes the next open of
-that run refuse and print the two commands that remove it; nothing removes it for you, because a second open
-cannot safely tell a leftover from a session starting at the same moment. The policy, how to change it, and a
+that run refuse and print the two commands that remove it. The **open** still never removes it for you, because
+a second open cannot safely tell a leftover from a session starting at the same moment; what does remove it is
+the retention sweep, once the run's retained directory is gone (issue #337). So a leftover on a run you can
+still re-open stays until you run those two commands or the window closes, and one on a run whose window has
+already closed is reclaimed by the next sweep without you doing anything. The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a
@@ -178,9 +181,13 @@ session that ends in a closed laptop still keeps the workspace.
   retained **directories** are swept, and by a separate reaper: it deletes the ones past their window,
   skipping any id whose container is live so a mount is never pulled out from under a shell. It runs at
   every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
-  `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Two things follow.
+  `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Three things follow.
   The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window
-  closes, so at both defaults a retained workspace can live up to 48 hours. And a restart after you lower
-  the retention setting still sweeps what the old one kept.
+  closes, so at both defaults a retained workspace can live up to 48 hours. A restart after you lower
+  the retention setting still sweeps what the old one kept. And since issue #337 that reaper also removes
+  the run's `pi-sandbox-<jobId>-net` network, on the directory's own clock: a network whose id the pass no
+  longer finds on disk, with nothing running and no `pi-sandbox-` container attached, is disconnected from
+  whatever is left on it and removed. Your shell is safe twice over, by the live container and by the
+  directory, and anything the sweep will not take is named in the worker log with the reason.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.
