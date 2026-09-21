@@ -1218,9 +1218,80 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
 });
 
-test("the reaper removes an expired key, keeps a fresh one, and never touches a key with no transcript", () => {
-	// The disk sweep keys on the TRANSCRIPT's mtime alone. A key directory with no transcript (a first promotion
-	// that died before the swap) is skipped rather than guessed at, which is why a lock leaked there outlives it.
+test("a FRESH transcript in an ancient directory survives the reaper (#336)", () => {
+	// The guard on the fallback, and the mutation that matters most: making the directory-mtime rule
+	// unconditional instead of ENOENT-only would sweep an actively used key whose directory nobody has written
+	// to lately, which is an operator's conversations deleted. Only the transcript's own mtime can say a key is
+	// alive, so the fallback may never outrank it.
+	const later = Date.now() + 3 * 86400000;
+	const { store, sessionsDir } = fixture({ ttlDays: 1, now: () => later });
+	const key = sessionKeyFor(ghIssue);
+	const file = seed(sessionsDir, key, { venue: "local" });
+	utimesSync(file, later / 1000, later / 1000);
+	const ancient = (later - 90 * 86400000) / 1000;
+	utimesSync(join(sessionsDir, key), ancient, ancient);
+
+	store.reapSessions();
+	assert.equal(existsSync(file), true, "a key with a fresh transcript is alive, whatever its directory's mtime says");
+});
+
+test("a disk fault on the transcript is not evidence that a key is old (#336)", () => {
+	// ENOENT-only, again from the other side. An EIO means the reaper could not ASK, and a reaper that treats
+	// "could not ask" as "old" deletes on a transient fault.
+	const later = Date.now() + 3 * 86400000;
+	const key = sessionKeyFor(ghIssue);
+	const { store, sessionsDir, logs } = fixture({
+		ttlDays: 1,
+		now: () => later,
+		fs: {
+			...realFs,
+			lstatSync: (p, ...rest) => {
+				if (String(p).endsWith(join(key, SESSION_FILE_NAME))) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+				return realFs.lstatSync(p, ...rest);
+			},
+		},
+	});
+	seed(sessionsDir, key, { venue: "local" });
+
+	store.reapSessions();
+	assert.equal(existsSync(join(sessionsDir, key)), true, "a key the reaper could not read is kept");
+	assert.ok(logs.some(([event, f]) => event === "session_reaper_skipped" && f.key === key), "and the fault is said");
+});
+
+test("only a real directory is a key: a stray file and a symlink are left alone (#336)", () => {
+	// The fallback lstats the ENTRY when the transcript is absent, so the shapes that reach it need naming. A
+	// stray file gives ENOTDIR on the inner lstat and never arrives; a SYMLINK gives ENOENT and does.
+	//
+	// The link here points at a REAL directory and its own mtime is aged past the cutoff, which is the only
+	// shape that pins the guard. Measured, because the obvious reading is wrong twice over: `rmSync` with
+	// `recursive` and `force` does NOT follow a link, so on a DANGLING one it silently does nothing (a test
+	// using one passes with the guard removed, which is how this was found) and on a link to a real directory
+	// it removes the LINK and leaves the target alone. So the target was never at risk; what the guard stops
+	// is the reaper unlinking an operator's own symlink out of the store.
+	const later = Date.now() + 3 * 86400000;
+	const { store, sessionsDir, root } = fixture({ ttlDays: 1, now: () => later });
+	mkdirSync(sessionsDir, { recursive: true });
+	const stray = join(sessionsDir, "stray");
+	writeFileSync(stray, "not a key");
+
+	const target = join(root, "elsewhere");
+	mkdirSync(target, { recursive: true });
+	writeFileSync(join(target, "precious.txt"), "not ours to remove");
+	const linked = join(sessionsDir, "linked");
+	symlinkSync(target, linked);
+	const aged = (later - 90 * 86400000) / 1000;
+	realFs.lutimesSync(linked, aged, aged);
+
+	store.reapSessions();
+	assert.equal(existsSync(stray), true, "a stray file is left alone");
+	assert.equal(realFs.lstatSync(linked).isSymbolicLink(), true, "and an aged symlink is not a key, so it is not swept");
+	assert.equal(existsSync(join(target, "precious.txt")), true, "and nothing behind it is touched");
+});
+
+test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key with no transcript (#336)", () => {
+	// The disk sweep keys on the TRANSCRIPT's mtime, and falls back to the key DIRECTORY's own mtime when there
+	// is no transcript to key on -- a first promotion that died before the swap. That key used to be skipped on
+	// every pass forever, so anything leaked in it outlived the store.
 	const later = Date.now() + 3 * 86400000;
 	const { store, sessionsDir, logs } = fixture({ ttlDays: 1, now: () => later });
 	const expired = sessionKeyFor(ghIssue);
@@ -1235,10 +1306,13 @@ test("the reaper removes an expired key, keeps a fresh one, and never touches a 
 	store.reapSessions();
 	assert.equal(existsSync(join(sessionsDir, expired)), false, "an expired transcript's key is swept whole, stamp and all");
 	assert.equal(existsSync(join(sessionsDir, fresh, SESSION_FILE_NAME)), true, "a fresh one is kept");
-	assert.equal(existsSync(join(sessionsDir, empty, "lock")), true, "a key with no transcript is not swept");
+	assert.equal(existsSync(join(sessionsDir, empty)), false, "a key with no transcript is swept on the directory's own mtime");
 	assert.ok(logs.some(([event, fields]) => event === "reaped_session" && fields.key === expired));
 
-	// Retention 0 is "keep forever": the sweep does nothing at all.
+	// Retention 0 is "keep forever": the sweep does nothing at all, and it is NOT relaxed for the case above.
+	// That is deliberate and it is why the stale-lock takeover is the primary recovery: `0` is an explicit
+	// operator instruction, and a reaper that removed something under it would be a surprise, so what makes a
+	// wedged key recoverable there is the takeover rather than this.
 	const keep = fixture({ ttlDays: 0, now: () => later });
 	seed(keep.sessionsDir, expired);
 	keep.store.reapSessions();

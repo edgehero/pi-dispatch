@@ -821,8 +821,36 @@ export function makeSessionStore({
 		for (const name of names) {
 			try {
 				const dir = join(sessionsDir, name);
-				const st = fs.lstatSync(join(dir, SESSION_FILE_NAME));
-				if (st.mtimeMs < cutoff) {
+				let mtimeMs;
+				try {
+					mtimeMs = fs.lstatSync(join(dir, SESSION_FILE_NAME)).mtimeMs;
+				} catch (err) {
+					// ENOENT ALONE falls back to the DIRECTORY's own mtime (issue #336). A key whose first promotion
+					// died before any transcript landed has none to key on, so this loop used to log-and-skip it on
+					// every pass forever, and anything leaked inside it -- a lock, an in-flight copy -- outlived the
+					// store. A directory's mtime moves on every entry created or removed inside it, so a live key is
+					// refreshed by its own promotions and a dead one is stamped at whatever last touched it.
+					//
+					// ENOENT-ONLY rather than unconditional, and that is the whole safety of it: an EIO or an EACCES
+					// on the transcript is a disk fault, and a disk fault is not evidence that a key is old. Those
+					// keep today's log-and-skip.
+					if (err?.code !== "ENOENT") throw err;
+					const dst = fs.lstatSync(dir);
+					// ONLY A REAL DIRECTORY IS A KEY. A stray FILE in the store gives ENOTDIR on the inner lstat
+					// rather than ENOENT, so it never reaches here; a SYMLINK gives ENOENT and does.
+					//
+					// What this guard is and is not, measured rather than assumed, because the obvious reading is
+					// wrong: `rmSync(p, { recursive: true, force: true })` does NOT follow a symlink. On a link to a
+					// real directory it removes the LINK and leaves the target and its contents untouched, and on a
+					// dangling link it silently does nothing at all. So a link's TARGET was never at risk here and
+					// this guard is not what protects it. What it does is narrower and still worth having: without
+					// it the reaper would unlink an operator's own symlink out of the store once the LINK's own
+					// mtime aged out, and a reaper that sweeps things that are not keys is a reaper an operator
+					// cannot leave anything beside.
+					if (!dst.isDirectory()) continue;
+					mtimeMs = dst.mtimeMs;
+				}
+				if (mtimeMs < cutoff) {
 					// ONE recursive remove, and the transcript's age is the only thing it keys on. Removing the
 					// transcript first (so an absent stamp, which reads as `local`, can never sit beside a readable
 					// transcript mid-sweep) was tried under #277 and withdrawn: a remove that then failed transiently
