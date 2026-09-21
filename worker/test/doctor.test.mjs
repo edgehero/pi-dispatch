@@ -3577,9 +3577,11 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 		assert.ok(!text.includes(JOB_USER_FIX["worker-is-root"]), `${what}: no refusal is invented`);
 	}
 	// A numeric account is addressed the way sudo reads one: `#4242`, quoted, never a bare number, which sudo
-	// takes for a user NAME. Under a remote endpoint, where nothing is refused, so the instruction is printed.
-	const numeric = await run(unit.replace("User=pi", "User=4242"), { plan: { "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } } });
-	assert.match(numeric, /sudo -u '#4242' pi-dispatch doctor/, "a uid needs sudo's # prefix, and the # needs quoting");
+	// takes for a user NAME. No daemon fixture is needed for a non-zero uid, which never takes the refusal
+	// branch whatever the decision is; uid 0 does need one, and `'#0'` only became reachable when that branch
+	// stopped answering for every root unit, so it is covered here rather than left to be discovered.
+	assert.match(await run(unit.replace("User=pi", "User=4242")), /sudo -u '#4242' pi-dispatch doctor/, "a uid needs sudo's # prefix, and the # needs quoting");
+	assert.match(await run(unit.replace("User=pi", "User=0"), { info: ROOTLESS_INFO }), /sudo -u '#0' pi-dispatch doctor/, "and uid 0 spelled numerically is a uid like any other");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");

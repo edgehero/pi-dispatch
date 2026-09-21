@@ -3384,10 +3384,15 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 				// UID 0 gets the ANSWER instead of the instruction (issue #348), and doctor names it only where it is
 				// CERTAIN. The certainty is narrow and is the whole rule: when THIS SHELL's decision is `worker`, the
 				// daemon maps uids fine and the only thing separating this shell from the unit's account is rootness,
-				// so that account gets `worker-is-root` and nothing else can intervene. Every other decision is about
-				// the HOST rather than the account -- a rootless or userns-remapped daemon, Docker Desktop on Linux,
-				// an unreadable answer, an endpoint that is not here -- and the `local:` line above has already said
-				// it for every account on this machine, so this line has nothing to add and keeps the instruction.
+				// so that account gets `worker-is-root`. The facts have to be the same facts, and they are read from
+				// THIS process: a unit pointing the service at another daemon through `Environment=` would not be
+				// seen, because `readUnitSeam` reads `ExecStart`'s `--env-setup` and `WorkingDirectory` and nothing
+				// else. Every other decision keeps the instruction, and for two different reasons rather than one.
+				// A host-level refusal (a userns-remapped daemon, Docker Desktop on Linux, an unreadable answer, an
+				// endpoint that is not here) is already stated by the `local:` line above and this line would only
+				// repeat it. A refusal inferred from THIS SHELL's own socket is the opposite case: that row is
+				// narrowed to `socket.uid === euid`, so it says nothing about another account, and the instruction
+				// is the only honest answer there. Both keep it; neither wants a per-account refusal invented.
 				//
 				// TWO WRONG VERSIONS were caught in review and both belong here, because each looks right. Printing
 				// `worker-is-root` for any explicit uid 0 tells an operator on a rootless daemon to run the worker as

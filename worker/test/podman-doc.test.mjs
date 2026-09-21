@@ -17,8 +17,9 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../
 // (`9cb2bce`'s own message says so), and the eventual answer was NOT a bigger regex here. Nothing in this file was
 // ever widened to chase it: `REFUSED_ENTRY_POINT` below was written once and has been byte-identical since, and it
 // governs the ENTRY-POINTS table anyway, while the refusal block's own test reads only the `Refused:` lines. The
-// timing clauses were never in range of either. `9cb2bce` moved the timing PARAGRAPHS off the page instead, onto
-// `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, which owns them, and that is the shape of the answer.
+// timing clauses were never in range of either. `9cb2bce` moved the "Where a refusal fires is one rule" paragraph
+// off the page instead, onto `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, which owns it, and that is the shape of
+// the answer. Not all of it went: the refusal lists above that paragraph still say when each cause fires.
 //
 // It did not end there, which is the part to remember. `9cb2bce`'s own deferral first named `docs/backends.md`
 // beside the design entry, and the very next commit (`0335146`) had to take that pointer back out, on the ground
