@@ -116,12 +116,32 @@ ones adapters get wrong:
   and Docker Desktop the image's own `USER` runs. On a daemon that enforces bind-mount ownership (native Linux
   Docker, rootful Podman) the worker runs the job as its own uid with `--user` and `HOME=/home/pi`, because
   only the uid that owns the job's files can use them (a uid-1001 worker, the image's own uid, needs no flag).
-  The worker decides this from facts at boot and before each job, never by starting a probe container. It
-  refuses by name what no uid can serve: rootless Docker or Podman, userns-remap, a root worker, Docker
-  Desktop on Linux (WSL is not affected), an image without the `anyUid` capability for another uid, and a
-  `--user` whose primary group is 0 or the docker socket's. `pi-dispatch doctor` names the answer for the shell
-  it runs in, and `pi-dispatch doctor --live` runs its probe as that user and reads it back. An adapter for
-  another runtime answers the same question in its own terms.
+  The worker decides this from facts at boot and before each job, never by starting a probe container, and
+  refuses by name what no uid can serve. **When that refusal fires depends on which cause it is**, so both
+  sets are named here rather than one:
+
+  <!-- BACKENDS-JOB-USER-TIMING -->
+  - **Stops the boot**: `rootless`, `userns-remap`, `worker-is-root`, `desktop-linux-userns`. No uid on such
+    a host can serve a job, so the worker exits rather than picking up work it could only refuse. That exit
+    is conditional, and the condition is real rather than decorative: it happens while `local` is the default
+    venue (`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs`, read by `jobUserBootRefusal` in
+    `start.mjs`), and a deployment whose default venue was elsewhere would boot and refuse each local job
+    instead. `local` is the only venue this build has, so every deployment today gets the exit.
+  - **Refuses each job**: `runtime-unreadable`, `root-group`, `docker-group`, `any-uid-unsupported`. The
+    worker boots, and each local job returns a policy refusal naming the cause. The last three are on the
+    `--user` path only, so a worker that is already uid 1001, the image's own uid, meets none of them:
+    nothing is passed, and its primary group is not compared.
+  <!-- /BACKENDS-JOB-USER-TIMING -->
+
+  A daemon that does not answer is in neither set. The decision is `unknown`, it is never cached and never a
+  boot exit, so a unit carrying `RestartPreventExitStatus=2` is not stranded by a daemon that is still
+  starting. A job picked up while the answer is still unknown is an infrastructure **retry**, not a refusal
+  (`CONST-RETRY-INFRA-ONLY`): the processor throws, so the queue tries again once the daemon answers, where a
+  policy refusal returns and is final.
+
+  `pi-dispatch doctor` names the answer for the shell it runs in, and `pi-dispatch doctor --live` runs its
+  probe as that user and reads it back. An adapter for another runtime answers the same question in its own
+  terms.
 
 ## A declaration is not a claim that the property holds
 
@@ -241,16 +261,29 @@ The harness cannot detect that. A green run is not a conformant backend.
 ## Registering it
 
 Pass your bundle to `startWorker` as an extra backend. It is registered after `local`, and its own `reap`
-joins the boot sweep automatically. **There is no published import for `startWorker` today**: it lives in
-`worker/src/start.mjs`, which the package's export map does not name, so this works from a checkout of this
-repository and not from an installed package. Its first argument is the environment, and the backends ride
-the second:
+joins the boot sweep automatically. Its first argument is the environment, and the backends ride the second:
 
 ```js
-import { startWorker } from "./worker/src/start.mjs"; // from a checkout; not an export of @edgehero/pi-dispatch
+import { startWorker } from "./worker/src/start.mjs"; // from a checkout of this repository
 
 await startWorker(process.env, { extraBackends: [myBackend] });
 ```
+
+**Registration is in-tree, and that is a decision rather than a gap** (issue #342). `startWorker` lives in
+`worker/src/start.mjs`, which the package's export map does not name, so this works from a checkout and not
+from an installed package. Exporting it was considered and refused: the second argument is the worker's
+whole dependency-injection bag, test seams included, and publishing an import for it makes every one of
+those seams a public API that a release has to keep.
+
+It costs an adapter author nothing they were not already paying, which is the part worth being clear about.
+Step 1's `BACKENDS_TABLE` entry is in-tree by necessity, for the reason given at the top of this page: the
+declaration is what an operator reads, so a venue that runs jobs without one would be a venue nobody can
+reason about. An adapter that already has to land a declaration here loses nothing by registering here too.
+The code itself can still live anywhere.
+
+What would reopen it is a venue whose adapter cannot be in this repository at all. A `podman` backend is the
+live example: in-tree it needs no export, out-of-tree it needs exactly the published entry point this
+decision declines, so issue #354 is where that lands rather than here.
 
 `startWorker` builds the registry itself:
 

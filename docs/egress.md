@@ -188,9 +188,14 @@ All of it was run. The method costs nothing and is worth repeating on your own h
   peer on another job network is unreachable by name and by address. See `docs/podman.md`.
 - **A denied host fails in about 20 ms, not on a DNS timeout**, because the client hands the name to the
   proxy in a `CONNECT` and never resolves it locally. An external name resolved *directly* from an internal
-  network fails without ever reaching the proxy, and how fast depends on the resolver in front of the container,
-  not on this design: about 10 seconds on the host this was first measured on, and under 5 ms in a Linux lab where
-  nothing answers at all. Either way it is the path a client that bypassed the proxy would take.
+  network fails without ever reaching the proxy, and how fast depends on the resolver **inside** the container
+  rather than on anything this design does. Measured on Docker 27.4.0, an `--internal` network, docker's
+  embedded resolver at `127.0.0.11` with no reachable upstream: the job image, which is Debian and glibc,
+  gives up in about 10 ms (six runs, 6 to 23 ms, all `EAI_AGAIN`), because it takes the embedded resolver's
+  failure as final. A musl image on the same network waits out musl's own 5 s resolver timeout instead (five
+  runs, 5013 to 5025 ms). So the number that describes a job here is milliseconds, and a multi-second reading
+  is a property of the client rather than of the network. Either way it is the path a client that bypassed
+  the proxy would take.
 
 ## Appendix: a host-firewall layer below docker's rules
 
