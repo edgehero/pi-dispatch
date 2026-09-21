@@ -289,17 +289,35 @@ export function makeSessionStore({
 				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
 				fs.renameSync(tmp, canonicalFile(session.key));
-				// The real stamp, straight after the swap and BEFORE the pi-version write, which can throw: a
-				// completed promotion must not be left under the sentinel because a later write failed. Non-fatal,
-				// but NOT for `writeSidecar`'s stated reason, which is about the next run resuming: a failed stamp
-				// leaves the sentinel, so the next run WILL cold-start. It is non-fatal because the transcript has
-				// landed and the chain and context sidecars below still describe it truthfully; `promote-failed`
-				// would claim no promotion happened. The `session_sidecar_failed` line is what links the promotion
-				// to the cold start that follows it. A session with no venue (a DI seam) leaves the sentinel on
-				// purpose: no stamp is better than a guessed one.
+				// The real stamp FIRST of the post-swap writes, and the ordering is the contract. It is the only one
+				// whose absence MISATTRIBUTES rather than cold-starts: between the rename and this write the key reads
+				// `(pending)` and cold-starts on every venue, so every write placed ahead of it lengthens that window,
+				// and `pi-version`, the chain counter and the context reading all degrade to a cold start instead.
+				// (It used to be ordered ahead of the pi-version write because THAT write could throw. It no longer
+				// can, and the ordering that survives is this one.) A session with no venue (a DI seam) leaves the
+				// sentinel on purpose: no stamp is better than a guessed one.
 				const venue = normaliseVenue(session.venue);
 				if (venue !== null) writeSidecar(dir, VENUE_FILE, session.key, venue);
-				fs.writeFileSync(join(dir, PI_VERSION_FILE), String(piVersion ?? ""));
+				// THROUGH `writeSidecar` like every other sidecar (issue #336). It was the one plain write left, and
+				// it carried both halves of that exception: `writeFileSync` FOLLOWS a link, so a symlink planted at
+				// this name -- at a path anyone who knows the repository and the branch can compute -- turned a
+				// promotion into a truncating write of the link's target with the pi version as its payload; and it
+				// sat inside the try, so a failure AFTER the swap reported `promote-failed` for a promotion that had
+				// landed.
+				//
+				// A FAILED STAMP IS SAFE IN BOTH DIRECTIONS, which is why this one needs no sentinel of its own and
+				// the venue stamp does. With no prior stamp the next read gets `null` and cold-starts. With one, it
+				// survives beside the new transcript -- and it is still TRUE, because this job resumed only if that
+				// stamp already matched its own image's pi, and a job runs one image. The remaining case, a job that
+				// cold-started under a new pi and then failed this write, leaves the OLD version beside the new
+				// transcript, and the next job on that image reads a mismatch and cold-starts. Stale-but-true, or a
+				// cold start. Never a transcript resumed under a version that did not write it.
+				//
+				// `String(piVersion ?? "")` is load-bearing and must not be simplified to skipping the write: an empty
+				// file is refused by `readSidecar`'s own size check and reads as `null`, so a promotion that knows no
+				// version INVALIDATES the stamp. Skipping instead would leave a PREVIOUS version beside a transcript
+				// written by an unknown pi, and the next matching job would resume it.
+				writeSidecar(dir, PI_VERSION_FILE, session.key, String(piVersion ?? ""));
 				// The chain and context sidecars, immediately after the swap and under the same lock. NOT part of
 				// the swap itself, which is one rename and cannot be widened: what the lock buys them is that no
 				// other job can interleave, and what the ordering buys them is that they never describe a

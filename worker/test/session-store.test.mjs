@@ -868,12 +868,19 @@ test("a job with no resolvable venue never resumes, even where the stamp cannot 
 	assert.equal(v.store.resolveSession(ghIssue, { jobDir: v.jobDir, piVersion: null }).reason, "venue-changed");
 });
 
-test("the real stamp is written BEFORE the pi-version write, so that write failing cannot strand a landed transcript under the sentinel", () => {
-	const { store, jobDir, sessionsDir } = fixture({
+test("a promotion that LANDED is never reported as promote-failed by its pi-version stamp (#336)", () => {
+	// This test used to pin the opposite, because the pi-version write was the one plain, in-try write left
+	// and a fault there reported `promote-failed` for a promotion that had already swapped. That was a stated
+	// residual of INT-SESSION-STORE-CONTRACT, not an intention, and it is closed.
+	//
+	// The fault predicate moved with the fix and that is the point: the write now goes through
+	// `writeSidecar` -> `replaceSidecar`, so the byte-carrying write lands on `pi-version.incoming` and a
+	// predicate on `pi-version` itself would no longer fire at all -- a test that silently stopped testing.
+	const { store, jobDir, sessionsDir, logs } = fixture({
 		fs: {
 			...realFs,
 			writeFileSync: (p, ...rest) => {
-				if (String(p).endsWith(join(sessionKeyFor(ghIssue), "pi-version"))) throw new Error("ENOSPC: no space left on device");
+				if (String(p).endsWith("pi-version.incoming")) throw new Error("ENOSPC: no space left on device");
 				return realFs.writeFileSync(p, ...rest);
 			},
 		},
@@ -881,10 +888,77 @@ test("the real stamp is written BEFORE the pi-version write, so that write faili
 	const key = sessionKeyFor(ghIssue);
 	const s = store.resolveSession(farIssue, { jobDir, piVersion: PI });
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}far\n`);
-	// The pi-version write is the one post-swap write that still reports promote-failed (a stated residual).
-	assert.equal(store.promoteSession(s, { piVersion: PI }).reason, "promote-failed");
+
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.promoted, true, "the transcript swapped, so the promotion happened");
+	assert.equal(p.reason, "promoted", "and the record must not claim otherwise");
 	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("far"), true, "the transcript did land");
 	assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "far", "and its venue is stamped, not left pending");
+	assert.ok(
+		logs.some(([event, f]) => event === "session_sidecar_failed" && f.file === "pi-version"),
+		"the bookkeeping loss is logged, which is what links this promotion to the cold start that follows it",
+	);
+
+	// The safe direction, asserted rather than argued: no stamp means the next job cold-starts.
+	const next = store.resolveSession(farIssue, { jobDir, piVersion: PI });
+	assert.equal(next.reason, "pi-version-changed", "an unstamped transcript is never resumed");
+});
+
+test("a link planted at pi-version is not written THROUGH by a promotion (#336)", () => {
+	// The write edge. `writeFileSync` follows a link, and the key directory's name is DERIVED, so the path is
+	// precomputable by anyone who knows the repository and the branch: the plain write turned a promotion into
+	// a truncating write of the link's target, with the pi version as the payload. A reviewer confirmed the
+	// target file was overwritten, which is why this is a test and not a comment.
+	const { store, jobDir, sessionsDir, root } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	const outside = join(root, "outside-version.txt");
+	writeFileSync(outside, "untouched");
+	realFs.rmSync(join(sessionsDir, key, "pi-version"));
+	symlinkSync(outside, join(sessionsDir, key, "pi-version"));
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+
+	assert.equal(readFileSync(outside, "utf8"), "untouched", "a promotion must not write through a planted link");
+	assert.equal(realFs.lstatSync(join(sessionsDir, key, "pi-version")).isSymbolicLink(), false, "the rename replaces the link with a regular file");
+	assert.equal(readFileSync(join(sessionsDir, key, "pi-version"), "utf8"), PI, "and the stamp is this promotion's own");
+});
+
+test("a link planted at pi-version cannot decide the pi-version gate either (#336)", () => {
+	// The read edge, which `readSidecar`'s lstat already guarded: a regression bolt, so the guard cannot be
+	// quietly dropped back to a bare readFileSync. Every shape reads as no usable stamp, hence a cold start.
+	const cases = {
+		dangling: (dir, root) => symlinkSync(join(root, "gone.txt"), join(dir, "pi-version")),
+		planted: (dir, root) => (writeFileSync(join(root, "elsewhere.txt"), PI), symlinkSync(join(root, "elsewhere.txt"), join(dir, "pi-version"))),
+		directory: (dir) => realFs.mkdirSync(join(dir, "pi-version")),
+	};
+	for (const [name, plant] of Object.entries(cases)) {
+		const { store, jobDir, sessionsDir, root } = fixture();
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key);
+		realFs.rmSync(join(sessionsDir, key, "pi-version"));
+		plant(join(sessionsDir, key), root);
+		assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "pi-version-changed", `${name} must not be read as a stamp`);
+	}
+});
+
+test("a promotion that knows no pi version INVALIDATES the stamp rather than leaving the old one (#336)", () => {
+	// `String(piVersion ?? "")` writes a 0-byte file, which `readSidecar`'s size check refuses, so the key
+	// cold-starts. Skipping the write instead -- the obvious simplification -- would leave a PREVIOUS version
+	// beside a transcript written by an unknown pi, and the next job on that version would resume it.
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "resumed", "the seeded stamp matches, so this run resumes");
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}next\n`);
+	assert.equal(store.promoteSession(s, { piVersion: null }).promoted, true);
+
+	assert.equal(readFileSync(join(sessionsDir, key, "pi-version"), "utf8"), "", "the stamp is emptied, not left naming a pi that did not write this");
+	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "pi-version-changed", "so the next job cold-starts");
 });
 
 test("a promotion from another venue that COMPLETES between the gate and the copy is caught too", () => {
