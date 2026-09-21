@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { READ_BACK_BY_A_LIVE_PROBE } from "../src/backend-conformance.mjs";
 import { JOB_NAME_PREFIX } from "../src/backend-local.mjs";

@@ -316,6 +316,11 @@ jobs:
           # A FAILING SUITE SKIPS THIS COUNT, deliberately and unavoidably: the default shell is `bash -e`,
           # so a non-zero `npm test` ends the step before the count runs. The build is red either way, and
           # counting leftovers from a run that did not finish would say nothing about cleanup.
+          #
+          # ONLY THIS RUN IS MEASURED, of the three this job makes and the fourth in release.yml. That is
+          # enough for DETECTION: all four run the same suite, so a test that leaks leaks here. Wrapping
+          # the others would buy disk on the runner, which dies with the job, and cost another export
+          # per step.
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-tmpdir"
           rm -rf "$TMPDIR"
           mkdir -p "$TMPDIR"

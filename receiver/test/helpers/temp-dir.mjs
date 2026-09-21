@@ -19,6 +19,15 @@
  * `rmSync` is `force` as well as `recursive`: a test that already removed its own directory is not a
  * teardown failure, and a teardown that throws would turn a green file red for a directory nobody
  * wanted anyway.
+ *
+ * ONE HAZARD, MEASURED, for whoever writes the next teardown here. ES imports hoist, so this hook is
+ * registered before any statement in the importing file, and `node:test` runs root hooks in
+ * registration order. This one therefore always runs FIRST, and a file's own `after()` that inspects a
+ * `tempDir()` directory will find it already gone. Read what you need inside the test, not in a hook.
+ *
+ * AND ONE LIMIT THIS CANNOT COVER: a test that TIMES OUT under `node --test` has its file wrapper
+ * killed before root hooks run, so its directory survives. Nothing in this tree sets a per-test
+ * timeout today; the CI leftover count is what would catch it if something did.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

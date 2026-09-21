@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 

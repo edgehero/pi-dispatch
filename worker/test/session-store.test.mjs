@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import * as realFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";

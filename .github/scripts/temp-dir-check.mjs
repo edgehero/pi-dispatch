@@ -32,11 +32,29 @@ import { join } from "node:path";
 const TEST_DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test"];
 
 /**
- * A `mkdtempSync` whose root is the OS temp dir, in the two spellings this tree can produce: the
- * `join(tmpdir(), ...)` form every call site used before #351, and a template literal. Matched across
- * the whole file rather than per line, because the argument list may wrap.
+ * A `mkdtemp` or `mkdtempSync` whose argument reaches `tmpdir()` textually: `join(tmpdir(), ...)`,
+ * `join(os.tmpdir(), ...)` or any namespace alias, a template literal, and plain concatenation. The
+ * async `node:fs/promises` spelling counts too -- an adversarial pass found it missing from the first
+ * draft, and it is the promises API rather than an exotic dodge. Bounded to 200 characters and stopped
+ * at a newline or `;` so the match cannot run past its own call.
+ *
+ * WHAT THIS CANNOT SEE, stated rather than implied, because the oracle beside it is what covers each:
+ *   - `const t = tmpdir(); mkdtempSync(join(t, ...))`. Following a value through a variable is dataflow,
+ *     not a grep, and pretending otherwise would be a check nobody could trust.
+ *   - a directory made OUTSIDE `tmpdir()` -- a hardcoded `/var/tmp`, or a child process spawned with a
+ *     scrubbed env that drops `TMPDIR` and falls back to `/tmp`. Measured on this tree: no test does
+ *     either today (a full CI-posture run under an isolated `TMPDIR` added nothing to `/tmp` or
+ *     `/var/tmp`), which is why this is a bound worth writing down rather than a defect worth chasing.
+ *   - `worker/src` making its own temp directories (`prepare-github.mjs`'s `pi-askpass-`,
+ *     `doctor.mjs`'s `pi-doctor-skills-`). Only `*.test.mjs` is scanned, so a test driving those paths
+ *     leaks through production code and the oracle is the sole detector.
+ *   - a test that TIMES OUT. `node --test` kills the file wrapper before root `after()` hooks run, so
+ *     the directory survives (measured). Nothing in this tree sets a per-test timeout except
+ *     `test-count-check.mjs`, whose runs are not the measured ones.
+ * Since it is textual, it also matches inside a string literal or a comment. A false positive costs one
+ * rename; the alternative is parsing, which `dated-fixture-check.mjs` already records as a four-round trap.
  */
-const BARE_TEMP_DIR = /mkdtempSync\s*\(\s*(?:join\s*\(\s*(?:os\.)?tmpdir\s*\(\s*\)|`\$\{\s*(?:os\.)?tmpdir\s*\(\s*\)\s*\})/g;
+const BARE_TEMP_DIR = /\bmkdtemp(?:Sync)?\s*\([^;\n]{0,200}?\btmpdir\s*\(\s*\)/g;
 
 function listTestFiles() {
 	const files = [];

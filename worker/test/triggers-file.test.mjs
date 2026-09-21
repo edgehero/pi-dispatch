@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync as realReadFileSync, rmSync, statSync as realStatSync, unlinkSync as realUnlinkSync, utimesSync as realUtimesSync, writeFileSync as realWriteFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync as realReadFileSync, rmSync, statSync as realStatSync, unlinkSync as realUnlinkSync, utimesSync as realUtimesSync, writeFileSync as realWriteFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
