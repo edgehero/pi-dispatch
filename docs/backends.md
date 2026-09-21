@@ -120,26 +120,29 @@ ones adapters get wrong:
   refuses by name what no uid can serve. **When that refusal fires depends on which cause it is**, so both
   sets are named here rather than one:
 
-  <!-- BACKENDS-JOB-USER-TIMING -->
+  <!-- worker/test/backends-doc.test.mjs GENERATES the two list lines below from `JOB_USER_FIX` and
+       `jobUserBootRefusal` and requires each verbatim, so edit them by pasting what that test prints. Each
+       cause name may appear exactly once on this page; to say more about one, say it without the name. -->
   - **Stops the boot**: `rootless`, `userns-remap`, `worker-is-root`, `desktop-linux-userns`. Nothing a job
     may run as works, so the worker exits rather than picking up work it could only refuse. Three of these
-    are facts about the daemon; the root-worker case is a fact about the account the worker itself runs as,
-    and is fixed by changing that account rather than the host. That exit
+    are read off the daemon, though one of them can instead be inferred from the socket this worker was
+    pointed at; the root-worker case is a fact about the account the worker itself runs as, and is fixed by
+    changing that account rather than the host. That exit
     is conditional, and the condition is real rather than decorative: it happens while `local` is the default
     venue (`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs`, read by `jobUserBootRefusal` in
     `start.mjs`), and a deployment whose default venue was elsewhere would boot and refuse each local job
     instead. `local` is the only venue this build has, so every deployment today gets the exit.
   - **Refuses each job**: `runtime-unreadable`, `root-group`, `docker-group`, `any-uid-unsupported`. The
-    worker boots, and each local job returns a policy refusal naming the cause. The last three are on the
+    worker boots, and each local job returns a policy refusal naming the cause. The first of those is a
+    daemon whose answer cannot be read at all, which is not the same as one that has not answered yet. The last three are on the
     `--user` path only, so a worker that is already uid 1001, the image's own uid, meets none of them:
     nothing is passed, and its primary group is not compared.
 
-  A daemon that does not answer is in neither set. The decision is `unknown`, it is never cached and never a
+  A daemon that has not answered YET is in neither set. The decision is `unknown`, it is never cached and never a
   boot exit, so a unit carrying `RestartPreventExitStatus=2` is not stranded by a daemon that is still
   starting. A job picked up while the answer is still unknown is an infrastructure **retry**, not a refusal
   (`CONST-RETRY-INFRA-ONLY`): the processor throws, so the queue tries again once the daemon answers, where a
   policy refusal returns and is final.
-  <!-- /BACKENDS-JOB-USER-TIMING -->
 
   `pi-dispatch doctor` names the answer for the shell it runs in, and `pi-dispatch doctor --live` runs its
   probe as that user and reads it back. An adapter for another runtime answers the same question in its own
@@ -287,9 +290,11 @@ Issue #342 asked for this to be decided alongside the Podman route rather than a
 #354's `podman` backend is specified in-tree, declaring its own words in the backend table and implementing
 the adapter contract on this page, so it needs no export and nothing here blocks it.
 
-What would reopen the question is an operator who installs this package from npm and wants to register an
-adapter without a checkout of this repository at all. That is the case an export would serve, and nobody has
-asked for it yet.
+Reopening this needs two things, not one, and the second is the harder. An export would let an
+npm-installed operator CALL `startWorker`, and it would still leave them unable to register anything:
+`BACKENDS` is frozen at module load, `parseBackendList` refuses a `PI_BACKENDS` name it does not know, and
+`validateBackend` refuses a trigger naming one. So an out-of-tree venue also needs a way to DECLARE itself,
+which is the thing the paragraph above refuses on purpose. Nobody has asked for either.
 
 `startWorker` builds the registry itself:
 

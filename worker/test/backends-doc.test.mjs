@@ -2,130 +2,92 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { DEFAULT_BACKEND } from "../src/backends.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX } from "../src/job-user.mjs";
+import { JOB_USER_FIX } from "../src/job-user.mjs";
 import { jobUserBootRefusal } from "../src/start.mjs";
 
 // `docs/backends.md` names WHEN each job-user refusal fires, which is a restatement of a derivable source, so it is
 // BOLTED to that source (CLAUDE.md: a hand-written table is derived or pinned, never trusted). Until this file there
-// was NO test reading that page at all, which is why its own refusal sentence had drifted to naming seven of
-// the code's eight causes in six clauses, omitting `runtime-unreadable` entirely.
+// was NO test reading that page at all, which is why its own refusal sentence had drifted to naming seven of the
+// code's eight causes in six clauses, omitting `runtime-unreadable` entirely.
 //
-// The bolt is `jobUserBootRefusal(decision, defaultBackend)` rather than `BOOT_REFUSING_JOB_USER_CAUSES` itself, and
-// that is deliberate: the page's claim is not "these four names are in a Set", it is "these stop a boot, and only
-// while `local` is the default venue". Only the function carries the second half, and it is exported (`start.mjs`)
-// precisely so the branch a one-venue build cannot reach stays pinned.
+// THIS FILE GENERATES THE TWO LINES AND REQUIRES THEM VERBATIM. It does not parse them back out of the page, and
+// that is the whole design rather than a detail. The first version did parse: it found a marked block, pulled the
+// backticked names out of it and compared the sets. An adversarial review got ELEVEN wrong pages past it; the lists
+// were genuinely derived, but nothing pinned WHICH TEXT was being read. It was hardened, and the second pass got ten
+// more through, each one a new hiding place rather than a new idea: a correct copy inside an HTML comment, a comment
+// closed by a plain `-->` in ordinary prose so the stripper ate the visible text around it, a link reference
+// definition that renders as nothing, non-breaking hyphens that render identically, a decoy marker pair, a narrowed
+// marker pair. Every repair bought one round. Generating the line ends that class by construction: there is one
+// correct string, the page either contains it or does not, and no hiding place helps because nothing is extracted.
 //
-// What is NOT pinned is the prose around the two lists, and `worker/test/podman-doc.test.mjs`'s header records why
-// at length: a regex over prose pins a claim's shape and never its truth. The lesson that page paid for four review
-// rounds to learn is the reason this file bolts the LISTS to a function instead.
+// The bolt is `jobUserBootRefusal(decision, defaultBackend)` rather than `BOOT_REFUSING_JOB_USER_CAUSES`, and the
+// distinction is the point: the page's claim is not that four names sit in a Set, it is that they stop a boot AND
+// only while `local` is the default venue. Only the function carries the second half, and it is exported
+// (`start.mjs`) precisely so the branch a one-venue build cannot reach stays pinned.
 //
-// THE RESIDUAL, stated because an adversarial review found it and nothing below closes it: a sentence that names no
-// cause at all is invisible to every rule here. "`pi-dispatch doctor` clears all four boot-stopping causes, so run
-// it once and the worker is guaranteed to start" would be false and green. The markers were widened to enclose the
-// whole passage so that anything NAMING a cause is caught, which is as far as a derivation reaches. The rest is a
-// limit this file states rather than a gap it papers over with a bigger pattern.
+// WHAT REMAINS UNPINNED, stated rather than overstated, because two reviews in a row corrected an earlier claim
+// about this file's reach. Only the two list lines and the cause names are derived. Every other sentence on that
+// page is prose, and prose can move a claim without moving a name: a third bullet, a sentence saying the two
+// headings were swapped in some release, a redefinition of "the boot" as the job container's, an invented promise
+// that `pi-dispatch doctor` clears the boot-stopping causes. All of those were demonstrated green and none is
+// reachable by a pattern. `worker/test/podman-doc.test.mjs` records the same limit and what it cost to learn: the
+// answer to prose that keeps being wrong is fewer such sentences, never a bigger regex.
 
 const doc = readFileSync(new URL("../../docs/backends.md", import.meta.url), "utf8");
 
-const OPEN = "<!-- BACKENDS-JOB-USER-TIMING -->";
-const CLOSE = "<!-- /BACKENDS-JOB-USER-TIMING -->";
+const CAUSES = Object.keys(JOB_USER_FIX);
+const stopsBoot = (cause) => jobUserBootRefusal({ mode: "unmappable", cause }, DEFAULT_BACKEND) !== null;
+const listLine = (label, causes) => `- **${label}**: ${causes.map((cause) => `\`${cause}\``).join(", ")}.`;
 
-/**
- * The block between the markers, with HTML comments removed. Three defences, and every one of them is here
- * because an adversarial review got a WRONG page past an earlier version of this file:
- *
- *   - Exactly one marker of each kind. `indexOf` takes the first, so a decoy pair pasted higher up the page
- *     made the test read a correct copy while the real block below it said the opposite.
- *   - The slice starts AFTER the opening marker and comments are stripped. Markdown hides HTML comments from
- *     the reader but not from `indexOf`, so a correct list in a comment satisfied every assertion while the
- *     rendered bullets were inverted. The same trick hid one cause mid-list from the reader alone.
- *   - The reader sees rendered markdown, so anything the extractor can see and the reader cannot is a lie
- *     this file would otherwise certify.
- */
-function timingBlock() {
-	assert.equal(doc.split(OPEN).length, 2, "exactly one opening marker");
-	assert.equal(doc.split(CLOSE).length, 2, "exactly one closing marker");
-	const start = doc.indexOf(OPEN);
-	const end = doc.indexOf(CLOSE);
-	assert.ok(start >= 0 && end > start, "the two lists are between their markers");
-	return doc.slice(start + OPEN.length, end).replace(/<!--[\s\S]*?-->/g, "");
-}
+/** The two lines this build says the page must carry, in `JOB_USER_FIX`'s own order so there is one canonical form. */
+const EXPECTED = [listLine("Stops the boot", CAUSES.filter(stopsBoot)), listLine("Refuses each job", CAUSES.filter((cause) => !stopsBoot(cause)))];
 
-/**
- * The two cause lists. Each list is the backticked names BEFORE the first full stop, so the prose after it
- * (which mentions `--user`, `local` and file paths) is out of range by construction rather than by a filter
- * that would have to be kept in step with the wording.
- */
-function timingLists() {
-	const block = timingBlock();
-	const listFor = (label) => {
-		const at = block.indexOf(`**${label}**:`);
-		assert.ok(at >= 0, `the page names a "${label}" set`);
-		const head = block.slice(at + `**${label}**:`.length);
-		const stop = head.indexOf(".");
-		assert.ok(stop > 0, `${label}: the list ends in a full stop`);
-		return [...head.slice(0, stop).matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-	};
-	return { boot: listFor("Stops the boot"), perJob: listFor("Refuses each job") };
-}
-
-test("every cause the page lists is a cause the worker actually has (#357)", () => {
-	const { boot, perJob } = timingLists();
-	for (const cause of [...boot, ...perJob]) {
-		assert.ok(Object.hasOwn(JOB_USER_FIX, cause), `not a cause this worker can refuse with: ${cause}`);
-	}
-	// Together, exactly the causes -- so a cause cannot be dropped from the page, and cannot be in both sets.
-	assert.deepEqual([...boot, ...perJob].sort(), Object.keys(JOB_USER_FIX).sort());
-	assert.equal(new Set([...boot, ...perJob]).size, boot.length + perJob.length, "no cause is in both sets");
-});
-
-// EXACTLY ONCE EACH, ANYWHERE IN THE BLOCK, and this is the assertion that makes the two lists mean something
-// rather than merely exist. The extractor reads up to each bullet's first full stop, so without this the prose
-// AFTER it was free to reassign a cause ("`worker-is-root` no longer stops the boot; it refuses each job"), to
-// add one to the wrong set, or to name one with no backticks at all, where the regex cannot see it. All three
-// passed an earlier version of this file. The constraint it imposes on the page is deliberate: a cause is named
-// in its list and nowhere else in the block, so there is exactly one place for a reader to look and exactly one
-// place for a future edit to be wrong in.
-test("each cause is named exactly once in the block, so prose cannot reassign one (#357)", () => {
-	const block = timingBlock();
-	for (const cause of Object.keys(JOB_USER_FIX)) {
-		assert.equal(block.split(cause).length - 1, 1, `${cause} is named once in the block, in its own list`);
+test("the page carries the two cause lists this build generates, verbatim (#357)", () => {
+	// Matched against TRIMMED LINES rather than the whole document, which is what makes a hiding place useless: a
+	// copy inside an HTML comment, a link reference definition or a table cell is not a line beginning `- **`, and
+	// a name spelled with a non-breaking hyphen is not this string. The bullet may carry prose after the full stop.
+	const lines = doc.split("\n").map((line) => line.trim());
+	for (const want of EXPECTED) {
+		const found = lines.filter((line) => line.startsWith(want));
+		assert.equal(found.length, 1, `docs/backends.md must carry exactly this line, exactly once:\n${want}`);
 	}
 });
 
-// The teeth. A cause the page files under the wrong heading dies here, in either direction, and so does a change to
-// the Set that the page was not updated for.
-test("the page's two sets are what `jobUserBootRefusal` decides, cause by cause (#357)", () => {
-	const { boot, perJob } = timingLists();
-	for (const cause of Object.keys(JOB_USER_FIX)) {
-		const refused = jobUserBootRefusal({ mode: "unmappable", cause }, "local") !== null;
-		assert.equal(refused, boot.includes(cause), `${cause}: the page files it under ${boot.includes(cause) ? "the boot" : "the per-job"} set`);
-		assert.equal(!refused, perJob.includes(cause), `${cause}: it belongs to exactly one of the two sets`);
+test("each cause is named once on the whole page, so no sentence can reassign one (#357)", () => {
+	// PAGE-WIDE, not block-wide, and the earlier block-wide version is why: a contradicting copy of the two lists
+	// somewhere else on the page passed it, and so did moving the block's own end marker. Counted in the BACKTICKED
+	// form, which is what avoids the collision that made an honest page fail -- `job-image-any-uid-unsupported` is
+	// the id the code uses for the per-image refusal and contains `any-uid-unsupported` as a bare substring.
+	for (const cause of CAUSES) {
+		assert.equal(doc.split(`\`${cause}\``).length - 1, 1, `${cause} is named once on the page, in its own list`);
 	}
-	assert.deepEqual(boot.slice().sort(), [...BOOT_REFUSING_JOB_USER_CAUSES].sort(), "and the boot set is that Set, in full");
 });
 
-// The conditional half of the page's claim, which the Set alone cannot carry: "while `local` is the default venue".
-// A build with one venue never reaches the other branch, so without this the sentence would be prose nobody checks.
-// The page's conditional half, which no derivation can reach: the function proves the BEHAVIOUR is conditional,
-// and nothing else stops the page asserting the opposite in words. Replacing the sentence with "that exit is
-// unconditional, whatever the default venue is" passed everything above. So the phrase is required, with the venue
-// name derived from `DEFAULT_BACKEND` rather than typed, which is the most this can be without pinning prose for
-// its own sake. It is the weakest assertion in the file and is kept because the alternative is a page free to
-// contradict a behaviour its own test proves.
-test("the page states the venue condition, not just a boot-refusing list (#357)", () => {
-	const flat = timingBlock().replace(/\s+/g, " ");
+// The page's conditional half, which no generation can reach: the function proves the BEHAVIOUR is conditional, and
+// nothing derivable stops a page asserting the opposite in words. This catches a page that stops MENTIONING the
+// condition, which is the drift that actually happened, and it does not catch one that mentions it in order to deny
+// it (demonstrated). Named that precisely so nobody mistakes it for the others or adds a second like it.
+test("the page still mentions the venue condition, not just a boot-refusing list (#357)", () => {
+	const flat = doc.replace(/\s+/g, " ");
 	assert.ok(flat.includes(`while \`${DEFAULT_BACKEND}\` is the default venue`), "the page says WHEN the boot exit applies");
 });
 
+// The teeth on the source side. A cause filed under the wrong heading dies in the generator above; these two pin the
+// function the generator asks, so a change to the Set or to the venue condition cannot quietly redefine both at once.
+test("the generated sets are what `jobUserBootRefusal` decides, cause by cause (#357)", () => {
+	const boot = CAUSES.filter(stopsBoot);
+	assert.deepEqual(boot, ["rootless", "userns-remap", "worker-is-root", "desktop-linux-userns"]);
+	assert.equal(CAUSES.length - boot.length, 4, "and the rest refuse each job");
+});
+
 test("no cause stops a boot when `local` is not the default venue (#357)", () => {
-	for (const cause of Object.keys(JOB_USER_FIX)) {
+	for (const cause of CAUSES) {
 		assert.equal(jobUserBootRefusal({ mode: "unmappable", cause }, "other"), null, cause);
 	}
-	// And a decision that is not a refusal never stops a boot, whatever the venue: an unanswered daemon reads as
+	// And a decision that is not a refusal never stops a boot, whatever the venue: an unanswered daemon reads
 	// `unknown`, which is the page's "in neither set" sentence and the reason a unit with
 	// RestartPreventExitStatus=2 is not stranded by a daemon that is still starting.
 	for (const decision of [{ mode: "unknown", reason: "no-daemon-facts" }, { mode: "worker", user: "1000:1000" }, { mode: "image", cause: "desktop-platform" }, null]) {
-		assert.equal(jobUserBootRefusal(decision, "local"), null, JSON.stringify(decision));
+		assert.equal(jobUserBootRefusal(decision, DEFAULT_BACKEND), null, JSON.stringify(decision));
 	}
 });

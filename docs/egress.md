@@ -188,16 +188,17 @@ All of it was run. The method costs nothing and is worth repeating on your own h
   peer on another job network is unreachable by name and by address. See `docs/podman.md`.
 - **A denied host fails in about 20 ms, not on a DNS timeout**, because the client hands the name to the
   proxy in a `CONNECT` and never resolves it locally. An external name resolved *directly* from an internal
-  network fails without ever reaching the proxy, and how fast depends on the resolver **inside** the container
-  rather than on anything this design does. Measured on Docker Desktop 27.4.0 (macOS), an `--internal`
-  network, docker's embedded resolver at `127.0.0.11` whose upstream is the VM gateway: the job image,
-  which is Debian and glibc,
-  gives up in about 10 ms (six runs, 6 to 23 ms, all `EAI_AGAIN`), because it takes the embedded resolver's
-  failure as final. A musl image on the same network waits out musl's own 5 s resolver timeout instead (five
-  runs, 5013 to 5025 ms). So the number that describes a job here is milliseconds: the job image is glibc,
-  and the earlier multi-second figure did not reproduce on this host at all. What that figure was measured
-  against is not known, so it is replaced rather than explained. Either way it is the path a client that
-  bypassed the proxy would take.
+  network fails without ever reaching the proxy, and how fast depends on the resolver **inside** the
+  container rather than on anything this design does. Measured on Docker Desktop 27.4.0 (macOS), an
+  `--internal` network, and docker's embedded resolver at `127.0.0.11`, whose upstream on that host is the
+  Desktop VM's own resolver and is not reachable from a network with no route off it. So the forward fails
+  rather than hanging, and what each client does with that failure is the whole of the difference: the job
+  image, which is Debian and glibc, gives up in about 10 ms (six runs, 6 to 23 ms, all `EAI_AGAIN`), taking
+  the embedded resolver's answer as final, while a musl image on the same network waits out musl's own 5 s
+  resolver timeout instead (five runs, 5013 to 5025 ms). The number that describes a job here is therefore
+  milliseconds, since the job image is glibc. The ten-second figure this replaces did not reproduce on this
+  host in any client, and what it was measured against is not known, so it is replaced rather than accounted
+  for. Either way it is the path a client that bypassed the proxy would take.
 
 ## Appendix: a host-firewall layer below docker's rules
 
