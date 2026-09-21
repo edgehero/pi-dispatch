@@ -167,7 +167,7 @@ line, because it says why the NEXT run for this key will cold start:
 | reason | meaning |
 |---|---|
 | `locked` | the key was already held by another job's exclusive promotion lock. A lock left behind by a killed promotion is taken over by the next promotion once it is older than an hour, so this means a live writer rather than a file somebody has to delete |
-| `promote-failed` | the transcript swap itself failed: a full disk, or a permissions change under the store mid-promotion. A sidecar that fails after the swap is logged, never reported here: the transcript landed |
+| `promote-failed` | the write failed before the transcript landed: a full disk, or a permissions change under the store mid-promotion. A sidecar that fails AFTER the swap is logged instead, never reported here, because the transcript did land |
 
 `locked` is the one with a design behind it. That run discards its own copy rather than clobbering the
 other's, and the reason is recorded to explain why the next run for the key will not see this run's work.

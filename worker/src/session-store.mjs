@@ -11,6 +11,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
@@ -102,10 +103,16 @@ const VENUE_PENDING = "(pending)";
  * an agent handed a truncated conversation with no gate able to see it. `triggers-file.mjs` learned this
  * on `triggers.json` and its `tmpPathFor` says the same thing.
  *
- * A pid plus a counter gives each promotion its own inode, so every rename moves a WHOLE transcript no
- * matter who else is mid-write. The cost is that a crash between the copy and the rename leaves a uniquely
- * named straggler instead of one the next promotion overwrites; the reaper's recursive sweep of the key
- * takes it with everything else.
+ * RANDOM BYTES, not just a pid and a counter, and the pid is why: two workers can share one. Two
+ * containers where node is pid 1, or two hosts on one shared `PI_SESSIONS_DIR` -- which is the very
+ * `OQ-031` shape the takeover's own skew analysis invokes -- produce byte-identical `<canonical>.1.0.incoming`
+ * names, measured, and a shared destination does tear (two processes copying 4 MiB to one path mixed both
+ * writers' bytes in 1 sample of 110). A pid-and-counter name separates two promotions inside ONE process,
+ * which is the one case that cannot happen, and leaves the case that can. The random half is what actually
+ * separates writers; the pid and counter stay because they make a straggler attributable.
+ *
+ * The cost is that a crash between the copy and the rename leaves a uniquely named straggler instead of one
+ * the next promotion overwrites; the reaper's recursive sweep of the key takes it with everything else.
  *
  * The SIDECAR temps keep the shared name deliberately, and the asymmetry is the point rather than an
  * oversight: a sidecar's worst case under a concurrent writer is a missing or half-written sidecar, and
@@ -384,15 +391,20 @@ export function makeSessionStore({
 			try {
 				// Atomic swap: a reader either sees the old file or the new one, never a half-written one.
 				// PER WRITER (see `tmpSeq`), not the fixed `.incoming` this shared before the lock could be taken
-				// over. The pid is readable and the counter starts at zero, so the name is still precomputable by
-				// a local attacker, which is why the unlink below stays exactly as it was.
-				const tmp = `${canonicalFile(session.key)}.${process.pid}.${tmpSeq++}.incoming`;
+				// over. The random half is what separates two writers; the pid and counter are there to make a
+				// straggler attributable, and neither is a writer identity on its own. The removal below stays
+				// regardless: a name that is hard to guess is not a name that cannot be guessed.
+				const tmp = `${canonicalFile(session.key)}.${process.pid}.${tmpSeq++}.${randomBytes(6).toString("hex")}.incoming`;
 				try {
 					// `copyFileSync` follows a link at the DESTINATION, so a link planted at this name would
-					// receive the whole transcript and leave the canonical path pointing at it. The key
-					// directory's name is derived rather than random, so the path is precomputable by anyone
-					// who knows the repository and the branch; unlinking removes the link, never its target.
-					fs.unlinkSync(tmp);
+					// receive the whole transcript and leave the canonical path pointing at it. Removing it first
+					// removes the LINK, never its target (`rmSync` does not follow one, measured).
+					//
+					// `rmSync` rather than `unlinkSync`, and recursively: a DIRECTORY planted at a temp name is
+					// not unlinkable, and at the venue sentinel's temp that wedged every promotion on the key
+					// forever, since that one write is the fatal one. The random half of this name makes planting
+					// at it a guess rather than a calculation, but the shape must not depend on that.
+					fs.rmSync(tmp, { recursive: true, force: true });
 				} catch {
 					// Absent is the desired state.
 				}
@@ -404,9 +416,9 @@ export function makeSessionStore({
 				// writes a stamp no venue matches. If that write fails, nothing has been swapped and the outer
 				// catch reports `promote-failed`; if the process dies after it, the key cold-starts everywhere
 				// until a promotion completes. A process KILLED inside this lock also leaks the lock itself, as it
-				// always has, so later promotions report `locked` until the reaper sweeps the key -- which it does
-				// only once the transcript's own mtime expires, and never for a key whose first promotion was
-				// killed before any transcript landed (INT-SESSION-STORE-CONTRACT). Unconditional rather than only
+				// always has -- but it no longer wedges the key: the next promotion takes a lock older than
+				// `LOCK_STALE_MS` over, and the reaper reaches a key with no transcript through the directory's own
+				// mtime (issue #336). Unconditional rather than only
 				// on a venue change, so the decision needs no read of the stamp under the lock and there is no
 				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
@@ -457,7 +469,8 @@ export function makeSessionStore({
 				try {
 					fs.unlinkSync(lock);
 				} catch {
-					// A leaked lock file wedges this key until the reaper sweeps it. Logged, never thrown.
+					// A lock left behind here is taken over by the next promotion once it is stale (`takeLock`).
+					// Logged, never thrown: the promotion itself succeeded.
 					log("session_lock_stuck", { key: session.key });
 				}
 			}
@@ -511,7 +524,10 @@ export function makeSessionStore({
 		const file = join(dir, name);
 		const tmp = `${file}.incoming`;
 		try {
-			fs.unlinkSync(tmp);
+			// `rmSync` recursively, for the transcript temp's reason: a link here would receive the write, and a
+			// DIRECTORY here is not unlinkable. At the venue sentinel, whose write is the one fatal sidecar
+			// write, a planted directory wedged every promotion on the key forever.
+			fs.rmSync(tmp, { recursive: true, force: true });
 		} catch {
 			// Absent is the desired state.
 		}
@@ -836,8 +852,12 @@ export function makeSessionStore({
 					// keep today's log-and-skip.
 					if (err?.code !== "ENOENT") throw err;
 					const dst = fs.lstatSync(dir);
-					// ONLY A REAL DIRECTORY IS A KEY. A stray FILE in the store gives ENOTDIR on the inner lstat
-					// rather than ENOENT, so it never reaches here; a SYMLINK gives ENOENT and does.
+					// ONLY A REAL DIRECTORY IS A KEY ON THIS PATH, and the scope of that is narrow enough to be worth
+					// stating. A stray FILE in the store gives ENOTDIR on the inner lstat, so it never reaches here.
+					// A symlink reaches here only when its target has no readable transcript: one pointing at a
+					// directory that DOES hold one resolves through the link in the path prefix, so the transcript's
+					// own mtime decides and the LINK is removed if it has aged out. That is pre-existing and
+					// unchanged, and it is safe for the reason below rather than because of this guard.
 					//
 					// What this guard is and is not, measured rather than assumed, because the obvious reading is
 					// wrong: `rmSync(p, { recursive: true, force: true })` does NOT follow a symlink. On a link to a
@@ -851,7 +871,8 @@ export function makeSessionStore({
 					mtimeMs = dst.mtimeMs;
 				}
 				if (mtimeMs < cutoff) {
-					// ONE recursive remove, and the transcript's age is the only thing it keys on. Removing the
+					// ONE recursive remove, on the transcript's age where there is one and the directory's own where
+					// there is not (above). Removing the
 					// transcript first (so an absent stamp, which reads as `local`, can never sit beside a readable
 					// transcript mid-sweep) was tried under #277 and withdrawn: a remove that then failed transiently
 					// left the directory with no transcript, which this loop never looks at again, so a leaked lock

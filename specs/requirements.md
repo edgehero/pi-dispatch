@@ -1580,10 +1580,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **pre-spend** rather than running unpersisted. Running it silently would be the failure
   `validatePackagesFlag`'s own comment describes one flag over: an operator who believes a thing is on
   while it is off, with a green run to confirm the belief.
-- **A transcript replaced under a reader cold-starts.** The read and the copy are not under the promotion
+- **A transcript SWAPPED under a reader cold-starts.** The read and the copy are not under the promotion
   lock, so a promotion can land between them. The copy is re-checked against the identity the gates judged
   (`INT-SESSION-STORE-CONTRACT`), and a job that would otherwise resume a transcript no gate has seen runs
-  cold with `transcript-replaced` instead. Fail-open, like every other eligibility arm: one cold start, and
+  cold with `transcript-replaced` instead. It is a SWAP that is caught, which is what a promotion performs:
+  a rewrite in place that restored the file's size and mtime would not be, and that bound is stated in the
+  contract rather than implied here. Fail-open, like every other eligibility arm: one cold start, and
   the next run resumes.
 - **One writer per key, and a dead writer does not keep it.** Promotion takes an exclusive per-key lock; a
   job that cannot take it runs cold with no persistence, never queued and never failed. A lock older than

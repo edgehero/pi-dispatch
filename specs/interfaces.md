@@ -3378,6 +3378,7 @@ validator rather than a second copy of it.
   <PI_SESSIONS_DIR>/<key>/context         `<tokens> <window> <model>` as last measured; cleared by a cold start
   <PI_SESSIONS_DIR>/<key>/lock            exclusive-create promotion lock; absent when free; taken over when stale
   <PI_SESSIONS_DIR>/<key>/current.jsonl.<pid>.<n>.incoming   a promotion's in-flight copy; PER WRITER
+  <PI_SESSIONS_DIR>/<key>/<sidecar>.incoming                 a sidecar's in-flight write; SHARED, deliberately
   <jobDir>/session/current.jsonl          this job's OWN copy; mounted /session:rw
   PI_SESSION_FILE=/session/current.jsonl  emitted ONLY when the job has a transcript; never empty
   ```
@@ -3442,28 +3443,46 @@ validator rather than a second copy of it.
   `PI_SESSION_MAX_BYTES=0` leaves no configured bound to derive from, and it is generous on purpose: too
   short steals a LIVE writer's lock, where too long only delays recovery on a key nobody is watching. The
   age is read with `lstat`, so a dangling link planted at that name is taken over rather than wedging the
-  key for good, which it did under an exclusive create. Two residuals stay open and are stated rather than
-  closed: the release unlinks by PATH, so after a takeover the original holder's release deletes the new
-  holder's lock, and a takeover on a key two venues share can leave one venue's transcript under the
-  other's stamp. Both need a takeover first, which needs an hour-old lock. **Two
+  key for good, which it did under an exclusive create. **What a takeover costs when it is wrong is stated rather than
+  softened**: two holders then run, BOTH report `promoted`, the last rename wins so one run's turns are
+  silently discarded, and the chain counter is incremented twice for one conversation. Four residuals stay
+  open. The release unlinks by PATH, so after a takeover the original holder's release deletes the new
+  holder's lock. The staleness read is a check-then-act: the lock is lstat'ed, judged, and then unlinked by
+  path without re-validating, so a lock created in that window is removed on the strength of its
+  predecessor's mtime -- the same window `triggers-file.mjs` concedes. The lock's mtime is its CREATE time
+  and is never refreshed, so the bound is on a promotion's total duration rather than on a holder's
+  liveness, and `PI_SESSION_MAX_BYTES=0` leaves that duration unbounded. And a lock whose mtime is in the
+  FUTURE, by clock skew or by a hand, is never stale, so under `PI_SESSIONS_TTL_DAYS=0`, where the reaper
+  does not run either, such a key is wedged until someone removes the file. A takeover on a key two venues
+  share can also leave one venue's transcript under the other's stamp. **Two
   triggers on one key that name different venues** replace each other's transcript and so cold-start on
   every alternation; that is the cost of keeping the venue out of the key, and it is the right way round,
   since the alternative resumes one venue's conversation in the other. Three residuals, one of them narrowed: two complete promotions from
   different venues inside one copy window (A, B, A) leave the STAMP matching again, and the venue re-check
   cannot see the round trip, but the identity re-check does, because each swap renames a fresh inode into
-  place. What survives is narrower and is stated rather than claimed closed: an inode NUMBER can be reused,
-  since the swapped-away inode is freed by its own rename, so two promotions inside one copy window whose
-  second lands on a recycled number with the same size and mtime compare equal. The sidecars are each read
+  place. What survives is narrower and is stated rather than claimed closed. **A SWAP is what this
+  catches**, which is what a promotion performs; a rewrite IN PLACE that restores the file's size and mtime
+  keeps every field of the identity and is not caught, measured. An inode NUMBER can also be reused, since
+  the swapped-away inode is freed by its own rename, so two promotions inside one copy window whose second
+  lands on a recycled number with the same size and mtime compare equal; that one is filesystem-dependent
+  and was NOT reproducible on APFS, which hands out strictly increasing numbers, so it is a residual on
+  filesystems that recycle rather than a general one. The sidecars are each read
   at their own instant and the identity covers the transcript only. **The reaper keys on the transcript's mtime, and falls back to the key DIRECTORY's own mtime
   when there is no transcript to key on** (issue #336), which is how a key whose first promotion died before
   the swap is swept at all rather than skipped on every pass forever. ENOENT alone takes that fallback: an
   EIO or an EACCES means the reaper could not ASK, and a reaper that treats "could not ask" as "old" deletes
-  on a transient fault. Only a real DIRECTORY is a key, so a stray file (ENOTDIR, which never reaches the
-  fallback) and a symlink are left alone; `rmSync` does not follow a link, measured, so a link's TARGET was
-  never at risk and the guard's job is narrower: it stops the reaper unlinking an operator's own symlink out
-  of the store. `PI_SESSIONS_TTL_DAYS=0` is unchanged and still sweeps nothing at all, deliberately, because
+  on a transient fault. Only a real DIRECTORY takes that fallback: a stray file gives ENOTDIR and never
+  reaches it, and a symlink reaches it only when its target has no readable transcript, in which case it is
+  left alone. A symlink whose target DOES hold one resolves through the link in the path prefix, so the
+  transcript's own mtime decides and the link is removed once it has aged, which is pre-existing and
+  unchanged. No link's TARGET is ever at risk either way: `rmSync` does not follow a symlink, measured, so
+  it removes the link and leaves the target and its contents. `PI_SESSIONS_TTL_DAYS=0` is unchanged and still sweeps nothing at all, deliberately, because
   it is an explicit operator instruction and what makes a wedged key recoverable there is the stale-lock
-  takeover rather than this. The reaper takes no lock and removes a key in one recursive walk, so a
+  takeover rather than this. **What the fallback widens is stated**: a transcript-less key directory was
+  previously never swept, so anything inside one now goes with it, including files an operator put there;
+  and the lockless-sweep race below, which this contract used to state only for an EXPIRED key, now reaches
+  any long-lived transcript-less key, where the cost is the whole key rather than a momentarily missing
+  stamp. The reaper takes no lock and removes a key in one recursive walk, so a
   promotion landing on an EXPIRED key during its own sweep could, for a moment, leave that transcript
   without its stamp, which reads as `local`; and a worker older than #277 sharing a `PI_SESSIONS_DIR`
   neither reads nor writes the stamp, so every worker on a shared store must run a release carrying it
@@ -3511,6 +3530,10 @@ validator rather than a second copy of it.
   was the last to inherit both halves (issue #336): its WRITE was plain until then, so it followed a link
   planted at that name, and a failure there after the swap reported `promote-failed` for a promotion that
   landed. Neither is true any more, and there is no longer an exception to state.
+  **The guarantee is about the NAMES INSIDE a key directory, not about the directory
+  itself**: a key directory that is itself a symlink, pre-created at the derived path, is followed like any
+  other path component, and every read and write then lands wherever it points. That is out of this
+  contract's scope rather than covered by it, and it is the one shape the lstat-per-name rule cannot see.
   The store is host-only and never mounted, so this is not a container reaching in; what makes
   it worth the lines is that the directory NAME is derived rather than random, so anyone who knows the
   repository and the branch can compute the path and pre-create it. `readFileSync` follows a link, which
@@ -3535,7 +3558,11 @@ validator rather than a second copy of it.
   one voids the atomicity the swap exists for the moment there can be two, since one writer's unlink removes
   the other's in-flight copy and whichever renames second can place a half-written file at the canonical
   path. The SIDECAR temps keep a shared name deliberately, because a sidecar's worst case under a concurrent
-  writer reads back as `null` and cold-starts, where the transcript's is a corrupt transcript. The venue sentinel is written under that lock
+  writer reads back as `null` and cold-starts, where the transcript's is a corrupt transcript. **That
+  asymmetry holds for three of the four sidecars and not for the venue sentinel**, whose write is the one
+  that is fatal: anything that makes its temp unwritable fails every promotion on the key. Every temp is
+  therefore removed with a recursive `rmSync` rather than an `unlinkSync`, so a DIRECTORY planted at a temp
+  name is removed like a file or a link instead of wedging the key forever. The venue sentinel is written under that lock
   immediately BEFORE the rename and is the one sidecar write that is fatal (above). The venue stamp,
   `pi-version`, the chain counter and the context reading are written under that lock immediately AFTER
   it, in that order, and are deliberately not described as part of it: the swap is one rename and cannot be
@@ -3550,7 +3577,7 @@ validator rather than a second copy of it.
   would also tell an operator the next run will cold start when it will in fact resume. For the venue stamp
   the forecast runs the other way: a failed stamp leaves the sentinel, so the next run WILL cold-start, and
   the logged `session_sidecar_failed` line is what explains it.
-  **`locked` means EEXIST AND A LOCK YOUNGER THAN THE STALENESS BOUND**: a read-only directory or a full disk also fails to create the
+  **`locked` means the lock was held and this job could not take it**: a lock younger than the staleness bound, or an older one whose takeover lost the recreate race. A read-only directory or a full disk also fails to create the
   lock, and reporting those as `locked` sends an operator looking for a stuck lock file that does not
   exist, so they fall through to `promote-failed`. A job that cannot take the lock discards rather
   than clobbers. Everything else the agent left in `/session` is deleted unread with the job dir.
@@ -3595,7 +3622,17 @@ validator rather than a second copy of it.
   deployment default is; given a stamp that exists but is not a readable regular file, including a dangling
   symlink, the job cold-starts; given a promotion whose transcript rename fails, the stamp reads
   `(pending)` and both venues cold-start; given a completed promotion, the stamp names the venue of the
-  session that promoted.
+  session that promoted. Given a link planted at `pi-version`, a promotion neither writes through it nor
+  reads through it and its target is byte-unchanged; given a `pi-version` write that fails after the swap,
+  the promotion reports `promoted` and the next job cold-starts. Given a promotion by a job on the same
+  venue landing between another job's gate read and its copy, that job cold-starts with
+  `transcript-replaced` and its staged file is 0 bytes, while a transcript nothing touched still resumes.
+  Given a promotion lock older than the staleness bound, the next promotion takes it over and lands, saying
+  so once it holds it, including on a key with no transcript and on a store with `PI_SESSIONS_TTL_DAYS=0`;
+  given one younger, the job records `locked` and leaves both the transcript and the lock alone. Given a
+  key directory with no transcript whose own mtime has expired, the reaper sweeps it; given a fresh
+  transcript in a long-untouched directory, it does not; given any error but ENOENT reading the transcript,
+  it keeps the key and says so.
 
 ## INT-CONFIG-OVERLAY-CONTRACT
 

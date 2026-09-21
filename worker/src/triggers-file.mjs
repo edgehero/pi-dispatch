@@ -13,11 +13,15 @@
  * every write now takes `<path>.lock` via exclusive create (`wx`), the session-store's idiom with its
  * two doctrines kept verbatim: EEXIST is the ONLY failure that means locked (anything else failed to
  * create the lock for its own reason and is reported as that reason), and a leaked lock is logged,
- * never thrown. What is NEW here, with no in-repo precedent, is the STALE TAKEOVER: a lock whose
- * mtime is older than LOCK_STALE_MS is unlinked and retaken once. The session store can afford to
- * discard on contention and let its reaper sweep a leak; this file cannot -- a crashed writer's lock
- * would otherwise wedge every trigger add, edit, delete and disarm on the deployment forever, and
- * there is no reaper whose beat covers it. The residual is the classic one: unlink-then-create is not
+ * never thrown. The STALE TAKEOVER started here and no longer has to argue for itself: a lock whose
+ * mtime is older than LOCK_STALE_MS is unlinked and retaken once, and the session store took the same
+ * idiom under issue #336, which refuted the premise this comment used to rest on -- that the store could
+ * afford to discard on contention and let its reaper sweep a leak. It could not: its reaper keys on a
+ * transcript, so a key whose first promotion died before one landed was never swept at all. The reason
+ * this file needed it FIRST still stands: a crashed writer's lock would wedge every trigger add, edit,
+ * delete and disarm on the deployment forever, and there is no reaper whose beat covers it. The two
+ * thresholds differ by three orders because the work under the two locks does (see the session store's
+ * own constant). The residual is the classic one: unlink-then-create is not
  * atomic, so two writers racing a stale takeover can interleave in a window of milliseconds. That
  * window replaces today's always-open one, and the loser's write still validated through the shared
  * parser, so the file stays loadable; the lost update is one disarm or one edit, and the disarm

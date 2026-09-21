@@ -910,6 +910,29 @@ test("a lock older than any plausible promotion is TAKEN OVER, and the promotion
 	assert.equal(existsSync(lock), false, "the lock is released again afterwards");
 });
 
+test("the takeover reaches the two shapes the reaper never could: no transcript, and TTL 0 (#336)", () => {
+	// These are the Acceptance clauses of the issue, and they are the whole reason a takeover is the primary
+	// fix rather than a reaper change. A key whose FIRST promotion died has no transcript for the reaper to
+	// key on, and `PI_SESSIONS_TTL_DAYS=0` stops the reaper running at all. The mechanism does not depend on
+	// either, which is exactly why both are pinned rather than argued.
+	for (const [name, ttlDays] of [["a key with no transcript", 14], ["a store with TTL 0", 0]]) {
+		const { store, jobDir, sessionsDir, logs } = fixture({ ttlDays });
+		const key = sessionKeyFor(ghIssue);
+		// No seed: the key directory exists with a leaked lock and nothing else, which is what a promotion
+		// killed before its first swap leaves behind.
+		mkdirSync(join(sessionsDir, key), { recursive: true });
+		agedLock(sessionsDir, key, 2 * 3600_000);
+
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		assert.equal(s.reason, "absent", `${name}: there is no transcript to resume`);
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}recovered\n`);
+
+		assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true, `${name}: the key must not stay wedged`);
+		assert.ok(logs.some(([event]) => event === "session_lock_stale_taken"), `${name}: and the takeover is said`);
+		assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("recovered"), true, name);
+	}
+});
+
 test("a lock YOUNGER than the threshold is a live writer, and the loser still discards (#336)", () => {
 	// The bound is exercised from both sides on purpose: a bound nothing tests is a bound that drifts, and
 	// this half is what stops the takeover from stealing a slow writer's lock.
@@ -918,23 +941,56 @@ test("a lock YOUNGER than the threshold is a live writer, and the loser still di
 	const first = seed(sessionsDir, key, { venue: "local" });
 	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}loser\n`);
-	const lock = agedLock(sessionsDir, key, 60_000);
+	// ONE MINUTE UNDER THE BOUND, not merely "young". A bound pinned only between a minute and two hours is
+	// a bound that can be set to a minute without a test objecting, and a one-minute takeover steals a live
+	// writer's lock on any store slower than a minute.
+	const lock = agedLock(sessionsDir, key, 3_600_000 - 60_000);
 
 	const p = store.promoteSession(s, { piVersion: PI });
-	assert.equal(p.reason, "locked", "a minute-old lock is a live writer");
+	assert.equal(p.reason, "locked", "a lock a minute under the bound is still a live writer");
 	assert.equal(readFileSync(first, "utf8"), HEADER, "and the loser leaves the canonical transcript alone");
 	assert.equal(existsSync(lock), true, "and does not remove the holder's lock");
 	assert.equal(logs.some(([event]) => event === "session_lock_stale_taken"), false, "and says nothing about a takeover");
 });
 
+test("the takeover is ONE retake, and the retake is still an exclusive create (#336)", () => {
+	// Two properties the contract states and nothing pinned. Retrying N times would make the takeover a loop
+	// that outlasts a rival rather than a single concession, and a non-exclusive retake would stop it being a
+	// lock at all -- the second is the very race the log-ordering rule above exists for.
+	const opens = [];
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			openSync: (p, flags, ...rest) => {
+				if (String(p).endsWith("lock")) opens.push(flags);
+				return realFs.openSync(p, flags, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	agedLock(sessionsDir, key, 2 * 3600_000);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+
+	assert.ok(opens.length <= 2, `one takeover means at most two creates, got ${opens.length}`);
+	for (const flags of opens) assert.equal(flags, "wx", "every attempt is an EXCLUSIVE create, retake included");
+});
+
 test("a takeover is logged only AFTER the retake succeeded (#336)", () => {
 	// A rival sweeper can win the recreate race. Logging on the unlink would tell an operator this process
 	// took a lock it does not hold.
+	let creates = 0;
 	const { store, jobDir, sessionsDir, logs } = fixture({
 		fs: {
 			...realFs,
 			openSync: (p, ...rest) => {
-				if (String(p).endsWith("lock")) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+				if (String(p).endsWith("lock")) {
+					creates++;
+					throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+				}
 				return realFs.openSync(p, ...rest);
 			},
 		},
@@ -947,6 +1003,9 @@ test("a takeover is logged only AFTER the retake succeeded (#336)", () => {
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
 	assert.equal(store.promoteSession(s, { piVersion: PI }).reason, "locked", "the retake lost, so this job stands down");
 	assert.equal(logs.some(([event]) => event === "session_lock_stale_taken"), false, "and claims no takeover it did not complete");
+	// ONE retake, even when it keeps losing. A loop that retries until it wins is a takeover that outlasts a
+	// rival rather than a single concession, and this is the only path where the difference is observable.
+	assert.equal(creates, 2, "one initial create and one retake, never a retry loop");
 });
 
 test("a DANGLING link planted at the lock name does not wedge the key forever (#336)", () => {
@@ -1061,9 +1120,95 @@ test("a promotion that knows no pi version INVALIDATES the stamp rather than lea
 	assert.equal(store.resolveSession(ghIssue, { jobDir, piVersion: PI }).reason, "pi-version-changed", "so the next job cold-starts");
 });
 
+test("every temp is REMOVED before it is written, so a link planted at one receives nothing (#336)", () => {
+	// The defence is the removal, not the name, and nothing pinned it. Removing either `rmSync` leaves the
+	// whole suite green while a link planted at that temp receives the agent's entire transcript (at the
+	// transcript temp) or the pi version (at a sidecar temp) -- which is issue #336 part 1's own defect, one
+	// name along. Both were demonstrated as passing mutants before this test existed.
+	//
+	// Pinned as ORDER on the injected fs rather than by planting a link: the transcript temp now carries
+	// random bytes, so its name cannot be predicted by a test any more than by an attacker, and the property
+	// that matters is that the remove happens first for the SAME path.
+	const calls = [];
+	const { store, jobDir, sessionsDir } = fixture({
+		fs: {
+			...realFs,
+			rmSync: (p, ...rest) => {
+				if (String(p).includes(".incoming")) calls.push(["rm", String(p)]);
+				return realFs.rmSync(p, ...rest);
+			},
+			copyFileSync: (from, to, ...rest) => {
+				if (String(to).includes(".incoming")) calls.push(["write", String(to)]);
+				return realFs.copyFileSync(from, to, ...rest);
+			},
+			writeFileSync: (p, ...rest) => {
+				if (String(p).includes(".incoming")) calls.push(["write", String(p)]);
+				return realFs.writeFileSync(p, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}body\n`);
+	assert.equal(store.promoteSession(s, { piVersion: PI, context: { tokens: 1, window: 1000 } }).promoted, true);
+
+	const written = calls.filter(([kind]) => kind === "write").map(([, p]) => p);
+	assert.ok(written.length >= 4, "the transcript temp and the sidecar temps are all written through one");
+	for (const path of new Set(written)) {
+		const first = calls.findIndex(([, p]) => p === path);
+		assert.equal(calls[first][0], "rm", `${path.split("/").pop()} must be REMOVED before anything writes it`);
+	}
+});
+
+test("two WORKER PROCESSES that share a pid still do not share a temp name (#336)", async () => {
+	// The pid is not a writer identity: two containers where node is pid 1, or two hosts on one shared
+	// PI_SESSIONS_DIR (the OQ-031 shape the takeover's own skew analysis invokes) share it. Measured as
+	// byte-identical temp names before the random half existed, and a shared destination does tear.
+	//
+	// A SECOND MODULE INSTANCE is what makes this the real case rather than a weaker one. `tmpSeq` is module
+	// state, so two stores built in ONE process already differ by the counter and would pass against a
+	// constant random half -- which is exactly the mutant that survived the first version of this test. A
+	// cache-busting import gives a genuinely fresh module registry entry, counter back at zero, which is what
+	// a second worker process is.
+	const second = await import(`../src/session-store.mjs?worker=2`);
+	const seen = [];
+	const capture = () => ({
+		...realFs,
+		copyFileSync: (from, to, ...rest) => {
+			if (String(to).includes(".incoming")) seen.push(String(to));
+			return realFs.copyFileSync(from, to, ...rest);
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	const a = fixture({ fs: capture() });
+	seed(a.sessionsDir, key, { venue: "local" });
+	const opts = { sessionsDir: a.sessionsDir, ttlDays: 14, maxBytes: 1_000_000, defaultBackend: "local", now: () => NOW, log: () => {} };
+	const b = second.makeSessionStore({ ...opts, fs: capture() });
+
+	for (const store of [a.store, b]) {
+		const s = store.resolveSession(ghIssue, { jobDir: a.jobDir, piVersion: PI });
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}x\n`);
+		assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+	}
+
+	assert.equal(seen.length, 2);
+	// The RANDOM segment is the assertion, not the whole name: the counter happens to differ here only
+	// because earlier tests in this file advanced the first instance's, and two genuinely fresh processes
+	// would both be at zero. So compare the half that has to carry the separation.
+	const rand = (p) => p.split(".").at(-2);
+	assert.notEqual(rand(seen[0]), rand(seen[1]), "the random half must differ, since the pid and counter can both collide across processes");
+	assert.notEqual(seen[0], seen[1], "two writers sharing a pid AND a counter must still not share a destination");
+	for (const p of seen) assert.match(p, /\.\d+\.\d+\.[0-9a-f]{12}\.incoming$/, "the name carries the pid, a counter and random bytes");
+	// WHAT IS NOT PINNED: that the pid is the PID. Replacing it with a constant still separates two writers,
+	// because the random half does that, so such a change passes here. It stays in the name to make a
+	// straggler attributable to the process that left it, which is a debugging property and not a safety one.
+});
+
 test("the transcript's in-flight copy is named PER WRITER, so two promotions never share one tmp (#336)", () => {
-	// WHAT THIS PINS, and no more: the NAME. Two promotions produce two different tmp paths, and the fixed
-	// `.incoming` this replaced produced one.
+	// WHAT THIS PINS, and no more: the NAME, for two promotions inside ONE process. Two writers that do not
+	// share a process are the case that matters and they are pinned separately above, because a pid is not a
+	// writer identity.
 	//
 	// WHAT IT CANNOT PIN: the interleaving the per-writer name protects against. `copyFileSync` is
 	// synchronous, so two writers inside ONE process can never be mid-copy at the same time -- a seam that
@@ -1092,7 +1237,7 @@ test("the transcript's in-flight copy is named PER WRITER, so two promotions nev
 
 	assert.equal(seen.length, 2, "both promotions copied through a tmp");
 	assert.notEqual(seen[0], seen[1], "and the two tmp paths differ, so neither can unlink or overwrite the other's");
-	for (const p of seen) assert.match(p, /\.\d+\.\d+\.incoming$/, "the name carries the pid and a counter");
+	for (const p of seen) assert.match(p, /\.\d+\.\d+\.[0-9a-f]{12}\.incoming$/, "the name carries the pid, a counter and random bytes");
 	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("two"), true, "and the last promotion is what landed");
 });
 
@@ -1101,9 +1246,10 @@ test("a SAME-venue promotion that lands between the gate and the copy cold-start
 	// after and only the transcript moved. Before the identity re-check this job resumed a transcript no gate
 	// had judged -- it could be past its TTL, past the age bound, chain-exhausted, or written by another pi.
 	//
-	// A TABLE over three replacements, each isolating a different field of the identity, so this pins WHICH
-	// fields are compared and not merely that something is. The renamed case is the load-bearing one: it is
-	// what a real promotion does, and only `dev:ino` differs.
+	// A TABLE over two replacements, so this pins WHICH fields are compared and not merely that something is:
+	// dropping `dev:ino` from the identity fails the first and dropping `size:mtime` fails the second. The
+	// renamed case is the load-bearing one, because it is what a real promotion does, and only `dev:ino`
+	// differs there.
 	const key = sessionKeyFor(ghIssue);
 	// A whole second, and inside the fixture clock's TTL window so the age gate stays out of this.
 	const STEADY = new Date(NOW - 1000);
@@ -1124,6 +1270,31 @@ test("a SAME-venue promotion that lands between the gate and the copy cold-start
 			assert.equal(after.mtimeMs, before.mtimeMs, "and the mtime, or it is not isolating the inode");
 		},
 		"rewritten in place, different bytes": (canonical) => realFs.writeFileSync(canonical, `${HEADER}{"type":"message"}\n`),
+		// The two cases above move `ino` alone and `size`+`mtime` together, so neither isolates `size` or
+		// `mtimeMs`. Dropping either from the identity left the suite green, which is a finding about this
+		// table rather than about the code. These two separate them.
+		//
+		// WHAT IS NOT PINNED, and cannot be from here: `dev`. Isolating it needs the canonical file to move to
+		// another DEVICE between the gate and the copy, which no test on one filesystem can arrange, so
+		// dropping `dev` from the identity passes. It stays in because an inode number is unique per device and
+		// a store spanning a mount point is otherwise two keys that can compare equal.
+		"same inode and mtime, different SIZE": (canonical) => {
+			const before = realFs.statSync(canonical);
+			realFs.writeFileSync(canonical, `${HEADER}{"type":"message"}\n`);
+			realFs.utimesSync(canonical, STEADY, STEADY);
+			assert.notEqual(realFs.statSync(canonical).size, before.size, "the fixture must change the size");
+			assert.equal(realFs.statSync(canonical).mtimeMs, before.mtimeMs, "and hold the mtime");
+		},
+		"same inode and SIZE, different mtime": (canonical) => {
+			const before = realFs.statSync(canonical);
+			const body = realFs.readFileSync(canonical, "utf8");
+			// Same length, different bytes: only the mtime moves.
+			realFs.writeFileSync(canonical, body.slice(0, -2) + "X\n");
+			const later = new Date(NOW + 5000);
+			realFs.utimesSync(canonical, later, later);
+			assert.equal(realFs.statSync(canonical).size, before.size, "the fixture must hold the size");
+			assert.notEqual(realFs.statSync(canonical).mtimeMs, before.mtimeMs, "and move the mtime");
+		},
 	};
 
 	for (const [name, replace] of Object.entries(cases)) {
@@ -1147,6 +1318,18 @@ test("a SAME-venue promotion that lands between the gate and the copy cold-start
 		assert.equal(s.bytes, null, `${name}: a cold start reports no bytes`);
 		assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, `${name}: the container is handed nothing of it`);
 	}
+});
+
+test("the transcript identity never rides the session object (#336)", () => {
+	// `resolveSession`'s return is spread onto the session the processor holds for the whole run, and the
+	// contract says the identity is deliberately split off it so a promotion an hour later cannot read it.
+	// Carrying it was a mutation the suite accepted.
+	const { store, jobDir, sessionsDir } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.reason, "resumed");
+	assert.deepEqual(Object.keys(s).sort(), ["bytes", "hostDir", "key", "modelId", "reason", "resume", "venue"], "no inode number leaves this function");
 });
 
 test("an untouched transcript still RESUMES: the re-check must not fire on the quiet path (#336)", () => {
@@ -1218,6 +1401,42 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
 });
 
+test("the reaper's fallback keys on the directory's MTIME, not its birthtime or atime (#336)", () => {
+	// Both alternatives were mutations the suite accepted, and both are wrong in the same direction: a
+	// directory's birthtime never moves, so a key in active use would never age out of it, and an atime moves
+	// on a READ, so merely listing the store would keep a dead key alive (and `noatime` would stop it moving
+	// at all). Only the mtime tracks entries being created and removed inside the directory, which is what
+	// "this key is still in use" means here.
+	//
+	// The three stamps are INJECTED rather than set with `utimes`, and that is not fastidiousness: on APFS,
+	// moving a directory's mtime backwards drags its BIRTHTIME back with it (measured), so on this platform a
+	// real directory cannot hold an old mtime and a fresh birthtime at once, and a test built on one lets the
+	// birthtime mutant through. A synthetic stat is the only way to separate the three fields here.
+	const later = Date.now() + 3 * 86400000;
+	const key = sessionKeyFor(ghIssue);
+	const { store, sessionsDir } = fixture({
+		ttlDays: 1,
+		now: () => later,
+		fs: {
+			...realFs,
+			lstatSync: (p, ...rest) => {
+				const st = realFs.lstatSync(p, ...rest);
+				if (String(p).endsWith(key)) {
+					// Aged mtime; birthtime and atime both FRESH, which only the mtime rule sweeps.
+					return { isDirectory: () => true, mtimeMs: later - 90 * 86400000, birthtimeMs: later, atimeMs: later };
+				}
+				return st;
+			},
+		},
+	});
+	const dir = join(sessionsDir, key);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "lock"), "");
+
+	store.reapSessions();
+	assert.equal(existsSync(dir), false, "an old mtime is what makes a transcript-less key dead, whatever its birthtime or atime say");
+});
+
 test("a FRESH transcript in an ancient directory survives the reaper (#336)", () => {
 	// The guard on the fallback, and the mutation that matters most: making the directory-mtime rule
 	// unconditional instead of ENOENT-only would sweep an actively used key whose directory nobody has written
@@ -1258,7 +1477,7 @@ test("a disk fault on the transcript is not evidence that a key is old (#336)", 
 	assert.ok(logs.some(([event, f]) => event === "session_reaper_skipped" && f.key === key), "and the fault is said");
 });
 
-test("only a real directory is a key: a stray file and a symlink are left alone (#336)", () => {
+test("the reaper's directory fallback takes only real directories: a stray file and a link do not (#336)", () => {
 	// The fallback lstats the ENTRY when the transcript is absent, so the shapes that reach it need naming. A
 	// stray file gives ENOTDIR on the inner lstat and never arrives; a SYMLINK gives ENOENT and does.
 	//
