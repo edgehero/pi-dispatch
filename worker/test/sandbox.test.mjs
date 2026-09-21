@@ -498,13 +498,17 @@ describe("decideSandboxJobUser", () => {
 // --- the session-network sweep (issue #337) ----------------------------------------------------------
 
 /** A fake daemon: `nets` maps a network name to its attached endpoint NAMES; `rm` refuses while any remain. */
-function fakeNetDaemon({ nets = {}, fail = {} } = {}) {
+function fakeNetDaemon({ nets = {}, fail = {}, created = [] } = {}) {
 	const calls = [];
 	const state = new Map(Object.entries(nets).map(([n, m]) => [n, [...m]]));
 	const run = async (args) => {
 		calls.push(args.join(" "));
 		const key = args.slice(0, 2).join(" ");
 		if (fail[key]) return { code: 1, stdout: "", stderr: fail[key] };
+		// `docker ps -a --filter status=created`: the launch window, which nothing else on this daemon can
+		// see. Measured on 27.4.0 (issue #337): a container created on a network but not started is absent
+		// from `docker ps` AND from `network inspect`, and the `network rm` still succeeds.
+		if (key === "ps -a") return { code: 0, stdout: created.join("\n"), stderr: "" };
 		if (key === "network ls") return { code: 0, stdout: [...state.keys()].join("\n"), stderr: "" };
 		if (key === "network inspect") {
 			const net = args.at(-1);
@@ -600,6 +604,29 @@ test("the id in a session network name is the one the directories and `--list` u
 	assert.ok(SANDBOX_NETWORK_SHAPE.test(`${SANDBOX_NAME_PREFIX}-net`), "a degenerate id is still ours");
 	assert.ok(!SANDBOX_NETWORK_SHAPE.test("my-pi-sandbox-notes"), "a name that merely contains the prefix is not");
 	assert.ok(!SANDBOX_NETWORK_SHAPE.test(`${SANDBOX_NAME_PREFIX}x-net-backup`), "nor our shape with something appended");
+});
+
+test("a sandbox being LAUNCHED keeps its network, which no other guard here can see (#337)", async () => {
+	// The window `docker run` opens between create and start: measured at 230ms on a local image, the whole
+	// pull when the image is not local. In it the container is in `created` state, where `docker ps` does not
+	// list it, `network inspect` does not list it as an endpoint, and -- the part that makes this a third
+	// guard rather than a nicety -- `network rm` SUCCEEDS, after which `docker start` fails with "network not
+	// found" and that sandbox can never run. Docker is a backstop for a RUNNING endpoint and for nothing else.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-opening-net": ["pi-dispatch-egress-proxy"] }, created: ["pi-sandbox-opening"] });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set() });
+	assert.deepEqual(out, { swept: [], notes: [] }, "a launch in flight is not a leftover, and is not worth a line either");
+	assert.ok(!d.calls.some((c) => c.startsWith("network inspect") || c.startsWith("network disconnect") || c.startsWith("network rm")), "it is never even inspected");
+	assert.deepEqual(d.state.get("pi-sandbox-opening-net"), ["pi-dispatch-egress-proxy"], "the proxy stays where the launch expects it");
+});
+
+test("a `created` listing that did not answer sweeps nothing at all (#337)", async () => {
+	// Fail closed: without this listing the launch window is unguarded, and the whole point of the listing is
+	// that nothing else on the daemon reports it. Sweeping on the other two sets would be sweeping on
+	// evidence we know to be incomplete.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [] }, fail: { "ps -a": "Cannot connect to the Docker daemon" } });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({});
+	assert.deepEqual(out, { swept: [], notes: [], failed: "starting-list-failed" });
+	assert.deepEqual(d.calls, ["ps -a --filter status=created --filter name=pi-sandbox- --format {{.Names}}"], "and it asks before it lists networks");
 });
 
 test("the sweep yields between networks, so it is never one uninterruptible block (#337)", async () => {

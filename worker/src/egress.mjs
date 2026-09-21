@@ -279,11 +279,18 @@ export function networkAbsentInDaemonWords(result) {
  * The endpoint NAMES attached to a network, as `{ ok, names, absent }`. `.Name` reads on Docker AND Podman
  * (measured, issue #344).
  *
- * WHAT "ATTACHED" MEANS HERE, measured end to end on docker 27.4.0 rather than assumed, because a review
- * round got it backwards: this lists RUNNING endpoints only, and that is exactly aligned with what blocks a
- * removal. A running member is listed and `network rm` fails "has active endpoints"; the SAME member stopped
- * is absent from this map AND the `rm` succeeds. So "listed" and "holds the network" agree, and a stopped
- * container is not something a sweep needs to reason about. Unmeasured on Podman's netavark.
+ * WHAT "ATTACHED" MEANS HERE, measured end to end on docker 27.4.0 rather than assumed. This lists RUNNING
+ * endpoints only. A running member is listed and `network rm` fails "has active endpoints"; the SAME member
+ * stopped is absent from this map AND the `rm` succeeds. So for those two states "listed" and "holds the
+ * network" agree, and a stopped container is not something a sweep needs to reason about.
+ *
+ * CORRECTED under issue #337: that agreement does NOT extend to a container in `created` state, and the
+ * earlier version of this comment generalised it to "listed and holds the network agree" full stop, which is
+ * false. Measured: a container created on a network but never started is absent from this map, absent from
+ * `docker ps`, and the `network rm` SUCCEEDS -- after which `docker start` fails with "network not found" and
+ * the container can never run. So the daemon is a backstop for a RUNNING endpoint and for nothing else, and a
+ * sweep that cares about a container being launched right now has to ask `docker ps -a --filter
+ * status=created` rather than infer it from here. Unmeasured on Podman's netavark.
  */
 export async function networkEndpoints(docker, network) {
 	const inspected = await runWith(docker, ["network", "inspect", "--format", "{{json .Containers}}", network]);

@@ -203,6 +203,23 @@ export const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NE
  */
 export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set() } = {}) {
+		// A sandbox being launched RIGHT NOW is invisible to everything else here, and that is measured, not
+		// feared: between `docker run`'s create and its start (230 ms on this host with the image local, the
+		// whole pull when it is not) the container is in `created` state, where `docker ps` does not list it,
+		// `network inspect` does not list it as an endpoint, AND `network rm` succeeds -- after which
+		// `docker start` fails with "network not found" and that container can never run. So the daemon is a
+		// backstop for a RUNNING endpoint only, and this is the one listing that sees the launch window.
+		// A leftover container stuck in `created` therefore holds its network back, which is the right
+		// direction: `openSandbox` would refuse that run by name anyway until an operator removes it.
+		const starting = await run(["ps", "-a", "--filter", "status=created", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"]);
+		if (starting?.code !== 0) return { swept: [], notes: [], failed: "starting-list-failed" };
+		const launching = new Set(
+			String(starting.stdout ?? "")
+				.split("\n")
+				.map((n) => n.trim())
+				.filter((n) => n.startsWith(SANDBOX_NAME_PREFIX))
+				.map((n) => n.slice(SANDBOX_NAME_PREFIX.length)),
+		);
 		const listed = await run(["network", "ls", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Name}}"]);
 		// A listing that did not answer is a FAULT, not a verdict about any network, and the two carry
 		// different names on `OQ-007`'s property: the reaper turns `failed` into its family's
@@ -215,22 +232,22 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 			const m = SANDBOX_NETWORK_SHAPE.exec(name);
 			if (!m) continue; // the filter is not the namespace
 			const id = m[1];
-			// Either means the run is still reachable: a shell is open on it, or its workspace is still
-			// retained and the next open will want this network's name free anyway.
-			if (running.has(id) || keep.has(id)) continue;
+			// Any of the three means the run is still reachable: a shell is open on it, a container is being
+			// created for it right now, or its workspace is still retained and the next open will want this
+			// network's name free anyway.
+			if (running.has(id) || keep.has(id) || launching.has(id)) continue;
 			const { ok, names, absent } = await networkEndpoints(run, name);
 			if (absent) continue;
 			if (!ok) {
 				notes.push({ network: name, reason: "unreadable" });
 				continue;
 			}
-			// The guard, and it gates the DETACH: a session container attached means an operator may be inside
-			// it. Be exact about what this covers, because the obvious claim is wrong: `.Containers` lists
-			// RUNNING endpoints only (measured on 27.4.0 under issue #357), so a container in `created` state
-			// is invisible HERE as well as to `listRunningSandboxes`. The launch window is covered by the
-			// retained directory, not by this. What this adds is the session whose directory neither set
-			// knows about -- deleted by hand, or moved -- where the shell is up and stripping its proxy is
-			// exactly the #277 harm.
+			// The last guard, and it gates the DETACH: a session container attached means an operator may be
+			// inside it. Be exact about what it covers, because the obvious claim is wrong: `.Containers`
+			// lists RUNNING endpoints only, so a container in `created` state is invisible HERE as well as to
+			// `listRunningSandboxes` -- that window belongs to `launching` above and to the retained
+			// directory. What THIS adds is the session whose directory neither set knows about (deleted by
+			// hand, or moved) where the shell is up, and stripping its proxy is exactly the #277 harm.
 			if (names.some((n) => n.startsWith(SANDBOX_NAME_PREFIX))) {
 				notes.push({ network: name, reason: "sandbox-attached" });
 				continue;

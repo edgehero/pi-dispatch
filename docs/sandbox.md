@@ -188,8 +188,9 @@ session that ends in a closed laptop still keeps the workspace.
   the retention setting still sweeps what the old one kept. And since issue #337 that reaper also removes
   the run's `pi-sandbox-<jobId>-net` network, on the directory's own clock: a network whose id the pass no
   longer finds on disk, with nothing running and no `pi-sandbox-` container attached, is disconnected from
-  whatever is left on it and removed. Your shell is held by the retained directory from before the
-  container starts until the window closes, and by the running container on top of that once it is up;
+  whatever is left on it and removed. Your shell is held three ways: by the retained directory from before
+  the container starts until the window closes, by the container itself while it is being created, and by
+  the running container once it is up;
   a network the sweep looked at and would not take is named in the worker log with the reason, while one
   it skipped because the run is still retained or still running is passed over in silence.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
