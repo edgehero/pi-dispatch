@@ -167,19 +167,6 @@ export function makeStopContainer({ exec = execDocker } = {}) {
 }
 
 /**
- * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind.
- *
- * MOVED HERE from `start.mjs` (issue #227). It belongs to the backend because the containers it sweeps are
- * that backend's, and a second backend's crashed containers are unreachable by this one's `docker ps`.
- *
- * THE TRI-STATE IS THE POINT and moved with it: `{ reaped: true }` means this host has ESTABLISHED that it
- * holds no job containers, `{ reaped: false }` means it could not establish that. `makeScopeClaimSweeper`
- * gates a money decision on the difference -- it may only delete a scope claim naming this host once the
- * host has proven it holds nothing -- so returning `[]` or `true` on a failed enumeration would free slots
- * for containers that may still be running and let another host start more alongside them. That is a spend
- * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
- */
-/**
  * A network THIS project made for a job: the exact shape the producer builds, derived from both constants.
  * `docker`'s `--filter name=` is a substring match, so the listing alone is not a namespace (issue #357).
  *
@@ -193,6 +180,19 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  */
 export const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.*${NETWORK_SUFFIX}$`);
 
+/**
+ * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind.
+ *
+ * MOVED HERE from `start.mjs` (issue #227). It belongs to the backend because the containers it sweeps are
+ * that backend's, and a second backend's crashed containers are unreachable by this one's `docker ps`.
+ *
+ * THE TRI-STATE IS THE POINT and moved with it: `{ reaped: true }` means this host has ESTABLISHED that it
+ * holds no job containers, `{ reaped: false }` means it could not establish that. `makeScopeClaimSweeper`
+ * gates a money decision on the difference -- it may only delete a scope claim naming this host once the
+ * host has proven it holds nothing -- so returning `[]` or `true` on a failed enumeration would free slots
+ * for containers that may still be running and let another host start more alongside them. That is a spend
+ * overrun rather than a tidy-up, which is why the catch below returns false rather than swallowing.
+ */
 export function makeReaper({ log, exec = execDocker }) {
 	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both
 	// are load-bearing. It is the shape `networkEndpoints` and `removeNetworkOrSay` need -- the "not found" rule

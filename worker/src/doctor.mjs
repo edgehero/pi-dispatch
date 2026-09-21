@@ -2348,28 +2348,6 @@ function triggersPath(env, cwd) {
  * output.
  */
 /**
- * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
- * rather than assumed from the compose file that was supposed to create it.
- *
- * Returns [] when `PI_EGRESS=0`, so a deployment that declined the policy gets byte-identical output --
- * the same convention envSetupChecks follows one feature over. Armed is the DEFAULT, so most deployments
- * see these lines.
- *
- * TIERING, and it is the whole editorial judgement here. The proxy's PRESENCE is a hard failure when the
- * policy is armed: the worker refuses every job pre-spend without it, so a ✓ would be a lie and a ⚠ would
- * under-report a deployment that cannot run anything. Everything that needs the NETWORK to answer is
- * warn-tier, on doctor's own rule that a ✗ is reserved for certainties: a custom provider base URL, a
- * corporate egress path or a transient provider blip each make a red here a false alarm, and an operator
- * who learns to scroll past doctor costs more than a missed warning does.
- *
- * NOTHING here carries a `fixAction` -- the never tier (REQ-DEPLOYMENT-BOOTSTRAP). One candidate was
- * considered and refused: a prompt-tier offer to start the proxy, on the Valkey precedent. That offer
- * starts a QUEUE, whose failure mode is that nothing runs. This one would stand up a SECURITY CONTROL
- * whose allowlist the operator has not written yet, turning "no policy" into "a policy that fails every
- * job inside a paid container". It is also not one argv but a compose profile and a file that must already
- * exist, and doctor "never guesses a semantic env value".
- */
-/**
  * Canary networks a doctor run that did not finish left behind (issue #350), for a PID no longer alive.
  *
  * UNLIKE `sweepStaleNetworks` in live-probes.mjs, an attached PROBE here is not a run in progress, and that
@@ -2458,6 +2436,10 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 /** The canary's two probe directions. ONE list: the loop names its containers from it and the sweep matches on it. */
 export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
 
+/**
+ * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
+ * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
+ */
 const CANARY_STEP_TIMEOUT_MS = 10_000;
 
 /** A leftover on a daemon this host cannot show it owns: the operator decides, because only they know the estate. */
@@ -2470,8 +2452,26 @@ const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but n
 const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network. A later `pi-dispatch doctor` on this host clears a leftover whose process has exited, but not one a container is still holding: that one waits for you";
 
 /**
- * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
- * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
+ * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
+ * rather than assumed from the compose file that was supposed to create it.
+ *
+ * Returns [] when `PI_EGRESS=0`, so a deployment that declined the policy gets byte-identical output --
+ * the same convention envSetupChecks follows one feature over. Armed is the DEFAULT, so most deployments
+ * see these lines.
+ *
+ * TIERING, and it is the whole editorial judgement here. The proxy's PRESENCE is a hard failure when the
+ * policy is armed: the worker refuses every job pre-spend without it, so a ✓ would be a lie and a ⚠ would
+ * under-report a deployment that cannot run anything. Everything that needs the NETWORK to answer is
+ * warn-tier, on doctor's own rule that a ✗ is reserved for certainties: a custom provider base URL, a
+ * corporate egress path or a transient provider blip each make a red here a false alarm, and an operator
+ * who learns to scroll past doctor costs more than a missed warning does.
+ *
+ * NOTHING here carries a `fixAction` -- the never tier (REQ-DEPLOYMENT-BOOTSTRAP). One candidate was
+ * considered and refused: a prompt-tier offer to start the proxy, on the Valkey precedent. That offer
+ * starts a QUEUE, whose failure mode is that nothing runs. This one would stand up a SECURITY CONTROL
+ * whose allowlist the operator has not written yet, turning "no policy" into "a policy that fails every
+ * job inside a paid container". It is also not one argv but a compose profile and a file that must already
+ * exist, and doctor "never guesses a semantic env value".
  */
 async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpoint = { local: null, reason: "not resolved" } }) {
 	// `pid` and `isAlive` default here as well as riding the seams, so a caller that predates issue #350 still
