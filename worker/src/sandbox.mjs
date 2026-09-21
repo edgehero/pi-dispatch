@@ -174,8 +174,12 @@ async function boundedDocker(args) {
  * fixing the same defect in the boot reaper (issue #357), where it returns an operator's own
  * `my-pi-job-notes`. The capture is the sanitised job id, which is also what the retained directories and
  * `listRunningSandboxes` are keyed by, so the three compare without a second grammar.
+ *
+ * Exported only so its test pins THIS constant. A test that rebuilds the pattern from the same two
+ * prefixes asserts a property of a string the test wrote, which is the drift a hand-written copy always
+ * has; the behavioural half of the same guard is the foreign names in the sweep's own fixtures.
  */
-const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NETWORK_SUFFIX}$`);
+export const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NETWORK_SUFFIX}$`);
 
 /**
  * Remove session networks whose run is gone (issue #337).
@@ -220,8 +224,13 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 				notes.push({ network: name, reason: "unreadable" });
 				continue;
 			}
-			// The guard, and it gates the DETACH: a session container attached means an operator may be
-			// inside it, and `listRunningSandboxes` cannot see one in `created` state.
+			// The guard, and it gates the DETACH: a session container attached means an operator may be inside
+			// it. Be exact about what this covers, because the obvious claim is wrong: `.Containers` lists
+			// RUNNING endpoints only (measured on 27.4.0 under issue #357), so a container in `created` state
+			// is invisible HERE as well as to `listRunningSandboxes`. The launch window is covered by the
+			// retained directory, not by this. What this adds is the session whose directory neither set
+			// knows about -- deleted by hand, or moved -- where the shell is up and stripping its proxy is
+			// exactly the #277 harm.
 			if (names.some((n) => n.startsWith(SANDBOX_NAME_PREFIX))) {
 				notes.push({ network: name, reason: "sandbox-attached" });
 				continue;

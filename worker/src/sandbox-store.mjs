@@ -271,13 +271,23 @@ export function makeSandboxReaper({
 			}
 		}
 
-		// The session networks, after the directories and keyed on the listing above. Reached only when
-		// `listRunning` ANSWERED and the directory listing was read, which is the same precondition the
-		// directory pass has: without either, nothing here can be called unclaimed.
+		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the
+		// directory listing was read, which is the same precondition the directory pass has: without either,
+		// nothing here can be called unclaimed.
+		//
+		// The keep set is the UNION of two listings, and each half covers what the other cannot. The one this
+		// pass STARTED with covers a run whose directory this pass then expired: an open that passed
+		// `resolveSandbox` a moment before is mid-launch and must not lose its network. A FRESH one, read
+		// here, covers the opposite end: `retainJobDir` creates a directory at job end, in this same process,
+		// and this pass awaits docker and yields per tree, so a job can finish and its run be opened while
+		// the pass is still running. That id is in neither the old listing nor `running` -- the container is
+		// not up yet -- so without the second read the sweep would take a network `createJobNetwork` had just
+		// made. A re-read that throws skips the sweep entirely rather than sweeping on half the evidence.
 		//
 		// Its own fault keeps the `sandbox_reaper_skipped` name on `OQ-007`'s stated property, that one grep
 		// covers boot and every tick; only the per-network VERDICTS get new names.
 		try {
+			for (const name of fs.readdirSync(sandboxDir)) keep.add(name);
 			const { swept, notes, failed } = await sweepNetworks({ running, keep });
 			for (const s of swept) log("reaped_sandbox_network", s);
 			for (const n of notes) log("sandbox_network_not_reaped", n);

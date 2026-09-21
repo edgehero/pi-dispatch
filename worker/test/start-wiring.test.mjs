@@ -803,6 +803,10 @@ test("sandbox: the retention sweep runs BEFORE the worker drains, and is handed 
 	// The one thing this reaper needs that its siblings do not: without it the sweep is blind and can
 	// delete a bind mount out from under a shell an operator is sitting in.
 	assert.equal(typeof reaperArgs.listRunning, "function", "the sweep must be able to ask which sandboxes are live");
+	// And the session networks beside them (issue #337). The reaper defaults this to a no-op, deliberately,
+	// so an unwired one still sweeps directories -- which means an unwired one is SILENT rather than broken,
+	// and nothing but this line would notice the whole feature missing from the worker.
+	assert.equal(typeof reaperArgs.sweepNetworks, "function", "the networks a dead shell left are swept too");
 	assert.equal(typeof deps.cleanup, "function", "teardown is the retention-aware closure, not the bare rm");
 });
 

@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
 import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
-import { SANDBOX_NAME_PREFIX, buildSandboxRunArgs, decideSandboxJobUser, listRunningSandboxes, makeSandboxNetworkSweeper, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
+import { SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, buildSandboxRunArgs, decideSandboxJobUser, listRunningSandboxes, makeSandboxNetworkSweeper, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, sandboxVenueRefusal } from "../src/sandbox.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
 const base = {
@@ -536,13 +536,22 @@ test("the sweep takes only a session network whose run is neither running nor re
 			"pi-sandbox-live-net": ["pi-dispatch-egress-proxy"],
 			"pi-job-someones-net": ["a-job"],
 			"my-pi-sandbox-notes": ["someone-elses-app"],
+			// The two that only an ANCHOR keeps out, and `docker network ls --filter name=pi-sandbox-`
+			// really does return both, because the filter is a substring match. Drop either `^` or `$`
+			// from `SANDBOX_NETWORK_SHAPE` and these are swept: an operator's own network, detached from
+			// its own containers first. That is the defect issue #357 shipped in the boot reaper.
+			"my-pi-sandbox-notes-net": ["someone-elses-app"],
+			"pi-sandbox-x-net-backup": ["someone-elses-app"],
 		},
 	});
 	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(["live"]), keep: new Set(["retained", "live"]) });
 	assert.deepEqual(out.swept, [{ network: "pi-sandbox-gone-net", detached: ["pi-dispatch-egress-proxy"] }]);
 	assert.ok(d.state.has("pi-sandbox-retained-net") && d.state.has("pi-sandbox-live-net"), "a retained run and a live shell keep theirs");
-	assert.ok(d.state.has("pi-job-someones-net") && d.state.has("my-pi-sandbox-notes"), "and the filter is not the namespace");
-	assert.ok(!d.calls.some((c) => c.includes("my-pi-sandbox-notes") || c.includes("pi-job-someones")), "foreign names are never even inspected");
+	const foreign = { "pi-job-someones-net": ["a-job"], "my-pi-sandbox-notes": ["someone-elses-app"], "my-pi-sandbox-notes-net": ["someone-elses-app"], "pi-sandbox-x-net-backup": ["someone-elses-app"] };
+	for (const [name, endpoints] of Object.entries(foreign)) {
+		assert.deepEqual(d.state.get(name), endpoints, `${name} is not ours: it keeps its network AND its endpoints`);
+		assert.ok(!d.calls.some((c) => c.endsWith(name)), `${name} is never even inspected`);
+	}
 	assert.ok(!d.calls.some((c) => c.startsWith("network rm -f")), "never `network rm -f`");
 });
 
@@ -579,17 +588,36 @@ test("the id in a session network name is the one the directories and `--list` u
 	// `sandboxContainerName` sanitises; the retained directories and `listRunningSandboxes` are keyed by the
 	// same sanitised form, so the three compare without a second grammar. A round trip through the RAW id
 	// would pin a relationship that does not exist.
+	// Against the sweeper's OWN constant, never a copy of it built here: a rebuilt pattern asserts a
+	// property of this file's string, and the two drift apart exactly when the shape changes.
 	for (const raw of ["gh-1", "local-abc", "a.b~c", "weird-net"]) {
 		const net = networkNameFor(sandboxContainerName(raw));
-		const m = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)-net$`).exec(net);
+		const m = SANDBOX_NETWORK_SHAPE.exec(net);
 		assert.equal(m?.[1], sandboxContainerName(raw).slice(SANDBOX_NAME_PREFIX.length), raw);
 	}
 	// And the anchor in the other direction, which is the one that LEAKS: the container half is a bare
 	// prefix, so the network half must not be stricter (the lesson issue #357 paid for twice).
-	const shape = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)-net$`);
-	assert.ok(shape.test(`${SANDBOX_NAME_PREFIX}-net`), "a degenerate id is still ours");
-	assert.ok(!shape.test("my-pi-sandbox-notes"), "a name that merely contains the prefix is not");
-	assert.ok(!shape.test(`${SANDBOX_NAME_PREFIX}x-net-backup`), "nor our shape with something appended");
+	assert.ok(SANDBOX_NETWORK_SHAPE.test(`${SANDBOX_NAME_PREFIX}-net`), "a degenerate id is still ours");
+	assert.ok(!SANDBOX_NETWORK_SHAPE.test("my-pi-sandbox-notes"), "a name that merely contains the prefix is not");
+	assert.ok(!SANDBOX_NETWORK_SHAPE.test(`${SANDBOX_NAME_PREFIX}x-net-backup`), "nor our shape with something appended");
+});
+
+test("the sweep yields between networks, so it is never one uninterruptible block (#337)", async () => {
+	// `retention-sweep.mjs` records why this matters and `retention-sweep.test.mjs` pins the sibling yield
+	// the same way: this loop runs on a timer beside draining jobs, `index.mjs` runs with
+	// `maxStalledCount: 0`, and a block past BullMQ's 30s lock renewal FAILS a paid job. This loop is the
+	// worse of the two, because every step is an await on a docker CLI rather than one `rmSync`.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [], "pi-sandbox-b-net": [] } });
+	const order = [];
+	const run = async (args) => {
+		const out = await d.run(args);
+		if (args[0] === "network" && args[1] === "rm") order.push(args.at(-1));
+		return out;
+	};
+	const sweeping = makeSandboxNetworkSweeper({ run })({});
+	setImmediate(() => order.push("<loop got a turn>"));
+	await sweeping;
+	assert.deepEqual(order, ["pi-sandbox-a-net", "<loop got a turn>", "pi-sandbox-b-net"], "the event loop runs between networks, not only after all of them");
 });
 
 test("a shell that is OPEN keeps its network even with no retained directory left (#337)", async () => {

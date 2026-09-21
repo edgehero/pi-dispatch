@@ -325,6 +325,60 @@ test("the network sweep is keyed on the listing the pass STARTED with, not on wh
 	assert.deepEqual(seen, [{ running: [], keep: ["fresh", "old"] }], "and its id is STILL in keep");
 });
 
+test("a run RETAINED while the pass was running is kept too, not just one it started with (#337)", async () => {
+	// The other end of the same race, and the pre-pass listing alone does not close it. `retainJobDir` creates
+	// a retained directory at job END, in this process, and this pass awaits docker and yields per tree -- so a
+	// job can finish, and an operator can open the run they just watched finish, while the pass is still going.
+	// That id is in neither the old listing nor `running`, because the container is not up yet, and the network
+	// `createJobNetwork` just made would be swept out from under the launch. So the keep set is the UNION of
+	// the listing this pass began with and a fresh one read immediately before the sweep.
+	const fs = sandboxDirWith({ old: { createdAt: hoursAgo(50) }, fresh: { createdAt: hoursAgo(1) } });
+	const rmSync = fs.rmSync;
+	fs.rmSync = (path) => {
+		rmSync(path);
+		fs.files["/sbx/justfinished"] = "<dir>"; // a job ended mid-pass
+	};
+	const seen = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => {
+			seen.push([...arg.keep].sort());
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.deepEqual(seen, [["fresh", "justfinished", "old"]], "both halves: the expired id AND the one that landed mid-pass");
+});
+
+test("a re-read that fails skips the network sweep rather than sweeping on half the evidence (#337)", async () => {
+	const fs = sandboxDirWith({ fresh: { createdAt: hoursAgo(1) } });
+	const readdirSync = fs.readdirSync;
+	let reads = 0;
+	fs.readdirSync = (path) => {
+		if (++reads > 1) throw new Error("EIO: the directory went away");
+		return readdirSync(path);
+	};
+	let called = 0;
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		log: (e, d) => logged.push([e, d]),
+		listRunning: async () => [],
+		sweepNetworks: async () => {
+			called++;
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.equal(called, 0, "half a keep set is worse than no sweep: the missing half is what protects a launch");
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "EIO: the directory went away" }]]);
+});
+
 test("a RUNNING sandbox reaches the network sweep through both sets (#337)", async () => {
 	const seen = [];
 	const fs = sandboxDirWith({ live: { createdAt: hoursAgo(50) } });

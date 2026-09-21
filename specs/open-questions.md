@@ -283,11 +283,12 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   directory is gone, and the obvious name for its per-network outcome would have been a
   `*_reaper_skipped`. It is not: a per-network verdict is `reaped_sandbox_network` or
   `sandbox_network_not_reaped`, and only the sweep's own FAULT keeps `sandbox_reaper_skipped`. The
-  distinction is exactly what this row's grep needs. `sandbox_reaper_skipped` means this pass established
-  nothing, which is the line an operator greps for across boot and every tick; a network that stayed
-  behind is a verdict from a pass that ran, and letting it wear the fault's name would make the grep
-  report an outage on a healthy worker. The sweep is also the last thing `reapSandboxes` does, inside its
-  own `try`, so it can never turn a completed directory pass into a skipped one.
+  distinction is exactly what this row's grep needs. `sandbox_reaper_skipped` means something this pass could
+  not establish, which is the line an operator greps for across boot and every tick; it is the name the
+  per-entry catch already wears, so it has never meant the whole pass failed. A network that stayed behind
+  is not that: it is a verdict from a look that succeeded, and letting it wear the fault's name would put an
+  everyday outcome into the grep an operator reads as trouble. The sweep is also the last thing
+  `reapSandboxes` does, inside its own `try`, so it can never abort the directory pass.
 - **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
   A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound

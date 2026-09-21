@@ -112,8 +112,9 @@ in place after it exits. A network left that way, or by a terminal closed mid-se
 that run refuse and print the two commands that remove it. The **open** still never removes it for you, because
 a second open cannot safely tell a leftover from a session starting at the same moment; what does remove it is
 the retention sweep, once the run's retained directory is gone (issue #337). So a leftover on a run you can
-still re-open stays until you run those two commands or the window closes, and one on a run whose window has
-already closed is reclaimed by the next sweep without you doing anything. The policy, how to change it, and a
+still re-open stays until you run those two commands or the window closes, and after that it is reclaimed
+without you doing anything: by the sweep AFTER the one that removed the directory, because the pass that
+deletes a directory still counts that run as retained. The policy, how to change it, and a
 host-firewall layer for a deployment that wants one underneath are all in [`docs/egress.md`](egress.md).
 
 Leaving sandboxes on the open bridge was the tempting alternative and it is the wrong one: it reads as a
@@ -187,7 +188,9 @@ session that ends in a closed laptop still keeps the workspace.
   the retention setting still sweeps what the old one kept. And since issue #337 that reaper also removes
   the run's `pi-sandbox-<jobId>-net` network, on the directory's own clock: a network whose id the pass no
   longer finds on disk, with nothing running and no `pi-sandbox-` container attached, is disconnected from
-  whatever is left on it and removed. Your shell is safe twice over, by the live container and by the
-  directory, and anything the sweep will not take is named in the worker log with the reason.
+  whatever is left on it and removed. Your shell is held by the retained directory from before the
+  container starts until the window closes, and by the running container on top of that once it is up;
+  a network the sweep looked at and would not take is named in the worker log with the reason, while one
+  it skipped because the run is still retained or still running is passed over in silence.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.

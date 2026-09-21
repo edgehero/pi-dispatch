@@ -2910,14 +2910,21 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `openSandbox` creates `pi-sandbox-<id>-net` before `docker run` and removes it in its own `finally`; a
     shell whose terminal died leaves it, and nothing removed it, because #277 had withdrawn removal AT OPEN
     TIME, where it raced a second open. A background sweep does not race that: an open in progress always
-    has its retained directory, so the sandbox retention reaper takes only an id that was ABSENT from the
-    directory listing the pass began with, is not running, and has no `pi-sandbox-` container attached.
-    Keying on the PRE-PASS listing rather than on what survives the pass is the whole of the safety, because
-    the same pass expires directories: a sweep reading the listing afterwards would remove the network of a
-    run being opened between `createJobNetwork` and `launch` and kill that open with a 125. The guard gates
-    the DETACH rather than the removal, which is the sharper way to say it: docker refuses to remove a
-    network a live container is on, so the harm a sweep can do is stripping the proxy off a shell someone is
-    sitting in. The refusal at open time is unchanged, and the cost is named rather than hidden: a leftover
+    has its retained directory, so the sandbox retention reaper takes only an id that is absent from BOTH the
+    directory listing the pass began with and a fresh one read immediately before the sweep, is not running,
+    and has no `pi-sandbox-` container attached. Two listings rather than one, because each end of the pass
+    leaks a different way. Keying on what SURVIVES the pass would remove the network of a run being opened
+    between `createJobNetwork` and `launch`, since the same pass expires directories and an open that passed
+    `resolveSandbox` a moment earlier is mid-launch. Keying on the pre-pass listing ALONE leaks the other
+    end: `retainJobDir` creates a retained directory at job end, in this same process, so a job can finish
+    and its run be opened while the pass is still running, and that id is in neither the old listing nor the
+    running set. A re-read that throws skips the sweep rather than sweeping on half the evidence, and the
+    price of the first half is that a network outlives its directory by one whole pass. The guard gates the
+    DETACH rather than the removal, which is the sharper way to say it: docker refuses to remove a network a
+    live container is on, so the harm a sweep can do is stripping the proxy off a shell someone is sitting
+    in. Be exact about its reach, because the obvious claim is wrong: `.Containers` lists RUNNING endpoints
+    only, so a container in `created` state is invisible to this check as well as to `listRunningSandboxes`,
+    and the launch window is covered by the directory rather than by the guard. The refusal at open time is unchanged, and the cost is named rather than hidden: a leftover
     on a run that is still re-openable survives until its window closes, which is #337's acceptance line
     narrowed deliberately, since the stricter reading is what reopens #277.
   - *Rejected*: `network rm -f` at any of the four sites (it pulls a network out from under a live endpoint,
