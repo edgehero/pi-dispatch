@@ -32,9 +32,9 @@ worker whose primary group is gid 0 (`root-group`) or the container socket's gro
 that does not declare `anyUid` (`job-image-any-uid-unsupported`). All three are on the `--user` path, so a worker
 that runs as **uid 1001** meets none of them: the image already runs as that uid, nothing is passed, and a uid-1001
 worker whose primary group is the socket's group is not refused. That is deliberate, so hosts that worked before
-issue #341 keep working. A worker running as root (`worker-is-root`) is refused too, and is in the first group:
-`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs` is the list of causes no job on this venue can get
-past, and `pi-dispatch doctor` marks those ✗ and everything else ⚠ on your own host.
+issue #341 keep working. A worker running as root (`worker-is-root`) is refused too, and belongs to the harder set:
+`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs` names the causes no job on this venue can get past, and
+`pi-dispatch doctor` marks those ✗ and everything else ⚠ on your own host.
 
 ### What a refusal says
 
