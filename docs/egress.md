@@ -178,7 +178,9 @@ All of it was run. The method costs nothing and is worth repeating on your own h
   peer on another job network is unreachable by name and by address. See `docs/podman.md`.
 - **A denied host fails in about 20 ms, not on a DNS timeout**, because the client hands the name to the
   proxy in a `CONNECT` and never resolves it locally. An external name resolved *directly* from an internal
-  network takes about 10 seconds to fail, which is the cost you would pay if a client bypassed the proxy.
+  network fails without ever reaching the proxy, and how fast depends on the resolver in front of the container,
+  not on this design: about 10 seconds on the host this was first measured on, and under 5 ms in a Linux lab where
+  nothing answers at all. Either way it is the path a client that bypassed the proxy would take.
 
 ## Appendix: a host-firewall layer below docker's rules
 

@@ -1424,6 +1424,10 @@ adversarial passes did.
     measured with `doctor --live` on each.
   - **OrbStack and Colima.** Unmeasured VM-backed daemons that the job-user decision treats like Docker Desktop.
     *Closes when* measured with `doctor --live`.
+  - **A rootful Podman configured with `userns = "auto"`.** It never reports `name=userns`, so it is not refused by
+    name and the worker passes `--user`. Whether the container then fails to create (125, refunded) or starts and
+    stops at the runner's `/job` check (exit 2, slot kept) is unmeasured, and the two differ in what a job costs.
+    *Closes when* measured on a host configured that way, with the exit code and the run record recorded.
 - **What bounds it meanwhile**: an unmeasured daemon still gets every refusal the facts support, the runner's `/job`
   check stops a job whose inputs are unreadable before it spends, and `doctor --live` reads the declarations back on
   request.
@@ -1487,4 +1491,4 @@ adversarial passes did.
 | 2026-09-14 | Issue #341, part 2. **NEW `OQ-036`** (ACCEPTED RISK, wants ratification): a job run as the worker's own uid has the worker's reach if it escapes. The row records that files it creates carry the worker's uid and group (setuid and setgid included), that the worker's `0600` files in a mounted folder become readable, that rootless daemons are refused (keep-id Podman included, since it reads like plain rootless), and that rootful Podman's default subscription mounts reach every job without an empty mounts.conf; plus the bounds (dedicated account, root worker refused, the gid rows, nothing trigger-settable moves the uid) and what would close it. **`OQ-012` UNCHANGED, checked**: its `anyUid` bullet from part 1 now has a reader, and the status stays. **`OQ-004` UNCHANGED, checked**: no network surface moved. |
 | 2026-09-15 | Issue #344. **`OQ-012` AMENDED**, one sentence: the read-back now covers `ephemeral` and, with the egress policy armed, `jobToJobIsolation`, off short-lived containers rather than one. Its limits (not a gate, `PI_JOB_IMAGE` only, not the image's contents, not a remote venue) and the status are UNCHANGED, checked. |
 | 2026-09-15 | Issue #345. **`OQ-036` AMENDED**, one sentence under its Podman subscription-mounts bullet: the risk is now observed (`runtimeAddsNoMounts` degrades `mountSet`, a floor refuses, `doctor --live` reads mountinfo) rather than only documented. Its status and every other bullet are UNCHANGED, checked. |
-| 2026-09-21 | Issue #345, the Podman route. **NEW `OQ-037`** (OPEN): rootless Podman (closes with a native `podman` backend using keep-id, issue #354); SELinux enforcing, netavark's nftables driver and systemd health checks, which need a real host (issue #355); `podman machine` and Podman Desktop; OrbStack and Colima. Each carries its close condition, and the entry states what bounds them meanwhile. |
+| 2026-09-21 | Issue #345, the Podman route. **NEW `OQ-037`** (OPEN): rootless Podman (closes with a native `podman` backend using keep-id, issue #354); SELinux enforcing, netavark's nftables driver and systemd health checks, which need a real host (issue #355); `podman machine` and Podman Desktop; OrbStack and Colima; and a rootful Podman with `userns = "auto"`, where the two possible outcomes cost a job differently. Each carries its close condition, and the entry states what bounds them meanwhile. |

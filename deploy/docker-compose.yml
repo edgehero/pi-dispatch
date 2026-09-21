@@ -124,7 +124,7 @@ services:
 
 networks:
   # The proxy's route out. Only the proxy is ever on it: job containers live on their own per-job
-  # `--internal` networks, which have no route anywhere except to this container.
+  # `--internal` networks, whose only other member is this container and which have no route off this host.
   egress-out:
     name: pi-dispatch-egress-out
 

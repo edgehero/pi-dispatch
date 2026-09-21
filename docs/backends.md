@@ -88,8 +88,8 @@ operator nothing to go and check, and `pi-dispatch doctor` prints the source bes
 `isolation`, `ephemeral`, `mountSet`, `egress`, `jobToJobIsolation`, `imagePinning`, `exitCodes`,
 `abortable`, `readOnlyJobInputs`, `nonRoot`, `secretsCustody`, `credentialTransit`, `localFolders`.
 
-Each carries the question an operator is actually asking; read them in `worker/src/backends.mjs`. Six are
-worth calling out because they are the ones adapters get wrong:
+Each carries the question an operator is actually asking; read them in `worker/src/backends.mjs`. These are the
+ones adapters get wrong:
 
 - **`egress` and `jobToJobIsolation` carry `armedBy: "PI_EGRESS"`.** A declaration is a **capability**, not a
   posture. `local` can enforce egress; a deployment with `PI_EGRESS=0` is not getting it. Those are two

@@ -97,9 +97,9 @@ you need to push from inside a sandbox, authenticate yourself — `gh auth login
 ## Egress
 
 A sandbox lands on **the network your egress setting gives a job**, whether you open it from the CLI or from
-the panel. By default that is its own `--internal` network with no route anywhere except the allowlist
-proxy; with `PI_EGRESS=0` it is Docker's default bridge and the whole internet, which is what `SECURITY.md`
-discloses. The setting is read from the environment of whatever opens the sandbox: the shell you run
+the panel. By default that is its own `--internal` network whose only other member is the allowlist proxy, with no
+route off this host (`docs/egress.md` says what that does and does not bound); with `PI_EGRESS=0` it is Docker's
+default bridge and the whole internet, which is what `SECURITY.md` discloses. The setting is read from the environment of whatever opens the sandbox: the shell you run
 `pi-dispatch sandbox` in, or the environment pi was started in for the panel. Neither reads your
 deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, export them where you open
 sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so). (Before #277 a sandbox opened from the panel

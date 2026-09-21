@@ -1,30 +1,39 @@
 # Podman
 
 pi-dispatch runs jobs on rootful Podman through Podman's Docker API, with the real `docker` CLI pointed at
-Podman's socket. That is the supported route. Rootless Podman is refused by name, and Podman's `podman-docker`
-emulation of the `docker` command runs jobs but is not supported. This page says what each setup gets, how that
-was measured, and how to set up the supported one. `docs/backends.md` explains the words used below.
+Podman's socket. That is the supported route. Rootless Podman **on this host** is refused by name, and Podman's
+`podman-docker` emulation of the `docker` command runs jobs but is not supported. Every rule below is about a
+daemon on the worker's own host: a docker endpoint somewhere else is a different question, and the last row of the
+next table says what happens there. This page says what each setup gets, how that was measured, and how to set up
+the supported one. `docs/backends.md` explains the words used below.
 
 ## Supported and refused
 
 | Setup | What happens |
 |---|---|
-| Rootful Podman on Linux, real docker CLI through a docker context | **Supported.** Jobs run as the worker's own uid (`--user`). |
-| Rootless Podman (with or without `userns = "keep-id"`) | **Refused**: `job-user-unmappable (rootless)`. The only uid that can use the job's `0700` directory there is container root, which `nonRoot` forbids. At boot when `local` is the default venue, per job otherwise. |
+| Rootful Podman on Linux, real docker CLI through a docker context | **Supported.** Jobs run as the worker's own uid (`--user`), unless the worker is uid 1001, where the image already runs as that uid and no `--user` is passed. One rootful setup is still refused as `rootless`: a socket this worker's own uid owns (a `SocketUser=` override), which reads exactly like a rootless daemon's socket. Give the worker access through a GROUP, not by owning the socket. |
+| Rootless Podman | **Refused**, cause `rootless`. The only uid that can use the job's `0700` job directory there is container root, which `nonRoot` forbids. |
+| Rootless Podman with `userns = "keep-id"` | **Refused the same way**, and this one is a limitation rather than a verdict: keep-id would map the worker's uid into the container, but it is a per-container mapping that `docker info` does not report, so the worker cannot tell it from plain rootless. Issue #354 is the native backend that would use it. |
 | Rootful Podman reached through `podman-docker` (the `docker` package that emulates the command) | **Runs, not supported.** The job user decides `worker` mode and jobs run as your uid, but it resolves no docker context, so `credentialTransit` is never observed and `pi-dispatch doctor --live` does not run. doctor warns. |
 | Rootful Docker Engine | The reference. Every word the backend table declares. |
+| Podman on ANOTHER machine (`DOCKER_HOST=ssh://...`, a `podman system connection`) | **Not refused, and not the same thing.** The bind-mount sources are that machine's paths, so no rule about this host's uids applies: the job runs as the image's own user, `credentialTransit` degrades to `asserted`, and doctor says the endpoint is not on this host. A rootless daemon reached that way is NOT refused by name. |
 
 Refused for the same reason on either runtime: **rootless Docker** (`rootless`) and **a Docker daemon with
 userns-remap** (`userns-remap`), both of which map container uids away from the worker's, exactly as rootless Podman
-does. Podman never reports `name=userns`, so a rootful Podman configured with `userns = "auto"` is not refused by
-name (source: Podman's compat info reports apparmor, seccomp, rootless and selinux only). There the runner's own
-`/job` check stops each job at exit 2 (`job-inputs-unreadable`) before any provider spend; the budget slot that job
-reserved is kept, not refunded.
+does. Podman never reports `name=userns` (measured: the compat API's `SecurityOptions` carries `name=seccomp` and,
+when rootless, `name=rootless`, and never `name=userns`), so a rootful Podman configured with `userns = "auto"`
+is not refused by name. What a job does there is **unmeasured** (`OQ-037`): the container either fails to create,
+because `--user` names a uid outside the namespace Podman allocated, or it starts and the runner's own `/job` check
+stops it at exit 2 (`job-inputs-unreadable`). Those two differ in what they cost, since only the second spends the
+budget slot, so the page does not claim one until it is measured.
 
 Refused per job, on the `--user` path only, so a worker that would otherwise boot still refuses each local job: a
 worker whose primary group is gid 0 (`root-group`) or the container socket's group (`docker-group`), and a job image
-that does not declare `anyUid` while the worker is not uid 1001 (`job-image-any-uid-unsupported`). A worker running
-as root (`worker-is-root`) refuses at boot when `local` is the default venue.
+that does not declare `anyUid` (`job-image-any-uid-unsupported`). All three are on the `--user` path, so a worker
+that runs as **uid 1001** meets none of them: the image already runs as that uid, nothing is passed, and a uid-1001
+worker whose primary group is the socket's group is not refused. That is deliberate, so hosts that worked before
+issue #341 keep working. A worker running as root (`worker-is-root`) refuses at boot: `local` is this build's only
+venue and therefore always the default, so every boot-refusing cause is a boot refusal here.
 
 ### What a refusal says
 
@@ -51,33 +60,57 @@ Refused: the worker's primary group is the docker socket's group, and a job runs
 # a job image without anyUid, and a worker that is not uid 1001 (per job)
 Refused: the job image does not declare `anyUid` (`dev.pi-dispatch.capabilities`), so it cannot run as this worker's own uid, which this host's container runtime requires; rebuild it from a release that has this feature, or run the worker as uid 1001 (issue #341).
 
+# Docker Desktop on Linux outside WSL (at boot)
+Refused: Docker Desktop on Linux maps container uids like a rootless daemon, so no uid a job may run as can read the worker's 0700 job dir; use Docker Engine on this host (WSL2 is not affected) (issue #341).
+
 # a daemon whose answer no rule reads (per job)
 Refused: the docker CLI answered `docker info` with something no rule can read, so which uid a job may run as is unknown; point the real docker CLI at a Docker or Podman daemon (issue #341).
 ```
 <!-- /PODMAN-REFUSAL-TEXTS -->
 
-`pi-dispatch doctor` prints the same fix text (without the `Refused:` prefix) beside its own ✗ or ⚠ line, and
-`pi-dispatch sandbox` prints it with the issue number. A forge job gets a shorter fixed comment instead, because a
-comment's reader may not be the operator and no refusal text carries a path, an endpoint or CLI output. Measured:
-doctor makes the first three a ✗ and exits 1, and the rest a ⚠ and exits 0, which is the same split as the worker's,
-since a boot-refusing cause is one no job on that venue can get past.
+`pi-dispatch doctor` prints the same fix text beside its own ✗ or ⚠ line, without the `Refused:` prefix and without
+the issue number. `pi-dispatch sandbox` prints it with the issue number for the daemon causes, and substitutes its
+own wording for a missing `anyUid` and for a run whose manifest carries no job user. A forge job gets a shorter
+fixed comment instead, because a comment's reader may not be the operator, and no refusal text carries a path, an
+endpoint or CLI output.
+
+Which of them is a ✗ and which a ⚠ is one list in the code, `BOOT_REFUSING_JOB_USER_CAUSES`: a cause no job on this
+venue can get past fails doctor and refuses the boot, and the rest warn and refuse each local job. Five of the eight
+were seen on a terminal in the lab (`rootless`, `worker-is-root`, `root-group`, `docker-group` and the missing
+`anyUid`); the other three are that same list, not a separate claim.
 
 Degraded, never refused unless a `PI_BACKEND_FLOOR` asks for the word:
 
-- **`isolation` is `asserted` on every Podman host.** Podman's Docker API reports `PidsLimit` and `MemoryLimit` as
-  true whether or not a container's bounds apply, so the worker gives the declaration no credit there. On rootful
-  Podman the bounds do apply (measured: `pids.max` 512 and `memory.max` 4 GiB in a job container), and
-  `pi-dispatch doctor --live` reads them back.
+- **`isolation` is `asserted` on every Podman host.** The rule stops at "the daemon is Podman" and reads no further,
+  because what it would read carries no information: Podman's Docker API reports `PidsLimit` and `MemoryLimit`
+  whether or not a container's bounds apply. The bounds themselves DO apply on rootful Podman (measured: `pids.max`
+  512 and `memory.max` 4 GiB in a job container, a fork run stopped at 504 children, a 64 MiB job killed with 137),
+  and `pi-dispatch doctor --live` reads them back off a real container, which is the way to earn the word here.
 - **`mountSet` is `asserted` without an empty `/etc/containers/mounts.conf`.** Stock Fedora and RHEL Podman mounts
   `/run/secrets` into every container, with the host's subscription files where they exist, and `docker inspect`
-  does not show it. The empty override removes it, and the worker then credits `mountSet` (see Setup).
+  does not show it. The empty override removes it, and the worker then credits `mountSet` (see Setup). The files it
+  reads are **this host's**, so a client talking to a Podman service on another machine over a unix path can be
+  credited for files that daemon never reads. `pi-dispatch doctor --live` is what settles it: it reads the
+  container's own `/proc/self/mountinfo`.
+- **`credentialTransit` is `asserted` under `podman-docker`.** The shim resolves no docker context, so the worker
+  never observes that the CLI sends containers to a daemon on this host. Measured: through the shim
+  `docker context ls` prints a header row and nothing else, and `docker context inspect` prints nothing at all.
 
 ## Setup (rootful Podman, the supported route)
 
+Steps 1 to 3 are the documented route on a systemd host, and they are the part of this page the lab could not
+exercise: its Podman ran as a bare `podman system service` with a hand-made socket group, because a container has no
+systemd. Everything from step 4 down was measured.
+
 1. **Start Podman's socket as root:** `sudo systemctl enable --now podman.socket`. It listens on
-   `/run/podman/podman.sock`.
-2. **Give the worker's account access to it, as a supplementary group.** Access to this socket is root on the
-   host, exactly as the docker group is. With a systemd drop-in for `podman.socket`:
+   `/run/podman/podman.sock`, owned by root.
+2. **Give the worker's account access to it through a GROUP.** Access to this socket is root on the host, exactly as
+   the docker group is. Fedora ships no `podman` group and its unit sets no `SocketGroup`, so make both:
+
+   ```sh
+   sudo groupadd --system podman
+   sudo systemctl edit podman.socket          # writes the drop-in below
+   ```
 
    ```ini
    [Socket]
@@ -85,15 +118,20 @@ Degraded, never refused unless a `PI_BACKEND_FLOOR` asks for the word:
    SocketGroup=podman
    ```
 
-   Then `sudo usermod -aG podman <worker account>` and log in again. The group must not be the account's PRIMARY
-   group: a job runs with the worker's primary group, and the worker refuses one that can reach the socket
-   (`docker-group`).
+   Then `sudo systemctl daemon-reload && sudo systemctl restart podman.socket` (editing the drop-in changes nothing
+   until the unit is restarted), `sudo usermod -aG podman <worker account>`, and log in again. Two rules about that
+   group: it must not be the account's PRIMARY group, because a job runs with the worker's primary group and the
+   worker refuses one that can reach the socket (`docker-group`); and do not give the worker the socket by making it
+   the socket's OWNER (a `SocketUser=` override), because a socket owned by the worker's own uid is what a rootless
+   daemon looks like, and the worker refuses it as `rootless`.
 3. **Install the real docker CLI and its compose plugin** (`docker-ce-cli` and `docker-compose-plugin` from Docker's
-   repository), not `podman-docker`.
+   repository), not `podman-docker`. If `podman-docker` is installed, remove it first: it owns `/usr/bin/docker`, so
+   the two packages conflict over that path.
 4. **Remove Podman's default mounts** so `mountSet` holds: `sudo sh -c ': > /etc/containers/mounts.conf'`. The file
    must exist and be EMPTY. Leave `volumes`, `mounts`, `devices` and `hooks_dir` unset in containers.conf and its
-   drop-ins, and install no OCI hooks, or the worker gives `mountSet` no credit. No restart is needed: the worker
-   reads these files before each job.
+   drop-ins, and install no OCI hooks, or the worker gives `mountSet` no credit. Two more conditions it checks: the
+   worker must be able to READ those files, and FIPS mode must be off, because a FIPS host mounts its crypto policy
+   into every container. No restart is needed: the worker reads these files before each job.
 5. **Point the docker CLI at Podman with a context**, as the worker's account:
 
    ```sh
@@ -152,10 +190,12 @@ How each column is known:
   reach the decision at all, which is why a keep-id host needs the native backend `OQ-037` describes. In both
   columns every word after the refusal is moot, because no job runs. Cgroup readings taken there are lab-limited
   (a nested lab without systemd delegation) and nothing here rests on them.
-- **podman-docker, rootful and rootless**: measured. Through the shim, `docker context ls` prints a header row and
-  nothing else and `docker context inspect` prints nothing at all, so doctor reports `credentialTransit` as asserted
-  because the CLI did not say which endpoint it resolves. The rootful column's `mountSet` row still reads this
-  host's Podman files, so the empty override credits it there too.
+- **podman-docker, rootful and rootless**: the job user, the doctor lines, the two observations and the rootless
+  refusal are measured; no job was run through the shim. Through it `docker context ls` prints a header row and
+  nothing else and `docker context inspect` prints nothing at all, which is why `credentialTransit` reads asserted.
+  The rootful column's `mountSet` row still reads this host's Podman files, so the empty override credits it there
+  too. Every other word in that column is the rootful column's, because it is the same daemon reached by a different
+  command, and where that inheritance is not safe the page says so.
 
 ## Entry points
 
@@ -168,10 +208,12 @@ How each column is known:
 | `pi-dispatch up` | runs doctor at the end | runs doctor at the end | as doctor | as doctor | as doctor | as doctor |
 | `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured |
 
-Where a refusal fires depends on the venue, not on the runtime. A `rootless` worker refuses **at boot** when
-`local` is the default venue, and otherwise **per job**, when a job asks for `local`. The `--user` refusals that
-need a job's image or its group (`job-image-any-uid-unsupported`, `root-group`, `docker-group`) are always per
-job: the worker boots, doctor warns, and each local job is refused with the text above and no spend.
+Where a refusal fires is one rule: a cause in `BOOT_REFUSING_JOB_USER_CAUSES` refuses the boot while `local` is the
+default venue, and the rest refuse each local job. `local` is this build's only venue, so it is always the default
+and those causes always refuse at boot; the per-job branch is there for a build with a second venue and cannot be
+reached today. The `--user` refusals that need a job's image or its group
+(`job-image-any-uid-unsupported`, `root-group`, `docker-group`) are the per-job ones: the worker boots, doctor
+warns, and each local job is refused with the text above and no spend.
 
 ## Health checks need systemd
 
@@ -222,10 +264,12 @@ native `podman` backend that rootless Podman would need.
 
 In nested labs on a Mac: a privileged `docker:27-dind` for Docker Engine, and a privileged Fedora 42 container
 running rootful and rootless Podman services, the real docker CLI and `podman-docker`. The job image, the worker and
-`doctor --live` ran inside them as an unprivileged account (uid 1234), against the worker at the commit this page
-ships with. Rows that nesting can distort (rootless cgroup bounds) were labelled lab-limited and not relied on. The
-lab used netavark's iptables firewall driver, because the LinuxKit kernel rejects its nftables rules; a real Fedora
-host uses nftables, which is `OQ-037`'s unmeasured row.
+`doctor --live` ran inside them as an unprivileged account (uid 1234), against the worker at commit a69b9a6, which
+is this page's parent and carries every line of worker code it describes. Rows that nesting can distort (rootless cgroup bounds) were labelled lab-limited and not relied on. The
+lab was configured with netavark's iptables firewall driver, because the LinuxKit kernel rejects its nftables rules,
+and with `cgroup_manager = "cgroupfs"` and a file event logger, because it has no systemd; a real Fedora host uses
+nftables, systemd cgroups and journald, which is `OQ-037`'s unmeasured row. Those three settings are carried over
+from the lab's build rather than re-read this round.
 
 Every sentence above that says "measured" was re-run on 2026-09-21 against this page, one command log per claim, and
 the decisive output is quoted in the closing comment on issue #345, where it stays readable after the lab is gone.

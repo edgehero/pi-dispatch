@@ -1449,8 +1449,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 - **Statement**: What a job container reaches on the network shall be bounded **by default**, with a
   control pi-dispatch itself applies. Every job runs on its own `--internal` Docker network whose only other
-  member is an allowlist proxy, reaching listed hosts by name and nothing else; and a job whose policy
-  cannot serve it shall be **refused before it spends**, with a reason naming what is wrong and no budget
+  member is an allowlist proxy, reaching listed hosts by name and nothing else beyond this host; and a job
+  whose policy cannot serve it shall be **refused before it spends**, with a reason naming what is wrong and no budget
   slot consumed. `PI_EGRESS=0` is the opt-out and takes a deployment back to the prior behaviour exactly:
   no `--network`, no proxy variable, no preflight spawn, and a docker argv byte-identical to one built
   before this requirement existed. The polarity is an opt-OUT because a control that ships off is a control
@@ -2012,6 +2012,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-21 | Issue #345, while verifying the Podman page. **`REQ-EGRESS-ALLOWLIST` AMENDED**, three words in the Statement: the bound is "listed hosts by name and nothing else **beyond this host**". An `--internal` network's gateway is the host, so a host service bound to `0.0.0.0` answers a job container while one bound to `127.0.0.1` does not, measured on Docker 27.5.1 and rootful Podman 5.8.2 alike; `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` carries the residual and `docs/egress.md` now says what bounds it. No behaviour changes: the requirement is scoped to what it always did. **`REQ-DEPLOYMENT-BOOTSTRAP` UNCHANGED, checked**: doctor's checks and their tiers are untouched by the Podman route. |
 | 2026-09-15 | Issue #344. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, in the Statement and the Acceptance: `doctor --live` reads the declarations back off short-lived real containers rather than one, and what it names before it starts and removes when it ends now includes the peer networks it makes with the egress policy armed. The shown-rather-than-consented tier is UNCHANGED, checked: typing the flag is still the approval, and nothing it makes outlives the run. |
 | 2026-09-14 | Issue #341, part 3. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: a bullet saying `doctor` names who a local job runs as, from the worker's own resolver and with no container, failing only for what stops the worker booting and warning when this shell is not the account a system unit runs the worker as; Acceptance gains the native-Linux and rootless cases, for `doctor` and `doctor --live`. Its no-unshown-mutation clause is UNCHANGED, checked: deciding starts nothing. |
 | 2026-09-14 | Issue #341, part 2 (the wiring). **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each: the sandbox env they list as exactly `TERM` and `TMOUT` also carries the proxy variables when egress is armed (true since #202 and never written here) and `HOME=/home/pi` beside `--user` when the run had a job user. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. |

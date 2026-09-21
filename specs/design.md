@@ -4074,10 +4074,11 @@ a tunnel.
     a compose Valkey six days up reports `starting` with an empty log, while the proxy beside it reports `healthy`
     off one hand-run check). doctor prints the stored status, so there it is the last answer rather than a live one.
     The worker's egress gate reads only `Running`, so no job is refused for it (issue #355).
-  - A rootful Podman with `userns = "auto"` never reports `name=userns` (its compat info lists apparmor, seccomp,
-    rootless and selinux only), so it decides `worker` and every job stops at the runner's `/job` check
-    (`job-inputs-unreadable`, exit 2) before any provider spend. That container ran, so the job keeps the budget slot
-    it reserved: nothing refunds it.
+  - A rootful Podman with `userns = "auto"` never reports `name=userns` (measured: the compat API's `SecurityOptions` carries
+    `name=seccomp` and, rootless, `name=rootless`, never `name=userns`), so it decides `worker` and passes `--user`. What a job
+    does there is UNMEASURED and the two candidates differ in cost: the container fails to create, because the uid is
+    outside the namespace Podman allocated (125, never-started, refunded), or it starts and the runner's `/job` check
+    stops it at exit 2 (`job-inputs-unreadable`), which keeps the slot it reserved. `OQ-037` carries it.
 - **Code evidence**: `worker/src/runtime-observations.mjs` -> `observeBounds`, `observeRuntimeMounts`,
   `podmanOnThisHost`; `worker/src/job-user.mjs` -> `parseDaemonFacts` (`PODMAN_PRODUCT_LICENSE`);
   `worker/src/run-container.mjs` -> `stopDetached`; `worker/src/doctor.mjs` -> the runtime line;
