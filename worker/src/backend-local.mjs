@@ -183,12 +183,13 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * A network THIS project made for a job: the exact shape the producer builds, derived from both constants.
  * `docker`'s `--filter name=` is a substring match, so the listing alone is not a namespace (issue #357).
  *
- * `.*` rather than `.+`, to match the container half exactly. `jobContainerName` does not sanitise, it
- * concatenates, so an empty job id yields the container `pi-job-` and the network `pi-job--net`. A bare
- * `startsWith` catches the container and `.+` would NOT catch the network, and the direction that asymmetry
- * fails in is "leak the network forever", which is the defect this whole slice exists to close. The
- * false-positive it admits is a foreign network named exactly `pi-job--net`, which is no more likely than
- * one named `pi-job-x-net`.
+ * `.*` rather than `.+`, and the reason is an INVARIANT rather than a live bug, which is worth saying
+ * plainly: the network half must never be stricter than the container half. The container half is a bare
+ * `startsWith`, and `jobContainerName` concatenates without sanitising, so a job id of `""` would give the
+ * container `pi-job-` and the network `pi-job--net` -- reaped and leaked respectively under `.+`. That id is
+ * NOT reachable today (`backend-registry.mjs` passes `job?.id`, and an absent one renders `undefined`), so
+ * this fixes nothing that can happen now. It is here because the asymmetry fails silently and permanently
+ * when it does happen, while the cost is matching one name nothing creates.
  */
 export const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.*${NETWORK_SUFFIX}$`);
 

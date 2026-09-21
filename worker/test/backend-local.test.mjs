@@ -384,9 +384,10 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 	assert.ok(!touched.includes("my-pi-job-notes"), "a name that merely CONTAINS the prefix is not ours");
 	assert.ok(!touched.includes("robtest-staging"), "nor one that contains it in the middle");
 	assert.ok(!touched.includes("pi-job-mine-net-backup"), "nor our own shape with something appended");
-	// The other direction, which is the one that leaks: the container half is a bare prefix match, so the
-	// network half must not be stricter. `jobContainerName` concatenates without sanitising, so a degenerate
-	// id gives `pi-job-` and `pi-job--net`, and a `.+` shape would reap the container and leave the network.
+	// The other direction, which is the one that leaks. This pins an INVARIANT, not a reachable case: an empty
+	// job id cannot occur today, but the container half is a bare prefix match and `jobContainerName`
+	// concatenates without sanitising, so if one ever could, a stricter network half would reap the container
+	// and leave its network behind forever. Asymmetry here fails silently; symmetry costs one unused name.
 	assert.ok(JOB_NETWORK_SHAPE.test("pi-job--net"), "the network half is never stricter than the container half");
 	assert.ok(JOB_NETWORK_SHAPE.test(networkNameFor(jobContainerName("gh-1"))), "and it matches what the producer builds");
 	assert.ok(state.has("my-pi-job-notes") && state.has("robtest-staging-pi-job-queue-net") && state.has("pi-job-mine-net-backup"), "every foreign network survives intact");
