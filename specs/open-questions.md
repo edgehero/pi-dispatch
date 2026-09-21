@@ -1364,6 +1364,13 @@ adversarial passes did.
 ## OQ-035 — failedReason is a bounded string channel, not a classified one
 
 - **Status**: ACCEPTED (issue #289, which gave the failed set its first surface).
+- **AMENDED (issue #337, 2026-09-21)**: the belt is no longer `failedReason`-only. RUN_DETAIL applies the
+  same class to every record string it prints, because that pane renders `reason`, `host`, `backend`,
+  `target`, `flow` and other runs' job ids, and this row's own argument for leaving them alone was that
+  the record's fields are a fixed enum written by the worker. That is still true and is still why this is
+  belt-and-braces rather than a boundary: what changed is the judgement that a terminal-controlling byte
+  should not depend on every future write site holding the enum, when one scrub inside one `show()` holds
+  it structurally. The class is unchanged (C0 + DEL, C1 left alone) and so is the `failedReason` cap.
 - **Position**: the FAILED panel section renders `failedReason` -- the message of the error the WORKER
   itself threw. The known payload-bearing sources were fixed at their sites in the same slice
   (`branch.mjs` answers with a type instead of the forge-payload value; `prepare-local.mjs` basenames
@@ -1444,6 +1451,45 @@ adversarial passes did.
   check stops a job whose inputs are unreadable before any provider spend, and `doctor --live` reads the
   declarations back on request.
 
+## OQ-038 — The `/dispatch` panel resolves sandbox settings from its OWN environment and cannot see the deployment's
+
+- **Status**: `WATCH`
+- **Position** (issue #337, 2026-09-21): pressing `b` on RUN_DETAIL opens a sandbox through `openSandbox`,
+  the same function the CLI uses, and every setting that decides what that container can reach is read
+  from the environment **pi was started in**, never the deployment's. The panel now SAYS so on the line
+  itself (`egress on via <proxy>` / `read from this shell, not the deployment`), which is what #337 asked
+  for, and this row records the rest of the blindness rather than letting the one fixed instance imply the
+  whole thing is answered.
+- **What the panel reads from its own process**, all through the worker's own readers so the panel and the
+  CLI agree with each other even when neither agrees with the deployment: `PI_EGRESS` and
+  `PI_EGRESS_PROXY` (what the shell can reach), `PI_SANDBOX_DIR` (which retained directories it can see at
+  all), `PI_SANDBOX_RETENTION_HOURS` (the window it reports, and `0` makes it report retention off),
+  `PI_SANDBOX_IDLE_MINUTES` (the `TMOUT` the shell gets) and **`DOCKER_HOST`**.
+- **`DOCKER_HOST` is the sharpest of them and it is NOT the one that got a line.** #337's own Podman
+  section names it: a Podman deployment points `DOCKER_HOST` at Podman's socket, and a panel that reads it
+  from its own process opens the sandbox on a **different daemon** than the worker's jobs ran on. The
+  egress posture at least fails visibly, because a missing proxy refuses; a different daemon simply does
+  not find the run's image or its containers, and the operator reads that as a broken sandbox rather than
+  as two daemons. Not surfaced on the line because the line has 53 columns and the posture is what the
+  issue asked for; recorded here because the fix for one is not the fix for the other.
+- **Why the panel cannot just be told**: nothing in this project loads a `.env` into a process
+  (`docs/secrets.md`), the panel may be started from anywhere, and the deployment pointer that DOES move
+  paths for it is allowlisted to paths and URLs and never to capability grants (`OQ-025`) -- a pointer
+  that could set `PI_EGRESS=0` or redirect `DOCKER_HOST` would be exactly the second unreviewed door that
+  allowlist exists to forbid. So widening the pointer is not the answer, and saying what was read is.
+- **Out of scope here, and named so it does not disappear with #337**: the sandbox launcher is hard-wired
+  to the docker CLI and `sandboxVenueRefusal` reopens only the `local` adapter by name, which belongs to
+  `#354` (a native podman backend). This row is about what the panel can SEE, not about which runtimes it
+  can drive.
+- **What would RESOLVE it**: a deployment-owned answer the panel can read without a capability grant --
+  the worker writing its resolved sandbox posture into the run record or a sibling file the panel already
+  reads, so the panel reports the DEPLOYMENT's setting and names its own only when they differ. That is a
+  new interface and a new file contract, which is why it is a watch rather than a fix.
+- **What would REOPEN it as urgent**: a report of a sandbox opening on the wrong daemon under Podman, or
+  a panel-opened shell reaching the network on a deployment whose `.env` sets `PI_EGRESS=1`.
+- **Cross-links**: `OQ-025` (the pointer allowlist is paths, never capability grants), `OQ-036`,
+  `OQ-016` (the panel suspends its TUI to hand the terminal to that shell), `INT-SANDBOX-CONTRACT`.
+
 ## Revision History
 
 | Date | Change |
@@ -1505,3 +1551,4 @@ adversarial passes did.
 | 2026-09-15 | Issue #345. **`OQ-036` AMENDED**, one sentence under its Podman subscription-mounts bullet: the risk is now observed (`runtimeAddsNoMounts` degrades `mountSet`, a floor refuses, `doctor --live` reads mountinfo) rather than only documented. Its status and every other bullet are UNCHANGED, checked. |
 | 2026-09-21 | Issue #345, the Podman route. **NEW `OQ-037`** (OPEN): rootless Podman (closes with a native `podman` backend using keep-id, issue #354); SELinux enforcing, netavark's nftables driver and systemd health checks, which need a real host (issue #355); `podman machine` and Podman Desktop; OrbStack and Colima; and a rootful Podman with `userns = "auto"`, where the two possible outcomes cost a job differently. Each carries its close condition, and the entry states what bounds them meanwhile. |
 | 2026-09-21 | Issue #337, item 1. **`OQ-007` AMENDED**, and it is that row's own stated property that constrained the naming: the sandbox reaper now sweeps a second kind of object, and its per-network outcomes are `reaped_sandbox_network` and `sandbox_network_not_reaped` rather than a third `*_reaper_skipped`. Only the sweep's FAULT keeps `sandbox_reaper_skipped`, because that name means this pass established nothing, which is what an operator greps for across boot and every tick, and a network left behind is a verdict from a pass that ran. **`OQ-016` UNCHANGED, checked**: the panel's suspend-and-hand-over pair is untouched, and nothing here runs while a shell is open. **Code evidence**: worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/sandbox.mjs -> makeSandboxNetworkSweeper. |
+| 2026-09-21 | Issue #337, items 2, 3 and 4. **NEW `OQ-038`** (WATCH): the panel resolves every sandbox setting from the environment pi was started in and cannot see the deployment's. The egress posture is now SAID on the line, which is what the issue asked for, and this row records the rest rather than letting one fixed instance imply the whole thing is answered: the retention window it reports, the idle timeout the shell gets, which directory of retained runs it can see, and `DOCKER_HOST`, which is the sharpest and did NOT get a line -- a Podman deployment points it at Podman's socket, so a panel reading it from its own process opens the sandbox on a DIFFERENT DAEMON than the worker's jobs ran on, and that fails as a missing image rather than visibly. Widening the deployment pointer is explicitly not the answer (`OQ-025`: paths and URLs, never capability grants), so the resolution named is a deployment-owned answer the panel can read without a grant. The launcher being hard-wired to the docker CLI belongs to `#354` and is named as out of scope rather than omitted. **`OQ-035` AMENDED**: its belt is no longer `failedReason`-only, and the reason it gave for leaving the record's own fields alone (a fixed enum written by the worker) is still true and is still why the wider scrub is belt-and-braces rather than a boundary. **`OQ-016` UNCHANGED, checked**: the suspend-and-hand-over pair is untouched; what changed is that a failed hand-over now stops before the redraw. **`OQ-025` UNCHANGED, checked, and cited**: the pointer allowlist is why the panel cannot simply be told. |

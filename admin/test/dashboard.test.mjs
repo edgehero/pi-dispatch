@@ -914,6 +914,81 @@ async function openRunDetail(deps = {}, tui = fakeTui()) {
   return comp;
 }
 
+test("RUN_DETAIL says what egress a sandbox opened HERE would get, and whose environment that is (#337)", async () => {
+  // #337 item 2: the panel resolves PI_EGRESS from its own process, because that is what `openSandbox`
+  // uses when `b` is pressed, and it cannot see the deployment's. The acceptance sentence is that it says
+  // so, rather than claiming a mismatch it has no way to detect.
+  const on = await openRunDetail({
+    sandboxInfo: () => ({ retained: true, expiresIn: "19h", egress: { armed: true, proxy: "pi-dispatch-egress-proxy", source: "this shell" } }),
+    launchSandbox: async () => {},
+  });
+  const out = stripAnsi(on.render(80).join("\n"));
+  await on.dispose();
+  assert.match(out, /sandbox\s+retained · 19h left/, "the retention verdict keeps its own line");
+  assert.match(out, /egress on via pi-dispatch-egress-proxy/);
+  assert.match(out, /read from this shell, not the deployment/);
+  // The budget is why it is two lines: `kv` leaves 53 columns for a value that `fitLine` CLIPS, not wraps,
+  // and the one-line form is 64. A clipped caveat loses exactly the half that matters.
+  for (const l of out.split("\n")) assert.ok(l.length <= 80, `line over budget: ${JSON.stringify(l)}`);
+  // Un-clipped is the point, so assert the LONGEST part survives whole. `fitLine` truncates silently,
+  // and a caveat cut at "not the" says the opposite of what it means.
+  assert.match(out, /egress on via pi-dispatch-egress-proxy\s/, "the proxy name is not truncated");
+  assert.ok(
+    out.split("\n").some((l) => l.includes("read from this shell, not the deployment")),
+    "and the caveat is on one line, whole",
+  );
+});
+
+test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#337)", async () => {
+  const off = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: false, proxy: "pi-dispatch-egress-proxy", source: "this shell" } }), launchSandbox: async () => {} });
+  const offOut = stripAnsi(off.render(80).join("\n"));
+  await off.dispose();
+  assert.match(offOut, /egress off/);
+  assert.doesNotMatch(offOut, /egress on/);
+
+  // `egressArmed` THROWS on a PI_EGRESS it cannot parse, and `openSandbox` refuses rather than opening a
+  // shell on the open network. Rendering that as "off" would be the one reading that is wrong in the
+  // dangerous direction.
+  const bad = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { malformed: true, source: "this shell" } }), launchSandbox: async () => {} });
+  const badOut = stripAnsi(bad.render(80).join("\n"));
+  await bad.dispose();
+  assert.match(badOut, /egress unreadable/);
+  assert.doesNotMatch(badOut, /egress off/);
+});
+
+test("RUN_DETAIL scrubs control bytes out of every record string it prints (#337)", async () => {
+  // Item 3. The record is PII-free and worker-written, so this is not a trust judgement about the data:
+  // a byte that moves the cursor, clears the screen or opens a hyperlink must not reach a terminal from a
+  // stored field, whoever wrote it. Asserted on what the pane renders MINUS the styler's own escapes,
+  // because the styler emits ESC and OSC-8 of its own and a naive "no ESC anywhere" check is both wrong
+  // and green.
+  const ESC = String.fromCharCode(27);
+  const nasty = (s) => `${s}${String.fromCharCode(13)}${ESC}[2J${ESC}]8;;http://evil${String.fromCharCode(7)}`;
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({
+        ...SNAPSHOT,
+        runs: [{ ...SNAPSHOT.runs[0], host: nasty("host"), backend: nasty("local"), flow: nasty("tidy"), reason: nasty("why"), parentJobId: nasty("gh-0") }],
+      }),
+      sandboxInfo: () => null,
+    }),
+  });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const plain = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  // `stripAnsi` removes the styler's escapes; what survives is what the record contributed.
+  for (const [name, code] of [["CR", 13], ["ESC", 27], ["BEL", 7]]) {
+    assert.ok(!plain.includes(String.fromCharCode(code)), `${name} from a record field reached the pane`);
+  }
+  assert.match(plain, /host/, "and the readable part of the value still renders");
+});
+
 test("RUN_DETAIL shows a run's retention state, and offers `b` only when there is something to open", async () => {
   const retained = await openRunDetail({
     sandboxInfo: () => ({ retained: true, expiresIn: "19h" }),

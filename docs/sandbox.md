@@ -16,7 +16,9 @@ A fresh container starts from the **same image** with the **same workspace** and
 flags** — and no credentials at all. The agent is not running. You are.
 
 You can also open one from the admin panel: `/dispatch`, Enter on a finished run, then `b`. The panel
-suspends itself, hands the terminal to the shell, and comes back when you exit.
+suspends itself, hands the terminal to the shell, and comes back when you exit. If the container never
+starts, the panel stops and tells you the exit code before it redraws, rather than painting over the one
+line docker printed.
 
 The command **needs a terminal**: it opens an interactive shell, so from a pipe, a TTY-less script or CI it
 refuses by name before anything else, rather than letting docker fail with "the input device is not a
@@ -103,7 +105,16 @@ default bridge and the whole internet, which is what `SECURITY.md` discloses. Th
 environment of whatever opens the sandbox: the shell you run
 `pi-dispatch sandbox` in, or the environment pi was started in for the panel. Neither reads your
 deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, export them where you open
-sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so). (Before #277 a sandbox opened from the panel
+sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so).
+
+**The panel now shows you which posture it would use, before you press `b`.** RUN_DETAIL's sandbox block
+carries two more lines, `egress on via <proxy>` (or `egress off`, or `egress unreadable`) and `read from
+this shell, not the deployment`. The second is the part that matters: the panel reports what IT resolved,
+and it has no way to see what your deployment's `.env` sets, so the two can disagree and only you can
+tell. The same is true of the other sandbox settings the panel resolves from its own environment, which
+`OQ-038` records in full: the retention window it reports, the idle timeout your shell gets, which
+directory of retained runs it can see at all, and `DOCKER_HOST`, which on a Podman deployment can point
+the panel at a different daemon than the one your jobs ran on. (Before #277 a sandbox opened from the panel
 skipped the network and got the whole internet even with the policy on. If you rely on the policy for
 sandboxes, run a version that carries #277.)
 

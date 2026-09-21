@@ -715,7 +715,9 @@ pi-dispatch sandbox gh-12345 --publish 3000   # a fresh container on that run's 
 ```
 
 Same image, same isolation, no minted token, no provider key. The agent is not running; you are. From
-the panel, press `b` on a run. A retained directory holds the run's clone plus its issue text, so read
+the panel, press `b` on a run; the panel shows which egress posture it would use and that it read it from
+that shell rather than from your deployment, and if the container never starts it names the exit code
+instead of redrawing over it. A retained directory holds the run's clone plus its issue text, so read
 [`docs/sandbox.md`](docs/sandbox.md) before extending retention.
 
 ## How it compares

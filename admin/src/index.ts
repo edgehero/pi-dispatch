@@ -1747,7 +1747,7 @@ async function openDashboard(paths: any, ctx: any, notify: Notify): Promise<void
  * currently running is deliberately NOT asked -- that needs docker and `pi-dispatch sandbox --list`
  * already answers it.
  */
-export function readSandboxInfo(paths: any, jobId: string, { now = Date.now }: { now?: () => number } = {}): any {
+export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env = process.env }: { now?: () => number; env?: any } = {}): any {
   if (!jobId) return null;
   if (!paths?.sandboxRetentionHours) return { retained: false, reason: "retention off" };
   const manifest = readManifest({ sandboxDir: paths.sandboxDir, jobId });
@@ -1762,9 +1762,33 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now }: {
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");
   const until = Number.isFinite(keepUntil) ? keepUntil : createdAt + paths.sandboxRetentionHours * 3600000;
-  if (!Number.isFinite(until)) return { retained: true };
+  const egress = sandboxEgressPosture(env);
+  if (!Number.isFinite(until)) return { retained: true, egress };
   const hours = Math.max(0, Math.round((until - now()) / 3600000));
-  return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d` };
+  return { retained: true, pinned: Number.isFinite(keepUntil), expiresIn: hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`, egress };
+}
+
+/**
+ * The egress posture a sandbox opened from HERE would get, and the fact that it is this shell's (#337).
+ *
+ * The panel resolves `PI_EGRESS` and `PI_EGRESS_PROXY` from its OWN process, through the worker's own
+ * reader, because that is what `openSandbox` will use when `b` is pressed. What it cannot do is compare
+ * that against the deployment's: nothing in this project loads a `.env` into a process, the panel may
+ * have been started from anywhere, and a deployment pointer carries paths and never capability grants
+ * (`OQ-025`). So the line states the posture AND its provenance, which is what #337 asks for: not a
+ * claim about a mismatch it cannot see, but the plain fact that this is the environment it read.
+ *
+ * `malformed` is its own state rather than a guess. `egressArmed` throws on a `PI_EGRESS` it cannot
+ * parse, and `openSandbox` refuses rather than opening a shell on the open network, so the panel must
+ * not render that as "off".
+ */
+function sandboxEgressPosture(env: any): any {
+  try {
+    const { armed, proxy } = sandboxEgress(env);
+    return { armed, proxy, source: "this shell" };
+  } catch {
+    return { malformed: true, source: "this shell" };
+  }
 }
 
 /**
@@ -1826,7 +1850,34 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     write(`\ncould not start docker: ${result.error.message}\n`);
     await pause();
   }
+  // A NON-ZERO EXIT, which used to redraw over itself in silence (#337 item 4). `openSandbox` returns
+  // docker's own code, and the panel suspended pi's TUI to hand the terminal over: without a pause the
+  // whole failure is one line that `tui.start()` paints over before anyone reads it. The operator is left
+  // pressing `b` at a run that never opens and no screen ever says why.
+  //
+  // A DETACHED session exits 0 (Ctrl-P Ctrl-Q returns 0 with the container live), so the `detached`
+  // guard is belt rather than the thing doing the work, and removing it changes no test: it is here so
+  // that a runtime which someday detaches with a non-zero code does not make the operator read two
+  // messages for one outcome. `result.code` is null when the spawn itself failed, which `result.error`
+  // above already said. Worded around the CODE and not around docker's
+  // message: 125, 126 and 127 mean the same things under Podman with different text, and the message is
+  // on the operator's screen already because `stdio` was inherited.
+  if (!result.detached && typeof result.code === "number" && result.code !== 0) {
+    write(`\nthe sandbox exited ${result.code} without opening a shell${SANDBOX_EXIT_HINTS[result.code] ?? ""}\n`);
+    await pause();
+  }
 }
+
+/**
+ * What a non-zero exit from `docker run` usually means here, for the three the runtime itself owns. Hints
+ * rather than diagnoses: the code is docker's and the container never ran, so the panel can narrow the
+ * search without claiming to know. 126 and 127 come from the entrypoint, so they are the operator's image.
+ */
+const SANDBOX_EXIT_HINTS: Record<number, string> = {
+  125: " (docker itself refused: the name may be taken by a container that is still around, or the image is missing under --pull=never)",
+  126: " (the entrypoint is not executable in that image)",
+  127: " (the entrypoint is not in that image)",
+};
 
 /**
  * Hold the suspended terminal open long enough to read a refusal, then return.

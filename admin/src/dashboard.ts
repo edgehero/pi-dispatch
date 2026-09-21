@@ -87,9 +87,27 @@ const FAILED_ON_DASHBOARD = 3;
  */
 function scrubReason(reason: any): string {
   if (typeof reason !== "string" || reason === "") return "-";
-  // C0 + DEL only, matching the project's one control-byte class (triggers.mjs's validator): the C1
-  // range is left alone there too, a convention shared rather than widened in one renderer.
-  return reason.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
+  return scrubControl(reason).slice(0, 120);
+}
+
+/**
+ * The control-byte class itself, shared rather than copied (issue #337). C0 + DEL only, matching the
+ * project's one such class (`triggers.mjs`'s validator): the C1 range is left alone there too, a
+ * convention shared rather than widened in one renderer.
+ *
+ * `scrubReason` applies it in the DEPS layer to one field, which is where it started and where
+ * `DES-ADMIN-VIA-PI-EXTENSION` argues the injection boundary holds by placement. RUN_DETAIL applies it
+ * again at RENDER time to every record string it prints, and that is belt-and-braces rather than a second
+ * boundary: the record is PII-free and its fields are worker-written, so this is not a trust judgement
+ * about the data, it is a property of the terminal. A byte that moves the cursor, clears the screen or
+ * opens a hyperlink must not reach it from a stored field, whoever wrote that field.
+ *
+ * Must be applied INSIDE the value, before styling. The styler emits its own escapes, including OSC-8
+ * hyperlinks for a target, so scrubbing a composed line would destroy the link and the pane's width math
+ * with it.
+ */
+function scrubControl(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ");
 }
 
 /** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
@@ -2169,7 +2187,11 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
  */
 function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[] = [], sandbox: any = null): string[] {
   const r = record ?? {};
-  const show = (v: any): string => (v === null || v === undefined ? "-" : String(v));
+  // Every record string this pane prints goes through here, which is why the scrub lives INSIDE `show`
+  // rather than around the lines it builds: `styler.link(styler.fg("accent", show(r.target)), url)` puts
+  // the value inside two layers of escapes the styler owns, and scrubbing the composed string would take
+  // the hyperlink and the width math with it.
+  const show = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
     fitLine(styler.cell(k, 12, { color: "muted" }) + " " + styler.fg(color, v), inner, styler);
@@ -2179,7 +2201,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const outcomeColor = oc === "completed" ? "success" : oc === "policy" ? "warning" : "error";
   const glyph = oc === "completed" ? "✔" : oc === "policy" ? "⚠" : "✘";
   let head = styler.bold(styler.fg(outcomeColor, `${glyph} ${oc}`));
-  if (r.reason) head += styler.fg("dim", ` · ${r.reason}`);
+  if (r.reason) head += styler.fg("dim", ` · ${show(r.reason)}`);
   out.push(fitLine(head, inner, styler));
   out.push(styler.cell("", inner));
 
@@ -2200,7 +2222,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // the target for the same budget, clipping silently at width 80 -- while this pane is variable-length
   // and framed at DRILL_WIDTH. Absent on records written before the field existed, and on a deployment
   // that never declared a name, so a single-host drill-in is byte-identical.
-  if (r.host) out.push(kv("host", String(r.host)));
+  if (r.host) out.push(kv("host", show(r.host)));
   // WHICH VENUE, beside which machine (#277): the backend this job RESOLVED to, which TRIGGER_DETAIL's
   // backend row cannot show -- that row is what a trigger requested before anything ran. A refused job
   // resolved to a venue too, so this is not a claim that a container ran there; the header's outcome says
@@ -2208,7 +2230,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // Absent on a record that carries no field (written before #277, or by an older host in a mixed fleet),
   // and nothing is inferred for it -- the panel shows a record, it decides nothing from one. Unlike the host
   // line, every record this version writes carries the field, so the line is the normal case.
-  if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", r.backend));
+  if (typeof r.backend === "string" && r.backend !== "") out.push(kv("backend", show(r.backend)));
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];
@@ -2231,9 +2253,9 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // chain: root vs child, depth, spawned children (scanned from the run window -- best-effort, no new I/O),
   // and refused-child count.
   const children = (Array.isArray(allRuns) ? allRuns : []).filter((x) => x?.parentJobId && r.jobId && x.parentJobId === r.jobId);
-  const chainBits = [r.parentJobId ? `child of ${r.parentJobId}` : "root"];
+  const chainBits = [r.parentJobId ? `child of ${show(r.parentJobId)}` : "root"];
   if (r.chainDepth !== null && r.chainDepth !== undefined) chainBits.push(`depth ${r.chainDepth}`);
-  if (children.length > 0) chainBits.push(`spawned ${children.length} → ${children.map((c) => c.jobId).join(", ")}`);
+  if (children.length > 0) chainBits.push(`spawned ${children.length} → ${children.map((c) => show(c.jobId)).join(", ")}`);
   if (r.chainRefused) chainBits.push(`${r.chainRefused} refused`);
   out.push(kv("chain", chainBits.join(" · ")));
 
@@ -2251,7 +2273,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
       (x) => x?.replica > 0 && x.replica !== r.replica && x.kind === r.kind && x.target === r.target && x.flow === r.flow,
     );
     const repBits = [`r${r.replica}/${r.replicas ?? "?"}`];
-    repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${s.replica} ${s.jobId}`).join(", ")}` : "no sibling in this window");
+    repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${s.replica} ${show(s.jobId)}`).join(", ")}` : "no sibling in this window");
     out.push(kv("replica", repBits.join(" · "), "warning"));
   }
 
@@ -2261,8 +2283,23 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   if (sandbox) {
     const state = sandbox.retained
       ? `${sandbox.running ? "running" : "retained"}${sandbox.expiresIn ? ` · ${sandbox.expiresIn} left` : ""}`
-      : (sandbox.reason ?? "swept");
+      : show(sandbox.reason ?? "swept");
     out.push(kv("sandbox", state, sandbox.retained ? "success" : "dim"));
+    // WHAT `b` WOULD GIVE THIS SHELL, and that it is this shell's (#337). The panel resolves PI_EGRESS
+    // from its OWN process, because that is what `openSandbox` uses when the key is pressed, and it
+    // genuinely cannot see the deployment's: nothing here loads a `.env`, the panel may have been started
+    // anywhere, and the deployment pointer carries paths and never capability grants (`OQ-025`). So this
+    // states the posture AND its provenance rather than claiming a mismatch it cannot detect.
+    //
+    // TWO LINES, and the second is not decoration. `kv` pays a 12-column label plus a space out of an
+    // `inner` of 66 at the pane's DRILL_WIDTH, leaving 53 for a value that `fitLine` CLIPS rather than
+    // wraps; `retained · 19h left · egress on (this shell, not the deployment)` is 64 and would lose its
+    // own point silently. The caveat gets its own budget under a blank label.
+    if (sandbox.retained && sandbox.egress) {
+      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${show(sandbox.egress.proxy)}` : "egress off";
+      out.push(kv("", posture, sandbox.egress.malformed ? "error" : "text"));
+      out.push(kv("", "read from this shell, not the deployment", "dim"));
+    }
   }
 
   out.push(styler.cell("", inner));
