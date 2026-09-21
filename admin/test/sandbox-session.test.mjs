@@ -135,7 +135,7 @@ test("a sandbox that exits non-zero without opening a shell PAUSES, rather than 
     assert.match(text, new RegExp(`the sandbox exited ${code}\\. If no shell opened`), `exit ${code} is also a runtime refusal code`);
     assert.match(text, cause, `exit ${code} names what THAT code means`);
     assert.doesNotMatch(text, wrong, `exit ${code} must not offer a cause that cannot produce it`);
-    assert.doesNotMatch(text, /never opened|did not start/, "and it does not assert which of the two happened");
+    assert.match(text, /If no shell opened/, "the runtime reading is OFFERED, never asserted: no exit code separates it from the shell's own status");
     assert.equal(p2, 1);
   }
 

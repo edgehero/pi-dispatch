@@ -1006,7 +1006,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
 
   if (view === "TRIGGER_DETAIL") {
     const t = detailTrigger?.record;
-    const detailTitle = `trigger · ${t?.type ?? "?"}`;
+    const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
     const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages);
@@ -1018,7 +1018,12 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   if (view === "RUN_DETAIL") {
     // The pane's own TITLE is built from a record id and reaches the terminal through `frame`, whose
     // `clipPlain` CLIPS but does not strip. Scrubbed for the same reason every line under it is.
-    const detailTitle = `run ${detailRun?.jobId ?? "-"}`;
+    // Scrubbed HERE and not only in `clipPlain`, which is a correction of last round's correction. The
+    // strip moved into `clipPlain` so every frame title would inherit it, and that is right for the
+    // framed path -- but a title has TWO consumers, and the unframed degrade (`width` under 8, or not a
+    // finite number) returns it as a bare array element without going near `frame()`. Both consumers
+    // now hold the property, and `clipPlain` keeps its own strip as the belt for any future caller.
+    const detailTitle = `run ${scrubControl(String(detailRun?.jobId ?? "-"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const allRuns = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
     const canOpen = Boolean(sandboxAvailable && detailSandbox?.retained);
@@ -1320,10 +1325,14 @@ function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: 
 
 /** One sentence for the footer from a cancel's result shape -- every branch names what actually happened. */
 function cancelNote(res: any): string {
-  if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : res.ack} — stopping the container (~30s)`;
+  // Three of these interpolate something the panel did not write: `ack` is a value ANOTHER PROCESS put in
+  // redis (`cancel-state.mjs`), and `jobId`/`invalid` are queue-side ids. They land in the same footer,
+  // through the same render call, as the armed question beside them (issue #337).
+  const say = (v: any): string => scrubControl(String(v ?? "-"));
+  if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : say(res.ack)} — stopping the container (~30s)`;
   if (res?.timeout) return "no worker acknowledged — the job may have just finished, or its host is unreachable; nothing was changed";
-  if (res?.ok) return `cancelled ${res.jobId} — it never ran, no record written`;
-  if (res?.invalid) return `rejected: ${res.invalid}`;
+  if (res?.ok) return `cancelled ${say(res.jobId)} — it never ran, no record written`;
+  if (res?.invalid) return `rejected: ${say(res.invalid)}`;
   return "cancel failed — check the worker log";
 }
 
@@ -1725,7 +1734,7 @@ export function targetUrl(record: any): string | null {
   // them, and `link` emits the URL into an OSC-8 sequence a BEL terminates early. The DISPLAY half of
   // that same call was scrubbed and the URL half was not, which is exactly the byte the design entry
   // says must never reach a terminal from a stored field.
-  const m = record.target.match(/^([^#\s\u0000-\u001f\u007f]+)#(\d+)$/);
+  const m = record.target.match(/^([^#\s\u0000-\u001f\u007f-\u009f]+)#(\d+)$/);
   if (!m) return null;
   return `https://github.com/${m[1]}/issues/${m[2]}`;
 }
@@ -2164,7 +2173,7 @@ function tailMatches(lines: any[], query: string): number[] {
  * never carry raw bytes past it.
  */
 function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, styler }: any): string[] {
-  const boxTitle = `live ${tailJobId}`;
+  const boxTitle = `live ${scrubControl(String(tailJobId ?? "-"))}`;
   if (tail === null && !tailAvailable) {
     const lines = ["live tail unavailable in this build"];
     if (!framed) return [boxTitle, "", ...lines, "", "Esc back"];
@@ -2190,7 +2199,10 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     footer += matches.length === 0 ? ` · /${tailQuery} · no match` : ` · /${tailQuery} · ${pos}/${matches.length}`;
   }
   if (!framed) {
-    const plain = [`live ${tailJobId} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT)];
+    // The plain header carries the id a SECOND time, beside `boxTitle`, and the framed branch below
+    // passes its copy through `clip`, which strips. This one reached neither, which is the same
+    // two-consumers-one-scrub shape as the titles: every place the id is interpolated holds it.
+    const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT)];
     if (ended) plain.push("(run ended -- Esc to go back)");
     if (tailSearchInput) plain.push("/ " + tailSearchInput.value());
     return [boxTitle, "", ...plain, "", footer];

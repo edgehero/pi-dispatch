@@ -1056,7 +1056,7 @@ test("nothing carries a control byte out of the panel: the armed question, the t
   // line when it is pasted at a shell prompt.
   const ESC = String.fromCharCode(27);
   const CR = String.fromCharCode(13);
-  const dirty = `gh-9${CR}${ESC}[2J`;
+  const dirty = `gh-9${CR}${ESC}[2J${String.fromCharCode(155)}`;
   // The armed question, on the ACTIVE row of its own component.
   const active = makeDashboard({
     paths: {},
@@ -1092,12 +1092,82 @@ test("nothing carries a control byte out of the panel: the armed question, the t
   const detail = stripAnsi(comp.render(80).join("\n"));
   assert.match(detail, /run gh-9/, "the title names the run");
   for (const code of [13, 27]) assert.ok(!detail.includes(String.fromCharCode(code)), `char ${code} reached the pane`);
+  // THE UNFRAMED DEGRADE, which is where last round's fix stopped reaching. A title has two consumers
+  // and only one of them is `frame()`: below `MIN_WIDTH`, or with a width that is not a finite number,
+  // the pane returns the title as a bare array element. `admin/test/dashboard.test.mjs` already renders
+  // at width 4 and width 0 elsewhere, so this is a supported mode rather than dead code.
+  for (const w of [7, 0, Number.NaN, undefined]) {
+    const degraded = stripAnsi(comp.render(w).join("\n"));
+    for (const code of [13, 27, 155]) {
+      assert.ok(!degraded.includes(String.fromCharCode(code)), `char ${code} reached the unframed title at width ${String(w)}`);
+    }
+  }
   comp.handleInput("y");
   await flush();
   await comp.dispose();
   assert.equal(copied.length, 1);
   for (const code of [13, 27]) assert.ok(!copied[0].includes(String.fromCharCode(code)), `char ${code} was handed to the system clipboard`);
   assert.match(copied[0], /gh-9/, "and the id is still copyable");
+});
+
+test("the cancel OUTCOME and the tail title carry nothing either (#337)", async () => {
+  // Two more places a value the panel did not write reaches the same footer and the same frame. The
+  // cancel ack is read out of redis by another process (`cancel-state.mjs`), and the tail's title is a
+  // queue-side id -- neither is a stored run record, and both land beside things that are.
+  const ESC = String.fromCharCode(27);
+  const dirty = `worker-A${String.fromCharCode(13)}${ESC}[2J${String.fromCharCode(155)}`;
+  const active = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: dirty, active: [{ jobId: dirty }] }),
+      cancelActive: async () => ({ ack: dirty }),
+      tailLog: () => ({ lines: ["L"] }),
+    }),
+  });
+  await flush();
+  active.handleInput("x");
+  await flush();
+  active.handleInput("y");
+  await flush();
+  const note = stripAnsi(active.render(80).join("\n"));
+  for (const code of [13, 27, 155]) assert.ok(!note.includes(String.fromCharCode(code)), `char ${code} reached the cancel outcome`);
+  assert.match(note, /cancel accepted by worker-A/, "and the outcome still names who accepted it");
+
+  // Three of `cancelNote`'s branches interpolate something the panel did not write, so the other two
+  // carrying an id are driven too rather than left to the one that happened to be first.
+  for (const [res, expect] of [
+    [{ ok: true, jobId: dirty }, /cancelled worker-A/],
+    [{ invalid: dirty }, /rejected: worker-A/],
+  ]) {
+    const one = makeDashboard({
+      paths: {},
+      done() {},
+      tui: fakeTui(),
+      intervalMs: 100000,
+      deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: dirty, active: [{ jobId: dirty }] }), cancelActive: async () => res }),
+    });
+    await flush();
+    one.handleInput("x");
+    await flush();
+    one.handleInput("y");
+    await flush();
+    const out = stripAnsi(one.render(80).join("\n"));
+    await one.dispose();
+    assert.match(out, expect);
+    for (const code of [13, 27, 155]) assert.ok(!out.includes(String.fromCharCode(code)), `char ${code} reached a cancel outcome`);
+  }
+
+  // The tail's own frame title, framed and degraded.
+  active.handleInput("\r");
+  await flush();
+  for (const w of [80, 7]) {
+    const tail = stripAnsi(active.render(w).join("\n"));
+    for (const code of [13, 27, 155]) assert.ok(!tail.includes(String.fromCharCode(code)), `char ${code} reached the tail title at width ${w}`);
+  }
+  await active.dispose();
 });
 
 test("the LIST rows hold the same property as the drill-in (#337)", async () => {
@@ -1135,7 +1205,7 @@ test("a control byte cannot reach the terminal through the target's OSC-8 URL ei
   // this. A clear-screen hidden inside a hyperlink payload is invisible to a stripped-text assertion.
   const ESC = String.fromCharCode(27);
   const BEL = String.fromCharCode(7);
-  for (const target of [`o${BEL}evil/r#5`, `o${ESC}[2Jevil/r#5`, `o${ESC}]8;;http://evil${BEL}/r#5`]) {
+  for (const target of [`o${BEL}evil/r#5`, `o${ESC}[2Jevil/r#5`, `o${ESC}]8;;http://evil${BEL}/r#5`, `o${String.fromCharCode(155)}2Jevil/r#5`, `o${String.fromCharCode(157)}8;;evil/r#5`]) {
     // A REAL theme, because PLAIN_THEME's `link` is a byte-identical passthrough that emits no OSC-8 at
     // all: under it there is nothing to inspect and every assertion here is vacuously true. That is what
     // made the first version of this test green against the bug it was written for.
@@ -1192,9 +1262,10 @@ test("the outcome word is a record string and is scrubbed like the rest (#337)",
   assert.ok(!plain.includes(ESC), "the outcome word reached the pane with an escape in it");
   assert.match(plain, /✘ failed/, "and it still renders as the failure it is");
 
-  // The comparisons must read the RAW value, not the scrubbed one, or a control byte in the field
-  // silently changes which glyph and colour a run gets. `scrubControl` is identity on a clean enum, so
-  // this is the only shape that can tell the two readings apart.
+  // The comparisons read the RAW value rather than the scrubbed one. That split is INTENT and no test can
+  // pin it: `show` maps a control byte to a space, so a dirty value can never become one of the two enum
+  // words, and both readings give the same glyph for every input. What this renders is the display half,
+  // which the loop above already covers; it is here because a decision should read the stored value.
   const dirtyEnum = makeDashboard({
     paths: {},
     done() {},
@@ -1207,7 +1278,7 @@ test("the outcome word is a record string and is scrubbed like the rest (#337)",
   await flush();
   const dirtyPlain = stripAnsi(dirtyEnum.render(80).join("\n"));
   await dirtyEnum.dispose();
-  assert.match(dirtyPlain, /✘ {2}completed/, "a byte in front of the word is not the word, so it is NOT the clean-completion glyph");
+  assert.match(dirtyPlain, /✘ {2}completed/, "a byte in front of the word is not the word, so it is not the clean-completion glyph");
 });
 
 test("RUN_DETAIL shows a run's retention state, and offers `b` only when there is something to open", async () => {

@@ -368,7 +368,10 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
 }
 
 /**
- * Every refusal that can be decided from the MANIFEST ALONE, in the order an operator should read them.
+ * The refusals `resolveSandbox` decides from the MANIFEST ALONE, in the order an operator should read
+ * them. Not every manifest-only refusal on the `b` path: `decideSandboxJobUser` can refuse a linux run
+ * from `manifest.jobUser` too, and that stays where it is because folding it in would change what the
+ * CLI refuses and when.
  *
  * Extracted (issue #337) because the admin panel needs the same answer before it advertises `b`, and the
  * alternative is the shape this file's own `openSandbox` docblock warns about: "Two callers assembling

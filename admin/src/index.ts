@@ -1755,9 +1755,13 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   // #277: the SAME venue refusal `resolveSandbox` applies when the key is pressed, asked here so the panel
   // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
   // verdict, which is what the dashboard's key guard reads.
-  // EVERY refusal that can be decided from the manifest alone, through the SAME predicate
-  // `resolveSandbox` uses (issue #337), so the panel never advertises `b` for a run this host cannot
-  // re-open. It used to ask only the venue one, so a run whose manifest names no image, or whose local
+  // THE THREE refusals `resolveSandbox` decides from the manifest alone, through the SAME predicate it
+  // uses (issue #337), so the panel does not advertise `b` for a run this host cannot re-open.
+  //
+  // NOT every one, and the exception is named rather than left to be discovered: `decideSandboxJobUser`
+  // can refuse a linux run from the manifest too, when the recorded job user is malformed (issue #341),
+  // and that check is not in this predicate. Folding it in would change what the CLI refuses and when,
+  // which is a separate decision from what the panel advertises. It used to ask only the venue one, so a run whose manifest names no image, or whose local
   // folder moved, was offered the key, given two lines of egress detail about the session it would get,
   // and refused the moment the key was pressed. Copying the other two here instead of sharing them would
   // have been the shape `openSandbox`'s own docblock warns about: two callers assembling the same answer
