@@ -998,7 +998,9 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   }
 
   if (view === "RUN_DETAIL") {
-    const detailTitle = `run ${detailRun?.jobId ?? "-"}`;
+    // The pane's own TITLE is built from a record id and reaches the terminal through `frame`, whose
+    // `clipPlain` CLIPS but does not strip. Scrubbed for the same reason every line under it is.
+    const detailTitle = `run ${scrubControl(String(detailRun?.jobId ?? "-"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const allRuns = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
     const canOpen = Boolean(sandboxAvailable && detailSandbox?.retained);
@@ -1700,7 +1702,12 @@ function runsWindow(len: number, selected: number): { top: number; count: number
  */
 export function targetUrl(record: any): string | null {
   if (record?.kind !== "github" || typeof record?.target !== "string") return null;
-  const m = record.target.match(/^([^#\s]+)#(\d+)$/);
+  // The repo half excludes control bytes as well as whitespace, and that is the fix for a real hole
+  // rather than tidiness (issue #337): JS `\s` does NOT include ESC, BEL or NUL, so `[^#\s]+` admitted
+  // them, and `link` emits the URL into an OSC-8 sequence a BEL terminates early. The DISPLAY half of
+  // that same call was scrubbed and the URL half was not, which is exactly the byte the design entry
+  // says must never reach a terminal from a stored field.
+  const m = record.target.match(/^([^#\s\u0000-\u001f\u007f]+)#(\d+)$/);
   if (!m) return null;
   return `https://github.com/${m[1]}/issues/${m[2]}`;
 }
@@ -1711,7 +1718,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     // The cancel hint rides the SELECTED row, not the footer -- the footer's width arithmetic has no
     // headroom for another hint (its own comment), and the key only means anything on this row anyway.
     const hint = sel ? ` ${styler.fg("dim", "· x cancel")}` : "";
-    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", row.jobId)} ${styler.fg("dim", "running")}${hint}`, inner, styler);
+    return fitLine(`${cursor} ${styler.fg("success", "● ACTIVE")} ${styler.fg("text", scrubControl(String(row.jobId ?? "-")))} ${styler.fg("dim", "running")}${hint}`, inner, styler);
   }
   const r = row.record ?? {};
   const tree = r.chainDepth > 0 ? styler.fg("dim", "└ ") : "";
@@ -1725,22 +1732,29 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   // construction; under a real theme, stripAnsi/visibleLen already strip OSC-8, so the linked cell still
   // measures exactly its text width and fitLine stays honest.
   const url = targetUrl(r);
-  const targetCell = styler.fg("muted", r.target ?? "-");
+  // The LIST pane renders the same stored fields as the drill-in and into the same terminal, so it holds
+  // the same property (issue #337). The issue named RUN_DETAIL, but a belt that stops at one pane while
+  // the row above it prints the same field raw is a belt the next reader will assume covers both.
+  const cell = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
+  const targetCell = styler.fg("muted", cell(r.target));
   const cells = [
-    styler.fg("text", r.jobId ?? "-"),
+    styler.fg("text", cell(r.jobId)),
     url === null ? targetCell : styler.link(targetCell, url),
-    styler.fg("accent", r.flow ?? "-"),
+    styler.fg("accent", cell(r.flow)),
     outcomeColored(r.outcome, r.reason, styler),
-    styler.fg("dim", `${r.turns ?? "-"}t`),
+    styler.fg("dim", `${cell(r.turns)}t`),
     styler.fg("dim", Number.isFinite(r.tokens?.total) ? fmtTokens(r.tokens.total) : "-"),
   ];
   return fitLine(`${cursor} ${tree}${rep}${cells.join(sep)}`, inner, styler);
 }
 
 function outcomeColored(outcome: any, reason: any, styler: any): string {
+  // Compared against the RAW values and rendered from scrubbed ones, so a control byte can change what a
+  // row looks like but never what it says a run did.
   if (outcome === "completed") return styler.fg("success", "✔ done");
-  if (outcome === "policy") return styler.fg("warning", `⚠ ${reason ?? "policy"}`);
-  return styler.fg("error", `✘ ${reason ?? outcome ?? "failed"}`);
+  const shown = (v: any): string => scrubControl(String(v));
+  if (outcome === "policy") return styler.fg("warning", `⚠ ${shown(reason ?? "policy")}`);
+  return styler.fg("error", `✘ ${shown(reason ?? outcome ?? "failed")}`);
 }
 
 /** A compact colored settings summary (the full editor is the `s` drill-in). */
@@ -2196,8 +2210,10 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const kv = (k: string, v: string, color = "text") =>
     fitLine(styler.cell(k, 12, { color: "muted" }) + " " + styler.fg(color, v), inner, styler);
 
-  // Header: colored outcome glyph + word, plus the reason when it is not a clean completion.
-  const oc = String(r.outcome ?? "-");
+  // Header: colored outcome glyph + word, plus the reason when it is not a clean completion. `outcome` is
+  // a record STRING and goes through `show` like every other one; the enum comparisons below read
+  // `r.outcome` directly, so a scrubbed display value cannot change a colour or a glyph.
+  const oc = show(r.outcome ?? "-");
   const outcomeColor = oc === "completed" ? "success" : oc === "policy" ? "warning" : "error";
   const glyph = oc === "completed" ? "✔" : oc === "policy" ? "⚠" : "✘";
   let head = styler.bold(styler.fg(outcomeColor, `${glyph} ${oc}`));
@@ -2234,8 +2250,8 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
 
   // turns · exit · budget slot · attempt (each present only when the field is).
   const turnBits = [`${show(r.turns)} turns`, `exit ${show(r.exitCode)}`];
-  if (r.budgetReserved !== null && r.budgetReserved !== undefined) turnBits.push(`${r.budgetReserved} budget slot`);
-  if (r.attempt !== null && r.attempt !== undefined) turnBits.push(`attempt ${r.attempt}`);
+  if (r.budgetReserved !== null && r.budgetReserved !== undefined) turnBits.push(`${show(r.budgetReserved)} budget slot`);
+  if (r.attempt !== null && r.attempt !== undefined) turnBits.push(`attempt ${show(r.attempt)}`);
   out.push(kv("turns", turnBits.join(" · ")));
 
   // Per-job token accounting (issue #25): total + cost-USD, or `-` when the container died before reporting.
@@ -2254,9 +2270,9 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // and refused-child count.
   const children = (Array.isArray(allRuns) ? allRuns : []).filter((x) => x?.parentJobId && r.jobId && x.parentJobId === r.jobId);
   const chainBits = [r.parentJobId ? `child of ${show(r.parentJobId)}` : "root"];
-  if (r.chainDepth !== null && r.chainDepth !== undefined) chainBits.push(`depth ${r.chainDepth}`);
+  if (r.chainDepth !== null && r.chainDepth !== undefined) chainBits.push(`depth ${show(r.chainDepth)}`);
   if (children.length > 0) chainBits.push(`spawned ${children.length} → ${children.map((c) => show(c.jobId)).join(", ")}`);
-  if (r.chainRefused) chainBits.push(`${r.chainRefused} refused`);
+  if (r.chainRefused) chainBits.push(`${show(r.chainRefused)} refused`);
   out.push(kv("chain", chainBits.join(" · ")));
 
   // replica: which member of a racing set this run is, and which siblings the scan `chain` already does can
@@ -2272,8 +2288,8 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
       // and naming a stranger's job as your sibling is worse than naming none.
       (x) => x?.replica > 0 && x.replica !== r.replica && x.kind === r.kind && x.target === r.target && x.flow === r.flow,
     );
-    const repBits = [`r${r.replica}/${r.replicas ?? "?"}`];
-    repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${s.replica} ${show(s.jobId)}`).join(", ")}` : "no sibling in this window");
+    const repBits = [`r${show(r.replica)}/${show(r.replicas ?? "?")}`];
+    repBits.push(sibs.length > 0 ? `sibling ${sibs.map((s) => `r${show(s.replica)} ${show(s.jobId)}`).join(", ")}` : "no sibling in this window");
     out.push(kv("replica", repBits.join(" · "), "warning"));
   }
 
@@ -2288,7 +2304,8 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     // WHAT `b` WOULD GIVE THIS SHELL, and that it is this shell's (#337). The panel resolves PI_EGRESS
     // from its OWN process, because that is what `openSandbox` uses when the key is pressed, and it
     // genuinely cannot see the deployment's: nothing here loads a `.env`, the panel may have been started
-    // anywhere, and the deployment pointer carries paths and never capability grants (`OQ-025`). So this
+    // anywhere, and the deployment pointer carries paths and never capability grants
+    // (`INT-DEPLOYMENT-POINTER-CONTRACT`, not `OQ-025`, which is about tier resolution). So this
     // states the posture AND its provenance rather than claiming a mismatch it cannot detect.
     //
     // TWO LINES, and the second is not decoration. `kv` pays a 12-column label plus a space out of an
@@ -2296,7 +2313,16 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     // wraps; `retained · 19h left · egress on (this shell, not the deployment)` is 64 and would lose its
     // own point silently. The caveat gets its own budget under a blank label.
     if (sandbox.retained && sandbox.egress) {
-      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${show(sandbox.egress.proxy)}` : "egress off";
+      // The proxy name is OPERATOR-SET and unbounded, so it is capped here rather than left to `fitLine`,
+      // which truncates silently: a line that loses its own point without saying so is the failure the
+      // two-line split exists to avoid, and it would be odd to guard the caveat and not this.
+      // `egressProxyName` falls back with `||`, so an EMPTY `PI_EGRESS_PROXY` gets the default and a
+      // whitespace one does not: without this the line reads `egress on via` and then stops, naming a
+      // container whose name is three spaces. Said rather than hidden, because that value is what `b`
+      // will actually look for.
+      const proxy = show(sandbox.egress.proxy).trim();
+      const named = proxy === "" ? "a proxy whose name is blank" : proxy.length > 39 ? `${proxy.slice(0, 38)}…` : proxy;
+      const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off";
       out.push(kv("", posture, sandbox.egress.malformed ? "error" : "text"));
       out.push(kv("", "read from this shell, not the deployment", "dim"));
     }
@@ -2336,7 +2362,9 @@ function toMs(v: any): number {
 function fmtStamp(v: any): string {
   if (v === null || v === undefined) return "—";
   const ms = toMs(v);
-  return Number.isFinite(ms) ? formatTs(ms) : String(v);
+  // The FALLBACK is a record string printed verbatim, so it is scrubbed for the same reason every other
+  // one is: a timestamp that does not parse is still a stored field reaching a terminal.
+  return Number.isFinite(ms) ? formatTs(ms) : scrubControl(String(v));
 }
 
 /** A timestamp (ms) as compact UTC `YYYY-MM-DD HH:MM`; `—` when not a finite number. */

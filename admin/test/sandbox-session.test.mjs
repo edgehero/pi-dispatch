@@ -112,9 +112,22 @@ test("a sandbox that exits non-zero without opening a shell PAUSES, rather than 
   let pauses = 0;
   const { io, written } = panelIo({ launch: async () => ({ code: 125 }), pause: async () => void pauses++ });
   await mod.openSandboxSession(RETAINED, "gh-1", io);
-  assert.match(written.join(""), /the sandbox exited 125 without opening a shell/);
-  assert.match(written.join(""), /the name may be taken/, "and 125 gets the hint docker's own code earns");
+  assert.match(written.join(""), /the sandbox did not start \(exit 125\)/);
+  assert.match(written.join(""), /the name may be taken/, "and it names what a runtime refusal usually is");
   assert.equal(pauses, 1, "the operator reads it before the panel comes back");
+
+  // 125 AND ONLY 125. The sandbox runs `--entrypoint bash -i`, so every other code is the SHELL's own
+  // status: an operator who types `exit 1`, or whose last command was not found, would otherwise be told
+  // the sandbox never opened and made to read a pause for it. 126 and 127 are the sharp case, because
+  // bash returns exactly those for a last command that was not executable or not found, so a hint about
+  // the IMAGE would fire on a perfectly healthy session.
+  for (const code of [1, 2, 126, 127, 130]) {
+    let p2 = 0;
+    const shell = panelIo({ launch: async () => ({ code }), pause: async () => void p2++ });
+    await mod.openSandboxSession(RETAINED, "gh-1", shell.io);
+    assert.doesNotMatch(shell.written.join(""), /did not start/, `exit ${code} is the shell's own status`);
+    assert.equal(p2, 0, `exit ${code} must not stop the panel`);
+  }
 });
 
 test("a DETACHED session exits 0 and must not also report a failure (#337)", async () => {

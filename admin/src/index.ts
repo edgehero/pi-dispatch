@@ -1775,7 +1775,7 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
  * reader, because that is what `openSandbox` will use when `b` is pressed. What it cannot do is compare
  * that against the deployment's: nothing in this project loads a `.env` into a process, the panel may
  * have been started from anywhere, and a deployment pointer carries paths and never capability grants
- * (`OQ-025`). So the line states the posture AND its provenance, which is what #337 asks for: not a
+ * (`INT-DEPLOYMENT-POINTER-CONTRACT`, and `deployment-pointer.mjs`'s own header). So the line states the posture AND its provenance, which is what #337 asks for: not a
  * claim about a mismatch it cannot see, but the plain fact that this is the environment it read.
  *
  * `malformed` is its own state rather than a guess. `egressArmed` throws on a `PI_EGRESS` it cannot
@@ -1850,34 +1850,45 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     write(`\ncould not start docker: ${result.error.message}\n`);
     await pause();
   }
-  // A NON-ZERO EXIT, which used to redraw over itself in silence (#337 item 4). `openSandbox` returns
-  // docker's own code, and the panel suspended pi's TUI to hand the terminal over: without a pause the
-  // whole failure is one line that `tui.start()` paints over before anyone reads it. The operator is left
-  // pressing `b` at a run that never opens and no screen ever says why.
+  // A 125, which used to redraw over itself in silence (#337 item 4). The panel suspended pi's TUI to hand
+  // the terminal over, so without a pause the whole failure is one line that `tui.start()` paints over
+  // before anyone reads it: the operator presses `b` at a run that never opens and no screen says why.
   //
-  // A DETACHED session exits 0 (Ctrl-P Ctrl-Q returns 0 with the container live), so the `detached`
-  // guard is belt rather than the thing doing the work, and removing it changes no test: it is here so
-  // that a runtime which someday detaches with a non-zero code does not make the operator read two
-  // messages for one outcome. `result.code` is null when the spawn itself failed, which `result.error`
-  // above already said. Worded around the CODE and not around docker's
-  // message: 125, 126 and 127 mean the same things under Podman with different text, and the message is
-  // on the operator's screen already because `stdio` was inherited.
-  if (!result.detached && typeof result.code === "number" && result.code !== 0) {
-    write(`\nthe sandbox exited ${result.code} without opening a shell${SANDBOX_EXIT_HINTS[result.code] ?? ""}\n`);
+  // 125 AND NOT EVERY NON-ZERO CODE, and the reason is that no other code can carry the claim. The
+  // sandbox runs `--entrypoint bash -i`, so `docker run` returns BASH's status: an operator whose last
+  // command failed, or who types `exit 1`, would be told the sandbox never opened and made to read a
+  // pause for it. 126 and 127 are worse than ambiguous, because bash returns exactly those for a last
+  // command that was not executable or not found, so a hint about the IMAGE would fire on a healthy
+  // session. 125 is the code a runtime reserves for its own pre-start refusal, and a shell that returns
+  // it deliberately is rare enough to be worth the false positive. Issue #337 asked for the 125; this is
+  // that and deliberately not more.
+  //
+  // NO `detached` GUARD, and its absence is the honest version. The first draft had one and justified it
+  // as insurance against a runtime that someday detaches with a non-zero code; that insurance cannot pay
+  // out, because `openSandbox` sets `detached` only inside `if (network && !error && code === 0)`, so
+  // such a session arrives here as `detached: false` and gets the message regardless. A guard that cannot
+  // do the job it is kept for is worse than none: it reads as a handled case. `result.code` is null when
+  // the spawn itself failed, which `result.error` above already said.
+  //
+  // The third cause in the message is the one an earlier draft omitted and a review pass measured: an
+  // unreachable `DOCKER_HOST` also exits 125, and sending the operator to inspect container names and
+  // images when they are talking to the wrong daemon is the expensive kind of wrong hint. It is also the
+  // variable `OQ-038` names as the sharpest thing this panel cannot see.
+  // Worded around the CODE and not around the runtime's message, because Podman uses the same convention
+  // with different text and that message is on the operator's screen already through the inherited
+  // `stdio`.
+  if (result.code === SANDBOX_REFUSED_BY_RUNTIME) {
+    write(`\nthe sandbox did not start (exit ${SANDBOX_REFUSED_BY_RUNTIME}): the runtime refused before the container ran -- the name may be taken by a container that is still around, the image may be missing under --pull=never, or DOCKER_HOST in this shell may not be the daemon you think it is\n`);
     await pause();
   }
 }
 
 /**
- * What a non-zero exit from `docker run` usually means here, for the three the runtime itself owns. Hints
- * rather than diagnoses: the code is docker's and the container never ran, so the panel can narrow the
- * search without claiming to know. 126 and 127 come from the entrypoint, so they are the operator's image.
+ * The exit code a container runtime reserves for "I refused before the container ran"; docker and Podman
+ * both use it. Every other non-zero code from this launch is the SHELL's own status, because the sandbox
+ * runs `--entrypoint bash -i`, so none of them can carry a claim about whether a shell opened.
  */
-const SANDBOX_EXIT_HINTS: Record<number, string> = {
-  125: " (docker itself refused: the name may be taken by a container that is still around, or the image is missing under --pull=never)",
-  126: " (the entrypoint is not executable in that image)",
-  127: " (the entrypoint is not in that image)",
-};
+const SANDBOX_REFUSED_BY_RUNTIME = 125;
 
 /**
  * Hold the suspended terminal open long enough to read a refusal, then return.

@@ -927,6 +927,21 @@ test("RUN_DETAIL says what egress a sandbox opened HERE would get, and whose env
   assert.match(out, /sandbox\s+retained · 19h left/, "the retention verdict keeps its own line");
   assert.match(out, /egress on via pi-dispatch-egress-proxy/);
   assert.match(out, /read from this shell, not the deployment/);
+
+  // An operator-set proxy name is unbounded, and `fitLine` truncates SILENTLY: capping it here is what
+  // keeps the line from losing its own point without saying so, which is the failure the two-line split
+  // exists to avoid in the first place.
+  const long = await openRunDetail({
+    sandboxInfo: () => ({ retained: true, expiresIn: "19h", egress: { armed: true, proxy: "an-extremely-long-egress-proxy-network-name-that-will-not-fit", source: "this shell" } }),
+    launchSandbox: async () => {},
+  });
+  const longOut = stripAnsi(long.render(80).join("\n"));
+  await long.dispose();
+  assert.match(longOut, /egress on via an-extremely-long-egress-proxy-network…/, "shortened by us, with a mark, rather than clipped by the frame");
+  assert.ok(
+    longOut.split("\n").some((l) => l.includes("read from this shell, not the deployment")),
+    "and the caveat still survives whole beneath it",
+  );
   // The budget is why it is two lines: `kv` leaves 53 columns for a value that `fitLine` CLIPS, not wraps,
   // and the one-line form is 64. A clipped caveat loses exactly the half that matters.
   for (const l of out.split("\n")) assert.ok(l.length <= 80, `line over budget: ${JSON.stringify(l)}`);
@@ -972,7 +987,34 @@ test("RUN_DETAIL scrubs control bytes out of every record string it prints (#337
     deps: cannedDeps({
       fetchSnapshot: async () => ({
         ...SNAPSHOT,
-        runs: [{ ...SNAPSHOT.runs[0], host: nasty("host"), backend: nasty("local"), flow: nasty("tidy"), reason: nasty("why"), parentJobId: nasty("gh-0") }],
+        // EVERY record string the pane prints, including the eight the first version of this test missed:
+      // `outcome` (the header is built from it), the two timestamps (`fmtStamp`'s unparseable fallback
+      // returns the raw string), the four numeric-by-contract fields whose guards check presence and not
+      // type, and `jobId`, which becomes the pane's own frame TITLE through `clipPlain`, which clips but
+      // does not strip.
+      runs: [
+        {
+          ...SNAPSHOT.runs[0],
+          jobId: nasty("j1"),
+          outcome: nasty("failed"),
+          startedAt: nasty("2026-07-21T00:00:00.000Z"),
+          endedAt: nasty("2026-07-21T00:00:01.000Z"),
+          // A SHORT payload for the four numeric-by-contract fields: they share one line with their
+          // neighbours, and a long value pushes the line past `inner` so `fitLine` clips the bytes away
+          // before any assertion can see them. A single CR is enough and cannot be clipped out.
+          budgetReserved: `1${String.fromCharCode(13)}`,
+          attempt: `2${String.fromCharCode(13)}`,
+          chainDepth: `3${String.fromCharCode(13)}`,
+          chainRefused: `4${String.fromCharCode(13)}`,
+          replica: 1,
+          replicas: `2${String.fromCharCode(13)}`,
+          host: nasty("host"),
+          backend: nasty("local"),
+          flow: nasty("tidy"),
+          reason: nasty("why"),
+          parentJobId: nasty("gh-0"),
+        },
+      ],
       }),
       sandboxInfo: () => null,
     }),
@@ -983,10 +1025,104 @@ test("RUN_DETAIL scrubs control bytes out of every record string it prints (#337
   const plain = stripAnsi(comp.render(80).join("\n"));
   await comp.dispose();
   // `stripAnsi` removes the styler's escapes; what survives is what the record contributed.
-  for (const [name, code] of [["CR", 13], ["ESC", 27], ["BEL", 7]]) {
+  for (const [name, code] of [["NUL", 0], ["BEL", 7], ["CR", 13], ["ESC", 27], ["DEL", 127]]) {
     assert.ok(!plain.includes(String.fromCharCode(code)), `${name} from a record field reached the pane`);
   }
   assert.match(plain, /host/, "and the readable part of the value still renders");
+  assert.match(plain, /run j1/, "including in the frame's own title");
+});
+
+test("the LIST rows hold the same property as the drill-in (#337)", async () => {
+  // The issue named RUN_DETAIL, and the belt covers the LIST too, because a row that prints the same
+  // stored field raw into the same terminal is a belt the next reader will assume covers both. Driven on
+  // the LIST itself, which the drill-in test never renders.
+  const ESC = String.fromCharCode(27);
+  const nasty = (s) => `${s}${String.fromCharCode(13)}${ESC}[2J`;
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], jobId: nasty("j1"), target: nasty("o/r"), flow: nasty("tidy"), outcome: "failed", reason: nasty("why") }] }),
+    }),
+  });
+  await flush();
+  const plain = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  for (const [name, code] of [["CR", 13], ["ESC", 27]]) {
+    assert.ok(!plain.includes(String.fromCharCode(code)), `${name} from a record field reached a LIST row`);
+  }
+  assert.match(plain, /j1/, "and the row still shows the run");
+});
+
+test("a control byte cannot reach the terminal through the target's OSC-8 URL either (#337)", async () => {
+  // The hole the first version left, on the exact call its own rationale cites: `show(r.target)` scrubbed
+  // the DISPLAYED half of `styler.link(styler.fg("accent", show(r.target)), url)` while `targetUrl` built
+  // the URL from the RAW field. `targetUrl`'s `[^#\s]+` excludes whitespace, and JS `\s` does not include
+  // ESC, BEL or NUL, so a github target carried them into an OSC-8 payload a BEL terminates early.
+  //
+  // Asserted on the RAW render rather than the stripped one, because `stripAnsi` swallows everything
+  // between the OSC opener and its BEL -- which is precisely why the first version's test could not see
+  // this. A clear-screen hidden inside a hyperlink payload is invisible to a stripped-text assertion.
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  for (const target of [`o${BEL}evil/r#5`, `o${ESC}[2Jevil/r#5`, `o${ESC}]8;;http://evil${BEL}/r#5`]) {
+    // A REAL theme, because PLAIN_THEME's `link` is a byte-identical passthrough that emits no OSC-8 at
+    // all: under it there is nothing to inspect and every assertion here is vacuously true. That is what
+    // made the first version of this test green against the bug it was written for.
+    const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
+    const comp = makeDashboard({
+      paths: {},
+      done() {},
+      tui: fakeTui(),
+      intervalMs: 100000,
+      theme,
+      deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], kind: "github", target }] }), sandboxInfo: () => null }),
+    });
+    await flush();
+    comp.handleInput("\r");
+    await flush();
+    const raw = comp.render(80).join("\n");
+    await comp.dispose();
+    // Whatever the styler emits, the URL it was handed cannot carry the record's bytes: either the target
+    // no longer yields a URL at all, or the URL is clean.
+    // Discriminating assertion, and getting it right took two tries. Parsing the OSC-8 payloads is NOT
+    // enough: a BEL inside one ends the sequence early, so a parser captures a clean prefix and calls the
+    // rest someone else's problem. And `stripAnsi` is not enough either, because it swallows everything
+    // between an OSC opener and its BEL, which is exactly where a clear-screen would hide.
+    //
+    // So: strip only the styler's own SGR, and then require that NO escape and NO bell survive. Every
+    // target in this loop carries control bytes, so a correct `targetUrl` yields no URL for any of them
+    // and the pane emits no OSC-8 at all; a `targetUrl` that admits them emits one and this goes red.
+    // The visible text may still read "evil" -- scrubbing replaces control bytes with spaces, it does not
+    // censor words, and a target an operator can read is the point of showing it.
+    const sgrStripped = raw.split(/\u001b\[[0-9;]*m/g).join("");
+    for (const code of [0, 7, 13, 27, 127]) {
+      assert.ok(!sgrStripped.includes(String.fromCharCode(code)), `char ${code} survived into the pane for target ${JSON.stringify(target)}`);
+    }
+  }
+});
+
+test("the outcome word is a record string and is scrubbed like the rest (#337)", async () => {
+  // It was not, and it is the field the header line is BUILT from, so "every record string" was false of
+  // the one the pane prints first. The enum comparisons read the raw value, so a scrubbed display cannot
+  // change which glyph or colour a run gets.
+  const ESC = String.fromCharCode(27);
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [{ ...SNAPSHOT.runs[0], outcome: `failed${ESC}[2J`, reason: null }] }), sandboxInfo: () => null }),
+  });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const plain = stripAnsi(comp.render(80).join("\n"));
+  await comp.dispose();
+  assert.ok(!plain.includes(ESC), "the outcome word reached the pane with an escape in it");
+  assert.match(plain, /✘ failed/, "and it still renders as the failure it is");
 });
 
 test("RUN_DETAIL shows a run's retention state, and offers `b` only when there is something to open", async () => {
