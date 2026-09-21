@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { egressArmed as egressArmedFn } from "./egress.mjs";
 import { updateEnvFile } from "./env-file.mjs";
@@ -89,6 +89,16 @@ const EGRESS_RUN_ARGS = [
 	"./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro",
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
+
+/**
+ * Whether `p` is `folder` itself or sits inside it, compared on the separator rather than on a prefix so
+ * `/srv/deploy-old` is not read as being inside `/srv/deploy`.
+ */
+function underFolder(p, folder) {
+	const a = String(p).replace(/[\\/]+$/, "");
+	const b = String(folder).replace(/[\\/]+$/, "");
+	return a === b || a.startsWith(`${b}/`) || a.startsWith(`${b}\\`);
+}
 
 export async function runUp(argv = [], deps = {}) {
 	const {
@@ -226,12 +236,37 @@ export async function runUp(argv = [], deps = {}) {
 		// `logsDirPath`/`settingsFilePath` would have resolved anyway: behaviour byte-unchanged, the value
 		// simply made explicit, which is the whole point -- a worker under another `User=` and the panel
 		// then cannot silently resolve two different directories.
-		for (const [key, value] of [
-			["PI_PAUSE_WINDOWS_FILE", join(cwd, "pause-windows.json")],
-			["PI_SCOPED_LIMITS_FILE", join(cwd, "scoped-limits.json")],
-			["PI_LOGS_DIR", logsDirPathFn(env)],
-			["PI_SETTINGS_FILE", settingsFilePathFn(env)],
+		for (const [key, value, durable] of [
+			["PI_PAUSE_WINDOWS_FILE", join(cwd, "pause-windows.json"), false],
+			["PI_SCOPED_LIMITS_FILE", join(cwd, "scoped-limits.json"), false],
+			["PI_LOGS_DIR", logsDirPathFn(env), true],
+			["PI_SETTINGS_FILE", settingsFilePathFn(env), true],
 		]) {
+			// `logsDirPath` and `settingsFilePath` RESOLVE rather than default: `env.PI_LOGS_DIR || <default>`.
+			// So on a shell that already exports one of them at the deployment folder -- which three shipped
+			// files told operators to do for a year, before this change made the promise true -- `up` would
+			// persist exactly the value the rest of this block exists to prevent, and print a ✓ over it. The
+			// refusal is here rather than in the resolver because the resolver is right for every other
+			// caller: the worker SHOULD honour an exported path. What must never happen is `up` writing one
+			// into the deployment's permanent config without anyone deciding to.
+			// TWO refusals, and both are about the same resolver. `logsDirPath` is `env.PI_LOGS_DIR || <default>`,
+			// so whatever this shell exports passes straight through, unvalidated and un-absolutised.
+			//
+			// RELATIVE is the sharper of the two and it is not hypothetical: `PI_LOGS_DIR=.` resolves against
+			// the unit's `WorkingDirectory`, which IS the deployment folder, so the retention sweep then
+			// deletes `triggers.json`, `pause-windows.json`, `scoped-limits.json` and `subscriptions.json`
+			// thirty days in. All three deploy templates document this key as absolute for exactly that
+			// reason. INSIDE THIS FOLDER is the same harm reached with an absolute path.
+			//
+			// The refusals live here and not in the resolver, because the resolver is right for the worker:
+			// an exported path SHOULD be honoured at run time. What must never happen is `up` copying one
+			// into the deployment's permanent config, where it outlives the shell that set it.
+			const why = durable && !isAbsolute(value) ? "is not an absolute path, and a relative one resolves against the service's WorkingDirectory, which is this folder" : durable && underFolder(value, cwd) ? "is inside this deployment folder" : null;
+			if (why) {
+				out(`✗ ${key} would be ${value}, which ${why} — not written\n`);
+				summary.push([key, `NOT written: the resolved value (${value}) ${why}, and the log retention sweep deletes every .log and .json there past its window. Set it by hand somewhere the worker owns`]);
+				continue;
+			}
 			if (updateEnvFile(envPath, key, value, { fs }).changed) {
 				wrote[key] = value;
 				out(`✓ ${key}=${value} written into .env\n`);
@@ -285,9 +320,16 @@ export async function runUp(argv = [], deps = {}) {
 	runDoctorFn ??= (await import("./doctor.mjs")).runDoctor;
 	// Layered, per the note at step (e1): the lines just written configure the service and not this
 	// process, so an unlayered call would warn about exactly what `up` had converged a moment earlier.
-	// `env` still wins where the operator had already set a value, because `wrote` only ever holds keys
-	// that were EMPTY.
-	const doctorCode = await runDoctorFn({ ...env, ...wrote }, { out });
+	//
+	// `env` WINS, and the filter is what makes that true rather than the spread order. `wrote` holds keys
+	// that were empty in the FILE, which is a different question from whether this shell sets them: an
+	// operator exporting `PI_SCOPED_LIMITS_FILE=/etc/pi/limits.json` with the key still commented in `.env`
+	// would otherwise have doctor read back the file `up` chose instead of the one their worker loads.
+	const layered = { ...env };
+	for (const [key, value] of Object.entries(wrote)) {
+		if (typeof env[key] !== "string" || env[key].trim() === "") layered[key] = value;
+	}
+	const doctorCode = await runDoctorFn(layered, { out });
 
 	// (g) the summary: what ran, what was skipped, what was already there — then the two commands
 	// that actually start work, so "up is green" flows straight into the first job.

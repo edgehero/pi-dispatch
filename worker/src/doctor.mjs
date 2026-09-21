@@ -268,10 +268,28 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  * honoured. Parsing is `readEnvKeys`, shared with the writer `up` uses, so a key one can set is a key the
  * other reads back the same way.
  */
-export function envFileKeys(path, keys, { fileExists, readEnvFile }) {
+export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
+
+export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = statSync }) {
 	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
+	// A REGULAR file or nothing. Every other host read in this module is bounded one way or another, and a
+	// synchronous read of a FIFO is not: a `.env` that is a named pipe hangs `pi-dispatch doctor` forever,
+	// with no output and no check to point at. A directory throws and is caught below; a pipe does not.
 	try {
-		return readEnvKeys(readEnvFile(path), keys);
+		if (!statFile(path).isFile()) return {};
+	} catch {
+		return {};
+	}
+	// The narrowing is STRUCTURAL rather than a convention the caller keeps. A caller's key list can only
+	// narrow this further, never widen it: the licence for reading a `.env` at all is that it decides what
+	// two named checks SAY, and "the caller passes the right keys" is the kind of rule that holds until the
+	// third check wants the same softening and adds its own key to an array. A `.env` also holds
+	// `WEBHOOK_SECRET` and provider keys, and `up.mjs` states the standard for those: a webhook secret in a
+	// scrollback is a webhook secret in a pastebin. Add a key here and the addition is the review.
+	const allowed = keys.filter((k) => ENV_FILE_READABLE_KEYS.includes(k));
+	if (allowed.length === 0) return {};
+	try {
+		return readEnvKeys(readEnvFile(path), allowed);
 	} catch {
 		return {};
 	}

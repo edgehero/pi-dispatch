@@ -912,7 +912,7 @@ export function registerNudge(pi: any, deps: any = {}): void {
       // A PRESENT pointer -- valid or broken -- means the operator has been here; /dispatch itself
       // surfaces broken-pointer notices, so the nudge stays quiet on anything but true absence.
       if (!(readPointer({ path: pointerPath(env), fs }) as any).absent) return;
-      // The full sextet here (VALKEY_URL included), unlike detection's env branch: with no probe
+      // All seven here (VALKEY_URL included), unlike detection's env branch: with no probe
       // allowed, an exported queue URL is the closest sync evidence of intent, and the nudge errs
       // toward silence.
       if (POINTER_ENV_ALLOWLIST.some((key) => envIsSet(env, key))) return;

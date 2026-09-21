@@ -84,8 +84,11 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 		// Resolved defaults, pinned rather than read off this host: `logsDirPath` calls the real
 		// `homedir()`, so without these the byte-exact `.env` assertions below would assert whose account
 		// ran the suite (issue #357).
-		logsDirPathFn: () => "/home/op/.pi-dispatch/logs",
-		settingsFilePathFn: () => "/home/op/.pi-dispatch/settings.json",
+		// The real ones RESOLVE rather than default (`env.PI_LOGS_DIR || <account default>`), and these
+		// mirror that shape exactly: a fake that ignored the environment would hide the one case where
+		// `up` can persist a path it must never persist.
+		logsDirPathFn: (e) => e.PI_LOGS_DIR || "/home/op/.pi-dispatch/logs",
+		settingsFilePathFn: (e) => e.PI_SETTINGS_FILE || "/home/op/.pi-dispatch/settings.json",
 		runInitFn: (cwd) => {
 			initCalls.push(cwd);
 			return 0;
@@ -264,6 +267,60 @@ test("up: the two FILE keys get this folder and the two DURABLE ones get the acc
 	assert.equal(written.PI_SETTINGS_FILE, "/home/op/.pi-dispatch/settings.json");
 	for (const key of Object.keys(written)) assert.notEqual(written[key], "/deploy", `${key} must never be the deployment folder itself`);
 	assert.notEqual(written.PI_LOGS_DIR, "/deploy/logs", "nor the directory the service installer already owns");
+});
+
+test("up REFUSES to pin a durable path that resolves inside this folder, and says why (#357)", async () => {
+	// `logsDirPath` RESOLVES rather than defaults: `env.PI_LOGS_DIR || <account default>`. Three shipped
+	// files told operators for a year that `up` pins these to the deployment folder, so a shell that
+	// already exports one there is exactly the case this change makes reachable -- and persisting it would
+	// hand the log retention sweep a directory holding triggers.json, which it deletes a month later with
+	// no name shape and no ownership check. The refusal lives here rather than in the resolver, because
+	// the resolver is right for the worker: an exported path SHOULD be honoured at run time.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: "/deploy", PI_SETTINGS_FILE: "/deploy/logs/settings.json" } });
+	await h.run();
+	const written = h.store.get("/deploy/.env");
+	assert.doesNotMatch(written, /^PI_LOGS_DIR=/m, "the deployment folder itself is refused");
+	assert.doesNotMatch(written, /^PI_SETTINGS_FILE=/m, "and so is anything under it");
+	assert.match(h.text(), /PI_LOGS_DIR would be \/deploy, which is inside this deployment folder/);
+	assert.match(h.text(), /NOT written/);
+	// The two FOLDER keys are unaffected: they are meant to be here, and nothing sweeps them.
+	assert.match(written, /^PI_PAUSE_WINDOWS_FILE=\/deploy\/pause-windows\.json$/m);
+});
+
+test("up REFUSES a RELATIVE durable path, which is the same harm reached the short way (#357)", async () => {
+	// `PI_LOGS_DIR=.` in the shell that runs `up` is persisted verbatim, and a relative value resolves
+	// against the unit's `WorkingDirectory`, which is the deployment folder. The retention sweep then takes
+	// `triggers.json` and its siblings a month later. All three deploy templates document this key as
+	// absolute, and until this refusal nothing enforced it.
+	for (const relative of [".", "./logs", "logs", "../pi-logs"]) {
+		const h = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: relative } });
+		await h.run();
+		assert.doesNotMatch(h.store.get("/deploy/.env"), /^PI_LOGS_DIR=/m, relative);
+		assert.match(h.text(), /is not an absolute path/, relative);
+	}
+});
+
+test("up: a sibling folder with the same prefix is not 'inside' this one (#357)", async () => {
+	// `/deploy-archive` starts with `/deploy` and is a different directory. A prefix compare would refuse
+	// a perfectly good path and send the operator looking for a problem that is not there.
+	const h = harness({ plan: green, files: { "/deploy/.env": "" }, env: { PI_PROVIDER: "anthropic", PI_LOGS_DIR: "/deploy-archive/logs" } });
+	await h.run();
+	assert.match(h.store.get("/deploy/.env"), /^PI_LOGS_DIR=\/deploy-archive\/logs$/m);
+});
+
+test("up: the doctor layer never overrides a value THIS SHELL sets (#357)", async () => {
+	// `wrote` holds keys that were empty in the FILE, which is a different question from whether the
+	// environment sets them. An operator exporting a limits file while the key is still commented in
+	// `.env` would otherwise have up's doctor read back the file up chose, not the one their worker loads.
+	const h = harness({
+		plan: green,
+		files: { "/deploy/.env": "" },
+		env: { PI_PROVIDER: "anthropic", PI_SCOPED_LIMITS_FILE: "/etc/pi/limits.json", PI_PAUSE_WINDOWS_FILE: "   " },
+	});
+	await h.run();
+	assert.equal(h.doctorCalls[0].PI_SCOPED_LIMITS_FILE, "/etc/pi/limits.json", "the exported value is what this shell's worker would load");
+	assert.equal(h.doctorCalls[0].PI_PAUSE_WINDOWS_FILE, "/deploy/pause-windows.json", "a blank export is not a value, so the layer fills it");
+	assert.match(h.store.get("/deploy/.env"), /^PI_SCOPED_LIMITS_FILE=\/deploy\/scoped-limits\.json$/m, "and the FILE still gets this folder, which is what the service will read");
 });
 
 test("up hands its OWN doctor call what it just wrote, or it warns about what it just fixed (#357)", async () => {

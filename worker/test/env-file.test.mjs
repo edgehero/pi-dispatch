@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { readEnvKeys, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
 
 // -- setEnvKeyIfEmpty: pure transform, table-driven over the text shapes it must handle ---------------
 //
@@ -19,14 +19,24 @@ const cases = [
 		expected: "A=1\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
 	},
 	{
-		name: "a commented line is uncommented in place when no set line exists",
+		// The comment line is KEPT, above the new one (issue #357). `.env.example` documents every key
+		// inline with indented continuations below, and filling four commented keys used to delete four
+		// lines of the operator's own reference. Carrying the inline `# ...` onto the new line instead was
+		// written and rejected: systemd's `EnvironmentFile=` parser only recognises a comment at the start
+		// of a line, so it would have set the variable to the value PLUS the sentence.
+		name: "a commented line is uncommented BELOW itself, so its documentation survives",
 		text: "A=1\n# WEBHOOK_SECRET=\nB=2\n",
-		expected: "A=1\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
+		expected: "A=1\n# WEBHOOK_SECRET=\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
 	},
 	{
 		name: "a commented line without the space after # also counts",
 		text: "#WEBHOOK_SECRET=old-note\nB=2\n",
-		expected: "WEBHOOK_SECRET=s3cr3t\nB=2\n",
+		expected: "#WEBHOOK_SECRET=old-note\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
+	},
+	{
+		name: "an inline comment survives as the line it was, never as a tail on the value",
+		text: "# WEBHOOK_SECRET=            # what the receiver verifies deliveries with\n",
+		expected: "# WEBHOOK_SECRET=            # what the receiver verifies deliveries with\nWEBHOOK_SECRET=s3cr3t\n",
 	},
 	{
 		name: "no trace of the key appends at the end",
@@ -47,6 +57,19 @@ const cases = [
 		name: "an already-set value is NEVER clobbered",
 		text: "A=1\nWEBHOOK_SECRET=operator-chose-this\nB=2\n",
 		expected: null,
+	},
+	{
+		// The wrapper scripts source this file with `set -a; . ./.env`, so `export KEY=value` is an
+		// ordinary assignment the operator made. Reading it as absent would append a second line, and the
+		// shell takes the LAST one: the operator's value replaced, with no prompt and a ✓ over it.
+		name: "an `export`ed value is a value, and is never clobbered either",
+		text: "export WEBHOOK_SECRET=operator-chose-this\n",
+		expected: null,
+	},
+	{
+		name: "an `export`ed EMPTY value is still the place the value belongs",
+		text: "export WEBHOOK_SECRET=\n",
+		expected: "WEBHOOK_SECRET=s3cr3t\n",
 	},
 	{
 		name: "an empty set line wins over a commented duplicate (the comment stays a comment)",
@@ -121,10 +144,20 @@ const overwriteCases = [
 		expected: "GITHUB_AUTH_SOURCE=app\n",
 	},
 	{
-		name: "a commented line is uncommented in place when no set line exists",
+		// Same rule as the sibling: a COMMENTED line is kept above the new one, so nothing documented is
+		// lost. A SET line is not, and that asymmetry is deliberate on this path -- copying a replaced
+		// value up as a comment would leave a fragment of a live credential behind, on the one transform
+		// whose docblock warns it will happily replace one.
+		name: "a commented line is uncommented BELOW itself when no set line exists",
 		text: "A=1\n# GITHUB_AUTH_SOURCE=gh\nB=2\n",
 		key: "GITHUB_AUTH_SOURCE",
-		expected: "A=1\nGITHUB_AUTH_SOURCE=app\nB=2\n",
+		expected: "A=1\n# GITHUB_AUTH_SOURCE=gh\nGITHUB_AUTH_SOURCE=app\nB=2\n",
+	},
+	{
+		name: "a replaced VALUE leaves no fragment of itself behind, not even as a comment",
+		text: "GITHUB_APP_PRIVATE_KEY=old-secret   # rotated 2026-01-01\n",
+		key: "GITHUB_APP_PRIVATE_KEY",
+		expected: "GITHUB_APP_PRIVATE_KEY=app\n",
 	},
 	{
 		name: "no trace of the key appends at the end",
@@ -198,6 +231,42 @@ for (const { name, text, key, expected } of overwriteCases) {
 		}
 	});
 }
+
+// -- readEnvKeys: the narrow reader doctor uses, and the only thing here that READS a .env -------------
+
+test("readEnvKeys returns only the keys it was asked for, and only real values", () => {
+	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "WEBHOOK_SECRET=s3cr3t", "# PI_SCOPED_LIMITS_FILE=/commented.json", "PI_LOGS_DIR=", "PI_SETTINGS_FILE=   ", "export PI_JOB_IMAGE=shell-ism", "PI_PAUSE_WINDOWS_FILE=/a-later-duplicate.json"].join("\n");
+	assert.deepEqual(readEnvKeys(text, ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_JOB_IMAGE"]), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json" }, "a commented line, an empty value, a whitespace value and an `export ` prefix are all absent, and the LAST duplicate wins");
+	assert.deepEqual(readEnvKeys(text, []), {}, "and an empty ask reads nothing at all");
+	assert.deepEqual(readEnvKeys("", ["PI_LOGS_DIR"]), {});
+	assert.deepEqual(readEnvKeys(undefined, ["PI_LOGS_DIR"]), {});
+});
+
+test("readEnvKeys agrees with the shell about duplicates, including an empty one that cancels a value", () => {
+	// Every actual consumer of this file takes the LAST assignment: `set -a; . ./.env` in the wrapper
+	// scripts, and systemd's `EnvironmentFile=`. Reading the first instead would let doctor report a value
+	// the service never sees and soften a warning about a deployment that really is unconfigured -- and the
+	// shape that produces it is not exotic, since appending to a file that already sets a key is how a
+	// duplicate appears in the first place.
+	const text = ["PI_PAUSE_WINDOWS_FILE=/srv/real.json", "PI_SCOPED_LIMITS_FILE=/srv/limits.json", "PI_PAUSE_WINDOWS_FILE="].join("\n");
+	assert.deepEqual(readEnvKeys(text, ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]), { PI_SCOPED_LIMITS_FILE: "/srv/limits.json" }, "the later empty line is what the service gets, so the key is absent");
+});
+
+test("readEnvKeys strips an inline comment exactly where a shell does, and not inside quotes", () => {
+	// Measured in sh, bash and zsh against every shape below: a `#` preceded by whitespace starts a
+	// comment, a `#` with nothing in front of it is part of the value, and inside quotes neither is true.
+	// The quoted case is the one that matters in practice: truncating it would have doctor print a path
+	// the deployment does not use.
+	const text = ["A=/a/path   # some comment", "B=/b/path\t# tab before the hash", "C=/c/pa#th", "D=value#", 'E="/e/path   # not a comment"', "F='/f/path # also not'"].join("\n");
+	assert.deepEqual(readEnvKeys(text, ["A", "B", "C", "D", "E", "F"]), {
+		A: "/a/path",
+		B: "/b/path",
+		C: "/c/pa#th",
+		D: "value#",
+		E: '"/e/path   # not a comment"',
+		F: "'/f/path # also not'",
+	});
+});
 
 test("setEnvKey: the already-exact case returns the same string object (identity, not just equality)", () => {
 	const text = "GITHUB_AUTH_SOURCE=app\n";

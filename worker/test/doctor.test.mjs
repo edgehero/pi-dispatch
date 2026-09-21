@@ -5,7 +5,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_PROBE_SLUGS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { egressCanaryProbe } from "../src/egress.mjs";
 import { parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
@@ -1346,12 +1346,44 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	// property rather than an accident: the read is a message decision. What must never drift is the
 	// helper's contract, so it is asserted here rather than inferred from the absence of output.
 	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "PI_JOB_IMAGE=never:read", "PI_ENV_SETUP=/tmp/evil.sh", "export PI_SCOPED_LIMITS_FILE=/l.json", "# PI_SCOPED_LIMITS_FILE=/commented.json", "PI_PAUSE_WINDOWS_FILE=/a-later-duplicate.json"].join("\n");
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists: () => true, readEnvFile: () => text }), { PI_PAUSE_WINDOWS_FILE: "/w.json" });
+	const seams = (readEnvFile) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }) });
+	// The later duplicate wins, because the shell and `EnvironmentFile=` both take the last assignment and
+	// this has to report what the SERVICE sees.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json" });
+	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
+	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
+	// licence for reading a `.env`, and a convention would not have held it.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE", "WEBHOOK_SECRET", "PI_ENV_SETUP"], seams(() => text)), {}, "a key outside the frozen set is not readable, however it is asked for");
+	assert.deepEqual([...ENV_FILE_READABLE_KEYS], ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], "adding to this list IS the review");
 	// `export KEY=` is a shell-ism a loader would honour and this deliberately does not, which is the line
 	// between reading a file and loading one.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], { fileExists: () => true, readEnvFile: () => text }), { PI_JOB_IMAGE: "never:read" }, "and it is the CALLER's key list that narrows, so that list is the thing to review");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/shell-ism.json")), {}, "an `export ` prefix is a loader feature and a loader is what this must not become");
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text }), {}, "no file, no evidence");
+	// A named pipe is the one shape that would not fail: a synchronous read of it never returns, and doctor
+	// would hang with no output and no check to point at. A directory throws and lands in the catch below.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: () => ({ isFile: () => false }) }), {}, "a .env that is not a regular file is not read at all");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: null }), {}, "and a seam that cannot answer is not evidence either");
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: null }), {}, "no seam, no evidence");
+});
+
+test("doctor: nothing but the two named keys is ever read out of .env, secrets least of all (#357)", async () => {
+	// The narrowing the whole precedent rests on, and until this test it was a sentence in a docblock:
+	// widening the key list at the call site changed no output, so nothing would have noticed. The bytes
+	// asserted here are the point -- a `.env` holds WEBHOOK_SECRET and provider keys, and `up.mjs`'s own
+	// rule is that a webhook secret in a scrollback is a webhook secret in a pastebin.
+	const cwd = scaffoldedCwd();
+	const secret = "cafef00d".repeat(8);
+	writeFileSync(join(cwd, ".env"), [`WEBHOOK_SECRET=${secret}`, "ANTHROPIC_API_KEY=sk-ant-not-a-real-key", "PI_ENV_SETUP=/tmp/evil.sh", `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}`].join("\n"));
+	const { out, text } = capture();
+	const checks = await collectChecks(imgEnv(), { out, cwd, spawn: fakeSpawn(green), probeValkey: async () => true, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") });
+	const rendered = JSON.stringify(checks) + text();
+	for (const leaked of [secret, "sk-ant-not-a-real-key", "/tmp/evil.sh"]) {
+		assert.ok(!rendered.includes(leaked), `${leaked.slice(0, 12)}... must never leave .env`);
+	}
+	assert.ok(
+		checks.some((c) => /PI_PAUSE_WINDOWS_FILE is set in/.test(c.label)),
+		"while the key the message names is read back",
+	);
 });
 
 test("doctor: an unreadable .env restores the full warning rather than softening on no evidence (#357)", async () => {

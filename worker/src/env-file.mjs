@@ -34,44 +34,47 @@ import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from "no
  * wrongly overwriting one.
  */
 /**
- * The trailing `# ...` of a line being replaced, or `""`. `.env.example` documents most keys INLINE
- * (`# PI_LOGS_DIR=   # where per-job status records land`), and both transforms replace a line whole, so
- * without this an `up` that fills four commented keys silently deletes four lines of the operator's own
- * reference and leaves the indented continuation comments below them dangling under a now-set key.
+ * Replace a commented line with `KEY=value` while KEEPING the original line, as a comment, above it.
  *
- * Only a `#` preceded by WHITESPACE counts, which is dotenv's own trailing-comment shape. A `#` with no
- * space in front of it is part of the old value (`#KEY=some#thing`), and that line is being replaced, so
- * turning half of it into a comment would be inventing one.
+ * `.env.example` documents most keys INLINE (`# PI_LOGS_DIR=   # where per-job status records land`) with
+ * indented continuation comments below, and both transforms replace a line whole, so without this an `up`
+ * that fills four commented keys silently deletes four lines of the operator's own reference and leaves
+ * those continuations dangling under a now-set key.
+ *
+ * The obvious alternative, carrying the inline `# ...` onto the new line, was written first and then
+ * REJECTED: `deploy/worker.service` feeds this file to systemd through `EnvironmentFile=`, whose parser
+ * recognises a comment only at the start of a line, so `PI_LOGS_DIR=/srv/logs   # where records land`
+ * sets that variable to the path PLUS the sentence. On this one key that is the difference between the run
+ * history landing in the right directory and the worker creating a directory named after a sentence. The
+ * wrapper scripts source the file with shell semantics, where the same line is harmless, so the two
+ * consumers disagree and the safe shape is the one both read identically: a value with nothing after it.
+ *
+ * Only a line that was ALREADY a comment is kept. Replacing a set line means replacing a real value, and
+ * copying the old one up as a comment would leave a fragment of what was replaced behind, on the path
+ * whose own docblock warns it will happily overwrite a live credential.
  */
-function trailingComment(afterEquals) {
-	return /\s(#.*)$/.exec(afterEquals)?.[1] ?? "";
-}
-
-/**
- * `KEY=value` plus the inline comment the replaced line carried, kept at ITS OWN COLUMN where the new text
- * still fits. `.env.example` lines the comments up at a fixed column and a file that keeps half of them
- * lined up and half not reads worse than one that lost them, so short values hold the column and long ones
- * (an absolute path, usually) fall back to a plain gap.
- */
-function withKeptComment(key, value, bare) {
-	const kept = trailingComment(bare.slice(bare.indexOf("=") + 1));
-	if (kept === "") return `${key}=${value}`;
-	const head = `${key}=${value}`;
-	const column = bare.indexOf(kept);
-	return `${head}${" ".repeat(Math.max(3, column - head.length))}${kept}`;
+function replacementLines(key, value, bare, wasComment) {
+	return wasComment ? [bare, `${key}=${value}`] : [`${key}=${value}`];
 }
 
 export function setEnvKeyIfEmpty(text, key, value) {
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const setRe = new RegExp(`^\\s*${escaped}\\s*=(.*)$`);
-	const commentRe = new RegExp(`^\\s*#\\s*${escaped}\\s*=`);
+	// `export ` is part of the SET shape here, and that is a never-clobber decision rather than dotenv
+	// pedantry: the wrapper scripts source this file with `set -a; . ./.env`, where `export KEY=value` is an
+	// ordinary assignment the operator made. Without it the key reads as absent, a second assignment is
+	// appended, and the shell takes the LAST one -- so filling four "empty" keys would replace four values
+	// the operator set, in one pass, with no prompt. The reader is deliberately stricter (see `readEnvKeys`):
+	// there, missing a value only costs a fuller warning, where missing one HERE costs the value itself.
+	const setRe = new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=(.*)$`);
+	const commentRe = new RegExp(`^\\s*#\\s*(?:export\\s+)?${escaped}\\s*=`);
 
 	const lines = text.split("\n");
 	// Replace a line wholesale, keeping a CRLF file's trailing \r so the file stays one convention, and
 	// keeping any inline `# ...` documentation the line carried (see `trailingComment`).
 	const replaceLine = (i) => {
-		const bare = lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
-		lines[i] = `${withKeptComment(key, value, bare)}${lines[i].endsWith("\r") ? "\r" : ""}`;
+		const crlf = lines[i].endsWith("\r") ? "\r" : "";
+		const bare = crlf === "" ? lines[i] : lines[i].slice(0, -1);
+		lines.splice(i, 1, ...replacementLines(key, value, bare, commentRe.test(bare)).map((l) => `${l}${crlf}`));
 		return lines.join("\n");
 	};
 
@@ -120,13 +123,15 @@ export function setEnvKeyIfEmpty(text, key, value) {
  */
 export function setEnvKey(text, key, value) {
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const setRe = new RegExp(`^\\s*${escaped}\\s*=`);
-	const commentRe = new RegExp(`^\\s*#\\s*${escaped}\\s*=`);
+	// `export ` counts as set here too, for the reason `setEnvKeyIfEmpty` gives.
+	const setRe = new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=`);
+	const commentRe = new RegExp(`^\\s*#\\s*(?:export\\s+)?${escaped}\\s*=`);
 
 	const lines = text.split("\n");
 	const replaceLine = (i) => {
-		const bare = lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i];
-		lines[i] = `${withKeptComment(key, value, bare)}${lines[i].endsWith("\r") ? "\r" : ""}`;
+		const crlf = lines[i].endsWith("\r") ? "\r" : "";
+		const bare = crlf === "" ? lines[i] : lines[i].slice(0, -1);
+		lines.splice(i, 1, ...replacementLines(key, value, bare, commentRe.test(bare)).map((l) => `${l}${crlf}`));
 		return lines.join("\n");
 	};
 
@@ -194,9 +199,12 @@ export function updateEnvFile(path, key, value, deps = {}) {
  * returns strings verbatim; no interpolation, no `export ` prefix, no quote stripping, because every one of
  * those is a loader feature and a loader is what this must not become.
  *
- * Same line grammar as the writers above, so a key this can read is a key those can set: a commented line
- * is not a value, a later duplicate does not win over an earlier one, and an empty or whitespace-only value
- * is absent rather than `""`.
+ * A commented line is not a value, and an empty or whitespace-only one is absent rather than `""`. Two
+ * rules differ from the writers above, each on purpose. The LAST occurrence wins and an empty one counts,
+ * because that is what `set -a; . ./.env` and `EnvironmentFile=` do, and this must report what the service
+ * SEES rather than where a value belongs. And `export KEY=` is NOT read, because honouring a shell prefix
+ * is a loader feature; missing a value here only costs a fuller warning, which is the safe direction,
+ * while missing one in the writers would cost the operator's value itself.
  */
 export function readEnvKeys(text, keys) {
 	const want = new Set(keys);
@@ -206,12 +214,24 @@ export function readEnvKeys(text, keys) {
 		const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
 		if (!m) continue;
 		const [, key, rest] = m;
-		if (!want.has(key) || key in found) continue;
-		// The same inline comment the writers above preserve has to come back OFF here, or a caller comparing
-		// a path would compare it against the path plus a paragraph. Dotenv's own trailing-comment shape:
-		// a `#` preceded by whitespace. A `#` with no space in front of it is part of the value.
-		const value = rest.replace(/\s#.*$/, "").trim();
-		if (value !== "") found[key] = value;
+		if (!want.has(key)) continue;
+		// An inline comment comes OFF, or a caller comparing a path would compare it against the path plus a
+		// paragraph. The rule is the shell's, measured in sh, bash and zsh against every shape in this file:
+		// a `#` preceded by whitespace starts a comment, a `#` with nothing in front of it is part of the
+		// value, and inside QUOTES neither is true. That last case is why the quote check is here rather
+		// than left as a rounding error: a quoted value holding ` #` is legal, the shells keep it whole, and
+		// truncating it would report a path this deployment does not use.
+		const trimmed = rest.trim();
+		const value = /^["']/.test(trimmed) ? trimmed : trimmed.replace(/\s#.*$/, "").trim();
+		// The LAST occurrence wins, and an empty one counts as an occurrence, because that is what every
+		// actual consumer of this file does: `set -a; . ./.env` and `EnvironmentFile=` both take the last
+		// assignment. Taking the first instead would let this report a value the service never sees, and on
+		// a file whose earlier line is real and whose later one is empty that turns a warning about a
+		// genuinely unconfigured deployment into "nothing to fix". The writers above deliberately differ:
+		// the first EMPTY line is where a value belongs, which is a question about where to write rather
+		// than about what is in force.
+		if (value === "") delete found[key];
+		else found[key] = value;
 	}
 	return found;
 }
