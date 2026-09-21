@@ -74,7 +74,7 @@ import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
 import { CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
-import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, decideJobUser, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
+import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, resolveImageUser } from "./job-user.mjs";
 import { parseSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
@@ -3381,21 +3381,30 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 			if (user === null) continue;
 			const uid = /^\d+$/.test(user) ? Number(user) : uidOf(user, passwd);
 			if (uid !== null && uid !== ids.euid) {
-				// UID 0 gets the ANSWER instead of the instruction (issue #348): "re-run doctor as that account" is
-				// true for any other uid and roundabout for this one, since doctor as root would only print a refusal
-				// this line can state outright. What it must NOT do is assume that refusal is `worker-is-root`. That
-				// row is the LAST in `decideJobUser`, so a Mac, a docker endpoint that is not on this host, a rootless
-				// or userns-remapped daemon and Docker Desktop on Linux all answer for uid 0 BEFORE it is reached, and
-				// the first two are not refusals at all. So ask the same function, with the same facts this shell has
-				// already read, what uid 0 gets HERE. A refusal prints that cause's own `JOB_USER_FIX` text, so the
-				// two can never drift; anything else keeps the instruction, because there is then nothing to state.
-				const asRoot = uid === 0 ? decideJobUser({ platform, ...(ids.release !== undefined ? { release: ids.release } : {}), euid: 0, egid: 0, endpoint, daemon, socket }) : null;
-				const rootFix = asRoot?.mode === "unmappable" ? JOB_USER_FIX[asRoot.cause] : null;
+				// UID 0 gets the ANSWER instead of the instruction (issue #348), and doctor names it only where it is
+				// CERTAIN. The certainty is narrow and is the whole rule: when THIS SHELL's decision is `worker`, the
+				// daemon maps uids fine and the only thing separating this shell from the unit's account is rootness,
+				// so that account gets `worker-is-root` and nothing else can intervene. Every other decision is about
+				// the HOST rather than the account -- a rootless or userns-remapped daemon, Docker Desktop on Linux,
+				// an unreadable answer, an endpoint that is not here -- and the `local:` line above has already said
+				// it for every account on this machine, so this line has nothing to add and keeps the instruction.
+				//
+				// TWO WRONG VERSIONS were caught in review and both belong here, because each looks right. Printing
+				// `worker-is-root` for any explicit uid 0 tells an operator on a rootless daemon to run the worker as
+				// an unprivileged account, which the line above has just refused. Re-asking `decideJobUser` with
+				// `euid: 0` looks like the careful repair and is worse: its socket-owner rootless row is guarded
+				// `euid !== 0`, so forcing uid 0 DISCARDS the one row that detects a rootless Podman older than
+				// 4.9.3, and the answer comes back `worker-is-root` on exactly the host where that is most wrong.
+				const rootFix = uid === 0 && decision.mode === "worker" ? JOB_USER_FIX["worker-is-root"] : null;
+				// sudo reads a bare number as a user NAME, not a uid: `man sudo` wants `#4242`, and the `#` has to be
+				// quoted or an interactive shell swallows the rest of the line as a comment. Reachable for 0 only
+				// since this line stopped always answering for root, and wrong for every numeric unit before that.
+				const asAccount = /^\d+$/.test(user) ? `'#${user}'` : user;
 				checks.push({
 					ok: false,
 					warn: true,
 					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
-					fix: rootFix ?? `re-run doctor as that account (sudo -u ${user} pi-dispatch doctor) to see what its jobs run as`,
+					fix: rootFix ?? `re-run doctor as that account (sudo -u ${asAccount} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
 		}

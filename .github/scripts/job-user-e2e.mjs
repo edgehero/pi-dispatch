@@ -104,6 +104,7 @@ const prepareWorkspace = makePrepareWorkspace({
 	preparers: makeForgePreparers({ prepareForge: (job, token, opts) => prepareGithubWorkspace(job, token, { ...opts, remoteUrlFor: () => `file://${bare}` }) }),
 });
 const forgeJob = { kind: "github", repo: "owner/name", resume: true, target: { type: "issue", number: 7, title: "e2e", body: "e2e" }, provider: "anthropic" };
+assert.ok(img.piVersion, `${image} declares no pi version, so nothing could ever resume on it`);
 const forge = await prepareWorkspace(forgeJob, "unused-token", { queueJobId: "gh-e2e", jobUser, piVersion: img.piVersion });
 assert.ok(forge.jobDir && forge.session?.hostDir, `the forge job prepared a session: ${JSON.stringify(Object.keys(forge))}`);
 assert.equal(statSync(forge.jobDir).mode & 0o777, 0o700, "a job dir is a 0700 mkdtemp");
@@ -114,11 +115,10 @@ assert.deepEqual(forge.sandbox.jobUser, jobUser, "the retention stamp carries th
 // `completed` run ends, so the second prepare below reads what a second trigger on this issue would read.
 const RESUMED_MARKER = "pd-e2e-resumed-transcript";
 // `timestamp` is not optional dressing: `readCanonical`'s conversation-age gate fails CLOSED on a header it
-// cannot read one, so a header without it is a transcript no deployment setting `PI_SESSION_MAX_AGE_DAYS`
+// cannot read one FROM, so a header without it is a transcript no deployment setting `PI_SESSION_MAX_AGE_DAYS`
 // would resume. This store leaves that bound off, so the fixture would pass either way, which is exactly
 // why it is worth spending one field to make the shape a real one.
 writeFileSync(join(forge.session.hostDir, "current.jsonl"), `${JSON.stringify({ type: "session", version: 3, id: RESUMED_MARKER, timestamp: new Date().toISOString(), cwd: "/workspace" })}\n`);
-assert.ok(img.piVersion, `${image} declares no pi version, so nothing could ever resume on it`);
 const promoted = store.promoteSession(forge.session, { piVersion: img.piVersion });
 assert.equal(promoted.promoted, true, JSON.stringify(promoted));
 // Both prepares are handed `piVersion`, exactly as the wired worker does, so the only difference between the
@@ -182,11 +182,17 @@ assert.equal(readAsJobUser.status, 0, `${readAsJobUser.stdout}${readAsJobUser.st
 assert.ok(readAsJobUser.stdout.includes(RESUMED_MARKER), `the job user read the resumed transcript back: ${readAsJobUser.stdout}`);
 // NEGATIVE CONTROL: the same read as the image's own uid, which owns neither the 0700 session directory nor the
 // transcript the worker copied into it. A mode that let this one through would hand the image a transcript the
-// host staged for another account. The REASON is asserted, not just the exit code, on the runner control's own
-// precedent below: a container that never started also exits non-zero and would otherwise pass this.
+// host staged for another account. The REASON is asserted, not just a non-zero exit, on the runner control's own
+// precedent below: a container that NEVER STARTED also exits non-zero and would otherwise pass this.
+//
+// Two assertions, because neither alone separates the two. The exit code does it without depending on any wording:
+// measured on docker 27.4.0, a container that ran and had `cat` refused exits 1, while one that could not start
+// exits 125 (a name already taken) or 127 (no such entrypoint). The text then says it was the MOUNT's mode and not
+// something else the command could have tripped on; `cat:` is in it because runc spells its own start failures
+// "... permission denied: unknown", so the bare phrase would match a container that never ran.
 const readAsImage = readTranscript(`pd-e2e-resumed-control-${process.pid}`, null);
-assert.notEqual(readAsImage.status, 0, `the image's own user must not read the transcript: ${readAsImage.stdout}${readAsImage.stderr}`);
-assert.match(`${readAsImage.stdout}${readAsImage.stderr}`, /permission denied/i, `refused for the mode, not for failing to start: ${readAsImage.stdout}${readAsImage.stderr}`);
+assert.equal(readAsImage.status, 1, `the container must RUN and be refused, not fail to start: ${readAsImage.stdout}${readAsImage.stderr}`);
+assert.match(`${readAsImage.stdout}${readAsImage.stderr}`, /cat: [^\n]*permission denied/i, `refused for the mode: ${readAsImage.stdout}${readAsImage.stderr}`);
 assert.ok(!readAsImage.stdout.includes(RESUMED_MARKER), `the image's own user read the transcript anyway: ${readAsImage.stdout}`);
 controls.ran++;
 say("a resumed transcript was staged into the 0700 session dir, read there by the job user, and refused to the image's own user");

@@ -18,16 +18,18 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, JOB_USER_FIX, jobUserRefusal } from "../
 // ever widened to chase it: `REFUSED_ENTRY_POINT` below was written once and has been byte-identical since, and it
 // governs the ENTRY-POINTS table anyway, while the refusal block's own test reads only the `Refused:` lines. The
 // timing clauses were never in range of either. `9cb2bce` moved the timing PARAGRAPHS off the page instead, onto
-// what owns them (`docs/backends.md`, `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, and
-// `BOOT_REFUSING_JOB_USER_CAUSES` for the list itself), and that is the shape of the answer.
+// `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST`, which owns them, and that is the shape of the answer.
 //
-// It did not end there, which is the part to remember: the page still carries a timing clause in each of its eight
-// refusal headings, and the very next commit (`0335146`) had to correct one of them from "(at boot)" to "(at boot
-// when local is the default venue, else per job)" -- a fourth round of the same defect, after the round that was
-// supposed to have settled it. Those headings are unpinned on purpose, because a regex over them would pin their
-// SHAPE and never their truth, and a green regex over a false sentence is worse than no test. So the answer to the
-// next recurrence is to DERIVE the claim from what a function returns, the way every test below is derived, or to
-// delete the sentence. Adding a regex over prose here would be repeating what has already failed four times.
+// It did not end there, which is the part to remember. `9cb2bce`'s own deferral first named `docs/backends.md`
+// beside the design entry, and the very next commit (`0335146`) had to take that pointer back out, on the ground
+// that the page does not in fact carry the detail and a pointer to a page without the answer is worse than none;
+// the same commit corrected one of the page's eight refusal headings from "(at boot)" to "(at boot when local is
+// the default venue, else per job)". So the recurrence ran to FOUR rounds, and even the fix for it needed fixing.
+// A timing clause still sits in each of those eight headings, unpinned on purpose: a regex over them would pin
+// their SHAPE and never their truth, and a green regex over a false sentence is worse than no test. So the answer
+// to the next recurrence is to DERIVE the claim from what a function returns, the way every test below is derived,
+// or to delete the sentence -- and a page becomes a legitimate pointer only once it carries the detail AND is
+// bolted to the source of it. Adding a regex over prose here would repeat what has already failed four times.
 
 const doc = readFileSync(new URL("../../docs/podman.md", import.meta.url), "utf8");
 

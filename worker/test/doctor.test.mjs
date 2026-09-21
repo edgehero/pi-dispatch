@@ -3503,16 +3503,16 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	const unitPath = "/etc/systemd/system/pi-dispatch-worker.service";
 	const unit = `[Service]\nUser=pi\nWorkingDirectory=${deployDir}\n`;
 	const PASSWD = () => "root:x:0:0::/root:/bin/sh\npi:x:998:998::/home/pi:/usr/sbin/nologin\nop:x:1234:1234::/home/op:/bin/sh\n";
-	const run = async (body, { passwd = PASSWD, path = unitPath, cwd = deployDir, info = ROOTFUL_INFO } = {}) => {
+	const run = async (body, { passwd = PASSWD, path = unitPath, cwd = deployDir, info = ROOTFUL_INFO, plan = {}, stat = socketStat } = {}) => {
 		const { out, text } = capture();
 		await runDoctor(ghEnv(), {
-			...ghDeps(out, { ...infoPlan(info), ...imageLabels("anyUid"), ...green }),
+			...ghDeps(out, { ...infoPlan(info), ...imageLabels("anyUid"), ...green, ...plan }),
 			cwd,
 			home,
 			platform: "linux",
 			fileExists: (p) => p === path || existsSync(p),
 			jobUserIdentity: LINUX_ID(1234),
-			stat: socketStat,
+			stat,
 			passwd,
 			readUnit: (p) => (p === path ? body : (() => { throw new Error("ENOENT"); })()),
 		});
@@ -3541,7 +3541,7 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 		// `0` for `User=root` -- no longer the line the operator can find in their unit file -- stay green.
 		const name = spelling.slice("User=".length);
 		const text = await run(unit.replace("User=pi", spelling));
-		assert.match(text, new RegExp(`runs the worker as ${name} \\(uid 0\\)`), spelling);
+		assert.ok(text.includes(`runs the worker as ${name} (uid 0)`), `${spelling}: ${text}`);
 		assert.match(text, warned, spelling);
 		// And uid 0 gets the ANSWER rather than the instruction (item 3). Asserted on the line UNDER the label
 		// rather than anywhere in the output: `worker-is-root`'s text is also what the `local:` check prints
@@ -3552,14 +3552,34 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 		assert.ok(lines[at + 1].includes(JOB_USER_FIX["worker-is-root"]), `${spelling}: ${lines[at + 1]}`);
 		assert.doesNotMatch(text, /sudo -u (root|0) pi-dispatch doctor/, `${spelling}: not the roundabout version`);
 	}
-	// And the fix is what THIS HOST would tell uid 0, never `worker-is-root` assumed. `decideJobUser` reaches
-	// that row last, so a rootless daemon answers for uid 0 several rows earlier: the fix must be that cause's
-	// text, and naming a root worker here would be advice for a refusal this deployment does not get.
-	const rootless = await run(unit.replace("User=pi", "User=root"), { info: ROOTLESS_INFO });
-	const rootlessLines = rootless.split("\n");
-	const rootlessAt = rootlessLines.findIndex((line) => /runs the worker as root/.test(line));
-	assert.ok(rootlessLines[rootlessAt + 1].includes(JOB_USER_FIX["rootless"]), rootlessLines[rootlessAt + 1]);
-	assert.ok(!rootlessLines[rootlessAt + 1].includes(JOB_USER_FIX["worker-is-root"]), "not a cause this daemon gives uid 0");
+	// The OTHER half of that rule, which is where two review rounds found the defect: doctor names the refusal
+	// only where this shell's own decision is `worker`, meaning the daemon maps uids fine and rootness is the
+	// only thing left to differ. Every other decision is about the HOST, the `local:` line above has already
+	// said it for every account, and inventing a per-account refusal there contradicts that line. Both shapes
+	// below are that case, and both used to print `worker-is-root`.
+	for (const [what, opts] of [
+		// A rootless daemon refuses every account. Telling the operator to run the worker unprivileged is
+		// advice against what the line above just proved, and it is worse than it looks: `decideJobUser` can
+		// infer rootless from the SOCKET's owner, a row guarded `euid !== 0`, so any attempt to re-decide this
+		// line as uid 0 loses it and lands back on `worker-is-root`.
+		["a rootless daemon", { info: ROOTLESS_INFO }],
+		// The same host with a daemon that does NOT say so: rootlessness is inferred from the socket's owner
+		// (a rootful-looking Podman older than 4.9.3). This is the shape that kills re-deciding as uid 0,
+		// because the row that sees it is guarded `euid !== 0` and a forced 0 walks straight past it.
+		["a socket this shell's uid owns", { stat: () => ({ uid: 1234, gid: 1234 }) }],
+		// An endpoint that is not on this host is not a refusal at all.
+		["a remote endpoint", { plan: { "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } } }],
+	]) {
+		const text = await run(unit.replace("User=pi", "User=root"), opts);
+		const at = text.split("\n").findIndex((line) => line.includes("runs the worker as root (uid 0)"));
+		assert.notEqual(at, -1, `${what}: the unit warning still fires`);
+		assert.match(text.split("\n")[at + 1], /sudo -u root pi-dispatch doctor/, `${what}: the instruction stays`);
+		assert.ok(!text.includes(JOB_USER_FIX["worker-is-root"]), `${what}: no refusal is invented`);
+	}
+	// A numeric account is addressed the way sudo reads one: `#4242`, quoted, never a bare number, which sudo
+	// takes for a user NAME. Under a remote endpoint, where nothing is refused, so the instruction is printed.
+	const numeric = await run(unit.replace("User=pi", "User=4242"), { plan: { "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } } });
+	assert.match(numeric, /sudo -u '#4242' pi-dispatch doctor/, "a uid needs sudo's # prefix, and the # needs quoting");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");
