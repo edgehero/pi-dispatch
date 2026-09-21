@@ -221,8 +221,10 @@ ephemeral (each must be gone before the next), and, with `PI_EGRESS` armed, two 
 for jobToJobIsolation (the first must reach the proxy and not the second, which must answer itself before and
 after the attempt). It folds in the egress canary and removes every container it
 started by ID, the peer networks after their peers (issue #344). The canary's own probes and network are not on
-that list: they are removed by the canary itself, which runs on every doctor with the policy armed, and a later
-run clears what a killed one left behind (issue #350). It runs as the job user a local job on this host gets
+that list: they are removed by the canary itself, which runs when the policy is armed, the daemon answers, the
+proxy is up and the job image is present. Clearing what a KILLED run left behind additionally needs your docker
+CLI to say which daemon it uses, so that a pid that is dead here is not assumed dead there; where it cannot say,
+doctor prints the command to list them rather than sweeping blind (issue #350). It runs as the job user a local job on this host gets
 (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the host; where a local job
 would be refused, or the job user cannot be decided, it runs nothing and says so. It runs only when the docker CLI
 is observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own

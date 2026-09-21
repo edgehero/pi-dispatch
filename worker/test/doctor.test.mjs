@@ -5,7 +5,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { backendChecks, collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_PROBE_SLUGS, backendChecks, collectChecks, defaultPromptFn, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { egressCanaryProbe } from "../src/egress.mjs";
 import { parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -3745,6 +3746,8 @@ test("doctor: a DEAD doctor's canary network is swept, its probe removed and the
 	const plan = {
 		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\npi-dispatch-egress-doctor-4242-extra\n" },
 		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"},"b":{"Name":"pi-dispatch-egress-proxy"}}' },
+		// Explicit: an unplanned command answers `undefined`, and `removed` now records only what exited 0.
+		"docker rm -f": 0,
 		...green,
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
@@ -3786,6 +3789,7 @@ test("doctor: the canary sweep removes only a probe whose SLUG it knows (#350)",
 	const plan = {
 		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
 		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"},"b":{"Name":"someone-elses-thing-4242"},"c":{"Name":"pi-dispatch-egress-probe-anything-you-like-4242"}}' },
+		"docker rm -f": 0,
 		...green,
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
@@ -3836,4 +3840,87 @@ test("doctor: the probe's name comes from the SEAM, so the producer and the reap
 	const ran = calls.filter((c) => c.args[0] === "run").map((c) => c.args[c.args.indexOf("--name") + 1]);
 	assert.deepEqual(ran, ["pi-dispatch-egress-probe-provider-777", "pi-dispatch-egress-probe-unlisted-777"], "the injected pid names the probes");
 	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args.at(-1)), ["pi-dispatch-egress-probe-unlisted-777"], "and the cleanup looks for that same name");
+});
+
+test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going quiet (#350)", async () => {
+	// Measured in this repo's own docs: through the podman-docker shim `docker context inspect` prints nothing
+	// at all, so `local` is null. Treating unknown as remote made the sweep silently never run on a supported
+	// runtime, with no line saying why. The in-image gh probe is the precedent: it refuses AND says.
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		...green,
+		"docker context inspect": { code: 0, output: "" },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.equal(code, 0, "an unswept leftover warns, it never fails doctor");
+	assert.match(text(), /⚠ Egress canary: leftovers from an interrupted doctor are not swept, because this shell's docker CLI did not say which daemon it uses/);
+	assert.match(text(), /docker network ls --filter name=pi-dispatch-egress-doctor-/, "and names the command that lists them");
+	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "nothing is touched while the daemon is unknown");
+});
+
+test("doctor: a REMOTE daemon sweeps nothing and says nothing (#350)", async () => {
+	// The other half of the three-way answer: a leftover there belongs to the doctor that owns that daemon,
+	// and there is nothing for this operator to do about it.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		...green,
+		"docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.doesNotMatch(text(), /are not swept/, "a remote daemon is not this doctor's business to report on");
+	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
+});
+
+test("doctor: a probe the sweep could NOT remove is never reported as removed (#350)", async () => {
+	// The rule `removeNetworkOrSay` applies to `detached`, applied to `removed` too: a check claiming a probe
+	// was removed while it is still running is worse than no line at all.
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"}}' },
+		"docker rm -f": 1,
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.doesNotMatch(text(), /after removing pi-dispatch-egress-probe-unlisted-4242/, "it did not go, so it is not claimed");
+	const detached = calls.filter((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.includes("pi-dispatch-egress-doctor-4242")).map((c) => c.args.at(-1));
+	assert.deepEqual(detached, ["pi-dispatch-egress-probe-unlisted-4242"], "and it falls back to being detached rather than between the two");
+});
+
+test("doctor: a canary create that could not be LAUNCHED leaves no teardown line either (#350)", async () => {
+	// `runCmd` has no timeout, so its null means the CLI never started -- not that it started and did not
+	// finish. Reading null as "it may have landed anyway" printed a removal instruction for a network that
+	// was never created. The numeric-refusal case is covered above; this is the launch-failure one.
+	const { out, text } = capture();
+	// The teardown must be made to FAIL, or `created` true and false look the same: a successful `network rm`
+	// of a network that never existed prints nothing either way. Specific keys lead, since fakeSpawn takes
+	// the first key the command line starts with.
+	const plan = {
+		"docker network create": "enoent",
+		"docker network rm": 1,
+		"docker network inspect": { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, []));
+	assert.doesNotMatch(text(), /could not be removed/, "nothing launched, so nothing was created, so nothing to remove");
+});
+
+test("doctor: the probe names ARE the slug list, so a new direction cannot reach only one side (#350)", async () => {
+	// A DRIFT pin rather than a value pin: re-typing today's two literals is an equivalent change, but adding
+	// a third direction to one place and not the other is the failure `egress.mjs` owns these names to
+	// prevent, and this is what goes red when that happens.
+	const calls = [];
+	const { out } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }, calls, { pid: 4242 }));
+	const named = calls.filter((c) => c.args[0] === "run").map((c) => c.args[c.args.indexOf("--name") + 1]);
+	const expected = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, 4242));
+	assert.deepEqual(named, expected, "every slug in the list gets a probe, and no probe is named outside it");
 });

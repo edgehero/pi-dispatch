@@ -29,7 +29,7 @@
 import { READ_BACK_BY_A_LIVE_PROBE } from "./backend-conformance.mjs";
 import { containerSpec } from "./container-spec.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
-import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
 
 /**
  * The namespace every live-probe object carries: every container name, the peer networks and the fixture directory. OUTSIDE the
@@ -895,14 +895,12 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 		const name = line.trim();
 		const m = shape.exec(name);
 		if (!m || Number(m[1]) === pid || isAlive(Number(m[1]))) continue;
-		const inspected = await step(["network", "inspect", "--format", "{{json .Containers}}", name]);
-		if (inspected?.code !== 0) continue;
-		let attached = [];
-		try {
-			attached = Object.values(JSON.parse(String(inspected.stdout ?? "").trim() || "{}") ?? {}).map((c) => String(c?.Name ?? "")).filter(Boolean);
-		} catch {
-			continue;
-		}
+		// Through the shared reader since issue #357, which is where the fail-closed rule lives: a `.Containers`
+		// that renders as `null` used to parse to `{}` here and read as "nothing attached", which would detach
+		// and remove a network that still had members. Unreadable is now unreadable, and this sweep's own
+		// silence on it is unchanged -- it is best effort, and what it CAN read it still says.
+		const { ok, names: attached } = await networkEndpoints(step, name);
+		if (!ok) continue;
 		if (attached.some((n) => probeContainer.test(n))) continue;
 		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
 		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.

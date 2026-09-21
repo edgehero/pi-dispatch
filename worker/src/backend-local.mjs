@@ -269,7 +269,8 @@ export function makeReaper({ log, exec = execDocker }) {
 			// REQ-EGRESS-ALLOWLIST: the per-job networks those containers were on. Swept AFTER the containers,
 			// because a network with a member still attached cannot be removed -- and swept by the SAME
 			// `pi-job-` filter, so the namespace rule that keeps an operator's live sandbox safe from the
-			// container reaper keeps their sandbox NETWORK safe too, with no second rule to remember.
+			// container reaper keeps their sandbox NETWORK safe too. The filter is the cheap narrowing only:
+			// the namespace decision is the anchored shape below, for the reason stated there.
 			//
 			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
