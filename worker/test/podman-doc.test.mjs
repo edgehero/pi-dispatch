@@ -53,9 +53,10 @@ test("its Docker Engine column is what `local` declares, word for word (#345)", 
 	}
 });
 
-// The teeth. A cell may say LESS than `local` declares (a measurement that fell short) but never more, and on a
-// setup whose observations are known it must say exactly what those observations earn. `isolation: enforced` on any
-// Podman column dies here, because `observeBounds` returns false for every Podman daemon.
+// The teeth. A cell must say exactly what its setup's observations earn, which is at most what `local` declares
+// (`effectiveWord` never raises a word). `isolation: enforced` on any Podman column dies here, because
+// `observeBounds` returns false for every Podman daemon, and the `meets` check below names that case separately
+// so the failure says which of the two rules a cell broke.
 test("every Podman cell is a word its own setup could actually earn, or its refusal (#345)", () => {
 	const { body } = propertyTable();
 	for (const row of body) {
@@ -95,4 +96,32 @@ test("the page quotes every refusal the worker can print, verbatim (#345)", () =
 		covered.add(cause);
 	}
 	assert.deepEqual([...covered].sort(), Object.keys(JOB_USER_FIX).sort());
+});
+
+// The entry-points table is the same six setups in the same order, so it is pinned to the same list. Its cells are
+// prose rather than declaration words, but a column whose jobs are all refused may only say so: an entry point that
+// claims to run something there would be a page that contradicts its own property table.
+const REFUSED_ENTRY_POINT = /^(refused `[a-z-]+`|✗ `[a-z-]+`|not run\b.*|as doctor|unmeasured\b.*)$/;
+
+test("the entry-points table covers the same six setups, and a refused column only refuses (#345)", () => {
+	const start = doc.indexOf("## Entry points");
+	const end = doc.indexOf("##", start + 3);
+	const rows = doc
+		.slice(start, end)
+		.split("\n")
+		.filter((line) => line.startsWith("|"))
+		.map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
+	const [header, separator, ...body] = rows;
+	assert.match(separator.join(""), /^-+$/);
+	assert.equal(header[0], "Entry point");
+	assert.deepEqual(header.slice(1), SETUPS.map((setup) => setup.header));
+	assert.ok(body.length >= 5, "one row per entry point");
+	for (const row of body) {
+		for (const [index, setup] of SETUPS.entries()) {
+			if (!setup.refusal) continue;
+			const cell = row[index + 1];
+			assert.match(cell, REFUSED_ENTRY_POINT, `${row[0]} on ${setup.header}: ${cell}`);
+			if (/`[a-z-]+`/.test(cell)) assert.ok(cell.includes(`\`${setup.refusal}\``), `${row[0]} on ${setup.header} names another cause`);
+		}
+	}
 });

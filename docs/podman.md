@@ -16,7 +16,7 @@ the supported one. `docs/backends.md` explains the words used below.
 | Rootless Podman with `userns = "keep-id"` | **Refused the same way**, and this one is a limitation rather than a verdict: keep-id would map the worker's uid into the container, but it is a per-container mapping that `docker info` does not report, so the worker cannot tell it from plain rootless. Issue #354 is the native backend that would use it. |
 | Rootful Podman reached through `podman-docker` (the `docker` package that emulates the command) | **Runs, not supported.** The job user decides `worker` mode and jobs run as your uid, but it resolves no docker context, so `credentialTransit` is never observed and `pi-dispatch doctor --live` does not run. doctor warns. |
 | Rootful Docker Engine | The reference. Every word the backend table declares. |
-| Podman on ANOTHER machine (`DOCKER_HOST=ssh://...`, a `podman system connection`) | **Not refused, and not the same thing.** The bind-mount sources are that machine's paths, so no rule about this host's uids applies: the job runs as the image's own user, `credentialTransit` degrades to `asserted`, and doctor says the endpoint is not on this host. A rootless daemon reached that way is NOT refused by name. |
+| Podman on ANOTHER machine (`DOCKER_HOST=ssh://...`, or a service reached over TCP) | **Not refused, and not the same thing.** The bind-mount sources are that machine's paths, so no rule about this host's uids applies: the job runs as the image's own user, `credentialTransit` degrades to `asserted`, and doctor says the endpoint is not on this host. A rootless daemon reached that way is NOT refused by name. One form escapes this row: a client reaching a UNIX-socket service over ssh reports that service's own unix path, which reads like a local socket, so the ordinary rules decide instead and a rootless daemon there IS refused as `rootless` (a residual `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` names). |
 
 Refused for the same reason on either runtime: **rootless Docker** (`rootless`) and **a Docker daemon with
 userns-remap** (`userns-remap`), both of which map container uids away from the worker's, exactly as rootless Podman
@@ -100,7 +100,8 @@ Degraded, never refused unless a `PI_BACKEND_FLOOR` asks for the word:
 
 Steps 1 to 3 are the documented route on a systemd host, and they are the part of this page the lab could not
 exercise: its Podman ran as a bare `podman system service` with a hand-made socket group, because a container has no
-systemd. Everything from step 4 down was measured.
+systemd. Step 5's docker context is a recommendation rather than a measurement, for the reason the step itself
+gives. Everything else from step 4 down was measured.
 
 1. **Start Podman's socket as root:** `sudo systemctl enable --now podman.socket`. It listens on
    `/run/podman/podman.sock`, owned by root.
@@ -199,7 +200,7 @@ How each column is known:
 
 ## Entry points
 
-| Entry point | Docker Engine, rootful | Podman rootful (supported) | Podman rootless, keep-id | Podman rootless | podman-docker, rootful | podman-docker, rootless |
+| Entry point | Docker Engine, rootful | Podman rootful | Podman rootless, keep-id | Podman rootless | podman-docker, rootful | podman-docker, rootless |
 |---|---|---|---|---|---|---|
 | worker | runs jobs as `--user` | runs jobs as `--user` | refused `rootless` | refused `rootless` | runs jobs as `--user`; `credentialTransit` asserted | refused `rootless` |
 | `pi-dispatch doctor` | names Docker Engine | names Podman through its Docker API; `isolation` asserted, `mountSet` per the override | ✗ `rootless` | ✗ `rootless` | ⚠ names podman-docker and the context fix | ✗ `rootless` |
@@ -209,11 +210,12 @@ How each column is known:
 | `docker compose --profile egress` | runs unchanged | runs unchanged through the real docker CLI | unmeasured (a job is refused anyway) | unmeasured (a job is refused anyway) | unmeasured | unmeasured |
 
 Where a refusal fires is one rule: a cause in `BOOT_REFUSING_JOB_USER_CAUSES` refuses the boot while `local` is the
-default venue, and the rest refuse each local job. `local` is this build's only venue, so it is always the default
-and those causes always refuse at boot; the per-job branch is there for a build with a second venue and cannot be
-reached today. The `--user` refusals that need a job's image or its group
-(`job-image-any-uid-unsupported`, `root-group`, `docker-group`) are the per-job ones: the worker boots, doctor
-warns, and each local job is refused with the text above and no spend.
+default venue, and every cause refuses each local job. `local` is this build's only venue, so it is always the
+default, and a boot that can read the daemon refuses there. A boot that CANNOT read it (a daemon still starting, a
+read that timed out) decides nothing, boots, and refuses per job instead, because the decision is read again before
+each job: the same refusal, later, with the job's budget slot untouched. The `--user` refusals that need a job's
+image or its group (`job-image-any-uid-unsupported`, `root-group`, `docker-group`) are always the per-job ones: the
+worker boots, doctor warns, and each local job is refused with the text above and no spend.
 
 ## Health checks need systemd
 
@@ -265,7 +267,8 @@ native `podman` backend that rootless Podman would need.
 In nested labs on a Mac: a privileged `docker:27-dind` for Docker Engine, and a privileged Fedora 42 container
 running rootful and rootless Podman services, the real docker CLI and `podman-docker`. The job image, the worker and
 `doctor --live` ran inside them as an unprivileged account (uid 1234), against the worker at commit a69b9a6, which
-is this page's parent and carries every line of worker code it describes. Rows that nesting can distort (rootless cgroup bounds) were labelled lab-limited and not relied on. The
+is this page's parent and carries every line of worker code it describes. Rows that nesting can distort (rootless
+cgroup bounds) were labelled lab-limited and not relied on. The
 lab was configured with netavark's iptables firewall driver, because the LinuxKit kernel rejects its nftables rules,
 and with `cgroup_manager = "cgroupfs"` and a file event logger, because it has no systemd; a real Fedora host uses
 nftables, systemd cgroups and journald, which is `OQ-037`'s unmeasured row. Those three settings are carried over
