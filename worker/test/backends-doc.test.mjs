@@ -18,7 +18,8 @@ import { jobUserBootRefusal } from "../src/start.mjs";
 // closed by a plain `-->` in ordinary prose so the stripper ate the visible text around it, a link reference
 // definition that renders as nothing, non-breaking hyphens that render identically, a decoy marker pair, a narrowed
 // marker pair. Every repair bought one round. Generating the line ends that class by construction: there is one
-// correct string, the page either contains it or does not, and no hiding place helps because nothing is extracted.
+// correct string and the page either contains it or does not, so a hiding place buys nothing once the comments a
+// reader never sees are removed first.
 //
 // The bolt is `jobUserBootRefusal(decision, defaultBackend)` rather than `BOOT_REFUSING_JOB_USER_CAUSES`, and the
 // distinction is the point: the page's claim is not that four names sit in a Set, it is that they stop a boot AND
@@ -32,8 +33,30 @@ import { jobUserBootRefusal } from "../src/start.mjs";
 // that `pi-dispatch doctor` clears the boot-stopping causes. All of those were demonstrated green and none is
 // reachable by a pattern. `worker/test/podman-doc.test.mjs` records the same limit and what it cost to learn: the
 // answer to prose that keeps being wrong is fewer such sentences, never a bigger regex.
+//
+// One more thing the generator does NOT prove, since a residual that lists only the easy half is the same sin:
+// the second line is the COMPLEMENT of the first, not an observed behaviour. `stopsBoot` asks about a synthetic
+// `{ mode: "unmappable", cause }` for every `JOB_USER_FIX` key, and `any-uid-unsupported` never reaches
+// `decideJobUser` as a decision at all -- `resolveImageUser` returns it as a refusal. So a cause added to
+// `JOB_USER_FIX` for doctor's use alone would be filed under "Refuses each job" here and this test would then
+// REQUIRE the page to say something false. What bounds that is `worker/test/job-user.test.mjs`, which pins the
+// exact eight keys, so such an addition cannot be accidental.
 
 const doc = readFileSync(new URL("../../docs/backends.md", import.meta.url), "utf8");
+
+/**
+ * The page as a READER sees it. Removing the extractor removed its comment strip with it, and a final review
+ * showed what that cost: the generated line is matched against trimmed lines, and a line inside a multi-line
+ * HTML comment is still a line beginning `- **`. Both lists could be moved into a comment while the visible
+ * prose said the opposite, or deleted outright with a copy buried at the end of the file. The realistic one is
+ * worse than either: deleting the ` -->` that closes this page's own instruction comment, one token directly
+ * above the bullets, swallows them both and leaves this file green.
+ *
+ * Stripping here cannot reopen the arms race the extractor lost, and the direction is the whole reason it is
+ * safe: a stripper can only REMOVE candidate lines, so its worst outcome is a false red on an honest page,
+ * never a pass on a wrong one. The unclosed-comment assertion is what makes that true in both directions.
+ */
+const VISIBLE = doc.replace(/<!--[\s\S]*?-->/g, "");
 
 const CAUSES = Object.keys(JOB_USER_FIX);
 const stopsBoot = (cause) => jobUserBootRefusal({ mode: "unmappable", cause }, DEFAULT_BACKEND) !== null;
@@ -43,10 +66,12 @@ const listLine = (label, causes) => `- **${label}**: ${causes.map((cause) => `\`
 const EXPECTED = [listLine("Stops the boot", CAUSES.filter(stopsBoot)), listLine("Refuses each job", CAUSES.filter((cause) => !stopsBoot(cause)))];
 
 test("the page carries the two cause lists this build generates, verbatim (#357)", () => {
-	// Matched against TRIMMED LINES rather than the whole document, which is what makes a hiding place useless: a
-	// copy inside an HTML comment, a link reference definition or a table cell is not a line beginning `- **`, and
-	// a name spelled with a non-breaking hyphen is not this string. The bullet may carry prose after the full stop.
-	const lines = doc.split("\n").map((line) => line.trim());
+	// Matched against TRIMMED LINES of the visible page, which is what makes a hiding place useless: a link
+	// reference definition or a table cell is not a line beginning `- **`, a name spelled with a non-breaking
+	// hyphen is not this string, and a comment is not there at all by the time this runs. The bullet may carry
+	// prose after the full stop.
+	assert.ok(!VISIBLE.includes("<!--"), "docs/backends.md has an unclosed HTML comment, which hides what follows it");
+	const lines = VISIBLE.split("\n").map((line) => line.trim());
 	for (const want of EXPECTED) {
 		const found = lines.filter((line) => line.startsWith(want));
 		assert.equal(found.length, 1, `docs/backends.md must carry exactly this line, exactly once:\n${want}`);
@@ -59,7 +84,7 @@ test("each cause is named once on the whole page, so no sentence can reassign on
 	// form, which is what avoids the collision that made an honest page fail -- `job-image-any-uid-unsupported` is
 	// the id the code uses for the per-image refusal and contains `any-uid-unsupported` as a bare substring.
 	for (const cause of CAUSES) {
-		assert.equal(doc.split(`\`${cause}\``).length - 1, 1, `${cause} is named once on the page, in its own list`);
+		assert.equal(VISIBLE.split(`\`${cause}\``).length - 1, 1, `${cause} is named once on the page, in its own list`);
 	}
 });
 

@@ -121,22 +121,24 @@ ones adapters get wrong:
   sets are named here rather than one:
 
   <!-- worker/test/backends-doc.test.mjs GENERATES the two list lines below from `JOB_USER_FIX` and
-       `jobUserBootRefusal` and requires each verbatim, so edit them by pasting what that test prints. Each
+       `jobUserBootRefusal` and requires each verbatim, so edit them by pasting what that test prints when it
+       fails. Each
        cause name may appear exactly once on this page; to say more about one, say it without the name. -->
   - **Stops the boot**: `rootless`, `userns-remap`, `worker-is-root`, `desktop-linux-userns`. Nothing a job
     may run as works, so the worker exits rather than picking up work it could only refuse. Three of these
     are read off the daemon, though one of them can instead be inferred from the socket this worker was
     pointed at; the root-worker case is a fact about the account the worker itself runs as, and is fixed by
-    changing that account rather than the host. That exit
+    changing that account rather than the host. Docker Desktop is refused only on Linux outside WSL, and
+    WSL2 is not affected. That exit
     is conditional, and the condition is real rather than decorative: it happens while `local` is the default
     venue (`BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs`, read by `jobUserBootRefusal` in
     `start.mjs`), and a deployment whose default venue was elsewhere would boot and refuse each local job
     instead. `local` is the only venue this build has, so every deployment today gets the exit.
   - **Refuses each job**: `runtime-unreadable`, `root-group`, `docker-group`, `any-uid-unsupported`. The
     worker boots, and each local job returns a policy refusal naming the cause. The first of those is a
-    daemon whose answer cannot be read at all, which is not the same as one that has not answered yet. The last three are on the
-    `--user` path only, so a worker that is already uid 1001, the image's own uid, meets none of them:
-    nothing is passed, and its primary group is not compared.
+    daemon whose answer cannot be read at all, which is not the same as one that has not answered yet.
+    The last three are on the `--user` path only, so a worker that is already uid 1001, the image's own
+    uid, meets none of them: nothing is passed, and its primary group is not compared.
 
   A daemon that has not answered YET is in neither set. The decision is `unknown`, it is never cached and never a
   boot exit, so a unit carrying `RestartPreventExitStatus=2` is not stranded by a daemon that is still
