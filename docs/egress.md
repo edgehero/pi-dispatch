@@ -100,8 +100,11 @@ deployment. `doctor` does it once, when you ask.
 
 You may also see a line saying a leftover network was removed, or one naming a network that could not be:
 those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>` and its two probe containers. A doctor
-run that was killed, or one whose proxy accepted a connection and never answered, can leave them behind; the
-next run sweeps whatever belongs to a process that is no longer alive.
+run that was killed, or one whose proxy accepted a connection and never answered, can leave them behind. The
+next run sweeps whatever belongs to a process that is no longer alive **on this host**, and only when your
+docker CLI resolves a daemon on this host: a leftover on a shared or remote daemon belongs to the doctor that
+made it, and a pid that is dead here may well be alive there. A third line, `could not be read`, means the
+network is still there and `docker network inspect` would not say what is on it.
 
 The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node**, so
 they prove the path your jobs actually take. They cost nothing: `api.anthropic.com` answers `401` to an

@@ -3578,7 +3578,7 @@ a tunnel.
   `worker/src/run-container.mjs` -> `stopDetached`; `worker/src/processor.mjs` -> `OBSERVATION_COMMENT` (#345);
   · `worker/src/live-probes.mjs` -> `runLiveProbes`, `isolationVerdict`, `mountSetVerdict`, `ephemeralVerdict`,
   `jobToJobIsolationVerdict`, `awaitRemoved`, `sweepStaleNetworks`; `worker/src/egress.mjs` ->
-  `createJobNetworkWith`, `removeJobNetworkWith` (#344);
+  `createJobNetworkWith`, `removeNetworkOrSay` (#344, moved onto the shared rule by #357);
   `worker/src/backend-conformance.mjs` -> `READ_BACK_BY_A_LIVE_PROBE`, `checkReadBack`; `worker/src/doctor.mjs`
   -> `liveChecks`; `worker/src/config.mjs` -> `jobsDirPath` (#278)
 

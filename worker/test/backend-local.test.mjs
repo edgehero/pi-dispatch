@@ -320,13 +320,24 @@ test("a network the daemon says is not there is not a line at all (#357)", async
 	assert.deepEqual(lines, []);
 });
 
-test("the network phase can NEVER flip the tri-state a scope claim is spent on (#357)", async () => {
+test("a PER-NETWORK fault never flips the tri-state a scope claim is spent on (#357)", async () => {
 	// `makeScopeClaimSweeper` may only delete a claim naming this host once the host has established it holds
-	// no containers. A network fault is not evidence about containers, so it must not reach the outer catch.
+	// no containers. An inspect, a disconnect or an rm that fails is not evidence about containers, so none of
+	// them may reach the outer catch.
 	const { exec } = fakeDockerExec({ containers: ["pi-job-e"], nets: { "pi-job-e-net": ["x"] }, fail: { "network inspect": "boom", "network disconnect": "boom", "network rm": "boom" } });
 	const { log, lines } = reaperLog();
 	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true }, "containers WERE enumerated");
 	assert.ok(!lines.some((l) => l[0] === "reaper_skipped"), "a network fault is not a skipped reaper");
+});
+
+test("a failing `network ls` DOES still answer {reaped:false}, and that is deliberate (#357)", async () => {
+	// The boundary of the test above, pinned so the claim beside `step` cannot quietly widen: the listing runs
+	// on the THROWING exec, so a daemon that dies between the `ps` and the `network ls` leaves this host unable
+	// to say it finished looking. Conservative in the money direction, and unchanged by #357.
+	const { exec } = fakeDockerExec({ containers: ["pi-job-e"], nets: {}, fail: { "network ls": "Cannot connect to the Docker daemon" } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: false });
+	assert.deepEqual(lines.map((l) => l[0]), ["reaped_container", "reaper_skipped"], "the containers it DID reap are still reported");
 });
 
 test("a docker ps that fails is {reaped:false} and one reaper_skipped (#357)", async () => {

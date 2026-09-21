@@ -250,3 +250,31 @@ test("networkEndpoints reads the Name field, and an unreadable answer is not an 
 	const down = await networkEndpoints(async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }), "n");
 	assert.deepEqual(down, { ok: false, names: [], absent: false });
 });
+
+test("no answer is never absence, and a non-object endpoint map fails CLOSED (#357)", () => {
+	// Two mutants that survived the first pass, each a hole rather than an equivalent change.
+	// (1) a result with NO `code` at all must not fall through to the regex: a runner that answers a shape
+	// this rule cannot read has told us nothing, and nothing is not "the network is gone".
+	assert.equal(networkAbsentInDaemonWords({ stdout: "network pi-job-x-net not found" }), false, "no code is no answer");
+	assert.equal(networkAbsentInDaemonWords({ code: "1", stdout: "network pi-job-x-net not found" }), false, "a non-numeric code is no answer either");
+});
+
+test("a .Containers that is not an object is NOT an empty network (#357)", async () => {
+	// `JSON.parse("null")` is `null`, and reading that as "no endpoints" makes every caller's attached-guard
+	// vacuous rather than cautious. Netavark's rendering is unmeasured, so this is the direction to be wrong in.
+	assert.deepEqual(await networkEndpoints(async () => ({ code: 0, stdout: "null", stderr: "" }), "n"), { ok: false, names: [], absent: false });
+	assert.deepEqual(await networkEndpoints(async () => ({ code: 0, stdout: "[]", stderr: "" }), "n"), { ok: true, absent: false, names: [] }, "an ARRAY is still an object, and an empty one really is empty");
+	assert.deepEqual(await networkEndpoints(async () => ({ code: 0, stdout: '"nope"', stderr: "" }), "n"), { ok: false, names: [], absent: false });
+});
+
+test("`detached` names what actually happened, never what was attempted (#357)", async () => {
+	// It is printed to an operator and logged. A list of attempts would name something still attached as
+	// something this sweep removed.
+	const run = async (args) => {
+		if (args[1] === "disconnect") return { code: args.at(-1) === "stuck" ? 1 : 0, stdout: "", stderr: "" };
+		if (args[1] === "rm") return { code: 0, stdout: "", stderr: "" };
+		return { code: 0, stdout: "", stderr: "" };
+	};
+	const out = await removeNetworkOrSay(run, { network: "n", detach: ["went", "stuck"] });
+	assert.deepEqual(out.detached, ["went"], "the one that did not detach is not claimed");
+});

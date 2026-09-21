@@ -1393,17 +1393,23 @@ contract governs the argv of one container, this governs the estate that argv jo
     | doctor canary probes | `pi-dispatch-egress-probe-<slug>-<pid>` | `--rm`, one per direction on that network (`egressCanaryProbe`) |
     | proxy component | `pi-dispatch-egress-proxy` | squid, `http_port 3128`, **no published port**. Overridable by `PI_EGRESS_PROXY`. |
 
-    **What is left behind, and what removes it** (issue #357, #350). Four namespaces make networks here and
-    each is swept by the code that owns it, never by a shared sweeper whose parameters would be the decision:
-    a per-job network by the boot reaper, a canary network by the canary itself, a peer network by
-    `doctor --live` (`INT-LIVE-PROBE-CONTRACT`), and a session network by the sandbox reaper. Every one of
-    them detaches what is attached before removing, removes **without `-f`** so a network is never pulled out
-    from under a live endpoint, and is silent only when the daemon says in its own words that the network is
-    not there; every other outcome names the network and a fixed reason token, never the CLI's own text
-    (`CONST-*`, and issue #339's channel stays shut). What each protects differs and that is the part that
-    must not be flattened: the boot reaper leaves a network a `pi-job-` container is still on, and the canary
-    sweep INVERTS that -- a probe attached to a network whose pid is dead is the leak itself, not a run in
-    progress, so it is removed by name.
+    **What is left behind, and what removes it** (issues #357, #350). Every network here is removed by the
+    code that made it, in a `finally`. What that cannot cover is a process that DIED, and three namespaces
+    have a sweep for it: a per-job network by the boot reaper, a canary network by the canary itself on its
+    next run, and a peer network by `doctor --live` (`INT-LIVE-PROBE-CONTRACT`). A **session** network has no
+    sweep: it is removed by the session's own `finally`, and one left by a process that died stays until an
+    operator removes it, which is the rule stated under `INT-SANDBOX-CONTRACT` and its reason.
+
+    The three sweeps share three rules. Each decides its namespace on the **anchored name shape its producer
+    builds**, never on `docker`'s `--filter name=`, which is a SUBSTRING match and returns foreign objects
+    (measured). Each removes **without `-f`**, so a network is never pulled out from under a live endpoint.
+    And each is silent only when the daemon says in its own words that the network is not there; every other
+    outcome names the network and a fixed reason token, never the CLI's own text (issue #339's channel stays
+    shut). What each PROTECTS differs, and that is the part that must not be flattened: the boot reaper
+    detaches what it saw but leaves a network a `pi-job-` container is still on, while the canary's sweep
+    INVERTS that -- a probe attached to a network whose pid is dead is the leak itself rather than a run in
+    progress, so it is removed by name, which is why that sweep is additionally confined to a daemon this
+    host owns.
 
     The network name is **derived from the container name** (`<name>-net`), never rebuilt from the job id.
     The container name already survives every id shape this project produces and docker's network-name
@@ -1643,7 +1649,7 @@ entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`).
     `PI_EGRESS` is armed and the proxy is not seen down, two PEERS (`-d --entrypoint node`, `--eval` the constant
     `PEER_SCRIPT` with the nonce, a fixed port and the derived seconds), each with `network` set to its own
     `pi-dispatch-live-peer<n>-<pid>-<nonce>-net`, created by the job path's own `createJobNetworkWith` (`--internal`,
-    then the proxy attached) and removed by `removeJobNetworkWith` (the proxy detached, then `network rm` without
+    then the proxy attached) and removed by `removeNetworkOrSay` (the proxy detached, then `network rm` without
     `-f`) after its peer. A network is on the ownership list BEFORE its create, since a create that timed out may
     still have made it; one whose removal fails is a ⚠ carrying the command unless `network inspect` says it is not
     there (`not found` in the daemon's words; an inspect that timed out or failed otherwise is said too). With the

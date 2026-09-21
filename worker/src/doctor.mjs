@@ -519,7 +519,7 @@ export async function collectChecks(env, seams) {
 	// REQ-EGRESS-ALLOWLIST (issue #202). [] when PI_EGRESS=0, so a deployment that declined it gets
 	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
 	// the rest are noise on top of a down daemon.
-	const egress = await egressChecks(env, seams, { dockerCode, imageCode, jobImage });
+	const egress = await egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpoint });
 	checks.push(...egress);
 	if (facts) {
 		let armed;
@@ -2370,10 +2370,6 @@ function triggersPath(env, cwd) {
  * exist, and doctor "never guesses a semantic env value".
  */
 /**
- * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
- * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
- */
-/**
  * Canary networks a doctor run that did not finish left behind (issue #350), for a PID no longer alive.
  *
  * UNLIKE `sweepStaleNetworks` in live-probes.mjs, an attached PROBE here is not a run in progress, and that
@@ -2386,17 +2382,25 @@ function triggersPath(env, cwd) {
  * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
  * pid is still alive belongs to a doctor that is still running.
  */
-async function sweepStaleCanaryNetworks({ docker, pid, isAlive, proxy }) {
+async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
 	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
 	if (listed?.code !== 0) return [];
 	const shape = new RegExp(`^${EGRESS_CANARY_NET_PREFIX}(\\d+)$`);
-	const probeOf = (name) => new RegExp(`^${EGRESS_CANARY_PROBE_PREFIX}\\S+-${name}$`);
+	// The slug is a CLOSED set, not free text: accepting `\\S+` there would `rm -f` any container under this
+	// prefix that happened to end in the dead pid. Escaped into the pattern because the pid reached it as a
+	// string from a name we matched, and a name is not a number.
+	const probeOf = (owner) => new RegExp(`^${EGRESS_CANARY_PROBE_PREFIX}(?:provider|unlisted)-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 		const m = shape.exec(name);
 		if (!m) continue;
-		const owner = Number(m[1]);
-		if (owner === pid || isAlive(owner)) continue;
+		// The matched TEXT is the identity for the probe names; the number is only for the liveness ask. A pid
+		// with leading zeros, or one long enough that `Number` renders it in exponential form, must not become
+		// a different string on the way to a regex.
+		const ownerText = m[1];
+		const owner = Number(ownerText);
+		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
+		if (owner === pid || !Number.isSafeInteger(owner) || isAlive(owner)) continue;
 		const { ok, names, absent } = await networkEndpoints(docker, name);
 		if (absent) continue;
 		if (!ok) {
@@ -2406,7 +2410,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, proxy }) {
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
 		// long-lived, and a stranger on a network in this namespace is not ours to delete.
 		const removed = [];
-		for (const endpoint of names.filter((n) => probeOf(String(owner)).test(n))) {
+		for (const endpoint of names.filter((n) => probeOf(ownerText).test(n))) {
 			await docker(["rm", "-f", endpoint]);
 			removed.push(endpoint);
 		}
@@ -2423,7 +2427,11 @@ const CANARY_STEP_TIMEOUT_MS = 10_000;
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
 const CANARY_LEFTOVER_FIX = "remove it by hand now, or let the next `pi-dispatch doctor` remove it once that process has exited";
 
-async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
+/**
+ * The bound on one canary docker step. Shorter than the 30 s the PROBES get, because these are `network`
+ * calls that either answer at once or are wedged, and the teardown must not be the slow part of a doctor run.
+ */
+async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpoint }) {
 	// `pid` and `isAlive` default here as well as riding the seams, so a caller that predates issue #350 still
 	// gets the process's own answer rather than a name ending in `undefined`.
 	const { spawn, pid = process.pid, isAlive = defaultIsAlive } = seams;
@@ -2460,7 +2468,13 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 	// on an armed deployment, where `--live` is opt-in by typing a flag, so putting it there would let the
 	// operators who never ask for a container read-back accumulate networks forever. The accepted cost, stated:
 	// a deployment that turns egress OFF returns above and never sweeps its old canary networks.
-	checks.push(...(await sweepStaleCanaryNetworks({ docker: (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS }), pid, isAlive, proxy })));
+	// ONLY ON A DAEMON THIS HOST OWNS. `isAlive` reads THIS process table while the name came from the
+	// DAEMON, so on a redirected DOCKER_HOST, a shared daemon or a doctor in a container, another doctor's
+	// live pid reads as dead here and its probe and network would be taken out from under it. The in-image
+	// `gh` probe already refuses on exactly this test, and `live-probes.mjs`'s sibling sweep -- which keeps a
+	// second guard this one deliberately inverts -- records the same PID-namespace caveat. A leftover on a
+	// remote daemon is left for the doctor that owns it.
+	if (endpoint?.local === true) checks.push(...(await sweepStaleCanaryNetworks({ docker: (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS }), pid, isAlive })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -2516,8 +2530,13 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		// entirely. `checks` is returned by reference on every early path here, so a line pushed in the
 		// `finally` still reaches the operator -- including on the `network connect` failure below, where the
 		// network exists and nothing else would say so.
-		created = true;
-		if ((await runCmd(spawn, "docker", ["network", "create", "--internal", net])) !== 0) return checks;
+		// From the create's OWN answer, not set blindly: `true` first meant the flag could never be false, so
+		// the teardown also ran for a create that cleanly refused and could emit a `could not be removed` line
+		// for a network that never existed. `null` is the case the flag exists for -- the CLI did not finish,
+		// so the network may have landed anyway.
+		const createCode = await runCmd(spawn, "docker", ["network", "create", "--internal", net]);
+		created = createCode === 0 || createCode === null;
+		if (createCode !== 0) return checks;
 		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
 		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
@@ -2535,7 +2554,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 				// reading `ps` afterwards to find out what a wedged probe was doing.
 				"--name",
 				// The PID too, so two doctor runs at once do not collide on a name and read the loser's exit 125 as a deny.
-				`pi-dispatch-egress-probe-${slug}-${process.pid}`,
+				egressCanaryProbe(slug, pid),
 				"--pull=never",
 				`--network=${net}`,
 				"-e",
@@ -2593,7 +2612,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage }) {
 		// The probes FIRST, by the name carrying this pid, then the network: a member still attached is exactly
 		// why the old `network rm` failed, and it failed silently. `rm -f` of a name that is not there is docker
 		// saying so, which is not worth a line (measured: exit 0).
-		for (const name of unfinished) await runCmd(spawn, "docker", ["rm", "-f", name]);
+		// Through the BOUNDED runner, not `runCmd`, which has no timeout at all: `unfinished` is non-empty only
+		// when the daemon already wedged a 30 s probe, so this is exactly the call most likely to hang.
+		for (const name of unfinished) await docker(["rm", "-f", name]);
 		if (created) {
 			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy] });
 			// The COMMAND lives in the label and the generic advice in the fix, which is the shape `--live`'s own

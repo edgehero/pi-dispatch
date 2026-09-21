@@ -3734,7 +3734,7 @@ test("doctor: a canary network the daemon says is gone is not a line at all (#35
 	const { out, text } = capture();
 	await runDoctor(
 		ghEnv({ PI_EGRESS: "1" }),
-		ghDeps(out, { "docker network rm": 1, "docker network inspect": { code: 1, output: "", stderr: "Error response from daemon: network pi-dispatch-egress-doctor-1 not found" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } }),
+		ghDeps(out, { "docker network rm": 1, "docker network inspect": (cmd, args) => ({ code: 1, output: "", stderr: `Error response from daemon: network ${args.at(-1)} not found` }), ...green, "gh auth status": { code: 0, output: ghStatusOutput } }),
 	);
 	assert.doesNotMatch(text(), /could not be removed/, "the one silence this allows, in the daemon's own words");
 });
@@ -3752,7 +3752,8 @@ test("doctor: a DEAD doctor's canary network is swept, its probe removed and the
 	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242, detaching pi-dispatch-egress-proxy\), left by a doctor run that did not finish/);
 	const touched = calls.map((c) => c.args.join(" "));
 	assert.ok(touched.includes("rm -f pi-dispatch-egress-probe-unlisted-4242"), "the dead run's own probe IS the leak, so it is removed");
-	assert.ok(touched.includes("network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy"), "the shared proxy is detached, never removed");
+	assert.ok(touched.includes("network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy"), "the shared proxy is detached");
+	assert.ok(!touched.some((t) => t.startsWith("rm -f pi-dispatch-egress-proxy")), "and NEVER removed: it is long-lived and shared");
 	assert.ok(!touched.some((t) => t.startsWith("network rm -f")), "never `network rm -f`");
 	assert.ok(!touched.some((t) => t.includes("4242-extra")), "the name shape is ANCHORED: a longer name is not this namespace");
 });
@@ -3764,4 +3765,75 @@ test("doctor: a canary network whose pid is still ALIVE is left entirely alone (
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => true, pid: 1 }));
 	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "a live doctor's network is its own business");
+});
+
+test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", async () => {
+	// A constant-derived assertion is correct at any value and therefore blind to a change IN that value: an
+	// adversarial pass set this bound to 1ms and the whole doctor suite stayed green, which in production makes
+	// every canary network read "could not be read" and none is ever removed. Pinned as a literal, the way
+	// PROTECTED_SKILL_ROOTS is, so moving it is a deliberate edit to this line.
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	assert.match(src, /const CANARY_STEP_TIMEOUT_MS = 10_000;/, "10s: long enough for a network call, short enough that a wedged daemon does not own the doctor run");
+	// And it must stay BELOW the probes' own bound, or the teardown becomes the slow part of a doctor run.
+	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false \} = opts;/, "runCmdCapture's probe bound");
+});
+
+test("doctor: the canary sweep removes only a probe whose SLUG it knows (#350)", async () => {
+	// `\S+` for the slug would `rm -f` any container under this prefix that happened to end in the dead pid.
+	// The slug is a closed set of two, so the matcher says so.
+	const calls = [];
+	const { out } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"},"b":{"Name":"someone-elses-thing-4242"},"c":{"Name":"pi-dispatch-egress-probe-anything-you-like-4242"}}' },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	const removed = calls.filter((c) => c.args[0] === "rm").map((c) => c.args.at(-1));
+	assert.deepEqual(removed, ["pi-dispatch-egress-probe-unlisted-4242"], "only a real probe name is removed");
+	// Scoped to the SWEPT network: this doctor run also tears down its own canary, which detaches the proxy.
+	const detached = calls.filter((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.includes("pi-dispatch-egress-doctor-4242")).map((c) => c.args.at(-1));
+	assert.deepEqual(detached.sort(), ["pi-dispatch-egress-probe-anything-you-like-4242", "someone-elses-thing-4242"], "anything else is merely detached, never deleted");
+});
+
+test("doctor: the dead-pid sweep runs ONLY on a daemon this host owns (#350)", async () => {
+	// `isAlive` reads THIS process table while the network name came from the DAEMON. On a redirected
+	// DOCKER_HOST another doctor's live pid reads as dead here, and its probe and network would be taken out
+	// from under it. The in-image gh probe already refuses on exactly this test.
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		...green,
+		// A daemon this shell cannot show is on this host.
+		"docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.doesNotMatch(text(), /left by a doctor run that did not finish/, "a leftover there belongs to the doctor that owns that daemon");
+	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "and nothing of it is touched");
+});
+
+test("doctor: a canary network that was never CREATED gets no teardown line (#350)", async () => {
+	// `created` used to be set to true as the first statement in the try, so the flag could never be false and
+	// the teardown ran even for a create that cleanly refused. With an unreachable daemon that emits a
+	// `could not be removed` instruction for a network that never existed.
+	const { out, text } = capture();
+	const plan = { "docker network create": 1, "docker network rm": 1, "docker network inspect": { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } };
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, []));
+	assert.doesNotMatch(text(), /could not be removed/, "nothing was created, so there is nothing to say about removing it");
+});
+
+test("doctor: the probe's name comes from the SEAM, so the producer and the reaper cannot disagree (#350)", async () => {
+	// The name is built by `egressCanaryProbe(slug, pid)` at both ends. Built inline from `process.pid` at the
+	// producing end, an injected pid would make the cleanup look for a name that was never created -- which is
+	// exactly the failure `egress.mjs` owns these names to prevent.
+	const calls = [];
+	const { out } = capture();
+	const wedged = { ...green, "docker run --rm --name pi-dispatch-egress-probe-unlisted": { code: null, output: "" }, "gh auth status": { code: 0, output: ghStatusOutput } };
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, wedged, calls, { pid: 777, isAlive: () => true }));
+	const ran = calls.filter((c) => c.args[0] === "run").map((c) => c.args[c.args.indexOf("--name") + 1]);
+	assert.deepEqual(ran, ["pi-dispatch-egress-probe-provider-777", "pi-dispatch-egress-probe-unlisted-777"], "the injected pid names the probes");
+	assert.deepEqual(calls.filter((c) => c.args[0] === "rm").map((c) => c.args.at(-1)), ["pi-dispatch-egress-probe-unlisted-777"], "and the cleanup looks for that same name");
 });

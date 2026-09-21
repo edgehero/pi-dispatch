@@ -235,7 +235,7 @@ export async function networkExists(spawnFn, network) {
  * Detach the proxy and remove the network. Best-effort and never throws: it runs in a `finally`, after the
  * container has exited (or when a network has just been built for a container that will not start), and a
  * failure here must not change the outcome. What it leaves behind if it fails is a network, which the boot
- * reaper tries to remove for a job (`pi-job-`, and only once nothing is attached) and never for a sandbox
+ * reaper tries to remove for a job (a `pi-job-<id>-net` name, detaching what is attached first since issue #357) and never for a sandbox
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
 export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
@@ -268,7 +268,10 @@ export async function removeJobNetworkWith(docker, { network, proxy = DEFAULT_EG
  * runner that captures BOTH streams; `runDocker` below captures neither by default.
  */
 export function networkAbsentInDaemonWords(result) {
-	if (!result || result.code === 0 || result.code === null) return false;
+	// A NUMBER that is not zero, or nothing. `code === null` is a timeout or a launch failure, and a result
+	// with no `code` at all is a runner that answered something this rule cannot read: both are NO ANSWER,
+	// and no answer is never absence.
+	if (typeof result?.code !== "number" || result.code === 0) return false;
 	return /network (?:\S+ )?not found/i.test(`${result.stdout ?? ""}${result.stderr ?? ""}`);
 }
 
@@ -286,7 +289,11 @@ export async function networkEndpoints(docker, network) {
 	const inspected = await runWith(docker, ["network", "inspect", "--format", "{{json .Containers}}", network]);
 	if (inspected?.code !== 0) return { ok: false, names: [], absent: networkAbsentInDaemonWords(inspected) };
 	try {
-		const parsed = JSON.parse(String(inspected.stdout ?? "").trim() || "{}") ?? {};
+		const parsed = JSON.parse(String(inspected.stdout ?? "").trim() || "{}");
+		// FAIL CLOSED on anything that is not an object: a runtime rendering `.Containers` as `null` would
+		// otherwise read as "no endpoints", which makes every caller's guard vacuous rather than cautious.
+		// Netavark's rendering is unmeasured, so this is the direction to be wrong in.
+		if (parsed === null || typeof parsed !== "object") return { ok: false, names: [], absent: false };
 		return { ok: true, absent: false, names: Object.values(parsed).map((c) => String(c?.Name ?? "")).filter(Boolean) };
 	} catch {
 		return { ok: false, names: [], absent: false };
@@ -300,7 +307,7 @@ export async function networkEndpoints(docker, network) {
  * A SIBLING of `removeJobNetworkWith`, deliberately NOT its replacement and not built on top of it, and the
  * direction matters both ways. Building this on that one would force-detach the proxy BEFORE anything
  * inspected the endpoint list, which is exactly the harm a sweep's guard exists to prevent. Building that one
- * on this would add an inspect to the job's own teardown path, which `worker/test/egress.test.mjs:146` pins
+ * on this would add an inspect to the job's own teardown path, which `worker/test/egress.test.mjs`'s "removeJobNetwork detaches before removing" pins
  * as exactly two calls. So the job path keeps its two-call shape and the sweeps get their own primitive.
  *
  * `detach` is an EXPLICIT list because every caller decides it differently: the boot reaper detaches what it
@@ -314,8 +321,9 @@ export async function networkEndpoints(docker, network) {
 export async function removeNetworkOrSay(docker, { network, detach = [] }) {
 	const detached = [];
 	for (const endpoint of detach) {
-		await runWith(docker, ["network", "disconnect", "-f", network, endpoint]);
-		detached.push(endpoint);
+		// Recorded only when it TOOK. `detached` is printed to an operator and logged, so a list of attempts
+		// would name something still attached as something this sweep removed.
+		if ((await runWith(docker, ["network", "disconnect", "-f", network, endpoint]))?.code === 0) detached.push(endpoint);
 	}
 	if ((await runWith(docker, ["network", "rm", network]))?.code === 0) return { removed: true, absent: false, detached, command: null };
 	// Silent ONLY when the daemon says it is not there. Anything else -- a timeout, an unreachable daemon, a

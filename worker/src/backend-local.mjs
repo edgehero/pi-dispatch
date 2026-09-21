@@ -189,8 +189,12 @@ export function makeReaper({ log, exec = execDocker }) {
 	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both
 	// are load-bearing. It is the shape `networkEndpoints` and `removeNetworkOrSay` need -- the "not found" rule
 	// reads both streams, and with `--format` the daemon puts that wording on stderr with stdout empty (measured
-	// on docker 27.4.0). And because it cannot throw, the network phase can no longer reach the outer catch,
-	// so nothing here can flip the tri-state a scope claim is spent on.
+	// on docker 27.4.0). And because it cannot throw, the PER-NETWORK calls cannot reach the outer catch, so the
+	// work this slice adds cannot flip the tri-state a scope claim is spent on.
+	//
+	// The `network ls` itself deliberately stays on the throwing `exec`, so a daemon that dies between the `ps`
+	// and the listing still answers `{ reaped: false }`. That is the pre-existing behaviour and it is the
+	// conservative direction: this host cannot claim it holds nothing while it could not finish looking.
 	const step = async (args) => {
 		try {
 			const { stdout, stderr } = await exec("docker", args);
@@ -219,7 +223,11 @@ export function makeReaper({ log, exec = execDocker }) {
 	 * strictly worse than the network it would have cleaned up. It should be unreachable -- the container loop
 	 * `rm -f`'d every one of them, and a failure there throws to the outer catch -- so the ways in are a
 	 * container started between the `ps` and this inspect, or the two-workers-per-daemon configuration
-	 * `DES-CONCURRENCY-3` already calls catastrophic and unsupported. Left alone, and said.
+	 * `DES-CONCURRENCY-3` already calls catastrophic and unsupported. Where it is seen, it is left alone and
+	 * said. Where it CANNOT be seen it is not protected, and that is worth stating rather than implying: a
+	 * container in `created` state appears in neither `docker ps` nor `.Containers` (measured), so a network
+	 * whose only member is one is removed and that container can no longer start. Pre-existing -- the bare
+	 * `network rm` this replaced also succeeded on a network docker reports as empty.
 	 */
 	async function reapNetwork(network) {
 		const { ok, names, absent } = await networkEndpoints(step, network);
