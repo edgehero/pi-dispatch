@@ -368,6 +368,38 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
 }
 
 /**
+ * Every refusal that can be decided from the MANIFEST ALONE, in the order an operator should read them.
+ *
+ * Extracted (issue #337) because the admin panel needs the same answer before it advertises `b`, and the
+ * alternative is the shape this file's own `openSandbox` docblock warns about: "Two callers assembling
+ * the same session from parts is how one of them drops a part." The panel had exactly that, checking the
+ * venue and not the other two, so a run whose manifest names no image was offered the key, given two
+ * lines of detail about the session it would get, and refused the moment the key was pressed.
+ *
+ * SYNCHRONOUS AND MANIFEST-ONLY is the boundary, not an accident of what fitted. The panel reads this
+ * inside a key handler, once per record; anything needing docker (a proxy that is not running, a sandbox
+ * already up) stays in `openSandbox` where it belongs and is `OQ-038`'s residual for the panel.
+ *
+ * The VENUE comes first, and that ordering is #277's: for a run from another venue the image and the
+ * workspace are symptoms, and the first refusal an operator reads should be the cause. A workspace that
+ * happens to exist at the same path on this host would otherwise pass and silently reproduce the wrong
+ * run.
+ */
+export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync }) {
+	const venue = sandboxVenueRefusal({ jobId, manifest });
+	if (venue) return venue;
+	if (!manifest?.image) {
+		return { refused: "no-image", message: `the manifest for ${jobId} names no image, so the sandbox cannot reproduce the run` };
+	}
+	if (!manifest?.workspace || !fileExists(manifest.workspace)) {
+		// The common cause for a local run: the operator's folder moved or was deleted. Naming the path is
+		// the whole diagnosis, so name it.
+		return { refused: "workspace-gone", message: `the workspace for ${jobId} is no longer at ${manifest.workspace} — a local folder that moved cannot be re-opened` };
+	}
+	return null;
+}
+
+/**
  * Resolve one retained run into a launchable argv, or a NAMED refusal.
  *
  * Split out from the launch so both callers -- the CLI and the admin panel -- refuse identically, the venue
@@ -388,16 +420,8 @@ export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = []
 	// The venue BEFORE the image and the workspace (#277): for a run from another venue those two are the
 	// symptoms, and the first refusal an operator reads should be the cause. A workspace that happens to
 	// exist at the same path on this host would otherwise pass and silently reproduce the wrong run.
-	const venue = sandboxVenueRefusal({ jobId, manifest });
-	if (venue) return venue;
-	if (!manifest.image) {
-		return { refused: "no-image", message: `the manifest for ${jobId} names no image, so the sandbox cannot reproduce the run` };
-	}
-	if (!manifest.workspace || !fileExists(manifest.workspace)) {
-		// The common cause for a local run: the operator's folder moved or was deleted. Naming the path is
-		// the whole diagnosis, so name it.
-		return { refused: "workspace-gone", message: `the workspace for ${jobId} is no longer at ${manifest.workspace} — a local folder that moved cannot be re-opened` };
-	}
+	const refusal = sandboxSyncRefusal({ jobId, manifest, fileExists });
+	if (refusal) return refusal;
 
 	return { manifest, name: sandboxContainerName(jobId), publish };
 }

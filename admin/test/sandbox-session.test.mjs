@@ -113,7 +113,7 @@ test("a sandbox that exits non-zero without opening a shell PAUSES, rather than 
   const { io, written } = panelIo({ launch: async () => ({ code: 125 }), pause: async () => void pauses++ });
   await mod.openSandboxSession(RETAINED, "gh-1", io);
   assert.match(written.join(""), /the sandbox exited 125\. If no shell opened, the runtime refused/);
-  assert.match(written.join(""), /DOCKER_HOST in this shell may not be the daemon/, "and it names all three causes, the daemon included");
+  assert.match(written.join(""), /DOCKER_HOST in this shell may not be the daemon/, "and 125 names all three of ITS causes, the daemon included");
   assert.equal(pauses, 1, "the operator reads it before the panel comes back");
 
   // THREE CODES, and the wording is what makes that safe. The sandbox runs `--entrypoint bash -i`, so
@@ -121,12 +121,21 @@ test("a sandbox that exits non-zero without opening a shell PAUSES, rather than 
   // earlier version asserted the sandbox "never opened" and was false for `exit 1`; the next narrowed to
   // 125 and made a genuine `exec bash failed` (127) silent again. Offering the runtime reading
   // conditionally is true either way.
-  for (const code of [126, 127]) {
+  // Each code gets ITS OWN cause. A shared list was written first and was wrong for two of the three: a
+  // name clash cannot produce a 127, and the cause the widening was FOR -- `exec bash failed: No such
+  // file or directory` -- was not in it at all.
+  for (const [code, cause, wrong] of [
+    [126, /entrypoint is not executable/, /--pull=never/],
+    [127, /no entrypoint at that path/, /name may be taken/],
+  ]) {
     let p2 = 0;
     const runtime = panelIo({ launch: async () => ({ code }), pause: async () => void p2++ });
     await mod.openSandboxSession(RETAINED, "gh-1", runtime.io);
-    assert.match(runtime.written.join(""), new RegExp(`the sandbox exited ${code}\\. If no shell opened`), `exit ${code} is also a runtime refusal code`);
-    assert.doesNotMatch(runtime.written.join(""), /never opened|did not start/, "and it does not assert which of the two happened");
+    const text = runtime.written.join("");
+    assert.match(text, new RegExp(`the sandbox exited ${code}\\. If no shell opened`), `exit ${code} is also a runtime refusal code`);
+    assert.match(text, cause, `exit ${code} names what THAT code means`);
+    assert.doesNotMatch(text, wrong, `exit ${code} must not offer a cause that cannot produce it`);
+    assert.doesNotMatch(text, /never opened|did not start/, "and it does not assert which of the two happened");
     assert.equal(p2, 1);
   }
 

@@ -2208,7 +2208,7 @@ function fakePanelValkey({ hosts = [], existing = [] } = {}) {
             ? [{
                 id: "gh-dead-1",
                 attemptsMade: 2,
-                failedReason: `infra failure, container exit 1 \u001b[31mANSI\u0007${"x".repeat(200)}`,
+                failedReason: `infra failure, container exit 1 \u001b[31mANSI\u0007\u009b\u0080${"x".repeat(200)}`,
                 finishedOn: 1000,
                 data: { kind: "github", target: { title: "SECRET TITLE", body: "SECRET BODY" }, trigger: { sender: { login: "secret-login" } } },
                 stacktrace: ["at secretFrame (/Users/someone/private.mjs:1:1)"],
@@ -2457,7 +2457,12 @@ test("the deps layer projects a failed Job to five host-chosen fields -- .data n
   assert.equal(row.attemptsMade, 2);
   const line = JSON.stringify(snap.failed);
   assert.ok(!line.includes("SECRET TITLE") && !line.includes("SECRET BODY") && !line.includes("secret-login") && !line.includes("secretFrame"), "payload and stacktrace stay out of the snapshot");
-  assert.ok(!row.failedReason.includes("\u001b") && !row.failedReason.includes("\u0007"), "control bytes (ANSI included) are scrubbed");
+  // C1 is in the class too since issue #337, because `scrubReason` shares `scrubControl` with the
+  // renderer and that moved to `panel.mjs`'s wider `CONTROL_CHARS`. Nothing this project produces puts a
+  // C1 code point in a worker throw's message, so this pins a contract rather than a behaviour.
+  for (const code of [0x1b, 0x07, 0x9b, 0x80]) {
+    assert.ok(!row.failedReason.includes(String.fromCharCode(code)), `control byte ${code} is scrubbed`);
+  }
   assert.ok(row.failedReason.length <= 120, "capped at the job_failed line's own 120");
   assert.equal(snap.failed.rows[1].jobId, "gh-dead-null");
   assert.equal(snap.failed.rows[1].failedReason, "-", "a reason that never arrived reads '-', never undefined or a crash");

@@ -108,8 +108,10 @@ deployment's `.env`, so if you set `PI_EGRESS` or `PI_EGRESS_PROXY` only there, 
 sandboxes too (otherwise the sandbox is refused rather than guessed at, and the refusal says so).
 
 **The panel now shows you which posture it would use, before you press `b`.** RUN_DETAIL's sandbox block
-carries two more lines, `egress on via <proxy>` (or `egress off`, or `egress unreadable`) and `read from
-this shell, not the deployment`. The second is the part that matters: the panel reports what IT resolved,
+carries two more lines, `egress on via <proxy>` (or `egress off (docker's default bridge)`, or `egress
+unreadable`) and `read from this shell, not the deployment`. The parenthetical on the off state is not
+decoration: `PI_EGRESS=0` omits `--network` entirely, so the shell lands on the default bridge and the
+whole internet, which "off" on its own reads as the opposite of. The second is the part that matters: the panel reports what IT resolved,
 and it has no way to see what your deployment's `.env` sets, so the two can disagree and only you can
 tell. The same is true of the other sandbox settings the panel resolves from its own environment, which
 `OQ-038` records in full: the retention window it reports, the idle timeout your shell gets, which

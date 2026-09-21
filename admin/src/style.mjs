@@ -246,9 +246,11 @@ function padVisible(styler, line, width) {
  * The title is STRIPPED of control bytes here rather than at each call site (issue #337). Two of the five
  * frame titles are built from a record's job id, this function clips without stripping, and fixing one
  * caller left the other carrying what the lines inside the frame no longer did. `panel.mjs`'s own `box`
- * already titles through `clip`, which strips; this is the same property in the other frame builder, so
- * the two agree instead of differing by which file a pane happens to use. C0 + DEL + C1, matching
- * `panel.mjs`'s `CONTROL_CHARS`, which is the project's class for untrusted text on its way to a terminal.
+ * already titles through `clip`, so the two frame builders now agree on the CLASS: C0 + DEL + C1, which
+ * is the project's class for untrusted text on its way to a terminal. They deliberately differ on what
+ * they do with a match. `clip` DELETES, which is right where it also measures the result; this
+ * SUBSTITUTES a space, because `frame` computes its top rule from the title's length at the call site
+ * and a deleting strip would silently change that arithmetic.
  */
 // eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
 const TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;

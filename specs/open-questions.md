@@ -1370,7 +1370,11 @@ adversarial passes did.
   the record's fields are a fixed enum written by the worker. That is still true and is still why this is
   belt-and-braces rather than a boundary: what changed is the judgement that a terminal-controlling byte
   should not depend on every future write site holding the enum, when one scrub inside one `show()` holds
-  it structurally. The `failedReason` cap is unchanged.
+  it structurally. The `failedReason` cap is unchanged; its CLASS is not, and that is recorded here rather
+  than left in a diff: `scrubReason` shares `scrubControl`, so widening the renderer's class widened this
+  belt's too, from C0 + DEL to C0 + DEL + C1. No `failedReason` this project can produce contains a C1
+  code point (it is a worker throw's message, decoded as UTF-8), so nothing observable moved -- but a
+  contract that moved without a row is the gap this project's own rule exists to close.
   **Issue #337 asked whether the class needs C1, and the answer turned out to be already written down.**
   This project has TWO control-byte classes, not one: `triggers.mjs`'s VALIDATOR is C0 + DEL and decides
   whether an operator-authored file is acceptable, while `panel.mjs`'s `CONTROL_CHARS` is C0 + DEL + C1,
@@ -1502,6 +1506,13 @@ adversarial passes did.
     disagree, and every retained run in that list reports itself swept with no `b` offered. That is a
     live defect today, and it is the cheapest possible case for the review. `PI_SANDBOX_RETENTION_HOURS` and `PI_SANDBOX_IDLE_MINUTES` are numbers rather than
     paths, so they would be a genuine widening of what the file's shape carries.
+- **A second thing the panel cannot settle without docker, recorded here so the code's pointer resolves**:
+  when a sandbox launch exits 125, 126 or 127, the panel cannot tell the RUNTIME's refusal from the
+  interactive shell's own status, because the sandbox runs `--entrypoint bash -i` and docker reuses those
+  three codes for both. The line therefore states the code and offers the runtime reading conditionally,
+  which is true either way. Settling it needs a docker read after the exit (whether a container by that
+  name exists, or a `--cidfile`), which is a second round trip inside a key handler, and it is the same
+  shape as the rest of this row: a question whose answer is on the daemon the panel may not be talking to.
 - **Out of scope here, and named so it does not disappear with #337**: the sandbox launcher is hard-wired
   to the docker CLI and `sandboxVenueRefusal` reopens only the `local` adapter by name, which belongs to
   `#354` (a native podman backend). This row is about what the panel can SEE, not about which runtimes it

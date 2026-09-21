@@ -1705,7 +1705,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (`{ jobId, attemptsMade, failedReason, queue, endedAt }`, key-set pinned; `.data` never crosses).
   `failedReason` is the worker's OWN throw message, de-payloaded at its sources in the same slice
   (branch.mjs answers with a type, prepare-local basenames its path) and belt-scrubbed in the deps
-  layer (control bytes stripped, 120-char cap, the `job_failed` line's own bound); `OQ-035` records
+  layer (control bytes replaced with spaces, C0 + DEL + C1 since issue #337, 120-char cap, the
+  `job_failed` line's own bound); `OQ-035` records
   that the belt is a bound, not a classification. The view states the retention split (31d forge, 7d
   local/cron) because a uniform claim would be false for half the rows. REJECTED here: a
   `dispatch_failed` model tool and a `failed` subcommand (both enumeration-pinned surfaces bought for

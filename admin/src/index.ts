@@ -122,7 +122,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { setGlyphs } from "./panel.mjs";
-import { openSandbox, sandboxEgress, sandboxVenueRefusal } from "@edgehero/pi-dispatch/sandbox";
+import { openSandbox, sandboxEgress, sandboxSyncRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
 import { makeDashboard, createDashboardDeps } from "./dashboard.ts";
@@ -1755,22 +1755,33 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   // #277: the SAME venue refusal `resolveSandbox` applies when the key is pressed, asked here so the panel
   // never advertises `b` for a run this host cannot re-open. `retained` is this object's "re-openable"
   // verdict, which is what the dashboard's key guard reads.
-  if (sandboxVenueRefusal({ jobId, manifest })) {
-    const named = typeof manifest.backend === "string" && manifest.backend !== "";
-    return { retained: false, reason: named ? `not reopenable here (ran on ${manifest.backend})` : "not reopenable (no venue recorded)" };
-  }
-  // The other two SYNCHRONOUS refusals `resolveSandbox` makes, asked here for the reason the venue one
-  // already is: so the panel never advertises `b` for a run this host cannot re-open. Until issue #337
-  // it stopped at the venue, so a run whose manifest names no image, or whose local folder moved, was
-  // offered the key, given two lines of egress detail about the session it would get, and then refused
-  // the moment it was pressed. Nobody reads two lines of detail about a door they are also told is shut.
+  // EVERY refusal that can be decided from the manifest alone, through the SAME predicate
+  // `resolveSandbox` uses (issue #337), so the panel never advertises `b` for a run this host cannot
+  // re-open. It used to ask only the venue one, so a run whose manifest names no image, or whose local
+  // folder moved, was offered the key, given two lines of egress detail about the session it would get,
+  // and refused the moment the key was pressed. Copying the other two here instead of sharing them would
+  // have been the shape `openSandbox`'s own docblock warns about: two callers assembling the same answer
+  // from parts is how one of them drops a part.
   //
-  // The third refusal `openSandbox` can make is NOT asked here and cannot be: a proxy that is not running
-  // fails at network creation, which needs docker, and this read is synchronous by design so RUN_DETAIL
-  // can do it once on entry inside a key handler. That residual is `OQ-038`'s, not this function's.
-  if (!manifest.image) return { retained: false, reason: "not reopenable (the manifest names no image)" };
-  if (!manifest.workspace || !nodeFs.existsSync(manifest.workspace)) {
-    return { retained: false, reason: "not reopenable (the workspace has moved or been deleted)" };
+  // What stays in `openSandbox` is anything needing docker (a proxy that is not running, a sandbox
+  // already up). This read is synchronous by design so RUN_DETAIL can do it once on entry inside a key
+  // handler, and that residual is `OQ-038`'s rather than this function's.
+  //
+  // The MESSAGE is this pane's own, not the refusal's: `resolveSandbox` names the workspace path, and
+  // the rule here is a retention state and never a path, because a manifest path embeds an account name
+  // on Windows and this view renders beside PII-free record fields.
+  const refusal = sandboxSyncRefusal({ jobId, manifest });
+  if (refusal) {
+    const named = typeof manifest.backend === "string" && manifest.backend !== "";
+    const reason =
+      refusal.refused === "no-image"
+        ? "not reopenable (the manifest names no image)"
+        : refusal.refused === "workspace-gone"
+          ? "not reopenable (the workspace has moved or been deleted)"
+          : named
+            ? `not reopenable here (ran on ${manifest.backend})`
+            : "not reopenable (no venue recorded)";
+    return { retained: false, reason };
   }
   const keepUntil = Date.parse(manifest.keepUntil ?? "");
   const createdAt = Date.parse(manifest.createdAt ?? "");
@@ -1878,21 +1889,31 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
   // readings are then true, and the redraw is stopped for all three.
   //
   // Telling them apart properly needs a docker read (whether a container by that name exists after the
-  // exit, or a `--cidfile`), which is a second round trip in a key handler and belongs with `OQ-038`'s
-  // other unanswerable-without-docker question rather than here.
-  if (SANDBOX_RUNTIME_REFUSAL_CODES.has(result.code)) {
-    write(`\nthe sandbox exited ${result.code}. If no shell opened, the runtime refused before the container ran: the name may be taken by a container that is still around, the image may be missing under --pull=never, or DOCKER_HOST in this shell may not be the daemon you think it is\n`);
+  // exit, or a `--cidfile`), which is a second round trip in a key handler. Recorded in `OQ-038` as one
+  // more thing this panel cannot settle without docker, beside the posture it can only read from its own
+  // environment.
+  const refusalCause = SANDBOX_RUNTIME_REFUSAL_CAUSES[result.code];
+  if (refusalCause) {
+    write(`\nthe sandbox exited ${result.code}. If no shell opened, ${refusalCause}\n`);
     await pause();
   }
 }
 
 /**
- * The exit codes a container runtime uses to refuse before the container runs. Docker and Podman both
- * use all three: 125 for the runtime's own refusal, 126 and 127 from the exec of the entrypoint. Bash
- * uses the same three for its own last command, which is why the message above offers rather than
- * asserts the runtime reading.
+ * The exit codes a container runtime uses to refuse before the container runs, each with the cause THAT
+ * code means. Docker and Podman both use all three, and they do not mean the same thing: 125 is the
+ * runtime's own refusal, while 126 and 127 come from the exec of the entrypoint. A shared list of causes
+ * was written first and was wrong for two of the three, offering a name clash as a reason for a 127 and
+ * omitting the one the widening was FOR -- `exec bash failed: No such file or directory`.
+ *
+ * Bash uses the same three codes for its own last command, which is why each line offers rather than
+ * asserts: "if no shell opened" is true whichever side produced the code.
  */
-const SANDBOX_RUNTIME_REFUSAL_CODES = new Set([125, 126, 127]);
+const SANDBOX_RUNTIME_REFUSAL_CAUSES: Record<number, string> = {
+  125: "the runtime refused before the container ran: the name may be taken by a container that is still around, the image may be missing under --pull=never, or DOCKER_HOST in this shell may not be the daemon you think it is",
+  126: "the image's entrypoint is not executable",
+  127: "the image has no entrypoint at that path (a sandbox needs bash in the image)",
+};
 /**
  * Hold the suspended terminal open long enough to read a refusal, then return.
  *
