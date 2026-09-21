@@ -298,29 +298,36 @@ test("readEnvKeys reads a value back exactly as the shell does, quotes and comme
 test("renderEnvValue writes what both consumers read back, and refuses what neither can", () => {
 	// A deployment folder with a space is ordinary on macOS, whose wrapper sources this file: bare, the
 	// shell splits the assignment, the key ends up empty, and the tail RUNS as the service account.
-	assert.equal(renderEnvValue("/srv/pi/pause-windows.json"), "/srv/pi/pause-windows.json", "an ordinary path is written bare");
-	assert.equal(renderEnvValue("/srv/a b/c.json"), "'/srv/a b/c.json'");
-	assert.equal(renderEnvValue("/srv/a #2/c.json"), "'/srv/a #2/c.json'");
+	assert.equal(renderEnvValue("/srv/pi/pause-windows.json", { platform: "linux" }), "/srv/pi/pause-windows.json", "an ordinary path is written bare");
+	assert.equal(renderEnvValue("/srv/a b/c.json", { platform: "linux" }), "'/srv/a b/c.json'");
+	assert.equal(renderEnvValue("/srv/a #2/c.json", { platform: "linux" }), "'/srv/a #2/c.json'");
 	// Single quotes and not double: `"/x$HOME/y"` is EXPANDED by the shell, measured in all three.
-	assert.equal(renderEnvValue("/x$HOME/y"), "'/x$HOME/y'");
-	assert.throws(() => renderEnvValue("/srv/it's/c.json"), /single quote/, "no rendering is read identically by both consumers, so it is refused rather than escaped");
-	assert.throws(() => renderEnvValue("/srv/a\nb"), /newline/);
+	assert.equal(renderEnvValue("/x$HOME/y", { platform: "linux" }), "'/x$HOME/y'");
+	assert.throws(() => renderEnvValue("/srv/it's/c.json", { platform: "linux" }), /single quote/, "no rendering is read identically by both consumers, so it is refused rather than escaped");
+	assert.throws(() => renderEnvValue("/srv/a\nb", { platform: "linux" }), /newline/);
 	// The one character every Windows path contains, and the row that forces the question of WHICH
 	// consumer reads the quotes. Bare, all three shells eat the backslashes
 	// (`C:\\Users\\op\\logs` comes back `C:Usersoplogs`), so it must be quoted for them.
-	assert.equal(renderEnvValue("C:\\pi\\deploy\\logs"), "'C:\\pi\\deploy\\logs'");
+	assert.equal(renderEnvValue("C:\\pi\\deploy\\logs", { platform: "linux" }), "'C:\\pi\\deploy\\logs'");
 	// And `%` is cmd's expansion character, so it is outside the bare set too.
-	assert.equal(renderEnvValue("C:/pi/100%/logs"), "'C:/pi/100%/logs'");
+	assert.equal(renderEnvValue("C:/pi/100%/logs", { platform: "linux" }), "'C:/pi/100%/logs'");
 });
 
-test("renderEnvValue refuses to quote for the Windows loader, which keeps the quotes", () => {
-	// `deploy/worker-env-wrapper.cmd` states this in its own header: "Values MUST be UNQUOTED -- cmd's
-	// `set` keeps surrounding quotes as part of the value." A quoted value there is a directory that does
-	// not exist, behind a ✓, which is the POSIX defect this rendering exists to prevent, reintroduced on
-	// the one platform none of the shell measurements covered.
-	assert.equal(renderEnvValue("C:/pi/deploy/logs", { quotable: false }), "C:/pi/deploy/logs", "forward slashes keep a Windows path inside the bare set");
-	assert.throws(() => renderEnvValue("C:\\pi\\deploy\\logs", { quotable: false }), /cmd's `set` keeps the quotes/);
-	assert.throws(() => renderEnvValue("C:/pi/my deploy/logs", { quotable: false }), /cmd's `set` keeps the quotes/);
+test("renderEnvValue never quotes for the Windows loader, and its bare set is cmd's own", () => {
+	// `deploy/worker-env-wrapper.cmd` keeps surrounding quotes as part of the value, so nothing is ever
+	// quoted there. Its bare set is DERIVED from that loader rather than borrowed from the POSIX one,
+	// which is what an earlier version got wrong: the loader is the QUOTED `set "%%A=%%B"` form, which
+	// preserves spaces exactly, so reusing the POSIX predicate refused all four keys on
+	// `C:\Program Files\...` and on any home with a space in it, telling the operator to move the
+	// deployment because of a space.
+	assert.equal(renderEnvValue("C:/pi/deploy/logs", { platform: "win32" }), "C:/pi/deploy/logs");
+	assert.equal(renderEnvValue("C:/Program Files/pi/logs", { platform: "win32" }), "C:/Program Files/pi/logs", "a space is fine for cmd's quoted `set`");
+	assert.equal(renderEnvValue("C:\\Users\\Bob Smith\\deploy", { platform: "win32" }), "C:\\Users\\Bob Smith\\deploy", "and so is a backslash: only the POSIX shells eat those");
+	assert.equal(renderEnvValue("C:/pi/a#b/logs", { platform: "win32" }), "C:/pi/a#b/logs", "cmd's `eol=#` only skips a line that STARTS with one");
+	// What cmd genuinely cannot take.
+	assert.throws(() => renderEnvValue("C:/pi/100%/logs", { platform: "win32" }), /expansion character/);
+	assert.throws(() => renderEnvValue('C:/pi/a"b/logs', { platform: "win32" }), /double quote/);
+	assert.throws(() => renderEnvValue("C:/pi/a\nb", { platform: "win32" }), /line break/);
 });
 
 test("a value that needs quoting round-trips through the writer and back out of the reader", () => {
@@ -425,6 +432,39 @@ test("updateEnvFile: a file this process does not own is refused, not rewritten 
 	};
 	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /owned by uid .* and this process is uid/);
 	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n", "and nothing was written on the way to finding out");
+	assert.equal(ops.filter(([op]) => op === "write").length, 0);
+});
+
+test("updateEnvFile derives the rendering rule itself, so no writer has to remember it", () => {
+	// The first version took `quotable` from each caller. `up` passed it and `github-app-setup.mjs` did
+	// not, so on Windows a PEM path was single-quoted and the cmd wrapper kept the quotes: the path the
+	// worker loads was wrong, behind a ✓, on the key that decides forge auth. A rendering rule every
+	// writer of this file must remember is a rule one of them will forget.
+	const win = fakeFs("/d/.env", "GITHUB_APP_PRIVATE_KEY_PATH=\n");
+	updateEnvFile("/d/.env", "GITHUB_APP_PRIVATE_KEY_PATH", "C:/pi/app key.pem", { fs: win.fs, platform: "win32" });
+	assert.equal(win.files.get("/d/.env"), "GITHUB_APP_PRIVATE_KEY_PATH=C:/pi/app key.pem\n", "bare, because cmd's quoted `set` preserves the space");
+	const posix = fakeFs("/d/.env", "GITHUB_APP_PRIVATE_KEY_PATH=\n");
+	updateEnvFile("/d/.env", "GITHUB_APP_PRIVATE_KEY_PATH", "/srv/pi/app key.pem", { fs: posix.fs, platform: "linux" });
+	assert.equal(posix.files.get("/d/.env"), "GITHUB_APP_PRIVATE_KEY_PATH='/srv/pi/app key.pem'\n", "quoted, because sh would split at the space");
+	// And with NOBODY passing it, which is the shape every caller but `up` uses: the default has to be
+	// this host's, or a caller that omits it gets another platform's rendering. Compared against the
+	// explicit form rather than against a fixed string, so the assertion holds on a Windows runner too.
+	const derived = fakeFs("/d/.env", "K=\n");
+	updateEnvFile("/d/.env", "K", "/srv/pi/app key.pem", { fs: derived.fs });
+	assert.equal(derived.files.get("/d/.env"), `K=${renderEnvValue("/srv/pi/app key.pem", { platform: process.platform })}\n`);
+});
+
+test("updateEnvFile: a file whose GROUP is not this process's is refused too", () => {
+	// The layout the uid check protects is a `.env` at 0640 read by the service THROUGH ITS GROUP. With
+	// `bob:pi 0640` and the operator in group `pi`, the uid matches, the rename still makes a new inode
+	// with the writer's primary gid, and the `pi` service loses read access exactly as on a uid mismatch.
+	const { fs, files, ops } = fakeFs("/deploy/.env", "WEBHOOK_SECRET=\n", 0o640);
+	fs.statSync = (p) => {
+		ops.push(["stat", p]);
+		return { mode: 0o100640, uid: process.getuid?.() ?? 0, gid: (process.getgid?.() ?? 0) + 1 };
+	};
+	assert.throws(() => updateEnvFile("/deploy/.env", "WEBHOOK_SECRET", "abc123", { fs }), /its group is gid .* and this process is gid/);
+	assert.equal(files.get("/deploy/.env"), "WEBHOOK_SECRET=\n");
 	assert.equal(ops.filter(([op]) => op === "write").length, 0);
 });
 

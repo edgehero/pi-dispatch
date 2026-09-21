@@ -120,6 +120,7 @@ function harness({ argv, answers = [], files = {}, routes = greenRoutes(), code 
 	};
 	return {
 		run: () => runGithubAppSetup(argv ?? ["--webhook-url", "https://hooks.example/github"], deps),
+		deps,
 		text: () => buf.join(""),
 		promptCalls,
 		opened,
@@ -141,6 +142,22 @@ function assertNoSecrets(text) {
 }
 
 // -- flags: the webhook shape is a choice, never a default ---------------------------------------------
+
+test("setup github: a .env it cannot write is a line naming what to add by hand, not a stack trace", async () => {
+	// `updateEnvFile` can refuse rather than write since issue #357: a `.env` owned by another account or
+	// group, or a value no loader of that file can read back. Unwrapped, that refusal left a half-done
+	// setup -- the PEM already on disk at 0600, possibly an empty `.env` just created -- and a stack trace
+	// instead of the summary. The App itself already exists on GitHub by then, so saying exactly what
+	// landed and what to add by hand is the whole remaining value.
+	const h = harness({ files: { [ENV_PATH]: SEED_ENV }, answers: ["y", "y", "y"] });
+	h.deps.fs.statSync = () => ({ mode: 0o100600, uid: (process.getuid?.() ?? 0) + 1, gid: process.getgid?.() ?? 0 });
+	const code = await h.run();
+	const text = h.text();
+	assert.match(text, /could not write the App's lines into/);
+	assert.match(text, /GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=\d+ and GITHUB_APP_PRIVATE_KEY_PATH=/, "it names the three lines and their values");
+	assert.doesNotMatch(text, /at updateEnvFile/, "and it is a sentence rather than a stack");
+	assert.equal(typeof code, "number");
+});
 
 test("setup github: neither --webhook-url nor --no-webhook is a refusal with guidance, before any listener", async () => {
 	const h = harness({ argv: [] });

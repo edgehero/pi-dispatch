@@ -79,17 +79,30 @@ function replacementLines(key, value, bare, wasComment, opts) {
  */
 const UNQUOTED_SAFE = /^[A-Za-z0-9_@+=:,./-]*$/;
 
-export function renderEnvValue(value, { quotable = true } = {}) {
+/**
+ * cmd's own bare set, derived from `deploy/worker-env-wrapper.cmd` rather than borrowed from the POSIX
+ * one, which is a distinction this got wrong once. That loader is
+ * `for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"`, the QUOTED `set` form,
+ * which preserves spaces exactly. So a space is fine there and `C:\Program Files\...` needs no quoting,
+ * while the POSIX predicate would have refused all four keys on the commonest Windows layout there is.
+ *
+ * What cmd cannot take is `%` (its expansion character), a `"` (it would close the quoted `set`), and a
+ * carriage return or newline. `'` is ordinary there, and is excluded anyway by the shared refusal above,
+ * because the same file is read on POSIX by deployments that share it.
+ */
+const WINDOWS_UNSAFE = /[%"\n\r]/;
+
+export function renderEnvValue(value, { platform = process.platform } = {}) {
 	const v = String(value);
+	// The Windows loader keeps surrounding quotes as part of the value ("Values MUST be UNQUOTED", its own
+	// header), so nothing is ever quoted for it: a value it can take is written bare, and one it cannot is
+	// refused rather than dressed in quotes that become part of a path.
+	if (platform === "win32") {
+		if (WINDOWS_UNSAFE.test(v)) throw new Error(`cannot write this value into a .env on Windows: it contains ${/[%]/.test(v) ? "a % (cmd's expansion character)" : /["]/.test(v) ? 'a double quote' : "a line break"}, and cmd's \`set\` cannot be quoted around it (deploy/worker-env-wrapper.cmd)`);
+		return v;
+	}
 	if (UNQUOTED_SAFE.test(v)) return v;
 	if (v.includes("'") || /[\n\r]/.test(v)) throw new Error(`cannot write this value into a .env safely: ${v.includes("'") ? "it contains a single quote" : "it contains a newline"}`);
-	// `quotable: false` is the Windows loader, and it is not a preference. `deploy/worker-env-wrapper.cmd`
-	// says so in its own header: "Values MUST be UNQUOTED -- cmd's `set` keeps surrounding quotes as part
-	// of the value." So a quoted value there is a directory that does not exist, behind a ✓, which is the
-	// POSIX defect this rendering exists to prevent, reintroduced on the one platform none of the
-	// measurements covered. `%` is excluded from the safe set for the same reader: it is cmd's expansion
-	// character.
-	if (!quotable) throw new Error(`cannot write this value into a .env on Windows: it needs quoting, and cmd's \`set\` keeps the quotes as part of the value (deploy/worker-env-wrapper.cmd)`);
 	return `'${v}'`;
 }
 
@@ -208,9 +221,14 @@ export function setEnvKey(text, key, value, opts) {
  * impose one.
  */
 export function updateEnvFile(path, key, value, deps = {}) {
-	const { fs = { readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync }, overwrite = false, quotable = true } = deps;
+	// `platform` is derived HERE rather than passed by each caller, which is what the first version got
+	// wrong: `up` passed it and `github-app-setup.mjs` did not, so on Windows a PEM path was single-quoted
+	// and the cmd wrapper kept the quotes, making the path the worker loads wrong behind a ✓ on the key
+	// that decides forge auth. A rendering rule that every writer of this file must remember is a rule one
+	// of them will forget.
+	const { fs = { readFileSync, writeFileSync, renameSync, statSync, chmodSync, realpathSync }, overwrite = false, platform = process.platform } = deps;
 	const text = fs.readFileSync(path, "utf8");
-	const next = (overwrite ? setEnvKey : setEnvKeyIfEmpty)(text, key, value, { quotable });
+	const next = (overwrite ? setEnvKey : setEnvKeyIfEmpty)(text, key, value, { platform });
 	if (next === text) return { changed: false };
 	// Through the SYMLINK, not over it. A deployment whose `.env` points at a shared env file is an
 	// ordinary layout, and rename-over-the-link replaces it with a regular file: every later edit to the
@@ -229,10 +247,16 @@ export function updateEnvFile(path, key, value, deps = {}) {
 	// would publish a file holding WEBHOOK_SECRET. Refusing is the only honest third option, and the caller
 	// turns it into a line rather than a stack trace.
 	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	const gid = typeof process.getgid === "function" ? process.getgid() : null;
 	if (uid !== null) {
 		try {
-			const owner = fs.statSync(target).uid;
+			const { uid: owner, gid: group } = fs.statSync(target);
+			// GID as well as UID, because the layout this protects is a `.env` at 0640 read by the service
+			// THROUGH ITS GROUP. With `bob:pi 0640` and the operator in group `pi` the uid matches, the
+			// rename still makes a new inode with the writer's primary gid, and the `pi` service loses read
+			// access exactly as it would have on a uid mismatch.
 			if (typeof owner === "number" && owner !== uid) throw new Error(`refusing to edit ${target}: it is owned by uid ${owner} and this process is uid ${uid}, and rewriting it would hand it to the wrong account`);
+			if (typeof group === "number" && gid !== null && group !== gid) throw new Error(`refusing to edit ${target}: its group is gid ${group} and this process is gid ${gid}, and rewriting it would hand it to the wrong group, which is how a 0640 .env stops being readable by the service`);
 		} catch (err) {
 			if (err instanceof Error && err.message.startsWith("refusing to edit")) throw err;
 			// Cannot stat: fall through to the write, which will fail on its own terms if it must.

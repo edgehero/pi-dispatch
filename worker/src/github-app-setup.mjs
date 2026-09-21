@@ -235,16 +235,28 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 			fs.writeFileSync(envPath, "");
 			say(`note: no .env existed here — created one for the lines you approved\n`);
 		}
-		updateEnvFile(envPath, "GITHUB_AUTH_SOURCE", "app", { fs, overwrite: true });
-		updateEnvFile(envPath, "GITHUB_APP_ID", String(app.id), { fs, overwrite: true });
-		updateEnvFile(envPath, "GITHUB_APP_PRIVATE_KEY_PATH", pemPath, { fs, overwrite: true });
-		summary.push(["auth source", "GITHUB_AUTH_SOURCE=app (+ app id and key path) written to .env"]);
-		if (offerSecret) {
-			// setEnvKeyIfEmpty, NOT overwrite: an operator's existing webhook secret is what their
-			// already-configured hooks sign with — replacing it would invalidate working deliveries.
-			const { changed } = updateEnvFile(envPath, "WEBHOOK_SECRET", app.webhook_secret, { fs });
-			say(changed ? "✓ WEBHOOK_SECRET set in .env (value not shown)\n" : "✓ WEBHOOK_SECRET already set in .env — kept (your configured hooks keep verifying)\n");
-			summary.push(["WEBHOOK_SECRET", changed ? "set from the App's minted secret (value not shown)" : "already set — kept, so existing deliveries stay valid"]);
+		// WRAPPED, because `updateEnvFile` can now refuse rather than write: a `.env` owned by another
+		// account or another group, and a value no loader of that file can read back. Unwrapped, the
+		// refusal would leave a half-done setup -- the PEM already on disk at 0600, possibly an empty
+		// `.env` just created above -- and a stack trace instead of the summary this command exists to
+		// print. The App itself is already created on GitHub by this point, so saying exactly what landed
+		// is the whole remaining value.
+		try {
+			updateEnvFile(envPath, "GITHUB_AUTH_SOURCE", "app", { fs, overwrite: true });
+			updateEnvFile(envPath, "GITHUB_APP_ID", String(app.id), { fs, overwrite: true });
+			updateEnvFile(envPath, "GITHUB_APP_PRIVATE_KEY_PATH", pemPath, { fs, overwrite: true });
+			summary.push(["auth source", "GITHUB_AUTH_SOURCE=app (+ app id and key path) written to .env"]);
+			if (offerSecret) {
+				// setEnvKeyIfEmpty, NOT overwrite: an operator's existing webhook secret is what their
+				// already-configured hooks sign with — replacing it would invalidate working deliveries.
+				const { changed } = updateEnvFile(envPath, "WEBHOOK_SECRET", app.webhook_secret, { fs });
+				say(changed ? "✓ WEBHOOK_SECRET set in .env (value not shown)\n" : "✓ WEBHOOK_SECRET already set in .env — kept (your configured hooks keep verifying)\n");
+				summary.push(["WEBHOOK_SECRET", changed ? "set from the App's minted secret (value not shown)" : "already set — kept, so existing deliveries stay valid"]);
+			}
+		} catch (err) {
+			say(`error: could not write the App's lines into ${envPath}: ${err?.message}\n`);
+			say(`    → the App exists on GitHub and its key is at ${pemPath}. Add GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=${app.id} and GITHUB_APP_PRIVATE_KEY_PATH=${pemPath} to that file by hand\n`);
+			summary.push(["auth source", `NOT written: ${err?.message}`]);
 		}
 		say(`✓ credentials written\n`);
 
@@ -320,7 +332,12 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 		// so this one IS printed in full.
 		say(`\nsetup would write to ${envPath}:\n      GITHUB_APP_INSTALLATION_ID=${chosen.id}${chosen.account?.login ? ` (account: ${chosen.account.login})` : ""}\n`);
 		if (await consent(prompt, "write it? [y/N] ")) {
-			updateEnvFile(envPath, "GITHUB_APP_INSTALLATION_ID", String(chosen.id), { fs, overwrite: true });
+			try {
+				updateEnvFile(envPath, "GITHUB_APP_INSTALLATION_ID", String(chosen.id), { fs, overwrite: true });
+			} catch (err) {
+				say(`error: could not write GITHUB_APP_INSTALLATION_ID into ${envPath}: ${err?.message}\n`);
+				say(`    → add GITHUB_APP_INSTALLATION_ID=${chosen.id} to that file by hand\n`);
+			}
 			say("✓ GITHUB_APP_INSTALLATION_ID written\n");
 			summary.push(["installation id", `GITHUB_APP_INSTALLATION_ID=${chosen.id} written to .env`]);
 		} else {

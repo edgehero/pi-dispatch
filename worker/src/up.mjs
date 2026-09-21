@@ -234,7 +234,7 @@ export async function runUp(argv = [], deps = {}) {
 		// disk, a `.env` this account does not own. Unwrapped, `up` died with a raw stack trace where a
 		// summary row was the whole point.
 		try {
-			if (updateEnvFile(envPath, "WEBHOOK_SECRET", randomHex(), { fs, quotable: platform !== "win32" }).changed) {
+			if (updateEnvFile(envPath, "WEBHOOK_SECRET", randomHex(), { fs, platform }).changed) {
 				out("\n✓ generated WEBHOOK_SECRET into .env (32 random bytes, hex — value not shown)\n");
 				summary.push(["WEBHOOK_SECRET", "generated into .env (value not shown; the receiver verifies deliveries with it)"]);
 			} else {
@@ -315,7 +315,7 @@ export async function runUp(argv = [], deps = {}) {
 			// and systemd's parser does not understand.
 			let changed;
 			try {
-				({ changed } = updateEnvFile(envPath, key, value, { fs, quotable: platform !== "win32" }));
+				({ changed } = updateEnvFile(envPath, key, value, { fs, platform }));
 			} catch (err) {
 				out(`✗ ${key} could not be written: ${err?.message}\n`);
 				summary.push([key, `NOT written: ${err?.message}. Set it by hand, or move the deployment somewhere without that character in its path`]);
