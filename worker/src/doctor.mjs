@@ -2407,6 +2407,10 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 		}
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
 		// long-lived, and a stranger on a network in this namespace is not ours to delete.
+		// RESIDUAL, same as `live-probes.mjs`'s and measured under #337: `names` holds RUNNING endpoints, so a
+		// probe in `created` state is missing from it and the removal below would succeed and strand it. Not
+		// guarded, and the reason is the line above: only a DEAD pid's network is touched here, and a dead
+		// process is not mid-launch.
 		// Recorded only when it TOOK, the same rule `removeNetworkOrSay` applies to `detached` -- a ✓ claiming a
 		// probe was removed while it is still running is worse than no line. One that did NOT go stays in the
 		// detach list, so it is at least taken off the network rather than falling between the two.

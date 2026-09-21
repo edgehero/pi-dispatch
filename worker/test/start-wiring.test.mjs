@@ -78,7 +78,7 @@ function fakeHost(overrides = {}) {
 const enoent = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
 const NO_HOST_FILES = { statSync: (p) => { throw enoent(p); }, readFileSync: (p) => { throw enoent(p); }, readdirSync: (p) => { throw enoent(p); } };
 
-async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs } = {}) {
+async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs } = {}) {
 	const secretsResolverCalls = [];
 	const calls = [];
 	const registered = {};
@@ -148,6 +148,20 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			return async () => {};
 		});
 
+	// Its network sweeper is faked for exactly the same reason, and one more: the real one's default runner
+	// is the docker CLI, so CALLING it in a wiring test would shell out. Tests assert what boot hands the
+	// reaper, never a docker call.
+	const sandboxSweeperCalls = [];
+	const sandboxSweeper =
+		makeSandboxNetworkSweeper ??
+		(() => {
+			const sweep = async (args) => {
+				sandboxSweeperCalls.push(args);
+				return { swept: [], notes: [] };
+			};
+			return sweep;
+		});
+
 	// The container factory is faked for the same reason as the run-history ones: the wiring tests assert
 	// what boot HANDS it (image, overlay, staged packages), never a docker launch. It records its args and
 	// returns an inert runContainer that is stored in deps and never invoked here.
@@ -181,6 +195,7 @@ async function runStart({ env = {}, makeAuth, makeHost, makeGitLabAuth, makeGitL
 			makeRecordWriter: recordWriter,
 			makeLogReaper: logReaper,
 			makeSandboxReaper: sandboxReaper,
+			makeSandboxNetworkSweeper: sandboxSweeper,
 			makeRunContainer: runContainerFactory,
 			makeSecretsResolver: (args) => (secretsResolverCalls.push(args), async () => ({ ok: true, secrets: {} })),
 			makeImagePreflight: (args) => (imagePreflightCalls.push(args), async () => bootImage ?? { ok: true }),
@@ -790,11 +805,13 @@ test("sandbox: the retention sweep runs BEFORE the worker drains, and is handed 
 			order.push("reapSandboxes");
 		};
 	};
+	const madeSweeper = async () => ({ swept: [], notes: [] });
 	const { deps } = await runStart({
 		env: { PI_SANDBOX_DIR: "/tmp/pi-sbx", PI_SANDBOX_RETENTION_HOURS: "6", PI_JOB_IMAGE: "pi-job:pinned" },
 		makeAuth,
 		makeHost: () => fakeHost(),
 		makeSandboxReaper,
+		makeSandboxNetworkSweeper: () => madeSweeper,
 		order,
 	});
 	assert.deepEqual(order, ["reapSandboxes", "createWorker"], "retained directories are swept before the worker takes a job");
@@ -803,10 +820,13 @@ test("sandbox: the retention sweep runs BEFORE the worker drains, and is handed 
 	// The one thing this reaper needs that its siblings do not: without it the sweep is blind and can
 	// delete a bind mount out from under a shell an operator is sitting in.
 	assert.equal(typeof reaperArgs.listRunning, "function", "the sweep must be able to ask which sandboxes are live");
-	// And the session networks beside them (issue #337). The reaper defaults this to a no-op, deliberately,
-	// so an unwired one still sweeps directories -- which means an unwired one is SILENT rather than broken,
-	// and nothing but this line would notice the whole feature missing from the worker.
-	assert.equal(typeof reaperArgs.sweepNetworks, "function", "the networks a dead shell left are swept too");
+	// And the session networks beside them (issue #337). Assert the reaper got the factory's RESULT, not
+	// merely something callable: `typeof` cannot tell the sweeper from the factory that makes it, and passing
+	// the factory uncalled is a one-character slip that leaves the whole feature dead while the suite stays
+	// green. At runtime it would surface only as a `sandbox_reaper_skipped` line reading "swept is not
+	// iterable", which is the line a dozen ordinary faults also produce. The reaper defaults this dep to a
+	// no-op as well, so an unwired one sweeps directories and is SILENT rather than broken.
+	assert.equal(reaperArgs.sweepNetworks, madeSweeper, "the reaper is handed the sweeper, not the factory that makes it");
 	assert.equal(typeof deps.cleanup, "function", "teardown is the retention-aware closure, not the bare rm");
 });
 

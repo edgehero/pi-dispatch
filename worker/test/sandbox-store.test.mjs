@@ -345,7 +345,10 @@ test("a run RETAINED while the pass was running is kept too, not just one it sta
 		fs,
 		now: () => AT,
 		listRunning: async () => [],
+		// The real sweeper calls `retained()` itself, after its own candidate listing, and unions what it
+		// returns into `keep`. This fake stands in for exactly that.
 		sweepNetworks: async (arg) => {
+			for (const name of arg.retained()) arg.keep.add(name);
 			seen.push([...arg.keep].sort());
 			return { swept: [], notes: [] };
 		},
@@ -353,15 +356,12 @@ test("a run RETAINED while the pass was running is kept too, not just one it sta
 	assert.deepEqual(seen, [["fresh", "justfinished", "old"]], "both halves: the expired id AND the one that landed mid-pass");
 });
 
-test("a re-read that fails skips the network sweep rather than sweeping on half the evidence (#337)", async () => {
-	const fs = sandboxDirWith({ fresh: { createdAt: hoursAgo(1) } });
-	const readdirSync = fs.readdirSync;
-	let reads = 0;
-	fs.readdirSync = (path) => {
-		if (++reads > 1) throw new Error("EIO: the directory went away");
-		return readdirSync(path);
-	};
-	let called = 0;
+test("a sandbox root that does not EXIST still sweeps networks, rather than never firing (#337)", async () => {
+	// The host most likely to be holding orphaned `pi-sandbox-` networks is the one whose sandbox root was
+	// never created or was removed by hand, and skipping there would mean the sweep never fires on it at all.
+	// Safe as well as useful: with no root, `resolveSandbox` refuses EVERY run, so no open can be in flight.
+	const fs = fakeFs({ files: {} });
+	const seen = [];
 	const logged = [];
 	await makeSandboxReaper({
 		sandboxDir: "/sbx",
@@ -370,13 +370,44 @@ test("a re-read that fails skips the network sweep rather than sweeping on half 
 		now: () => AT,
 		log: (e, d) => logged.push([e, d]),
 		listRunning: async () => [],
-		sweepNetworks: async () => {
-			called++;
+		sweepNetworks: async (arg) => {
+			seen.push([...arg.retained()]);
 			return { swept: [], notes: [] };
 		},
 	})();
-	assert.equal(called, 0, "half a keep set is worse than no sweep: the missing half is what protects a launch");
-	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "EIO: the directory went away" }]]);
+	assert.deepEqual(seen, [[]], "an absent root is an EMPTY listing, not a failed one");
+	assert.deepEqual(logged, [], "and nothing is reported as skipped, because nothing was");
+	assert.deepEqual(fs.calls.removed, []);
+});
+
+test("a re-read that FAILS is one skipped line, and nothing is swept on half the evidence (#337)", async () => {
+	// Not ENOENT: a permission wall or an I/O fault is a read that failed, and the fresh half of the keep set
+	// is what protects a run retained mid-pass. The sweeper lets that throw leave it; the reaper turns it into
+	// its family's one line.
+	const fs = sandboxDirWith({ fresh: { createdAt: hoursAgo(1) } });
+	const readdirSync = fs.readdirSync;
+	let reads = 0;
+	fs.readdirSync = (path) => {
+		if (++reads > 1) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		return readdirSync(path);
+	};
+	let swept = 0;
+	const logged = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		log: (e, d) => logged.push([e, d]),
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => {
+			for (const name of arg.retained()) arg.keep.add(name);
+			swept++;
+			return { swept: [], notes: [] };
+		},
+	})();
+	assert.equal(swept, 0, "the throw leaves the sweeper before anything is removed");
+	assert.deepEqual(logged, [["sandbox_reaper_skipped", { reason: "EACCES: permission denied" }]]);
 });
 
 test("a RUNNING sandbox reaches the network sweep through both sets (#337)", async () => {

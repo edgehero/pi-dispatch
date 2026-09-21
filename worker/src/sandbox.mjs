@@ -182,6 +182,29 @@ async function boundedDocker(args) {
 export const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NETWORK_SUFFIX}$`);
 
 /**
+ * The container states that leave a session network free. An ALLOWLIST rather than a denylist, so a state a
+ * future daemon adds is hands off by default: this decides whether something gets removed, and the safe
+ * direction is a leftover surviving one more pass. `--rm` means an exited sandbox is normally gone already.
+ */
+const SWEEPABLE_CONTAINER_STATES = new Set(["exited", "dead"]);
+
+/**
+ * Whether `docker ps -a`'s output holds a container of OURS for `id` in a state that is not finished.
+ * `--filter name=` is a substring match here exactly as it is for networks, so an operator's own
+ * `my-pi-sandbox-notes` comes back from a filter on `pi-sandbox-notes` and must never be sliced into the id
+ * vocabulary: the comparison is against the whole name the producer builds.
+ */
+function containerHolds(stdout, id) {
+	const mine = `${SANDBOX_NAME_PREFIX}${id}`;
+	for (const line of String(stdout ?? "").split("\n")) {
+		const [name, state] = line.trim().split("\t");
+		if (name !== mine) continue;
+		if (!SWEEPABLE_CONTAINER_STATES.has(String(state ?? "").trim())) return true;
+	}
+	return false;
+}
+
+/**
  * Remove session networks whose run is gone (issue #337).
  *
  * WHAT THIS IS NOT. Issue #277 withdrew removing a network at OPEN time: two opens of the same run overlap
@@ -191,65 +214,96 @@ export const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NE
  * pass STARTED with, which no open in progress can be absent from because `resolveSandbox` refuses a job
  * whose directory is gone. Nothing here runs while an operator is opening anything.
  *
- * THE DANGEROUS VERB IS `detach`, NOT `rm`, and the guard is placed accordingly. Measured on docker 27.4.0:
- * a `network rm` of a network a live container is on FAILS ("has active endpoints"), so docker itself is the
- * backstop for the removal. What docker will not stop is stripping the proxy off a live session's network,
- * which is exactly the #277 harm. So the session-container check gates what goes into the DETACH list, and
- * the test asserts no `network disconnect` is issued rather than asserting the network survived -- the
- * weaker assertion would pass on docker's refusal alone.
+ * THE DANGEROUS VERB IS `detach`, NOT `rm`, for a RUNNING container. Measured on docker 27.4.0: a
+ * `network rm` of a network a running container is on FAILS ("has active endpoints"), so docker itself is
+ * the backstop for the removal there. What docker will not stop is stripping the proxy off that session,
+ * which is exactly the #277 harm, so the endpoint check gates what goes into the DETACH list, and the test
+ * asserts no `network disconnect` is issued rather than asserting the network survived -- the weaker
+ * assertion would pass on docker's refusal alone. The backstop does NOT extend to a container in `created`
+ * state, where the `rm` succeeds and leaves that container unable to start ever, which is why the last call
+ * before the removal is a `docker ps -a` for this id and not something inferred from the endpoint list.
+ *
+ * ORDER, since three of the four reads here only work in one arrangement: candidates first (`network ls`),
+ * then every piece of evidence that protects one, freshest last. An open creates its network BEFORE its
+ * container and AFTER the directory that made it legal, so evidence read before the candidate listing can be
+ * older than the thing it must protect.
  *
  * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
  * pure-ish function over its runner.
  */
 export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
-	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set() } = {}) {
-		// A sandbox being launched RIGHT NOW is invisible to everything else here, and that is measured, not
-		// feared: between `docker run`'s create and its start (230 ms on this host with the image local, the
-		// whole pull when it is not) the container is in `created` state, where `docker ps` does not list it,
-		// `network inspect` does not list it as an endpoint, AND `network rm` succeeds -- after which
-		// `docker start` fails with "network not found" and that container can never run. So the daemon is a
-		// backstop for a RUNNING endpoint only, and this is the one listing that sees the launch window.
-		// A leftover container stuck in `created` therefore holds its network back, which is the right
-		// direction: `openSandbox` would refuse that run by name anyway until an operator removes it.
-		const starting = await run(["ps", "-a", "--filter", "status=created", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Names}}"]);
-		if (starting?.code !== 0) return { swept: [], notes: [], failed: "starting-list-failed" };
-		const launching = new Set(
-			String(starting.stdout ?? "")
-				.split("\n")
-				.map((n) => n.trim())
-				.filter((n) => n.startsWith(SANDBOX_NAME_PREFIX))
-				.map((n) => n.slice(SANDBOX_NAME_PREFIX.length)),
-		);
+	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = () => [] } = {}) {
+		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
+		// accident of writing: a network is created BEFORE the container that joins it and AFTER the directory
+		// that made the open legal, so evidence read before this listing can be older than the thing it is
+		// meant to protect. Read the other way round, anything that appears after this listing is simply not a
+		// candidate this pass.
 		const listed = await run(["network", "ls", "--filter", `name=${SANDBOX_NAME_PREFIX}`, "--format", "{{.Name}}"]);
 		// A listing that did not answer is a FAULT, not a verdict about any network, and the two carry
 		// different names on `OQ-007`'s property: the reaper turns `failed` into its family's
 		// `sandbox_reaper_skipped` line, while `notes` are per-network outcomes of a pass that ran. Reporting
 		// this as a note would say "one network was not reaped" about a look that saw none.
 		if (listed?.code !== 0) return { swept: [], notes: [], failed: "network-list-failed" };
+
+		// The retained directories as they are NOW, unioned by the caller with the listing its pass began
+		// with. Each half covers what the other cannot, and this is the half that has to be read here rather
+		// than handed in: `retainJobDir` creates a directory at job END, in this same process, so a run can be
+		// retained and opened while the pass is still going. A read that throws leaves this function, which is
+		// deliberate: half a keep set is worse than no sweep.
+		for (const name of retained()) keep.add(name);
+
 		const swept = [];
 		const notes = [];
 		for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 			const m = SANDBOX_NETWORK_SHAPE.exec(name);
 			if (!m) continue; // the filter is not the namespace
 			const id = m[1];
-			// Any of the three means the run is still reachable: a shell is open on it, a container is being
-			// created for it right now, or its workspace is still retained and the next open will want this
-			// network's name free anyway.
-			if (running.has(id) || keep.has(id) || launching.has(id)) continue;
+			// Either means the run is still reachable, and both are ordinary rather than notable: a shell is
+			// open on it, or its workspace is still retained and the next open will want this network's name
+			// free anyway. A line per retained run per pass would be noise.
+			if (running.has(id) || keep.has(id)) continue;
 			const { ok, names, absent } = await networkEndpoints(run, name);
 			if (absent) continue;
 			if (!ok) {
 				notes.push({ network: name, reason: "unreadable" });
 				continue;
 			}
-			// The last guard, and it gates the DETACH: a session container attached means an operator may be
-			// inside it. Be exact about what it covers, because the obvious claim is wrong: `.Containers`
-			// lists RUNNING endpoints only, so a container in `created` state is invisible HERE as well as to
-			// `listRunningSandboxes` -- that window belongs to `launching` above and to the retained
-			// directory. What THIS adds is the session whose directory neither set knows about (deleted by
-			// hand, or moved) where the shell is up, and stripping its proxy is exactly the #277 harm.
+			// One guard gates the DETACH: a session container attached means an operator may be inside it.
 			if (names.some((n) => n.startsWith(SANDBOX_NAME_PREFIX))) {
 				notes.push({ network: name, reason: "sandbox-attached" });
+				continue;
+			}
+			// And one LAST look, deliberately the freshest thing in this function and deliberately the call
+			// immediately before the destructive verb. It asks the one question the two above cannot: is
+			// there a container of ours for this id in a state that is not finished?
+			//
+			// Measured on docker 27.4.0: between `docker run`'s create and its start (230 ms with the image
+			// local, the whole pull when it is not) the container is in `created` state, where `docker ps`
+			// does not list it, `network inspect` does not list it as an endpoint, AND `network rm` SUCCEEDS
+			// -- after which `docker start` fails with "network not found" and that sandbox can never run.
+			// The daemon backstops a RUNNING endpoint and nothing else.
+			//
+			// ORDER IS THE POINT. An earlier draft read this once, at the top of the pass, which is the one
+			// placement that cannot work: an open creates its network BEFORE its container, so a snapshot
+			// taken before the candidate listing is older than the thing it has to protect, and a review pass
+			// drove exactly that -- 486 ms of exposure, the network removed and the operator's `docker run`
+			// dead with a 125. A check-then-act still has a gap, but here it is the width of one command
+			// rather than of the whole pass.
+			const held = await run(["ps", "-a", "--filter", `name=${SANDBOX_NAME_PREFIX}${id}`, "--format", "{{.Names}}\t{{.State}}"]);
+			if (held?.code !== 0) {
+				notes.push({ network: name, reason: "unreadable" });
+				continue;
+			}
+			// Only a FINISHED container frees the network: `--rm` means an exited sandbox is normally gone
+			// already, so one still listed is abnormal and its network is a leftover either way. Every other
+			// state, and anything a future daemon adds, is hands off. Unlike the `keep` and `running` skips
+			// this one is SAID, because a container stuck in `created` would otherwise hold its network back
+			// forever with nothing on the host naming it: it is invisible to `docker ps`, so to
+			// `listRunningSandboxes` and to `pi-dispatch sandbox --list`, and `network inspect` does not list
+			// it either, so the `egress-network-exists` refusal cannot name it and the commands that refusal
+			// prints do not clear it.
+			if (containerHolds(held.stdout, id)) {
+				notes.push({ network: name, reason: "sandbox-present" });
 				continue;
 			}
 			const outcome = await removeNetworkOrSay(run, { network: name, detach: names });

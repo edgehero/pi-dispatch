@@ -1598,38 +1598,44 @@ sibling rather than an extension of the GitHub one for the same reason.
     sweep, not the feature: the lookup is re-issued on every tick and the reaper holds no state between
     calls, so a docker outage costs one interval of retention overshoot rather than latching it off.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
-    directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep: the entries the
-    pass READ AT ITS START, plus everything `listRunningSandboxes` reported. The sweeper lists
-    `pi-sandbox-` networks and parses each against the shape `networkNameFor` builds, because `--filter
-    name=` is a SUBSTRING match and the listing is therefore not the namespace; for an id that is in
-    neither set it inspects the endpoints, leaves the network alone while a `pi-sandbox-` container is
-    attached, otherwise disconnects what it saw and removes WITHOUT `-f`. Three properties are load-bearing
-    and each has its own reason. **The keep set is the UNION of two listings**, the one the pass began with and
-    a fresh one read immediately before the sweep, and neither half is redundant. The pre-pass half is never
-    the survivors, because the same pass deletes directories and an id expired a moment ago may be an open in
-    flight between `createJobNetwork` and `launch`; it simply waits for the next sweep, which is also why a
-    network outlives its directory by one whole pass. The fresh half covers the other end: `retainJobDir`
-    creates a retained directory at job END, in this same process, so a job can finish and its run be opened
-    while the pass is still running, and that id is in neither the old listing nor `running`. A re-read that
-    throws skips the sweep rather than sweeping on half the evidence. **The LAUNCH WINDOW is its own
-    listing**, `docker ps -a --filter status=created --filter name=pi-sandbox-`, read once before anything
-    else and failing the whole sweep closed when it does not answer. It is not redundant with the other two,
-    and the reason is a measurement that corrects one this project shipped: between `docker run`'s create and
-    its start (230 ms on a local image, the whole pull when it is not local) the container is in `created`
-    state, where `docker ps` does not list it, `network inspect` does not list it as an endpoint, and
-    `network rm` SUCCEEDS -- after which `docker start` fails with "network not found" and that sandbox can
-    never run. The daemon is a backstop for a RUNNING endpoint and for nothing else. **The container guard
-    gates the detach**, not the removal: for a running endpoint docker refuses the removal itself, so the
-    harm left to prevent is stripping the proxy off a shell someone is sitting in. It covers a RUNNING
-    session container and no more, which is why the launch window has a listing of its own. **The sweep is injected rather than
-    imported**, because `sandbox.mjs` already imports `readManifest` from `sandbox-store.mjs` and the other
-    direction would be a cycle; it also keeps this module docker-free in its own tests. Its docker calls are
-    bounded and it yields between networks, on `DES-RETENTION-SWEEPS-ON-A-TIMER`'s finding that this loop
-    runs against BullMQ's 30 s lock. Its own failure is one `sandbox_reaper_skipped` line and never aborts
-    the directory pass, which has already finished by then, and a `network ls` that does not answer is that
-    same line (`network-list-failed`) rather than a verdict about a network nobody saw; a per-network outcome is
-    `reaped_sandbox_network` or `sandbox_network_not_reaped` with a fixed reason token
-    (`unreadable | sandbox-attached | rm-failed`), which is `OQ-007`'s grep property kept intact.
+    directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
+    re-reads the retained directories. The sweeper lists `pi-sandbox-` networks and parses each against the
+    shape `networkNameFor` builds, because `--filter name=` is a SUBSTRING match and the listing is therefore
+    not the namespace. A candidate whose id is retained or running is passed over; one that survives that is
+    inspected, left alone while a `pi-sandbox-` container is attached, checked once more for a container of
+    its own id, and only then disconnected from what was seen and removed WITHOUT `-f`.
+    **Four properties are load-bearing** and each has its own reason.
+    **The keep set is a UNION of two listings**, the one the pass began with and a fresh one, and neither
+    half is redundant. The pre-pass half is never the survivors, because the same pass deletes directories
+    and an id expired a moment ago may be an open in flight between `createJobNetwork` and `launch`; it
+    simply waits for the next sweep, which is also why a network outlives its directory by one whole pass.
+    The fresh half covers the other end: `retainJobDir` creates a retained directory at job END, in this same
+    process, so a job can finish and its run be opened while the pass is still running, and that id is in
+    neither the old listing nor `running`. It arrives as a CLOSURE rather than a set so the sweeper reads it
+    after its own candidate listing, and a read that throws leaves the sweeper rather than sweeping on half
+    the evidence. An absent sandbox root is an EMPTY listing rather than a failed one, because with no root
+    `resolveSandbox` refuses every run, and skipping there would mean never sweeping on the host most likely
+    to be holding leftovers.
+    **ORDER: candidates first, then the evidence that protects them, freshest last.** An open creates its
+    network BEFORE its container and AFTER the directory that made it legal, so evidence read before the
+    candidate listing can be older than the thing it has to protect.
+    **The endpoint guard gates the DETACH**, not the removal: for a RUNNING endpoint the daemon refuses the
+    removal itself, so the harm left to prevent is stripping the proxy off a shell someone is sitting in.
+    **The last call before the removal is a `docker ps -a` for this id**, and it is the only thing here that
+    sees the LAUNCH WINDOW. Measured on docker 27.4.0, correcting a claim this project shipped under #357: a
+    container in `created` state is absent from `docker ps`, absent from `network inspect`, and the
+    `network rm` SUCCEEDS anyway, after which `docker start` fails with "network not found" and that sandbox
+    can never run. Only `exited` and `dead` free a network; every other state, and anything a future daemon
+    adds, is hands off and is SAID, because a container stuck in `created` is invisible to every other
+    listing here and to `pi-dispatch sandbox --list`, so without a line nothing on the host would name it.
+    The docker calls are bounded and the loop yields between networks, on
+    `DES-RETENTION-SWEEPS-ON-A-TIMER`'s finding that this loop runs against BullMQ's 30 s lock. The sweep's
+    own failure is one `sandbox_reaper_skipped` line and never aborts the directory pass, which has already
+    finished by then, and a `network ls` that does not answer is that same line (`network-list-failed`)
+    rather than a verdict about a network nobody saw; a per-network outcome is `reaped_sandbox_network` or
+    `sandbox_network_not_reaped` with a fixed reason token
+    (`unreadable | sandbox-attached | sandbox-present | rm-failed`), which is `OQ-007`'s grep property kept
+    intact.
 - **Why**: The 5% case (`REQ-RESURRECTABLE-SANDBOX`). Every choice above exists to keep the *job*
   contract untouched while serving it: a second container shape rather than a longer-lived first one, a
   second env builder rather than a credential-optional one, a second name namespace rather than a
@@ -1644,15 +1650,14 @@ sibling rather than an extension of the GitHub one for the same reason.
   contains no member of `MINTED_TOKEN_VARS` and no provider key variable. The container name contains no
   `pi-job-`. `--publish 3000` yields `127.0.0.1:3000:3000` and an explicit bind address is refused. A
   retained directory contains no `session/`. A directory whose sandbox is running is not swept, and a
-  sweep whose docker lookup failed removes nothing, network sweep included, and a `docker ps -a
-  --filter status=created` that does not answer sweeps no network at all. A `pi-sandbox-<id>-net` whose
-  id the pass listed on disk, or whose id is running, or whose container is in `created` state, is passed
-  over in SILENCE, because a line per retained
-  run per pass is noise; one still carrying a `pi-sandbox-` container is left alone and said. One with none
-  of the three is disconnected from what is on it and removed with a plain `network rm`, and its run's
-  directory was gone for at least one whole pass before that, since the pass that deletes a directory still
-  counts that run as retained. A network outside that name shape is never listed as a candidate and never
-  touched. Unless `PI_EGRESS=0` the argv carries
+  sweep whose docker lookup failed removes nothing, network sweep included. A `pi-sandbox-<id>-net` whose id
+  the pass listed on disk, or whose id is running, is passed over in SILENCE, because a line per retained run
+  per pass is noise; one carrying a `pi-sandbox-` container, one whose own container is in any state but
+  `exited` or `dead`, and one whose `docker ps -a` did not answer are each left alone and SAID. One with none
+  of those is disconnected from what is on it and removed with a plain `network rm`, and its run's directory
+  was gone for at least one whole pass before that, since the pass that deletes a directory still counts that
+  run as retained. A network outside that name shape is never listed as a candidate and never touched, and
+  neither a network name nor a container name that merely CONTAINS `pi-sandbox-` is ever parsed into an id. Unless `PI_EGRESS=0` the argv carries
   `--network=pi-sandbox-<jobId>-net` and the four proxy variables, and **still no credential** -- a proxy
   URL is not one, and `buildContainerEnv` is still not reused here. Given `PI_EGRESS=0`, the argv is
   byte-identical to one built before `REQ-EGRESS-ALLOWLIST` existed. Given a manifest whose `backend` names a
@@ -4346,4 +4351,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-15 | Issue #345, runtime observations. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: two bullets. "What the daemon is observed to provide": `daemonAppliesBounds` gates `isolation` and `runtimeAddsNoMounts` gates `mountSet`, from the same cached `docker info` read (now made on every platform) and this host's Podman files (the keys `volumes`, `mounts`, `devices` and `hooks_dir` in any TOML spelling or letter case, OCI hooks, FIPS; an unparseable answer or no docker CLI is an answered miss), refused only under a floor, at boot (unanswered exits 1, answered exits 2) and per job as `backend-floor-unobserved`. "A container that outlives its `docker run`": the job argv's `--cidfile`, and a never-started exit whose container this attempt created and that is still there is stopped and removed by ID and fails as INFRA `container-detached`, retried and not refunded, each step asked again for up to 10 s while it fails; `created` stays never-started. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `container-detached`. **`INT-LIVE-PROBE-CONTRACT` AMENDED**: `mountSet` also reads the reading container's `/proc/self/mountinfo` by a constant `cat` against an exact list plus three kernel trees (where a disk, network or host-share filesystem type still fails), failing `runtime-mount`, with Acceptance for it, and the reading container's sleep is derived from four steps. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: the sandbox argv carries no cidfile and no new observation gates it. |
 | 2026-09-21 | Issue #345, the Podman route. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, one bullet: rootful Podman through its Docker API is the `local` venue and the live probes run there unchanged, while under `podman-docker` nothing runs because no endpoint is observed. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: its Podman conditions landed with the observations. |
 | 2026-09-21 | Issues #357 and #350. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: the object table gains `pi-dispatch-egress-doctor-<pid>` and `pi-dispatch-egress-probe-<slug>-<pid>`, which doctor has always made and which nothing had written down, and the per-job row's "removed at job end" is qualified with the crash path. A new bullet states what is left behind and what removes it: THREE namespaces have a sweep for a process that died, a session network deliberately has none, and the sweeps share two rules (the anchored name shape their producer builds, and never `network rm -f`) while differing on purpose in what they say when something stays and the one that differs per site: the boot reaper leaves a network a `pi-job-` container is on, and the canary sweep INVERTS that, because a probe attached to a network whose pid is dead is the leak rather than a run in progress. **`INT-LIVE-PROBE-CONTRACT` AMENDED**, and the correction is worth reading back. The row first claimed UNCHANGED on the grounds that `dropNetwork`'s call sequence, notes and silences were byte-identical, which is true of `dropNetwork` and was NOT true of `sweepStaleNetworks`: moving its inline `.Containers` parse onto the shared `networkEndpoints` changed what happens when that field renders as `null`, a number or a string, from "read as an empty network, detach nothing, remove it" to "unreadable, pass over in silence". The tests passed untouched because none of them covers those inputs, which is exactly how a false UNCHANGED survives review. The entry now also states what that sweep says versus what it stays silent about, which was already wrong before this round: "said on every path" had never been true of an inspect it could not read. Measured 2026-09-21 on docker 27.4.0 while moving it: `network inspect` and `network rm` word a missing network IDENTICALLY, so the rule was never inspecting-vs-removing specific; and with `--format` that wording is on STDERR with stdout empty, which is why the callers hand in a runner that captures both streams. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: `pi-sandbox-` networks are untouched here. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: no job argv moves. **Code evidence**: worker/src/egress.mjs -> networkAbsentInDaemonWords, networkEndpoints, removeNetworkOrSay, egressCanaryNetwork; worker/src/live-probes.mjs -> sweepStaleNetworks. |
-| 2026-09-21 | Issue #337, item 1. **`INT-SANDBOX-CONTRACT` AMENDED, and one clause is a CORRECTION**: "the boot reaper sweeps only `pi-job-` networks, so such a network stays until an operator removes it" was true when written and is not now. A new contract bullet states the sweep: the keep set is the pre-pass listing plus what `listRunningSandboxes` reported, the shape is the one `networkNameFor` builds (the `--filter` is a substring match and is not the namespace), the launch window has a listing of its own (`docker ps -a --filter status=created`, failing the sweep closed when it does not answer), the container guard gates the DETACH rather than the removal, removal is never `-f`, the sweeper is INJECTED because `sandbox.mjs` imports `readManifest` from `sandbox-store.mjs` and the other direction is a cycle, and the docker calls are bounded with a yield between networks on `DES-RETENTION-SWEEPS-ON-A-TIMER`'s finding about BullMQ's 30 s lock. A per-network outcome is `reaped_sandbox_network` or `sandbox_network_not_reaped` with a fixed reason token; the sweep's own fault, a `network ls` that did not answer included, keeps `sandbox_reaper_skipped`. Acceptance gains both directions. The refusal at OPEN time is UNCHANGED and the entry says so. **`INT-EGRESS-POLICY-CONTRACT` AMENDED, and it is a correction of a sentence this round wrote a week ago**: its "what is left behind and what removes it" bullet said a **session** network has no sweep at all, which was the state of the tree at #357 and is now wrong. It names the sweep, says it is a change, and counts four swept namespaces where it counted three. Its per-job network row, its proxy row and its canary rows are UNCHANGED, and the namespace split still holds because the two prefixes share no substring. One measured claim this round shipped is CORRECTED in `egress.mjs`'s own docblock rather than left to be re-derived: "listed and holds the network agree" holds for a running and for a stopped endpoint and NOT for a container in `created` state, which is absent from both listings while `network rm` still succeeds and leaves that container unstartable. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: `sweepStaleNetworks` is not touched, and its inverted protection rule (an attached probe means a run that is NOT over) is the one this transposes. **Code evidence**: worker/src/sandbox.mjs -> makeSandboxNetworkSweeper; worker/src/sandbox-store.mjs -> makeSandboxReaper. |
+| 2026-09-21 | Issue #337, item 1. **`INT-SANDBOX-CONTRACT` AMENDED, and one clause is a CORRECTION**: "the boot reaper sweeps only `pi-job-` networks, so such a network stays until an operator removes it" was true when written and is not now. A new contract bullet states the sweep: the keep set is the UNION of the listing the pass began with and a fresh one the sweeper reads itself (each half covers what the other cannot, and an absent sandbox root is an empty listing rather than a failed one), candidates are listed before the evidence that protects them and the freshest evidence is read last, the shape is the one `networkNameFor` builds (the `--filter` is a substring match and is not the namespace, on the container names as well as the network ones), the endpoint guard gates the DETACH rather than the removal, the last call before the removal is a `docker ps -a` for that id and only `exited` or `dead` frees a network, removal is never `-f`, the sweeper is INJECTED because `sandbox.mjs` imports `readManifest` from `sandbox-store.mjs` and the other direction is a cycle, and the docker calls are bounded with a yield between networks on `DES-RETENTION-SWEEPS-ON-A-TIMER`'s finding about BullMQ's 30 s lock. A per-network outcome is `reaped_sandbox_network` or `sandbox_network_not_reaped` with a fixed reason token; the sweep's own fault, a `network ls` that did not answer included, keeps `sandbox_reaper_skipped`. Acceptance gains both directions. The refusal at OPEN time is UNCHANGED and the entry says so. **`INT-EGRESS-POLICY-CONTRACT` AMENDED, and it is a correction of a sentence this round wrote a week ago**: its "what is left behind and what removes it" bullet said a **session** network has no sweep at all, which was the state of the tree at #357 and is now wrong. It names the sweep, says it is a change, and counts four swept namespaces where it counted three. Its per-job network row, its proxy row and its canary rows are UNCHANGED, and the namespace split still holds because the two prefixes share no substring. One measured claim this round shipped is CORRECTED in `egress.mjs`'s own docblock rather than left to be re-derived: "listed and holds the network agree" holds for a running and for a stopped endpoint and NOT for a container in `created` state, which is absent from both listings while `network rm` still succeeds and leaves that container unstartable. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked, and the correction was checked AGAINST it rather than only beside it**: `sweepStaleNetworks` keeps its behaviour, and its inverted protection rule (an attached probe means a run that is NOT over) is the one this transposes. The corrected measurement does reach it and doctor's canary sweep in principle, since a probe in `created` state is missing from the endpoint list there too, and both are left unguarded ON PURPOSE with the reason written at each call site: both touch only a network whose owning pid is DEAD, and a dead process has no launch in flight. The sandbox sweep, whose owner may be alive, is the one that needs the guard. **Code evidence**: worker/src/sandbox.mjs -> makeSandboxNetworkSweeper; worker/src/sandbox-store.mjs -> makeSandboxReaper. |

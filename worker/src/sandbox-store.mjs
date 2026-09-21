@@ -233,8 +233,18 @@ export function makeSandboxReaper({
 		try {
 			names = fs.readdirSync(sandboxDir);
 		} catch (err) {
-			log("sandbox_reaper_skipped", { reason: err?.message });
-			return;
+			// A root that does not EXIST is not a failed read, it is an empty one, and the difference matters
+			// to the network sweep below (issue #337): a host whose sandbox root was never created or was
+			// removed by hand is exactly the host most likely to be holding orphaned `pi-sandbox-` networks,
+			// and skipping there would mean the sweep never fires on it at all. It is also safe rather than
+			// merely convenient: with no root, `resolveSandbox` refuses EVERY run, so no open can be in
+			// flight for the sweep to race. Any other error (a permission wall, an I/O fault) is a read that
+			// failed and still skips the pass.
+			if (err?.code !== "ENOENT") {
+				log("sandbox_reaper_skipped", { reason: err?.message });
+				return;
+			}
+			names = [];
 		}
 
 		const at = now();
@@ -277,18 +287,30 @@ export function makeSandboxReaper({
 		//
 		// The keep set is the UNION of two listings, and each half covers what the other cannot. The one this
 		// pass STARTED with covers a run whose directory this pass then expired: an open that passed
-		// `resolveSandbox` a moment before is mid-launch and must not lose its network. A FRESH one, read
-		// here, covers the opposite end: `retainJobDir` creates a directory at job end, in this same process,
-		// and this pass awaits docker and yields per tree, so a job can finish and its run be opened while
-		// the pass is still running. That id is in neither the old listing nor `running` -- the container is
-		// not up yet -- so without the second read the sweep would take a network `createJobNetwork` had just
-		// made. A re-read that throws skips the sweep entirely rather than sweeping on half the evidence.
+		// `resolveSandbox` a moment before is mid-launch and must not lose its network. A FRESH one covers the
+		// opposite end: `retainJobDir` creates a directory at job end, in this same process, and this pass
+		// awaits docker and yields per tree, so a job can finish and its run be opened while the pass is still
+		// running. That id is in neither the old listing nor `running` -- the container is not up yet -- so
+		// without the second read the sweep would take a network `createJobNetwork` had just made.
+		//
+		// The fresh read is handed over as a CLOSURE rather than as a set, so the sweeper can take it after
+		// its own candidate listing: evidence that protects a network must never be older than the listing
+		// that nominated it. A read that throws leaves the sweeper and lands in the catch below, which is
+		// deliberate -- half a keep set is worse than no sweep. ENOENT is an empty root, not a failure, for
+		// the reason given above.
 		//
 		// Its own fault keeps the `sandbox_reaper_skipped` name on `OQ-007`'s stated property, that one grep
 		// covers boot and every tick; only the per-network VERDICTS get new names.
 		try {
-			for (const name of fs.readdirSync(sandboxDir)) keep.add(name);
-			const { swept, notes, failed } = await sweepNetworks({ running, keep });
+			const retained = () => {
+				try {
+					return fs.readdirSync(sandboxDir);
+				} catch (err) {
+					if (err?.code === "ENOENT") return [];
+					throw err;
+				}
+			};
+			const { swept, notes, failed } = await sweepNetworks({ running, keep, retained });
 			for (const s of swept) log("reaped_sandbox_network", s);
 			for (const n of notes) log("sandbox_network_not_reaped", n);
 			if (failed) log("sandbox_reaper_skipped", { reason: failed });

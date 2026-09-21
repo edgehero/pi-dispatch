@@ -187,10 +187,10 @@ session that ends in a closed laptop still keeps the workspace.
   closes, so at both defaults a retained workspace can live up to 48 hours. A restart after you lower
   the retention setting still sweeps what the old one kept. And since issue #337 that reaper also removes
   the run's `pi-sandbox-<jobId>-net` network, on the directory's own clock: a network whose id the pass no
-  longer finds on disk, with nothing running and no `pi-sandbox-` container attached, is disconnected from
-  whatever is left on it and removed. Your shell is held three ways: by the retained directory from before
-  the container starts until the window closes, by the container itself while it is being created, and by
-  the running container once it is up;
+  longer finds on disk, with nothing running, no `pi-sandbox-` container attached, and no container of its
+  own that has not finished, is disconnected from whatever is left on it and removed. Your shell is held
+  three ways: by the retained directory from before the container starts until the window closes, by its own
+  container from the moment docker creates it, and by the endpoint list once it is up;
   a network the sweep looked at and would not take is named in the worker log with the reason, while one
   it skipped because the run is still retained or still running is passed over in silence.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25

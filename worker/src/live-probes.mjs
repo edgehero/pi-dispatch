@@ -901,6 +901,12 @@ export async function sweepStaleNetworks({ step, pid, isAlive, notes = [] }) {
 		// silence on it is unchanged -- it is best effort, and what it CAN read it still says.
 		const { ok, names: attached } = await networkEndpoints(step, name);
 		if (!ok) continue;
+		// RESIDUAL, recorded under issue #337 where it was measured rather than left for the next reader:
+		// `.Containers` lists RUNNING endpoints, so a probe in `created` state is not in `attached`, and on
+		// this daemon the `network rm` below would then SUCCEED and leave that container unable to start.
+		// Unguarded here on purpose rather than by oversight: this sweep only looks at a network whose owning
+		// pid is DEAD, and a dead process has no launch in flight. The sandbox sweep, whose owner may be very
+		// much alive, does carry the guard.
 		if (attached.some((n) => probeContainer.test(n))) continue;
 		for (const endpoint of attached) await step(["network", "disconnect", "-f", name, endpoint]);
 		// Every endpoint detached is SAID, the proxy included: a container this sweep did not make may be among them.
