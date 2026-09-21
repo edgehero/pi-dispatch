@@ -182,8 +182,15 @@ export function makeStopContainer({ exec = execDocker } = {}) {
 /**
  * A network THIS project made for a job: the exact shape the producer builds, derived from both constants.
  * `docker`'s `--filter name=` is a substring match, so the listing alone is not a namespace (issue #357).
+ *
+ * `.*` rather than `.+`, to match the container half exactly. `jobContainerName` does not sanitise, it
+ * concatenates, so an empty job id yields the container `pi-job-` and the network `pi-job--net`. A bare
+ * `startsWith` catches the container and `.+` would NOT catch the network, and the direction that asymmetry
+ * fails in is "leak the network forever", which is the defect this whole slice exists to close. The
+ * false-positive it admits is a foreign network named exactly `pi-job--net`, which is no more likely than
+ * one named `pi-job-x-net`.
  */
-const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.+${NETWORK_SUFFIX}$`);
+export const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.*${NETWORK_SUFFIX}$`);
 
 export function makeReaper({ log, exec = execDocker }) {
 	// The SAME injected `exec`, as a NON-THROWING `{ code, stdout, stderr }` step. Two things fall out and both

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, JOB_NETWORK_SHAPE, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
+import { networkNameFor } from "../src/egress.mjs";
 
 const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) });
 
@@ -383,6 +384,11 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 	assert.ok(!touched.includes("my-pi-job-notes"), "a name that merely CONTAINS the prefix is not ours");
 	assert.ok(!touched.includes("robtest-staging"), "nor one that contains it in the middle");
 	assert.ok(!touched.includes("pi-job-mine-net-backup"), "nor our own shape with something appended");
+	// The other direction, which is the one that leaks: the container half is a bare prefix match, so the
+	// network half must not be stricter. `jobContainerName` concatenates without sanitising, so a degenerate
+	// id gives `pi-job-` and `pi-job--net`, and a `.+` shape would reap the container and leave the network.
+	assert.ok(JOB_NETWORK_SHAPE.test("pi-job--net"), "the network half is never stricter than the container half");
+	assert.ok(JOB_NETWORK_SHAPE.test(networkNameFor(jobContainerName("gh-1"))), "and it matches what the producer builds");
 	assert.ok(state.has("my-pi-job-notes") && state.has("robtest-staging-pi-job-queue-net") && state.has("pi-job-mine-net-backup"), "every foreign network survives intact");
 	assert.deepEqual(state.get("my-pi-job-notes"), ["someone-elses-app"], "and keep every endpoint they had");
 	assert.deepEqual(lines, [["reaped_container", { name: "pi-job-mine" }], ["reaped_network", { network: "pi-job-mine-net", detached: ["pi-dispatch-egress-proxy"] }]], "only ours is swept");
