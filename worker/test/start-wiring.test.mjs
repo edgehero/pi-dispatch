@@ -1935,9 +1935,27 @@ test("a real err.reason token rides the hook's argv end to end, through a REAL s
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
 	const { handlers } = await runStart({ env: { PI_ON_FAILURE: script, INJECTED_ENV_MARKER: "threaded" }, makeAuth, makeHost: () => fakeHost() });
 	handlers.failed({ id: "gh-9", data: { kind: "github", repo: "o/r" }, attemptsMade: 2, finishedOn: 9 }, Object.assign(new Error("the runtime could not start the container, exit 125"), { reason: "container-never-started" }));
-	// A real child: poll for its write rather than guessing its scheduling.
-	for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 20));
-	assert.ok(existsSync(out), "the hook really spawned");
+	// A real child: poll for its write rather than guessing its scheduling, on a WALL CLOCK. The bound is a
+	// ceiling on a hang, never a wait in the healthy case: the poll measures 146-292ms idle and 1642ms at its
+	// worst under deliberate fork pressure (19 node processes on 14 cores), so the ceiling sits about 6x above
+	// anything observed and the loop leaves on its first look once the file is there.
+	//
+	// NOT `i < n` (issue #369, and issue #221 is the same defect one file over -- see service.test.mjs's
+	// waitForMarker, which this shape is copied from). A nominal count undercharges every iteration by the
+	// existsSync plus the event-loop hop, so the bound it enforces is neither the number in the source nor
+	// knowable, and the term it undercharges is exactly the one that grows under the full parallel suite --
+	// which `contract-tests` runs three times per job. The old `i < 100` at 20ms read as 2s, was less, and
+	// missed: the assertion below then failed wearing "the hook really spawned", which reads as a defect in
+	// the failure hook and is not one.
+	//
+	// NOT lifted into test/helpers/ beside temp-dir.mjs, deliberately. This is the suite's only real-child
+	// iteration-count poll, and service.test.mjs's sibling declines a shared ceiling for a reason of its own:
+	// its bound is DERIVED from the signal stub's lifetime, so a shared constant would be a second place for
+	// that relationship to be wrong. One caller and one standing opt-out is not a helper, it is a third thing
+	// to keep in step.
+	const deadline = Date.now() + 10_000;
+	while (!existsSync(out) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+	assert.ok(existsSync(out), "the hook really spawned -- nothing was written within the 10s ceiling, which is a failure to spawn rather than a slow one");
 	// The host cell is this machine's derived worker name, which varies -- pin the id-only trio exactly
 	// and only the SHAPE of the fourth.
 	const argv = readFileSync(out, "utf8").trim().split(" ");
