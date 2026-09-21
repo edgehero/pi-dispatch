@@ -21,6 +21,10 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const fakeTui = () => ({ requestRender() {} });
 
+// The one instant every canned render is stamped with. Matches the fixture dates below rather than being a
+// second unrelated date, so a reader comparing a rendered clock against a run's `endedAt` sees one timeline.
+const AT = Date.UTC(2026, 6, 21, 12, 0, 0);
+
 const SNAPSHOT = {
   queue: { pausedState: true, counts: { waiting: 2, active: 1, paused: 0, delayed: 0, failed: 3 }, workers: 1 },
   budget: { day: 5, week: 0, month: 0 },
@@ -46,6 +50,13 @@ function cannedDeps(overrides = {}) {
     pause: async () => {},
     resume: async () => {},
     dispose: async () => {},
+    // An INJECTED clock, on the seam `makeDashboard` already reads (`deps.now`, dashboard.ts). Without it
+    // every render stamps the status header with `Date.now()`, so two renders that straddle a second differ
+    // by one character -- and the tests that compare two renders BYTE FOR BYTE then fail on the clock cell
+    // while claiming something about images or rows. Measured at 1 in 40 runs before this, in a suite
+    // `contract-tests` runs three times per job. The panel's own issue #293 test already made this point
+    // about the header; this is the harness half, so no canned render takes the wall clock at all.
+    now: () => AT,
     ...overrides,
   };
 }
@@ -2368,6 +2379,74 @@ test("schedulers are read across the fleet, or TRIGGERS shows zero while cron ru
   const snap = await deps.fetchSnapshot();
   assert.equal(snap.schedulers.length, 1, "the host queue's scheduler is visible");
   await deps.dispose();
+});
+
+/**
+ * Render the same component twice with the PAINT clock moved between, and hand back both frames.
+ *
+ * A FUNCTION sharing `Date.prototype`, never `class extends Date`, and the reason is measured in
+ * `.github/scripts/shift-clock.mjs`: a subclass gets its own prototype, and `globalThis.Date = Subclass`
+ * then makes `instanceof Date` false for every Date the process already built. `new Date(<arg>)`,
+ * `Date.parse` and `Date.UTC` are carried through unchanged, so only "now" moves.
+ */
+async function framesAcrossPaintClocks(snap, at1, at2, drive = async () => {}) {
+  const RealDate = Date;
+  const paintAt = (ms) => {
+    function FakeDate(...args) {
+      if (new.target === undefined) return RealDate();
+      return args.length === 0 ? new RealDate(ms) : new RealDate(...args);
+    }
+    FakeDate.prototype = RealDate.prototype;
+    Object.setPrototypeOf(FakeDate, RealDate);
+    FakeDate.now = () => ms;
+    Object.defineProperty(FakeDate, "name", { value: "Date", configurable: true });
+    globalThis.Date = FakeDate;
+  };
+  const once = async (ms) => {
+    paintAt(ms);
+    try {
+      const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+      await flush();
+      await drive(comp);
+      const out = stripAnsi(comp.render(80).join("\n"));
+      await comp.dispose();
+      return out;
+    } finally {
+      globalThis.Date = RealDate;
+    }
+  };
+  return [await once(at1), await once(at2)];
+}
+
+test("the WHOLE frame comes from the snapshot: moving the paint clock changes nothing (issues #293, #372)", async () => {
+  // Issue #293 established the property in its own name -- one snapshot renders one frame -- and moved
+  // `statusHeader` off the paint clock to `fetchedAt`. It was true of the header alone. Three other
+  // renderers kept reading the wall clock while painting: the spend countdown (`resets 13h 29m`, on the
+  // day row, which is `always: true` and so in EVERY frame), the pause-window resume countdown, and
+  // TRIGGER_DETAIL's `next fire (in 2h 0m)`. The spend line turns over once a MINUTE rather than once a
+  // second, which is why it survived the second-boundary reasoning that closed #293.
+  //
+  // The paint clocks are 13 hours apart, which crosses every one of those three countdowns at once. The
+  // frames must be byte-identical, because the snapshot -- `fetchedAt` included -- did not move.
+  const at = Date.UTC(2026, 6, 21, 12, 0, 0);
+  const snap = {
+    ...SNAPSHOT,
+    pauseWindows: { windows: [{ scope: "acme/web", from: "00:00", to: "23:59", tz: "UTC", fromMin: 0, toMin: 1439 }] },
+    triggers: { triggers: [{ type: "cron", id: "nightly", pattern: "0 3 * * *", folder: "/srv", flow: "tidy" }] },
+    schedulers: [{ key: "nightly", next: at + 2 * 3600_000, overdueMs: 0, stalls: 0, stallMax: 3 }],
+  };
+
+  const [listA, listB] = await framesAcrossPaintClocks(snap, at, at + 13 * 3600_000);
+  assert.match(listA, /resets /, "the spend countdown is in the frame, or this pins nothing");
+  assert.match(listA, /resumes in |acme\/web/, "the pause row is in the frame");
+  assert.equal(listA, listB, "the LIST frame must not move with the paint clock");
+
+  const [detailA, detailB] = await framesAcrossPaintClocks(snap, at, at + 13 * 3600_000, async (comp) => {
+    comp.handleInput("\r"); // row 0 is the cron trigger
+    await flush();
+  });
+  assert.match(detailA, /next fire/, "the cron countdown is in the frame, or this pins nothing");
+  assert.equal(detailA, detailB, "the TRIGGER_DETAIL frame must not move with the paint clock");
 });
 
 test("the header clock comes from the SNAPSHOT, so one snapshot always renders one frame (issue #293)", async () => {

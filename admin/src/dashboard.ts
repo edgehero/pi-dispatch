@@ -1009,7 +1009,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     const detailTitle = `trigger · ${scrubControl(String(t?.type ?? "?"))}`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const sched = cronSchedInfo(t, snapshot);
-    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages);
+    const lines = renderTriggerDetail(t, framed ? dw - 4 : 24, styler, sched, snapshot?.stagedPackages, snapshot?.fetchedAt);
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", pendingDelete ? "delete this trigger? y/n" : "e edit · x delete · esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: triggerDetailHints(dw - 4, styler, pendingDelete) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -1200,7 +1200,7 @@ function collapseKeys(sections: any[], availableRows: any, focus: string | null,
 function buildListLines(snapshot: any, selected: number, inner: number, styler: any, runSort = "time", availableRows: any = null): any[] {
   // Triggers are selectable and come FIRST in buildRows, so a trigger's file index == its selection index.
   const trg = triggerLines(snapshot, selected, inner, styler);
-  const pw = pauseLines(snapshot.pauseWindows, inner, styler);
+  const pw = pauseLines(snapshot.pauseWindows, inner, styler, snapshot.fetchedAt);
   const sl = limitLines(snapshot.scopedLimits, snapshot.scopedBudget, inner, styler);
   // Active + run rows follow the triggers in buildRows, so offset the selection index by the trigger count.
   const runRows = buildRows(snapshot, runSort).slice(trg.count);
@@ -1212,7 +1212,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
     { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
-    { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler), priority: 4, viewKey: "s" },
+    { key: "spend", head: ["spend & limits", "jobs & tokens/day · s set"], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: trg.lines, priority: 3, viewKey: "tab" },
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
     // Priority 0: the section an operator acts on least often from the panel folds FIRST under the
@@ -1460,13 +1460,21 @@ function delayedBreakdownLine(snapshot: any, inner: number, styler: any): string
 }
 
 /** Colored spend meters (day/week/month) with reset countdown + soft-hold marker. */
-function spendLines(budget: any, settings: any, inner: number, styler: any): string[] {
+function spendLines(budget: any, settings: any, inner: number, styler: any, fetchedAt?: number): string[] {
   if (!budget || budget.unreachable) {
     return [styler.cell(`budget unreachable (${budget?.unreachable ?? "?"})`, inner, { color: "error" })];
   }
   const overlay = (settings && settings.overlay) ?? {};
   const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;
-  const now = new Date();
+  // THE SNAPSHOT'S instant, not the paint clock. `statusHeader` was moved to `fetchedAt` by issue #293
+  // because the same snapshot rendered two different frames whenever two renders straddled a second; these
+  // countdowns had the identical defect and kept it, so the property that issue established ("one snapshot
+  // always renders one frame") was true of the header alone. The day row is `always: true`, so this line is
+  // in EVERY frame, and it turns over once a minute rather than once a second.
+  // The fallback is the paint clock rather than the epoch `statusHeader` falls back to: `refresh()` always
+  // stamps `fetchedAt` before a render, so it is unreachable, and a renderer called without one should
+  // degrade to today's behaviour rather than to a countdown measured from 1970.
+  const now = new Date(Number.isFinite(fetchedAt) ? (fetchedAt as number) : Date.now());
   const specs = [
     { key: "day", label: "day", cap: overlay.dailyCap, reset: nextDayResetMs(now), always: true },
     { key: "week", label: "week", cap: overlay.weeklyCap, reset: nextWeekResetMs(now), always: false },
@@ -1626,13 +1634,15 @@ function targetColored(t: any, styler: any): string {
 }
 
 /** The scheduled pause windows as colored rows, each marked `●` (paused now, with a resume countdown) or `○`. */
-function pauseLines(pauseWindows: any, inner: number, styler: any): { count: number; lines: string[] } {
+function pauseLines(pauseWindows: any, inner: number, styler: any, fetchedAt?: number): { count: number; lines: string[] } {
   const lines: string[] = [];
   if (pauseWindows && pauseWindows.missing) { lines.push(styler.cell("(no pause windows · w to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
   if (pauseWindows && pauseWindows.invalid) { lines.push(styler.cell(`(pause-windows file invalid: ${pauseWindows.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (pauseWindows && pauseWindows.windows) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no pause windows · w to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
-  const now = Date.now();
+  // The snapshot's instant, for `spendLines`' reason: a resume countdown painted from the wall clock makes
+  // one snapshot render two frames.
+  const now = Number.isFinite(fetchedAt) ? (fetchedAt as number) : Date.now();
   for (const w of list) lines.push(pauseRow(w, now, inner, styler));
   return { count: list.length, lines };
 }
@@ -1804,7 +1814,7 @@ function settingsLines(settings: any, inner: number, styler: any): string[] {
  * no crammed "produces" line. Read-only; `e`/`x` drive edit/delete through the command loop. Every line is
  * `inner` cols.
  */
-function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = null, staged: any = null): string[] {
+function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = null, staged: any = null, fetchedAt?: number): string[] {
   if (!t) return [styler.cell("(no trigger)", inner, { color: "dim" })];
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
@@ -1830,7 +1840,8 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     // `next` is real (BullMQ scheduler); `last` fire time is not stored on the scheduler, so it is omitted
     // rather than faked. Absent scheduler -> next unknown.
     if (sched) {
-      const inMs = typeof sched.next === "number" ? sched.next - Date.now() : NaN;
+      // The snapshot's instant, for `spendLines`' reason.
+      const inMs = typeof sched.next === "number" ? sched.next - (Number.isFinite(fetchedAt) ? (fetchedAt as number) : Date.now()) : NaN;
       const next = typeof sched.next === "number" ? `${formatTs(sched.next)} (${humanizeMs(inMs) ? `in ${humanizeMs(inMs)}` : "due"})` : "—";
       out.push(kv("next fire", next, "accent"));
       const drift = sched.overdueMs ? formatDuration(sched.overdueMs) : "0s";
