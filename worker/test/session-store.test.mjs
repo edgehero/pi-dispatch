@@ -175,7 +175,7 @@ test("the store never throws -- a disk fault must not fail the prepare that only
 test("a second writer on one key discards rather than clobbers", () => {
 	// Two jobs on one PR inside one runtime is a real shape (REQ-QUEUE-BURST-NO-DROP), and last-write-wins
 	// there would interleave two agents' turns into one transcript, then resume whichever wrote last.
-	const { store, jobDir, sessionsDir } = fixture();
+	const { store, jobDir, sessionsDir, logs } = fixture();
 	const key = sessionKeyFor(ghIssue);
 	const first = seed(sessionsDir, key);
 	writeFileSync(first, HEADER);
@@ -184,11 +184,18 @@ test("a second writer on one key discards rather than clobbers", () => {
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message"}\n`);
 
 	// Another worker holds the key: the lock is an exclusive create, so this one must stand down.
+	//
+	// THIS STAYS A CONCURRENCY PIN ONLY BECAUSE THE LOCK IS FRESH, and that is worth saying, because the
+	// reason is not visible here. `fixture()`'s clock is `NOW` (2001) while a hand-planted file gets a real
+	// filesystem mtime, so `now() - mtimeMs` is hugely NEGATIVE and the staleness takeover can never fire in
+	// this test. Change the fixture's default clock to the wall clock and this silently becomes a takeover
+	// test asserting the opposite of its own name. The negative assertion below is what would say so.
 	writeFileSync(join(sessionsDir, key, "lock"), "");
 	const p = store.promoteSession(s, { piVersion: PI });
 	assert.equal(p.promoted, false);
 	assert.equal(p.reason, "locked");
 	assert.equal(readFileSync(first, "utf8"), HEADER, "the loser must leave the canonical transcript untouched");
+	assert.equal(logs.some(([event]) => event === "session_lock_stale_taken"), false, "a live lock is never taken over");
 });
 
 test("the lock is released, so the next job on the key is not wedged forever", () => {
@@ -866,6 +873,99 @@ test("a job with no resolvable venue never resumes, even where the stamp cannot 
 	const v = fixture({ defaultBackend: null });
 	seed(v.sessionsDir, key);
 	assert.equal(v.store.resolveSession(ghIssue, { jobDir: v.jobDir, piVersion: null }).reason, "venue-changed");
+});
+
+// --- the stale-lock takeover (issue #336) ---
+
+// A lock's age is decided against the store's own injected clock, so the planted mtime is derived from NOW
+// rather than from the wall clock: a real 2026 mtime against a 2001 fixture clock is NEGATIVE age, which is
+// exactly the trap that kept the pin above honest by accident.
+const agedLock = (sessionsDir, key, ageMs) => {
+	const lock = join(sessionsDir, key, "lock");
+	writeFileSync(lock, "");
+	const at = new Date(NOW - ageMs);
+	realFs.utimesSync(lock, at, at);
+	return lock;
+};
+
+test("a lock older than any plausible promotion is TAKEN OVER, and the promotion lands (#336)", () => {
+	// A process killed inside the lock leaks it, and nothing released it: later promotions reported `locked`
+	// until the reaper swept the key, which it could not do for a key whose first promotion died before any
+	// transcript landed, and does not do at all under PI_SESSIONS_TTL_DAYS=0.
+	const { store, jobDir, sessionsDir, logs } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	const lock = agedLock(sessionsDir, key, 2 * 3600_000);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}after-takeover\n`);
+	const p = store.promoteSession(s, { piVersion: PI });
+
+	assert.equal(p.promoted, true, "a crashed writer's lock must not wedge the key forever");
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("after-takeover"), true);
+	const taken = logs.find(([event]) => event === "session_lock_stale_taken");
+	assert.ok(taken, "the takeover has its own line, or it happens silently");
+	assert.equal(taken[1].key, key);
+	assert.ok(taken[1].ageMs >= 2 * 3600_000, "and the line carries how stale it was");
+	assert.equal(existsSync(lock), false, "the lock is released again afterwards");
+});
+
+test("a lock YOUNGER than the threshold is a live writer, and the loser still discards (#336)", () => {
+	// The bound is exercised from both sides on purpose: a bound nothing tests is a bound that drifts, and
+	// this half is what stops the takeover from stealing a slow writer's lock.
+	const { store, jobDir, sessionsDir, logs } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	const first = seed(sessionsDir, key, { venue: "local" });
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}loser\n`);
+	const lock = agedLock(sessionsDir, key, 60_000);
+
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.reason, "locked", "a minute-old lock is a live writer");
+	assert.equal(readFileSync(first, "utf8"), HEADER, "and the loser leaves the canonical transcript alone");
+	assert.equal(existsSync(lock), true, "and does not remove the holder's lock");
+	assert.equal(logs.some(([event]) => event === "session_lock_stale_taken"), false, "and says nothing about a takeover");
+});
+
+test("a takeover is logged only AFTER the retake succeeded (#336)", () => {
+	// A rival sweeper can win the recreate race. Logging on the unlink would tell an operator this process
+	// took a lock it does not hold.
+	const { store, jobDir, sessionsDir, logs } = fixture({
+		fs: {
+			...realFs,
+			openSync: (p, ...rest) => {
+				if (String(p).endsWith("lock")) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+				return realFs.openSync(p, ...rest);
+			},
+		},
+	});
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	agedLock(sessionsDir, key, 2 * 3600_000);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).reason, "locked", "the retake lost, so this job stands down");
+	assert.equal(logs.some(([event]) => event === "session_lock_stale_taken"), false, "and claims no takeover it did not complete");
+});
+
+test("a DANGLING link planted at the lock name does not wedge the key forever (#336)", () => {
+	// `openSync(..., "wx")` fails EEXIST on a dangling symlink, so a link planted at this name was a permanent
+	// wedge. It is also why the age is read with `lstat`: under `stat` a dangling link throws ENOENT on every
+	// attempt, and the key stays wedged with the takeover in place.
+	const { store, jobDir, sessionsDir, root, logs } = fixture();
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key, { venue: "local" });
+	const lock = join(sessionsDir, key, "lock");
+	symlinkSync(join(root, "nothing-here"), lock);
+	const at = new Date(NOW - 2 * 3600_000);
+	realFs.lutimesSync(lock, at, at);
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}unwedged\n`);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true, "a planted link must not hold the key for good");
+	assert.ok(logs.some(([event]) => event === "session_lock_stale_taken"));
+	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("unwedged"), true);
 });
 
 test("a promotion that LANDED is never reported as promote-failed by its pi-version stamp (#336)", () => {

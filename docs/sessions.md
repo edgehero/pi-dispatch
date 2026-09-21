@@ -166,7 +166,7 @@ line, because it says why the NEXT run for this key will cold start:
 
 | reason | meaning |
 |---|---|
-| `locked` | the key was already held by another job's exclusive promotion lock |
+| `locked` | the key was already held by another job's exclusive promotion lock. A lock left behind by a killed promotion is taken over by the next promotion once it is older than an hour, so this means a live writer rather than a file somebody has to delete |
 | `promote-failed` | the transcript swap itself failed: a full disk, or a permissions change under the store mid-promotion. A sidecar that fails after the swap is logged, never reported here: the transcript landed |
 
 `locked` is the one with a design behind it. That run discards its own copy rather than clobbering the
@@ -200,7 +200,8 @@ that bounds how long a conversation accumulates.
 <PI_SESSIONS_DIR>/<hash>/venue           which backend wrote it; absent on keys from before venues were recorded
 <PI_SESSIONS_DIR>/<hash>/resume-chain    how many times in a row it has been resumed
 <PI_SESSIONS_DIR>/<hash>/context         how full the context was when it was last written
-<PI_SESSIONS_DIR>/<hash>/lock            the one-writer promotion lock; absent when free
+<PI_SESSIONS_DIR>/<hash>/lock            the one-writer promotion lock; absent when free, and taken
+                                         over by the next promotion once it is older than an hour
 ```
 
 The directory name is a hash, not a readable path, so a branch name never becomes a filesystem path and a

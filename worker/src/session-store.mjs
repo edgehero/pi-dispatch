@@ -113,6 +113,27 @@ const VENUE_PENDING = "(pending)";
  * the safe outcome. The transcript's worst case is a corrupt transcript, which it does not.
  */
 let tmpSeq = 0;
+
+/**
+ * A promotion lock older than this is a crashed writer's, not a live one's.
+ *
+ * `triggers-file.mjs` holds the same idiom at ten seconds; this is three orders larger because the work
+ * under the two locks is not comparable. A trigger write is a read, one mutate and two syscalls. A
+ * promotion is a COPY of the container's transcript -- up to `PI_SESSION_MAX_BYTES`, 8 MiB by default --
+ * plus a rename and four small sidecar writes.
+ *
+ * AN ASSERTION ABOUT STORAGE, NOT A DERIVATION, and said plainly because `PI_SESSION_MAX_BYTES=0` is a
+ * supported setting and there is then no configured bound to derive from. An hour covers roughly three
+ * gigabytes at a megabyte a second, which is a slower store than anything this project will meet.
+ *
+ * WHAT MAKES A GENEROUS NUMBER THE RIGHT TRADE IS THE ASYMMETRY. Too short steals a LIVE writer's lock,
+ * and with the release-by-path residual below that degrades into the lock being functionally absent. Too
+ * long only delays recovery on a key nobody is watching, at one extra cold start per job until it passes.
+ *
+ * A CONSTANT RATHER THAN A KNOB, on triggers-file's precedent: the one value an operator would reach for
+ * is zero, and zero here means no lock at all.
+ */
+const LOCK_STALE_MS = 3_600_000;
 /** Every sidecar format is a handful of bytes. Generous, and still nowhere near a job's wall clock. */
 const SIDECAR_MAX_BYTES = 4096;
 /**
@@ -273,6 +294,64 @@ export function makeSessionStore({
 	 * one key is a real shape (REQ-QUEUE-BURST-NO-DROP), and last-write-wins there would interleave two
 	 * agents' turns into one transcript.
 	 */
+	/**
+	 * Take the per-key promotion lock, with ONE stale takeover. Returns `{ fd }`, or `{ locked: true }` when
+	 * a LIVE writer holds it. Throws only for non-EEXIST failures, which is the doctrine this call site
+	 * already carried: a read-only directory, a full disk or a vanished store all fail to create the lock
+	 * too, and reporting those as `locked` sends an operator hunting a stuck file that does not exist.
+	 *
+	 * WITHOUT THIS, A PROCESS KILLED INSIDE THE LOCK WEDGED THE KEY FOREVER (issue #336). Later promotions
+	 * reported `locked` until the reaper swept the key, and the reaper keys on the TRANSCRIPT's mtime: a key
+	 * whose first promotion died before any transcript landed had none to key on, and with
+	 * `PI_SESSIONS_TTL_DAYS=0` the reaper does not run at all. A takeover works in both of those, which is
+	 * why it is the primary fix and the reaper's own repair is the secondary one.
+	 *
+	 * `lstatSync`, never `statSync`. The injected `fs` deliberately carries no `statSync`, this module's
+	 * whole doctrine is lstat-in-a-key-directory, and a DANGLING link planted at this name throws ENOENT
+	 * under `stat` on every attempt, which is the same wedge in a different coat.
+	 *
+	 * TWO DIFFERENT CLOCKS, and the comparison is between them: `now()` is this process's, `mtimeMs` is the
+	 * FILESYSTEM's, which on a network mount is a server's. `OQ-031` already records two hosts sharing one
+	 * working tree as a live hazard, and a shared `PI_SESSIONS_DIR` is exactly that shape. Both signs of the
+	 * skew are bad, and differently. A server more than `LOCK_STALE_MS` BEHIND makes every live lock read as
+	 * stale, so the takeover fires on every attempt and the conceded double-take window stops being rare;
+	 * worse, `releaseLock` unlinks by PATH rather than by fd, so once A's lock is stolen A's release deletes
+	 * B's. A server AHEAD makes the difference negative, so a genuinely crashed writer's lock is NEVER
+	 * swept -- which is precisely today's behaviour, so under that skew this degrades to the status quo
+	 * rather than to something worse. Nothing here closes either; `triggers-file.mjs` states the same pair.
+	 */
+	function takeLock(dir, key) {
+		const lock = join(dir, LOCK_FILE);
+		let sweptAgeMs = null;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				const fd = fs.openSync(lock, "wx"); // exclusive create IS the lock; no daemon, no lease
+				// Logged only AFTER the retake create SUCCEEDED. The unlink alone proves nothing, since a rival
+				// sweeper can win the recreate race, and a takeover line for a lock we did not get would send an
+				// operator reading a history that never happened.
+				if (sweptAgeMs !== null) log("session_lock_stale_taken", { key, ageMs: sweptAgeMs });
+				return { fd };
+			} catch (err) {
+				if (err?.code !== "EEXIST") throw err;
+				let mtimeMs;
+				try {
+					mtimeMs = fs.lstatSync(lock).mtimeMs;
+				} catch {
+					// Released between our open and our stat: the next create answers.
+					continue;
+				}
+				if (now() - mtimeMs <= LOCK_STALE_MS) return { locked: true };
+				try {
+					fs.unlinkSync(lock);
+				} catch {
+					// Someone else swept it first; the retry create answers who won.
+				}
+				sweptAgeMs = Math.round(now() - mtimeMs);
+			}
+		}
+		return { locked: true };
+	}
+
 	function promoteSession(session, { piVersion = null, context = null } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
@@ -293,18 +372,15 @@ export function makeSessionStore({
 			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
 			const lock = join(dir, LOCK_FILE);
-			let fd;
-			try {
-				fd = fs.openSync(lock, "wx"); // exclusive create IS the lock; no daemon, no lease
-			} catch (err) {
-				// EEXIST is the only failure that MEANS locked. A read-only directory, a full disk or a
-				// vanished store all failed to create the lock too, and reporting those as `locked` sends an
-				// operator looking for a stuck lock file that does not exist. Anything else falls through to
-				// the outer catch and reports `promote-failed`, which is what actually happened.
-				if (err?.code !== "EEXIST") throw err;
+			// `locked` still means a LIVE writer and nothing else. A lock older than any plausible promotion is
+			// taken over rather than believed (see `takeLock`); anything that is not EEXIST still falls through
+			// to the outer catch and reports `promote-failed`, which is what actually happened.
+			const taken = takeLock(dir, session.key);
+			if (taken.locked) {
 				log("session_promote_skipped", { key: session.key, reason: "locked" });
 				return { promoted: false, reason: "locked" };
 			}
+			const fd = taken.fd;
 			try {
 				// Atomic swap: a reader either sees the old file or the new one, never a half-written one.
 				// PER WRITER (see `tmpSeq`), not the fixed `.incoming` this shared before the lock could be taken
