@@ -2402,7 +2402,14 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
 		const ownerText = m[1];
 		const owner = Number(ownerText);
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
-		if (owner === pid || !Number.isSafeInteger(owner) || isAlive(owner)) continue;
+		//
+		// OUR OWN PID IS SWEPT, and that is not a contradiction. This runs BEFORE the canary creates anything,
+		// and one host cannot have two live processes under one pid, so a network already carrying our pid
+		// cannot be ours: it was left by an earlier process that the OS has since reused the number for. It is
+		// in fact the ONE value here that is certainly stale. Skipping it, which the first draft did in the
+		// belief it was protecting a concurrent run, left that network to block our own `network create` and
+		// take the whole egress read-back down silently, measured.
+		if (!Number.isSafeInteger(owner) || (owner !== pid && isAlive(owner))) continue;
 		const { ok, names, absent } = await networkEndpoints(docker, name);
 		if (absent) continue;
 		if (!ok) {
@@ -2430,6 +2437,9 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive }) {
 export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
 
 const CANARY_STEP_TIMEOUT_MS = 10_000;
+
+/** One fixed text for a canary that could not start. The policy may be fine; what is missing is the PROOF. */
+const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it";
 
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
 const CANARY_LEFTOVER_FIX = "remove it by hand now, or let the next `pi-dispatch doctor` remove it once that process has exited";
@@ -2559,8 +2569,17 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// create that never launched created nothing.
 		const createCode = await runCmd(spawn, "docker", ["network", "create", "--internal", net]);
 		created = createCode === 0;
-		if (createCode !== 0) return checks;
-		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) return checks;
+		// SAID, not returned into silence. Both of these used to leave `doctor` with no egress reading at all
+		// and no line explaining the absence, which is the shape this whole slice exists to remove: a reader
+		// cannot tell "the policy was proved" from "nothing was tried".
+		if (createCode !== 0) {
+			checks.push({ ok: false, warn: true, label: `Egress policy: not proved, because the canary network ${net} could not be created`, fix: CANARY_UNPROVED_FIX });
+			return checks;
+		}
+		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) {
+			checks.push({ ok: false, warn: true, label: `Egress policy: not proved, because ${proxy} could not be attached to the canary network`, fix: CANARY_UNPROVED_FIX });
+			return checks;
+		}
 		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
 		// allow-all squid answered 503 for it and let `example.com` through). `example.com` is reserved for documentation

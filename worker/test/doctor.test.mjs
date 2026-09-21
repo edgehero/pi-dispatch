@@ -3924,3 +3924,38 @@ test("doctor: the probe names ARE the slug list, so a new direction cannot reach
 	const expected = CANARY_PROBE_SLUGS.map((slug) => egressCanaryProbe(slug, 4242));
 	assert.deepEqual(named, expected, "every slug in the list gets a probe, and no probe is named outside it");
 });
+
+test("doctor: a leftover carrying OUR OWN pid is swept, because it cannot be ours (#350)", async () => {
+	// Measured before the fix: the sweep skipped `owner === pid` believing it protected a concurrent run, so a
+	// network left by an EARLIER process the OS had since reused the number for stayed, blocked our own
+	// `network create`, and took the whole egress read-back down with no line saying why. One host cannot have
+	// two live processes under one pid, and this sweep runs before the canary creates anything, so our own pid
+	// is the one value here that is certainly stale.
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: "{}" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { pid: 4242, isAlive: (p) => p === 4242 }));
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242/, "our own stale pid is reclaimed, not skipped");
+	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm" && c.args.at(-1) === "pi-dispatch-egress-doctor-4242"));
+});
+
+test("doctor: a canary that cannot START says so instead of leaving no egress reading at all (#350)", async () => {
+	// A reader cannot tell "the policy was proved" from "nothing was tried". Both early returns used to be
+	// silent, so a blocked canary looked identical to a healthy one that simply printed less.
+	for (const [what, plan] of [
+		["create", { "docker network create": 1, ...green, "gh auth status": { code: 0, output: ghStatusOutput } }],
+		["connect", { "docker network connect": 1, ...green, "gh auth status": { code: 0, output: ghStatusOutput } }],
+	]) {
+		const { out, text } = capture();
+		const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, []));
+		assert.equal(code, 0, `${what}: an unproved policy warns, it never fails doctor`);
+		assert.match(text(), /⚠ Egress policy: not proved, because/, what);
+		assert.match(text(), /the policy itself may be fine, but nothing here has shown that it is/, `${what}: and says what is missing`);
+		assert.doesNotMatch(text(), /Egress policy reaches the provider/, `${what}: nothing may read as proved`);
+	}
+});
