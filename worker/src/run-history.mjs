@@ -1,4 +1,5 @@
 import * as nodeFs from "node:fs";
+import { scrubCredentials } from "./redact.mjs";
 import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
@@ -719,11 +720,11 @@ export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () =>
 						log("reaped_log", { file: name });
 					}
 				} catch (err) {
-					log("log_reaper_skipped", { file: name, reason: err?.message });
+					log("log_reaper_skipped", { file: name, reason: scrubCredentials(err?.message) });
 				}
 			}
 		} catch (err) {
-			log("log_reaper_skipped", { reason: err?.message });
+			log("log_reaper_skipped", { reason: scrubCredentials(err?.message) });
 		}
 	};
 }

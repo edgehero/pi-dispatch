@@ -1,3 +1,6 @@
+// The one import this module takes, and it is an import-free leaf for that reason (issue #339).
+import { scrubCredentials } from "./redact.mjs";
+
 /**
  * Reap several backends and combine the tri-state CONSERVATIVELY.
  *
@@ -29,7 +32,7 @@ export async function reapAll(reaps = [], { log = () => {} } = {}) {
 			// catch reached the caller before this function existed, and the caller logged it. Swallowing it
 			// here without a word would delete an operator-visible signal about a venue that could not be
 			// swept, so the log seam is threaded through rather than assumed to be somebody else's job.
-			log("reaper_skipped", { reason: err?.message });
+			log("reaper_skipped", { reason: scrubCredentials(err?.message) });
 			reaped = false;
 		}
 	}

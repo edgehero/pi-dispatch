@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { scrubCredentials } from "./redact.mjs";
 import { sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
@@ -852,7 +853,7 @@ export function makeSessionStore({
 		try {
 			names = fs.readdirSync(sessionsDir);
 		} catch (err) {
-			log("session_reaper_skipped", { reason: err?.message });
+			log("session_reaper_skipped", { reason: scrubCredentials(err?.message) });
 			return;
 		}
 		for (const name of names) {
@@ -903,7 +904,7 @@ export function makeSessionStore({
 					log("reaped_session", { key: name });
 				}
 			} catch (err) {
-				log("session_reaper_skipped", { key: name, reason: err?.message });
+				log("session_reaper_skipped", { key: name, reason: scrubCredentials(err?.message) });
 			}
 		}
 	}

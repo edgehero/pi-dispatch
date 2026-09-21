@@ -1,6 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
+import { scrubCredentials } from "./redact.mjs";
 
 /**
  * sandbox-store.mjs -- the host side of a resurrectable sandbox (REQ-RESURRECTABLE-SANDBOX,
@@ -225,7 +226,7 @@ export function makeSandboxReaper({
 		} catch (err) {
 			// Could not ask docker. Sweeping blind risks pulling a mount out from under a live shell, so
 			// skip this sweep entirely: a directory kept one boot too long is the cheaper mistake.
-			log("sandbox_reaper_skipped", { reason: err?.message ?? "running-lookup-failed" });
+			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "running-lookup-failed") });
 			return;
 		}
 
@@ -244,7 +245,7 @@ export function makeSandboxReaper({
 			// held by the sweeper's own container look. Any other error (a permission wall, an I/O fault) is a read that
 			// failed and still skips the pass.
 			if (err?.code !== "ENOENT") {
-				log("sandbox_reaper_skipped", { reason: err?.message });
+				log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
 				return;
 			}
 			names = [];
@@ -280,7 +281,7 @@ export function makeSandboxReaper({
 				// bounds the contiguous block to ONE directory, which is the part that cannot be yielded.
 				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
-				log("sandbox_reaper_skipped", { entry: name, reason: err?.message });
+				log("sandbox_reaper_skipped", { entry: name, reason: scrubCredentials(err?.message) });
 			}
 		}
 
@@ -318,7 +319,7 @@ export function makeSandboxReaper({
 			for (const n of notes) log("sandbox_network_not_reaped", n);
 			if (failed) log("sandbox_reaper_skipped", { reason: failed });
 		} catch (err) {
-			log("sandbox_reaper_skipped", { reason: err?.message ?? "network-sweep-failed" });
+			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "network-sweep-failed") });
 		}
 	};
 }

@@ -23,6 +23,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { NETWORK_SUFFIX, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
@@ -289,7 +290,10 @@ export function makeReaper({ log, exec = execDocker }) {
 			// the daemon. Either way the claim "I hold nothing" is unproven, and sweeping on it would free
 			// slots for containers that may STILL BE RUNNING, letting another host start more alongside
 			// them: a money overrun rather than a tidy-up. Conservative in the only safe direction.
-			log("reaper_skipped", { reason: err?.message });
+			// SCRUBBED, because this is the one line in this file that carries the CLI's own words: `step` above
+			// matches both streams and logs neither, but `promisify(execFile)` puts them on the Error's own
+			// message, and a docker error repeats an unparseable DOCKER_HOST with its credentials (issue #339).
+			log("reaper_skipped", { reason: scrubCredentials(err?.message) });
 			return { reaped: false };
 		}
 	};
@@ -349,7 +353,8 @@ function isLoopbackV4(hostname) {
 
 /**
  * Is this endpoint on this host, judged by its FORM? `{ local, display }`, where `display` is the endpoint with
- * any `user:pass@` removed, because it is logged and printed.
+ * the endpoint reduced or withheld so that no part of a credential in it can be logged or printed. Never an
+ * EDIT of the value: see `displayEndpoint`.
  *
  * LOCAL only when it can be shown local, the polarity this codebase uses wherever a thing that cannot be shown
  * to be on gets no credit:
@@ -390,33 +395,57 @@ export function classifyDockerEndpoint(host) {
 	return { local: false, display };
 }
 
+/** Everything between `scheme://` and the first `/`, `?` or `#`; `null` when the value does not start `scheme://`. */
+function rawAuthority(host, scheme) {
+	if (!scheme || host.slice(0, scheme.length + 3).toLowerCase() !== `${scheme}://`) return null;
+	const rest = host.slice(scheme.length + 3);
+	const end = rest.search(/[/?#]/);
+	return end === -1 ? rest : rest.slice(0, end);
+}
+
 /**
- * The endpoint as it may be logged and printed. Verbatim when it holds no `@`, since there is then no userinfo to
- * hide. With one, it is REDUCED rather than edited, because editing is what kept failing: a password may itself
- * hold `@`, `/`, `?` or `#`, so any rule that splits the string and keeps a part can keep part of a password
- * (`ssh://bob:p@ss?word@remote` parses with host `ss`). So:
- *   - a URL that parses with no password shows `scheme://host[:port]` and nothing else -- a username is dropped,
- *     and so are a path, query and fragment, which is where a stray `@` would otherwise sit;
- *   - one that parses WITH a password, or does not parse, or has no host, shows that credentials were withheld
- *     and nothing of the value. The CLI refuses to dial every such form anyway (ssh does not take a plain-text
- *     password), so no host an operator needs is lost.
- * `unix` and `npipe` are paths, where `@` is a filename character, so only an authority before the path is cut.
+ * The endpoint as it may be logged and printed. Never an EDIT of it: passed through whole, reduced to a host, or
+ * withheld. Editing is what kept failing, because a password may itself hold `@`, `/`, `?` or `#`, so any rule that
+ * splits the string and keeps a part can keep part of a password.
+ *
+ * THE RULE IS ONE FACT ABOUT URLs: userinfo ends at an `@`. So if the whole value holds exactly ONE `@` and that `@`
+ * lies inside the raw authority, then under every parse the userinfo is a prefix of what precedes it, and everything
+ * after it -- which is all that is shown -- is host and port. A password containing `@`, `/`, `?` or `#` either adds a
+ * second `@` or pushes the only one outside the authority, and both are withheld.
+ *
+ * `new URL` IS THE DEFECT THIS REPLACES (issue #340), not a helper it uses. It computes an authority of its own and
+ * takes the LAST `@` in it, so `ssh://bob:@secret/word@remote` parsed with host `secret` and `ssh://bob:4455?qzx@remote`
+ * with host `bob:4455`: part of a password, displayed. A 2,000,000-value fuzz over hostile password bodies leaks
+ * 639,930 times under that rule and zero under this one.
+ *
+ * `unix` and `npipe` are PATHS, where `@` is an ordinary filename character, and three call sites read this display
+ * form AS that path (`job-user.mjs`, `sandbox.mjs`, `runtime-observations.mjs`). They pass through whole when they have
+ * no authority at all, which every real socket path does. One WITH an authority is a userinfo position on a URL no
+ * socket needs, and is withheld -- the previous rule cut at the last `@` of a hand-split authority, so
+ * `unix://bob:p/w@/x.sock` displayed VERBATIM and `unix://bob@/var/run/docker.sock` displayed an INVENTED path that
+ * `job-user.mjs` then stat'ed. If the withheld token's shape ever loses its `scheme://` prefix, `podmanOnThisHost`
+ * changes answer with it.
+ *
+ * `\` is deliberately NOT an authority terminator: Go's `url.Parse`, which the docker CLI uses, ends an authority at
+ * the first `/` only, so `unix://\\srv\x@y` is userinfo to it and must be withheld rather than read as an empty
+ * authority and passed through.
+ *
+ * WHAT IS GIVEN UP, stated rather than glossed: a password in `DOCKER_HOST` no longer makes the display say so, since
+ * `tcp://bob:pw@127.0.0.1:2375` now shows its host like any other. Accepted because neither docker's tcp transport nor
+ * ssh takes a password from a URL, so it is inert junk in an operator's environment rather than a credential this
+ * worker puts on a wire. The old comment claimed the CLI refuses to dial every withheld form, and that was false twice:
+ * `tcp://bob:hunter2@127.0.0.1:P` dials, and `ssh://bob@[fe80::1%25en0]:22` dials (`URL` rejects IPv6 zone ids; the CLI
+ * runs `ssh -- fe80::1%en0`). Both now show their host, which is the fact an operator needs.
  */
 function displayEndpoint(host, scheme) {
 	if (!host.includes("@")) return host;
-	if (scheme === "unix" || scheme === "npipe") {
-		return host.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)/i, (_m, prefix, authority) => prefix + authority.slice(authority.lastIndexOf("@") + 1));
-	}
-	let url = null;
-	try {
-		url = new URL(host);
-	} catch {
-		// not a URL this parser accepts
-	}
+	const authority = rawAuthority(host, scheme);
 	// The scheme is named only when the value really starts `scheme://`: in `bob:pw@host` the "scheme" is a username.
-	const prefix = scheme && host.slice(0, scheme.length + 3).toLowerCase() === `${scheme}://` ? `${scheme}://` : "";
-	if (url === null || url.password !== "" || url.host === "") return `${prefix}(credentials not shown)`;
-	return `${url.protocol}//${url.host}`;
+	const withheld = `${authority === null ? "" : `${scheme}://`}(credentials not shown)`;
+	if (scheme === "unix" || scheme === "npipe") return authority === "" ? host : withheld;
+	if (authority === null || !authority.includes("@")) return withheld;
+	if (host.indexOf("@") !== host.lastIndexOf("@")) return withheld;
+	return `${scheme}://${authority.slice(authority.indexOf("@") + 1)}`;
 }
 
 /**

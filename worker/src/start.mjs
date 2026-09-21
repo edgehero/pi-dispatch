@@ -29,6 +29,7 @@ import { listRunningSandboxes, makeSandboxNetworkSweeper } from "./sandbox.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
+import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
 import { makeWatchCloser } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
@@ -612,7 +613,7 @@ export async function startWorker(
 		backendReaps = { [DEFAULT_BACKEND]: makeReaperFn({ log }), ...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])) };
 		reaped = (await reapAll(Object.values(backendReaps), { log }))?.reaped === true;
 	} catch (err) {
-		log("reaper_skipped", { reason: err?.message });
+		log("reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
 
 	// REQ-LOCAL-JOB-VISIBILITY: sweep aged `.log`/`.json` history at boot so the logs directory stays
@@ -627,7 +628,7 @@ export async function startWorker(
 		reapLogs = makeLogReaperFn({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
 		await reapLogs();
 	} catch (err) {
-		log("log_reaper_skipped", { reason: err?.message });
+		log("log_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
@@ -654,7 +655,7 @@ export async function startWorker(
 		});
 		await reapSandboxes();
 	} catch (err) {
-		log("sandbox_reaper_skipped", { reason: err?.message });
+		log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
 
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
@@ -671,7 +672,7 @@ export async function startWorker(
 		if (config.workerNameDeclared)
 			await makeScopeClaimSweeperFn({ redis, workerName: config.workerName, limits: scopedLimits.current.map((r) => ({ concurrent: r.concurrent, hash: scopeKeyPrefix(r.scope).slice("budget:s:".length) })), log })({ reaped });
 	} catch (err) {
-		log("scope_claims_sweep_skipped", { reason: err?.message });
+		log("scope_claims_sweep_skipped", { reason: scrubCredentials(err?.message) });
 	}
 
 	// The persistent runtime queue: the stall guard tears schedulers down through it, AND the outbox
@@ -725,7 +726,7 @@ export async function startWorker(
 	try {
 		sessionStore.reapSessions();
 	} catch (err) {
-		log("session_reaper_skipped", { reason: err?.message });
+		log("session_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
 	// The one-shot file path (issue #231): PI_TRIGGERS_FILE, else ./triggers.json against this process's
 	// cwd -- doctor's own fallback, chosen for doctor's own reason ("the two must read the same file"),
@@ -1531,7 +1532,7 @@ function dockerEndpointState(endpoint) {
 
 /**
  * What an endpoint answer shows, for a refusal message. The context name is operator config; the endpoint is
- * the display form, with any `user:pass@` already removed.
+ * the display form, which is the value reduced to `scheme://host` or withheld, never edited (`displayEndpoint`).
  */
 function dockerEndpointEvidence(endpoint) {
 	if (endpoint.local === null) return `the docker CLI did not say which endpoint it resolves (${endpoint.reason})`;

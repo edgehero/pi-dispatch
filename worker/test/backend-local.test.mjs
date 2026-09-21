@@ -143,24 +143,69 @@ test("an endpoint is LOCAL only when its form shows it, and credentials in it ar
 	notLocal.push("tcp://LOCALHOST:2375");
 	for (const h of local) assert.equal(classifyDockerEndpoint(h).local, true, h);
 	for (const h of notLocal) assert.equal(classifyDockerEndpoint(h).local, false, String(h));
-	// With an `@` present the value is REDUCED, never edited: a password may hold `@`, `/`, `?` or `#`, and every
-	// splitting rule tried kept part of one (`ssh://bob:p@ss?word@remote` parses with host `ss`).
+	// With an `@` present the value is REDUCED, never edited. The rule is one fact about URLs: userinfo ends at
+	// an `@`, so exactly ONE `@`, INSIDE the raw authority, means everything after it is host and port under
+	// every parse. Anything else is withheld (issue #340).
 	const hidden = "ssh://(credentials not shown)";
-	for (const h of ["ssh://bob:hunter2@remote:22", "ssh://bob:s3cr/et@remote", "ssh://bob:pa?ss@remote", "ssh://bob:pa#ss@remote", "ssh://bob:p@ss?word@remote", "ssh://bob:p@ss#word@remote", "ssh://bob:p@ss/word@remote", "ssh://bob:pa?ss\n@remote", "ssh://bob:pa?s@s@remote"]) {
+	for (const h of ["ssh://bob:s3cr/et@remote", "ssh://bob:pa?ss@remote", "ssh://bob:pa#ss@remote", "ssh://bob:p@ss?word@remote", "ssh://bob:p@ss#word@remote", "ssh://bob:p@ss/word@remote", "ssh://bob:pa?ss\n@remote", "ssh://bob:pa?s@s@remote"]) {
 		assert.equal(classifyDockerEndpoint(h).display, hidden, JSON.stringify(h));
 	}
+	// The three shapes `new URL` got wrong, which is what this rule replaced: it computes an authority of its own
+	// and takes the LAST `@` in it, so each of these displayed part of the password.
+	assert.equal(classifyDockerEndpoint("ssh://bob:@secret/word@remote").display, hidden, "`bob:` reads as no password to URL and the host became `secret`");
+	assert.equal(classifyDockerEndpoint("ssh://bob:4455/qzx@remote").display, hidden, "leading digits of a password parsed as a port");
+	assert.equal(classifyDockerEndpoint("ssh://bob:4455?qzx@remote").display, hidden, "and again with a query");
+	assert.equal(classifyDockerEndpoint("ssh://a@b@c").display, hidden, "two `@` means the userinfo boundary is not knowable");
 	assert.equal(classifyDockerEndpoint("tcp://user:p@ss@10.1.2.3:2375").display, "tcp://(credentials not shown)");
 	assert.equal(classifyDockerEndpoint("bob:pw@remote").display, "(credentials not shown)", "a username is not named as if it were a scheme");
-	// No password: `scheme://host[:port]` only, so a username, and a path, query or fragment holding an `@`, go.
+	// A host IS shown whenever the rule can prove it is one, and that is WIDER than before on purpose. The old
+	// comment claimed the CLI refuses to dial every withheld form; measured, it dials both of these.
+	assert.equal(classifyDockerEndpoint("ssh://bob:hunter2@remote:22").display, "ssh://remote:22", "a password is not a reason to withhold the host it precedes");
+	assert.deepEqual(classifyDockerEndpoint("tcp://bob:hunter2@127.0.0.1:2375"), { local: true, display: "tcp://127.0.0.1:2375" }, "and this one the CLI really dials");
+	assert.equal(classifyDockerEndpoint("ssh://bob@[fe80::1%25en0]:22").display, "ssh://[fe80::1%25en0]:22", "an IPv6 zone id `URL` rejects, which the CLI runs as `ssh -- fe80::1%en0`");
+	assert.equal(classifyDockerEndpoint("ssh://bob:@remote").display, "ssh://remote", "an empty password is no password");
 	assert.equal(classifyDockerEndpoint("ssh://bob@remote:2222").display, "ssh://remote:2222");
 	assert.equal(classifyDockerEndpoint("tcp://user@10.1.2.3:2375").display, "tcp://10.1.2.3:2375");
-	assert.equal(classifyDockerEndpoint("ssh://bob@remote/p@x").display, "ssh://remote");
-	// An `@` after `?` or `#` is not userinfo: the host shown is the one the CLI dials, not the one after it.
-	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375?@localhost").display, "tcp://10.1.2.3:2375");
-	assert.deepEqual(classifyDockerEndpoint("tcp://127.0.0.1:2375#frag@10.1.2.3"), { local: true, display: "tcp://127.0.0.1:2375" });
-	// Paths: an `@` is a filename character there, and verbatim is right.
+	// An `@` OUTSIDE the authority is withheld, not read as a host: which side of it is userinfo is exactly what
+	// cannot be decided, and the previous rule decided it wrongly.
+	assert.equal(classifyDockerEndpoint("ssh://bob@remote/p@x").display, hidden, "two `@`, one of them in the path");
+	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375?@localhost").display, "tcp://(credentials not shown)");
+	assert.deepEqual(classifyDockerEndpoint("tcp://127.0.0.1:2375#frag@10.1.2.3"), { local: true, display: "tcp://(credentials not shown)" }, "and `local` does not move with the display");
+	// Paths: an `@` is a filename character there, and verbatim is right -- three call sites read this form AS
+	// the socket path. One with an AUTHORITY is a userinfo position no socket needs, and both shapes below
+	// leaked before #340: the first displayed verbatim, the second an INVENTED path that job-user.mjs stat'ed.
 	assert.equal(classifyDockerEndpoint("unix:///run/user@1000/docker.sock").display, "unix:///run/user@1000/docker.sock", "an @ in a path is not userinfo");
+	assert.equal(classifyDockerEndpoint("unix://bob:p/w@/x.sock").display, "unix://(credentials not shown)", "a unix URL with an authority is withheld, not passed through");
+	assert.equal(classifyDockerEndpoint("unix://bob@/var/run/docker.sock").display, "unix://(credentials not shown)", "and never reduced to a path it does not name");
 	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375").display, "tcp://10.1.2.3:2375", "no @, nothing touched");
+	// The two missing regression bolts (#340): a no-`@` value with a PATH stays whole, and a local pipe with a
+	// leading backslash stays local. Both behave correctly already; neither was pinned, so either could be
+	// undone silently.
+	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375/base").display, "tcp://10.1.2.3:2375/base", "no @ means the early return, path and all");
+	assert.deepEqual(classifyDockerEndpoint("npipe://\\\\.\\pipe\\docker_engine"), { local: true, display: "npipe://\\\\.\\pipe\\docker_engine" }, "a leading-backslash pipe is local and untouched");
+});
+
+test("no password body can put any of itself into the display (#340)", () => {
+	// The belt to the table's braces, and the property IS the rule: the answer is the withheld token or the
+	// host, never anything in between. Exhaustive over a hostile alphabet at lengths 1 to 3 rather than random,
+	// so it is deterministic. A 600,000-value random fuzz of the same property leaked 120,712 times against the
+	// `new URL` rule this replaced and zero against this one.
+	const alphabet = [..."abz09:@/?#.%[]-_\\"];
+	const bodies = [];
+	for (const a of alphabet) {
+		bodies.push(a);
+		for (const b of alphabet) {
+			bodies.push(a + b);
+			for (const c of alphabet) bodies.push(a + b + c);
+		}
+	}
+	for (const scheme of ["ssh", "tcp"]) {
+		const ok = new Set([`${scheme}://(credentials not shown)`, `${scheme}://remote`]);
+		for (const body of bodies) {
+			const shown = classifyDockerEndpoint(`${scheme}://bob:${body}@remote`).display;
+			assert.ok(ok.has(shown), `${scheme} ${JSON.stringify(body)} -> ${JSON.stringify(shown)}`);
+		}
+	}
 });
 
 test("the CLI's answer is read from the last line that parses, so a warning ahead of it is not mistaken for it", () => {
@@ -235,7 +280,10 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 function fakeDockerExec({ containers = [], nets = {}, fail = {} } = {}) {
 	const calls = [];
 	const state = new Map(Object.entries(nets).map(([n, members]) => [n, [...members]]));
-	const reject = (code, stderr) => Promise.reject(Object.assign(new Error(`Command failed: docker`), { code, stdout: "", stderr }));
+	// `promisify(execFile)` puts the CLI's stderr on the Error's own MESSAGE, not only on `.stderr`, and that
+	// is the channel issue #339 is about: a fake that carried it only on `.stderr` made every test here blind
+	// to the one line that logs `err.message`.
+	const reject = (code, stderr) => Promise.reject(Object.assign(new Error(`Command failed: docker\n${stderr}`), { code, stdout: "", stderr }));
 	const exec = async (_cmd, args) => {
 		calls.push(args.join(" "));
 		const key = args.slice(0, 2).join(" ");
@@ -357,13 +405,31 @@ test("nothing the reaper logs about a network carries the CLI's own text (#339, 
 	await makeReaper({ log, exec })();
 	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed"]);
 	for (const [event, fields] of lines) {
+		// `reaper_skipped` is exempt from the CLOSED-TOKEN rule and only from that. Its reason is a fault's
+		// own prose, deliberately, because at most of the twelve sites that share this treatment the message
+		// IS the diagnosis. It is NOT exempt from the credential rule below, which is the one this issue is
+		// about and which used to skip it with the token check (issue #339).
 		if (event === "reaper_skipped") continue;
 		for (const [key, value] of Object.entries(fields)) {
 			const values = Array.isArray(value) ? value : [value];
 			for (const v of values) assert.ok(key === "reason" ? reasons.has(v) : /^[A-Za-z0-9._-]+$/.test(String(v)), `${event}.${key} must be an object name or a closed token, got ${JSON.stringify(v)}`);
 		}
 	}
-	assert.ok(!JSON.stringify(lines).includes("ssh://"), "the CLI's text never reaches a log line");
+	for (const needle of ["ssh://", "bob", "pa?ss"]) assert.ok(!JSON.stringify(lines).includes(needle), `no line may carry ${needle}`);
+});
+
+test("a docker spawn that THROWS logs the CLI's words with the credentials scrubbed, not a token (#339)", async () => {
+	// The line the exemption above used to hide. Both directions are pinned on purpose: the host and the
+	// daemon's own sentence must SURVIVE, because at this site the message is usually the diagnosis, and the
+	// credential must not.
+	const { exec } = fakeDockerExec({ fail: { "ps --filter": 'unable to resolve docker endpoint: parse "ssh://bob:hunter2@remote:22": invalid port ":hunter2"' } });
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: false });
+	assert.deepEqual(lines.map((l) => l[0]), ["reaper_skipped"]);
+	const reason = lines[0][1].reason;
+	assert.match(reason, /ssh:\/\/\[redacted\]@remote:22/, "the host survives: it is what an operator needs");
+	assert.match(reason, /unable to resolve docker endpoint/, "and so does the daemon's own sentence");
+	for (const needle of ["bob", "hunter2"]) assert.ok(!reason.includes(needle), `the credential must not: ${needle}`);
 });
 
 test("the sweep's namespace is the NAME, not the filter: a foreign network is never touched (#357)", async () => {

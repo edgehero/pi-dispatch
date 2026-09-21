@@ -243,6 +243,30 @@ test("a directory whose sandbox is RUNNING is never swept out from under the ope
 	assert.deepEqual(fs.calls.removed, ["/sbx/gh-2"], "the live one stays, however old it is");
 });
 
+test("the sweep's fault line carries the daemon's words with credentials scrubbed (#339)", async () => {
+	// `listRunning` is a `promisify(execFile)` docker spawn in production, so its rejection message repeats an
+	// unparseable DOCKER_HOST with whatever is in it. Both directions pinned: the fs/daemon diagnosis survives,
+	// the credential does not.
+	const logged = [];
+	const reap = makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs: fakeFs({ files: {} }),
+		now: () => AT,
+		listRunning: async () => {
+			throw new Error('Command failed: docker ps\nCannot connect to the Docker daemon at tcp://bob:hunter2@10.0.0.5:2375. Is the docker daemon running?');
+		},
+		log: (event, fields) => logged.push([event, fields]),
+	});
+	await reap();
+	assert.equal(logged.length, 1);
+	assert.equal(logged[0][0], "sandbox_reaper_skipped");
+	const reason = logged[0][1].reason;
+	assert.match(reason, /tcp:\/\/\[redacted\]@10\.0\.0\.5:2375/, "the host survives");
+	assert.match(reason, /Is the docker daemon running\?/, "and so does the daemon's own sentence");
+	for (const needle of ["bob", "hunter2"]) assert.ok(!reason.includes(needle), needle);
+});
+
 test("a docker lookup that FAILS skips the whole sweep rather than sweeping blind", async () => {
 	const at = Date.parse("2026-08-02T00:00:00Z");
 	const fs = sandboxDirWith({ ancient: { createdAt: "2020-01-01T00:00:00Z" } });

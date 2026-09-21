@@ -1,5 +1,6 @@
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { jobContainerName } from "./backend-local.mjs";
+import { scrubCredentials } from "./redact.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
 import { InfraRetry, runJob } from "./processor.mjs";
@@ -604,9 +605,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// host. Losing the kill for one job is bad; losing the process is worse.
 				const note = deps.log ?? (() => {});
 				try {
-					Promise.resolve(stopContainer(name, venue)).catch((err) => note("stop_container_failed", { job: job.id, reason: err?.message }));
+					Promise.resolve(stopContainer(name, venue)).catch((err) => note("stop_container_failed", { job: job.id, reason: scrubCredentials(err?.message) }));
 				} catch (err) {
-					note("stop_container_failed", { job: job.id, reason: err?.message });
+					note("stop_container_failed", { job: job.id, reason: scrubCredentials(err?.message) });
 				}
 			};
 			signal.addEventListener("abort", onAbort, { once: true });

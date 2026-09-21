@@ -1,3 +1,6 @@
+// The one import this module takes, and it is otherwise an import-free leaf (issue #339).
+import { scrubCredentials } from "./redact.mjs";
+
 /**
  * The periodic retention sweep (issue #292, OQ-007).
  *
@@ -106,7 +109,10 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 					// The existing per-store event names, reused rather than invented: an operator greps one
 					// name and gets both the boot sweep and every tick. Fault isolation per store, so one
 					// broken reaper cannot stop the other two.
-					log(`${entry?.name}_reaper_skipped`, { reason: err?.message });
+					// SCRUBBED here as well as at each store's own catch, and that is not belt-and-braces: this line
+					// re-emits every one of those families on the TIMER, so a fix confined to the boot paths would
+					// leave every tick uncovered (issue #339).
+					log(`${entry?.name}_reaper_skipped`, { reason: scrubCredentials(err?.message) });
 				}
 			}
 		})();

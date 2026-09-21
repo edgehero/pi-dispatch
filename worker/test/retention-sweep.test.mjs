@@ -255,3 +255,19 @@ test("a tick yields between stores, so one sweep is never a single uninterruptib
 	await sweeping;
 	assert.deepEqual(order, ["log", "<loop got a turn>", "sandbox"], "the event loop runs between stores, not only after all of them");
 });
+
+test("a reaper that throws on a TICK has its message scrubbed too (#339)", async () => {
+	// THE PIN A BOOT-ONLY FIX FAILS. This line re-emits every `*_reaper_skipped` family by name on the timer,
+	// so scrubbing only the catches in `start.mjs` would leave every tick after boot carrying the credential.
+	const logged = [];
+	const t = timers();
+	const reapers = [{ name: "sandbox", reap: () => { throw new Error("Cannot connect to the Docker daemon at ssh://bob:hunter2@remote. Is the docker daemon running?"); } }];
+	makeRetentionSweep({ reapers, intervalMs: 1000, log: (event, fields) => logged.push([event, fields]), ...t }).start();
+	await t.tick();
+
+	const line = logged.find(([event]) => event === "sandbox_reaper_skipped");
+	assert.ok(line, "the family name is unchanged, which is OQ-007's one-grep property");
+	assert.match(line[1].reason, /ssh:\/\/\[redacted\]@remote/, "the host survives");
+	assert.match(line[1].reason, /Is the docker daemon running\?/, "and so does the daemon's own sentence");
+	for (const needle of ["bob", "hunter2"]) assert.ok(!line[1].reason.includes(needle), needle);
+});
