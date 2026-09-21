@@ -1133,6 +1133,12 @@ test("every temp is REMOVED before it is written, so a link planted at one recei
 	const { store, jobDir, sessionsDir } = fixture({
 		fs: {
 			...realFs,
+			// BOTH removals count: `removeTemp` reaches for `unlinkSync` first and `rmSync` only for the one
+			// shape unlink cannot take, so a test that watched only one of them would pin half the rule.
+			unlinkSync: (p, ...rest) => {
+				if (String(p).includes(".incoming")) calls.push(["rm", String(p)]);
+				return realFs.unlinkSync(p, ...rest);
+			},
 			rmSync: (p, ...rest) => {
 				if (String(p).includes(".incoming")) calls.push(["rm", String(p)]);
 				return realFs.rmSync(p, ...rest);
@@ -1158,6 +1164,42 @@ test("every temp is REMOVED before it is written, so a link planted at one recei
 	for (const path of new Set(written)) {
 		const first = calls.findIndex(([, p]) => p === path);
 		assert.equal(calls[first][0], "rm", `${path.split("/").pop()} must be REMOVED before anything writes it`);
+	}
+});
+
+test("a temp name carrying ANY shape is cleared, and nothing is written through it (#336)", () => {
+	// The three shapes a temp name can be left in, and each was got wrong by a different version of this
+	// rule. A DANGLING link is the sharp one: `rmSync` resolves the path, finds nothing, and reports success
+	// while LEAVING the link, so the write that follows creates a file at the link's target -- the
+	// write-through-a-link hole this series exists to close, reintroduced by the fix for the directory case.
+	// A directory cannot be unlinked at all, and at `venue.incoming`, the one fatal sidecar write, that
+	// wedged every promotion on the key forever.
+	//
+	// The sidecar temp names are FIXED and precomputable, which is the threat model this module already
+	// states; the transcript temp now carries random bytes, so it is covered by the shared rule rather than
+	// by a plantable name.
+	for (const [shape, plant] of [
+		["a dangling link", (at, victim) => symlinkSync(victim, at)],
+		["a link to an existing file", (at, victim) => (writeFileSync(victim, "PRECIOUS"), symlinkSync(victim, at))],
+		["a directory", (at) => (mkdirSync(at, { recursive: true }), writeFileSync(join(at, "inside"), "x"))],
+	]) {
+		const { store, jobDir, sessionsDir, root } = fixture();
+		const key = sessionKeyFor(ghIssue);
+		seed(sessionsDir, key, { venue: "local" });
+		const victim = join(root, `victim-${shape.replace(/\W+/g, "-")}`);
+		// `venue.incoming` is the sentinel's temp: the ONE sidecar write that is fatal, so a shape that
+		// survives here fails every promotion on the key rather than logging a lost sidecar.
+		plant(join(sessionsDir, key, "venue.incoming"), victim);
+
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		writeFileSync(join(s.hostDir, SESSION_FILE_NAME), `${HEADER}${shape}\n`);
+		const p = store.promoteSession(s, { piVersion: PI });
+
+		assert.equal(p.promoted, true, `${shape}: a planted temp must not wedge the key`);
+		assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes(shape), true, `${shape}: the transcript lands`);
+		assert.equal(readFileSync(join(sessionsDir, key, "venue"), "utf8"), "local", `${shape}: and the stamp is real, not the sentinel`);
+		if (shape === "a dangling link") assert.equal(existsSync(victim), false, `${shape}: nothing may be created at the link's target`);
+		if (shape === "a link to an existing file") assert.equal(readFileSync(victim, "utf8"), "PRECIOUS", `${shape}: the target is untouched`);
 	}
 });
 

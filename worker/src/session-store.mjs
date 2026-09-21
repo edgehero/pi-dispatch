@@ -112,7 +112,9 @@ const VENUE_PENDING = "(pending)";
  * separates writers; the pid and counter stay because they make a straggler attributable.
  *
  * The cost is that a crash between the copy and the rename leaves a uniquely named straggler instead of one
- * the next promotion overwrites; the reaper's recursive sweep of the key takes it with everything else.
+ * the next promotion overwrites; the reaper's recursive sweep of the key takes it with everything else --
+ * except under `PI_SESSIONS_TTL_DAYS=0`, where that sweep does not run at all, so stragglers accumulate
+ * there where the old shared name was self-cleaning. The same TTL-0 caveat the lock's takeover carries.
  *
  * The SIDECAR temps keep the shared name deliberately, and the asymmetry is the point rather than an
  * oversight: a sidecar's worst case under a concurrent writer is a missing or half-written sidecar, and
@@ -124,8 +126,8 @@ let tmpSeq = 0;
 /**
  * A promotion lock older than this is a crashed writer's, not a live one's.
  *
- * `triggers-file.mjs` holds the same idiom at ten seconds; this is three orders larger because the work
- * under the two locks is not comparable. A trigger write is a read, one mutate and two syscalls. A
+ * `triggers-file.mjs` holds the same idiom at ten seconds; this is 360 times that, because the work under
+ * the two locks is not comparable. A trigger write is a read, one mutate and two syscalls. A
  * promotion is a COPY of the container's transcript -- up to `PI_SESSION_MAX_BYTES`, 8 MiB by default --
  * plus a rename and four small sidecar writes.
  *
@@ -395,19 +397,10 @@ export function makeSessionStore({
 				// straggler attributable, and neither is a writer identity on its own. The removal below stays
 				// regardless: a name that is hard to guess is not a name that cannot be guessed.
 				const tmp = `${canonicalFile(session.key)}.${process.pid}.${tmpSeq++}.${randomBytes(6).toString("hex")}.incoming`;
-				try {
-					// `copyFileSync` follows a link at the DESTINATION, so a link planted at this name would
-					// receive the whole transcript and leave the canonical path pointing at it. Removing it first
-					// removes the LINK, never its target (`rmSync` does not follow one, measured).
-					//
-					// `rmSync` rather than `unlinkSync`, and recursively: a DIRECTORY planted at a temp name is
-					// not unlinkable, and at the venue sentinel's temp that wedged every promotion on the key
-					// forever, since that one write is the fatal one. The random half of this name makes planting
-					// at it a guess rather than a calculation, but the shape must not depend on that.
-					fs.rmSync(tmp, { recursive: true, force: true });
-				} catch {
-					// Absent is the desired state.
-				}
+				// `copyFileSync` follows a link at the DESTINATION, so anything left at this name would receive
+				// the whole transcript. `removeTemp` takes every shape; see its own comment for why one call
+				// could not.
+				removeTemp(tmp);
 				fs.copyFileSync(staged, tmp);
 				// THE VENUE STAMP IS INVALIDATED BEFORE THE SWAP, and fatally (#277). Removing a stamp does not
 				// invalidate it, because an absent stamp reads as `local`; stamping only after the rename would
@@ -416,9 +409,10 @@ export function makeSessionStore({
 				// writes a stamp no venue matches. If that write fails, nothing has been swapped and the outer
 				// catch reports `promote-failed`; if the process dies after it, the key cold-starts everywhere
 				// until a promotion completes. A process KILLED inside this lock also leaks the lock itself, as it
-				// always has -- but it no longer wedges the key: the next promotion takes a lock older than
-				// `LOCK_STALE_MS` over, and the reaper reaches a key with no transcript through the directory's own
-				// mtime (issue #336). Unconditional rather than only
+				// always has -- but it no longer wedges the key in the shapes that used to be permanent: the next
+				// promotion takes a lock older than `LOCK_STALE_MS` over, and the reaper reaches a key with no
+				// transcript through the directory's own mtime (issue #336). A lock whose mtime is in the FUTURE is
+				// still never stale, so under `PI_SESSIONS_TTL_DAYS=0` such a key stays wedged. Unconditional rather than only
 				// on a venue change, so the decision needs no read of the stamp under the lock and there is no
 				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
@@ -520,17 +514,40 @@ export function makeSessionStore({
 	 * `writeSidecar`'s link-safe temp-and-rename, and it THROWS. For the one write whose failure must stop a
 	 * promotion rather than be logged past it: the venue sentinel, which runs before the swap (#277).
 	 */
+	/**
+	 * Remove whatever is at a temp path, whatever SHAPE it has, before anything writes there.
+	 *
+	 * ONE RULE BECAUSE CHOOSING BETWEEN THE TWO CALLS WAS GOT WRONG TWICE, in opposite directions.
+	 * `unlinkSync` alone cannot remove a DIRECTORY planted at the name, and at the venue sentinel -- the one
+	 * sidecar write that is fatal -- that wedged every promotion on the key forever. `rmSync` alone does not
+	 * remove a DANGLING SYMLINK: it resolves the path, finds nothing, and with `force` reports success while
+	 * leaving the link (measured, and it is the same measurement the reaper's own guard records three
+	 * functions down). The next write then follows the surviving link and creates a file at its target, which
+	 * is the write-through-a-link hole this whole series exists to close, and if that target is unreachable
+	 * the write throws and the key is wedged again.
+	 *
+	 * So: `unlinkSync` first, which takes a file or a link INCLUDING a dangling one; then `rmSync` for the
+	 * one shape it cannot take. A directory is removed with its subtree, which is bounded to a temp name
+	 * inside the key directory and is the point rather than a side effect: nothing may be left at that name.
+	 */
+	function removeTemp(path) {
+		try {
+			fs.unlinkSync(path);
+			return;
+		} catch (err) {
+			if (err?.code === "ENOENT") return; // absent is the desired state
+		}
+		try {
+			fs.rmSync(path, { recursive: true, force: true });
+		} catch {
+			// Nothing further to try. The write that follows fails and is reported as itself.
+		}
+	}
+
 	function replaceSidecar(dir, name, value) {
 		const file = join(dir, name);
 		const tmp = `${file}.incoming`;
-		try {
-			// `rmSync` recursively, for the transcript temp's reason: a link here would receive the write, and a
-			// DIRECTORY here is not unlinkable. At the venue sentinel, whose write is the one fatal sidecar
-			// write, a planted directory wedged every promotion on the key forever.
-			fs.rmSync(tmp, { recursive: true, force: true });
-		} catch {
-			// Absent is the desired state.
-		}
+		removeTemp(tmp);
 		fs.writeFileSync(tmp, value);
 		fs.renameSync(tmp, file);
 	}

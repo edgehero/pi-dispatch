@@ -3377,7 +3377,7 @@ validator rather than a second copy of it.
   <PI_SESSIONS_DIR>/<key>/resume-chain    consecutive resumed completions on this key; maintained unconditionally
   <PI_SESSIONS_DIR>/<key>/context         `<tokens> <window> <model>` as last measured; cleared by a cold start
   <PI_SESSIONS_DIR>/<key>/lock            exclusive-create promotion lock; absent when free; taken over when stale
-  <PI_SESSIONS_DIR>/<key>/current.jsonl.<pid>.<n>.incoming   a promotion's in-flight copy; PER WRITER
+  <PI_SESSIONS_DIR>/<key>/current.jsonl.<pid>.<n>.<rand>.incoming  a promotion's in-flight copy; PER WRITER
   <PI_SESSIONS_DIR>/<key>/<sidecar>.incoming                 a sidecar's in-flight write; SHARED, deliberately
   <jobDir>/session/current.jsonl          this job's OWN copy; mounted /session:rw
   PI_SESSION_FILE=/session/current.jsonl  emitted ONLY when the job has a transcript; never empty
@@ -3433,8 +3433,9 @@ validator rather than a second copy of it.
   instead. A promotion renames a freshly created file into place, so the inode moves on every completed
   swap. The venue re-check runs FIRST, because a cross-venue promotion trips both and `venue-changed` names
   why where the identity only says that something moved.
-  **A process killed inside the promotion lock** leaks the lock, as any kill there always has, so later
-  promotions report `locked` until the reaper sweeps the key. Killed between the sentinel and the real stamp,
+  **A process killed inside the promotion lock** leaks the lock, as any kill there always has, and until
+  issue #336 later promotions then reported `locked` until the reaper swept the key, which for two shapes it
+  never did. Killed between the sentinel and the real stamp,
   it also leaves the sentinel, and the key cold-starts on every venue meanwhile; killed after the stamp, the
   stamped venue keeps resuming. **A leaked lock is now recovered by the next promotion** (issue #336), not left for an
   operator: a lock older than `LOCK_STALE_MS` (one hour) is taken over once, with its age on its own
@@ -3561,8 +3562,12 @@ validator rather than a second copy of it.
   writer reads back as `null` and cold-starts, where the transcript's is a corrupt transcript. **That
   asymmetry holds for three of the four sidecars and not for the venue sentinel**, whose write is the one
   that is fatal: anything that makes its temp unwritable fails every promotion on the key. Every temp is
-  therefore removed with a recursive `rmSync` rather than an `unlinkSync`, so a DIRECTORY planted at a temp
-  name is removed like a file or a link instead of wedging the key forever. The venue sentinel is written under that lock
+  therefore cleared by ONE rule that takes every shape, because choosing between the two calls was got wrong
+  twice in opposite directions: `unlinkSync` first, which removes a file or a link INCLUDING a dangling one,
+  and `rmSync` only for the directory it cannot take, which goes with its whole subtree. `rmSync` alone does
+  not remove a dangling link (it resolves the path, finds nothing, and reports success while leaving it), so
+  the next write follows the survivor, which is the write-through-a-link hole this contract exists to
+  close. The venue sentinel is written under that lock
   immediately BEFORE the rename and is the one sidecar write that is fatal (above). The venue stamp,
   `pi-version`, the chain counter and the context reading are written under that lock immediately AFTER
   it, in that order, and are deliberately not described as part of it: the swap is one rename and cannot be
@@ -3624,7 +3629,9 @@ validator rather than a second copy of it.
   `(pending)` and both venues cold-start; given a completed promotion, the stamp names the venue of the
   session that promoted. Given a link planted at `pi-version`, a promotion neither writes through it nor
   reads through it and its target is byte-unchanged; given a `pi-version` write that fails after the swap,
-  the promotion reports `promoted` and the next job cold-starts. Given a promotion by a job on the same
+  the promotion reports `promoted`, and the surviving stamp is stale-but-true where the job resumed under a
+  matching stamp and wrong where it cold-started under a new pi, so the next job resumes in the first case
+  and cold-starts in the second. Given a promotion by a job on the same
   venue landing between another job's gate read and its copy, that job cold-starts with
   `transcript-replaced` and its staged file is 0 bytes, while a transcript nothing touched still resumes.
   Given a promotion lock older than the staleness bound, the next promotion takes it over and lands, saying

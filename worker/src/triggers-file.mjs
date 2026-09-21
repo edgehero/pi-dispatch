@@ -20,8 +20,8 @@
  * transcript, so a key whose first promotion died before one landed was never swept at all. The reason
  * this file needed it FIRST still stands: a crashed writer's lock would wedge every trigger add, edit,
  * delete and disarm on the deployment forever, and there is no reaper whose beat covers it. The two
- * thresholds differ by three orders because the work under the two locks does (see the session store's
- * own constant). The residual is the classic one: unlink-then-create is not
+ * thresholds differ by 360 times because the work under the two locks does (see the session store's own
+ * constant). The residual is the classic one: unlink-then-create is not
  * atomic, so two writers racing a stale takeover can interleave in a window of milliseconds. That
  * window replaces today's always-open one, and the loser's write still validated through the shared
  * parser, so the file stays loadable; the lost update is one disarm or one edit, and the disarm
