@@ -806,7 +806,7 @@ test("the stamp follows the transcript that last landed, whichever venue promote
 	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("from-local"), true);
 });
 
-test("a promotion from another venue that lands between the gate and the copy is caught, and nothing of it is staged", () => {
+test("a promotion from another venue that lands between the gate and the open is caught, and nothing of it is staged", () => {
 	const key = sessionKeyFor(ghIssue);
 	let sessionsDirRef;
 	const { store, jobDir, sessionsDir } = fixture({
@@ -1328,7 +1328,7 @@ test("the transcript's in-flight copy is named PER WRITER, so two promotions nev
 	assert.equal(readFileSync(join(sessionsDir, key, SESSION_FILE_NAME), "utf8").includes("two"), true, "and the last promotion is what landed");
 });
 
-test("a SAME-venue promotion that lands between the gate and the copy cold-starts rather than resuming unjudged (#336)", () => {
+test("a SAME-venue promotion that lands between the gate and the open cold-starts rather than resuming unjudged (#336)", () => {
 	// The race the venue stamp cannot see: the promoting job shares this venue, so the stamp matches before and
 	// after and only the transcript moved. Before the identity re-check this job resumed a transcript no gate
 	// had judged -- it could be past its TTL, past the age bound, chain-exhausted, or written by another pi.
@@ -1362,7 +1362,7 @@ test("a SAME-venue promotion that lands between the gate and the copy cold-start
 		// table rather than about the code. These two separate them.
 		//
 		// WHAT IS NOT PINNED, and cannot be from here: `dev`. Isolating it needs the canonical file to move to
-		// another DEVICE between the gate and the copy, which no test on one filesystem can arrange, so
+		// another DEVICE between the gate and the open, which no test on one filesystem can arrange, so
 		// dropping `dev` from the identity passes. It stays in because an inode number is unique per device and
 		// a store spanning a mount point is otherwise two keys that can compare equal.
 		"same inode and mtime, different SIZE": (canonical) => {
@@ -1440,7 +1440,7 @@ test("an untouched transcript still RESUMES: the re-check must not fire on the q
 	assert.equal(second.reason, "resumed", "and a promotion this job's OWN run completed is not a race either");
 });
 
-test("a promotion from another venue that COMPLETES between the gate and the copy is caught too", () => {
+test("a promotion from another venue that COMPLETES between the gate and the open is caught too", () => {
 	// The stamp then names the other venue outright rather than the sentinel. A re-check that only looked for
 	// the sentinel would resume that venue's transcript.
 	const key = sessionKeyFor(ghIssue);
@@ -2019,4 +2019,257 @@ test("a promoted key directory is created 0700, because transcripts are PII-bear
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
 	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
 	assert.equal(statSync(join(sessionsDir, sessionKeyFor(ghIssue))).mode & 0o777, 0o700, "the key directory is the worker's alone");
+});
+
+test("a link planted after the GATES read, before the open, is caught by the by-path re-check (#375)", () => {
+	// The gates run by path, so a link planted after the FIRST of their lstats has every one of them judge the
+	// attacker's files -- and then the descriptor agrees, because `judged` is the attacker's identity too. The
+	// descriptor alone cannot see this; the by-path re-check after the copy is what does. A round that had
+	// only the descriptor staged 2 attacker transcripts in 16,594 resumes against a live flipper.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			lstatSync: (path, ...rest) => {
+				const out = realFs.lstatSync(path, ...rest);
+				if (!armed && String(path) === join(made.sessionsDir, key)) {
+					armed = true;
+					const attacker = join(made.root, "attacker-gates");
+					mkdirSync(attacker, { recursive: true });
+					writeFileSync(join(attacker, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "ATTACKER" })}\n`);
+					writeFileSync(join(attacker, "pi-version"), PI);
+					writeFileSync(join(attacker, "venue"), "local");
+					realFs.renameSync(join(made.sessionsDir, key), join(made.root, "stash"));
+					symlinkSync(attacker, join(made.sessionsDir, key));
+				}
+				return out;
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a key directory replaced before the gates ran must not resume");
+	assert.equal(s.reason, "key-not-a-directory");
+	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "and nothing of the attacker's transcript is staged");
+});
+
+test("the staged bytes are READ FROM THE DESCRIPTOR, not re-fetched by path (#375)", () => {
+	// What kills the one mutation the first descriptor round left alive: `copyFromDescriptor(fd, staged)`
+	// replaced by `copyFileSync(canonicalFile(key), staged)` passed the whole suite, because the only test
+	// that could have seen it drove its swap from `readSync`, which the mutant never calls. This one swaps the
+	// TRANSCRIPT's bytes at the staged file's own open, a seam both versions take, and then asserts which
+	// bytes arrived. Reading by path stages the new ones; reading the descriptor stages the judged ones.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			openSync: (path, flags, ...rest) => {
+				if (!armed && flags === "w" && String(path).includes(join("session", SESSION_FILE_NAME))) {
+					armed = true;
+					// The canonical NAME now holds a different file: a fresh inode, so a by-path read gets it.
+					const swapped = join(made.root, "swapped.jsonl");
+					writeFileSync(swapped, `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "BY-PATH" })}\n`);
+					renameSync(swapped, join(made.sessionsDir, key, SESSION_FILE_NAME));
+				}
+				return realFs.openSync(path, flags, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	const staged = readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8");
+	assert.equal(staged.includes("BY-PATH"), false, "a copy that re-resolved the name would have staged the file that replaced it");
+	// The by-path re-check then sees the swap and refuses, which is the other half of the pair: the bytes were
+	// never the attacker's, and the job is told the transcript moved rather than resuming a stale one.
+	assert.equal(s.reason, "transcript-replaced");
+	assert.equal(staged, "", "and a refused resume stages the 0-byte cold start");
+});
+
+test("a promotion refuses a key directory swapped for ANOTHER REAL directory, on identity not shape (#375)", () => {
+	// Shape alone passed this: a swap to a real directory under the lock let the transcript and all four
+	// sidecars land in it while the promotion reported `promoted: true`. Both write-edge re-checks compare the
+	// directory's `dev:ino` with what `ensureKeyDir` saw.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			openSync: (path, flags, ...rest) => {
+				if (!armed && flags === "wx" && String(path).endsWith("lock")) {
+					armed = true;
+					const attacker = join(made.root, "attacker-real");
+					mkdirSync(attacker, { recursive: true });
+					realFs.rmSync(join(made.sessionsDir, key), { recursive: true, force: true });
+					renameSync(attacker, join(made.sessionsDir, key));
+				}
+				return realFs.openSync(path, flags, ...rest);
+			},
+		},
+	});
+	const hostDir = join(made.jobDir, "session");
+	mkdirSync(hostDir, { recursive: true });
+	writeFileSync(join(hostDir, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user" })}\n`);
+
+	const p = made.store.promoteSession({ key, hostDir, modelId: "m", venue: "local" }, { piVersion: PI });
+	assert.equal(p.promoted, false, "the directory this promotion prepared is not the one it would be writing into");
+	assert.equal(p.reason, "key-not-a-directory");
+	assert.deepEqual(readdirSync(join(made.sessionsDir, key)), [], "and nothing reaches the replacement: the lock this took is released on the way out, and no transcript or sidecar is written");
+});
+
+test("a transcript that GROWS under the copy is a race, and nothing of it is staged (#375)", () => {
+	// A transcript that changes under the copy has moved, whatever direction it moved in: the by-path
+	// re-check sees the identity change and cold-starts. The copy is ALSO bounded by the judged size, which
+	// is belt and braces behind that and is what keeps `PI_SESSION_MAX_BYTES` and the record's `bytes` true
+	// of what was staged while it was being staged: an unbounded copy put 2,460,306 bytes under the job dir
+	// against a 1,000,000 cap while the record said 306.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			readSync: (fd, ...rest) => {
+				if (!armed) {
+					armed = true;
+					realFs.appendFileSync(join(made.sessionsDir, key, SESSION_FILE_NAME), "x".repeat(500000));
+				}
+				return realFs.readSync(fd, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a transcript that grew under the copy is not the one the gates judged");
+	assert.equal(s.reason, "transcript-replaced");
+	assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, "and the container gets the 0-byte cold start rather than a transcript nothing gated");
+});
+
+test("a transcript TRUNCATED under the copy is a race, not a half transcript (#375)", () => {
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			readSync: (fd, ...rest) => {
+				if (!armed) {
+					armed = true;
+					realFs.truncateSync(join(made.sessionsDir, key, SESSION_FILE_NAME), 0);
+				}
+				return realFs.readSync(fd, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { body: `${HEADER}${"y".repeat(200000)}\n`, venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a short read means the judged transcript shrank under the copy");
+	assert.equal(s.reason, "transcript-replaced");
+	assert.equal(statSync(join(s.hostDir, SESSION_FILE_NAME)).size, 0, "and the container gets the 0-byte cold start, never a half conversation");
+});
+
+test("a promotion still landing, with its sentinel in place, cold-starts as venue-changed (#375)", () => {
+	// The venue arm must stay reachable when NO identity moved. A promotion that wrote `(pending)` and has not
+	// yet swapped is exactly that shape, and an identity-gated ladder never asks about it: a round that gated
+	// the whole ladder on the identity resumed this, where #277's design cold-starts it.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			readSync: (fd, ...rest) => {
+				if (!armed) {
+					armed = true;
+					realFs.writeFileSync(join(made.sessionsDir, key, "venue"), "(pending)");
+				}
+				return realFs.readSync(fd, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a sentinel that appeared under this job means a promotion is mid-flight");
+	assert.equal(s.reason, "venue-changed");
+});
+
+test("a transcript swapped for the attacker's and back again is refused by the DESCRIPTOR check (#375)", () => {
+	// The A, B, A the descriptor exists for, at file level: the attacker's file is at the name when the open
+	// happens, and the judged one is back before anything re-reads the path. A by-path re-check alone sees
+	// nothing moved and stages what the descriptor holds, which is the attacker's conversation. `fstat` on the
+	// descriptor is what refuses it, and it is the one check that cannot be lied to by a later rename.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			openSync: (path, flags, ...rest) => {
+				const canonical = join(made.sessionsDir, key, SESSION_FILE_NAME);
+				if (!armed && flags === "r" && String(path) === canonical) {
+					armed = true;
+					const attacker = join(made.root, "attacker.jsonl");
+					writeFileSync(attacker, `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "ATTACKER" })}\n`);
+					renameSync(canonical, join(made.root, "stash.jsonl"));
+					renameSync(attacker, canonical);
+					const fd = realFs.openSync(path, flags, ...rest); // the descriptor the store will hold
+					renameSync(canonical, join(made.root, "gone.jsonl")); // and now put the judged file back
+					renameSync(join(made.root, "stash.jsonl"), canonical);
+					return fd;
+				}
+				return realFs.openSync(path, flags, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "the descriptor is not the file the gates judged, whatever the name says now");
+	assert.equal(s.reason, "transcript-replaced");
+	const staged = readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8");
+	assert.equal(staged.includes("ATTACKER"), false, "and no byte of the attacker's conversation is staged");
+	assert.equal(staged, "");
+});
+
+test("the copy reads no more than the judged size, whatever the file does under it (#375)", () => {
+	// The bound is not what refuses a grown transcript (the identity re-check is), so it is invisible in the
+	// verdict. What it does is stop an unbounded append from being READ at all, and this is the only way to
+	// see it: count the bytes handed to the staged file while the transcript grows under the copy.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	let written = 0;
+	made = fixture({
+		fs: {
+			...realFs,
+			readSync: (fd, ...rest) => {
+				if (!armed) {
+					armed = true;
+					realFs.appendFileSync(join(made.sessionsDir, key, SESSION_FILE_NAME), "x".repeat(300000));
+				}
+				return realFs.readSync(fd, ...rest);
+			},
+			writeFileSync: (target, data, ...rest) => {
+				if (typeof target === "number") written += data.length;
+				return realFs.writeFileSync(target, data, ...rest);
+			},
+		},
+	});
+	// LARGER THAN ONE CHUNK, and deliberately not a multiple of it: the clamp only shows itself on the LAST
+	// read, where an unclamped one would take a whole 64 KiB buffer's worth of whatever arrived meanwhile. A
+	// transcript smaller than a chunk cannot see this, because the buffer is sized to the file.
+	const body = `${HEADER}${"z".repeat(100_000)}\n`;
+	seed(made.sessionsDir, key, { body, venue: "local" });
+
+	made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(written, body.length, "exactly the judged size was read and staged, not the 300kB that arrived during the copy");
 });
