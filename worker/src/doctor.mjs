@@ -2476,7 +2476,18 @@ function triggersPath(env, cwd) {
  * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
  * pid is still alive belongs to a doctor that is still running.
  */
-async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
+async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
+	// ONE QUESTION: can this shell show the daemon is on this host? Only `local === true` can, so remote and
+	// unknown take the same branch. The whole endpoint is passed rather than that boolean because the line
+	// this sweep prints for a daemon it will not touch now NAMES what the CLI resolved, the way
+	// `credentialTransit` and the in-image `gh` probe already do, and a boolean cannot carry that.
+	const owned = endpoint?.local === true;
+	// SAFE TO PRINT because `endpoint` is what `makeDockerEndpointResolver` stored, which is
+	// `classifyDockerEndpoint`'s `display` and therefore already through `displayEndpoint` (issue #340). The
+	// raw `DOCKER_HOST` can carry `user:password@`, and this is a doctor line an operator pastes into a
+	// support thread. If a future resolver ever stores the raw host, this leaks: pinned by a test that hands
+	// the sweep an endpoint with a password in it.
+	const cliSays = endpoint?.local === false ? `resolves ${endpoint.endpoint}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint?.reason ?? "not asked"})`;
 	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
 	// THE LISTING ALWAYS RUNS, on any daemon. The reason the sweep is confined to a daemon this host owns is
 	// `isAlive`, whose answer is about THIS process table -- reading a list is not. Asking first is what lets
@@ -2503,7 +2514,10 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 		// Not ours to judge: `isAlive` would be answering about a different machine's process table. Say what
 		// is there, once something IS there, and leave it to the doctor that owns that daemon.
 		if (!owned) {
-			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} is left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say the daemon is on this host, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
+			// MAY be left over, not IS: the clause four words later already says the pid may be alive there, so
+			// the sentence used to assert a thing and then walk it back inside itself. This is a network whose
+			// owner this shell cannot ask about at all, which is exactly the case where doctor states less.
+			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} may be left over from an interrupted doctor, and is not swept because this shell's docker CLI ${cliSays}, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
 			continue;
 		}
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
@@ -2518,7 +2532,11 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 		const { ok, names, absent } = await networkEndpoints(docker, name);
 		if (absent) continue;
 		if (!ok) {
-			checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be read: docker network rm ${name}`, fix: CANARY_LEFTOVER_FIX });
+			// The command that FAILED, which is this file's convention for a label, and it was the wrong one
+			// here: a `network rm` is advice, it never ran, and it is advice about a network whose membership
+			// is by definition unknown -- removing it could strand a probe nothing else can find. The advice
+			// stays in the fix, where advice belongs.
+			checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be read: docker network inspect ${name}`, fix: CANARY_LEFTOVER_FIX });
 			continue;
 		}
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
@@ -2548,7 +2566,14 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, owned }) {
 		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
 		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
 		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by a doctor run that did not finish` });
-		else if (!outcome.removed) checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
+		// THE NETWORK WENT BETWEEN OUR OWN COMMANDS, and the silence that covers is only a silence about the
+		// NETWORK. A network the daemon says is not there is not worth a line, which is the rule this sweep
+		// shares with the boot reaper. Containers this pass `rm -f`'d are a different fact: they existed, we
+		// removed them, and saying nothing left an operator with probes gone and no line accounting for them
+		// (issue #360). Said without `${name}`, which is the one object here that is NOT news.
+		else if (outcome.absent) {
+			if (removed.length > 0) checks.push({ ok: true, label: `Egress canary: removed ${removed.join(", ")}, left by a doctor run that did not finish (the network ${name} was already gone)` });
+		} else checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
 	}
 	return checks;
 }
@@ -2631,16 +2656,21 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// operators who never ask for a container read-back accumulate networks forever. The accepted cost, stated:
 	// a deployment that turns egress OFF returns above and never sweeps its old canary networks.
 	// ONLY ON A DAEMON THIS HOST OWNS. `isAlive` reads THIS process table while the name came from the
-	// DAEMON, so on a redirected DOCKER_HOST, a shared daemon or a doctor in a container, another doctor's
-	// live pid reads as dead here and its probe and network would be taken out from under it. The in-image
-	// `gh` probe already refuses on exactly this test, and `live-probes.mjs`'s sibling sweep -- which keeps a
-	// second guard this one deliberately inverts -- records the same PID-namespace caveat.
+	// DAEMON, so on a redirected DOCKER_HOST or a shared daemon another doctor's live pid reads as dead here
+	// and its probe and network would be taken out from under it. The in-image `gh` probe already refuses on
+	// exactly this test, and `live-probes.mjs`'s sibling sweep -- which keeps a second guard this one
+	// deliberately inverts -- records the same PID-namespace caveat.
 	//
-	// ONE QUESTION, TWO ANSWERS: can this shell show the daemon is on this host? Only `local === true` can, and
-	// that is the only thing `isAlive` needs, so remote and unknown take the same branch and get the same line.
-	// An earlier draft split them and said so in three places; the code never did.
+	// WHAT THIS TEST DOES NOT COVER, and the list above used to claim it did (issue #360): a doctor IN A
+	// CONTAINER with the socket bind-mounted. `classifyDockerEndpoint` answers `local: true` for any `unix:`
+	// endpoint unconditionally, which is right for what it is asked -- a socket is on this machine's
+	// filesystem -- and says nothing about PID namespaces. So two containerised doctors on one daemon read as
+	// owned, and if they collide on a pid each can `rm -f` the other's probe and remove its network. Not data
+	// loss: the objects are doctor's own ephemera and the victim degrades to a `probe did not run` with
+	// `reached: null`, never a false verdict. Stated in `INT-EGRESS-POLICY-CONTRACT` beside the sibling's,
+	// rather than guarded, because nothing this shell can ask distinguishes the two containers.
 	const canaryDocker = (args) => liveRunVia(spawn)(args, { timeoutMs: CANARY_STEP_TIMEOUT_MS });
-	checks.push(...(await sweepStaleCanaryNetworks({ docker: canaryDocker, pid, isAlive, owned: endpoint?.local === true })));
+	checks.push(...(await sweepStaleCanaryNetworks({ docker: canaryDocker, pid, isAlive, endpoint })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither

@@ -3986,6 +3986,48 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false \} = opts;/, "runCmdCapture's probe bound");
 });
 
+test("doctor: a canary network that could not be READ names the command that failed (#350, #360)", async () => {
+	// This file's convention is that a label carries the command that FAILED. This line carried
+	// `docker network rm`, which never ran -- and which is advice about a network whose membership is by
+	// definition unknown, so following it could strand a probe nothing else can find. The advice stays in the
+	// fix line, which is where advice lives (issue #360, item 3).
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: "not json" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.match(text(), /⚠ Egress canary: the network pi-dispatch-egress-doctor-4242 could not be read: docker network inspect pi-dispatch-egress-doctor-4242/);
+	assert.doesNotMatch(text(), /could not be read: docker network rm/, "the label never carries a command that did not run");
+	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm" && c.args.at(-1) === "pi-dispatch-egress-doctor-4242"), "and nothing removes it either");
+});
+
+test("doctor: probes removed off a network that then vanished are still accounted for (#360)", async () => {
+	// The silence a vanished network earns covers the NETWORK, not the containers this pass already removed.
+	// `removeNetworkOrSay` answers `{ removed: true, absent: true }` when its `rm` failed and the daemon then
+	// said the network is not there, and neither of the two branches fired on it: the probes were gone and
+	// nothing said so. `${name}` is deliberately not the subject of the line -- it is the one object here that
+	// is not news.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"pi-dispatch-egress-probe-unlisted-4242"}}' },
+		"docker rm -f": 0,
+		// The `rm` fails and the follow-up inspect gets the daemon's own not-found words, which is the shape
+		// that reaches the `absent` branch.
+		"docker network rm pi-dispatch-egress-doctor-4242": { code: 1, output: "" },
+		"docker network inspect pi-dispatch-egress-doctor-4242": { code: 1, output: "Error response from daemon: network pi-dispatch-egress-doctor-4242 not found" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242, left by a doctor run that did not finish \(the network pi-dispatch-egress-doctor-4242 was already gone\)/);
+	assert.doesNotMatch(text(), /⚠ Egress canary: the network pi-dispatch-egress-doctor-4242 could not be removed/, "a network the daemon says is gone is not a failure");
+});
+
 test("doctor: the canary sweep removes only a probe whose SLUG it knows (#350)", async () => {
 	// `\S+` for the slug would `rm -f` any container under this prefix that happened to end in the dead pid.
 	// The slug is a closed set of two, so the matcher says so.
@@ -4061,14 +4103,23 @@ test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going qu
 	};
 	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.equal(code, 0, "an unswept leftover warns, it never fails doctor");
-	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say the daemon is on this host/);
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say which daemon it uses \(unparseable\), so a pid that is dead here may be alive there/);
+	// MAY be left over. The same sentence says four words later that the pid may be alive there, so asserting
+	// it IS a leftover and then walking that back was the line contradicting itself (issue #360, item 3).
+	assert.doesNotMatch(text(), /pi-dispatch-egress-doctor-4242 is left over/, "doctor does not assert what it just said it cannot know");
+	// The reason is the SAME word `credentialTransit` prints four lines below for the same endpoint, which is
+	// the alignment issue #360 item 3 asked for: one shell, one reading, one vocabulary.
+	assert.match(text(), /credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI did not say which endpoint it resolves \(unparseable\)/);
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network ls"), "it LOOKS on any daemon: reading a list says nothing about a process table");
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("rm") && c.args.join(" ").includes("4242")), "but removes nothing there");
 });
 
-test("doctor: a REMOTE daemon is named and left, exactly as an unknown one is (#350)", async () => {
-	// Remote and unknown take the SAME branch and emit the SAME line, deliberately: in both cases this
-	// shell cannot show the daemon is on this host, which is the only question `isAlive` needs answered.
+test("doctor: a REMOTE daemon is named and left, and the line says WHICH daemon (#350, #360)", async () => {
+	// Remote and unknown take the same BRANCH, deliberately: in both cases this shell cannot show the daemon
+	// is on this host, which is the only question `isAlive` needs answered. They no longer emit the same
+	// LINE, and that is issue #360 item 3: the operator fixing it needs to know whether their CLI is pointed
+	// somewhere else or merely mute, and those are two different fixes. The wording is
+	// `credentialTransit`'s and the in-image gh probe's, which had the two branches already.
 	const { out, text } = capture();
 	const plan = {
 		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
@@ -4079,8 +4130,29 @@ test("doctor: a REMOTE daemon is named and left, exactly as an unknown one is (#
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
 	// The needle must be a string the code can actually emit: `are not swept` appears in no doctor output,
 	// so this assertion passed against anything at all until it was proven vacuous.
-	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is left over from an interrupted doctor, and is not swept/, "a leftover there is named, not silently skipped");
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves tcp:\/\/build\.example\.invalid:2376, which is not shown to be on this host, so a pid that is dead here may be alive there/, "a leftover there is named, not silently skipped");
 	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
+	assert.doesNotMatch(text(), /Egress canary:[^\n]*did not say which daemon it uses/, "a RESOLVED remote endpoint never takes the mute branch");
+});
+
+test("doctor: a password in DOCKER_HOST never reaches the canary's leftover line (#360)", async () => {
+	// The line names what the CLI resolved, which is only safe because `makeDockerEndpointResolver` stores
+	// `classifyDockerEndpoint`'s `display` and never the raw host (issue #340). A future resolver that stored
+	// the raw one would leak a credential into a doctor line operators paste into support threads, and
+	// nothing else in this file would notice. `ssh://` is also NOT local, so this drives the same branch the
+	// test above does.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		...green,
+		"docker context inspect": { code: 0, output: '"remote"|"ssh://bob:hunter2@remote.example.invalid:22"\n' },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	const printed = text();
+	assert.match(printed, /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over/, "the line still fires");
+	assert.match(printed, /resolves ssh:\/\/remote\.example\.invalid:22/, "the host survives, which is what an operator needs");
+	for (const needle of ["bob", "hunter2"]) assert.ok(!printed.includes(needle), `the credential must not: ${needle}`);
 });
 
 test("doctor: a probe the sweep could NOT remove is never reported as removed (#350)", async () => {

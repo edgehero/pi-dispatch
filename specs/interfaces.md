@@ -1430,7 +1430,24 @@ contract governs the argv of one container, this governs the estate that argv jo
     detaches what it saw but leaves a network a `pi-job-` container is still on, while the canary's sweep
     INVERTS that -- a probe attached to a network whose pid is dead is the leak itself rather than a run in
     progress, so it is removed by name, which is why that sweep is additionally confined to a daemon this
-    host owns.
+    host owns. A container on such a network that is NOT one of that run's own probes is **force-detached**
+    and named in the line, never removed: the proxy is shared and long-lived, and a stranger under this
+    namespace is not the canary's to delete. Measured: a live stranger lost its only network and kept
+    running. `INT-LIVE-PROBE-CONTRACT` states the same for its sibling and this bullet did not (issue #360).
+
+    **The residual in "a daemon this host owns", stated rather than guarded** (issue #360). `isAlive` reads
+    THIS process table while the name came from the daemon, and the test that gates it is
+    `classifyDockerEndpoint`'s `local`, which answers `true` for any `unix:` endpoint unconditionally. That
+    is correct for the question it is asked -- a socket is on this machine's filesystem -- and it says
+    nothing about PID NAMESPACES. So a doctor running IN A CONTAINER with the socket bind-mounted reads as
+    owned, and two such doctors on one daemon that collide on a pid can each `rm -f` the other's probe and
+    remove its network, with no `isAlive` ask between them at all, because the own-pid rule treats a network
+    carrying our own pid as certainly stale. The bound on the harm: the objects are doctor's own ephemera,
+    and the victim degrades to a `probe did not run` warning with `reached: null`, never a false verdict. Not
+    guarded, because nothing this shell can ask distinguishes the two containers. `INT-LIVE-PROBE-CONTRACT`
+    carries the equivalent caveat for its sibling sweep ("a PID from another namespace reads as dead here"),
+    and this is that caveat's other half: there a live peer reads as dead, here a foreign doctor reads as
+    local.
 
     The network name is **derived from the container name** (`<name>-net`), never rebuilt from the job id.
     The container name already survives every id shape this project produces and docker's network-name
