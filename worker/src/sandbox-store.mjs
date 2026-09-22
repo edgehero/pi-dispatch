@@ -259,6 +259,12 @@ export function makeSandboxReaper({
 		// its network between `createJobNetwork` and `launch`. No open in progress can be absent from this list,
 		// because `resolveSandbox` refuses a job whose directory is gone.
 		const keep = new Set(names);
+		// The ids whose directory this pass could NOT remove (issue #363). Such a directory stays on disk, so its
+		// id stays in `keep` on every later pass and its network is never a candidate again. That is CORRECT (a
+		// directory that exists is a run that can be re-opened, so its network is wanted) and it was invisible:
+		// `sandbox_reaper_skipped` names a directory and nothing on the host named the network it holds. The
+		// ordinary shape on Linux is a retained forge workspace holding root-owned files under a non-root worker.
+		const blocked = new Set();
 		for (const name of names) {
 			const dir = join(sandboxDir, name);
 			try {
@@ -281,6 +287,7 @@ export function makeSandboxReaper({
 				// bounds the contiguous block to ONE directory, which is the part that cannot be yielded.
 				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
+				blocked.add(name);
 				log("sandbox_reaper_skipped", { entry: name, reason: scrubCredentials(err?.message) });
 			}
 		}
@@ -314,7 +321,7 @@ export function makeSandboxReaper({
 					throw err;
 				}
 			};
-			const { swept, notes, failed } = await sweepNetworks({ running, keep, retained });
+			const { swept, notes, failed } = await sweepNetworks({ running, keep, retained, blocked });
 			for (const s of swept) log("reaped_sandbox_network", s);
 			for (const n of notes) log("sandbox_network_not_reaped", n);
 			if (failed) log("sandbox_reaper_skipped", { reason: failed });

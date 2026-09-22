@@ -119,7 +119,10 @@ test("a good run builds a credential-free argv, launches it, and returns the she
 			return { code: 7 };
 		},
 	});
-	const code = await runSandbox(["gh-1", "--publish", "3000"], { env: envWith(root, { TERM: "xterm-256color" }), deps: c.deps });
+	// `PI_EGRESS: "0"` is new here and is the point rather than a workaround: since issue #362 `--publish`
+	// belongs to that posture and is refused on the armed default, because a container on an `--internal`
+	// network publishes nothing. The rest of this test is about the argv and is unchanged.
+	const code = await runSandbox(["gh-1", "--publish", "3000"], { env: envWith(root, { TERM: "xterm-256color", PI_EGRESS: "0" }), deps: c.deps });
 
 	assert.equal(code, 7, "the shell's exit code is the command's");
 	assert.ok(args.includes("--name=pi-sandbox-gh-1"));
@@ -128,6 +131,34 @@ test("a good run builds a credential-free argv, launches it, and returns the she
 	assert.ok(args.includes("TMOUT=1800"), "the default 30-minute idle logout");
 	assert.ok(!args.join(" ").includes("TOKEN") && !args.join(" ").includes("API_KEY"));
 	assert.match(c.text(), /no credentials are set in this container/);
+});
+
+test("--publish is REFUSED while the egress policy is armed, before anything is created (#362)", async () => {
+	// Docker resolves the contradiction silently: it accepts `-p` on a container joined only to an
+	// `--internal` network, exits 0 and binds nothing. Measured on docker 27.4.0, `docker port` prints nothing.
+	const { root } = retained();
+	let launched = false;
+	const c = capture({ launch: async () => ((launched = true), { code: 0 }) });
+	const code = await runSandbox(["gh-1", "--publish", "3000"], { env: envWith(root, {}), deps: c.deps });
+
+	assert.equal(code, 1, "a refusal is a failure exit");
+	assert.equal(launched, false, "and nothing is created");
+	assert.match(c.errText(), /--publish` is refused while the egress policy is armed/);
+	assert.match(c.errText(), /PI_EGRESS=0/, "the refusal names the opt-out");
+	// BEFORE `beforeLaunch`, which is where the `published:` line is printed. One line later and the CLI would
+	// print a false line and then refuse, which is the defect this issue is about wearing a different face.
+	assert.equal(c.text(), "", "and prints no `opening`/`published:` line at all");
+});
+
+test("with the policy off, --publish is the feature it always was (#362)", async () => {
+	const { root } = retained();
+	let args = null;
+	const c = capture({ launch: async (a) => ((args = a.args), { code: 0 }) });
+	await runSandbox(["gh-1", "--publish", "8080:3000"], { env: envWith(root, { PI_EGRESS: "0" }), deps: c.deps });
+
+	assert.ok(args.includes("127.0.0.1:8080:3000"), "published, and still bound to loopback");
+	assert.ok(!args.some((a) => String(a).startsWith("--network=")), "and there is no internal network to contradict it");
+	assert.match(c.text(), /published: 127\.0\.0\.1:8080:3000/, "and the line is true when it is printed");
 });
 
 test("the CLI hands the run's manifest to the job-user seam and launches as the user it answers (#341)", async () => {

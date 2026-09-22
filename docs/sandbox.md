@@ -145,9 +145,24 @@ run produced from an issue anyone could open. The network is the same; the stake
 ## Publishing a port
 
 ```bash
-pi-dispatch sandbox gh-12345 --publish 3000        # host 3000 -> container 3000
+pi-dispatch sandbox gh-12345 --publish 3000        # host 3000 -> container 3000; needs PI_EGRESS=0
 pi-dispatch sandbox gh-12345 --publish 8080:3000   # host 8080 -> container 3000
 ```
+
+**Only with the egress policy off.** With `PI_EGRESS` armed, which is the default, the sandbox joins its
+own `--internal` network, and a container attached only to one publishes nothing: docker accepts `-p`,
+exits 0 and binds no host port. Measured on docker 27.4.0, `docker ps --format {{.Ports}}` is empty and
+`docker port` prints nothing. So `--publish` is **refused** on the armed posture rather than accepted and
+ignored, and the refusal names `PI_EGRESS=0` as the opt-out. Run that one session with `PI_EGRESS=0` if you
+need the port on the host, and know what it buys: that shell lands on docker's default bridge, with the
+whole internet.
+
+**Attaching the bridge afterwards does not rescue a published port**, and it looks like it does, which is
+worth knowing before you try it. Measured on docker 27.4.0: after `docker network connect bridge
+pi-sandbox-<jobId>`, `docker port` reports `3000/tcp -> 127.0.0.1:3000` and nothing answers there. A
+container's port forwarder is set up when the container is created, from the networks it has then; the
+later attach updates what docker reports and starts no forwarder. A control container published the same
+way on the default bridge at create time answers immediately, so the listener is not what is missing.
 
 **Always bound to `127.0.0.1`.** An explicit bind address is refused rather than honoured — there is no
 flag that puts a container full of agent-written code on your LAN. Ports exist only while the sandbox

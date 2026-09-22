@@ -80,6 +80,59 @@ test("the name namespace sits OUTSIDE the boot reaper's pi-job- filter", () => {
 	assert.equal(sandboxContainerName("repeat:sched:100"), "pi-sandbox-repeat_sched_100");
 });
 
+test("openSandbox REFUSES a published port while the policy is armed, and creates nothing (#362)", async () => {
+	// The refusal sits after `resolveSandbox` (a run that cannot be opened says why first), before the first
+	// docker ask (a determinate refusal must not cost a round trip), and before `beforeLaunch` (where the CLI
+	// prints `published: ...`, so one line later it would print a false line and then refuse).
+	const calls = [];
+	const r = await openSandbox({
+		jobId: "gh-1",
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		publish: ["-p", "127.0.0.1:3000:3000"],
+		egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+		running: async () => (calls.push("running"), []),
+		launch: async () => (calls.push("launch"), { code: 0 }),
+		spawnNetwork: () => (calls.push("network"), null),
+		beforeLaunch: () => calls.push("beforeLaunch"),
+		resolveJobUser: async () => (calls.push("jobUser"), { user: null, home: null }),
+		...openable(),
+	});
+
+	assert.equal(r.refused, "publish-needs-egress-off");
+	assert.match(r.message, /PI_EGRESS=0/);
+	assert.deepEqual(calls, [], "no docker ask, no job-user ask, and above all no beforeLaunch");
+});
+
+test("openSandbox allows a published port with the policy off (#362)", async () => {
+	let args = null;
+	const r = await openSandbox({
+		jobId: "gh-1",
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		publish: ["-p", "127.0.0.1:3000:3000"],
+		egress: { armed: false, proxy: "pi-dispatch-egress-proxy" },
+		running: async () => [],
+		launch: async (a) => ((args = a.args), { code: 0 }),
+		resolveJobUser: async () => ({ user: null, home: null }),
+		...openable(),
+	});
+	assert.equal(r.refused, undefined);
+	assert.ok(args.includes("127.0.0.1:3000:3000"));
+});
+
+test("buildSandboxRunArgs THROWS on the one argv that would lie (#362)", () => {
+	// A refusal is for an operator's mistake; this is for a caller assembling an argv from parts that cannot
+	// mean what it says. Same place and shape as the user/home pairing beside it.
+	assert.throws(
+		() => buildSandboxRunArgs({ image: "img", name: "pi-sandbox-a", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"], network: "pi-sandbox-a-net" }),
+		/cannot be paired with the internal network/,
+	);
+	// and the two halves apart are still fine
+	assert.ok(buildSandboxRunArgs({ image: "img", name: "pi-sandbox-a", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"] }).includes("127.0.0.1:3000:3000"));
+	assert.ok(buildSandboxRunArgs({ image: "img", name: "pi-sandbox-a", workspace: "/w", jobDir: "/j", network: "pi-sandbox-a-net" }).includes("--network=pi-sandbox-a-net"));
+});
+
 test("--publish is always bound to loopback, and an explicit bind address is refused", () => {
 	assert.deepEqual(parsePublish(["3000"]), ["-p", "127.0.0.1:3000:3000"]);
 	assert.deepEqual(parsePublish(["8080:3000"]), ["-p", "127.0.0.1:8080:3000"]);
@@ -535,6 +588,59 @@ function fakeNetDaemon({ nets = {}, fail = {}, containers = {} } = {}) {
 	};
 	return { run, calls, state };
 }
+
+test("the guard gates BOTH destructive verbs, so a launch in the window is not cut (#363)", async () => {
+	// THE PROPERTY THIS CHANGE EXISTS FOR. The guard used to be asked once, before a detach loop that pushed
+	// the removal one command further out per endpoint. A sandbox whose `docker create` landed in that window
+	// is in `created` state: absent from `docker ps`, absent from `network inspect`, and no obstacle to
+	// `network rm` -- after which `docker start` fails with "network not found" and that sandbox never runs.
+	let asks = 0;
+	// The fake reads this object by reference, so mutating it mid-pass is what makes the race real.
+	const containers = {};
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, containers });
+	const run = async (args) => {
+		const key = args.slice(0, 2).join(" ");
+		if (key !== "ps -a") return d.run(args);
+		// The first guard answers CLEAR, and the container is created immediately after it: the exact window.
+		// The answer is taken BEFORE the mutation, or the first guard would see what it is meant to miss.
+		const answer = await d.run(args);
+		if (++asks === 1) containers["pi-sandbox-a"] = "created";
+		return answer;
+	};
+	const out = await makeSandboxNetworkSweeper({ run })({ retained: () => [] });
+
+	assert.equal(asks, 2, "the guard is asked twice: once before the detach, once before the rm");
+	assert.deepEqual(out.swept, [], "nothing is removed once the late container is seen");
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "sandbox-present", detached: ["pi-dispatch-egress-proxy"] }], "and the note names what was already detached");
+	assert.ok(!d.calls.some((c) => c.startsWith("network rm")), "the rm never runs");
+});
+
+test("a guard that stops answering between the two asks fails CLOSED (#363)", async () => {
+	let asks = 0;
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["pi-dispatch-egress-proxy"] }, containers: {} });
+	const run = async (args) => {
+		if (args.slice(0, 2).join(" ") === "ps -a" && ++asks > 1) return { code: 1, stdout: "", stderr: "" };
+		return d.run(args);
+	};
+	const out = await makeSandboxNetworkSweeper({ run })({ retained: () => [] });
+	assert.deepEqual(out.swept, []);
+	assert.equal(out.notes[0].reason, "containers-unreadable", "could-not-ask is not could-not-find");
+	assert.ok(!d.calls.some((c) => c.startsWith("network rm")));
+});
+
+test("a network held back by a directory this pass could not remove is NAMED (#363)", async () => {
+	// Correct behaviour (a directory that exists is a run that can be re-opened, so its network is wanted) and
+	// it used to be invisible: the skip line names a DIRECTORY and nothing named the network it holds.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["p"] }, containers: {} });
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({ retained: () => ["a"], keep: new Set(["a"]), blocked: new Set(["a"]) });
+	assert.deepEqual(out.swept, []);
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "directory-not-removed" }]);
+
+	// and an ORDINARY retained run stays silent, because a line per retained run per pass is noise
+	const d2 = fakeNetDaemon({ nets: { "pi-sandbox-a-net": ["p"] }, containers: {} });
+	const quiet = await makeSandboxNetworkSweeper({ run: d2.run })({ retained: () => ["a"], keep: new Set(["a"]) });
+	assert.deepEqual(quiet.notes, [], "a retained run says nothing");
+});
 
 test("the sweep takes only a session network whose run is neither running nor retained (#337)", async () => {
 	const d = fakeNetDaemon({

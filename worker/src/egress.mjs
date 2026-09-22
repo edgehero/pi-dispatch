@@ -325,13 +325,29 @@ export async function networkEndpoints(docker, network) {
  * error text is never surfaced, because a docker error can repeat a `DOCKER_HOST` with credentials in it
  * (issue #339).
  */
-export async function removeNetworkOrSay(docker, { network, detach = [] }) {
+export async function removeNetworkOrSay(docker, { network, detach = [], stillClear = async () => true }) {
+	// `stillClear` is the OTHER kind of parameter, and naming the difference is what keeps `detach` explicit.
+	// `detach` names WHICH endpoints go, which every caller decides differently, so a default there would hide
+	// a decision. `stillClear` decides NOTHING about the target: it is the caller's own guard, re-asked
+	// immediately before each destructive verb, and `false` STOPS this function rather than changing what it
+	// would have removed. It exists because the guard that protects a sandbox mid-launch is a `docker ps -a`
+	// this module cannot phrase -- the filter and the id are the caller's -- and because the interval between
+	// that guard and the `rm` was two commands wide and grew by one per endpoint (issue #363).
+	//
+	// It defaults to a no-op, so four of the five callers are byte-identical and the one that opts in does so
+	// by name: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls touch objects whose owner
+	// is already gone or whose pid is DEAD, where nothing can be mid-launch, and `live-probes.mjs`'s peer sweep
+	// is best effort behind a flag an operator typed. Only the sandbox sweep has an owner who may be alive.
+	if (!(await stillClear())) return { removed: false, absent: false, detached: [], command: null, aborted: true };
 	const detached = [];
 	for (const endpoint of detach) {
 		// Recorded only when it TOOK. `detached` is printed to an operator and logged, so a list of attempts
 		// would name something still attached as something this sweep removed.
 		if ((await runWith(docker, ["network", "disconnect", "-f", network, endpoint]))?.code === 0) detached.push(endpoint);
 	}
+	// AGAIN, immediately before the verb that kills a launch. This is what removes the SCALING: with k
+	// endpoints the `rm` used to be k+1 commands after the only guard, and it is now always one.
+	if (!(await stillClear())) return { removed: false, absent: false, detached, command: null, aborted: true };
 	if ((await runWith(docker, ["network", "rm", network]))?.code === 0) return { removed: true, absent: false, detached, command: null };
 	// Silent ONLY when the daemon says it is not there. Anything else -- a timeout, an unreachable daemon, a
 	// race that attached something between the inspect and the rm -- is said, with the command.
