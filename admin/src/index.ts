@@ -1759,9 +1759,16 @@ export function readSandboxInfo(paths: any, jobId: string, { now = Date.now, env
   // uses (issue #337), so the panel does not advertise `b` for a run this host cannot re-open.
   //
   // NOT every one, and the exception is named rather than left to be discovered: `decideSandboxJobUser`
-  // can refuse a linux run from the manifest too, when the recorded job user is malformed (issue #341),
-  // and that check is not in this predicate. Folding it in would change what the CLI refuses and when,
-  // which is a separate decision from what the panel advertises. It used to ask only the venue one, so a run whose manifest names no image, or whose local
+  // can also refuse from the manifest alone, when the recorded job user is malformed (issue #341), and
+  // that check is not in this predicate. The reason is MEASURED and lives at `sandboxSyncRefusal`'s own
+  // declaration; the superseded one ("it would change what the CLI refuses and when") was corrected there
+  // and left standing here for a round, which is the recurrence this round keeps catching (issue #367).
+  // In short: that function checks the PLATFORM before it reads the stamp, so one malformed manifest
+  // refuses on linux and every other posix and returns `{ user: null, home: null }` on darwin and win32.
+  // Folding it in would make whether this panel offers `b` depend on the OPERATOR'S OS for an identical
+  // run, where every other refusal here is a property of the run.
+  //
+  // It used to ask only the venue one, so a run whose manifest names no image, or whose local
   // folder moved, was offered the key, given two lines of egress detail about the session it would get,
   // and refused the moment the key was pressed. Copying the other two here instead of sharing them would
   // have been the shape `openSandbox`'s own docblock warns about: two callers assembling the same answer

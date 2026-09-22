@@ -422,14 +422,19 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
  * would change what the CLI refuses and when" this comment used to give (issue #367, item 5).
  *
  * IT IS NOT MANIFEST-ONLY. It returns `{ user: null, home: null }` on `darwin` and `win32` before it ever
- * reads the stamp, so the SAME malformed `jobUser` refuses on linux and does not refuse on macOS or
- * Windows -- measured, one manifest, three platforms. Folding it in would make this function's answer, and
- * therefore whether the panel advertises `b` at all, depend on the operator's own OS for an identical run.
- * Every other refusal here is a property of the run.
+ * reads the stamp, so the SAME malformed `jobUser` refuses everywhere else and does not refuse on macOS or
+ * Windows. Measured across twelve platform strings: the split is darwin and win32 against every other
+ * value, linux, the BSDs, sunos, aix and the empty string alike, which is wider than "linux" and is why
+ * this says it that way. Folding it in would make this function's answer, and therefore whether the panel
+ * advertises `b` at all, depend on the operator's own OS for an identical run. Every other refusal here is
+ * a property of the run, and that is the whole of the argument.
  *
- * AND IT IS NOT SYNCHRONOUS. It is `async` and, past the stamp check, resolves the docker endpoint, reads
- * daemon facts and asks the image for its capabilities. This function is called on RUN_DETAIL entry and on
- * every left or right between runs; that is what keeps it a manifest read.
+ * NOT because it is async, which is true of the function and is NOT a reason about this refusal: measured,
+ * `job-user-stamp-invalid` is reached with zero calls to the endpoint resolver, the daemon-facts reader
+ * and the image preflight, on every platform and every malformed shape. It is decided from the manifest
+ * before any await that does work. A well-formed stamp does reach the daemon, which is why this function
+ * stays async and out of a predicate called on every left and right between runs, but that is a cost of
+ * moving the WHOLE function, not of the refusal #367 item 5 is about.
  *
  * Extracted (issue #337) because the admin panel needs the same answer before it advertises `b`, and the
  * alternative is the shape this file's own `openSandbox` docblock warns about: "Two callers assembling

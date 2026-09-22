@@ -124,10 +124,54 @@ function scrubControl(value: string): string {
 }
 
 /**
- * One cell of a pane, scrubbed, with a dash where there is nothing. Every list row and every detail pane
- * renders through this (issue #367): `runRow` and `renderRunDetail` had written the identical ternary
- * under two names, and the HELD and FAILED panes had neither, so the same job id was safe in one pane and
- * raw in the next.
+ * The proxy name `b` will look for, rendered so a reader can actually see it (issue #367).
+ *
+ * It is shown UNTRIMMED, because the line's whole point is to name what `openSandbox` will look for and
+ * `openSandbox` does not trim either, so `" myproxy "` is a container called `" myproxy "`. Bare, that is
+ * unreadable: a leading space is indistinguishable from the separator before it and a trailing one is
+ * invisible. So a name whose first or last character is not a VISIBLE ASCII GLYPH is quoted and escaped.
+ *
+ * THE EDGE TEST IS "VISIBLE", NOT "WHITESPACE", and that is the correction rather than the first idea. A
+ * `\s` test misses U+200B and U+2060, which are exactly the edges a reader cannot see, so the first version
+ * of this rendered them bare -- the failure it exists to prevent. `[\x21-\x7e]` is one rule covering
+ * space, tab, NBSP, zero-width anything and any non-ASCII edge.
+ *
+ * ESCAPED, NOT JUST WRAPPED, for two reasons the first version got wrong. It ran on the SCRUBBED value, so
+ * a tab at the edge was already a space: the operator read `" myproxy "` and typed spaces while `b` looked
+ * for tabs. And bare quotes are not injective -- a name that already contains quotes rendered identically
+ * to the padded one, which is precisely the over-quoted `.env` this line exists to expose. It runs on the
+ * RAW value now, and the escape covers the control bytes that would otherwise reach the terminal, so this
+ * is safe ahead of `show`.
+ *
+ * ACCEPTED, because clipping is not this function's to solve: a name long enough for `fitLine` to clip
+ * loses its closing quote, like any other clipped text. The budget is 39 columns and the leading edge,
+ * which is the one a reader meets first, survives.
+ */
+function proxyName(raw: any): string {
+  const value = String(raw ?? "");
+  if (/^\s*$/.test(value)) return "a proxy whose name is blank or spaces";
+  // A name that already CONTAINS a quote is escaped too, or the rendering is not injective: `" myproxy "`
+  // stored verbatim would otherwise draw exactly like the escaped form of ` myproxy `, and an over-quoted
+  // `.env` is precisely the mistake this line exists to expose.
+  if (!value.includes('"') && /^[\x21-\x7e]/.test(value) && /[\x21-\x7e]$/.test(value)) return scrubControl(value);
+  return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
+
+/**
+ * One cell of a RECORD pane, scrubbed, with a dash for an absent value. Every pane that renders a job --
+ * LIST, RUN_DETAIL, HELD, HELD_LIST and its armed question, FAILED -- goes through this (issue #367):
+ * `runRow` and `renderRunDetail` had written the identical ternary under two names, and the HELD and
+ * FAILED panes had neither, so the same job id was safe in one pane and raw in the next.
+ *
+ * NOT every pane in the panel, and the limit is worth stating rather than implied: TRIGGERS,
+ * TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS render operator-authored CONFIG and do not
+ * come through here. That is a different surface with a different argument (the operator typed it into
+ * their own file) and widening to it is not what #367 asked for, but a control byte in a trigger label
+ * does reach the screen today.
+ *
+ * The dash is for ABSENCE only, `null` or `undefined`. A value made ENTIRELY of control bytes becomes the
+ * same number of spaces, so a destructive confirm can name what looks like nothing; that is the cost of
+ * substituting rather than deleting, and the next paragraph is why substitution wins anyway.
  *
  * WHY EVERY CELL AND NOT THE OBVIOUSLY UNSAFE ONES. The comments those panes carried argued their cells
  * were safe because each is "host-chosen", and host-chosen is not control-byte-free: a job id is derived
@@ -591,7 +635,12 @@ export function makeDashboard({
               actionNote = cancelNote(res);
             } catch (err: any) {
               // act() swallows to protect the overlay; the note is how the operator still learns.
-              actionNote = `cancel failed: ${err?.message ?? String(err)}`;
+              // SCRUBBED here rather than in the two footers that render it (issue #367): `cancelNote` two
+              // functions down already scrubs every value it interpolates, and this sibling did not, which
+              // is the same "one field with a belt beside two without one" shape the issue is about. The
+              // message is a thrown Error's, and `requestCancel` is not wrapped, so an ioredis rejection
+              // reaches here verbatim.
+              actionNote = `cancel failed: ${cellOf(err?.message ?? String(err))}`;
             }
           });
           tui?.requestRender?.();
@@ -1093,7 +1142,11 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     const lines = rows.length === 0 ? [styler.cell("(nothing held)", iw)] : rows.map((r: any, i: number) => heldListRow(r, i === heldSelected, iw, styler));
     if (Number(held.more) > 0) lines.push(styler.cell(styler.fg("dim", `↓ ${held.more} more`), iw));
     if (!framed) {
-      const q = pendingCancel ? `cancel held job ${pendingCancel.target ?? pendingCancel.jobId}? it will never run · y/n` : (actionNote ? `${actionNote} · ` : "") + "↑↓ select · x cancel job · esc back";
+      // The UNFRAMED twin of `heldListHints`, and it is the literal second half of #367 item 1: the framed
+      // question gained `cellOf` and this one did not. A degrade is a width under 8 or one that is not a
+      // finite number, and it returns bare array elements without going near `frame()`, so anything
+      // scrubbed only inside the frame builders is unscrubbed here.
+      const q = pendingCancel ? `cancel held job ${cellOf(pendingCancel.target ?? pendingCancel.jobId)}? it will never run · y/n` : (actionNote ? `${actionNote} · ` : "") + "↑↓ select · x cancel job · esc back";
       return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", q];
     }
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: heldListHints(iw, styler, pendingCancel, actionNote) });
@@ -1105,7 +1158,9 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     return box({ title, sections: [{ lines: ["loading"] }], footer: KEY_HINTS, width });
   }
   if (snapshot.unreachable) {
-    const msg = `unreachable (${snapshot.unreachable})`;
+    // Every `unreachable` on this snapshot is a CAUGHT error's `.message` (see the readers above), so it
+    // is the same class as the cancel note: a thrown string, not a field this panel wrote (issue #367).
+    const msg = `unreachable (${cellOf(snapshot.unreachable)})`;
     if (!framed) return [`${title} -- ${msg}`, "", KEY_HINTS];
     return box({ title, sections: [{ lines: [msg] }], footer: KEY_HINTS, width });
   }
@@ -1287,7 +1342,7 @@ function heldSection(held: any, inner: number, styler: any): any[] {
   if (!held) return [];
   if (held.unreachable) {
     // No viewKey on the degraded row: the view would render an empty list over an unreadable index.
-    return [{ key: "held", priority: 5, head: ["held", "waiting on conditions"], body: [styler.cell(`unreadable (${held.unreachable})`, inner, { color: "error" })] }];
+    return [{ key: "held", priority: 5, head: ["held", "waiting on conditions"], body: [styler.cell(`unreadable (${cellOf(held.unreachable)})`, inner, { color: "error" })] }];
   }
   const rows: any[] = Array.isArray(held.rows) ? held.rows : [];
   if (rows.length === 0) return [];
@@ -1363,7 +1418,7 @@ function failedSection(failed: any, inner: number, styler: any): any[] {
   if (!failed) return [];
   if (failed.unreachable) {
     // No viewKey on the degrade: a view over an unreadable set answers nothing (the held rule).
-    return [{ key: "failed", priority: 6, head: ["failed", "queue failures"], body: [styler.cell(`unreadable (${failed.unreachable})`, inner, { color: "error" })] }];
+    return [{ key: "failed", priority: 6, head: ["failed", "queue failures"], body: [styler.cell(`unreadable (${cellOf(failed.unreachable)})`, inner, { color: "error" })] }];
   }
   const rows: any[] = Array.isArray(failed.rows) ? failed.rows : [];
   if (rows.length === 0) return [];
@@ -2396,14 +2451,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
       // container whose name is three spaces. Said rather than hidden, because that value is what `b`
       // will actually look for, and shown WITHOUT trimming for the same reason: `openSandbox` reads the
       // variable itself and does not trim, so `" myproxy "` is a container called `" myproxy "`.
-      const proxy = show(sandbox.egress.proxy);
-      // QUOTED when an edge is whitespace, and only then (issue #367). The name is shown UNTRIMMED for the
-      // reason above -- it is what `b` will look for -- but a leading space is indistinguishable from the
-      // separator before it and a trailing one is invisible, so the line named a container the eye cannot
-      // read. ASCII quotes, not a curly pair, because `PI_DISPATCH_ASCII` exists to keep this pane
-      // transcribable; they cost 2 of the 39 columns, and a name with no edge whitespace renders
-      // byte-identically to before.
-      const named = /^\s*$/.test(proxy) ? "a proxy whose name is blank or spaces" : proxy === proxy.trim() ? proxy : `"${proxy}"`;
+      const named = proxyName(sandbox.egress.proxy);
       // "egress off" alone reads as "no network at all", and it is the opposite: `PI_EGRESS=0` omits
       // `--network` entirely, so the shell lands on docker's default bridge with the whole internet.
       const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off (docker's default bridge)";

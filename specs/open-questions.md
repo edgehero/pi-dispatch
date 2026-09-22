@@ -1515,9 +1515,12 @@ adversarial passes did.
   shape as the rest of this row: a question whose answer is on the daemon the panel may not be talking to.
 - **Two pre-start refusals exit 1 and are therefore SILENT, measured against docker 27.4.0** (issue #367,
   item 2). `SANDBOX_RUNTIME_REFUSAL_CAUSES` holds 125, 126 and 127, which is what a container runtime uses
-  to refuse before the container runs. Two refusals land outside that set and both exit **1**: `-t` with no
-  TTY, where the client refuses and creates no container; and a `DOCKER_CONTEXT` naming a context that does
-  not resolve (`unable to resolve docker endpoint`). The second is the sharp one, because the message was
+  to refuse before the container runs. Two refusals land outside that set and both exit **1**: `-i -t`
+  with no TTY, where the client refuses (`the input device is not a TTY`) and creates no container --
+  measured, and it takes BOTH flags, since `-t` or `-i` alone exits 0, which is why this names the pair the
+  sandbox's own argv uses; and a `DOCKER_CONTEXT` naming a context that does not resolve (`unable to
+  resolve docker endpoint`). The `DOCKER_HOST` form of that second mistake exits **125**, which IS in the
+  set, so the panel speaks for one spelling of one mistake and not the other. The second is the sharp one, because the message was
   extended specifically to name `DOCKER_HOST` as a cause and the `DOCKER_CONTEXT` form of exactly that
   mistake says nothing.
   **Widening to 1 is not the answer** and is not what is deferred here: 1 is the commonest shell exit there
@@ -1535,11 +1538,14 @@ adversarial passes did.
 - **A fourth manifest-only refusal exists and is deliberately NOT folded in** (issue #367, item 5).
   `sandboxSyncRefusal` carries the venue, the image and the workspace; `decideSandboxJobUser` can also
   refuse from `manifest.jobUser` alone. Measured, one malformed manifest across three platforms: it refuses
-  on `linux` and returns `{ user: null, home: null }` on `darwin` and `win32`, because it checks the
-  platform before it reads the stamp. So folding it in would make whether the panel offers `b` depend on the
-  OPERATOR'S OS for an identical run, where every other refusal there is a property of the run; and it is
-  `async` and asks the daemon, while the sync version is called on every left and right between runs. The
-  reason is at its declaration too.
+  on `darwin` and `win32` and refuses on every other platform string -- linux, the BSDs, sunos, aix and the
+  empty string alike, measured across twelve -- because it checks the platform before it reads the stamp. So
+  folding it in would make whether the panel offers `b` depend on the OPERATOR'S OS for an identical run,
+  where every other refusal there is a property of the run. That is the whole argument, and NOT that the
+  function is async: measured, `job-user-stamp-invalid` is reached with zero calls to the endpoint
+  resolver, the daemon-facts reader and the image preflight, so that refusal is decided from the manifest
+  alone. A well-formed stamp does reach the daemon, which is a cost of moving the whole function rather than
+  a property of the refusal. The reason is at its declaration too.
 - **Out of scope here, and named so it does not disappear with #337**: the sandbox launcher is hard-wired
   to the docker CLI and `sandboxVenueRefusal` reopens only the `local` adapter by name, which belongs to
   `#354` (a native podman backend). This row is about what the panel can SEE, not about which runtimes it

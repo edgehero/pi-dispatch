@@ -144,21 +144,40 @@ export function renderBudget({ budget, settings } = {}) {
  * missing (no lines) or invalid (one error line) file, like renderTriggers.
  */
 /**
+ * One cell of a plain-text pane: a control byte becomes a space, an absent value becomes a dash. The same
+ * class and the same substitution the framed panel uses (`dashboard.ts`'s `cellOf`), so the two renderers
+ * of one record cannot disagree about what they will print. C1 is in the class as well as C0 and DEL,
+ * because U+009B is a CSI introducer that needs no ESC in front of it.
+ */
+function plainCell(v) {
+	return v === null || v === undefined ? "-" : String(v).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/**
  * The held-jobs block for the NO-COLOR / non-TTY path (issue #230). Returns null when nothing is held, so
  * the caller adds no empty section.
  *
  * It has to exist for `renderRunList`'s stated reason: this is the renderer a non-TTY panel uses, and "a
- * job is being held, and for how long" must not be a fact only the pretty one tells. Every cell is the same
- * host-chosen, PII-free set the framed row carries -- an id-only target, an operator-authored label, a
- * duration -- because both read the worker's own hashes rather than a delayed job's data.
+ * job is being held, and for how long" must not be a fact only the pretty one tells. Both read the worker's
+ * own hashes rather than a delayed job's data, so no `.data` -- no issue title, body or username -- reaches
+ * either.
+ *
+ * THAT IS A PII ARGUMENT AND NOT A CONTROL-BYTE ONE, which this comment used to conflate by calling the
+ * cells "host-chosen" (issue #367). Host-chosen is not control-byte-free: an id-only target is derived from
+ * forge data and a condition label is whatever the operator typed. The framed row gained a scrub and this,
+ * its plain twin, did not -- and the plain twin is the one the UNFRAMED degrade uses, where nothing goes
+ * near `frame()` at all, so a belt applied only inside the frame builders misses it entirely.
+ *
+ * SCRUBBED HERE rather than by the caller, because this function is also exported for the non-TTY panel and
+ * a belt that lives in one of two callers is the shape that produced the defect.
  */
 export function renderHeldJobs({ held } = {}) {
 	if (!held) return null;
-	if (held.unreachable) return `unreadable (${held.unreachable})`;
+	if (held.unreachable) return `unreadable (${plainCell(held.unreachable)})`;
 	const rows = Array.isArray(held.rows) ? held.rows : [];
 	if (rows.length === 0) return null;
 	const more = Number(held.more) || 0;
-	const lines = rows.map((r) => `${r.target ?? r.jobId ?? "-"}  ${r.label ?? "-"}  waited ${plainDuration(r.waitedMs)}`);
+	const lines = rows.map((r) => `${plainCell(r.target ?? r.jobId)}  ${plainCell(r.label)}  waited ${plainDuration(r.waitedMs)}`);
 	if (more > 0) lines.push(`... and ${more} more`);
 	return lines.join("\n");
 }
