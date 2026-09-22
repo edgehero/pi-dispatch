@@ -142,9 +142,10 @@ be told apart.
 | `conversation-too-old` | the conversation itself started more than `PI_SESSION_MAX_AGE_DAYS` ago. A different clock from `expired`: that one reads the transcript's mtime, which every completed run refreshes, so a lineage that keeps finishing work never ages out however old its first turn is. A header whose timestamp is missing or unreadable lands here too, because a conversation that cannot say how old it is has not been shown to be young enough. The timestamp is written by the agent's own session, so this bounds accumulation, not an adversary |
 | `too-large` | over `PI_SESSION_MAX_BYTES` |
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
-| `not-a-regular-file` | ignored, not refused: the check is an `lstat`, so a symlink planted in `/session` is never followed, and the job runs cold |
+| `not-a-regular-file` | the transcript's own name is not a regular file. The check is an `lstat`, so a symlink is never followed, whether the agent planted it in `/session` or something planted it in the store, and the job runs cold |
+| `key-not-a-directory` | the key's own directory in the store is not a directory: a symlink, a regular file, a dangling link. Both edges refuse it and the entry is left alone, so this key stays cold on every run until you remove what is standing there. The store itself may be a symlink; only the key's own name is checked |
 | `venue-changed` | the job runs in a different backend than wrote the transcript (see [`backends.md`](backends.md)). A transcript from before venues were recorded counts as `local`, whatever your default is now. It also covers a stamp this store cannot read, and a promotion that was interrupted, or was still landing from another job on the same key, when this job read it: all three cold-start rather than risk handing one venue's conversation to another |
-| `transcript-replaced` | another completed job on this key promoted a new transcript while this job was staging the old one. The host copies the transcript outside the promotion lock, then re-checks that the file it copied is still the one its gates judged; when it is not, this run cold-starts rather than resuming a conversation no gate has seen. It is the read-side half of the same event `locked` reports from the write side, so the two appearing together on one key means two jobs overlapping on one pull request |
+| `transcript-replaced` | the transcript this job judged, or the key directory holding it, was replaced while this job was staging it: usually another completed job on this key promoting a new one. The host copies the transcript outside the promotion lock, then re-checks that the file it copied is still the one its gates judged; when it is not, this run cold-starts rather than resuming a conversation no gate has seen. It is the read-side half of the same event `locked` reports from the write side, so the two appearing together on one key means two jobs overlapping on one pull request |
 | `pi-version-changed` | the job image ships a different pi than wrote the transcript |
 | `context-too-full` | the saved session's context was already at or above `PI_SESSION_MAX_CONTEXT_PCT` of its model's window when it was last written. The measurement comes from the job image's runner, so on an image that does not report one this bound does nothing at all; where there is no measurement the gate passes rather than guessing, and it never estimates one from the transcript's size. The reading is stamped with the model that produced it and ignored by a job running a different one, since the same token count is most of a small window and almost none of a large one. A cold start clears it, so a key cannot be refused forever on a number describing a conversation it no longer holds |
 | `resume-chain-too-long` | the host has already handed this key's transcript to a container `PI_SESSION_MAX_RESUME_CHAIN` times in a row. It counts deliveries rather than what pi made of them, so an agent cannot reset it by arranging for pi to find nothing usable in a file it still receives. The count is kept for every key whether or not the bound is set, so setting it takes effect on the next job rather than that many jobs later, and the cold start it causes resets the count **once that run completes**: a lineage whose runs keep failing keeps cold-starting, which is the safe direction |
@@ -166,6 +167,7 @@ line, because it says why the NEXT run for this key will cold start:
 
 | reason | meaning |
 |---|---|
+| `key-not-a-directory` | the key's own directory in the store is not a directory (see the table above). Nothing is written, and the entry is left exactly as it was |
 | `locked` | the key was already held by another job's exclusive promotion lock. A lock left behind by a killed promotion is taken over by the next promotion once it is older than an hour, so this almost always means a live writer rather than a file somebody has to delete. The exception is a lock whose timestamp is in the FUTURE, from a clock skew on a shared store: that one never ages, and with `PI_SESSIONS_TTL_DAYS=0` nothing else clears it either |
 | `promote-failed` | the write failed before the transcript landed: a full disk, or a permissions change under the store mid-promotion. A sidecar that fails AFTER the swap is logged instead, never reported here, because the transcript did land |
 
@@ -205,7 +207,11 @@ that bounds how long a conversation accumulates.
 ```
 
 The directory name is a hash, not a readable path, so a branch name never becomes a filesystem path and a
-listing of the store names none of your repositories.
+listing of the store names none of your repositories. The hash is derived rather than random, so it is
+computable by anyone who knows the repository and the branch: each of those directories must therefore BE a
+directory, and the worker refuses a key whose name is a symlink, a regular file or a dangling link rather
+than following it. `PI_SESSIONS_DIR` itself may be a symlink, which is how you move the store elsewhere;
+only the key's own name is held to that rule.
 
 The store itself is **never mounted into a container**. Each job gets its own copy, and only a job that
 completed successfully has its copy promoted back — so a failed or retried job leaves the stored
