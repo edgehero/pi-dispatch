@@ -68,7 +68,7 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
 import { observeHost } from "./runtime-observations.mjs";
-import { makeDockerEndpointResolver } from "./backend-local.mjs";
+import { endpointShown, makeDockerEndpointResolver } from "./backend-local.mjs";
 import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
@@ -938,7 +938,7 @@ export async function collectChecks(env, seams) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpoint.endpoint}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
+					label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpointShown(endpoint)}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
 					fix: "point the docker CLI at this host and re-run doctor to check it",
 				});
 			} else if (token) {
@@ -2482,12 +2482,20 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 	// this sweep prints for a daemon it will not touch now NAMES what the CLI resolved, the way
 	// `credentialTransit` and the in-image `gh` probe already do, and a boolean cannot carry that.
 	const owned = endpoint?.local === true;
-	// SAFE TO PRINT because `endpoint` is what `makeDockerEndpointResolver` stored, which is
+	// NO CREDENTIAL, because `endpoint` is what `makeDockerEndpointResolver` stored, which is
 	// `classifyDockerEndpoint`'s `display` and therefore already through `displayEndpoint` (issue #340). The
 	// raw `DOCKER_HOST` can carry `user:password@`, and this is a doctor line an operator pastes into a
 	// support thread. If a future resolver ever stores the raw host, this leaks: pinned by a test that hands
 	// the sweep an endpoint with a password in it.
-	const cliSays = endpoint?.local === false ? `resolves ${endpoint.endpoint}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint?.reason ?? "not asked"})`;
+	//
+	// THAT IS THE ONLY THING `displayEndpoint` GUARANTEES HERE, and the limit is worth stating because this
+	// is terminal output: it returns a host with no `@` VERBATIM, so it strips no control byte, and a `\r` or
+	// a CSI sequence in an endpoint would rewrite the line an operator is reading. What keeps them out is not
+	// this code, it is docker's own URL parser: measured on 27.4.0, both `docker context create --docker
+	// host=` and `DOCKER_HOST` refuse a control character outright (`net/url: invalid control character in
+	// URL`, exit 1), which lands doctor on the `unparseable` branch instead. Measured on one CLI version, so
+	// it is recorded as a measurement and not as a property this project enforces.
+	const cliSays = endpoint?.local === false ? `resolves ${endpointShown(endpoint)}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint?.reason ?? "not asked"})`;
 	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
 	// THE LISTING ALWAYS RUNS, on any daemon. The reason the sweep is confined to a daemon this host owns is
 	// `isAlive`, whose answer is about THIS process table -- reading a list is not. Asking first is what lets
@@ -2573,12 +2581,19 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
 		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by a doctor run that did not finish` });
 		// THE NETWORK WENT BETWEEN OUR OWN COMMANDS, and the silence that covers is only a silence about the
-		// NETWORK. A network the daemon says is not there is not worth a line, which is the rule this sweep
-		// shares with the boot reaper. Containers this pass `rm -f`'d are a different fact: they existed, we
-		// removed them, and saying nothing left an operator with probes gone and no line accounting for them
-		// (issue #360). Said without `${name}`, which is the one object here that is NOT news.
+		// NETWORK: one the daemon says is not there is not worth a line, which is the rule this sweep shares
+		// with the boot reaper. What this pass DID is a different fact. It existed, we did it, and saying
+		// nothing left an operator with probes gone and endpoints cut loose and no line accounting for either
+		// (issue #360).
+		//
+		// BOTH VERBS, not just the removals. The first version of this branch named `removed` alone, so a
+		// stranger force-detached off the network -- which is the act `INT-EGRESS-POLICY-CONTRACT` promises
+		// is always named -- went unreported, and with no probe of ours to remove there was no line at all.
+		// `${name}` is the OBJECT of the sentence rather than its subject, because it is the one thing here
+		// that is not news.
 		else if (outcome.absent) {
-			if (removed.length > 0) checks.push({ ok: true, label: `Egress canary: removed ${removed.join(", ")}, left by a doctor run that did not finish (the network ${name} was already gone)` });
+			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
+			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by a doctor run that did not finish; the network itself was already gone` });
 		} else checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
 	}
 	return checks;
@@ -3237,7 +3252,7 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 				// degrades to, and who is asserting it, with THIS SHELL named: the service's EnvironmentFile or a
 				// systemd User= can resolve differently, and the worker logs its own answer at boot.
 				const redirected = endpoint?.local === false;
-				const seen = redirected ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}, which is not shown to be on this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
+				const seen = redirected ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpointShown(endpoint)}, which is not shown to be on this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
 				checks.push({
 					ok: false,
 					warn: true,

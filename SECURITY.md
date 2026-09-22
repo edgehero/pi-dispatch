@@ -299,16 +299,24 @@ Stated openly rather than discovered later:
   you built or pulled onto that host yourself. `docs/job-image.md` is the conformance checklist; `OQ-012` in
   `specs/open-questions.md` is the honest statement of what nothing here can check.
 - **`pi-job-*` is a name, not a claim, so a boot reaper will clear your object that happens to use it.**
-  The namespace is the string, and nothing checks whether this deployment made the thing: on start, the
-  worker removes every container whose name begins `pi-job-` and then every network whose name does,
-  detaching whatever was attached first. That is what lets it recover a job a crashed worker left running,
-  because after a crash nothing else distinguishes one. A `pi-job-runner_default` network or a
-  `pi-job-mine-net-backup` copy of one is inside it and goes with the rest. Until issue #360 the two halves
-  disagreed — the container was taken and the network was not — which was not a protection so much as an
-  inconsistency that happened to spare half of some objects. Docker labels would be unambiguous and are
-  **not** used: a label cannot be on what a worker that crashed before this change already created, so the
-  migration is the real content of that choice and it has not been made. Keep your own objects out of the
-  prefix. A sandbox is safe by construction: `pi-sandbox-*` is outside it, deliberately.
+  The namespace is the string, and nothing checks whether this deployment made the thing. On start, the
+  worker removes every **running** container whose name begins `pi-job-` (it lists with `docker ps`, so a
+  stopped one is left), and then, for every network whose name begins `pi-job-`, detaches what is attached
+  and removes it. That is what lets it recover a job a crashed worker left running, because after a crash
+  nothing else distinguishes one. A `pi-job-runner_default` network, or a `pi-job-mine-net-backup` copy of
+  one, is inside the namespace and goes with the rest.
+  **The likely way to meet this is `docker compose`**: a project named `pi-job-anything` gets a network
+  `pi-job-anything_default`, and its services are named `pi-job-anything-<service>-1` unless you set
+  `container_name:`. The network sweep has one carve-out and it will not save you here: it leaves a network
+  alone only while a container **that is itself under the prefix** is attached, so a stack whose services
+  carry explicit names keeps running with its network removed from under it. Reattach with
+  `docker network connect`; the containers the other half removed are not recoverable.
+  Until issue #360 the two halves disagreed — the container was taken and the network was not — which was
+  not a protection so much as an inconsistency that spared half of an object by an accident of suffix.
+  Docker labels would be unambiguous and are **not** used: a label cannot be on what a worker that crashed
+  before this change already created, so the migration is the real content of that choice and it has not
+  been made. Keep your own objects out of the prefix. A sandbox is safe by construction: `pi-sandbox-*` is
+  outside it, deliberately.
 - **`run.replicas` multiplies budget reservations by N, and the caps are the only ceiling.** A webhook
   trigger on any forge carrying `run.replicas: 2` turns one delivery into two independent paid jobs — two
   containers, two token bills, two review requests. Nothing about that is a bypass: each replica reserves its own slot

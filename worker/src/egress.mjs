@@ -235,7 +235,8 @@ export async function networkExists(spawnFn, network) {
  * Detach the proxy and remove the network. Best-effort and never throws: it runs in a `finally`, after the
  * container has exited (or when a network has just been built for a container that will not start), and a
  * failure here must not change the outcome. What it leaves behind if it fails is a network, which the boot
- * reaper tries to remove for a job (a `pi-job-<id>-net` name, detaching what is attached first since issue #357) and never for a sandbox
+ * reaper tries to remove for a job (any name under the `pi-job-` prefix since issue #360, not only the
+ * `<container>-net` one this builds, detaching what is attached first since issue #357) and never for a sandbox
  * (`pi-sandbox-`); a sandbox's next open of the same run refuses and names it for removal.
  */
 export async function removeJobNetwork(spawnFn, { network, proxy = DEFAULT_EGRESS_PROXY }) {
@@ -342,7 +343,11 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	// that guard and the `rm` was two commands wide and grew by one per endpoint (issue #363).
 	//
 	// It defaults to a no-op, so four of the five callers are byte-identical and the one that opts in does so
-	// by name: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls touch objects whose owner
+	// by name, and that default is also what makes those four callers SAFE rather than merely unchanged: an
+	// aborted pass returns `command: null`, and every one of them would render that into "could not be
+	// removed: null" if it ever saw the shape. A caller that opts in MUST branch on `aborted` before it reads
+	// `command`. `sandbox.mjs` does; nothing else can reach it.
+	// The opting-in caller: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls touch objects whose owner
 	// is already gone or whose pid is DEAD, where nothing can be mid-launch, and `live-probes.mjs`'s peer sweep
 	// is best effort behind a flag an operator typed. Only the sandbox sweep has an owner who may be alive.
 	//

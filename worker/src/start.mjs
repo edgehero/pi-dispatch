@@ -38,7 +38,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
@@ -1536,7 +1536,7 @@ function dockerEndpointState(endpoint) {
  */
 function dockerEndpointEvidence(endpoint) {
 	if (endpoint.local === null) return `the docker CLI did not say which endpoint it resolves (${endpoint.reason})`;
-	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpoint.endpoint}${endpoint.local ? ", on this host" : ", which is not shown to be on this host"}`;
+	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpointShown(endpoint)}${endpoint.local ? ", on this host" : ", which is not shown to be on this host"}`;
 }
 
 /** Log an endpoint answer that is not plainly local; a return to local is logged only as a change. */

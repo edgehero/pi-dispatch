@@ -106,20 +106,20 @@ answered, can leave them behind. The next run sweeps whatever belongs to a proce
 **on this host**, and only when your docker CLI resolves a daemon on this host: a leftover on a shared or
 remote daemon belongs to the doctor that made it, and a pid that is dead here may well be alive there.
 
-There are **seven shapes**, and this page used to describe three of them. Every one carries the network's
-name, and every warning names a command:
+There are **seven shapes**, and this page used to describe three of them. Every warning names a command,
+in the line itself or in the fix line under it:
 
 <!-- CANARY-LINE-SITES: 8 -->
 
 | Line | What it means | What to do |
 |---|---|---|
 | `✓ removed <net> (after removing <probes>, detaching <endpoints>), left by a doctor run that did not finish` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |
-| `✓ removed <probes>, left by a doctor run that did not finish (the network <net> was already gone)` | the probes were removed and the network then turned out to be gone already, so there is nothing left to report about it | nothing |
-| `⚠ leftovers from an interrupted doctor could not be listed: docker network ls --filter name=...` | the listing itself failed, so doctor does not know whether there are any | run the command yourself; a daemon that cannot list is usually the real problem |
+| `✓ removed <probes>, detached <endpoints> on <net>, left by a doctor run that did not finish; the network itself was already gone` | what the pass did land, on a network that then turned out to be gone already. Either half of the list may be absent; if the pass did nothing at all, there is no line, because a network the daemon says is not there is not news | nothing, unless one of the detached names is yours: reattach it with `docker network connect` |
+| `⚠ leftovers from an interrupted doctor could not be listed: docker network ls --filter name=...` | the listing itself failed, so doctor does not know whether there are any. The only line here that names no network, because none was ever read | run the command yourself; a daemon that cannot list is usually the real problem |
 | `⚠ <net> may be left over from an interrupted doctor, and is not swept because this shell's docker CLI ...` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
 | `⚠ the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
 | `⚠ <net> is kept, because the probe <probe> could not be removed and the network is the only way left to find it: docker rm -f <probe>` | a probe container would not go. The network is deliberately **kept**, because nothing in this project searches for probe containers by name, so removing the network would orphan that container permanently | `docker rm -f <probe>`, then re-run doctor |
-| `⚠ the network <net> could not be removed: docker network rm <net>` | everything on it was dealt with and the removal itself failed | run the command |
+| `⚠ the network <net> could not be removed: docker network rm <net>` | the removal failed. Two places produce this line. From the **sweep** it means everything on the network was dealt with first. From doctor's own **teardown** at the end of a run it does not: that path force-removes its probes without reading the result, so a probe the daemon is still wedged on is still attached, and "has active endpoints" is the likeliest reason the removal failed | run the command. If it says the network has active endpoints, `docker network inspect <net>` first and remove what is on it, as in the row above |
 
 
 The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node**, so

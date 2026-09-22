@@ -3992,19 +3992,29 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 // carry it; that is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and these labels are
 // worse subjects for it than that page's were -- several begin with `${name}`, and one nests a template
 // inside itself, so there is no honest static text to require. So this pins the ONE thing that is both
-// derivable and sufficient: how many places in doctor produce a line under this prefix. A seventh site
-// cannot be added without this failing and sending its author to the page, which is all the page needs. What
-// each line SAYS is the page's own job and is not pinned here, and saying so is the point: a green regex
-// over a false sentence is worse than no test.
+// derivable and sufficient: how many places in doctor produce a line under this prefix. What each line SAYS
+// is the page's own job and is not pinned here, and saying so is the point: a green regex over a false
+// sentence is worse than no test.
+//
+// THE NEEDLE IS ONE SPELLING, so there are two assertions rather than one, and the first is the load-bearing
+// half. A review pass added a ninth line site in four shapes that kept the count at eight: the label held in
+// a variable first, the prefix in a constant, a double-quoted string (which is how a line with nothing to
+// interpolate would naturally be written), and `label:` wrapped onto its own line. So the count alone
+// promised a guarantee it does not give. The first assertion closes that: every occurrence of the prefix
+// anywhere in the source must be one the needle found, whatever the author's spelling, and any other way of
+// writing one fails here and says how to fix it.
 test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
+	const everywhere = src.split("Egress canary: ").length - 1;
 	const sites = src.split("label: `Egress canary: ").length - 1;
+	assert.equal(everywhere, sites, "a canary line written any other way is invisible to the count below: write it as ``label: `Egress canary: …` `` or widen this needle");
 	const claimed = Number(/<!-- CANARY-LINE-SITES: (\d+) -->/.exec(doc)?.[1]);
 	assert.equal(sites, claimed, `doctor produces ${sites} canary lines; docs/egress.md is written for ${claimed}. Update the page, then the marker.`);
 	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
-	// is why the page describes seven and this counts eight. Stated here rather than derived: telling two
-	// identical template literals apart needs a parser, and a parser over source is the same arms race.
+	// is why the page describes seven shapes and this counts eight sites. Stated here rather than derived:
+	// telling two identical template literals apart needs a parser, and a parser over source is the same arms
+	// race this test exists to refuse.
 	assert.equal(sites, 8, "a deliberate edit, not a derived number: change it with the page");
 });
 
@@ -4046,8 +4056,65 @@ test("doctor: probes removed off a network that then vanished are still accounte
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242, left by a doctor run that did not finish \(the network pi-dispatch-egress-doctor-4242 was already gone\)/);
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242 on pi-dispatch-egress-doctor-4242, left by a doctor run that did not finish; the network itself was already gone/);
 	assert.doesNotMatch(text(), /⚠ Egress canary: the network pi-dispatch-egress-doctor-4242 could not be removed/, "a network the daemon says is gone is not a failure");
+});
+
+test("a stranger DETACHED off a network that then vanished is named, with no probe of ours in the pass (#360)", async () => {
+	// The half the first version of this branch missed, and the one the contract promises loudest: a container
+	// this project did not make is force-detached and NAMED, never removed. With no probe of ours to remove,
+	// `removed` is empty, so a line gated on removals alone printed nothing at all while a live stranger had
+	// just lost its only network. That is a worse silence than the one the branch was written to close.
+	const calls = [];
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: '{"a":{"Name":"their-worker"}}' },
+		"docker network rm pi-dispatch-egress-doctor-4242": { code: 1, output: "" },
+		"docker network inspect pi-dispatch-egress-doctor-4242": { code: 1, output: "Error response from daemon: network pi-dispatch-egress-doctor-4242 not found" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
+	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.at(-1) === "their-worker"), "it really was detached");
+	assert.match(text(), /✓ Egress canary: detached their-worker on pi-dispatch-egress-doctor-4242, left by a doctor run that did not finish; the network itself was already gone/);
+});
+
+test("a vanished network with NOTHING done to it is still not a line (#360)", async () => {
+	// The other half of the same branch, and the one that keeps it honest. The silence a vanished network
+	// earns is real: this sweep and the boot reaper both refuse to speak about a network the daemon says is
+	// not there. Without this pin the `did` guard can be deleted with a green suite, and doctor then prints a
+	// ✓ with no subject at all.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": { code: 0, output: "{}" },
+		"docker network rm pi-dispatch-egress-doctor-4242": { code: 1, output: "" },
+		"docker network inspect pi-dispatch-egress-doctor-4242": { code: 1, output: "Error response from daemon: network pi-dispatch-egress-doctor-4242 not found" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.doesNotMatch(text(), /Egress canary:/, "an empty network that was already gone is the one silence this sweep allows");
+});
+
+test("an endpoint that resolves to NOTHING is said as a phrase, not as a gap (#360)", async () => {
+	// `docker context create X --docker host=` is accepted by docker 27.4.0 and `context inspect` renders the
+	// Host as "". Every site that interpolates an endpoint into "resolves ..., which is not shown to be on
+	// this host" then printed "resolves , which is not shown". One helper, four call sites.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		...green,
+		"docker context inspect": { code: 0, output: '"X"|""\n' },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.match(text(), /may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves an empty endpoint, which is not shown to be on this host/);
+	// The sibling site four lines down, which had the identical gap and is fixed by the same helper.
+	assert.match(text(), /credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "X" to an empty endpoint, which is not shown to be on this host/);
+	assert.doesNotMatch(text(), /resolves , which is not shown/, "no site renders the gap");
+	assert.doesNotMatch(text(), /to , which is not shown/, "including the one that names the context");
 });
 
 test("doctor: the canary sweep removes only a probe whose SLUG it knows (#350)", async () => {
@@ -4129,8 +4196,11 @@ test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going qu
 	// MAY be left over. The same sentence says four words later that the pid may be alive there, so asserting
 	// it IS a leftover and then walking that back was the line contradicting itself (issue #360, item 3).
 	assert.doesNotMatch(text(), /pi-dispatch-egress-doctor-4242 is left over/, "doctor does not assert what it just said it cannot know");
-	// The reason is the SAME word `credentialTransit` prints four lines below for the same endpoint, which is
-	// the alignment issue #360 item 3 asked for: one shell, one reading, one vocabulary.
+	// The REASON WORD is the one `credentialTransit` prints below for the same endpoint. The sentences around
+	// it still differ ("which daemon it uses" against "which endpoint it resolves", and that one names the
+	// context), and the limit is worth stating: issue #360 item 3 asked the canary line to gain a second
+	// branch the way those two already had one, which is what happened. The wording copied verbatim is the
+	// in-image gh probe's, four hundred lines up, not this one's.
 	assert.match(text(), /credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI did not say which endpoint it resolves \(unparseable\)/);
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network ls"), "it LOOKS on any daemon: reading a list says nothing about a process table");
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("rm") && c.args.join(" ").includes("4242")), "but removes nothing there");

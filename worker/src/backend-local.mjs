@@ -168,6 +168,22 @@ export function makeStopContainer({ exec = execDocker } = {}) {
 }
 
 /**
+ * What the CLI resolved, as a phrase that is never EMPTY. Four call sites interpolate an endpoint into a
+ * sentence of the form "resolves <this>, which is not shown to be on this host", and a context can carry no
+ * host at all: `docker context create X --docker host=` is accepted by docker 27.4.0 (exit 0, "Successfully
+ * created context"), and `context inspect` then renders the Host as `""`. `classifyDockerEndpoint("")`
+ * answers `{ local: false, display: "" }`, which is the right answer to its own question, and every one of
+ * those sites then printed "resolves , which is not shown to be on this host" at an operator.
+ *
+ * A PHRASE rather than a fallback value, so no caller can mistake what it returns for something to hand to
+ * docker.
+ */
+export function endpointShown(endpoint) {
+	const shown = String(endpoint?.endpoint ?? "");
+	return shown === "" ? "an empty endpoint" : shown;
+}
+
+/**
  * Is this name one THIS project claims? ONE answer for both halves of the boot reaper, which is the whole
  * point of it being a function rather than two tests (issue #360, item 7).
  *
@@ -176,8 +192,11 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * `^pi-job-.*-net$`, so an operator's `pi-job-runner_default` had its CONTAINER reaped and its NETWORK left
  * standing. Two answers to "what is ours" is the defect; which answer to keep is the decision, and the
  * container half cannot be the one that moves. After a crash nothing distinguishes our `pi-job-<id>` from
- * any other name under the prefix, and a charset rule does not separate them either: `sanitizeJobId` permits
- * `_` and `-`, so `runner_default` and `runner-db-1` are both shapes a real job id can take. There is no
+ * any other name under the prefix, and a charset rule does not separate them either. The ids that reach
+ * `jobContainerName` are BullMQ's, which that function's own comment records as already `[A-Za-z0-9._-]` and
+ * deliberately does NOT re-sanitise, so `runner_default` and `runner-db-1` are both shapes a real job id can
+ * take. (An earlier version of this paragraph credited `sanitizeJobId`, which governs the SANDBOX namespace
+ * and is not in this path; the conclusion survives because both charsets carry `_` and `-`.) There is no
  * stricter rule available that is also TRUE, so the halves agree by widening the network one.
  *
  * WHAT THAT COSTS, stated rather than buried in a test diff: a network called `pi-job-mine-net-backup`, or
@@ -193,6 +212,14 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  *
  * Not a constant called `_SHAPE`: a name that says "shape" while holding a prefix test is a name that lies,
  * and the previous one did.
+ *
+ * The `typeof` guard is UNREACHABLE from both production call sites, and saying so is the point rather than
+ * claiming a coverage it does not have: the container listing is `stdout.split("\n").map(trim)`, and
+ * `networkEndpoints` already coerces every endpoint with `String(c?.Name ?? "")` before returning, so
+ * neither can hand this a non-string. It is here because this is EXPORTED, and a predicate that throws on a
+ * value it should simply answer `false` to is a trap for the next caller -- inside `makeReaper` that throw
+ * reaches the outer catch and answers `{ reaped: false }`, which is a money decision. Measured: dropping the
+ * guard is caught by the unit table below and by no call-site test.
  *
  * `SANDBOX_NETWORK_SHAPE` is the sibling that must NOT be loosened the same way, and the difference is what
  * the name is FOR rather than taste: it carries a capture group and the sandbox sweep parses the session id
@@ -293,7 +320,7 @@ export function makeReaper({ log, exec = execDocker }) {
 			// because a network with a member still attached cannot be removed -- and swept by the SAME
 			// `pi-job-` filter, so the namespace rule that keeps an operator's live sandbox safe from the
 			// container reaper keeps their sandbox NETWORK safe too. The filter is the cheap narrowing only:
-			// the namespace decision is the anchored shape below, for the reason stated there.
+			// the namespace decision is `isJobNamespace`, asked below and by the container loop above.
 			//
 			// A crashed worker is the case this exists for: `runContainer`'s own finally removes the network
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
