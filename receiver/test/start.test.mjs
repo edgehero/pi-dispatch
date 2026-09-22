@@ -370,7 +370,6 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 		env: { PATH: process.env.PATH, PI_TRIGGERS_FILE: triggers, WEBHOOK_SECRET: "s" },
 		encoding: "utf8",
 	});
-
 	assert.equal(r.status, 2, "a determinate config refusal is EXIT_POLICY, never the retryable 1");
 	const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
 	assert.equal(line.event, "receiver_start_failed");
@@ -462,15 +461,43 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// entry-point guard deleted, and it is also what keeps the silence assertion below honest -- the same
 	// write on the same wire, first observed loud, then observed quiet.
 	const beforeEdit = chunks.length;
-	writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
-	// POLLED, not slept: the reload's arrival depends on fs.watch delivery latency plus the 150ms
-	// debounce, and a fixed wait is a fuse on a loaded runner. The silence half below keeps its fixed
-	// window, because "nothing arrives" has no event to poll for.
-	const deadline = Date.now() + 5000;
+	const edit = () => writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
+	edit();
+	// POLLED against a wall clock, not slept, and the SAME edit is RE-WRITTEN every second until the
+	// reload lands (issue #373). The re-write is the fix, not padding: on macOS an edit made right after
+	// arming can be LOST, not merely late, so a longer wait alone would have fixed nothing. libuv (1.49.2,
+	// src/unix/fsevents.c) answers `fs.watch()` from `uv__fsevents_init`, which only queues the path and
+	// signals its CoreFoundation thread; the FSEvents stream is destroyed and recreated there later, for
+	// EVERY watched path in the process, starting from "now". An edit that lands before the new stream is
+	// live is never delivered, and any watcher armed or closed elsewhere in the process reopens that window.
+	// Measured against this sequence and the real `startReceiver`, 40 trials per row:
+	//   idle, one boot at a time ............ 0 lost, reload at 163ms
+	//   idle, four boots in one process ..... 24 lost (no reload in 10s)
+	//   two suites + test-count-check load .. 1 lost, one boot at a time -- this issue's failure
+	//   with this re-write, every row ........ 0 lost, worst 1223ms (one re-write at most)
+	// Linux's inotify registers before `fs.watch` returns, so there an edit can be late but not lost.
+	// The ceiling is the round's rule, max(10s, 6x the worst observed) = 10s. The limit: this proves the
+	// watch delivers AN edit made after it armed, and reloads -- not that the first edit after boot is
+	// seen, which no test can promise on macOS, and not WHICH write was delivered, since the setup write
+	// above is itself usually delivered after arming (40 of 40 at idle, with no edit at all). Every write
+	// is the same content, and the closer cancels a pending debounce, so the silence half below still
+	// observes the last write this block made, and nothing after it. That half keeps its fixed window,
+	// because "nothing arrives" has no event to poll for.
+	const ARRIVAL_CEILING_MS = 10_000;
+	const REWRITE_EVERY_MS = 1000;
+	const deadline = Date.now() + ARRIVAL_CEILING_MS;
+	let rewriteAt = Date.now() + REWRITE_EVERY_MS;
 	while (!parse(beforeEdit).some((l) => l.event === "triggers_reloaded") && Date.now() < deadline) {
+		if (Date.now() >= rewriteAt) {
+			edit();
+			rewriteAt += REWRITE_EVERY_MS;
+		}
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	}
-	assert.ok(parse(beforeEdit).some((l) => l.event === "triggers_reloaded"), "a live watch reloads, or this test is asserting silence from a watch that never worked");
+	assert.ok(
+		parse(beforeEdit).some((l) => l.event === "triggers_reloaded"),
+		`a live watch reloads within ${ARRIVAL_CEILING_MS}ms of repeated edits, or this test is asserting silence from a watch that never worked`,
+	);
 
 	for (const c of closers) c.close();
 
