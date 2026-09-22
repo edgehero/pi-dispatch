@@ -293,6 +293,13 @@ export function networkAbsentInDaemonWords(result) {
  * status=created` rather than infer it from here. Unmeasured on Podman's netavark.
  */
 export async function networkEndpoints(docker, network) {
+	// HALF-PROTECTED, and the half is worth naming (issue #360, item 6). `runWith` turns a runner that THROWS
+	// into `{ code: null }`, so a throwing runner reads here as an unreadable network and every caller's guard
+	// stays cautious. The `disconnect` and `rm` in `removeNetworkOrSay` go through the same wrapper, but the
+	// callers' OWN steps around them do not, and neither does the `network ls` that produced the candidate
+	// list: on the boot reaper that one is the throwing `exec` deliberately, so a daemon that dies mid-pass
+	// still answers `{ reaped: false }`. Unreachable with the production runners, which are all non-throwing
+	// by construction; stated so a future injected runner is not assumed to be.
 	const inspected = await runWith(docker, ["network", "inspect", "--format", "{{json .Containers}}", network]);
 	if (inspected?.code !== 0) return { ok: false, names: [], absent: networkAbsentInDaemonWords(inspected) };
 	try {

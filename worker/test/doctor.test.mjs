@@ -3986,6 +3986,28 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false \} = opts;/, "runCmdCapture's probe bound");
 });
 
+// A COUNT, deliberately, and not a match over the page's prose. `docs/egress.md` described three canary line
+// shapes while doctor produced six, and the page went a whole round without anyone noticing (issue #360,
+// item 2). The obvious repair is a test that reads each label out of the source and requires the page to
+// carry it; that is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and these labels are
+// worse subjects for it than that page's were -- several begin with `${name}`, and one nests a template
+// inside itself, so there is no honest static text to require. So this pins the ONE thing that is both
+// derivable and sufficient: how many places in doctor produce a line under this prefix. A seventh site
+// cannot be added without this failing and sending its author to the page, which is all the page needs. What
+// each line SAYS is the page's own job and is not pinned here, and saying so is the point: a green regex
+// over a false sentence is worse than no test.
+test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
+	const sites = src.split("label: `Egress canary: ").length - 1;
+	const claimed = Number(/<!-- CANARY-LINE-SITES: (\d+) -->/.exec(doc)?.[1]);
+	assert.equal(sites, claimed, `doctor produces ${sites} canary lines; docs/egress.md is written for ${claimed}. Update the page, then the marker.`);
+	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
+	// is why the page describes seven and this counts eight. Stated here rather than derived: telling two
+	// identical template literals apart needs a parser, and a parser over source is the same arms race.
+	assert.equal(sites, 8, "a deliberate edit, not a derived number: change it with the page");
+});
+
 test("doctor: a canary network that could not be READ names the command that failed (#350, #360)", async () => {
 	// This file's convention is that a label carries the command that FAILED. This line carried
 	// `docker network rm`, which never ran -- and which is advice about a network whose membership is by

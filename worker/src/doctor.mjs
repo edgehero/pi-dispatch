@@ -2501,6 +2501,12 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 	// string from a name we matched, and a name is not a number. The set is read from CANARY_PROBE_SLUGS,
 	// which the probe loop names its own containers from: two literals in two places is how a third direction
 	// gets added to the producer and not to the reaper.
+	//
+	// ASYMMETRY ON PURPOSE, recorded because it looks like an oversight three characters apart: the OWNER is
+	// escaped and the slugs are interpolated raw. `CANARY_PROBE_SLUGS` is a frozen literal of two plain words
+	// three lines below, so today there is nothing to escape and escaping it would say the set is untrusted
+	// when it is this file's own. It is here so that whoever adds a slug with a `.` or a `-` in it sees the
+	// obligation: a metacharacter there widens what this `rm -f` matches (issue #360, item 6).
 	const probeOf = (owner) => new RegExp(`^${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {

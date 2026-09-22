@@ -98,13 +98,29 @@ deployment. `doctor` does it once, when you ask.
 ✓ Egress policy denies an unlisted host (the deny direction is the half an allowlist can silently lose)
 ```
 
-You may also see a line saying a leftover network was removed, or one naming a network that could not be:
-those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>` and its two probe containers. A doctor
-run that was killed, or one whose proxy accepted a connection and never answered, can leave them behind. The
-next run sweeps whatever belongs to a process that is no longer alive **on this host**, and only when your
-docker CLI resolves a daemon on this host: a leftover on a shared or remote daemon belongs to the doctor that
-made it, and a pid that is dead here may well be alive there. A third line, `could not be read`, means the
-network is still there and `docker network inspect` would not say what is on it.
+### Lines about leftovers
+
+You may also see a line about a leftover. Those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>`
+and its two probe containers. A doctor run that was killed, or one whose proxy accepted a connection and never
+answered, can leave them behind. The next run sweeps whatever belongs to a process that is no longer alive
+**on this host**, and only when your docker CLI resolves a daemon on this host: a leftover on a shared or
+remote daemon belongs to the doctor that made it, and a pid that is dead here may well be alive there.
+
+There are **seven shapes**, and this page used to describe three of them. Every one carries the network's
+name, and every warning names a command:
+
+<!-- CANARY-LINE-SITES: 8 -->
+
+| Line | What it means | What to do |
+|---|---|---|
+| `✓ removed <net> (after removing <probes>, detaching <endpoints>), left by a doctor run that did not finish` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |
+| `✓ removed <probes>, left by a doctor run that did not finish (the network <net> was already gone)` | the probes were removed and the network then turned out to be gone already, so there is nothing left to report about it | nothing |
+| `⚠ leftovers from an interrupted doctor could not be listed: docker network ls --filter name=...` | the listing itself failed, so doctor does not know whether there are any | run the command yourself; a daemon that cannot list is usually the real problem |
+| `⚠ <net> may be left over from an interrupted doctor, and is not swept because this shell's docker CLI ...` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
+| `⚠ the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
+| `⚠ <net> is kept, because the probe <probe> could not be removed and the network is the only way left to find it: docker rm -f <probe>` | a probe container would not go. The network is deliberately **kept**, because nothing in this project searches for probe containers by name, so removing the network would orphan that container permanently | `docker rm -f <probe>`, then re-run doctor |
+| `⚠ the network <net> could not be removed: docker network rm <net>` | everything on it was dealt with and the removal itself failed | run the command |
+
 
 The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node**, so
 they prove the path your jobs actually take. They cost nothing: `api.anthropic.com` answers `401` to an
@@ -115,9 +131,12 @@ finding. A probe container that does not run at all is reported as not run, neve
 
 An absent proxy is a **hard failure** in doctor, because every job is refused while it is down. Everything
 that needs the network to answer is a **warning**, because a custom provider base URL or a transient blip
-would each make a red there a false alarm. So is a leftover the canary could not remove: it is a warning
-carrying the exact `docker network rm` to run, since a network nobody is using costs nothing but disk and a
-doctor that failed over one would be crying wolf.
+would each make a red there a false alarm. So is any leftover the canary could not clear: a network nobody is
+using costs nothing but disk, and a doctor that failed over one would be crying wolf. Each of those warnings
+names **the command that failed**, which is not always `docker network rm`: it is `docker network ls` when the
+listing did not answer, `docker network inspect` when the membership could not be read, and `docker rm -f` on
+the probe when a container would not go. This page said `network rm` for all of them, and following that on
+the unreadable and stuck-probe lines is the one thing you should not do.
 
 ## The trap that was not one
 
