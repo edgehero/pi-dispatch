@@ -129,7 +129,8 @@ function scrubControl(value: string): string {
  * It is shown UNTRIMMED, because the line's whole point is to name what `openSandbox` will look for and
  * `openSandbox` does not trim either, so `" myproxy "` is a container called `" myproxy "`. Bare, that is
  * unreadable: a leading space is indistinguishable from the separator before it and a trailing one is
- * invisible. So a name whose first or last character is not a VISIBLE ASCII GLYPH is quoted and escaped.
+ * invisible. So a name is shown verbatim ONLY when every character of it is printable ASCII, its first and
+ * last are visible glyphs, and it holds no quote; anything else is quoted and fully escaped.
  *
  * THE EDGE TEST IS "VISIBLE", NOT "WHITESPACE", and that is the correction rather than the first idea. A
  * `\s` test misses U+200B and U+2060, which are exactly the edges a reader cannot see, so the first version
@@ -149,11 +150,19 @@ function scrubControl(value: string): string {
  */
 function proxyName(raw: any): string {
   const value = String(raw ?? "");
-  if (/^\s*$/.test(value)) return "a proxy whose name is blank or spaces";
-  // A name that already CONTAINS a quote is escaped too, or the rendering is not injective: `" myproxy "`
-  // stored verbatim would otherwise draw exactly like the escaped form of ` myproxy `, and an over-quoted
-  // `.env` is precisely the mistake this line exists to expose.
-  if (!value.includes('"') && /^[\x21-\x7e]/.test(value) && /[\x21-\x7e]$/.test(value)) return scrubControl(value);
+  // EMPTY OR SPACES ONLY gets the sentence, and it is `[ ]` rather than `\s` deliberately. A first version
+  // tested `\s` and ran this branch FIRST, so a name made of one tab, an ideographic space or a BOM was
+  // reported as "blank or spaces" -- a different value described as the one thing it is not. Everything
+  // else with odd bytes falls through and is escaped, where a reader can see exactly what it is.
+  if (/^ *$/.test(value)) return "a proxy whose name is blank or spaces";
+  // VERBATIM only when the whole value is plainly printable, its edges are visible, and it holds no quote.
+  // The interior matters as much as the edges: an earlier version tested only the edges and then passed the
+  // value through `scrubControl`, so `my<TAB>proxy` and `my proxy` rendered identically -- the operator
+  // read a space and `b` looked for a tab, which is the exact failure this rule was rewritten to remove.
+  // The quote test keeps the rendering injective: `" myproxy "` stored verbatim would otherwise draw
+  // exactly like the escaped form of ` myproxy `, and an over-quoted `.env` is the mistake this line exists
+  // to expose.
+  if (!value.includes('"') && /^[\x21-\x7e][\x20-\x7e]*$/.test(value) && /[\x21-\x7e]$/.test(value)) return value;
   return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`);
 }
 
@@ -2266,7 +2275,7 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     return box({ title: boxTitle, footer: "Esc back", width, sections: [{ lines }] });
   }
   if (tail?.missing) {
-    const lines = [`live ${tailJobId} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found)`];
+    const lines = [`live ${scrubControl(String(tailJobId ?? "-"))} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found)`];
     if (!framed) return [boxTitle, "", ...lines, "", "Esc back"];
     return box({ title: boxTitle, footer: "Esc back", width, sections: [{ lines }] });
   }
@@ -2288,7 +2297,12 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     // The plain header carries the id a SECOND time, beside `boxTitle`, and the framed branch below
     // passes its copy through `clip`, which strips. This one reached neither, which is the same
     // two-consumers-one-scrub shape as the titles: every place the id is interpolated holds it.
-    const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT)];
+    // THE TAIL LINES THEMSELVES, not only the id. These are the file's own bytes -- container output, the
+    // most untrusted content this panel renders -- and the framed branch below runs every one through
+    // `clip`, which is the gate this function's docblock calls "the security seam". The degrade spread them
+    // RAW, so the seam existed on one branch of an if (issue #367). Scrubbed rather than clipped, because
+    // an unframed pane has no width to clip to; the class is the same one `clip` applies.
+    const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT).map((l: string) => scrubControl(String(l)))];
     if (ended) plain.push("(run ended -- Esc to go back)");
     if (tailSearchInput) plain.push("/ " + tailSearchInput.value());
     return [boxTitle, "", ...plain, "", footer];
@@ -2424,7 +2438,11 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     // written (issue #367). Removed rather than reserved, because the one state it would have shown is the
     // one that warns an operator BEFORE `openSandbox`'s `already-running` refusal, and a dead branch is a
     // worse placeholder for that than nothing: it reads as covered.
-    const state = sandbox.retained ? `retained${sandbox.expiresIn ? ` · ${sandbox.expiresIn} left` : ""}` : show(sandbox.reason ?? "swept");
+    // BOTH halves through `show`. `expiresIn` is computed arithmetically by `readSandboxInfo` today, so a
+    // control byte in it is latent rather than live -- but it was the one raw interpolation left in a
+    // framed record pane, beside a sibling that is scrubbed, on the line this round rewrote for a
+    // different reason. "One field with a belt beside one without" is the defect #367 reports.
+    const state = sandbox.retained ? `retained${sandbox.expiresIn ? ` · ${show(sandbox.expiresIn)} left` : ""}` : show(sandbox.reason ?? "swept");
     out.push(kv("sandbox", state, sandbox.retained ? "success" : "dim"));
     // WHAT `b` WOULD GIVE THIS SHELL, and that it is this shell's (#337). The panel resolves PI_EGRESS
     // from its OWN process, because that is what `openSandbox` uses when the key is pressed, and it

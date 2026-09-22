@@ -1003,6 +1003,20 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
     ["tab", "\tmyproxy", '"\\tmyproxy"'],
     ["non-breaking space", "\u00a0myproxy", '"\\u00a0myproxy"'],
     ["an already-quoted name", '" myproxy "', '"\\" myproxy \\""'],
+    // A CLEAN LEADING EDGE and an invisible trailing one: every other row here is dirty at the front, so
+    // deleting the trailing-edge test survived the whole suite.
+    ["a trailing non-breaking space", "myproxy\u00a0", '"myproxy\\u00a0"'],
+    ["a trailing zero-width space", "myproxy\u200b", '"myproxy\\u200b"'],
+    // The INTERIOR, which the first version scrubbed to a space so a tab and a space read alike.
+    ["an interior tab", "my\tproxy", '"my\\tproxy"'],
+    // Only-a-tab is NOT "blank or spaces": it is a different value, and saying so is the point.
+    ["a name that is one tab", "\t", '"\\t"'],
+    ["a name that is an ideographic space", "\u3000", '"\\u3000"'],
+    // A TRAILING PLAIN SPACE, all-ASCII: the only shape that reaches the trailing-edge test on its own,
+    // because every non-ASCII edge already fails the printable-interior test. Deleting that test survived
+    // the suite until this row existed.
+    ["a trailing space", "myproxy ", '"myproxy "'],
+    ["a leading space only", " myproxy", '" myproxy"'],
   ]) {
     const comp = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: raw, source: "this shell" } }), launchSandbox: async () => {} });
     const text = stripAnsi(comp.render(80).join("\n"));
@@ -1017,6 +1031,16 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
   await plain.dispose();
   assert.match(plainOut, /egress on via myproxy/);
   assert.doesNotMatch(plainOut, /egress on via "/, "an ordinary name is never quoted");
+
+  // `expiresIn` sits on the same line as a scrubbed sibling and was the one raw interpolation left in a
+  // framed record pane. Latent through the real reader, which computes it arithmetically, so it is driven
+  // through the seam the panel actually injects.
+  const ESC2 = String.fromCharCode(27);
+  const ttl = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: `3h${String.fromCharCode(13)}${ESC2}[2J${String.fromCharCode(155)}`, egress: { armed: true, proxy: "myproxy", source: "this shell" } }), launchSandbox: async () => {} });
+  const ttlRaw = ttl.render(80).join("\n");
+  await ttl.dispose();
+  assert.match(stripAnsi(ttlRaw), /retained · 3h/, "the window is still reported");
+  assert.doesNotMatch(ttlRaw.replace(new RegExp(`${ESC2}\\[[0-9;]*m`, "g"), ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "but not its bytes");
 
   // `egressArmed` THROWS on a PI_EGRESS it cannot parse, and `openSandbox` refuses rather than opening a
   // shell on the open network. Rendering that as "off" would be the one reading that is wrong in the
@@ -2145,6 +2169,55 @@ test("the HELD panes and the FAILED pane scrub control bytes out of every cell (
   }
 });
 
+test("the LIVE_TAIL degrade scrubs the log's own bytes, not just the id (#367)", async () => {
+  // The most untrusted content this panel renders: a captured container log, straight off disk. The framed
+  // branch runs every line through `clip`, which this function's docblock calls the security seam; the
+  // unframed branch spread them RAW, so the seam existed on one branch of an `if`.
+  const ESC = String.fromCharCode(27);
+  const dirty = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const nasty = `boom${String.fromCharCode(13)}${ESC}[2J${String.fromCharCode(155)}`;
+  for (const [what, tail] of [
+    ["a captured tail", { lines: [nasty, `and ${nasty}`] }],
+    ["a missing tail", { missing: true }],
+  ]) {
+    const comp = makeDashboard({
+      paths: {},
+      done() {},
+      tui: fakeTui(),
+      intervalMs: 100000,
+      deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: nasty, active: [{ jobId: nasty }] }), tailLog: async () => tail }),
+    });
+    await flush();
+    comp.handleInput("l");
+    await flush();
+    for (const width of [80, 40, NaN, 4]) assert.doesNotMatch(comp.render(width).join("\n"), dirty, `${what} leaked at width ${width}`);
+    await comp.dispose();
+  }
+});
+
+test("the plain renderers put every RECORD field through one cell rule (#367)", async () => {
+  // `renderRuns` prints six record fields and `renderHeldJobs` two, and a first fix gave the file a SECOND
+  // helper called from one of them. `renderRuns` is the `/dispatch runs` surface, so it is not only the
+  // degraded panel that reads it.
+  const ESC = String.fromCharCode(27);
+  const dirty = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const nasty = (b) => `${b}${String.fromCharCode(13)}${ESC}[2J${String.fromCharCode(155)}`;
+  const render = await import("../src/render.mjs");
+  const runs = render.renderRuns([{ jobId: nasty("gh-1"), target: nasty("a/b#1"), flow: nasty("fix"), outcome: nasty("done"), reason: nasty("x"), endedAt: nasty("2026-01-01") }]);
+  assert.doesNotMatch(runs, dirty, "renderRuns");
+  assert.match(runs, /gh-1/, "and it still shows the record");
+  assert.doesNotMatch(render.renderHeldJobs({ held: { rows: [{ jobId: nasty("gh-2"), target: nasty("a/b#2"), label: nasty("jira"), waitedMs: 1000 }], more: 0 } }), dirty, "renderHeldJobs");
+  // The caught-Error class, which reaches these through the read model on an unreachable source.
+  assert.doesNotMatch(render.renderStatus({ unreachable: nasty("timed out") }), dirty, "renderStatus");
+  assert.doesNotMatch(render.renderRuns({ unreachable: nasty("timed out") }), dirty, "renderRuns unreachable");
+  assert.doesNotMatch(render.renderBudget({ budget: { unreachable: nasty("timed out") } }), dirty, "renderBudget");
+  assert.doesNotMatch(render.renderHeldJobs({ held: { unreachable: nasty("timed out") } }), dirty, "renderHeldJobs unreachable");
+  // SUBSTITUTION, not deletion, and the same dash for absence: the two renderers of one record must clip
+  // the same way, which is what the shared class buys. Deleting would make the plain pane narrower.
+  assert.match(render.renderHeldJobs({ held: { rows: [{ target: `a${String.fromCharCode(1)}b`, label: "x", waitedMs: 1000 }], more: 0 } }), /a b/, "a control byte becomes a space, not nothing");
+  assert.match(render.renderRuns([{ jobId: "gh-1" }]), /-/, "and an absent field is still a dash");
+});
+
 test("the UNFRAMED degrade scrubs too, where nothing goes near a frame builder (#367)", async () => {
   // A width under 8, or one that is not a finite number, returns bare array elements without touching
   // `frame()` or `box()`, so a belt applied only inside them misses this path entirely -- which is what
@@ -2173,6 +2246,16 @@ test("the UNFRAMED degrade scrubs too, where nothing goes near a frame builder (
   await drill.dispose();
   assert.match(degraded, /cancel held job acme\/web#7/, "the question is still armed and still names the target");
   assert.doesNotMatch(degraded, dirty, "the degraded armed question leaked");
+
+  // The degraded LIST's OWN armed cancel question, the twin of the one above in the same function.
+  const active = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: nasty("gh-9"), active: [{ jobId: nasty("gh-9") }] }), sandboxInfo: () => null }) });
+  await flush();
+  active.handleInput("x");
+  await flush();
+  const activeDegraded = active.render(NaN).join("\n");
+  await active.dispose();
+  assert.match(activeDegraded, /cancel active job gh-9/, "still armed and still named");
+  assert.doesNotMatch(activeDegraded, dirty, "the degraded LIST question leaked");
 
   // An unreachable snapshot, whose message is a caught Error's and was interpolated raw on both paths.
   const dead = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ unreachable: nasty("Connection is closed.") }) }) });

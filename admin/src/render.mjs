@@ -52,10 +52,25 @@ const RUN_COLUMNS = [
   { key: "endedAt", header: "ENDED" },
 ];
 
-/** A nullish record field renders as "-" so a stable record shape reads cleanly. */
+/**
+ * One cell of a record in a PLAIN-TEXT pane: a nullish field renders as "-" so a stable record shape reads
+ * cleanly, and a control byte becomes a space.
+ *
+ * THE SCRUB LIVES HERE rather than at the call sites, and that is the whole point (issue #367). A first
+ * attempt added a second helper beside this one and called it from `renderHeldJobs` alone, which left
+ * `renderRuns` -- six record fields instead of two, and the `/dispatch runs` surface -- printing raw, and
+ * gave this file two rules where the framed panel has one. Every renderer in this file that prints a
+ * RECORD field goes through this; the ones that print operator-authored CONFIG deliberately do not, and
+ * that carve-out is named in `DES-ADMIN-VIA-PI-EXTENSION`.
+ *
+ * Same class and same SUBSTITUTION as the framed panel's `cellOf` (`dashboard.ts`), so the two renderers
+ * of one record cannot disagree about what they will print -- deleting instead of substituting would make
+ * the panes clip differently. C1 is in the class as well as C0 and DEL, because U+009B is a CSI introducer
+ * that needs no ESC in front of it.
+ */
 function cell(value) {
   if (value === null || value === undefined) return "-";
-  return String(value);
+  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
 /**
@@ -70,7 +85,7 @@ function cell(value) {
  */
 export function renderStatus(queue, { heldCount, cronNext } = {}) {
   if (!queue || queue.unreachable) {
-    return `Queue: unreachable (${queue?.unreachable ?? "unknown"})`;
+    return `Queue: unreachable (${cell(queue?.unreachable ?? "unknown")})`;
   }
   const counts = queue.counts ?? {};
   const line = ["waiting", "active", "paused", "delayed", "failed"]
@@ -87,7 +102,7 @@ export function renderStatus(queue, { heldCount, cronNext } = {}) {
   // Issue #57: name them when the registry can. `getWorkers()` counts CLIENT LIST rows and reports
   // "unknown" where CLIENT SETNAME is unsupported, so a fleet that has declared its names deserves to see
   // them -- and a deployment that has not is unchanged, because there are no names to show.
-  const named = Array.isArray(queue.workerNames) && queue.workerNames.length > 0 ? ` (${queue.workerNames.join(", ")})` : "";
+  const named = Array.isArray(queue.workerNames) && queue.workerNames.length > 0 ? ` (${queue.workerNames.map(cell).join(", ")})` : "";
   // A half-paused deployment is its own state and must not read as either whole one: `setQueuePaused`
   // can leave one behind if it fails partway through the fleet, and an operator told "running" would
   // walk away from a host that is stopped.
@@ -97,7 +112,7 @@ export function renderStatus(queue, { heldCount, cronNext } = {}) {
 
 /** Render the run history as aligned columns; a null field is "-", an unreachable/empty set degrades. */
 export function renderRuns(runs) {
-  if (runs && runs.unreachable) return `Runs: unreachable (${runs.unreachable})`;
+  if (runs && runs.unreachable) return `Runs: unreachable (${cell(runs.unreachable)})`;
   const list = Array.isArray(runs) ? runs : [];
   if (list.length === 0) return "No runs recorded.";
 
@@ -122,7 +137,7 @@ export function renderRuns(runs) {
  */
 export function renderBudget({ budget, settings } = {}) {
   if (!budget || budget.unreachable) {
-    return `Budget: unreachable (${budget?.unreachable ?? "unknown"})`;
+    return `Budget: unreachable (${cell(budget?.unreachable ?? "unknown")})`;
   }
   const overlay = (settings && settings.overlay) ?? {};
   const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;
@@ -144,16 +159,6 @@ export function renderBudget({ budget, settings } = {}) {
  * missing (no lines) or invalid (one error line) file, like renderTriggers.
  */
 /**
- * One cell of a plain-text pane: a control byte becomes a space, an absent value becomes a dash. The same
- * class and the same substitution the framed panel uses (`dashboard.ts`'s `cellOf`), so the two renderers
- * of one record cannot disagree about what they will print. C1 is in the class as well as C0 and DEL,
- * because U+009B is a CSI introducer that needs no ESC in front of it.
- */
-function plainCell(v) {
-	return v === null || v === undefined ? "-" : String(v).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-}
-
-/**
  * The held-jobs block for the NO-COLOR / non-TTY path (issue #230). Returns null when nothing is held, so
  * the caller adds no empty section.
  *
@@ -173,11 +178,11 @@ function plainCell(v) {
  */
 export function renderHeldJobs({ held } = {}) {
 	if (!held) return null;
-	if (held.unreachable) return `unreadable (${plainCell(held.unreachable)})`;
+	if (held.unreachable) return `unreadable (${cell(held.unreachable)})`;
 	const rows = Array.isArray(held.rows) ? held.rows : [];
 	if (rows.length === 0) return null;
 	const more = Number(held.more) || 0;
-	const lines = rows.map((r) => `${plainCell(r.target ?? r.jobId)}  ${plainCell(r.label)}  waited ${plainDuration(r.waitedMs)}`);
+	const lines = rows.map((r) => `${cell(r.target ?? r.jobId)}  ${cell(r.label)}  waited ${plainDuration(r.waitedMs)}`);
 	if (more > 0) lines.push(`... and ${more} more`);
 	return lines.join("\n");
 }
