@@ -104,6 +104,31 @@ test("openSandbox REFUSES a published port while the policy is armed, and create
 	assert.deepEqual(calls, [], "no docker ask, no job-user ask, and above all no beforeLaunch");
 });
 
+test("a run that cannot be opened at all says ITS reason, not the publish one (#362)", async () => {
+	// CAUSE BEFORE SYMPTOM, and it was asserted in three places with nothing holding it: hoisting the refusal
+	// above `resolveSandbox` leaves the suite green while every swept, wrong-venue or no-image run is told
+	// about a flag instead of why it cannot be opened at all.
+	const cases = [
+		["swept or never retained", { fs: { readFileSync: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } }, fileExists: () => true }, "absent"],
+		["no image in the manifest", openable({ image: null }), "no-image"],
+		["another venue wrote it", openable({ backend: "far" }), "venue-unreachable"],
+	];
+	for (const [name, seam, expected] of cases) {
+		const r = await openSandbox({
+			jobId: "gh-1",
+			sandboxDir: "/sbx",
+			retentionHours: 24,
+			publish: ["-p", "127.0.0.1:3000:3000"],
+			egress: { armed: true, proxy: "p" },
+			running: async () => [],
+			launch: async () => ({ code: 0 }),
+			resolveJobUser: async () => ({ user: null, home: null }),
+			...seam,
+		});
+		assert.equal(r.refused, expected, `${name}: its own reason must win over the flag`);
+	}
+});
+
 test("openSandbox allows a published port with the policy off (#362)", async () => {
 	let args = null;
 	const r = await openSandbox({
@@ -126,7 +151,7 @@ test("buildSandboxRunArgs THROWS on the one argv that would lie (#362)", () => {
 	// mean what it says. Same place and shape as the user/home pairing beside it.
 	assert.throws(
 		() => buildSandboxRunArgs({ image: "img", name: "pi-sandbox-a", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"], network: "pi-sandbox-a-net" }),
-		/cannot be paired with the internal network/,
+		/cannot be paired with a session network/,
 	);
 	// and the two halves apart are still fine
 	assert.ok(buildSandboxRunArgs({ image: "img", name: "pi-sandbox-a", workspace: "/w", jobDir: "/j", publish: ["-p", "127.0.0.1:3000:3000"] }).includes("127.0.0.1:3000:3000"));
@@ -577,6 +602,16 @@ function fakeNetDaemon({ nets = {}, fail = {}, containers = {} } = {}) {
 			state.set(net, (state.get(net) ?? []).filter((x) => x !== ep));
 			return { code: 0, stdout: "", stderr: "" };
 		}
+		// The inverse, because an aborted pass puts back what it detached (#363). Without it this daemon
+		// accepted the reconnect and silently kept the endpoint off, which is the state the abort exists to
+		// avoid: a fake that cannot represent the repair cannot test it.
+		if (key === "network connect") {
+			const [net, ep] = args.slice(-2);
+			if (fail["network connect"]) return { code: 1, stdout: "", stderr: fail["network connect"] };
+			const on = state.get(net) ?? [];
+			if (!on.includes(ep)) state.set(net, [...on, ep]);
+			return { code: 0, stdout: "", stderr: "" };
+		}
 		if (key === "network rm") {
 			const net = args.at(-1);
 			if (!state.has(net)) return { code: 1, stdout: "", stderr: `Error response from daemon: network ${net} not found` };
@@ -611,8 +646,14 @@ test("the guard gates BOTH destructive verbs, so a launch in the window is not c
 
 	assert.equal(asks, 2, "the guard is asked twice: once before the detach, once before the rm");
 	assert.deepEqual(out.swept, [], "nothing is removed once the late container is seen");
-	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "sandbox-present", detached: ["pi-dispatch-egress-proxy"] }], "and the note names what was already detached");
 	assert.ok(!d.calls.some((c) => c.startsWith("network rm")), "the rm never runs");
+
+	// AND THE PROXY GOES BACK ON. Without this the mid-launch sandbox starts on a network whose proxy has been
+	// disconnected, with the proxy variables pointing at a name that no longer resolves there: a shell with
+	// silently dead egress, where the shape this replaced gave a loud `docker run` failure. Silent is worse.
+	assert.deepEqual(out.notes, [{ network: "pi-sandbox-a-net", reason: "sandbox-present", restored: ["pi-dispatch-egress-proxy"] }], "the note reports a restore, not a removal");
+	assert.deepEqual(d.state.get("pi-sandbox-a-net"), ["pi-dispatch-egress-proxy"], "and the network really has its proxy again");
+	assert.ok(d.calls.includes("network connect pi-sandbox-a-net pi-dispatch-egress-proxy"), "by an actual reconnect");
 });
 
 test("a guard that stops answering between the two asks fails CLOSED (#363)", async () => {

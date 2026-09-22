@@ -267,9 +267,16 @@ export function makeSandboxReaper({
 		const blocked = new Set();
 		for (const name of names) {
 			const dir = join(sandboxDir, name);
+			// Set ONLY around a removal, so `blocked` means what its name says. The first version added every
+			// throw in this loop, which is a different set: a directory that VANISHED between the listing and
+			// the lstat is not a directory that could not be removed, and the note it produced asserted the
+			// opposite of what had happened -- that the directory stays on disk, so its id stays in `keep` and
+			// its network is never a candidate again. It does not stay, and it is.
+			let removing = false;
 			try {
 				// lstat: a symlink here resolves on the host, and this tree is agent-written.
 				if (!fs.lstatSync(dir).isDirectory()) {
+					removing = true;
 					fs.rmSync(dir, { recursive: true, force: true });
 					log("reaped_sandbox", { entry: name, reason: "not-a-directory" });
 					continue;
@@ -277,6 +284,7 @@ export function makeSandboxReaper({
 				if (running.has(name)) continue; // an operator is inside it
 				const verdict = expiry(dir, fs, at, cutoff);
 				if (!verdict.expired) continue;
+				removing = true;
 				fs.rmSync(dir, { recursive: true, force: true });
 				log("reaped_sandbox", { entry: name, reason: verdict.reason });
 				// Yield after each tree. Free at boot, where nothing is in flight; NOT free since issue
@@ -287,7 +295,7 @@ export function makeSandboxReaper({
 				// bounds the contiguous block to ONE directory, which is the part that cannot be yielded.
 				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
-				blocked.add(name);
+				if (removing) blocked.add(name);
 				log("sandbox_reaper_skipped", { entry: name, reason: scrubCredentials(err?.message) });
 			}
 		}

@@ -338,6 +338,13 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	// by name: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls touch objects whose owner
 	// is already gone or whose pid is DEAD, where nothing can be mid-launch, and `live-probes.mjs`'s peer sweep
 	// is best effort behind a flag an operator typed. Only the sandbox sweep has an owner who may be alive.
+	//
+	// WHAT THE SECOND ASK COSTS, and why the abort below puts back what it took. The guard before the DETACH is
+	// where it already was; what is new is the one before the `rm`, which used to sit k+1 commands out. That
+	// leaves a window the previous shape did not have: the detach can succeed and the guard then refuse, and a
+	// network whose proxy has been disconnected is a session with silently dead egress, where the old shape
+	// gave a loud `docker run` failure. Silent is the worse of the two, so anything detached on an aborted pass
+	// is reconnected.
 	if (!(await stillClear())) return { removed: false, absent: false, detached: [], command: null, aborted: true };
 	const detached = [];
 	for (const endpoint of detach) {
@@ -346,8 +353,22 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 		if ((await runWith(docker, ["network", "disconnect", "-f", network, endpoint]))?.code === 0) detached.push(endpoint);
 	}
 	// AGAIN, immediately before the verb that kills a launch. This is what removes the SCALING: with k
-	// endpoints the `rm` used to be k+1 commands after the only guard, and it is now always one.
-	if (!(await stillClear())) return { removed: false, absent: false, detached, command: null, aborted: true };
+	// endpoints the `rm` used to be k+1 commands after the only guard, and it is now always one. Asked only
+	// when there is something to re-ask ABOUT: with nothing detached, nothing has happened since the first ask
+	// and a second identical `docker ps -a` back to back would be a round trip that answers itself.
+	if (detached.length > 0 && !(await stillClear())) {
+		// PUT BACK WHAT WAS TAKEN. Reported separately from `detached`, which means "removed from this network
+		// by this pass": an endpoint that was detached and then restored was not, and a caller printing
+		// `detached` must not name it. A reconnect that fails is named too, because that endpoint IS now off a
+		// network someone may be using and nothing else will put it back.
+		const restored = [];
+		const lost = [];
+		for (const endpoint of detached) {
+			if ((await runWith(docker, ["network", "connect", network, endpoint]))?.code === 0) restored.push(endpoint);
+			else lost.push(endpoint);
+		}
+		return { removed: false, absent: false, detached: [], restored, lost, command: null, aborted: true };
+	}
 	if ((await runWith(docker, ["network", "rm", network]))?.code === 0) return { removed: true, absent: false, detached, command: null };
 	// Silent ONLY when the daemon says it is not there. Anything else -- a timeout, an unreachable daemon, a
 	// race that attached something between the inspect and the rm -- is said, with the command.

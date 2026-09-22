@@ -267,6 +267,51 @@ test("the sweep's fault line carries the daemon's words with credentials scrubbe
 	for (const needle of ["bob", "hunter2"]) assert.ok(!reason.includes(needle), needle);
 });
 
+test("a directory that could not be REMOVED names its network, end to end (#363)", async () => {
+	// THE PRODUCER HALF, which nothing held: deleting `blocked.add(name)` or dropping `blocked` from the
+	// `sweepNetworks` call left the whole worker suite green while the feature was disconnected in production.
+	// The sweeper's own test hands it a hand-built set, which cannot see either.
+	const at = Date.now();
+	const fs = sandboxDirWith({ a: { createdAt: "2020-01-01T00:00:00Z" } });
+	fs.rmSync = (p) => {
+		if (p === "/sbx/a") throw new Error("EPERM: operation not permitted");
+		fs.calls.removed.push(p);
+	};
+	const handed = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => at,
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => (handed.push(arg), { swept: [], notes: [], failed: null }),
+	})();
+
+	assert.equal(handed.length, 1, "the network sweep still runs");
+	assert.deepEqual([...(handed[0].blocked ?? [])], ["a"], "and is told which directory would not go");
+});
+
+test("a directory that VANISHED is not reported as one that could not be removed (#363)", async () => {
+	// `blocked` means "a removal was attempted and failed". A directory gone between the listing and the lstat
+	// is a different thing, and the note it would produce asserts the opposite of what happened: that the
+	// directory stays on disk, so its network is never a candidate again. It does not stay, and it is.
+	const at = Date.now();
+	const fs = sandboxDirWith({ a: { createdAt: "2020-01-01T00:00:00Z" } });
+	fs.lstatSync = () => {
+		throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+	};
+	const handed = [];
+	await makeSandboxReaper({
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => at,
+		listRunning: async () => [],
+		sweepNetworks: async (arg) => (handed.push(arg), { swept: [], notes: [], failed: null }),
+	})();
+	assert.deepEqual([...(handed[0].blocked ?? [])], [], "a vanished directory is not blocked");
+});
+
 test("a docker lookup that FAILS skips the whole sweep rather than sweeping blind", async () => {
 	const at = Date.parse("2026-08-02T00:00:00Z");
 	const fs = sandboxDirWith({ ancient: { createdAt: "2020-01-01T00:00:00Z" } });

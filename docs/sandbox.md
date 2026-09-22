@@ -157,12 +157,19 @@ ignored, and the refusal names `PI_EGRESS=0` as the opt-out. Run that one sessio
 need the port on the host, and know what it buys: that shell lands on docker's default bridge, with the
 whole internet.
 
-**Attaching the bridge afterwards does not rescue a published port**, and it looks like it does, which is
-worth knowing before you try it. Measured on docker 27.4.0: after `docker network connect bridge
-pi-sandbox-<jobId>`, `docker port` reports `3000/tcp -> 127.0.0.1:3000` and nothing answers there. A
-container's port forwarder is set up when the container is created, from the networks it has then; the
-later attach updates what docker reports and starts no forwarder. A control container published the same
-way on the default bridge at create time answers immediately, so the listener is not what is missing.
+**Attaching the bridge afterwards behaves differently on Docker Desktop and on Linux**, so it is worth
+knowing which one you are on before you reach for it. On **native Linux docker** (measured on 27.5.1) the
+attach does rescue the port: docker installs the DNAT rule at attach time and removes it again on detach,
+and the port answers. On **Docker Desktop for macOS** (measured on 27.4.0) it does not: `docker port` starts
+reporting a binding and nothing answers there. In both cases a control container published on the default
+bridge at create time answers immediately, so the listener is not what is missing.
+
+Either way this is the escape hatch rather than the route: it hands that session the whole internet.
+
+One ordering note, since the refusal comes early: with `--publish` set on an armed deployment you get the
+publish refusal even when the sandbox is already running or its job user cannot be resolved, and `--pin`
+does not take, because pinning happens just before the shell opens. Drop the flag, or set `PI_EGRESS=0`,
+and those speak for themselves again.
 
 **Always bound to `127.0.0.1`.** An explicit bind address is refused rather than honoured — there is no
 flag that puts a container full of agent-written code on your LAN. Ports exist only while the sandbox

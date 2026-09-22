@@ -1650,7 +1650,7 @@ sibling rather than an extension of the GitHub one for the same reason.
     finished by then, and a `network ls` that does not answer is that same line (`network-list-failed`)
     rather than a verdict about a network nobody saw; a per-network outcome is `reaped_sandbox_network` or
     `sandbox_network_not_reaped` with a fixed reason token
-    (`unreadable | containers-unreadable | sandbox-attached | sandbox-present | rm-failed`), which is `OQ-007`'s grep property kept
+    (`unreadable | containers-unreadable | sandbox-attached | sandbox-present | directory-not-removed | rm-failed`), which is `OQ-007`'s grep property kept
     intact.
 - **Why**: The 5% case (`REQ-RESURRECTABLE-SANDBOX`). Every choice above exists to keep the *job*
   contract untouched while serving it: a second container shape rather than a longer-lived first one, a

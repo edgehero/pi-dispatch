@@ -93,12 +93,6 @@ function inPortRange(n) {
  * @param user         "<uid>:<gid>" the run had (issue #341), or null for the image's own USER
  * @param home         CONTAINER_HOME beside `user`, and required with it
  */
-/**
- * The one combination this builder must never produce (issue #362): a published port on a container that
- * joins an `--internal` network publishes nothing, so such an argv would lie. `openSandbox` refuses it with
- * a message an operator can act on; this is the construction-time backstop in the same place and the same
- * shape as the user/home pairing below, so a third caller cannot assemble it from parts.
- */
 export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = [], term, idleSeconds = 0, network = null, egressEnv: proxyEnv = {}, user = null, home = null }) {
 	// Issue #341: the job path's pairing, for the same measured reason (a uid with no passwd entry gets HOME=/ or
 	// HOME=/workspace), so a sandbox shell as that uid can write its own home.
@@ -108,8 +102,14 @@ export function buildSandboxRunArgs({ image, name, workspace, jobDir, publish = 
 	// Issue #362, and it throws where `openSandbox` returns a refusal because the two answer different
 	// questions: that one is an operator's mistake with a fix, this one is a caller assembling an argv that
 	// cannot mean what it says.
+	//
+	// It refuses on ANY network rather than on an internal one, and that is deliberate rather than loose:
+	// this builder is handed a NAME and cannot see the flags the network was created with. What it can rely
+	// on is that every network this project puts a session on is created `--internal` by `createJobNetwork`.
+	// A `-p` on some other user-defined network does work (measured), so this is a refusal about this
+	// project's shapes and not a claim about docker.
 	if (publish.length > 0 && network !== null) {
-		throw new Error(`buildSandboxRunArgs: a published port cannot be paired with the internal network ${network} -- docker accepts -p there and binds nothing`);
+		throw new Error(`buildSandboxRunArgs: a published port cannot be paired with a session network (${network}) -- every network this project puts a session on is created --internal, where docker accepts -p and binds nothing`);
 	}
 	return buildDockerRunArgs({
 		user,
@@ -199,8 +199,8 @@ export const SANDBOX_NETWORK_SHAPE = new RegExp(`^${SANDBOX_NAME_PREFIX}(.*)${NE
  * direction is a leftover surviving one more pass. `--rm` means an exited sandbox is normally gone already.
  *
  * PODMAN'S `.State` VOCABULARY IS UNMEASURED, and that is a stated limit rather than a guess (issue #363).
- * Docker 27.4.0 renders `created`, `running`, `paused`, `exited`, `restarting`, all lowercase and
- * single-word. If a runtime renders `stopped` where docker renders `exited`, every leftover network on that
+ * Docker 27.4.0 accepts `created`, `running`, `paused`, `exited`, `restarting`, `removing` and `dead` as
+ * `--filter status=` values, all lowercase and single-word (`status=bogus` is refused as an invalid filter). If a runtime renders `stopped` where docker renders `exited`, every leftover network on that
  * host is held back forever behind a `sandbox-present` note: one network per run, named in the log, and the
  * safe direction of the two. Adding a word on a guess is the other direction, removing networks on a
  * vocabulary nobody has read, which is exactly what an allowlist is for.
@@ -316,22 +316,6 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 				notes.push({ network: name, reason: "sandbox-attached" });
 				continue;
 			}
-			// And one LAST look, deliberately the freshest thing in this function and deliberately the call
-			// immediately before the destructive verb. It asks the one question the two above cannot: is
-			// there a container of ours for this id in a state that is not finished?
-			//
-			// Measured on docker 27.4.0: between `docker run`'s create and its start (230 ms with the image
-			// local, the whole pull when it is not) the container is in `created` state, where `docker ps`
-			// does not list it, `network inspect` does not list it as an endpoint, AND `network rm` SUCCEEDS
-			// -- after which `docker start` fails with "network not found" and that sandbox can never run.
-			// The daemon backstops a RUNNING endpoint and nothing else.
-			//
-			// ORDER IS THE POINT. An earlier draft read this once, at the top of the pass, which is the one
-			// placement that cannot work: an open creates its network BEFORE its container, so a snapshot
-			// taken before the candidate listing is older than the thing it has to protect, and a review pass
-			// drove exactly that -- 486 ms of exposure, the network removed and the operator's `docker run`
-			// dead with a 125. A check-then-act still has a gap, but here it is the width of one command
-			// rather than of the whole pass.
 			// ONE guard, asked LATE and asked TWICE (issue #363). It answers the question the two above cannot:
 			// is there a container of ours for this id in a state that is not finished? Measured on docker
 			// 27.4.0, a container between `docker create` and `docker start` is in `created` state, where
@@ -339,11 +323,18 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 			// SUCCEEDS -- after which `docker start` fails with "network not found" and that sandbox can never
 			// run. The daemon backstops a RUNNING endpoint and nothing else.
 			//
-			// PASSED DOWN rather than asked once here, and the reason is what the previous shape measured: the
-			// guard answered, then the detach landed and the removal after it, and with k endpoints the removal
-			// moved one command further out for each. The detach is the act that strips a live session's proxy
-			// and it was the one the guard did not protect at all. Re-asked before the `rm` as well, so the act
-			// that kills a launch is always ONE command after a fresh answer whatever k is.
+			// PASSED DOWN rather than asked once here, and what actually changed is worth stating exactly,
+			// because the obvious summary is wrong. The guard was ALREADY the statement immediately before the
+			// detach loop, so the first disconnect was zero commands after a fresh answer then and now. What
+			// moved is the `rm`: it sat k+1 commands out and is now always one. The issue says the detach is
+			// the act the guard does not DIRECTLY protect, and directly is the right word -- an earlier version
+			// of this comment said "not at all", which the command counts refute.
+			//
+			// ORDER IS THE POINT, and an earlier draft read this once at the TOP of the pass, which is the one
+			// placement that cannot work: an open creates its network BEFORE its container, so a snapshot taken
+			// before the candidate listing is older than the thing it has to protect, and a review pass drove
+			// exactly that -- 486 ms of exposure, the network removed and the operator's `docker run` dead with
+			// a 125.
 			//
 			// RESIDUAL, stated rather than implied: disconnect number i is still i commands after the guard. k
 			// is 1 in every shape this project produces (the proxy), and a per-endpoint re-ask would double the
@@ -372,7 +363,15 @@ export function makeSandboxNetworkSweeper({ run = boundedDocker } = {}) {
 			};
 			const outcome = await removeNetworkOrSay(run, { network: name, detach: names, stillClear });
 			if (outcome.aborted) {
-				notes.push({ network: name, reason: lateReason, ...(outcome.detached.length > 0 ? { detached: outcome.detached } : {}) });
+				// `restored`/`lost` rather than `detached`: an endpoint put back was not removed by this pass,
+				// and one that could not be put back is off a network someone may be using, which is the half an
+				// operator has to act on.
+				notes.push({
+					network: name,
+					reason: lateReason,
+					...(outcome.restored?.length > 0 ? { restored: outcome.restored } : {}),
+					...(outcome.lost?.length > 0 ? { lost: outcome.lost } : {}),
+				});
 				continue;
 			}
 			if (outcome.absent) continue;
@@ -557,7 +556,7 @@ export async function openSandbox({
 	if (resolved.publish.length > 0 && egress.armed === true) {
 		return {
 			refused: "publish-needs-egress-off",
-			message: `\`--publish\` is refused while the egress policy is armed — this sandbox joins an \`--internal\` network, where docker accepts \`-p\`, exits 0 and binds no host port, so the flag would name a port that is not there. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on docker's default bridge, with the whole internet. Attaching the bridge to a running sandbox does NOT rescue it, measured: \`docker port\` then claims a binding that carries no traffic, because the forwarder is set up when the container is created`,
+			message: `\`--publish\` is refused while the egress policy is armed — this sandbox joins an \`--internal\` network, where docker accepts \`-p\`, exits 0 and binds no host port, so the flag would name a port that is not there. Open this one with \`PI_EGRESS=0\` in the environment you run this from, and know what that buys: the shell lands on docker's default bridge, with the whole internet`,
 		};
 	}
 
