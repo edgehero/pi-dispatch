@@ -154,7 +154,11 @@ function proxyName(raw: any): string {
   // tested `\s` and ran this branch FIRST, so a name made of one tab, an ideographic space or a BOM was
   // reported as "blank or spaces" -- a different value described as the one thing it is not. Everything
   // else with odd bytes falls through and is escaped, where a reader can see exactly what it is.
-  if (/^ *$/.test(value)) return "a proxy whose name is blank or spaces";
+  // SPACES ARE COUNTED, because this branch was not injective either: `" "`, `"       "` and a name whose
+  // text literally is this sentence all rendered the same line, and the line's whole point is to name what
+  // `b` will look for. An empty value is a different thing from a name made of spaces and says so.
+  if (value === "") return "a proxy whose name is empty";
+  if (/^ +$/.test(value)) return `a proxy whose name is ${value.length} space${value.length === 1 ? "" : "s"}`;
   // VERBATIM only when the whole value is plainly printable, its edges are visible, and it holds no quote.
   // The interior matters as much as the edges: an earlier version tested only the edges and then passed the
   // value through `scrubControl`, so `my<TAB>proxy` and `my proxy` rendered identically -- the operator
@@ -1482,7 +1486,7 @@ function fmtDuration(ms: any): string {
 /** The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. */
 function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): string {
   if (!queue || queue.unreachable) {
-    return styler.cell(`queue unreachable (${queue?.unreachable ?? "?"})`, inner, { color: "error" });
+    return styler.cell(`queue unreachable (${cellOf(queue?.unreachable ?? "?")})`, inner, { color: "error" });
   }
   const c = queue.counts ?? {};
   const running = !queue.pausedState && !queue.pausedPartial;
@@ -1546,7 +1550,7 @@ function delayedBreakdownLine(snapshot: any, inner: number, styler: any): string
 /** Colored spend meters (day/week/month) with reset countdown + soft-hold marker. */
 function spendLines(budget: any, settings: any, inner: number, styler: any, fetchedAt?: number): string[] {
   if (!budget || budget.unreachable) {
-    return [styler.cell(`budget unreachable (${budget?.unreachable ?? "?"})`, inner, { color: "error" })];
+    return [styler.cell(`budget unreachable (${cellOf(budget?.unreachable ?? "?")})`, inner, { color: "error" })];
   }
   const overlay = (settings && settings.overlay) ?? {};
   const pct = Number.isInteger(overlay.softHoldPct) ? overlay.softHoldPct : null;

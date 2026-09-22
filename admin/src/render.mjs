@@ -117,7 +117,12 @@ export function renderRuns(runs) {
   if (list.length === 0) return "No runs recorded.";
 
   const headers = RUN_COLUMNS.map((c) => c.header);
-  const rows = list.map((r) => RUN_COLUMNS.map((c) => (c.derive ? c.derive(r) : cell(r?.[c.key]))));
+  // `cell` on the DERIVED value too, which is the whole rule rather than one more site: a `derive` builds
+  // its cell out of record fields (`chainDepth`, `replica`, `replicas`) and returned them raw, so the
+  // belt covered the columns that did not need it and missed the three that did. Wrapping the output
+  // instead of each derive means a column added later cannot reintroduce this, and it costs nothing on
+  // the `-` and `r1/2` shapes a derive normally produces.
+  const rows = list.map((r) => RUN_COLUMNS.map((c) => cell(c.derive ? c.derive(r) : r?.[c.key])));
   const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i].length)));
   const fmt = (cells) => cells.map((v, i) => v.padEnd(widths[i])).join("  ").trimEnd();
   return [fmt(headers), ...rows.map(fmt)].join("\n");
@@ -232,7 +237,7 @@ function capLabel(cap, reserved, pct) {
 export function renderSchedulers(schedulers) {
   const out = ["Schedulers:"];
   if (schedulers && schedulers.unreachable) {
-    out.push(`  unreachable (${schedulers.unreachable})`);
+    out.push(`  unreachable (${cell(schedulers.unreachable)})`);
   } else {
     const list = Array.isArray(schedulers) ? schedulers : [];
     if (list.length === 0) out.push("  (none configured)");

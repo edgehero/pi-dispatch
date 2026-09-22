@@ -978,7 +978,16 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
   const blank = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: "   ", source: "this shell" } }), launchSandbox: async () => {} });
   const blankOut = stripAnsi(blank.render(80).join("\n"));
   await blank.dispose();
-  assert.match(blankOut, /egress on via a proxy whose name is blank or spaces/);
+  // COUNTED, not "blank or spaces": that sentence was not injective either -- one space, seven spaces and a
+  // name whose text literally is that sentence all rendered the same line, while the line's whole point is
+  // to name what `b` will look for.
+  assert.match(blankOut, /egress on via a proxy whose name is 3 spaces/);
+  for (const [raw, want] of [["", "is empty"], [" ", "is 1 space"], ["       ", "is 7 spaces"]]) {
+    const one = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: raw, source: "this shell" } }), launchSandbox: async () => {} });
+    const text = stripAnsi(one.render(80).join("\n"));
+    await one.dispose();
+    assert.match(text, new RegExp(`egress on via a proxy whose name ${want}`), JSON.stringify(raw));
+  }
 
   // And a name with padding is shown WITH it, because the sentence beneath only means something if the
   // name shown is the name `b` will look for: `openSandbox` reads the variable itself and does not trim,
@@ -2206,6 +2215,12 @@ test("the plain renderers put every RECORD field through one cell rule (#367)", 
   const runs = render.renderRuns([{ jobId: nasty("gh-1"), target: nasty("a/b#1"), flow: nasty("fix"), outcome: nasty("done"), reason: nasty("x"), endedAt: nasty("2026-01-01") }]);
   assert.doesNotMatch(runs, dirty, "renderRuns");
   assert.match(runs, /gh-1/, "and it still shows the record");
+  // The DERIVED columns, which is the rule rather than one more site: a `derive` builds its cell out of
+  // record fields and returned them raw, so the belt covered the columns that did not need it.
+  assert.doesNotMatch(render.renderRuns([{ jobId: "gh-1", chainDepth: "\t9", replica: 1, replicas: nasty("2") }]), dirty, "renderRuns derived columns");
+  // The worker-name list, whose only fixture in the tree is clean, so the belt on it pinned nothing.
+  assert.doesNotMatch(render.renderStatus({ workers: 2, workerNames: [nasty("worker-A"), "worker-B"] }), dirty, "renderStatus workerNames");
+  assert.doesNotMatch(render.renderSchedulers({ unreachable: nasty("timed out") }), dirty, "renderSchedulers");
   assert.doesNotMatch(render.renderHeldJobs({ held: { rows: [{ jobId: nasty("gh-2"), target: nasty("a/b#2"), label: nasty("jira"), waitedMs: 1000 }], more: 0 } }), dirty, "renderHeldJobs");
   // The caught-Error class, which reaches these through the read model on an unreachable source.
   assert.doesNotMatch(render.renderStatus({ unreachable: nasty("timed out") }), dirty, "renderStatus");
@@ -2262,6 +2277,15 @@ test("the UNFRAMED degrade scrubs too, where nothing goes near a frame builder (
   await flush();
   for (const width of [80, NaN]) assert.doesNotMatch(dead.render(width).join("\n"), dirty, `an unreachable snapshot leaked at width ${width}`);
   await dead.dispose();
+
+  // The STATUS header and the SPEND lines, same class again. Latent through `createDashboardDeps`, whose
+  // queue and budget shapes carry no `unreachable` today, so they are driven through the injected snapshot
+  // -- which is the same argument this round accepted for `sandbox.expiresIn`, and both were named as
+  // fixed in a commit body while still raw.
+  const degraded2 = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, queue: { unreachable: nasty("q-timeout") }, budget: { unreachable: nasty("b-timeout") } }) }) });
+  await flush();
+  for (const width of [80, NaN]) assert.doesNotMatch(degraded2.render(width).join("\n"), dirty, `an unreachable queue or budget leaked at width ${width}`);
+  await degraded2.dispose();
 
   // And an unreadable HELD or FAILED index, same class: a caught Error's message.
   const degrade = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { unreachable: nasty("timed out") }, failed: { unreachable: nasty("timed out") } }) }) });
