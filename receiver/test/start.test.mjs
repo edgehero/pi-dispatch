@@ -479,9 +479,10 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// a reload still landed in 40 of 40 idle trials (and in 0 of 10 once a 2s gap was inserted before the
 	// boot). Draining it here is what stops the assertion below from being satisfied by the setup write.
 	//
-	// The window is sized from that delivery, which was 205-209ms across 200 trials including four postures
-	// under load, and never late-but-present: under stress the setup write is LOST rather than delayed. So
-	// 500ms is roughly twice the worst arrival, and overrunning it costs a weaker claim, never a failure.
+	// The window is sized from that delivery, measured at the injected `write` rather than at this loop's own
+	// 50ms tick: 156-170ms across 268 trials in four postures, and never late-but-present, because under
+	// stress the setup write is LOST rather than delayed (40 of those 268, none arriving after 500ms). So
+	// 500ms is about three times the worst arrival, and overrunning it costs a weaker claim, never a failure.
 	// It is not free on Linux: inotify never delivers a write made before the watch armed (0 of 20 trials in
 	// a node:23.5.0-bookworm container), so there this always runs to the deadline. That is the platform CI
 	// runs on, and `contract-tests` runs the suite three times per job. The settle is also NOT pinned by any

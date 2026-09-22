@@ -1053,16 +1053,18 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   live is not delivered late, it is gone. Measured against the real receiver boot, 40 trials per row, edit
   written in the same tick the boot returned: 0 lost with one boot at a time on an idle machine, 24 lost
   with four boots in one process (32 of 40 on a second machine), 1 lost with one boot at a time while two
-  full suites ran beside it. It is the ARMING that costs, not the company: with twenty neighbours armed once
-  and then left quiet, an already-live watcher missed nothing in 60 writes, while twenty being armed and
-  closed around every write cost it 27 of 60. How much churn it takes is harness-specific, so the number to
-  carry is the shape, not the 27. **The 0 row proves less than it looks**: a write made just BEFORE arming is itself usually delivered
-  after arming, so at idle a reload arrives whether or not a later edit does. Linux's inotify registers the
-  watch before `fs.watch` returns, so an edit cannot be lost to this window there. Two consequences worth separating. For a TEST, the answer is to repeat
-  the edit rather than to wait longer, which is what `receiver/test/start.test.mjs` does. For an OPERATOR,
-  the window is real but bounded by boot: both services read the file first and arm the watch afterwards, so
-  an edit made in that gap is missed until the next edit or a restart. Neither service re-reads after
-  arming, which is the wider version of the same gap and is tracked as issue #386 rather than closed here.
+  full suites ran beside it. It is the ARMING that costs, not the company: with twenty neighbouring watches
+  (each a bare `fs.watch` on its own directory) armed once and then left quiet, an already-live watcher
+  missed nothing in 60 writes, while twenty armed and closed around every write cost it up to 27 of 60. How
+  much churn it takes varies with the harness, so the shape is what to carry, not the 27. **The 0 row proves
+  less than it looks**: a write made just BEFORE arming is itself usually delivered after arming, so at idle
+  a reload arrives whether or not a later edit does. Linux's inotify registers the watch before `fs.watch`
+  returns, so an edit cannot be lost to this window there. Two consequences worth separating. For a TEST,
+  the answer is to repeat the edit rather than to wait longer, which is what `receiver/test/start.test.mjs`
+  does. For an OPERATOR, the window is real but bounded by boot: both services read the file first and arm
+  the watch afterwards, so an edit made in that gap is missed until the next edit or a restart. Neither
+  service re-reads after arming, which is the wider version of the same gap and is tracked as issue #386
+  rather than closed here.
 - **What the close cannot do, stated because the guarantee would otherwise read as complete**: cancel a
   reload that has ALREADY started. `reloadSchedules` is async and awaits Valkey, and the watchers stay
   armed through the whole drain that precedes the closer loop, not merely a 150ms debounce. That reload
