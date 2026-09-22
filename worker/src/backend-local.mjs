@@ -428,7 +428,12 @@ function rawAuthority(host, scheme) {
  *
  * `\` is deliberately NOT an authority terminator: Go's `url.Parse`, which the docker CLI uses, ends an authority at
  * the first `/` only, so `unix://\\srv\x@y` is userinfo to it and must be withheld rather than read as an empty
- * authority and passed through.
+ * authority and passed through. Adding it to the set makes `npipe://\\host\pipe:pw@x` display its
+ * password, measured, and there is a test for that rather than only this sentence.
+ *
+ * Taking the FIRST `@` of the authority rather than the last is equivalent while the one-`@` guard below
+ * stands, since there is then only one. It is written as `indexOf` because that is the rule being
+ * expressed; remove the guard and the difference between them is the entire defect this replaced.
  *
  * WHAT IS GIVEN UP, stated rather than glossed: a password in `DOCKER_HOST` no longer makes the display say so, since
  * `tcp://bob:pw@127.0.0.1:2375` now shows its host like any other. Accepted because neither docker's tcp transport nor

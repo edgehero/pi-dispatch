@@ -183,6 +183,12 @@ test("an endpoint is LOCAL only when its form shows it, and credentials in it ar
 	// undone silently.
 	assert.equal(classifyDockerEndpoint("tcp://10.1.2.3:2375/base").display, "tcp://10.1.2.3:2375/base", "no @ means the early return, path and all");
 	assert.deepEqual(classifyDockerEndpoint("npipe://\\\\.\\pipe\\docker_engine"), { local: true, display: "npipe://\\\\.\\pipe\\docker_engine" }, "a leading-backslash pipe is local and untouched");
+	// `\` is deliberately NOT an authority terminator, and this is what that costs if it becomes one: Go's
+	// `url.Parse`, which the CLI uses, ends an authority at the first `/` only, so these are userinfo to it.
+	// Adding `\` to the terminator set makes the authority read as EMPTY and the value pass through whole,
+	// which displays the password. Measured; the docblock asserted it and nothing held it.
+	assert.equal(classifyDockerEndpoint("npipe://\\\\host\\pipe:pw@x").display, "npipe://(credentials not shown)", "a backslash does not end an authority");
+	assert.equal(classifyDockerEndpoint("unix://\\\\srv\\x@y").display, "unix://(credentials not shown)", "nor here");
 });
 
 test("no password body can put any of itself into the display (#340)", () => {
