@@ -179,11 +179,14 @@ test("a post-queue identity refusal EXITS, code intact: the queue's live connect
 		});
 		let stderr = "";
 		child.stderr.on("data", (d) => (stderr += d));
-		// The 15s reaper was re-measured under issue #373's survey and stays: this exit took 0.2-0.3s idle
-		// and 2.2s at worst with two suites and test-count-check running beside it, and 6x that still fits. It is deliberately NOT derived
-		// from `IDENTITY_ATTEMPT_TIMEOUT_MS + IDENTITY_RETRY_DELAY_MS`: this path takes no retry (the 401
-		// is determinate and rethrown in the same tick), so a reaper sized to survive a timed-out first
-		// attempt would let exactly the wedge described above pass green.
+		// The 15s reaper was re-measured under issue #373's survey and stays: this exit took 0.2-0.3s idle and
+		// 2.2s at worst with two suites and test-count-check running beside it, and 6x that still fits. It
+		// happens to EQUAL `IDENTITY_ATTEMPT_TIMEOUT_MS + IDENTITY_RETRY_DELAY_MS` (10s + 5s), and that is a
+		// coincidence rather than a derivation, said here because the next reader will otherwise take the
+		// equality for one: this path takes no retry at all, since the 401 is determinate and rethrown in the
+		// same tick. Sizing the reaper to survive a timed-out first attempt would not make the wedge above
+		// pass green -- that wedge never exits, so it would only be reaped later -- but it would widen this
+		// test's window for a retry that cannot happen here.
 		let reaper = null;
 		const r = await Promise.race([
 			new Promise((resolve) => child.on("exit", (status, signal) => resolve({ status, signal }))),

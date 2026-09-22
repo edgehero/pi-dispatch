@@ -372,8 +372,10 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 	// worst measured (13.4s once with two suites and test-count-check running beside it, against a usual
 	// 0.2-0.5s), and it only ever costs time on the failure path. SIGKILL rather than the default SIGTERM
 	// because `spawnSync` waits for the child to EXIT: a catchable signal lets a slow or hung shutdown
-	// outlive the bound (measured, a 2s handler held a 300ms bound for 2.3s). It is not about a handler
-	// turning a hang into a clean exit -- this child refuses at config load, before any handler exists.
+	// outlive the bound (measured, a 2s handler held a 300ms bound for 2.3s, and returned that child's own
+	// status alongside the timeout, which is exactly why `r.error` is read BEFORE the status). The 13.4s
+	// that sets the bound was seen once, against a usual 0.2-0.5s: sized for the worst, paid only on the
+	// failure path.
 	const HANG_BOUND_MS = 80_000;
 	const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/start.mjs", import.meta.url))], {
 		env: { PATH: process.env.PATH, PI_TRIGGERS_FILE: triggers, WEBHOOK_SECRET: "s" },
@@ -473,6 +475,15 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// Before the close, the watch is REAL: an edit lands as a reload. This is the arming coverage the old
 	// entry-point guard deleted, and it is also what keeps the silence assertion below honest -- the same
 	// write on the same wire, first observed loud, then observed quiet.
+	// SETTLE FIRST, so what follows is about the EDIT. The setup write above was made just before the boot
+	// armed the watch, and on macOS that write is itself usually delivered AFTER arming: with no edit at all,
+	// a reload still landed in 40 of 40 idle trials (and in 0 of 10 once a 2s gap was inserted before the
+	// boot). Draining it here is what stops the assertion below from being satisfied by the setup write.
+	const settleBy = Date.now() + 1000;
+	while (!parse(0).some((l) => l.event === "triggers_reloaded") && Date.now() < settleBy) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+
 	const beforeEdit = chunks.length;
 	const edit = () => writeFileSync(triggersPath, `${JSON.stringify({ triggers: [] })}\n`);
 	edit();
@@ -489,12 +500,16 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	//   two suites + test-count-check load .. 1 lost, one boot at a time -- this issue's failure
 	//   with this re-write, every row ........ 0 lost, worst 1223ms (one re-write at most)
 	// Linux's inotify registers before `fs.watch` returns, so there an edit can be late but not lost.
-	// The ceiling is the round's rule, max(10s, 6x the worst observed) = 10s. The limit: this proves the
-	// watch delivers AN edit made after it armed, and reloads -- not that the first edit after boot is
-	// seen, which no test can promise on macOS, and not WHICH write was delivered, since the setup write
-	// above is itself usually delivered after arming (40 of 40 at idle, with no edit at all). Every write
-	// is the same content, and the closer cancels a pending debounce, so the silence half below still
-	// observes the last write this block made, and nothing after it. That half keeps its fixed window,
+	// The ceiling is the round's rule, max(10s, 6x the worst observed) = 10s. Two limits worth stating.
+	// What this proves is that the watch is LIVE and that writing the file reloads it, not that the first
+	// edit after boot is seen, which no test can promise on macOS; the settle above is what keeps it about
+	// this block's write rather than the setup write. And the re-write itself is not PINNED by any
+	// assertion here: deleting it leaves this green on an idle machine, because loss needs concurrent
+	// arming to reproduce. It earns its place in the measurements, not in a mutant.
+	// The interval has a floor: each write restarts the loader's own 150ms debounce, so re-writing faster
+	// than that starves the reload it is waiting for (measured: 100ms never lands, 200ms does).
+	// Every write is the same content, and the closer cancels a pending debounce, so the silence half below
+	// still observes the last write this block made, and nothing after it. That half keeps its fixed window,
 	// because "nothing arrives" has no event to poll for.
 	const ARRIVAL_CEILING_MS = 10_000;
 	const REWRITE_EVERY_MS = 1000;
