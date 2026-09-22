@@ -238,7 +238,7 @@ export function makeSessionStore({
 			// The identity is split off the verdict rather than carried on it: this return is spread onto the
 			// session object the processor holds for the WHOLE run, and an inode number is bookkeeping for the
 			// next few lines, not state a promotion an hour later should be able to read.
-			const { ident: judged = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
+			const { ident: judged = null, dirIdent: judgedDir = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
 			let verdict = judgedVerdict;
 			if (verdict.resume) {
 				// THE BYTES COME OFF THE DESCRIPTOR THAT WAS JUDGED, never off the path a second time.
@@ -248,8 +248,9 @@ export function makeSessionStore({
 				// Every one of those resolutions is a separate walk of the same name, so an attacker who is a
 				// symlink DURING the copy and the original directory again before the re-check matched all three
 				// arms while the bytes came from somewhere else entirely. Measured on the pre-fix code by a plain
-				// second process doing rename/symlink/rename in a loop: 195 of 757 successful resumes, 26%,
-				// staged an attacker's transcript and reported `resumed`. The same shape one level down -- the
+				// second process doing rename/symlink/rename in a loop: 195 of 757 successful resumes in the
+				// review round's own harness, and 23 of 654 in a 90-second run of this file's, staged an
+				// attacker's transcript and reported `resumed`. The same shape one level down -- the
 				// A, B, A round trip on `current.jsonl` itself -- is what this contract used to state as a
 				// residual the identity re-check could only shrink.
 				//
@@ -278,14 +279,18 @@ export function makeSessionStore({
 					// resumes, where the by-path version staged none), and it is also what keeps the venue arm
 					// reachable: a promotion that wrote its `(pending)` sentinel and has not yet swapped moves no
 					// identity at all, so an identity-gated ladder never asks about it.
-					const swapped = () =>
-						inspectKeyDir(key).reason === "key-not-a-directory"
+					const swapped = () => {
+						const dirNow = inspectKeyDir(key);
+						return dirNow.reason === "key-not-a-directory"
 							? "key-not-a-directory"
-							: readVenue(key) !== venue
-								? "venue-changed"
-								: readIdentity(canonicalFile(key)) !== judged
-									? "transcript-replaced"
-									: null;
+							: dirNow.ident !== judgedDir
+								? "transcript-replaced" // another REAL directory at the name: the gates judged its files
+								: readVenue(key) !== venue
+									? "venue-changed"
+									: readIdentity(canonicalFile(key)) !== judged
+										? "transcript-replaced"
+										: null;
+					};
 					// VENUE FIRST inside `swapped()`, as it has been since #277: a cross-venue promotion trips
 					// both and `venue-changed` names WHY where `transcript-replaced` only says something moved.
 					// The directory arm is ahead of both (issue #375), because a name that is not a directory is
@@ -523,8 +528,11 @@ export function makeSessionStore({
 				// DETECTION for the segment prevention cannot reach (issue #375's gate round). A link swapped in
 				// after the check above takes this rename and every sidecar write with it, and the old code then
 				// reported `promoted: true` for a transcript that landed outside the store: the operator's record
-				// said the next run would resume work that is not there. This cannot undo the write -- the bytes
-				// are already wherever the name pointed -- but it refuses to CLAIM it.
+				// said the next run would resume work that is not there. This cannot undo the write, the bytes
+				// being already wherever the name pointed, and it catches such a swap only while it is STILL
+				// STANDING here. An A, B, A that puts the real directory back before this check still returns
+				// `promoted: true` with the transcript outside the store, which is the write edge's own version
+				// of the round trip the read edge answers with a descriptor, and which nothing here can answer.
 				if (!sameDir()) {
 					log("session_promote_skipped", { key: session.key, reason: "key-not-a-directory" });
 					return { promoted: false, reason: "key-not-a-directory" };
@@ -780,8 +788,10 @@ export function makeSessionStore({
 		if (!st.isDirectory()) return { ok: false, reason: "key-not-a-directory" };
 		// `dev:ino` and NOTHING else. The file rule's `dev:ino:size:mtime` is wrong for a directory: both move
 		// on every entry a promotion creates inside the key (64 -> 96 -> 1376 bytes on APFS, measured), so a
-		// re-check built on it reports a race on every quiet run. Only the write edge compares it; the read
-		// edge asks the shape and lets the transcript's own identity answer the rest.
+		// re-check built on it reports a race on every quiet run. BOTH edges compare this identity: the write
+		// edge against what `ensureKeyDir` made or found, the read edge against what the gates were computed
+		// from. Comparing the SHAPE alone on either edge lets a swap for another REAL directory through, which
+		// is how it was found on the write edge and, one round later, on this one.
 		return { ok: true, ident: `${st.dev}:${st.ino}` };
 	}
 
@@ -792,6 +802,7 @@ export function makeSessionStore({
 		// through the ENOTDIR their inner lstat threw; they are now named for what they are.
 		const dirCheck = inspectKeyDir(key);
 		if (!dirCheck.ok) return COLD(dirCheck.reason);
+
 
 		const file = canonicalFile(key);
 		const check = inspectFile(file);
@@ -903,7 +914,7 @@ export function makeSessionStore({
 			if (!Number.isFinite(started)) return COLD("conversation-too-old");
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
-		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident };
+		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident, dirIdent: dirCheck.ident };
 	}
 
 	/**

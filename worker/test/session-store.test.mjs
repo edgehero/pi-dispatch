@@ -1826,7 +1826,8 @@ test("a swap AFTER the open cannot change what is staged: the bytes come off the
 	// The attack the gate round found, and the reason the copy runs off a descriptor at all. Every arm of the
 	// old re-check read BY PATH after a path-based copy, so an attacker who was a symlink DURING the copy and
 	// the original directory again before the re-check matched all three arms while the bytes came from
-	// somewhere else: measured at 195 of 757 successful resumes against a plain second process. Here the swap
+	// somewhere else: 195 of 757 successful resumes in the review round's harness, 23 of 654 in a 90-second
+	// run of one built here, both against a plain second process. Here the swap
 	// lands after the open and is then restored, which is exactly that A, B, A -- and it now buys nothing,
 	// because a descriptor is bound to its inode and cannot be re-pointed by a later rename.
 	const key = sessionKeyFor(ghIssue);
@@ -1864,28 +1865,34 @@ test("a swap AFTER the open cannot change what is staged: the bytes come off the
 });
 
 test("an ordinary write inside the key directory does NOT disturb a resume (#375)", () => {
-	// The quiet path, pinned because the first draft of this change broke it: the post-copy re-check compared
-	// the key directory with the FILE identity rule, `dev:ino:size:mtime`, and a directory's size and mtime
-	// move on every entry created inside it (64 -> 96 -> 1376 bytes on APFS, measured), so an ordinary
-	// concurrent promotion reported a race on every run. The directory identity is gone entirely now -- the
-	// staged bytes come off one descriptor -- and this is what keeps that regression from coming back.
+	// The quiet path, pinned because the first draft of this change broke it: the re-check compared the key
+	// directory with the FILE identity rule, `dev:ino:size:mtime`, and a directory's size and mtime move on
+	// every entry created inside it (64 -> 96 -> 1376 bytes on APFS, measured), so an ordinary concurrent
+	// promotion reported a race on every run. Both edges compare `dev:ino` and nothing else, and this is what
+	// keeps the file rule from creeping back into a directory comparison.
 	const key = sessionKeyFor(ghIssue);
 	let made;
+	let armed = false;
 	made = fixture({
 		fs: {
 			...realFs,
-			copyFileSync: (src, dest, ...rest) => {
-				const out = realFs.copyFileSync(src, dest, ...rest);
-				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+			// The seam is `readSync`: the resolve path no longer calls `copyFileSync` at all, since it reads the
+			// staged bytes off a descriptor. A hook on the old seam would never fire and this test would pass
+			// while pinning nothing, which is what it did for one round -- so the seam asserts that it fired.
+			readSync: (fd, ...rest) => {
+				if (!armed) {
+					armed = true;
 					writeFileSync(join(made.sessionsDir, key, "lock"), ""); // an entry created, so the mtime moves
 				}
-				return out;
+				return realFs.readSync(fd, ...rest);
 			},
 		},
 	});
 	seed(made.sessionsDir, key, { venue: "local" });
 
 	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(armed, true, "the seam must actually fire, or this pins nothing at all");
+	assert.equal(existsSync(join(made.sessionsDir, key, "lock")), true, "and it must really create an entry, which is what moves the directory's size and mtime");
 	assert.equal(s.resume, true, "the key directory is the same one, so this resumes");
 	assert.equal(s.reason, "resumed");
 });
@@ -2013,7 +2020,8 @@ test("a promoted key directory is created 0700, because transcripts are PII-bear
 	// The mode moved into `ensureKeyDir` with this change, and nothing pinned it: `doctor.test.mjs` pins 0700
 	// for `PI_SESSIONS_DIR` itself, and `SECURITY.md` promises it for the store, but the per-key directory the
 	// worker creates on every first promotion had no assertion at all. Dropping the mode here leaves the whole
-	// suite green and the transcripts world-readable.
+	// suite green: defence in depth rather than the only barrier, since `PI_SESSIONS_DIR` is itself 0700, and
+	// worth a line because a store an operator relaxed one level up would then have nothing under it.
 	const { store, jobDir, sessionsDir } = fixture();
 	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
 	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
@@ -2272,4 +2280,42 @@ test("the copy reads no more than the judged size, whatever the file does under 
 
 	made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
 	assert.equal(written, body.length, "exactly the judged size was read and staged, not the 300kB that arrived during the copy");
+});
+
+test("a key directory swapped for another REAL directory before the gates is refused on the READ edge too (#375)", () => {
+	// The write edge learned this first: comparing the key directory's SHAPE lets a swap for another real
+	// directory through, because a real directory IS the right shape. The read edge carried the same asymmetry
+	// one round longer, and it is worse there: the gates then judge the attacker's transcript and sidecars,
+	// the descriptor agrees with them because it opened the attacker's file, and the job resumes with
+	// `reason: "resumed"` on a conversation nobody wrote. Both edges now compare `dev:ino`.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			lstatSync: (path, ...rest) => {
+				const out = realFs.lstatSync(path, ...rest);
+				if (!armed && String(path) === join(made.sessionsDir, key)) {
+					armed = true;
+					const attacker = join(made.root, "attacker-realdir");
+					mkdirSync(attacker, { recursive: true });
+					writeFileSync(join(attacker, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "ATTACKER" })}\n`);
+					writeFileSync(join(attacker, "pi-version"), PI);
+					writeFileSync(join(attacker, "venue"), "local");
+					realFs.rmSync(join(made.sessionsDir, key), { recursive: true, force: true });
+					renameSync(attacker, join(made.sessionsDir, key));
+				}
+				return out;
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "the key directory the gates were computed from is not the one at this name now");
+	assert.equal(s.reason, "transcript-replaced", "it is still a directory and still this venue, so what moved is what the identity arm names");
+	const staged = readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8");
+	assert.equal(staged.includes("ATTACKER"), false, "and nothing of the replacement is staged");
+	assert.equal(staged, "");
 });

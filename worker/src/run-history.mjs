@@ -129,11 +129,13 @@ export function parseExitTurns(text) {
  * anywhere but the admission point is a comment, not a check.
  */
 /**
- * EXPORTED so the enum has ONE home. It is written out in four places -- here, the record shape and the
+ * EXPORTED so the enum has ONE home. It is written out in five places -- here, the record shape and the
  * producer rows in `INT-RUN-HISTORY-FILE-CONTRACT`, and the two tables in `docs/sessions.md` -- and until
- * issue #375's gate round nothing compared them: an invented token added here survived the whole suite, and
- * a token removed was caught only because a test restated the list by hand. `session-reasons.test.mjs`
- * derives the other three from this one.
+ * issue #375's review rounds nothing compared them: an invented token added here survived the whole suite,
+ * and a token removed was caught only because a test restated the list by hand. `session-reasons.test.mjs`
+ * derives the record-shape enum and both operator tables from this set. THE PRODUCER ROWS ARE NOT DERIVED
+ * and nothing checks them, which is said here rather than left to be assumed: they say which PATH can emit
+ * each token, and this set knows only the vocabulary.
  */
 export const SESSION_REASONS = new Set([
 	"resumed",
