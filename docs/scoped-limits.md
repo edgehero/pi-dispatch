@@ -130,7 +130,7 @@ Three doors, same as quiet hours:
 
 | Piece | Value |
 |---|---|
-| Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits) |
+| Env var | `PI_SCOPED_LIMITS_FILE` (absolute path; unset = no scoped limits. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it) |
 | File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }` |
 | Refusal reason | `scope-cap` (pre-spend, never retried) |
 | Deferral | delayed set, fixed re-check, never dropped |
