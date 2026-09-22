@@ -1652,6 +1652,14 @@ export async function collectChecks(env, seams) {
 		const scaffolded = join(cwd, "pause-windows.json");
 		if ((typeof pauseWindowsFile !== "string" || pauseWindowsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_PAUSE_WINDOWS_FILE;
+			// BLANK IS NOT ABSENT, and this branch treats them alike because for every OTHER purpose they are
+			// alike. They are not alike to the worker: `config.mjs` reads this key with `??`, so an empty
+			// string survives, and `start.mjs` calls `loadPauseWindows` unconditionally at boot, which THROWS on a
+			// path that does not exist. So a blank value is a refused boot, and this check's own text --
+			// "the worker ignores it, so scoped pauses are OFF" -- asserted the opposite of what happens (issue #365,
+			// gate). Reachable exactly as doctor's own fix line advises, by running
+			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
+			const blank = typeof pauseWindowsFile === "string";
 			const onlyExported = envFile.exported?.PI_PAUSE_WINDOWS_FILE;
 			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
 			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
@@ -1677,7 +1685,9 @@ export async function collectChecks(env, seams) {
 					: {
 							ok: false,
 							warn: true,
-							label: `${scaffolded} exists but PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it, so scoped pauses are OFF`,
+							label: blank
+								? `PI_PAUSE_WINDOWS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a pause-windows file at that empty path, and REFUSES TO START`
+								: `${scaffolded} exists but PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it, so scoped pauses are OFF`,
 							fix: `set PI_PAUSE_WINDOWS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker loads no windows at all, while the admin panel defaults to this same file and reports each window it writes as applied live; delete the file if this deployment has no quiet hours`,
 						},
 			);
@@ -1692,6 +1702,14 @@ export async function collectChecks(env, seams) {
 		const scaffolded = join(cwd, "scoped-limits.json");
 		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_SCOPED_LIMITS_FILE;
+			// BLANK IS NOT ABSENT, and this branch treats them alike because for every OTHER purpose they are
+			// alike. They are not alike to the worker: `config.mjs` reads this key with `??`, so an empty
+			// string survives, and `start.mjs` calls `loadScopedLimits` unconditionally at boot, which THROWS on a
+			// path that does not exist. So a blank value is a refused boot, and this check's own text --
+			// "the worker ignores it, so scoped caps and concurrency are OFF" -- asserted the opposite of what happens (issue #365,
+			// gate). Reachable exactly as doctor's own fix line advises, by running
+			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
+			const blank = typeof scopedLimitsFile === "string";
 			const onlyExported = envFile.exported?.PI_SCOPED_LIMITS_FILE;
 			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
 			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
@@ -1717,7 +1735,9 @@ export async function collectChecks(env, seams) {
 					: {
 							ok: false,
 							warn: true,
-							label: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
+							label: blank
+								? `PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a scoped-limits file at that empty path, and REFUSES TO START`
+								: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
 							fix: `set PI_SCOPED_LIMITS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker enforces no scoped limits at all, while the admin panel defaults to this same file and reports each limit it writes as applied live; delete the file if this deployment has no scoped limits`,
 						},
 			);

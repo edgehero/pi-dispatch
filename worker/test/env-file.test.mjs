@@ -287,7 +287,10 @@ test("readEnvKeys strips a trailing comment before deciding a quoted value is em
 	assert.deepEqual(readEnvKeys('K="a"b', ["K"]), { K: '"a"b' }, "nor is a closing quote with text running on after it");
 });
 
-test("readEnvKeys reads a value back exactly as the shell does, quotes and comments included", () => {
+test("readEnvKeys reads a value back as the shell does for every shape `up` writes or an operator hand-edits", () => {
+	// NOT "exactly as the shell does", which this test was called and which is not true of four shapes that
+	// fall through to the unquoted rule -- an unclosed quote, a quote running straight on, two quoted words,
+	// and an escaped quote. They are named at the rule in `env-file.mjs` and measured against /bin/sh there.
 	// Measured in sh, bash and zsh against every shape below, and the quoted rows were measured too rather
 	// than reasoned about, which is where an earlier version of this table was wrong: it kept the quote
 	// characters in the value, which no shell does. One matched surrounding pair comes off, and it comes

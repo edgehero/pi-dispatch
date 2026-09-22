@@ -1529,12 +1529,24 @@ test("doctor: no scaffolded file, no line -- the feature-off deployment is not t
 	assert.doesNotMatch(text(), /pause-windows/, "nothing exists to be ignored");
 });
 
-test("doctor: an EMPTY PI_PAUSE_WINDOWS_FILE counts as unset, mirroring the worker's own load site", async () => {
-	// start.mjs gates on `if (config.pauseWindowsFile)`, so an empty value leaves the feature off exactly as
-	// an absent one does. A check that read only `undefined` would call that deployment wired.
+test("doctor: an EMPTY PI_PAUSE_WINDOWS_FILE is a REFUSED BOOT, not an unset one (#365)", async () => {
+	// THE CITATION THIS TEST WAS BUILT ON WAS WRONG, and the claim with it. It said start.mjs "gates on
+	// `if (config.pauseWindowsFile)`, so an empty value leaves the feature off exactly as an absent one
+	// does" -- but that gate is the LIVE-RELOAD WATCHER at start.mjs:1436, and it is unreachable here,
+	// because `loadPauseWindows(config)` at start.mjs:371 runs unconditionally first and THROWS. Measured:
+	// `config.mjs` reads this key with `??`, so `""` and `"   "` survive into the config, and the loader
+	// answers `pause-windows file does not exist: `. So the worker does not leave the feature off; it
+	// refuses to start, and doctor was telling the operator the opposite.
 	const cwd = scaffoldedCwd();
+	for (const blank of ["", "   "]) {
+		const { out, text } = capture();
+		await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: blank }), scaffoldDeps(out, cwd));
+		assert.match(text(), /PI_PAUSE_WINDOWS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a pause-windows file at that empty path, and REFUSES TO START/, JSON.stringify(blank));
+		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it/, "the false sentence is gone");
+	}
+	// And a genuinely ABSENT key still gets the unset warning, which is the sentence that was always true.
 	const { out, text } = capture();
-	await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: "   " }), scaffoldDeps(out, cwd));
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
 	assert.ok(text().includes(`⚠ ${join(cwd, "pause-windows.json")} exists but PI_PAUSE_WINDOWS_FILE is unset`));
 });
 
@@ -2743,14 +2755,18 @@ test("doctor: a scaffolded scoped-limits.json with PI_SCOPED_LIMITS_FILE unset w
 	assert.equal(trap.fixAction, undefined, "never-tier: doctor cannot guess which path was meant");
 });
 
-test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY value counts as unset", async () => {
+test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY value is a REFUSED BOOT (#365)", async () => {
 	const cwd = scopedScaffoldCwd();
 	const wired = capture();
 	await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: join(cwd, "scoped-limits.json") }), scaffoldDeps(wired.out, cwd));
 	assert.doesNotMatch(wired.text(), /PI_SCOPED_LIMITS_FILE is unset/, "a wired deployment gets no trap line");
+	// "Blank mirrors the worker's own load gate" was the claim and it is false, for the same reason its
+	// pause-windows twin was: `loadScopedLimits(config)` runs unconditionally at boot and throws on an empty
+	// path, so blank is a refused boot rather than a feature left off.
 	const empty = capture();
 	await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: "   " }), scaffoldDeps(empty.out, cwd));
-	assert.ok(empty.text().includes("PI_SCOPED_LIMITS_FILE is unset"), "blank mirrors the worker's own load gate");
+	assert.match(empty.text(), /PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a scoped-limits file at that empty path, and REFUSES TO START/);
+	assert.doesNotMatch(empty.text(), /PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it/);
 });
 
 test("doctor: a configured scoped-limits file that will not load is a FAILURE naming the boot refusal, never-tier", async () => {

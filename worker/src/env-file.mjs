@@ -338,9 +338,17 @@ export function readEnvKeys(text, keys, { acceptExport = false } = {}) {
 		// whitespace, as outside it; measured in sh, bash and zsh.
 		const quote = trimmed[0] === '"' || trimmed[0] === "'" ? trimmed[0] : "";
 		const close = quote ? trimmed.indexOf(quote, 1) : -1;
-		// Falls through to the unquoted rule when the quote never closes, or when what follows the closing
-		// quote runs straight on (`"a"b`, which the shells CONCATENATE): neither is a quoted value, and
-		// guessing at either would be a third reading nothing measured.
+		// FOUR SHAPES FALL THROUGH TO THE UNQUOTED RULE, and this reader then differs from the shells on all
+		// of them. Measured against /bin/sh over sixteen shapes; named here rather than left to be found,
+		// because the test below is called "reads a value back exactly as the shell does" and that is true
+		// of what `up` writes and of ordinary hand edits, not of these:
+		//   `K="unclosed`     the shells fail the whole `source` and set nothing; this keeps the raw text.
+		//   `K="a"b`          the shells CONCATENATE to `ab`; this keeps the raw text.
+		//   `K="a" "b"`       the shells fail (a second word is a command); this takes `a`.
+		//   `K='it'\''s'`     the shells read `it's`; this keeps the escape verbatim.
+		// None is a shape `renderEnvValue` can produce, and closing them means writing a shell parser, which
+		// is a much larger promise than deciding what a warning SAYS. Guessing at any of them would be a
+		// third reading nothing measured, which is how this function got its previous bug.
 		const closes = close !== -1 && (close === trimmed.length - 1 || /^\s/.test(trimmed.slice(close + 1)));
 		const stripped = closes ? trimmed.slice(0, close + 1) : trimmed.replace(/\s#.*$/, "").trim();
 		const unquoted = /^(["'])(.*)\1$/.exec(stripped);
