@@ -56,7 +56,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { readEnvKeys } from "./env-file.mjs";
+import { envKeyIsBlank, readEnvKeys } from "./env-file.mjs";
 import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -323,7 +323,13 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// An absent entry is recorded as the empty string it stands for, and the caller words it.
 			else if (key in plain && plain[key] !== withExport[key]) alsoExported[key] = withExport[key] ?? "";
 		}
-		return { ...plain, exported, alsoExported };
+		// A LINE EXISTS AND ITS VALUE IS BLANK, which `readEnvKeys` alone cannot say because it deletes such a
+		// key (issue #365, gate). Doctor needs it for the same reason `up` does: a blank line reaches a
+		// sourcing wrapper as `KEY=""`, which the worker keeps and refuses to boot on -- so falling through
+		// to "is unset, the worker ignores it" reports the opposite of what happens.
+		const blankInFile = {};
+		for (const key of allowed) if (envKeyIsBlank(text, key)) blankInFile[key] = true;
+		return { ...plain, exported, alsoExported, blankInFile };
 	} catch {
 		return {};
 	}
@@ -1619,7 +1625,10 @@ export async function collectChecks(env, seams) {
 	// belongs. Warn, never fail, like every other setup-shaped check: a deployment can legitimately be
 	// mid-setup, and a scaffolded file the operator never intended to use is not a fault.
 	//
-	// Empty counts as unset, mirroring `if (config.pauseWindowsFile)` at the worker's own load site.
+	// Empty is NOT unset, and the citation this comment used to carry was the wrong line:
+	// `if (config.pauseWindowsFile)` at `start.mjs` is the LIVE-RELOAD WATCHER, unreachable on this path
+	// because `loadPauseWindows(config)` runs unconditionally before it and throws on an empty path. A blank
+	// value is a refused boot; the branches below say so and no longer share the unset sentence (issue #365).
 	//
 	// NEVER TIER, deliberately no fixAction: doctor cannot know which path the operator meant. This cwd is
 	// doctor's, not necessarily the worker's (a service manager sets its own), and writing an env line into
@@ -1659,7 +1668,9 @@ export async function collectChecks(env, seams) {
 			// "the worker ignores it, so scoped pauses are OFF" -- asserted the opposite of what happens (issue #365,
 			// gate). Reachable exactly as doctor's own fix line advises, by running
 			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
-			const blank = typeof pauseWindowsFile === "string";
+			// THE SHELL OR THE FILE. A blank line in the `.env` is the same refused boot on any deployment
+			// whose wrapper sources it, and the shell-only test missed it entirely.
+			const blank = typeof pauseWindowsFile === "string" || envFile.blankInFile?.PI_PAUSE_WINDOWS_FILE === true;
 			const onlyExported = envFile.exported?.PI_PAUSE_WINDOWS_FILE;
 			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
 			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
@@ -1679,7 +1690,7 @@ export async function collectChecks(env, seams) {
 							warn: true,
 							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_PAUSE_WINDOWS_FILE=\`` : `, and again as \`export PI_PAUSE_WINDOWS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
 							fix: alsoExported !== undefined
-								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? "nothing, leaving the feature off" : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_PAUSE_WINDOWS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
+								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? 'an EMPTY value, which the worker keeps and REFUSES TO BOOT on' : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_PAUSE_WINDOWS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
 								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {
@@ -1709,7 +1720,9 @@ export async function collectChecks(env, seams) {
 			// "the worker ignores it, so scoped caps and concurrency are OFF" -- asserted the opposite of what happens (issue #365,
 			// gate). Reachable exactly as doctor's own fix line advises, by running
 			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
-			const blank = typeof scopedLimitsFile === "string";
+			// THE SHELL OR THE FILE. A blank line in the `.env` is the same refused boot on any deployment
+			// whose wrapper sources it, and the shell-only test missed it entirely.
+			const blank = typeof scopedLimitsFile === "string" || envFile.blankInFile?.PI_SCOPED_LIMITS_FILE === true;
 			const onlyExported = envFile.exported?.PI_SCOPED_LIMITS_FILE;
 			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
 			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
@@ -1729,7 +1742,7 @@ export async function collectChecks(env, seams) {
 							warn: true,
 							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_SCOPED_LIMITS_FILE=\`` : `, and again as \`export PI_SCOPED_LIMITS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
 							fix: alsoExported !== undefined
-								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? "nothing, leaving the feature off" : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_SCOPED_LIMITS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
+								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? 'an EMPTY value, which the worker keeps and REFUSES TO BOOT on' : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_SCOPED_LIMITS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
 								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {

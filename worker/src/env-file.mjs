@@ -106,6 +106,31 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
 	return `'${v}'`;
 }
 
+/**
+ * Does this text carry a line for `key` whose value is EMPTY for every loader of this file?
+ *
+ * ONE HELPER because `up` and `doctor` answered it separately and disagreed (issue #365). `readEnvKeys`
+ * deletes a key whose last assignment is empty, which is right for its own question -- "what value is in
+ * force" -- and loses the one thing both callers need here: that a LINE EXISTS and its value is blank.
+ * With that lost, doctor fell through to "is unset, so the worker ignores it" for a file that makes the
+ * worker refuse to start, while `up`, reading the same file, said the value is empty. One run, both
+ * sentences.
+ *
+ * WHY BLANK IS NOT UNSET, measured in sh, bash and zsh: `set -a; . ./.env` on a `KEY=` line SETS and
+ * EXPORTS `KEY=""` -- it does not leave the key absent. `deploy/worker-env-wrapper.sh` does exactly that,
+ * so a blank line reaches the worker as an empty string, `config.mjs` keeps it (`??`, not `||`) for
+ * `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the unconditional loader at `start.mjs` throws.
+ *
+ * BOTH READINGS ARE ASKED, so a key that is blank for one loader and set for another is not blank: a bare
+ * `KEY=` with a later `export KEY=/v.json` is empty under `EnvironmentFile=` and configured under the POSIX
+ * wrapper, and calling that "blank" would tell half the operators their configured key is empty.
+ */
+export function envKeyIsBlank(text, key) {
+	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	if (!new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=`, "m").test(String(text ?? ""))) return false;
+	return readEnvKeys(text, [key])[key] === undefined && readEnvKeys(text, [key], { acceptExport: true })[key] === undefined;
+}
+
 export function setEnvKeyIfEmpty(text, key, value, opts) {
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	// `export ` is part of the SET shape here, and that is a never-clobber decision rather than dotenv

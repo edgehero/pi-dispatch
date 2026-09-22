@@ -26,7 +26,7 @@ import { connect as netConnect } from "node:net";
 import { join, posix, win32 } from "node:path";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { egressArmed as egressArmedFn } from "./egress.mjs";
-import { readEnvKeys, updateEnvFile } from "./env-file.mjs";
+import { envKeyIsBlank, updateEnvFile } from "./env-file.mjs";
 
 // The one image up may ever fetch, and the local name jobs run under. Literal on purpose (not
 // env.PI_JOB_IMAGE): an operator who pointed PI_JOB_IMAGE elsewhere has outgrown the quickstart, and
@@ -217,42 +217,24 @@ export async function runUp(argv = [], deps = {}) {
 	// never-clobber contract at key granularity: a value the operator set survives. The value itself
 	// is NEVER printed — a webhook secret in a scrollback is a webhook secret in a pastebin.
 	const envPath = join(cwd, ".env");
-	/**
-	 * `KEY=` or `KEY=""` -- a line that EXISTS and whose value is empty for every consumer of this file.
-	 *
-	 * `setEnvKeyIfEmpty` treats a `""` as SET and leaves it alone, which is the never-clobber rule at key
-	 * granularity: an operator who wrote `KEY=""` meant something by it. Doctor, three lines below `up`'s
-	 * own summary, then says the feature is OFF, because every consumer reads an empty value as unset. Both
-	 * are true and they answer different questions, and an operator reading them in sequence had to work
-	 * that out (issue #365, item 1).
-	 *
-	 * NAMED ON `up`'S SIDE rather than given a fourth state in doctor's warning: a doctor state exists to
-	 * carry a DECISION, and this is a wording overlap between two correct sentences. Both readings are
-	 * asked, so a line that is empty only for systemd and set for the wrapper is not called empty.
-	 *
-	 * AND THE CONSEQUENCE IS PER KEY, which the first version of this got wrong in the worst direction. It
-	 * said an empty value is what "every consumer reads as unset", and for two of these keys that is false:
-	 * `config.mjs` reads `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE` with `??`, so an empty string
-	 * survives, and `start.mjs` calls `loadPauseWindows`/`loadScopedLimits` unconditionally at boot, which
-	 * THROW on a path that does not exist. So the worker does not ignore the feature, it refuses to start.
-	 * `PI_LOGS_DIR` and `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET`
-	 * reads as absent. Measured on all five.
-	 */
-	// The two keys `config.mjs` reads with `??`, so an empty string reaches a loader that throws on it.
+	// WHAT AN EMPTY VALUE COSTS IS PER KEY, and the first version of this said one thing for all five.
+	// `config.mjs` reads these two with `??`, so an empty string survives, and `start.mjs` calls
+	// `loadPauseWindows`/`loadScopedLimits` unconditionally at boot, which throw on a path that does not
+	// exist: the worker does not ignore the feature, it refuses to start. `PI_LOGS_DIR` and
+	// `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET` reads as absent.
 	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
 	const emptyNote = (key) =>
 		EMPTY_REFUSES_BOOT.has(key)
-			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- the worker reads it with \`??\`, so it starts up, tries to load a file at "" and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
+			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- a shell that sources this file exports it as "", the worker keeps it and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
 			: `left untouched: the line is there and its value is empty, which reads as unset. up never clobbers a key an operator wrote, so fill it in or delete the line`;
+	// The blank test is `env-file.mjs`'s, shared with doctor since issue #365: two callers answering it
+	// separately is how `up` and doctor came to print opposite sentences about one file in one run.
 	const writtenButEmpty = (key) => {
-		let text;
 		try {
-			text = String(fs.readFileSync(envPath, "utf8"));
+			return envKeyIsBlank(String(fs.readFileSync(envPath, "utf8")), key);
 		} catch {
 			return false;
 		}
-		if (!new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`, "m").test(text)) return false;
-		return readEnvKeys(text, [key])[key] === undefined && readEnvKeys(text, [key], { acceptExport: true })[key] === undefined;
 	};
 	// Windows takes forward slashes everywhere Node does, and writing them is what keeps these four values
 	// inside the BARE set: `deploy/worker-env-wrapper.cmd` says "Values MUST be UNQUOTED -- cmd's `set`

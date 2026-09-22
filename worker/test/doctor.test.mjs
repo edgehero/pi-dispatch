@@ -1339,6 +1339,27 @@ test("doctor: a file carrying BOTH forms names both, and which start wins (#365)
 	assert.doesNotMatch(text(), /which a wrapper script reads and systemd's EnvironmentFile= does not/, "not the export-ONLY line: there is a bare assignment here");
 });
 
+test("doctor: a BLANK line in the .env is the same refused boot as a blank shell value (#365)", async () => {
+	// The shell-only test missed this entirely: `readEnvKeys` deletes a key whose value is empty, so `inFile`
+	// was falsy and doctor fell through to "is unset -- the worker ignores it" for a file that makes the
+	// worker refuse to start. Measured in sh, bash and zsh: `set -a; . ./.env` on `KEY=` SETS and EXPORTS
+	// `KEY=""`, and `deploy/worker-env-wrapper.sh` does exactly that, so the worker gets the empty string.
+	for (const [key, scaff, word] of [
+		["PI_PAUSE_WINDOWS_FILE", "pause-windows", "pause-windows"],
+		["PI_SCOPED_LIMITS_FILE", "scoped-limits", "scoped-limits"],
+	]) {
+		for (const blankLine of [`${key}=`, `${key}=""`, `${key}=   `, `export ${key}=`]) {
+			const cwd = scaffoldedCwd();
+			writeFileSync(join(cwd, `${scaff}.json`), scaff === "scoped-limits" ? "{}\n" : "[]\n");
+			writeFileSync(join(cwd, ".env"), `${blankLine}\n`);
+			const { out, text } = capture();
+			await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+			assert.match(text(), new RegExp(`${key} is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a ${word} file at that empty path, and REFUSES TO START`), `${key} ${JSON.stringify(blankLine)}`);
+			assert.doesNotMatch(text(), new RegExp(`${key} is unset -- the worker ignores it`), `${key} ${JSON.stringify(blankLine)}`);
+		}
+	}
+});
+
 test("doctor: an `export` line that CLEARS the key is the same disagreement, and was silent (#365)", async () => {
 	// The sharpest shape and the one the first version of this signal could not see. `readEnvKeys` deletes a
 	// key whose last assignment is empty, so the second reading had no entry and the `key in withExport`
@@ -1353,7 +1374,11 @@ test("doctor: an `export` line that CLEARS the key is the same disagreement, and
 		await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
 		assert.match(text(), /and CLEARED again by a later `export PI_PAUSE_WINDOWS_FILE=`/, JSON.stringify(cleared));
 		assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/, JSON.stringify(cleared));
-		assert.match(text(), /takes nothing, leaving the feature off/, JSON.stringify(cleared));
+		// NOT "takes nothing": measured in sh, bash and zsh, `set -a; . ./.env` on an empty assignment SETS
+		// and EXPORTS `KEY=""`. The worker keeps it and refuses to boot, which is the opposite of a feature
+		// left off, and was the last surviving copy of the claim this round has been correcting.
+		assert.match(text(), /so it takes an EMPTY value, which the worker keeps and REFUSES TO BOOT on/, JSON.stringify(cleared));
+		assert.doesNotMatch(text(), /takes nothing, leaving the feature off/, "the false half is gone");
 		assert.doesNotMatch(text(), /nothing to fix if the worker runs as a service/, "the old fix asserted the false half out loud");
 	}
 });
@@ -1451,29 +1476,29 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	const seams = (readEnvFile) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }) });
 	// The later duplicate wins, because the shell and `EnvironmentFile=` both take the last assignment and
 	// this has to report what the SERVICE sees.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" }, alsoExported: {} });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" }, alsoExported: {}, blankInFile: {} });
 	// THREE states, not two. A key assigned only with an `export ` prefix is read by the wrapper scripts
 	// and not by systemd's `EnvironmentFile=` (measured on systemd 257.13), so it is neither "set" nor
 	// "unset" and gets a sentence of its own. Collapsing it either way makes doctor wrong: called set, it
 	// claims the service reads what systemd does not; called unset, it tells the operator to write a line
 	// that is already there, moments after `up` reported that key as already set.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" }, alsoExported: {} });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" }, alsoExported: {}, blankInFile: {} });
 	// A bare assignment ANYWHERE means the key is not export-only, however many export lines follow it.
 	// systemd's `EnvironmentFile=` reads `/plain.json` and nothing else, so calling this export-only would
 	// print a value systemd never sees and advise dropping a prefix, which would change which file the
 	// worker loads on a wrapper deployment.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: { PI_PAUSE_WINDOWS_FILE: "/later.json" } });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: { PI_PAUSE_WINDOWS_FILE: "/later.json" }, blankInFile: {} });
 	// A THIRD SIGNAL for that same file (issue #365, item 2). It is not export-only and never was, so the
 	// label said nothing about it -- while the two readings DISAGREE about the value, which means the two
 	// deployment shapes disagree about which file the worker loads. Only when they differ: both forms
 	// carrying the same value is tidiness, not a fact about the deployment, and warning on it would be the
 	// crying wolf this file refuses elsewhere.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/same.json\nexport PI_PAUSE_WINDOWS_FILE=/same.json")), { PI_PAUSE_WINDOWS_FILE: "/same.json", exported: {}, alsoExported: {} }, "agreeing duplicates are not a finding");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/same.json\nexport PI_PAUSE_WINDOWS_FILE=/same.json")), { PI_PAUSE_WINDOWS_FILE: "/same.json", exported: {}, alsoExported: {}, blankInFile: {} }, "agreeing duplicates are not a finding");
 	// ORDER MATTERS, and the first version of this assertion got it backwards. With the export line FIRST
 	// and the bare one last, the wrappers take the last assignment and so read `/plain.json` too, which is
 	// what `EnvironmentFile=` reads: the two agree, so there is nothing to report. The signal is about the
 	// readings DISAGREEING, not about both forms being present.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/later.json\nPI_PAUSE_WINDOWS_FILE=/plain.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: {} }, "an export line BEFORE the bare one is overridden for both consumers");
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/later.json\nPI_PAUSE_WINDOWS_FILE=/plain.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: {}, blankInFile: {} }, "an export line BEFORE the bare one is overridden for both consumers");
 	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
 	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
 	// licence for reading a `.env`, and a convention would not have held it.
