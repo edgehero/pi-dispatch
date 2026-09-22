@@ -236,7 +236,7 @@ export function makeSessionStore({
 			// The identity is split off the verdict rather than carried on it: this return is spread onto the
 			// session object the processor holds for the WHOLE run, and an inode number is bookkeeping for the
 			// next few lines, not state a promotion an hour later should be able to read.
-			const { ident: judged = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
+			const { ident: judged = null, dirIdent: judgedDir = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
 			let verdict = judgedVerdict;
 			if (verdict.resume) {
 				fs.copyFileSync(canonicalFile(key), staged);
@@ -263,7 +263,23 @@ export function makeSessionStore({
 				// Either way, empty the staged copy so the container is handed nothing of it -- the 0-byte shape
 				// every cold start gets. If emptying fails, the catch below removes the staged directory rather
 				// than leave the copy behind.
-				const raced = readVenue(key) !== venue ? "venue-changed" : readIdentity(canonicalFile(key)) !== judged ? "transcript-replaced" : null;
+				// The DIRECTORY arm runs first and asks only "is the name still a real directory" (issue #375). A
+				// link swapped in over a real key directory between the read and the copy defeats every arm below
+				// it, since each of those resolves through it. It is deliberately NOT a venue-first exception: it
+				// asks a different question, not a more urgent version of the same one, and a key directory that
+				// is still a directory falls straight through to the venue arm with its ordering untouched.
+				//
+				// The directory's IDENTITY joins the transcript's arm rather than the one above, so a key
+				// directory REPLACED by another real directory reports `transcript-replaced` and a cross-venue
+				// replacement still reports `venue-changed`, which is the ordering `VENUE FIRST` above argues for.
+				const dirNow = inspectKeyDir(key);
+				const raced = dirNow.reason === "key-not-a-directory"
+					? "key-not-a-directory"
+					: readVenue(key) !== venue
+						? "venue-changed"
+						: readIdentity(canonicalFile(key)) !== judged || (dirNow.ok && judgedDir !== null && dirNow.ident !== judgedDir)
+							? "transcript-replaced"
+							: null;
 				if (raced !== null) {
 					fs.writeFileSync(staged, "");
 					verdict = COLD(raced);
@@ -330,6 +346,30 @@ export function makeSessionStore({
 	 * swept -- which is precisely today's behaviour, so under that skew this degrades to the status quo
 	 * rather than to something worse. Nothing here closes either; `triggers-file.mjs` states the same pair.
 	 */
+	/**
+	 * Make the key directory, or answer that the name is not one (issue #375). The write-side twin of
+	 * `inspectKeyDir`, separate because it CREATES: the read path must never make a directory for a key it is
+	 * only asking about.
+	 *
+	 * An lstat that fails with anything but ENOENT is re-thrown, which the outer catch reports as
+	 * `promote-failed`: a disk fault is not evidence about the shape of the name, and reporting it as one
+	 * would send an operator hunting a symlink that does not exist. That is `takeLock`'s doctrine one step
+	 * earlier.
+	 */
+	function ensureKeyDir(dir) {
+		let st = null;
+		try {
+			st = fs.lstatSync(dir);
+		} catch (err) {
+			if (err?.code !== "ENOENT") throw err;
+		}
+		if (st === null) {
+			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			st = fs.lstatSync(dir); // the second lstat: a link planted between the two is caught here
+		}
+		return st.isDirectory();
+	}
+
 	function takeLock(dir, key) {
 		const lock = join(dir, LOCK_FILE);
 		let sweptAgeMs = null;
@@ -379,7 +419,20 @@ export function makeSessionStore({
 			}
 
 			const dir = keyDir(session.key);
-			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			// LSTAT BEFORE CREATE, and again after (issue #375). Recursive `mkdir` succeeds silently on an
+			// existing link to a directory, so asking it first and checking afterwards would accept exactly the
+			// shape this refuses; asking first means nothing already at the name is ever handed to `mkdir` at all,
+			// and the outcome does not depend on how `mkdir` treats a link, a file or a dangling link. Placed
+			// BEFORE `takeLock`, so a refused promotion never creates a lock file through a link either.
+			//
+			// The entry is NOT removed. It is not ours: this store creates key directories and nothing else, so
+			// whatever is sitting there was put there by an operator or by an attacker, and a sweep that deletes
+			// either is a worse answer than a refusal an operator can read. The key stays cold until they clear
+			// it, which is the loud direction.
+			if (!ensureKeyDir(dir)) {
+				log("session_promote_skipped", { key: session.key, reason: "key-not-a-directory" });
+				return { promoted: false, reason: "key-not-a-directory" };
+			}
 
 			const lock = join(dir, LOCK_FILE);
 			// `locked` still means a LIVE writer and nothing else. A lock older than any plausible promotion is
@@ -595,8 +648,49 @@ export function makeSessionStore({
 		return join(keyDir(key), SESSION_FILE_NAME);
 	}
 
+	/**
+	 * Is the key's own name a real directory? `inspectFile`'s rule, one level up (issue #375).
+	 *
+	 * Every other read and write in here is an `lstat` on a name INSIDE the key directory, which is exactly
+	 * what a key directory that is ITSELF a symlink defeats: the link is the directory, so each of those
+	 * lstats resolves through it and every guarantee in this file lands wherever it points. Measured before
+	 * the fix: a link planted at the derived path made `resolveSession` return `resumed` from a transcript
+	 * outside the store, and `promoteSession` write `current.jsonl`, `pi-version`, `venue` and `resume-chain`
+	 * through it. `mkdirSync(dir, { recursive: true })` succeeds on an existing link to a directory, so
+	 * nothing on the write path noticed either.
+	 *
+	 * THE FINAL COMPONENT ONLY, deliberately. `PI_SESSIONS_DIR` and its ancestors may legitimately be links:
+	 * macOS's own temp root is `/var -> private/var`, and moving the whole store behind a link is a supported
+	 * layout. A `realpath` or an ancestor walk would refuse those, and would refuse every test fixture on
+	 * this platform. The name this checks is the DERIVED one, which is what an attacker who knows the
+	 * repository and the branch can precompute, and which nothing but this module should be creating.
+	 *
+	 * `dev:ino` only, with no mtime: a directory's mtime moves on every entry a live promotion creates, so
+	 * including it would report a race on every ordinary write.
+	 */
+	function inspectKeyDir(key) {
+		let st;
+		try {
+			st = fs.lstatSync(keyDir(key));
+		} catch {
+			return { ok: false, reason: "absent" }; // nothing there yet is the normal cold start, not a refusal
+		}
+		if (!st.isDirectory()) return { ok: false, reason: "key-not-a-directory" };
+		// `dev:ino` ALONE, deliberately not `identityOf`: that one carries size and mtime, which are the right
+		// identity for a FILE and the wrong one for a directory. Both move on every entry a promotion creates
+		// inside the key, so a re-check built on it would report a race on the quiet path -- which is exactly
+		// what it did in the first draft of this change, caught by the test that pins the quiet path.
+		return { ok: true, ident: `${st.dev}:${st.ino}` };
+	}
+
 	/** The read path, gate by gate. The FIRST miss wins and names itself. */
 	function readCanonical(key, piVersion, modelId, venue) {
+		// FIRST, because every gate below it is an lstat inside this directory and none of them can see that
+		// the directory is not one. A regular file or a link to one read as `absent` before this arm existed,
+		// through the ENOTDIR their inner lstat threw; they are now named for what they are.
+		const dirCheck = inspectKeyDir(key);
+		if (!dirCheck.ok) return COLD(dirCheck.reason);
+
 		const file = canonicalFile(key);
 		const check = inspectFile(file);
 		if (!check.ok) return COLD(check.reason);
@@ -707,7 +801,7 @@ export function makeSessionStore({
 			if (!Number.isFinite(started)) return COLD("conversation-too-old");
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
-		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident };
+		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident, dirIdent: dirCheck.ident };
 	}
 
 	/**
@@ -859,6 +953,21 @@ export function makeSessionStore({
 		for (const name of names) {
 			try {
 				const dir = join(sessionsDir, name);
+				// THE ENTRY ITSELF FIRST (issue #375), so nothing here is ever judged THROUGH a link. Before this,
+				// a link whose target held a transcript was judged on that target's mtime, and the link was
+				// removed once the target aged: the sweep's decision came from a file outside the store. Now only
+				// a real directory is a key on this path, on both edges, which is the same rule `resolveSession`
+				// and `promoteSession` now apply.
+				//
+				// `session_not_reaped`, NOT `session_reaper_skipped`. OQ-007's #337 amendment reserves the
+				// `*_reaper_skipped` names for what a pass could not establish, and says that giving an everyday
+				// verdict the fault's name puts an ordinary outcome into the grep an operator reads as trouble.
+				// This pass established exactly what this entry is and decided to leave it, which is a verdict.
+				const entry = fs.lstatSync(dir);
+				if (!entry.isDirectory()) {
+					log("session_not_reaped", { key: name, reason: "key-not-a-directory" });
+					continue;
+				}
 				let mtimeMs;
 				try {
 					mtimeMs = fs.lstatSync(join(dir, SESSION_FILE_NAME)).mtimeMs;
@@ -873,23 +982,16 @@ export function makeSessionStore({
 					// on the transcript is a disk fault, and a disk fault is not evidence that a key is old. Those
 					// keep today's log-and-skip.
 					if (err?.code !== "ENOENT") throw err;
-					const dst = fs.lstatSync(dir);
-					// ONLY A REAL DIRECTORY IS A KEY ON THIS PATH, and the scope of that is narrow enough to be worth
-					// stating. A stray FILE in the store gives ENOTDIR on the inner lstat, so it never reaches here.
-					// A symlink reaches here only when its target has no readable transcript: one pointing at a
-					// directory that DOES hold one resolves through the link in the path prefix, so the transcript's
-					// own mtime decides and the LINK is removed if it has aged out. That is pre-existing and
-					// unchanged, and it is safe for the reason below rather than because of this guard.
+					const dst = entry; // the entry's own stat, already taken and already proven a directory
+					// The entry was already proven a real directory above (issue #375), so this arm is now only about
+					// a key that has no transcript yet, and `dst` is that same stat rather than a second one.
 					//
-					// What this guard is and is not, measured rather than assumed, because the obvious reading is
-					// wrong: `rmSync(p, { recursive: true, force: true })` does NOT follow a symlink. On a link to a
-					// real directory it removes the LINK and leaves the target and its contents untouched, and on a
-					// dangling link it silently does nothing at all. So a link's TARGET was never at risk here and
-					// this guard is not what protects it. What it does is narrower and still worth having: without
-					// it the reaper would unlink an operator's own symlink out of the store once the LINK's own
-					// mtime aged out, and a reaper that sweeps things that are not keys is a reaper an operator
-					// cannot leave anything beside.
-					if (!dst.isDirectory()) continue;
+					// What the removal below is and is not, measured rather than assumed, because the obvious reading
+					// is wrong: `rmSync(p, { recursive: true, force: true })` does NOT follow a symlink. On a link to
+					// a real directory it removes the LINK and leaves the target untouched, and on a dangling link it
+					// does nothing at all. So a link's TARGET was never at risk here even before this change; what
+					// has changed is that a link is no longer JUDGED, which it was whenever its target held a
+					// readable transcript -- the sweep's decision then came from a file outside the store entirely.
 					mtimeMs = dst.mtimeMs;
 				}
 				if (mtimeMs < cutoff) {

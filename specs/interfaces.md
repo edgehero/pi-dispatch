@@ -3138,7 +3138,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|key-not-a-directory|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
     "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
@@ -3200,9 +3200,9 @@ validator rather than a second copy of it.
 
   | Producer | Tokens |
   |---|---|
-  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed`, `transcript-replaced` |
+  | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `key-not-a-directory`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed`, `transcript-replaced` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
-  | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `too-large`, `locked`, `promote-failed` |
+  | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `key-not-a-directory`, `too-large`, `locked`, `promote-failed` |
 
   Precedence has **two** rules, and for the feature's first year this entry recorded only the first.
   A refused promotion **wins** over the other two (`mergeSession`, `worker/src/processor.mjs`): on a
@@ -3444,7 +3444,8 @@ validator rather than a second copy of it.
   `key` is `sha256(kind \0 repo \0 ref)` truncated — a hash, not a path built from a branch.
   `PI_SESSIONS_DIR` has **no default**; unset means the feature is unavailable.
 - **Read path**, host-side, fail-open at the first miss, every miss a named cold start: key resolves ->
-  canonical file exists -> **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
+  **the key's own name `lstat`s as a real directory** -> canonical file exists ->
+  **`lstat` says regular file, not a symlink** -> size <= `PI_SESSION_MAX_BYTES`
   -> mtime within `PI_SESSIONS_TTL_DAYS` -> stamped `venue` matches the job's resolved backend -> stamped
   `pi-version` matches the job image's label ->
   `resume-chain` below `PI_SESSION_MAX_RESUME_CHAIN` -> stored `context` occupancy below
@@ -3491,7 +3492,15 @@ validator rather than a second copy of it.
   TTL, past the age bound, chain-exhausted or written by another pi. It cold-starts as `transcript-replaced`
   instead. A promotion renames a freshly created file into place, so the inode moves on every completed
   swap. The venue re-check runs FIRST, because a cross-venue promotion trips both and `venue-changed` names
-  why where the identity only says that something moved.
+  why where the identity only says that something moved. **A third re-check, ahead of both** (issue #375),
+  asks only whether the key's own name is STILL a real directory, because a link swapped in over it defeats
+  the other two: each of them resolves through it. It is ordered first because it asks a different
+  question rather than a more urgent version of the same one, and a key that is still a directory falls
+  through to the venue arm with its ordering untouched. The key directory's own `dev:ino` rides the
+  IDENTITY arm rather than that one, so a key directory replaced by ANOTHER REAL directory reports
+  `transcript-replaced` even when the replacement carries the same transcript inode. `dev:ino` alone and
+  deliberately not the file rule's `dev:ino:size:mtime`: a directory's size and mtime move on every entry a
+  promotion creates inside it, so the file rule there would report a race on every quiet run.
   **A process killed inside the promotion lock** leaks the lock, as any kill there always has, and until
   issue #336 later promotions then reported `locked` until the reaper swept the key, which for two shapes it
   never did. Killed between the sentinel and the real stamp,
@@ -3531,12 +3540,14 @@ validator rather than a second copy of it.
   when there is no transcript to key on** (issue #336), which is how a key whose first promotion died before
   the swap is swept at all rather than skipped on every pass forever. ENOENT alone takes that fallback: an
   EIO or an EACCES means the reaper could not ASK, and a reaper that treats "could not ask" as "old" deletes
-  on a transient fault. Only a real DIRECTORY takes that fallback: a stray file gives ENOTDIR and never
-  reaches it, and a symlink reaches it only when its target has no readable transcript, in which case it is
-  left alone. A symlink whose target DOES hold one resolves through the link in the path prefix, so the
-  transcript's own mtime decides and the link is removed once it has aged, which is pre-existing and
-  unchanged. No link's TARGET is ever at risk either way: `rmSync` does not follow a symlink, measured, so
-  it removes the link and leaves the target and its contents. `PI_SESSIONS_TTL_DAYS=0` is unchanged and still sweeps nothing at all, deliberately, because
+  on a transient fault. **The reaper `lstat`s each entry FIRST** (issue #375), so nothing is
+  judged THROUGH a link: an entry that is not a real directory is left where it stands and said, as
+  `session_not_reaped {reason: "key-not-a-directory"}`. Until then a link whose target held a readable
+  transcript was judged on that target's mtime and removed once it aged, which took the sweep's decision
+  from a file outside the store entirely. It is a VERDICT event rather than `session_reaper_skipped`,
+  which `OQ-007` reserves for what a pass could not establish. No link's TARGET was ever at risk either
+  way: `rmSync` does not follow a symlink, measured, so it removes the link and leaves the target and its
+  contents. `PI_SESSIONS_TTL_DAYS=0` is unchanged and still sweeps nothing at all, deliberately, because
   it is an explicit operator instruction and what makes a wedged key recoverable there is the stale-lock
   takeover rather than this. **What the fallback widens is stated**: a transcript-less key directory was
   previously never swept, so anything inside one now goes with it, including files an operator put there;
@@ -3590,13 +3601,23 @@ validator rather than a second copy of it.
   was the last to inherit both halves (issue #336): its WRITE was plain until then, so it followed a link
   planted at that name, and a failure there after the swap reported `promote-failed` for a promotion that
   landed. Neither is true any more, and there is no longer an exception to state.
-  **The guarantee is about the NAMES INSIDE a key directory, not about the directory
-  itself**: a key directory that is itself a symlink, pre-created at the derived path, is followed like any
-  other path component, and every read and write then lands wherever it points. That is out of this
-  contract's scope rather than covered by it, and it is the one shape the lstat-per-name rule cannot see.
-  The store is host-only and never mounted, so this is not a container reaching in; what makes
-  it worth the lines is that the directory NAME is derived rather than random, so anyone who knows the
-  repository and the branch can compute the path and pre-create it. `readFileSync` follows a link, which
+  **The key DIRECTORY is checked too, and that was the one shape the lstat-per-name rule could not see**
+  (issue #375). A key directory that is itself a symlink is followed like any other path component, so every
+  lstat above resolves through it and lands wherever it points: measured before the fix, a link planted at
+  the derived path made a resolve return `resumed` from a transcript outside the store, and a promotion write
+  `current.jsonl`, `pi-version`, `venue` and `resume-chain` through it. Both edges now `lstat` the key's own
+  name and refuse anything that is not a real directory, with the token `key-not-a-directory`; the reaper
+  does the same, so nothing is judged through a link either. THE FINAL COMPONENT ONLY: `PI_SESSIONS_DIR` and
+  its ancestors may legitimately be symlinks (macOS's own temp root is one), so a `realpath` or an ancestor
+  walk would refuse a supported layout. The entry is refused, never removed: this store creates key
+  directories and nothing else, so whatever stands at that name belongs to an operator or to an attacker, and
+  a refusal an operator can read beats a sweep that deletes either. The store is host-only and never mounted,
+  so this is not a container reaching in; what makes it worth the lines is that the directory NAME is derived
+  rather than random, so anyone who knows the repository and the branch can compute the path and pre-create
+  it. Two residuals stay, both needing the same precondition (write access to the store): a real directory
+  pre-created by another user passes, since no ownership check is made (a store shared across hosts or worker
+  uids would otherwise cold-start every key, and Windows has no uid); and the promote window from the check
+  to the last sidecar write is unbounded without `*at` syscalls, which Node does not expose. `readFileSync` follows a link, which
   would decide a gate on some other file's contents; `writeFileSync` and `copyFileSync` follow one at the
   destination, which would turn a promotion into a truncating write of any worker-writable file. Writing a
   temp and renaming over the name replaces a link with a regular file and never opens its target. Sidecar
@@ -3679,7 +3700,11 @@ validator rather than a second copy of it.
   `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `OQ-014`
 - **Acceptance**: Given two jobs whose keys differ only in repository or only in branch, their `/session`
   host paths differ and neither is `PI_SESSIONS_DIR` nor a directory under it that the other can name.
-  Given a symlink at either edge, it is refused and its target is never read. Given a non-completed exit,
+  Given a symlink at either edge, it is refused and its target is never read; given a KEY DIRECTORY that is
+  a symlink, a regular file or a dangling link, both edges refuse it with `key-not-a-directory`, leave the
+  entry where it stands, write nothing through it, and the reaper leaves it and says so; given the STORE
+  itself behind a symlink, resolve and promote both work, because only the key's own name is checked.
+  Given a non-completed exit,
   the canonical file is byte-identical to before the run. Given a second writer holding the lock, the
   loser leaves the canonical transcript untouched. Given an image whose pi version differs from the
   stamped one, the job cold-starts. Given a transcript stamped with a venue other than the job's resolved
@@ -4548,3 +4573,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-22 | Issues #340 and #339. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: "credentials in the URL stripped" was the wrong verb for a rule that reduces or withholds and never edits, and it now says so and cites the design entry. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, and this one was a claim the tree did not honour: its four-sweeps bullet said those sweeps name every outcome "with a fixed reason token and never the CLI's own text (issue #339's channel stays shut)". True of the per-network VERDICTS, false of a pass-level FAULT, which carries the thrown error's own message. The bullet now separates the two and states the treatment that makes the fault line safe: every such message goes through `scrubCredentials`, a scrubber rather than a fixed token, because across the twelve sites that share it the message is as often a filesystem fault an operator needs as it is the CLI's, and a token would delete the diagnosis at most of them to protect three. Its residual is named at its declaration: a credential holding whitespace or a quote that a runtime printed UNQUOTED, which neither runtime does, since both print an unparseable endpoint through Go's `%q`. Two sites the issue did not name are included, and the second is why: `sandbox-store.mjs`'s network-sweep catch, and `retention-sweep.mjs`, which re-emits every one of these families BY NAME on the timer, so a fix confined to the boot paths would have left every tick after boot carrying the credential. **`OQ-007` UNCHANGED, checked, and it is the constraint that shaped this**: no event name is added, renamed or split, so `sandbox_reaper_skipped` is still the one grep covering boot and every tick and only the sweep's own FAULT wears it. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: its per-network tokens are untouched; only the reason VALUE on a pass-level fault is scrubbed. |
 | 2026-09-22 | Issues #362 and #363. **`INT-SANDBOX-CONTRACT` AMENDED**, two Acceptance clauses. The `--publish` clause is about the ARGV and stays true, and now records that the pairing is refused twice: `openSandbox` returns `publish-needs-egress-off` before it creates or asks anything, and `buildSandboxRunArgs` THROWS, so no caller can assemble an argv that publishes a port docker will not bind. The sweep clause states that the `docker ps -a` for this id gates BOTH destructive verbs rather than only the removal: it is re-asked immediately before the detach and again immediately before the `network rm`. The detach is the act that strips a live session's proxy and it was the one the single guard did not protect at all, and the removal moved one command further out per endpoint. The remaining gap is stated rather than claimed closed: disconnect number i is still i commands after the guard, and i is 1 in every shape this project produces. A new per-network token, `directory-not-removed`, names the one silence that will not resolve on its own, since a directory this pass could not remove keeps its id in `keep` on every later pass and no other line names the network it holds. Podman's `.State` vocabulary is recorded at `SWEEPABLE_CONTAINER_STATES` as UNMEASURED, with the direction that costs: a runtime rendering `stopped` where docker renders `exited` holds every leftover network back behind a named note, which is the safe half. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: `removeNetworkOrSay`'s guard parameter decides nothing about WHAT is removed, so the four sweeps' own rules are untouched and four of its five callers are byte-identical. |
 | 2026-09-22 | Issue #360. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, three clauses and one of them is a CORRECTION. (1) "Each decides its namespace on the anchored name shape its producer builds" was true of all four sweeps when it was written, the boot reaper's network half then being `^pi-job-.*-net$`, and THIS CHANGE is what makes it false: the halves disagreed, the container one asking a prefix and the network one that shape, so `pi-job-runner_default` lost its container and kept its network, and the repair widens the network half rather than the sentence surviving intact. The bullet says which test each sweep actually asks, and why the boot reaper's must be the PREFIX: after a crash nothing distinguishes our `pi-job-<id>` from any other name under it, and no charset rule separates them either, because the ids reaching `jobContainerName` are BullMQ's `[A-Za-z0-9._-]` and are deliberately not re-sanitised, so `runner_default` is a legal one. The cost, a `pi-job-mine-net-backup` network now removed at boot, is named here and in `SECURITY.md`'s *What is NOT defended*, where the label alternative is also recorded as considered and not taken (a label cannot be on what a worker that crashed before the change already made). The sandbox sweep KEEPS its full shape, because it parses the session id back out of the name and a predicate cannot. (2) The canary sweep force-detaches a stranger on one of its networks and names it, never removes it, which `INT-LIVE-PROBE-CONTRACT` stated for its sibling and this bullet did not; measured, a live stranger lost its only network and kept running. (3) The PID-namespace residual in "a daemon this host owns": `classifyDockerEndpoint` answers `local: true` for any `unix:` endpoint unconditionally, which is right for the question it is asked and says nothing about PID namespaces, so two containerised doctors on one daemon read as owned and can collide on a pid; bounded to doctor's own ephemera, with the victim degrading to `probe did not run` and `reached: null`, and not guarded because nothing this shell can ask distinguishes them. That residual's other half was already in `INT-LIVE-PROBE-CONTRACT` ("a PID from another namespace reads as dead here"); this is the direction where a foreign doctor reads as local. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: its own sweep, its guards and its caveats are untouched, and it is what the two new clauses were written to match. **`INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT` UNCHANGED, checked**: no job or sandbox argv moves, and the sandbox's own namespace is outside `pi-job-` by construction. **Code evidence**: worker/src/backend-local.mjs -> isJobNamespace, makeReaper; worker/src/doctor.mjs -> sweepStaleCanaryNetworks. |
+| 2026-09-22 | Issue #375. **`INT-SESSION-STORE-CONTRACT` AMENDED**, and it REVERSES a paragraph this contract added one round earlier: that the lstat-per-name guarantee was about the NAMES INSIDE a key directory and that the directory itself was out of scope. It is in scope now. Both edges lstat the key's own name, refuse anything that is not a real directory with the new token `key-not-a-directory`, leave the entry alone rather than sweeping it, and the reaper judges nothing through a link, saying `session_not_reaped` where it used to resolve through one and remove it. The resolve path's post-copy re-check gains a third arm ahead of venue and identity, and the key directory's own `dev:ino` rides the IDENTITY arm; `dev:ino` alone, because a directory's size and mtime move on every entry a promotion creates and the file rule would report a race on every quiet run (caught by the quiet-path test, not by review). FINAL COMPONENT ONLY: the store may itself be a symlink. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the closed enum, both producer rows and the read-path order. Residuals stated rather than closed: a real directory pre-created by another user passes (no ownership check, because a shared store or a second worker uid would cold-start every key), and the promote window is unbounded without `*at` syscalls Node does not expose. **`INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked**: nothing about the mount or the container side moves. **Code evidence**: `worker/src/session-store.mjs` -> `inspectKeyDir`, `ensureKeyDir`; `worker/src/run-history.mjs` -> `SESSION_REASONS`. |

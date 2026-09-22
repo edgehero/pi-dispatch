@@ -993,7 +993,9 @@ test("a host gate that refused outranks the runner's absent, so the record names
 	// either way, and pi opens it and finds no messages -- so the runner reports `absent` on EVERY host
 	// refusal. While that won, `expired` and `pi-version-changed` reached no completed record at all and
 	// docs/sessions.md's promise that every cold start is nameable in the record was false for them.
-	for (const token of ["expired", "conversation-too-old", "venue-changed", "pi-version-changed", "transcript-replaced", "too-large", "not-a-regular-file", "unparseable"]) {
+	// The LIMIT of this loop, since it reads like coverage of the store: it proves the PRECEDENCE rule holds
+	// for each token, not that the store can produce any of them. That is session-store.test.mjs's job.
+	for (const token of ["expired", "conversation-too-old", "venue-changed", "pi-version-changed", "transcript-replaced", "too-large", "not-a-regular-file", "key-not-a-directory", "unparseable"]) {
 		const prepared = { workspace: "/w", jobDir: "/j", session: { key: "k", hostDir: "/j/session", resume: false, reason: token, bytes: null } };
 		const { deps: d } = deps({
 			prepareWorkspace: async () => prepared,

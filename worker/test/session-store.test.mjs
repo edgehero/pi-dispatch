@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import * as realFs from "node:fs";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeSessionStore, SESSION_FILE_NAME } from "../src/session-store.mjs";
@@ -1622,4 +1622,273 @@ test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key wit
 	seed(keep.sessionsDir, expired);
 	keep.store.reapSessions();
 	assert.equal(existsSync(join(keep.sessionsDir, expired, SESSION_FILE_NAME)), true);
+});
+
+// --------------------------------------------------------------------------------------------------
+// Issue #375: the key DIRECTORY itself. Every guarantee above is an lstat on a name INSIDE that
+// directory, and a key directory that is a symlink defeats all of them at once, because the link IS the
+// directory. Measured against the real store before the fix: a link planted at the derived path made
+// resolve return `resumed` from a transcript outside the store, and promote write `current.jsonl`,
+// `pi-version`, `venue` and `resume-chain` through it into that outside directory.
+// --------------------------------------------------------------------------------------------------
+
+/** The shapes a key's own name can carry that are not a real directory, and how to plant each. */
+const NOT_A_DIRECTORY = {
+	"a link to a directory holding a transcript": (at, root) => {
+		const outside = join(root, "outside-seeded");
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(outside, SESSION_FILE_NAME), HEADER);
+		writeFileSync(join(outside, "pi-version"), PI);
+		writeFileSync(join(outside, "venue"), "local");
+		symlinkSync(outside, at);
+		return outside;
+	},
+	"a link to a directory holding something else": (at, root) => {
+		const outside = join(root, "outside-precious");
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(outside, "PRECIOUS"), "keep me\n");
+		symlinkSync(outside, at);
+		return outside;
+	},
+	"a dangling link": (at, root) => {
+		const outside = join(root, "outside-absent");
+		symlinkSync(outside, at);
+		return outside;
+	},
+	"a link to a regular file": (at, root) => {
+		const outside = join(root, "outside-file");
+		writeFileSync(outside, "not a key\n");
+		symlinkSync(outside, at);
+		return outside;
+	},
+	"a regular file": (at) => {
+		writeFileSync(at, "not a key\n");
+		return null;
+	},
+};
+
+test("a key directory that is NOT A DIRECTORY is refused on the READ edge, and its target is never read (#375)", () => {
+	for (const [name, plant] of Object.entries(NOT_A_DIRECTORY)) {
+		const { store, jobDir, sessionsDir, root, logs } = fixture();
+		const key = sessionKeyFor(ghIssue);
+		plant(join(sessionsDir, key), root);
+
+		const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+		assert.equal(s.resume, false, `${name} must never resume`);
+		assert.equal(s.reason, "key-not-a-directory", `${name} names what it is, not what a file inside it would have been`);
+		assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", `${name}: the container is handed the 0-byte cold start`);
+		assert.ok(
+			logs.some(([event, fields]) => event === "session_resolved" && fields.reason === "key-not-a-directory"),
+			`${name}: the refusal rides the line an operator already greps, with no new event name`,
+		);
+	}
+});
+
+test("a key directory that is NOT A DIRECTORY is refused on the WRITE edge, and nothing is written through it (#375)", () => {
+	for (const [name, plant] of Object.entries(NOT_A_DIRECTORY)) {
+		const { store, jobDir, sessionsDir, root, logs } = fixture();
+		const key = sessionKeyFor(ghIssue);
+		const at = join(sessionsDir, key);
+		const outside = plant(at, root);
+		const before = outside !== null && existsSync(outside) && realFs.lstatSync(outside).isDirectory() ? readdirSync(outside).sort().join(",") : null;
+
+		const hostDir = join(jobDir, "session");
+		mkdirSync(hostDir, { recursive: true });
+		writeFileSync(join(hostDir, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user" })}\n`);
+		const p = store.promoteSession({ key, hostDir, modelId: "m", venue: "local" }, { piVersion: PI });
+
+		assert.equal(p.promoted, false, `${name} must never promote`);
+		assert.equal(p.reason, "key-not-a-directory", `${name}: the refusal names the directory, not the transcript`);
+		assert.ok(
+			logs.some(([event, fields]) => event === "session_promote_skipped" && fields.reason === "key-not-a-directory"),
+			`${name}: and it is said, on the line the other promote refusals use`,
+		);
+		// The entry is LEFT: it is not this store's to remove, and a refusal an operator can read beats a
+		// sweep that deletes whatever is standing at a precomputable path.
+		assert.equal(realFs.lstatSync(at).isDirectory(), false, `${name}: the planted entry is left exactly as it was`);
+		if (outside !== null && before !== null) {
+			assert.equal(readdirSync(outside).sort().join(","), before, `${name}: the target directory gains nothing -- no transcript, no stamp, no lock, no temp`);
+		}
+		if (name === "a dangling link") assert.equal(existsSync(outside), false, "a dangling link's target is never created");
+	}
+});
+
+test("a link planted between the lstat and the mkdir is still caught: the second lstat is why (#375)", () => {
+	// `mkdirSync(dir, { recursive: true })` SUCCEEDS on an existing link to a directory, so a promotion that
+	// asked only "did mkdir work" would accept exactly the shape the read edge refuses. This arms an injected
+	// `mkdirSync` that plants the link the instant the store reaches for the key directory.
+	const { store, jobDir, sessionsDir, root, logs } = (() => {
+		let armed = false;
+		let made;
+		const outside = () => join(made.root, "outside-raced");
+		made = fixture({
+			fs: {
+				...realFs,
+				mkdirSync: (p, ...rest) => {
+					const path = String(p);
+					if (!armed && path.startsWith(join(made.sessionsDir, sessionKeyFor(ghIssue)))) {
+						armed = true;
+						mkdirSync(outside(), { recursive: true });
+						writeFileSync(join(outside(), "PRECIOUS"), "keep me\n");
+						symlinkSync(outside(), path);
+						return undefined; // the real mkdir would have succeeded on the link, silently
+					}
+					return realFs.mkdirSync(p, ...rest);
+				},
+			},
+		});
+		return made;
+	})();
+
+	const hostDir = join(jobDir, "session");
+	mkdirSync(hostDir, { recursive: true });
+	writeFileSync(join(hostDir, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user" })}\n`);
+	const p = store.promoteSession({ key: sessionKeyFor(ghIssue), hostDir, modelId: "m", venue: "local" }, { piVersion: PI });
+
+	assert.equal(p.promoted, false, "a link that appears during the create is refused like one that was already there");
+	assert.equal(p.reason, "key-not-a-directory");
+	assert.deepEqual(readdirSync(join(root, "outside-raced")), ["PRECIOUS"], "and the target gains nothing");
+	assert.ok(logs.some(([event, fields]) => event === "session_promote_skipped" && fields.reason === "key-not-a-directory"));
+});
+
+test("a link swapped in AFTER the gates read, while the copy is in flight, is caught by the re-check (#375)", () => {
+	// The gates and the copy are not under the promotion lock, so the directory can be replaced between
+	// them -- the same window the venue and transcript re-checks already cover, one level up. The injected
+	// `copyFileSync` swaps the real key directory for a link the instant the copy runs.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	made = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (src, dest, ...rest) => {
+				const out = realFs.copyFileSync(src, dest, ...rest);
+				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+					const at = join(made.sessionsDir, key);
+					const attacker = join(made.root, "attacker");
+					mkdirSync(attacker, { recursive: true });
+					writeFileSync(join(attacker, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "ATTACKER" })}\n`);
+					writeFileSync(join(attacker, "pi-version"), PI);
+					writeFileSync(join(attacker, "venue"), "local");
+					realFs.rmSync(at, { recursive: true, force: true });
+					symlinkSync(attacker, at);
+				}
+				return out;
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a key directory replaced mid-copy must not resume");
+	assert.equal(s.reason, "key-not-a-directory", "and the miss names the directory, which is what moved");
+	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "the staged copy is emptied, so nothing of the attacker's transcript reaches the container");
+});
+
+test("a key directory REPLACED by another real directory is caught too, on the identity rather than the shape (#375)", () => {
+	// The sharp case, and the reason the directory's dev:ino rides the re-check at all: the replacement is a
+	// real directory holding the SAME transcript inode, so the transcript identity arm sees nothing move.
+	// Without the directory's own identity this passes as an untouched resume.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	made = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (src, dest, ...rest) => {
+				const out = realFs.copyFileSync(src, dest, ...rest);
+				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+					const at = join(made.sessionsDir, key);
+					const swapped = join(made.root, "swapped");
+					mkdirSync(swapped, { recursive: true });
+					// The SAME transcript inode, hard-linked, and the same stamps: only the directory moves.
+					realFs.linkSync(join(at, SESSION_FILE_NAME), join(swapped, SESSION_FILE_NAME));
+					writeFileSync(join(swapped, "pi-version"), PI);
+					writeFileSync(join(swapped, "venue"), "local");
+					realFs.rmSync(at, { recursive: true, force: true });
+					renameSync(swapped, at);
+				}
+				return out;
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, false, "a key directory swapped for another real one must not resume");
+	assert.equal(s.reason, "transcript-replaced", "it is still a directory and still this venue, so what moved is the thing the identity arm names");
+	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "and the staged copy is emptied");
+});
+
+test("an ordinary write inside the key directory does NOT trip the re-check: no mtime in the identity (#375)", () => {
+	// A directory's mtime moves on every entry created inside it, and a concurrent promotion creates several.
+	// If the directory's identity carried mtime, the quiet path would report a race on every ordinary run.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	made = fixture({
+		fs: {
+			...realFs,
+			copyFileSync: (src, dest, ...rest) => {
+				const out = realFs.copyFileSync(src, dest, ...rest);
+				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+					writeFileSync(join(made.sessionsDir, key, "lock"), ""); // an entry created, so the mtime moves
+				}
+				return out;
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, true, "the key directory is the same one, so this resumes");
+	assert.equal(s.reason, "resumed");
+});
+
+test("the STORE itself may be a symlink: only the key's own name is checked (#375)", () => {
+	// macOS's own temp root is `/var -> private/var`, and moving the whole store behind a link is a supported
+	// layout. A realpath or an ancestor walk would refuse both, and every fixture on this platform with them.
+	const { store, jobDir, root } = (() => {
+		const made = fixture();
+		const real = join(made.root, "real-store");
+		renameSync(made.sessionsDir, real);
+		symlinkSync(real, made.sessionsDir);
+		return made;
+	})();
+	const key = sessionKeyFor(ghIssue);
+	seed(join(root, "real-store", ".."), key, { venue: "local" }); // seeded through the link's own parent
+	renameSync(join(root, key), join(root, "real-store", key));
+
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	assert.equal(s.resume, true, "a linked STORE is a layout, not an attack: the check is the final component only");
+
+	const p = store.promoteSession(s, { piVersion: PI });
+	assert.equal(p.promoted, true, "and a promotion lands through it too");
+});
+
+test("the reaper judges NOTHING through a link, and says so as a verdict rather than a fault (#375)", () => {
+	const later = NOW + 40 * 86400000;
+	const aged = (NOW - 30 * 86400000) / 1000;
+	const { store, sessionsDir, root, logs } = fixture({ ttlDays: 14, now: () => later });
+
+	// A link whose TARGET holds an aged transcript. Before this, the reaper resolved through the link, judged
+	// the target's transcript, and removed the link once it aged: a decision taken on a file outside the store.
+	const linked = sessionKeyFor(ghIssue);
+	const outside = join(root, "outside-aged");
+	mkdirSync(outside, { recursive: true });
+	writeFileSync(join(outside, SESSION_FILE_NAME), HEADER);
+	realFs.lutimesSync(join(outside, SESSION_FILE_NAME), aged, aged);
+	symlinkSync(outside, join(sessionsDir, linked));
+	// And a stray file, which reached the same skip through an ENOTDIR fault before.
+	writeFileSync(join(sessionsDir, "stray"), "not a key\n");
+
+	store.reapSessions();
+
+	assert.equal(existsSync(join(sessionsDir, linked)), true, "the link is left where it stands");
+	assert.equal(existsSync(join(outside, SESSION_FILE_NAME)), true, "and its target is untouched");
+	assert.equal(existsSync(join(sessionsDir, "stray")), true, "so is a stray file");
+	const verdicts = logs.filter(([event]) => event === "session_not_reaped").map(([, f]) => `${f.key}:${f.reason}`).sort();
+	assert.deepEqual(verdicts, ["stray:key-not-a-directory", `${linked}:key-not-a-directory`].sort(), "both are named, once each");
+	assert.equal(
+		logs.some(([event]) => event === "session_reaper_skipped"),
+		false,
+		"and neither wears the FAULT name: `*_reaper_skipped` means a pass could not establish something, which is not what this is (OQ-007)",
+	);
 });
