@@ -813,14 +813,15 @@ test("a promotion from another venue that lands between the gate and the copy is
 		maxResumeChain: 5,
 		fs: {
 			...realFs,
-			// The copy INTO the job dir is where the race lands: a concurrent far promotion writes its sentinel and
-			// swaps its transcript in, and this copy reads the new file.
-			copyFileSync: (from, to) => {
-				if (String(from).startsWith(sessionsDirRef) && String(to).includes(`${join("session", SESSION_FILE_NAME)}`)) {
+			// The OPEN of the canonical transcript is where the race lands (issue #375): a concurrent far
+			// promotion writes its sentinel and swaps its transcript in, and the descriptor this store is about
+			// to take is therefore the new file rather than the judged one.
+			openSync: (path, flags, ...rest) => {
+				if (flags === "r" && String(path).startsWith(sessionsDirRef) && String(path).endsWith(SESSION_FILE_NAME)) {
 					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "(pending)");
-					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+					realFs.writeFileSync(path, `${HEADER}far-transcript\n`);
 				}
-				return realFs.copyFileSync(from, to);
+				return realFs.openSync(path, flags, ...rest);
 			},
 		},
 	});
@@ -1388,9 +1389,13 @@ test("a SAME-venue promotion that lands between the gate and the copy cold-start
 		const { store, jobDir, sessionsDir, root } = fixture({
 			fs: {
 				...realFs,
-				copyFileSync: (from, to) => {
-					if (String(from).startsWith(ref) && String(to).includes(join("session", SESSION_FILE_NAME))) replace(String(from), root);
-					return realFs.copyFileSync(from, to);
+				// The seam is the OPEN, not the copy (issue #375): the store takes one descriptor on the
+				// canonical transcript and reads the staged bytes off it, so a promotion that lands after that
+				// open is one this job simply does not see. Landing it here is landing it between the gate and
+				// the open, which is the window that remains.
+				openSync: (path, flags, ...rest) => {
+					if (flags === "r" && String(path).startsWith(ref) && String(path).endsWith(SESSION_FILE_NAME)) replace(String(path), root);
+					return realFs.openSync(path, flags, ...rest);
 				},
 			},
 		});
@@ -1443,12 +1448,14 @@ test("a promotion from another venue that COMPLETES between the gate and the cop
 	const { store, jobDir, sessionsDir } = fixture({
 		fs: {
 			...realFs,
-			copyFileSync: (from, to) => {
-				if (String(from).startsWith(sessionsDirRef) && String(to).includes(join("session", SESSION_FILE_NAME))) {
-					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+			// The seam is the OPEN, not the copy (issue #375): the staged bytes are read off one descriptor
+			// taken here, so this is the window between the gate and that open.
+			openSync: (path, flags, ...rest) => {
+				if (flags === "r" && String(path).startsWith(sessionsDirRef) && String(path).endsWith(SESSION_FILE_NAME)) {
+					realFs.writeFileSync(path, `${HEADER}far-transcript\n`);
 					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "far");
 				}
-				return realFs.copyFileSync(from, to);
+				return realFs.openSync(path, flags, ...rest);
 			},
 		},
 	});
@@ -1468,12 +1475,14 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	const { store, jobDir, sessionsDir } = fixture({
 		fs: {
 			...realFs,
-			copyFileSync: (from, to) => {
-				if (String(from).startsWith(sessionsDirRef) && String(to).includes(join("session", SESSION_FILE_NAME))) {
-					realFs.writeFileSync(from, `${HEADER}far-transcript\n`);
+			// The seam is the OPEN, not the copy (issue #375): the staged bytes are read off one descriptor
+			// taken here, so this is the window between the gate and that open.
+			openSync: (path, flags, ...rest) => {
+				if (flags === "r" && String(path).startsWith(sessionsDirRef) && String(path).endsWith(SESSION_FILE_NAME)) {
+					realFs.writeFileSync(path, `${HEADER}far-transcript\n`);
 					realFs.writeFileSync(join(sessionsDirRef, key, "venue"), "far");
 				}
-				return realFs.copyFileSync(from, to);
+				return realFs.openSync(path, flags, ...rest);
 			},
 			writeFileSync: (p, data, ...rest) => {
 				if (String(p).includes(join("session", SESSION_FILE_NAME)) && data === "") throw new Error("EIO: i/o error");
@@ -1563,16 +1572,16 @@ test("a disk fault on the transcript is not evidence that a key is old (#336)", 
 	assert.ok(logs.some(([event, f]) => event === "session_reaper_skipped" && f.key === key), "and the fault is said");
 });
 
-test("the reaper's directory fallback takes only real directories: a stray file and a link do not (#336)", () => {
-	// The fallback lstats the ENTRY when the transcript is absent, so the shapes that reach it need naming. A
-	// stray file gives ENOTDIR on the inner lstat and never arrives; a SYMLINK gives ENOENT and does.
-	//
-	// The link here points at a REAL directory and its own mtime is aged past the cutoff, which is the only
-	// shape that pins the guard. Measured, because the obvious reading is wrong twice over: `rmSync` with
-	// `recursive` and `force` does NOT follow a link, so on a DANGLING one it silently does nothing (a test
-	// using one passes with the guard removed, which is how this was found) and on a link to a real directory
-	// it removes the LINK and leaves the target alone. So the target was never at risk; what the guard stops
-	// is the reaper unlinking an operator's own symlink out of the store.
+test("the reaper removes neither a stray file nor an aged link out of the store (#336, #375)", () => {
+	// The outcome is the same as when this test was written for #336; the mechanism under it moved. Then, a
+	// stray file gave ENOTDIR on the inner lstat and a symlink gave ENOENT and reached a fallback guard. Since
+	// issue #375 the reaper lstats the ENTRY first, so neither reaches that fallback at all: both are named as
+	// `session_not_reaped` and left, which the #375 reaper test pins. What this test keeps is the OUTCOME, and
+	// the measurement behind it, because the obvious reading is wrong twice over: `rmSync` with `recursive`
+	// and `force` does NOT follow a link, so on a DANGLING one it silently does nothing (a test using one
+	// passed even with the old guard removed, which is how that was found) and on a link to a real directory
+	// it removes the LINK and leaves the target alone. The target was never at risk; what is at stake is the
+	// reaper unlinking an operator's own symlink out of the store.
 	const later = Date.now() + 3 * 86400000;
 	const { store, sessionsDir, root } = fixture({ ttlDays: 1, now: () => later });
 	mkdirSync(sessionsDir, { recursive: true });
@@ -1751,18 +1760,17 @@ test("a link planted between the lstat and the mkdir is still caught: the second
 	assert.ok(logs.some(([event, fields]) => event === "session_promote_skipped" && fields.reason === "key-not-a-directory"));
 });
 
-test("a link swapped in AFTER the gates read, while the copy is in flight, is caught by the re-check (#375)", () => {
-	// The gates and the copy are not under the promotion lock, so the directory can be replaced between
-	// them -- the same window the venue and transcript re-checks already cover, one level up. The injected
-	// `copyFileSync` swaps the real key directory for a link the instant the copy runs.
+test("a link swapped in between the gates and the OPEN is caught, and stages nothing of its target (#375)", () => {
+	// The gates and the open are not under the promotion lock, so the key directory can be replaced between
+	// them. The injected `openSync` swaps the real key directory for a link the instant the store reaches for
+	// the transcript, which is the window that remains once the bytes come off one descriptor.
 	const key = sessionKeyFor(ghIssue);
 	let made;
 	made = fixture({
 		fs: {
 			...realFs,
-			copyFileSync: (src, dest, ...rest) => {
-				const out = realFs.copyFileSync(src, dest, ...rest);
-				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+			openSync: (path, flags, ...rest) => {
+				if (flags === "r" && String(path).startsWith(made.sessionsDir) && String(path).endsWith(SESSION_FILE_NAME)) {
 					const at = join(made.sessionsDir, key);
 					const attacker = join(made.root, "attacker");
 					mkdirSync(attacker, { recursive: true });
@@ -1772,55 +1780,95 @@ test("a link swapped in AFTER the gates read, while the copy is in flight, is ca
 					realFs.rmSync(at, { recursive: true, force: true });
 					symlinkSync(attacker, at);
 				}
-				return out;
+				return realFs.openSync(path, flags, ...rest);
 			},
 		},
 	});
 	seed(made.sessionsDir, key, { venue: "local" });
 
 	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
-	assert.equal(s.resume, false, "a key directory replaced mid-copy must not resume");
+	assert.equal(s.resume, false, "a key directory replaced before the open must not resume");
 	assert.equal(s.reason, "key-not-a-directory", "and the miss names the directory, which is what moved");
-	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "the staged copy is emptied, so nothing of the attacker's transcript reaches the container");
+	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "nothing of the attacker's transcript reaches the container");
 });
 
-test("a key directory REPLACED by another real directory is caught too, on the identity rather than the shape (#375)", () => {
-	// The sharp case, and the reason the directory's dev:ino rides the re-check at all: the replacement is a
-	// real directory holding the SAME transcript inode, so the transcript identity arm sees nothing move.
-	// Without the directory's own identity this passes as an untouched resume.
+test("a link swapped in with a DIFFERENT venue is still the directory's miss, not a venue move (#375)", () => {
+	// What pins the ladder's ORDER. With the directory arm below the venue arm, a planted symlink whose target
+	// happens to stamp another venue reports `venue-changed`, which sends an operator to the venue docs
+	// instead of to the symlink standing in their store.
 	const key = sessionKeyFor(ghIssue);
 	let made;
 	made = fixture({
 		fs: {
 			...realFs,
-			copyFileSync: (src, dest, ...rest) => {
-				const out = realFs.copyFileSync(src, dest, ...rest);
-				if (String(src).endsWith(SESSION_FILE_NAME) && !String(src).includes("job-")) {
+			openSync: (path, flags, ...rest) => {
+				if (flags === "r" && String(path).startsWith(made.sessionsDir) && String(path).endsWith(SESSION_FILE_NAME)) {
 					const at = join(made.sessionsDir, key);
-					const swapped = join(made.root, "swapped");
-					mkdirSync(swapped, { recursive: true });
-					// The SAME transcript inode, hard-linked, and the same stamps: only the directory moves.
-					realFs.linkSync(join(at, SESSION_FILE_NAME), join(swapped, SESSION_FILE_NAME));
-					writeFileSync(join(swapped, "pi-version"), PI);
-					writeFileSync(join(swapped, "venue"), "local");
+					const attacker = join(made.root, "attacker-far");
+					mkdirSync(attacker, { recursive: true });
+					writeFileSync(join(attacker, SESSION_FILE_NAME), HEADER);
+					writeFileSync(join(attacker, "pi-version"), PI);
+					writeFileSync(join(attacker, "venue"), "far");
 					realFs.rmSync(at, { recursive: true, force: true });
-					renameSync(swapped, at);
+					symlinkSync(attacker, at);
 				}
-				return out;
+				return realFs.openSync(path, flags, ...rest);
 			},
 		},
 	});
 	seed(made.sessionsDir, key, { venue: "local" });
 
 	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
-	assert.equal(s.resume, false, "a key directory swapped for another real one must not resume");
-	assert.equal(s.reason, "transcript-replaced", "it is still a directory and still this venue, so what moved is the thing the identity arm names");
-	assert.equal(readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8"), "", "and the staged copy is emptied");
+	assert.equal(s.reason, "key-not-a-directory", "the directory arm runs ahead of the venue arm, and a name that is not a directory is neither a venue move nor a swap");
 });
 
-test("an ordinary write inside the key directory does NOT trip the re-check: no mtime in the identity (#375)", () => {
-	// A directory's mtime moves on every entry created inside it, and a concurrent promotion creates several.
-	// If the directory's identity carried mtime, the quiet path would report a race on every ordinary run.
+test("a swap AFTER the open cannot change what is staged: the bytes come off the judged descriptor (#375)", () => {
+	// The attack the gate round found, and the reason the copy runs off a descriptor at all. Every arm of the
+	// old re-check read BY PATH after a path-based copy, so an attacker who was a symlink DURING the copy and
+	// the original directory again before the re-check matched all three arms while the bytes came from
+	// somewhere else: measured at 195 of 757 successful resumes against a plain second process. Here the swap
+	// lands after the open and is then restored, which is exactly that A, B, A -- and it now buys nothing,
+	// because a descriptor is bound to its inode and cannot be re-pointed by a later rename.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let swapped = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			readSync: (fd, ...rest) => {
+				if (!swapped) {
+					swapped = true;
+					const at = join(made.sessionsDir, key);
+					const attacker = join(made.root, "attacker");
+					mkdirSync(attacker, { recursive: true });
+					writeFileSync(join(attacker, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user", content: "ATTACKER" })}\n`);
+					writeFileSync(join(attacker, "pi-version"), PI);
+					writeFileSync(join(attacker, "venue"), "local");
+					const stash = join(made.root, "stash");
+					renameSync(at, stash);
+					symlinkSync(attacker, at);
+					realFs.unlinkSync(at); // and back again, so every by-path re-check would see the original
+					renameSync(stash, at);
+				}
+				return realFs.readSync(fd, ...rest);
+			},
+		},
+	});
+	seed(made.sessionsDir, key, { venue: "local" });
+
+	const s = made.store.resolveSession(ghIssue, { jobDir: made.jobDir, piVersion: PI });
+	assert.equal(s.resume, true, "the judged transcript is still the one this job reads, so it resumes");
+	const staged = readFileSync(join(s.hostDir, SESSION_FILE_NAME), "utf8");
+	assert.equal(staged.includes("ATTACKER"), false, "and no byte of the attacker's transcript reaches the container");
+	assert.equal(staged, HEADER, "what is staged is exactly the transcript the gates judged");
+});
+
+test("an ordinary write inside the key directory does NOT disturb a resume (#375)", () => {
+	// The quiet path, pinned because the first draft of this change broke it: the post-copy re-check compared
+	// the key directory with the FILE identity rule, `dev:ino:size:mtime`, and a directory's size and mtime
+	// move on every entry created inside it (64 -> 96 -> 1376 bytes on APFS, measured), so an ordinary
+	// concurrent promotion reported a race on every run. The directory identity is gone entirely now -- the
+	// staged bytes come off one descriptor -- and this is what keeps that regression from coming back.
 	const key = sessionKeyFor(ghIssue);
 	let made;
 	made = fixture({
@@ -1891,4 +1939,84 @@ test("the reaper judges NOTHING through a link, and says so as a verdict rather 
 		false,
 		"and neither wears the FAULT name: `*_reaper_skipped` means a pass could not establish something, which is not what this is (OQ-007)",
 	);
+});
+
+test("a link swapped in UNDER the lock is refused before anything is written through it (#375)", () => {
+	// `ensureKeyDir` runs before `takeLock`, so the segment between them is a window: measured on the first
+	// draft of this change, a swap there put the transcript and all four sidecars in the attacker's directory
+	// and still reported `promoted: true`. The lock's own `openSync` is the first call after the check, so
+	// this fires exactly in that window.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			openSync: (path, flags, ...rest) => {
+				if (!armed && flags === "wx" && String(path).endsWith("lock")) {
+					armed = true;
+					const at = join(made.sessionsDir, key);
+					const attacker = join(made.root, "attacker-lock");
+					mkdirSync(attacker, { recursive: true });
+					realFs.rmSync(at, { recursive: true, force: true });
+					symlinkSync(attacker, at);
+				}
+				return realFs.openSync(path, flags, ...rest);
+			},
+		},
+	});
+	const hostDir = join(made.jobDir, "session");
+	mkdirSync(hostDir, { recursive: true });
+	writeFileSync(join(hostDir, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user" })}\n`);
+
+	const p = made.store.promoteSession({ key, hostDir, modelId: "m", venue: "local" }, { piVersion: PI });
+	assert.equal(p.promoted, false, "a key directory replaced between the check and the lock must not be promoted into");
+	assert.equal(p.reason, "key-not-a-directory");
+	assert.deepEqual(readdirSync(join(made.root, "attacker-lock")), [], "and the target gains nothing at all: no transcript, no stamp, no temp");
+});
+
+test("a swap the write path cannot prevent is at least not CLAIMED as promoted (#375)", () => {
+	// Prevention stops at the last check: Node exposes no `renameat`, so every write after it resolves the
+	// name again and a swap landing there really does put the bytes outside the store. What must not happen is
+	// the record saying the work is in the store when it is not, which is what the old code reported. This
+	// swaps at the rename, the latest point that still precedes the post-swap check.
+	const key = sessionKeyFor(ghIssue);
+	let made;
+	let armed = false;
+	made = fixture({
+		fs: {
+			...realFs,
+			renameSync: (from, to, ...rest) => {
+				const out = realFs.renameSync(from, to, ...rest);
+				if (!armed && String(to).endsWith(SESSION_FILE_NAME)) {
+					armed = true;
+					const at = join(made.sessionsDir, key);
+					const attacker = join(made.root, "attacker-late");
+					mkdirSync(attacker, { recursive: true });
+					realFs.rmSync(at, { recursive: true, force: true });
+					symlinkSync(attacker, at);
+				}
+				return out;
+			},
+		},
+	});
+	const hostDir = join(made.jobDir, "session");
+	mkdirSync(hostDir, { recursive: true });
+	writeFileSync(join(hostDir, SESSION_FILE_NAME), `${HEADER}${JSON.stringify({ type: "message", role: "user" })}\n`);
+
+	const p = made.store.promoteSession({ key, hostDir, modelId: "m", venue: "local" }, { piVersion: PI });
+	assert.equal(p.promoted, false, "the record must not claim a promotion that landed somewhere else");
+	assert.equal(p.reason, "key-not-a-directory");
+});
+
+test("a promoted key directory is created 0700, because transcripts are PII-bearing (#375)", () => {
+	// The mode moved into `ensureKeyDir` with this change, and nothing pinned it: `doctor.test.mjs` pins 0700
+	// for `PI_SESSIONS_DIR` itself, and `SECURITY.md` promises it for the store, but the per-key directory the
+	// worker creates on every first promotion had no assertion at all. Dropping the mode here leaves the whole
+	// suite green and the transcripts world-readable.
+	const { store, jobDir, sessionsDir } = fixture();
+	const s = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(s, { piVersion: PI }).promoted, true);
+	assert.equal(statSync(join(sessionsDir, sessionKeyFor(ghIssue))).mode & 0o777, 0o700, "the key directory is the worker's alone");
 });

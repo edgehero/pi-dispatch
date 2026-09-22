@@ -1614,9 +1614,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   job cold-starts with `transcript-replaced` and the staged file is 0 bytes, while a transcript nothing
   touched still resumes. Given a key whose directory in the store is a symlink, a regular file or a
   dangling link, the job cold-starts with `key-not-a-directory`, a completed run promotes nothing, and
-  what stands at that name is left untouched rather than swept. Given a trigger moved from one venue to another, its next job cold-starts with
-  `venue-changed` and never stages the transcript the other venue wrote; given a key promoted before venues were recorded, it resumes
-  for a job resolving to `local` and for no other venue.
+  what stands at that name is left untouched rather than swept. Given a trigger moved from one venue to
+  another, its next job cold-starts with `venue-changed` and never stages the transcript the other venue
+  wrote; given a key promoted before venues were recorded, it resumes for a job resolving to `local` and for
+  no other venue.
 
 ## REQ-RESURRECTABLE-SANDBOX
 

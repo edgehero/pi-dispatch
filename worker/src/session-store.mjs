@@ -1,9 +1,11 @@
 import {
 	copyFileSync,
+	fstatSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	closeSync,
+	readSync,
 	readFileSync,
 	readdirSync,
 	renameSync,
@@ -193,7 +195,7 @@ export function makeSessionStore({
 	defaultBackend = null,
 	log = () => {},
 	now = () => Date.now(),
-	fs = { copyFileSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
+	fs = { copyFileSync, fstatSync, lstatSync, mkdirSync, openSync, closeSync, readSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
 }) {
 	/**
 	 * Stage this job's /session directory and decide whether it resumes.
@@ -236,53 +238,56 @@ export function makeSessionStore({
 			// The identity is split off the verdict rather than carried on it: this return is spread onto the
 			// session object the processor holds for the WHOLE run, and an inode number is bookkeeping for the
 			// next few lines, not state a promotion an hour later should be able to read.
-			const { ident: judged = null, dirIdent: judgedDir = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
+			const { ident: judged = null, ...judgedVerdict } = readCanonical(key, piVersion, modelId, venue);
 			let verdict = judgedVerdict;
 			if (verdict.resume) {
-				fs.copyFileSync(canonicalFile(key), staged);
-				// The read above and this copy are not under the promotion lock, so a promotion can land between
-				// them and the copy would stage a transcript no gate judged. TWO re-checks, and neither subsumes
-				// the other.
+				// THE BYTES COME OFF THE DESCRIPTOR THAT WAS JUDGED, never off the path a second time.
 				//
-				// The VENUE stamp catches a promotion that wrote its sentinel and then did NOT swap: the
-				// transcript is unchanged, so no identity moved. Every promotion writes the pending sentinel
-				// before it swaps and its own venue after, so a stamp that no longer names this venue after the
-				// copy -- pending, or another venue outright -- means the file just copied may not be the one
-				// that was judged.
+				// The gates above ran by PATH, and so did this copy until issue #375's gate round: it was
+				// `copyFileSync(canonicalFile(key), staged)` followed by re-checks that also re-resolved the path.
+				// Every one of those resolutions is a separate walk of the same name, so an attacker who is a
+				// symlink DURING the copy and the original directory again before the re-check matched all three
+				// arms while the bytes came from somewhere else entirely. Measured on the pre-fix code by a plain
+				// second process doing rename/symlink/rename in a loop: 195 of 757 successful resumes, 26%,
+				// staged an attacker's transcript and reported `resumed`. The same shape one level down -- the
+				// A, B, A round trip on `current.jsonl` itself -- is what this contract used to state as a
+				// residual the identity re-check could only shrink.
 				//
-				// The IDENTITY catches a promotion that DID swap, which the stamp cannot see when the promoting
-				// job shares this venue, and which it also cannot see across the A, B, A round trip that leaves
-				// the stamp matching again (a residual this contract used to state). Every swap renames a fresh
-				// inode into place, so the identity moves whether or not the stamp does.
+				// One `open` answers both. The descriptor is bound to the inode at the instant it is taken, so
+				// `fstat` on it cannot be lied to by a later swap, and bytes read from it cannot come from a file
+				// that replaced the name afterwards. What a swap can still do is make this refuse: the identity
+				// will not match what the gates judged, and the job cold-starts, which is the safe direction.
 				//
-				// VENUE FIRST, deliberately: a cross-venue promotion trips BOTH, and `venue-changed` is the more
-				// useful of the two answers there, because it names WHY and sends an operator to the venue docs
-				// where `transcript-replaced` would only say that something moved. The first miss naming itself
-				// is the same rule the gate ladder above runs on.
-				//
-				// Either way, empty the staged copy so the container is handed nothing of it -- the 0-byte shape
-				// every cold start gets. If emptying fails, the catch below removes the staged directory rather
-				// than leave the copy behind.
-				// The DIRECTORY arm runs first and asks only "is the name still a real directory" (issue #375). A
-				// link swapped in over a real key directory between the read and the copy defeats every arm below
-				// it, since each of those resolves through it. It is deliberately NOT a venue-first exception: it
-				// asks a different question, not a more urgent version of the same one, and a key directory that
-				// is still a directory falls straight through to the venue arm with its ordering untouched.
-				//
-				// The directory's IDENTITY joins the transcript's arm rather than the one above, so a key
-				// directory REPLACED by another real directory reports `transcript-replaced` and a cross-venue
-				// replacement still reports `venue-changed`, which is the ordering `VENUE FIRST` above argues for.
-				const dirNow = inspectKeyDir(key);
-				const raced = dirNow.reason === "key-not-a-directory"
-					? "key-not-a-directory"
-					: readVenue(key) !== venue
-						? "venue-changed"
-						: readIdentity(canonicalFile(key)) !== judged || (dirNow.ok && judgedDir !== null && dirNow.ident !== judgedDir)
-							? "transcript-replaced"
+				// Streamed in bounded chunks rather than read whole: `PI_SESSION_MAX_BYTES` defaults to 8 MiB but
+				// `0` means NO CAP, and buffering an uncapped transcript into memory to copy it would be a new
+				// way to hurt a host that the old `copyFileSync` never had.
+				let fd = null;
+				try {
+					fd = fs.openSync(canonicalFile(key), "r");
+					const opened = identityOf(fs.fstatSync(fd));
+					// The same ladder as before, now asked only when the descriptor is NOT the judged file. It
+					// still names the most useful miss first: a cross-venue promotion trips venue and identity
+					// both, and `venue-changed` sends an operator to the venue docs where `transcript-replaced`
+					// would only say that something moved. The DIRECTORY arm is ahead of both (issue #375),
+					// because a name that is no longer a directory is neither a venue move nor a swap.
+					const raced =
+						opened !== judged
+							? inspectKeyDir(key).reason === "key-not-a-directory"
+								? "key-not-a-directory"
+								: readVenue(key) !== venue
+									? "venue-changed"
+									: "transcript-replaced"
 							: null;
-				if (raced !== null) {
-					fs.writeFileSync(staged, "");
-					verdict = COLD(raced);
+					if (raced !== null) {
+						// A 0-byte staged file, the shape every cold start gets. If emptying fails, the catch
+						// below removes the staged directory rather than leave a copy behind.
+						fs.writeFileSync(staged, "");
+						verdict = COLD(raced);
+					} else {
+						copyFromDescriptor(fd, staged);
+					}
+				} finally {
+					if (fd !== null) fs.closeSync(fd);
 				}
 			} else {
 				// A 0-BYTE FILE, not an absent one. pi's setSessionFile then takes its empty-file branch and
@@ -346,30 +351,6 @@ export function makeSessionStore({
 	 * swept -- which is precisely today's behaviour, so under that skew this degrades to the status quo
 	 * rather than to something worse. Nothing here closes either; `triggers-file.mjs` states the same pair.
 	 */
-	/**
-	 * Make the key directory, or answer that the name is not one (issue #375). The write-side twin of
-	 * `inspectKeyDir`, separate because it CREATES: the read path must never make a directory for a key it is
-	 * only asking about.
-	 *
-	 * An lstat that fails with anything but ENOENT is re-thrown, which the outer catch reports as
-	 * `promote-failed`: a disk fault is not evidence about the shape of the name, and reporting it as one
-	 * would send an operator hunting a symlink that does not exist. That is `takeLock`'s doctrine one step
-	 * earlier.
-	 */
-	function ensureKeyDir(dir) {
-		let st = null;
-		try {
-			st = fs.lstatSync(dir);
-		} catch (err) {
-			if (err?.code !== "ENOENT") throw err;
-		}
-		if (st === null) {
-			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-			st = fs.lstatSync(dir); // the second lstat: a link planted between the two is caught here
-		}
-		return st.isDirectory();
-	}
-
 	function takeLock(dir, key) {
 		const lock = join(dir, LOCK_FILE);
 		let sweptAgeMs = null;
@@ -400,6 +381,30 @@ export function makeSessionStore({
 			}
 		}
 		return { locked: true };
+	}
+
+	/**
+	 * Make the key directory, or answer that the name is not one (issue #375). The write-side twin of
+	 * `inspectKeyDir`, separate because it CREATES: the read path must never make a directory for a key it is
+	 * only asking about.
+	 *
+	 * An lstat that fails with anything but ENOENT is re-thrown, which the outer catch reports as
+	 * `promote-failed`: a disk fault is not evidence about the shape of the name, and reporting it as one
+	 * would send an operator hunting a symlink that does not exist. That is `takeLock`'s doctrine one step
+	 * earlier.
+	 */
+	function ensureKeyDir(dir) {
+		let st = null;
+		try {
+			st = fs.lstatSync(dir);
+		} catch (err) {
+			if (err?.code !== "ENOENT") throw err;
+		}
+		if (st === null) {
+			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			st = fs.lstatSync(dir); // the second lstat: a link planted between the two is caught here
+		}
+		return st.isDirectory();
 	}
 
 	function promoteSession(session, { piVersion = null, context = null } = {}) {
@@ -445,6 +450,20 @@ export function makeSessionStore({
 			}
 			const fd = taken.fd;
 			try {
+				// RE-CHECKED UNDER THE LOCK (issue #375's gate round). `ensureKeyDir` ran before the lock, so a
+				// link swapped in between the two would take every write below it outside the store: measured on
+				// the first draft, the transcript and all four sidecars landed in the attacker's directory and
+				// the promotion still reported `promoted: true`. Asking again here closes that segment, and
+				// costs one lstat on a path already in the page cache.
+				//
+				// It does NOT close the whole window, and the residual is stated rather than implied: a swap
+				// after THIS check still redirects the writes, because Node exposes no `openat`/`renameat` and
+				// every write below therefore resolves the name again. What the re-check after the swap does is
+				// make that case reportable rather than silent.
+				if (!inspectKeyDir(session.key).ok) {
+					log("session_promote_skipped", { key: session.key, reason: "key-not-a-directory" });
+					return { promoted: false, reason: "key-not-a-directory" };
+				}
 				// Atomic swap: a reader either sees the old file or the new one, never a half-written one.
 				// PER WRITER (see `tmpSeq`), not the fixed `.incoming` this shared before the lock could be taken
 				// over. The random half is what separates two writers; the pid and counter are there to make a
@@ -471,6 +490,15 @@ export function makeSessionStore({
 				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
 				fs.renameSync(tmp, canonicalFile(session.key));
+				// DETECTION for the segment prevention cannot reach (issue #375's gate round). A link swapped in
+				// after the check above takes this rename and every sidecar write with it, and the old code then
+				// reported `promoted: true` for a transcript that landed outside the store: the operator's record
+				// said the next run would resume work that is not there. This cannot undo the write -- the bytes
+				// are already wherever the name pointed -- but it refuses to CLAIM it.
+				if (!inspectKeyDir(session.key).ok) {
+					log("session_promote_skipped", { key: session.key, reason: "key-not-a-directory" });
+					return { promoted: false, reason: "key-not-a-directory" };
+				}
 				// The real stamp FIRST of the post-swap writes, and the ordering is the contract. It is the only one
 				// whose absence MISATTRIBUTES rather than cold-starts: between the rename and this write the key reads
 				// `(pending)` and cold-starts on every venue, so every write placed ahead of it lengthens that window,
@@ -571,7 +599,7 @@ export function makeSessionStore({
 	 * `unlinkSync` alone cannot remove a DIRECTORY planted at the name, and at the venue sentinel -- the one
 	 * sidecar write that is fatal -- that wedged every promotion on the key forever. `rmSync` alone does not
 	 * remove a DANGLING SYMLINK: it resolves the path, finds nothing, and with `force` reports success while
-	 * leaving the link (measured, and it is the same measurement the reaper's own guard records further down
+	 * leaving the link (measured, and it is the same measurement the reaper's removal note records further down
 	 * this file -- measured there for the reaper, and not carried here until it had cost a round). The next write then follows the surviving link and creates a file at its target, which
 	 * is the write-through-a-link hole this whole series exists to close, and if that target is unreachable
 	 * the write throws and the key is wedged again.
@@ -649,6 +677,32 @@ export function makeSessionStore({
 	}
 
 	/**
+	 * Copy an already-open transcript to `dest`, in bounded chunks.
+	 *
+	 * The source is a DESCRIPTOR rather than a path, which is the whole point (issue #375): the bytes a job
+	 * resumes must come off the same inode the gates judged, and any second resolution of the name is a second
+	 * chance for something else to be standing there. `copyFileSync` cannot take one, so this is the copy.
+	 *
+	 * The destination is truncated-or-created and written through its own descriptor, so the staged path is
+	 * never resolved twice either. 64 KiB because it is one buffer per resume and the transcript is usually a
+	 * few hundred KiB; the loop is what keeps an uncapped `PI_SESSION_MAX_BYTES` from becoming a memory bound.
+	 */
+	function copyFromDescriptor(fd, dest) {
+		const buf = Buffer.allocUnsafe(64 * 1024);
+		let out = null;
+		try {
+			out = fs.openSync(dest, "w");
+			for (;;) {
+				const read = fs.readSync(fd, buf, 0, buf.length, null);
+				if (read === 0) return;
+				fs.writeFileSync(out, buf.subarray(0, read));
+			}
+		} finally {
+			if (out !== null) fs.closeSync(out);
+		}
+	}
+
+	/**
 	 * Is the key's own name a real directory? `inspectFile`'s rule, one level up (issue #375).
 	 *
 	 * Every other read and write in here is an `lstat` on a name INSIDE the key directory, which is exactly
@@ -665,22 +719,25 @@ export function makeSessionStore({
 	 * this platform. The name this checks is the DERIVED one, which is what an attacker who knows the
 	 * repository and the branch can precompute, and which nothing but this module should be creating.
 	 *
-	 * `dev:ino` only, with no mtime: a directory's mtime moves on every entry a live promotion creates, so
-	 * including it would report a race on every ordinary write.
+	 * It answers the SHAPE only. It carried a `dev:ino` identity for the post-copy re-check in the first draft
+	 * of this change, and the gate round removed the need for it: the staged bytes now come off one descriptor
+	 * (see `resolveSession`), so a directory swapped under a job cannot change what that job reads, and there
+	 * is nothing left for a directory identity to protect.
 	 */
 	function inspectKeyDir(key) {
 		let st;
 		try {
 			st = fs.lstatSync(keyDir(key));
 		} catch {
-			return { ok: false, reason: "absent" }; // nothing there yet is the normal cold start, not a refusal
+			// EVERY failure reads as `absent`, not only ENOENT, and that is this edge's posture rather than an
+			// oversight: `inspectFile` one level down has always done the same, and a read that cannot ask costs a
+			// job its history and nothing else. Its write-side twin `ensureKeyDir` takes the opposite trade
+			// deliberately, because a promotion that cannot ask must not report the key's SHAPE as the reason.
+			// The cost, stated: an unreadable store cold-starts silently, indistinguishable from a fresh key.
+			return { ok: false, reason: "absent" };
 		}
 		if (!st.isDirectory()) return { ok: false, reason: "key-not-a-directory" };
-		// `dev:ino` ALONE, deliberately not `identityOf`: that one carries size and mtime, which are the right
-		// identity for a FILE and the wrong one for a directory. Both move on every entry a promotion creates
-		// inside the key, so a re-check built on it would report a race on the quiet path -- which is exactly
-		// what it did in the first draft of this change, caught by the test that pins the quiet path.
-		return { ok: true, ident: `${st.dev}:${st.ino}` };
+		return { ok: true };
 	}
 
 	/** The read path, gate by gate. The FIRST miss wins and names itself. */
@@ -801,7 +858,7 @@ export function makeSessionStore({
 			if (!Number.isFinite(started)) return COLD("conversation-too-old");
 			if (now() - started > maxAgeDays * 86400000) return COLD("conversation-too-old");
 		}
-		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident, dirIdent: dirCheck.ident };
+		return { resume: true, reason: "resumed", bytes: check.bytes, ident: check.ident };
 	}
 
 	/**
