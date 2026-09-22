@@ -373,9 +373,8 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 	// 0.2-0.5s), and it only ever costs time on the failure path. SIGKILL rather than the default SIGTERM
 	// because `spawnSync` waits for the child to EXIT: a catchable signal lets a slow or hung shutdown
 	// outlive the bound (measured, a 2s handler held a 300ms bound for 2.3s, and returned that child's own
-	// status alongside the timeout, which is exactly why `r.error` is read BEFORE the status). The 13.4s
-	// that sets the bound was seen once, against a usual 0.2-0.5s: sized for the worst, paid only on the
-	// failure path.
+	// status alongside the timeout, which is exactly why `r.error` is read BEFORE the status). It is not about
+	// a handler turning a hang into a clean exit: this child refuses at config load, before any handler exists.
 	const HANG_BOUND_MS = 80_000;
 	const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/start.mjs", import.meta.url))], {
 		env: { PATH: process.env.PATH, PI_TRIGGERS_FILE: triggers, WEBHOOK_SECRET: "s" },
@@ -479,7 +478,16 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// armed the watch, and on macOS that write is itself usually delivered AFTER arming: with no edit at all,
 	// a reload still landed in 40 of 40 idle trials (and in 0 of 10 once a 2s gap was inserted before the
 	// boot). Draining it here is what stops the assertion below from being satisfied by the setup write.
-	const settleBy = Date.now() + 1000;
+	//
+	// The window is sized from that delivery, which was 205-209ms across 200 trials including four postures
+	// under load, and never late-but-present: under stress the setup write is LOST rather than delayed. So
+	// 500ms is roughly twice the worst arrival, and overrunning it costs a weaker claim, never a failure.
+	// It is not free on Linux: inotify never delivers a write made before the watch armed (0 of 20 trials in
+	// a node:23.5.0-bookworm container), so there this always runs to the deadline. That is the platform CI
+	// runs on, and `contract-tests` runs the suite three times per job. The settle is also NOT pinned by any
+	// assertion: delete it and this stays green, because what it removes is a false PASS at idle, not a fail.
+	const SETTLE_MS = 500;
+	const settleBy = Date.now() + SETTLE_MS;
 	while (!parse(0).some((l) => l.event === "triggers_reloaded") && Date.now() < settleBy) {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	}
@@ -491,11 +499,14 @@ test("the triggers watch ARMS under test, and a shut-down watch writes NOTHING (
 	// reload lands (issue #373). The re-write is the fix, not padding: on macOS an edit made right after
 	// arming can be LOST, not merely late, so a longer wait alone would have fixed nothing. libuv (1.49.2,
 	// src/unix/fsevents.c) answers `fs.watch()` from `uv__fsevents_init`, which only queues the path and
-	// signals its CoreFoundation thread; the FSEvents stream is destroyed and recreated there later, for
-	// EVERY watched path in the process, starting from "now". An edit that lands before the new stream is
-	// live is never delivered, and any watcher armed or closed elsewhere in the process reopens that window.
-	// Measured against this sequence and the real `startReceiver`, 40 trials per row:
-	//   idle, one boot at a time ............ 0 lost, reload at 163ms
+	// signals its CoreFoundation thread; that thread destroys the LOOP's single FSEvents stream and builds a
+	// new one covering every path that loop watches, starting from "now". An edit that lands before the new
+	// stream is live is gone rather than late, and concurrent arming in the same loop reopens that window.
+	// Measured against the real `startReceiver`, 40 trials per row, before the settle above existed, with the
+	// edit written in the same tick the boot returned:
+	//   idle, one boot at a time ............ 0 lost, reload at 163ms, but see the settle: at idle the setup
+	//                                        write alone satisfies this, so the row measures delivery, not
+	//                                        that the EDIT was seen
 	//   idle, four boots in one process ..... 24 lost (no reload in 10s)
 	//   two suites + test-count-check load .. 1 lost, one boot at a time -- this issue's failure
 	//   with this re-write, every row ........ 0 lost, worst 1223ms (one re-write at most)

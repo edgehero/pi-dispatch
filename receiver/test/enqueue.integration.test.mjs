@@ -184,9 +184,8 @@ test("a post-queue identity refusal EXITS, code intact: the queue's live connect
 		// happens to EQUAL `IDENTITY_ATTEMPT_TIMEOUT_MS + IDENTITY_RETRY_DELAY_MS` (10s + 5s), and that is a
 		// coincidence rather than a derivation, said here because the next reader will otherwise take the
 		// equality for one: this path takes no retry at all, since the 401 is determinate and rethrown in the
-		// same tick. Sizing the reaper to survive a timed-out first attempt would not make the wedge above
-		// pass green -- that wedge never exits, so it would only be reaped later -- but it would widen this
-		// test's window for a retry that cannot happen here.
+		// same tick. Deriving it from that sum would therefore land on the same 15s by accident rather than by
+		// argument, which is the only reason the distinction is worth a line.
 		let reaper = null;
 		const r = await Promise.race([
 			new Promise((resolve) => child.on("exit", (status, signal) => resolve({ status, signal }))),
