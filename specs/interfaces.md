@@ -1400,9 +1400,20 @@ contract governs the argv of one container, this governs the estate that argv jo
     sandbox retention reaper (issue #337), which is a change from what this bullet said when it was written:
     a session network used to have no sweep at all.
 
-    The four sweeps share two rules. Each decides its namespace on the **anchored name shape its producer
-    builds**, never on `docker`'s `--filter name=`, which is a SUBSTRING match and returns foreign objects
-    (measured). And each removes **without `-f`**, so a network is never pulled out from under a live
+    The four sweeps share two rules. Each decides its namespace on an **anchored test over the name**, never
+    on `docker`'s `--filter name=`, which is a SUBSTRING match and returns foreign objects (measured). What
+    that test IS differs by sweep, and issue #360 corrected this sentence, which used to say every one of
+    them matched the full shape its producer builds. The boot reaper asks a **prefix** of both halves
+    (`isJobNamespace`), so `pi-job-runner_default` and `pi-job-mine-net-backup` are in the namespace and are
+    removed. It has to: after a crash nothing distinguishes a job's network from any other name under the
+    prefix, and no charset rule separates them because `sanitizeJobId` permits `_` and `-`. The alternative
+    was the state before #360, where the container half asked the prefix and the network half asked
+    `^pi-job-.*-net$`, so one operator name lost its container and kept its network: two answers to what is
+    ours, which is worse than either answer alone. The sandbox sweep keeps the full shape because it PARSES
+    the session id back out of the name to key against the directories it kept, which a prefix cannot do.
+    That the namespace is a NAME and not a label, and what that costs an operator who uses the prefix, is in
+    `SECURITY.md`'s *What is NOT defended*; a label was considered and not taken, because it cannot be on
+    what a worker that crashed before the change already made. And each removes **without `-f`**, so a network is never pulled out from under a live
     endpoint. What they say when something stays differs, and the difference is deliberate rather than
     accidental: the boot reaper, the sandbox sweep and the canary name every outcome they cannot complete, because those run unattended on
     every boot and every doctor. Their per-network VERDICTS carry a fixed reason token from a closed set and

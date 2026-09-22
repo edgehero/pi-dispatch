@@ -161,7 +161,9 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   construction, holding **no credential of any kind**, started by an operator at a keyboard and never by
   a trigger, an agent or a model tool. What it re-mounts is the run's workspace, retained on the host for
   a bounded window (`PI_SANDBOX_RETENTION_HOURS`, 24h by default, `0` to disable). Its container name is
-  outside the `pi-job-*` namespace the boot reaper clears, so a worker restart cannot kill it. The
+  outside the `pi-job-*` namespace the boot reaper clears — containers *and* their networks, by the one
+  prefix test both halves of that sweep now ask (issue #360; see *What is NOT defended*) — so a worker
+  restart cannot kill it. The
   sandbox retention reaper does reach into the `pi-sandbox-*` namespace since issue #337, and only for the
   run's egress NETWORK, never a container: it takes one only when that run has no retained directory left,
   no running container and no container being created, which is what keeps it away from a session that is
@@ -296,6 +298,17 @@ Stated openly rather than discovered later:
   jobs run with `--pull=never` behind a pre-spend presence check, so the only images that can run are ones
   you built or pulled onto that host yourself. `docs/job-image.md` is the conformance checklist; `OQ-012` in
   `specs/open-questions.md` is the honest statement of what nothing here can check.
+- **`pi-job-*` is a name, not a claim, so a boot reaper will clear your object that happens to use it.**
+  The namespace is the string, and nothing checks whether this deployment made the thing: on start, the
+  worker removes every container whose name begins `pi-job-` and then every network whose name does,
+  detaching whatever was attached first. That is what lets it recover a job a crashed worker left running,
+  because after a crash nothing else distinguishes one. A `pi-job-runner_default` network or a
+  `pi-job-mine-net-backup` copy of one is inside it and goes with the rest. Until issue #360 the two halves
+  disagreed — the container was taken and the network was not — which was not a protection so much as an
+  inconsistency that happened to spare half of some objects. Docker labels would be unambiguous and are
+  **not** used: a label cannot be on what a worker that crashed before this change already created, so the
+  migration is the real content of that choice and it has not been made. Keep your own objects out of the
+  prefix. A sandbox is safe by construction: `pi-sandbox-*` is outside it, deliberately.
 - **`run.replicas` multiplies budget reservations by N, and the caps are the only ceiling.** A webhook
   trigger on any forge carrying `run.replicas: 2` turns one delivery into two independent paid jobs — two
   containers, two token bills, two review requests. Nothing about that is a bypass: each replica reserves its own slot

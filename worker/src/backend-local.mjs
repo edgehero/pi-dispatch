@@ -25,7 +25,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { NETWORK_SUFFIX, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
@@ -168,18 +168,40 @@ export function makeStopContainer({ exec = execDocker } = {}) {
 }
 
 /**
- * A network THIS project made for a job: the exact shape the producer builds, derived from both constants.
- * `docker`'s `--filter name=` is a substring match, so the listing alone is not a namespace (issue #357).
+ * Is this name one THIS project claims? ONE answer for both halves of the boot reaper, which is the whole
+ * point of it being a function rather than two tests (issue #360, item 7).
  *
- * `.*` rather than `.+`, and the reason is an INVARIANT rather than a live bug, which is worth saying
- * plainly: the network half must never be stricter than the container half. The container half is a bare
- * `startsWith`, and `jobContainerName` concatenates without sanitising, so a job id of `""` would give the
- * container `pi-job-` and the network `pi-job--net` -- reaped and leaked respectively under `.+`. That id is
- * NOT reachable today (`backend-registry.mjs` passes `job?.id`, and an absent one renders `undefined`), so
- * this fixes nothing that can happen now. It is here because the asymmetry fails silently and permanently
- * when it does happen, while the cost is matching one name nothing creates.
+ * It is the bare prefix, and it is NOT an accident that it does not require `-net` of a network. The two
+ * halves used to disagree: the container half was this `startsWith` and the network half was
+ * `^pi-job-.*-net$`, so an operator's `pi-job-runner_default` had its CONTAINER reaped and its NETWORK left
+ * standing. Two answers to "what is ours" is the defect; which answer to keep is the decision, and the
+ * container half cannot be the one that moves. After a crash nothing distinguishes our `pi-job-<id>` from
+ * any other name under the prefix, and a charset rule does not separate them either: `sanitizeJobId` permits
+ * `_` and `-`, so `runner_default` and `runner-db-1` are both shapes a real job id can take. There is no
+ * stricter rule available that is also TRUE, so the halves agree by widening the network one.
+ *
+ * WHAT THAT COSTS, stated rather than buried in a test diff: a network called `pi-job-mine-net-backup`, or
+ * `pi-job-runner_default`, is now removed by the boot reaper. Their CONTAINERS always were. `SECURITY.md`
+ * states "the `pi-job-*` namespace the boot reaper clears" as a deliberate claim, so this makes the code
+ * agree with the claim rather than extending it -- but the objects are an operator's, so it is named in the
+ * commit, in `SECURITY.md` and in the spec, not only here.
+ *
+ * The prefix is still only half the rule at the call sites. `docker`'s `--filter name=` is a SUBSTRING match
+ * (measured on 27.4.0: `my-pi-job-notes` comes back from `--filter name=pi-job-`), so the filter is the cheap
+ * server-side narrowing and this anchored test is the namespace decision. A name that merely CONTAINS the
+ * prefix is not ours and never was.
+ *
+ * Not a constant called `_SHAPE`: a name that says "shape" while holding a prefix test is a name that lies,
+ * and the previous one did.
+ *
+ * `SANDBOX_NETWORK_SHAPE` is the sibling that must NOT be loosened the same way, and the difference is what
+ * the name is FOR rather than taste: it carries a capture group and the sandbox sweep parses the session id
+ * back out of it to key against the directories it kept. A predicate cannot answer that question, so the
+ * sandbox's full shape is load-bearing where this one's was only a filter.
  */
-export const JOB_NETWORK_SHAPE = new RegExp(`^${JOB_NAME_PREFIX}.*${NETWORK_SUFFIX}$`);
+export function isJobNamespace(name) {
+	return typeof name === "string" && name.startsWith(JOB_NAME_PREFIX);
+}
 
 /**
  * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind.
@@ -244,7 +266,7 @@ export function makeReaper({ log, exec = execDocker }) {
 		// this sweep allows, and only in the daemon's own words for a network.
 		if (absent) return;
 		if (!ok) return log("network_not_reaped", { network, reason: "unreadable" });
-		if (names.some((n) => n.startsWith(JOB_NAME_PREFIX))) return log("network_not_reaped", { network, reason: "job-container-attached" });
+		if (names.some(isJobNamespace)) return log("network_not_reaped", { network, reason: "job-container-attached" });
 		const outcome = await removeNetworkOrSay(step, { network, detach: names });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.
@@ -262,7 +284,7 @@ export function makeReaper({ log, exec = execDocker }) {
 			const names = stdout
 				.split("\n")
 				.map((n) => n.trim())
-				.filter((n) => n.startsWith(JOB_NAME_PREFIX));
+				.filter(isJobNamespace);
 			for (const name of names) {
 				await exec("docker", ["rm", "-f", name]);
 				log("reaped_container", { name });
@@ -277,10 +299,11 @@ export function makeReaper({ log, exec = execDocker }) {
 			// on every ordinary path, so anything still here outlived a process that did not get to run it.
 			const { stdout: nets } = await exec("docker", ["network", "ls", "--filter", `name=${JOB_NAME_PREFIX}`, "--format", "{{.Name}}"]);
 			// Same substring hazard, and worse here: this sweep DETACHES before it removes, so a foreign
-			// network that merely contains `pi-job-` would have its endpoints stripped. The shape is the one
-			// the producer builds (`networkNameFor(jobContainerName(id))`), derived from both constants rather
-			// than spelled again, so a rename cannot leave the sweep matching the old form.
-			for (const net of nets.split("\n").map((n) => n.trim()).filter((n) => JOB_NETWORK_SHAPE.test(n))) await reapNetwork(net);
+			// network that merely contains `pi-job-` would have its endpoints stripped. THE SAME PREDICATE as
+			// the container loop above, which is the fix for #360 item 7: this used to be an anchored
+			// `^pi-job-.*-net$`, so the two loops gave different answers to "what is ours" and a network under
+			// the prefix without the suffix outlived the container it belonged to. See `isJobNamespace`.
+			for (const net of nets.split("\n").map((n) => n.trim()).filter(isJobNamespace)) await reapNetwork(net);
 			// Whether the enumeration HAPPENED, which the scope-claim sweep depends on: it may only delete a
 			// claim naming this host once this host has actually established that it holds no containers.
 			return { reaped: true };

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, JOB_NETWORK_SHAPE, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -448,21 +448,61 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 		containers: ["pi-job-mine", "my-pi-job-notes-runner"],
 		// The third and fourth cover the two anchors separately: one has the prefix in the MIDDLE, the other
 		// has our exact shape plus a SUFFIX, which is what a `-backup` or `-old` copy of a real name looks like.
-		nets: { "pi-job-mine-net": ["pi-dispatch-egress-proxy"], "my-pi-job-notes": ["someone-elses-app"], "robtest-staging-pi-job-queue-net": ["their-worker"], "pi-job-mine-net-backup": ["their-worker"] },
+		nets: { "pi-job-mine-net": ["pi-dispatch-egress-proxy"], "my-pi-job-notes": ["someone-elses-app"], "robtest-staging-pi-job-queue-net": ["their-worker"] },
 	});
 	const { log, lines } = reaperLog();
 	await makeReaper({ log, exec })();
 	const touched = calls.join(" | ");
 	assert.ok(!touched.includes("my-pi-job-notes"), "a name that merely CONTAINS the prefix is not ours");
 	assert.ok(!touched.includes("robtest-staging"), "nor one that contains it in the middle");
-	assert.ok(!touched.includes("pi-job-mine-net-backup"), "nor our own shape with something appended");
-	// The other direction, which is the one that leaks. This pins an INVARIANT, not a reachable case: an empty
-	// job id cannot occur today, but the container half is a bare prefix match and `jobContainerName`
-	// concatenates without sanitising, so if one ever could, a stricter network half would reap the container
-	// and leave its network behind forever. Asymmetry here fails silently; symmetry costs one unused name.
-	assert.ok(JOB_NETWORK_SHAPE.test("pi-job--net"), "the network half is never stricter than the container half");
-	assert.ok(JOB_NETWORK_SHAPE.test(networkNameFor(jobContainerName("gh-1"))), "and it matches what the producer builds");
-	assert.ok(state.has("my-pi-job-notes") && state.has("robtest-staging-pi-job-queue-net") && state.has("pi-job-mine-net-backup"), "every foreign network survives intact");
+	assert.ok(state.has("my-pi-job-notes") && state.has("robtest-staging-pi-job-queue-net"), "every foreign network survives intact");
 	assert.deepEqual(state.get("my-pi-job-notes"), ["someone-elses-app"], "and keep every endpoint they had");
 	assert.deepEqual(lines, [["reaped_container", { name: "pi-job-mine" }], ["reaped_network", { network: "pi-job-mine-net", detached: ["pi-dispatch-egress-proxy"] }]], "only ours is swept");
+});
+
+// The agreement itself, over NAMES rather than over one sweep's log, because the defect #360 item 7 reports is
+// that the two halves answered differently and either half alone looks correct. Every row is asserted through
+// ONE predicate, so a future edit cannot reintroduce a second rule without deleting this table.
+test("both halves of the reaper give ONE answer to `what is ours` (#360)", () => {
+	const ours = [
+		jobContainerName("gh-1"),
+		networkNameFor(jobContainerName("gh-1")),
+		// The shapes `sanitizeJobId` permits, which is why no charset rule can separate an operator's name from
+		// a job's: `_` and `-` are both legal in a real id.
+		"pi-job-runner_default",
+		"pi-job-runner-db-1",
+		// WIDENED BY #360, and this is the row that can destroy an operator's object: our exact shape with
+		// something appended used to survive the network half and its container never did.
+		"pi-job-mine-net-backup",
+		// The invariant the old `.*` was written for, now free: an empty job id would name the container
+		// `pi-job-` and the network `pi-job--net`, and a stricter network half would reap the one and leak the
+		// other forever. Not reachable today (`backend-registry.mjs` passes `job?.id`, absent renders
+		// `undefined`), pinned because the asymmetry fails silently and permanently.
+		JOB_NAME_PREFIX,
+		`${JOB_NAME_PREFIX}-net`,
+	];
+	const theirs = ["my-pi-job-notes", "my-pi-job-notes-runner", "robtest-staging-pi-job-queue-net", "pi-sandbox-gh-1", "pi-sandbox-gh-1-net", "pi-dispatch-egress-proxy", "pi-job", "PI-JOB-mine", ""];
+	for (const name of ours) assert.equal(isJobNamespace(name), true, name);
+	for (const name of theirs) assert.equal(isJobNamespace(name), false, name);
+	// A non-string is what a `.Containers` rendering as a number or `null` hands a caller, and `startsWith`
+	// would throw on it: this predicate is also the guard, because the sweep's own catch would read a throw
+	// here as a daemon fault and answer `{ reaped: false }`.
+	for (const junk of [null, undefined, 0, {}, ["pi-job-x"]]) assert.equal(isJobNamespace(junk), false, String(junk));
+});
+
+// The destructive half of the widening, driven end to end rather than asserted on the predicate: the sweep
+// really does remove `pi-job-mine-net-backup` now, and really does detach whatever was on it first. If this
+// ever goes green while the row above still passes, the call site has stopped using the predicate.
+test("a network under the prefix without the `-net` suffix is now swept, and that is the cost (#360)", async () => {
+	const { exec, calls, state } = fakeDockerExec({
+		nets: { "pi-job-mine-net-backup": ["their-worker"], "pi-job-runner_default": ["their-worker"] },
+	});
+	const { log, lines } = reaperLog();
+	assert.deepEqual(await makeReaper({ log, exec })(), { reaped: true });
+	assert.ok(calls.join(" | ").includes("pi-job-mine-net-backup"), "our own shape with a suffix IS ours");
+	assert.deepEqual(lines, [
+		["reaped_network", { network: "pi-job-mine-net-backup", detached: ["their-worker"] }],
+		["reaped_network", { network: "pi-job-runner_default", detached: ["their-worker"] }],
+	]);
+	assert.ok(!state.has("pi-job-mine-net-backup") && !state.has("pi-job-runner_default"), "both are gone");
 });
