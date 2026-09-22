@@ -219,6 +219,41 @@ test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER rea
 	assert.match(h.text(), /generated WEBHOOK_SECRET/);
 });
 
+test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set` (#365)", async () => {
+	// `KEY=""` is SET to the never-clobber rule -- an operator who wrote it meant something by it, and `up`
+	// mutating a value they chose is the one thing this command must not do -- and UNSET to every consumer,
+	// because the shells and `EnvironmentFile=` both read an empty value as unset. So `up` said "already
+	// set" three lines above a doctor warning saying the feature is OFF: two true sentences answering
+	// different questions, which an operator had to reconcile themselves.
+	//
+	// NAMED ON `up`'S SIDE. A fourth doctor state was rejected: a state exists to carry a DECISION, and
+	// this is a wording overlap between two correct sentences.
+	const h = harness({ plan: green, files: { "/deploy/.env": `WEBHOOK_SECRET=x\nPI_PAUSE_WINDOWS_FILE=""\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\n` } });
+	await h.run();
+	assert.equal(h.store.get("/deploy/.env").includes('PI_PAUSE_WINDOWS_FILE=""'), true, "and the line itself is STILL untouched, which is the point of saying it rather than fixing it");
+	const text = h.text();
+	assert.match(text, /PI_PAUSE_WINDOWS_FILE[\s\S]*?the line is there and its value is empty/, "the empty value is named");
+	// The key beside it, with a real value, keeps the plain sentence -- so the new wording is about the
+	// value and not about every untouched key.
+	assert.match(text, /PI_SCOPED_LIMITS_FILE[\s\S]*?already set — left untouched/, "a key with a real value reads as before");
+	// And a `KEY=` with nothing after it is not this case at all: `setEnvKeyIfEmpty` FILLS that one, so it
+	// is reported as written and never reaches the untouched branch.
+	const filled = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=x\nPI_PAUSE_WINDOWS_FILE=\n" } });
+	await filled.run();
+	assert.match(filled.text(), /PI_PAUSE_WINDOWS_FILE=\/deploy\/pause-windows\.json written into \.env/);
+	assert.doesNotMatch(filled.text(), /PI_PAUSE_WINDOWS_FILE[^\n]*the line is there and its value is empty/);
+
+	// BOTH READINGS ARE ASKED, and this is the case that needs the second one. A bare `PI_X=` with an
+	// `export PI_X=/v.json` below it is empty for systemd's `EnvironmentFile=` and SET for the wrapper
+	// deployments, which source the file and take the last assignment. Calling that "empty" would tell a
+	// launchd or nssm operator their configured key is unset. `up` leaves it alone either way, because the
+	// export line is a value the operator wrote.
+	const halfSet = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=x\nPI_PAUSE_WINDOWS_FILE=\nexport PI_PAUSE_WINDOWS_FILE=/v.json\n" } });
+	await halfSet.run();
+	assert.doesNotMatch(halfSet.text(), /PI_PAUSE_WINDOWS_FILE[^\n]*the line is there and its value is empty/, "set for one consumer is not empty");
+	assert.equal(halfSet.store.get("/deploy/.env").includes("export PI_PAUSE_WINDOWS_FILE=/v.json"), true, "and never clobbered");
+});
+
 test("up and the deployment pointer agree on the two basenames they share, and only those two (#357)", async () => {
 	// Two surfaces write paths for one deployment: `up` into the `.env` the WORKER reads, and the setup
 	// wizard into the pointer the PANEL reads. Where they overlap they must not drift, because a panel

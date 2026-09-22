@@ -34,7 +34,12 @@ that runs as **uid 1001** meets none of them: the image already runs as that uid
 worker whose primary group is the socket's group is not refused. That is deliberate, so hosts that worked before
 issue #341 keep working. A worker running as root (`worker-is-root`) is refused too, and belongs to the harder set:
 `BOOT_REFUSING_JOB_USER_CAUSES` in `worker/src/job-user.mjs` names the causes no job on this venue can get past, and
-`pi-dispatch doctor` marks those ✗ and everything else ⚠ on your own host.
+`pi-dispatch doctor` marks those ✗ and everything else ⚠ on your own host -- ✗ only while `local` is the default
+venue, which is the condition `DES-JOB-USER-INFERRED-READ-BACK-ON-REQUEST` states and this page used to read
+straight past. Today that condition always holds, because `local` is the backend table's only entry and
+`parseBackendList` refuses a set without it, so the two readings cannot differ on any build that exists. Written
+down anyway: the page describing the only build there is, as if it were describing the rule, is the drift this
+page kept producing.
 
 ### What a refusal says
 

@@ -1314,6 +1314,36 @@ test("doctor: a .env that NAMES the key softens the warning instead of crying wo
 	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is set in/);
 });
 
+test("doctor: a file carrying BOTH forms names both, and which start wins (#365)", async () => {
+	// The gap the three-state reading left: a key with a bare line AND an `export` one is not export-only,
+	// so the label said nothing about it -- while the two readings disagree about the VALUE, which means the
+	// two deployment shapes load different files. `EnvironmentFile=` takes the bare line (systemd does not
+	// strip the prefix, measured on 257.13) and `set -a; . ./.env` in the wrappers takes the LAST
+	// assignment. Doctor reported the bare value and called it the service's, which is right for systemd
+	// and wrong for launchd and nssm.
+	const cwd = scaffoldedCwd();
+	const bare = join(cwd, "pause-windows.json");
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${bare}\nexport PI_PAUSE_WINDOWS_FILE=/wrapper-wins.json\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /and again as `export PI_PAUSE_WINDOWS_FILE=\/wrapper-wins\.json`/, "the second assignment is named");
+	assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/);
+	assert.match(text(), /systemd's EnvironmentFile= reads bare lines only and takes .*pause-windows\.json, while deploy\/worker-env-wrapper\.sh and the nssm wrapper source the file and take the LAST assignment, which is \/wrapper-wins\.json/);
+	assert.doesNotMatch(text(), /which a wrapper script reads and systemd's EnvironmentFile= does not/, "not the export-ONLY line: there is a bare assignment here");
+});
+
+test("doctor: two assignments that AGREE are not a finding (#365)", async () => {
+	// Tidiness is not a fact about the deployment, and a warning about it would be the crying wolf this file
+	// refuses elsewhere. Both consumers read the same path, so there is nothing an operator has to decide.
+	const cwd = scaffoldedCwd();
+	const same = join(cwd, "pause-windows.json");
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${same}\nexport PI_PAUSE_WINDOWS_FILE=${same}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.doesNotMatch(text(), /and again as `export/, "agreeing duplicates say nothing");
+	assert.doesNotMatch(text(), /Those two disagree/);
+});
+
 test("doctor: an `export`ed key is neither set nor unset, and says which reader honours it (#357)", async () => {
 	// Measured on systemd 257.13: `EnvironmentFile=` parses bare `VAR=VALUE` and does not strip an
 	// `export ` prefix, while `deploy/worker-env-wrapper.sh` sources the file and does. So the same line is
@@ -1378,18 +1408,29 @@ test("doctor: the .env reader hands back only the keys it was asked for (#357)",
 	const seams = (readEnvFile) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }) });
 	// The later duplicate wins, because the shell and `EnvironmentFile=` both take the last assignment and
 	// this has to report what the SERVICE sees.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" } });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" }, alsoExported: {} });
 	// THREE states, not two. A key assigned only with an `export ` prefix is read by the wrapper scripts
 	// and not by systemd's `EnvironmentFile=` (measured on systemd 257.13), so it is neither "set" nor
 	// "unset" and gets a sentence of its own. Collapsing it either way makes doctor wrong: called set, it
 	// claims the service reads what systemd does not; called unset, it tells the operator to write a line
 	// that is already there, moments after `up` reported that key as already set.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" } });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" }, alsoExported: {} });
 	// A bare assignment ANYWHERE means the key is not export-only, however many export lines follow it.
 	// systemd's `EnvironmentFile=` reads `/plain.json` and nothing else, so calling this export-only would
 	// print a value systemd never sees and advise dropping a prefix, which would change which file the
 	// worker loads on a wrapper deployment.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {} });
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: { PI_PAUSE_WINDOWS_FILE: "/later.json" } });
+	// A THIRD SIGNAL for that same file (issue #365, item 2). It is not export-only and never was, so the
+	// label said nothing about it -- while the two readings DISAGREE about the value, which means the two
+	// deployment shapes disagree about which file the worker loads. Only when they differ: both forms
+	// carrying the same value is tidiness, not a fact about the deployment, and warning on it would be the
+	// crying wolf this file refuses elsewhere.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/same.json\nexport PI_PAUSE_WINDOWS_FILE=/same.json")), { PI_PAUSE_WINDOWS_FILE: "/same.json", exported: {}, alsoExported: {} }, "agreeing duplicates are not a finding");
+	// ORDER MATTERS, and the first version of this assertion got it backwards. With the export line FIRST
+	// and the bare one last, the wrappers take the last assignment and so read `/plain.json` too, which is
+	// what `EnvironmentFile=` reads: the two agree, so there is nothing to report. The signal is about the
+	// readings DISAGREEING, not about both forms being present.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/later.json\nPI_PAUSE_WINDOWS_FILE=/plain.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: {} }, "an export line BEFORE the bare one is overridden for both consumers");
 	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
 	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
 	// licence for reading a `.env`, and a convention would not have held it.
@@ -3582,6 +3623,24 @@ test("doctor warns when PI_FORWARD_ENV names HOME for a --user job, and when a s
 	// stopped answering for every root unit, so it is covered here rather than left to be discovered.
 	assert.match(await run(unit.replace("User=pi", "User=4242")), /sudo -u '#4242' pi-dispatch doctor/, "a uid needs sudo's # prefix, and the # needs quoting");
 	assert.match(await run(unit.replace("User=pi", "User=0"), { info: ROOTLESS_INFO }), /sudo -u '#0' pi-dispatch doctor/, "and uid 0 spelled numerically is a uid like any other");
+	// THE NAME BRANCH IS QUOTED ON THE SAME RULE (issue #370, item 3). #368 closed the numeric half and left
+	// this one bare, so an `/etc/passwd` entry whose name carries a space or a metacharacter rendered a line
+	// that does not do what it looks like when pasted. An ordinary name gains nothing, which is the other
+	// half of the rule and is asserted above by every case that came before this one.
+	// The account has to EXIST in passwd for the comparison to happen at all, so these rows bring their own.
+	const oddPasswd = () => `${PASSWD()}odd name:x:777:777::/home/odd:/bin/sh\na;rm -rf /:x:778:778::/home/x:/bin/sh\no'brien:x:779:779::/home/o:/bin/sh\nop2:x:780:780::/home/op2:/bin/sh\n`;
+	assert.match(await run(unit.replace("User=pi", "User=odd name"), { passwd: oddPasswd }), /sudo -u 'odd name' pi-dispatch doctor/, "a name needing quotes gets them");
+	assert.match(await run(unit.replace("User=pi", "User=a;rm -rf /"), { passwd: oddPasswd }), /sudo -u 'a;rm -rf \/' pi-dispatch doctor/, "and a metacharacter is inside the quotes, not beside them");
+	assert.match(await run(unit.replace("User=pi", "User=o'brien"), { passwd: oddPasswd }), /sudo -u 'o'\\''brien' pi-dispatch doctor/, "an embedded quote is closed, escaped and reopened, the one form sh, bash and zsh all read back");
+	assert.match(await run(unit.replace("User=pi", "User=op2"), { passwd: oddPasswd }), /sudo -u op2 pi-dispatch doctor/, "an ordinary name is not quoted");
+	// THE LABEL SAYS "MAY NOT BE" (issue #370, item 2). Under a host-level refusal -- a userns-remapped
+	// daemon, Docker Desktop on Linux, an unreadable answer, a rootless daemon -- every account on the host
+	// gets the identical verdict, so the line above IS the service's answer too and re-running as that
+	// account changes nothing. "is not" was true in some modes and false in others; "may not be" is true in
+	// all of them.
+	const labelText = await run(unit.replace("User=pi", "User=4242"));
+	assert.match(labelText, /so the job-user line above is this shell's answer and may not be the service's/);
+	assert.doesNotMatch(labelText, /this shell's answer, not the service's/, "the flat claim is gone");
 	assert.doesNotMatch(await run(unit.replace("User=pi", "User=op")), warned, "the same uid says nothing");
 	assert.doesNotMatch(await run(unit, { passwd: () => { throw new Error("EACCES"); } }), warned, "an unreadable passwd is no answer, never a guess");
 	assert.doesNotMatch(await run(unit, { cwd: tempDir("pi-other-deploy-") }), warned, "a unit serving another deployment is not this one's");

@@ -26,7 +26,7 @@ import { connect as netConnect } from "node:net";
 import { join, posix, win32 } from "node:path";
 import { logsDirPath, settingsFilePath } from "./config.mjs";
 import { egressArmed as egressArmedFn } from "./egress.mjs";
-import { updateEnvFile } from "./env-file.mjs";
+import { readEnvKeys, updateEnvFile } from "./env-file.mjs";
 
 // The one image up may ever fetch, and the local name jobs run under. Literal on purpose (not
 // env.PI_JOB_IMAGE): an operator who pointed PI_JOB_IMAGE elsewhere has outgrown the quickstart, and
@@ -217,6 +217,29 @@ export async function runUp(argv = [], deps = {}) {
 	// never-clobber contract at key granularity: a value the operator set survives. The value itself
 	// is NEVER printed — a webhook secret in a scrollback is a webhook secret in a pastebin.
 	const envPath = join(cwd, ".env");
+	/**
+	 * `KEY=` or `KEY=""` -- a line that EXISTS and whose value is empty for every consumer of this file.
+	 *
+	 * `setEnvKeyIfEmpty` treats a `""` as SET and leaves it alone, which is the never-clobber rule at key
+	 * granularity: an operator who wrote `KEY=""` meant something by it. Doctor, three lines below `up`'s
+	 * own summary, then says the feature is OFF, because every consumer reads an empty value as unset. Both
+	 * are true and they answer different questions, and an operator reading them in sequence had to work
+	 * that out (issue #365, item 1).
+	 *
+	 * NAMED ON `up`'S SIDE rather than given a fourth state in doctor's warning: a doctor state exists to
+	 * carry a DECISION, and this is a wording overlap between two correct sentences. Both readings are
+	 * asked, so a line that is empty only for systemd and set for the wrapper is not called empty.
+	 */
+	const writtenButEmpty = (key) => {
+		let text;
+		try {
+			text = String(fs.readFileSync(envPath, "utf8"));
+		} catch {
+			return false;
+		}
+		if (!new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`, "m").test(text)) return false;
+		return readEnvKeys(text, [key])[key] === undefined && readEnvKeys(text, [key], { acceptExport: true })[key] === undefined;
+	};
 	// Windows takes forward slashes everywhere Node does, and writing them is what keeps these four values
 	// inside the BARE set: `deploy/worker-env-wrapper.cmd` says "Values MUST be UNQUOTED -- cmd's `set`
 	// keeps surrounding quotes as part of the value", so a quoted `C:\pi\deploy\logs` there is a
@@ -238,8 +261,9 @@ export async function runUp(argv = [], deps = {}) {
 				out("\n✓ generated WEBHOOK_SECRET into .env (32 random bytes, hex — value not shown)\n");
 				summary.push(["WEBHOOK_SECRET", "generated into .env (value not shown; the receiver verifies deliveries with it)"]);
 			} else {
-				out("\n✓ WEBHOOK_SECRET already set in .env — left untouched\n");
-				summary.push(["WEBHOOK_SECRET", "already set — left untouched"]);
+				const empty = writtenButEmpty("WEBHOOK_SECRET");
+				out(`\n✓ WEBHOOK_SECRET already ${empty ? "has a line in .env, and its value is EMPTY" : "set in .env"} — left untouched\n`);
+				summary.push(["WEBHOOK_SECRET", empty ? "left untouched: the line is there and its value is empty, which every consumer reads as unset. up never clobbers a key an operator wrote, so fill it in by hand" : "already set — left untouched"]);
 			}
 		} catch (err) {
 			out(`\n✗ WEBHOOK_SECRET could not be written: ${err?.message}\n`);
@@ -326,7 +350,7 @@ export async function runUp(argv = [], deps = {}) {
 				out(`✓ ${key}=${value} written into .env\n`);
 				summary.push([key, `written into .env (${value})`]);
 			} else {
-				summary.push([key, "already set — left untouched"]);
+				summary.push([key, writtenButEmpty(key) ? "left untouched: the line is there and its value is empty, which every consumer reads as unset, so a warning below may say this feature is off. up never clobbers a key an operator wrote, so fill it in by hand" : "already set — left untouched"]);
 			}
 		}
 	} else {

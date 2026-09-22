@@ -300,14 +300,25 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		const plain = readEnvKeys(text, allowed);
 		const withExport = readEnvKeys(text, allowed, { acceptExport: true });
 		const exported = {};
+		// A THIRD SIGNAL, from the same two readings (issue #365, item 2). A file holding BOTH forms is not
+		// export-only and never was, so the label said nothing about it at all -- and when the two readings
+		// disagree about the VALUE, the two deployments disagree about which file the worker loads:
+		// `EnvironmentFile=` takes the bare line, while `set -a; . ./.env` in the wrappers takes the last
+		// assignment, which is the `export` one. Doctor reported the bare value and called it the service's,
+		// which is right for systemd and wrong for launchd and nssm.
+		//
+		// Only when they DIFFER. Both forms carrying the same value is a tidiness question, not a fact about
+		// the deployment, and a warning about it would be the crying wolf this file refuses elsewhere.
+		const alsoExported = {};
 		for (const key of allowed) {
 			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
 			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling
 			// it export-only would print a value systemd never sees and advise dropping a prefix, which
 			// would change which file the worker loads.
 			if (!(key in plain) && key in withExport) exported[key] = withExport[key];
+			else if (key in plain && key in withExport && plain[key] !== withExport[key]) alsoExported[key] = withExport[key];
 		}
-		return { ...plain, exported };
+		return { ...plain, exported, alsoExported };
 	} catch {
 		return {};
 	}
@@ -1637,6 +1648,10 @@ export async function collectChecks(env, seams) {
 		if ((typeof pauseWindowsFile !== "string" || pauseWindowsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_PAUSE_WINDOWS_FILE;
 			const onlyExported = envFile.exported?.PI_PAUSE_WINDOWS_FILE;
+			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
+			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
+			// this operator the wrong file (issue #365, item 2).
+			const alsoExported = envFile.alsoExported?.PI_PAUSE_WINDOWS_FILE;
 			checks.push(
 				onlyExported
 					? {
@@ -1649,8 +1664,10 @@ export async function collectChecks(env, seams) {
 					? {
 							ok: false,
 							warn: true,
-							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker`,
-							fix: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
+							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported ? `, and again as \`export PI_PAUSE_WINDOWS_FILE=${alsoExported}\`` : ""}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported ? `. Those two disagree, and which one is in force depends on how the worker starts` : ""}`,
+							fix: alsoExported
+								? `two assignments are in force at once: systemd's EnvironmentFile= reads bare lines only and takes ${inFile}, while deploy/worker-env-wrapper.sh and the nssm wrapper source the file and take the LAST assignment, which is ${alsoExported}. Delete whichever line this deployment does not want rather than guessing which one wins`
+								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {
 							ok: false,
@@ -1671,6 +1688,10 @@ export async function collectChecks(env, seams) {
 		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
 			const inFile = envFile.PI_SCOPED_LIMITS_FILE;
 			const onlyExported = envFile.exported?.PI_SCOPED_LIMITS_FILE;
+			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
+			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
+			// this operator the wrong file (issue #365, item 2).
+			const alsoExported = envFile.alsoExported?.PI_SCOPED_LIMITS_FILE;
 			checks.push(
 				onlyExported
 					? {
@@ -1683,8 +1704,10 @@ export async function collectChecks(env, seams) {
 					? {
 							ok: false,
 							warn: true,
-							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker`,
-							fix: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
+							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported ? `, and again as \`export PI_SCOPED_LIMITS_FILE=${alsoExported}\`` : ""}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported ? `. Those two disagree, and which one is in force depends on how the worker starts` : ""}`,
+							fix: alsoExported
+								? `two assignments are in force at once: systemd's EnvironmentFile= reads bare lines only and takes ${inFile}, while deploy/worker-env-wrapper.sh and the nssm wrapper source the file and take the LAST assignment, which is ${alsoExported}. Delete whichever line this deployment does not want rather than guessing which one wins`
+								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {
 							ok: false,
@@ -3469,11 +3492,22 @@ export async function jobUserChecks(env, seams, { endpoint, dockerCode, imageCod
 				// sudo reads a bare number as a user NAME, not a uid: `man sudo` wants `#4242`, and the `#` has to be
 				// quoted or an interactive shell swallows the rest of the line as a comment. Reachable for 0 only
 				// since this line stopped always answering for root, and wrong for every numeric unit before that.
-				const asAccount = /^\d+$/.test(user) ? `'#${user}'` : user;
+				// The NAME branch is quoted on the same rule, which #368 closed for the numeric half and left
+				// open here (issue #370, item 3): an `/etc/passwd` entry whose name carries a space or a shell
+				// metacharacter renders a line that does not do what it appears to when pasted. Anything
+				// outside `[A-Za-z0-9._-]` is single-quoted, and an embedded single quote is closed, escaped
+				// and reopened, which is the only form `sh`, `bash` and `zsh` all read back exactly. Effectively
+				// unreachable, and closed with the half beside it rather than left as the odd one out.
+				const asAccount = /^\d+$/.test(user) ? `'#${user}'` : /^[A-Za-z0-9._-]+$/.test(user) ? user : `'${user.replace(/'/g, `'\\''`)}'`;
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer, not the service's`,
+					// "MAY NOT BE", not "is not" (issue #370, item 2). Under `userns-remap`, `desktop-linux-userns`,
+					// `runtime-unreadable` and a daemon reporting `name=rootless`, the refusal is host-level: every
+					// account on this host gets the identical verdict, so the line above IS the service's answer too
+					// and re-running as that account changes nothing. "may not be" is true in every mode, and this is
+					// the mirror image of a correction #368 made to the comment beside it.
+					label: `this shell is uid ${ids.euid}, but ${path} runs the worker as ${user} (uid ${uid}), so the job-user line above is this shell's answer and may not be the service's`,
 					fix: rootFix ?? `re-run doctor as that account (sudo -u ${asAccount} pi-dispatch doctor) to see what its jobs run as`,
 				});
 			}
