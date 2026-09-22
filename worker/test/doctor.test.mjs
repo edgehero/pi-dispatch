@@ -3957,7 +3957,7 @@ test("doctor: a DEAD doctor's canary network is swept, its probe removed and the
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242, detaching pi-dispatch-egress-proxy\), left by a doctor run that did not finish/);
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242, detaching pi-dispatch-egress-proxy\), left by an EARLIER doctor run/);
 	const touched = calls.map((c) => c.args.join(" "));
 	assert.ok(touched.includes("rm -f pi-dispatch-egress-probe-unlisted-4242"), "the dead run's own probe IS the leak, so it is removed");
 	assert.ok(touched.includes("network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy"), "the shared proxy is detached");
@@ -3971,7 +3971,7 @@ test("doctor: a canary network whose pid is still ALIVE is left entirely alone (
 	const { out, text } = capture();
 	const plan = { "docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" }, ...green, "gh auth status": { code: 0, output: ghStatusOutput } };
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => true, pid: 1 }));
-	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
+	assert.doesNotMatch(text(), /left by an EARLIER doctor run/);
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "a live doctor's network is its own business");
 });
 
@@ -3996,19 +3996,33 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 // is the page's own job and is not pinned here, and saying so is the point: a green regex over a false
 // sentence is worse than no test.
 //
-// THE NEEDLE IS ONE SPELLING, so there are two assertions rather than one, and the first is the load-bearing
-// half. A review pass added a ninth line site in four shapes that kept the count at eight: the label held in
-// a variable first, the prefix in a constant, a double-quoted string (which is how a line with nothing to
-// interpolate would naturally be written), and `label:` wrapped onto its own line. So the count alone
-// promised a guarantee it does not give. The first assertion closes that: every occurrence of the prefix
-// anywhere in the source must be one the needle found, whatever the author's spelling, and any other way of
-// writing one fails here and says how to fix it.
+// THE NEEDLE TOOK THREE GOES, and the two wrong ones are worth keeping because each failed in its own
+// direction. Counting `` label: `Egress canary: `` alone was a FALSE NEGATIVE: a review pass added a ninth
+// site in four shapes that kept the count at eight (the label in a variable, the prefix in a constant, a
+// plain double-quoted string, and `label:` wrapped onto its own line). Adding a second count over the raw
+// source closed those and bought a FALSE POSITIVE instead, which is the worse failure: this file's house
+// style is to quote its own output in comments, so one comment naming the prefix turned the test red and
+// told its author to rewrite their prose as a label.
+//
+// So the source is stripped of comments first and the needle is the bare phrase, with no colon and no
+// trailing space. Comments cannot trip it, and a site is counted however it is spelled, including a
+// constant holding the prefix, because the constant's own declaration carries the phrase. WHAT STILL EVADES
+// IT, stated rather than claimed away: splitting the phrase itself across an interpolation
+// (`Egress can${""}ary:`). Nothing else in this file is written that way and no ordinary edit produces it.
+//
+// What each line SAYS remains the page's own job and is not pinned here, and saying so is the point: this
+// is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and a green regex over a false
+// sentence is worse than no test. The count is the one thing that is both derivable and sufficient, because
+// a new site fails it and sends its author to the page, which is all the page needs.
 test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
-	const everywhere = src.split("Egress canary: ").length - 1;
-	const sites = src.split("label: `Egress canary: ").length - 1;
-	assert.equal(everywhere, sites, "a canary line written any other way is invisible to the count below: write it as ``label: `Egress canary: …` `` or widen this needle");
+	// Block comments, then whole-line `//` ones. Deliberately NOT trailing `//` comments: `tcp://` inside a
+	// template literal would make a naive stripper eat the rest of a real line, which is a false GREEN.
+	const code = src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+	const everywhere = code.split("Egress canary").length - 1;
+	const sites = code.split("label: `Egress canary: ").length - 1;
+	assert.equal(everywhere, sites, "a canary line is spelled some way this test cannot see: write it as ``label: `Egress canary: …` `` or widen the needle");
 	const claimed = Number(/<!-- CANARY-LINE-SITES: (\d+) -->/.exec(doc)?.[1]);
 	assert.equal(sites, claimed, `doctor produces ${sites} canary lines; docs/egress.md is written for ${claimed}. Update the page, then the marker.`);
 	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
@@ -4056,7 +4070,7 @@ test("doctor: probes removed off a network that then vanished are still accounte
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242 on pi-dispatch-egress-doctor-4242, left by a doctor run that did not finish; the network itself was already gone/);
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242 on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself was already gone/);
 	assert.doesNotMatch(text(), /⚠ Egress canary: the network pi-dispatch-egress-doctor-4242 could not be removed/, "a network the daemon says is gone is not a failure");
 });
 
@@ -4077,7 +4091,7 @@ test("a stranger DETACHED off a network that then vanished is named, with no pro
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.at(-1) === "their-worker"), "it really was detached");
-	assert.match(text(), /✓ Egress canary: detached their-worker on pi-dispatch-egress-doctor-4242, left by a doctor run that did not finish; the network itself was already gone/);
+	assert.match(text(), /✓ Egress canary: detached their-worker on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself was already gone/);
 });
 
 test("a vanished network with NOTHING done to it is still not a line (#360)", async () => {
@@ -4113,8 +4127,26 @@ test("an endpoint that resolves to NOTHING is said as a phrase, not as a gap (#3
 	assert.match(text(), /may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves an empty endpoint, which is not shown to be on this host/);
 	// The sibling site four lines down, which had the identical gap and is fixed by the same helper.
 	assert.match(text(), /credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "X" to an empty endpoint, which is not shown to be on this host/);
-	assert.doesNotMatch(text(), /resolves , which is not shown/, "no site renders the gap");
-	assert.doesNotMatch(text(), /to , which is not shown/, "including the one that names the context");
+	assert.doesNotMatch(text(), /resolves\s*, which is not shown/, "neither site rendered here renders the gap");
+	assert.doesNotMatch(text(), /to\s*, which is not shown/, "including the one that names the context");
+	// The other two sites the helper covers are driven separately below, because this plan mints no gh token
+	// and never reaches the in-image probe, and `start.mjs` is a different module entirely. An earlier version
+	// of this test said "no site renders the gap" while measuring half of them.
+});
+
+test("the in-image gh probe names an empty endpoint too, not a gap (#360)", async () => {
+	// The third of the four sites, and it was UNPINNED: reverting it to `endpoint.endpoint` survived the whole
+	// suite, because no other test in this file mints a token and this branch runs only once there is one.
+	const { out, text } = capture();
+	const plan = {
+		...green,
+		"docker context inspect": { code: 0, output: '"X"|""\n' },
+		"gh auth status": { code: 0, output: ghStatusOutput },
+		"gh auth token": { code: 0, output: "gho_dummy\n" },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(out, plan, [], {}));
+	assert.match(text(), /⚠ in-image gh auth: not checked, because this shell's docker CLI resolves an empty endpoint, which is not shown to be on this host, and the probe would send your gh token there/);
+	assert.doesNotMatch(text(), /resolves\s*, which is not shown/);
 });
 
 test("doctor: the canary sweep removes only a probe whose SLUG it knows (#350)", async () => {

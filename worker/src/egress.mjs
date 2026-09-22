@@ -347,9 +347,11 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	// aborted pass returns `command: null`, and every one of them would render that into "could not be
 	// removed: null" if it ever saw the shape. A caller that opts in MUST branch on `aborted` before it reads
 	// `command`. `sandbox.mjs` does; nothing else can reach it.
-	// The opting-in caller: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls touch objects whose owner
-	// is already gone or whose pid is DEAD, where nothing can be mid-launch, and `live-probes.mjs`'s peer sweep
-	// is best effort behind a flag an operator typed. Only the sandbox sweep has an owner who may be alive.
+	//
+	// WHY THE OTHER FOUR PASS NOTHING: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls
+	// touch objects whose owner is already gone or whose pid is DEAD, where nothing can be mid-launch, and
+	// `live-probes.mjs`'s peer sweep is best effort behind a flag an operator typed. Only the sandbox sweep
+	// has an owner who may be alive.
 	//
 	// WHAT THE SECOND ASK COSTS, and why the abort below puts back what it took. The guard before the DETACH is
 	// where it already was; what is new is the one before the `rm`, which used to sit k+1 commands out. That

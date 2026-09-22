@@ -308,9 +308,15 @@ Stated openly rather than discovered later:
   **The likely way to meet this is `docker compose`**: a project named `pi-job-anything` gets a network
   `pi-job-anything_default`, and its services are named `pi-job-anything-<service>-1` unless you set
   `container_name:`. The network sweep has one carve-out and it will not save you here: it leaves a network
-  alone only while a container **that is itself under the prefix** is attached, so a stack whose services
-  carry explicit names keeps running with its network removed from under it. Reattach with
-  `docker network connect`; the containers the other half removed are not recoverable.
+  alone only while a **running** container that is itself under the prefix is attached, which a stack with
+  explicit `container_name:` values never has, and which `docker network inspect` cannot see for a stopped
+  or `created` one even when the name does match. So the stack keeps running with its network removed from
+  under it.
+  **Recovering it is `docker compose up -d` from the project directory**, and that is the whole of the
+  advice: the network is GONE, not merely detached, so `docker network connect` answers `network not found`,
+  and recreating it by hand loses the compose labels and the `--network-alias` entries, which leaves
+  service-name DNS inside the stack broken (measured on docker 27.4.0). Where the container half did take
+  something, under default compose naming, that is not recoverable at all.
   Until issue #360 the two halves disagreed — the container was taken and the network was not — which was
   not a protection so much as an inconsistency that spared half of an object by an accident of suffix.
   Docker labels would be unambiguous and are **not** used: a label cannot be on what a worker that crashed

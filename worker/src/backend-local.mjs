@@ -176,11 +176,27 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * those sites then printed "resolves , which is not shown to be on this host" at an operator.
  *
  * A PHRASE rather than a fallback value, so no caller can mistake what it returns for something to hand to
- * docker.
+ * docker. WHITESPACE counts as empty: `docker context create` refuses a blank host, but `context inspect`,
+ * which is the command doctor actually runs, does NOT re-validate what the context store already holds, so
+ * the read path can return one.
+ *
+ * IT ALSO STRIPS CONTROL BYTES, and that is a property of this function rather than a measurement of some
+ * other command. `displayEndpoint` returns a host with no `@` VERBATIM -- it withholds credentials and was
+ * never a sanitiser -- so a carriage return or a CSI sequence in a stored endpoint reaches a line an
+ * operator is reading, where an erase-line plus a CR wipes the warning and rewrites it from column 0 with
+ * whatever follows. An earlier version of this comment claimed docker's own URL parser kept them out, having
+ * measured `docker context create` and `DOCKER_HOST`: both are WRITE paths, the read path does not
+ * re-validate, so the claim was measured on the wrong command. Stripping here covers all four call sites at
+ * once, because every one of them funnels through this.
+ *
+ * RESIDUAL, named rather than closed: a stored endpoint whose value IS the literal text "an empty endpoint"
+ * is indistinguishable from the empty case. It cannot be created through the CLI, and it costs one sentence
+ * misread, so it does not earn a quoting rule that would move the wording at all four sites.
  */
 export function endpointShown(endpoint) {
-	const shown = String(endpoint?.endpoint ?? "");
-	return shown === "" ? "an empty endpoint" : shown;
+	// C0 and C1, which is exactly the set that must never reach a terminal.
+	const shown = String(endpoint?.endpoint ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+	return shown.trim() === "" ? "an empty endpoint" : shown;
 }
 
 /**

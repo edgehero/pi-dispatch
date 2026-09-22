@@ -1083,6 +1083,20 @@ test("the record's default venue and the registry's come from the one config val
 	assert.match(src, /defaultName:\s*config\.defaultBackend/, "and the registry is built with the same value");
 });
 
+test("the boot refusal's endpoint evidence goes through the one renderer, not the raw field (#360)", () => {
+	// `dockerEndpointEvidence` is the FOURTH site that interpolates an endpoint into "resolves ..., which is
+	// not shown to be on this host", and it was the one nothing covered: a review pass reverted it to
+	// `endpoint.endpoint` and the whole 4045-test suite stayed green. It is private to `start.mjs` and its
+	// output only reaches a refusal's `evidence`, which every existing test hands in by hand, so a source pin
+	// is the honest instrument here rather than a behavioural test built to reach one string.
+	//
+	// What it buys: a context stored with a blank host renders "an empty endpoint" instead of a gap, and a
+	// control byte in one cannot rewrite the operator's line (`endpointShown`, backend-local.mjs).
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.match(src, /function dockerEndpointEvidence\(endpoint\) \{[\s\S]*?endpointShown\(endpoint\)/, "the evidence line renders through endpointShown");
+	assert.doesNotMatch(src, /to \$\{endpoint\.endpoint\}/, "and never the raw field");
+});
+
 // --- one-shot wiring (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE): the file path, the deps entry,
 // --- and the record-before-disarm order. startWorker exposes no factory seam for makeDisarmOnce /
 // --- makeCheckOnceSpent, so these pins drive the REAL closures against a real temp triggers file.

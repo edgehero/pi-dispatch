@@ -114,7 +114,7 @@ in the line itself or in the fix line under it:
 | Line | What it means | What to do |
 |---|---|---|
 | `✓ removed <net> (after removing <probes>, detaching <endpoints>), left by a doctor run that did not finish` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |
-| `✓ removed <probes>, detached <endpoints> on <net>, left by a doctor run that did not finish; the network itself was already gone` | what the pass did land, on a network that then turned out to be gone already. Either half of the list may be absent; if the pass did nothing at all, there is no line, because a network the daemon says is not there is not news | nothing, unless one of the detached names is yours: reattach it with `docker network connect` |
+| `✓ removed <probes>, detached <endpoints> on <net>, left by a doctor run that did not finish; the network itself was already gone` | what the pass did land, on a network that then turned out to be gone already. Either half of the list may be absent; if the pass did nothing at all, there is no line, because a network the daemon says is not there is not news | nothing, unless one of the detached names is yours. The network is gone, so there is nothing to reconnect to: bring it back the way it was made (`docker compose up -d` for a compose stack) |
 | `⚠ leftovers from an interrupted doctor could not be listed: docker network ls --filter name=...` | the listing itself failed, so doctor does not know whether there are any. The only line here that names no network, because none was ever read | run the command yourself; a daemon that cannot list is usually the real problem |
 | `⚠ <net> may be left over from an interrupted doctor, and is not swept because this shell's docker CLI ...` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
 | `⚠ the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
@@ -133,10 +133,12 @@ An absent proxy is a **hard failure** in doctor, because every job is refused wh
 that needs the network to answer is a **warning**, because a custom provider base URL or a transient blip
 would each make a red there a false alarm. So is any leftover the canary could not clear: a network nobody is
 using costs nothing but disk, and a doctor that failed over one would be crying wolf. Each of those warnings
-names **the command that failed**, which is not always `docker network rm`: it is `docker network ls` when the
-listing did not answer, `docker network inspect` when the membership could not be read, and `docker rm -f` on
-the probe when a container would not go. This page said `network rm` for all of them, and following that on
-the unreadable and stuck-probe lines is the one thing you should not do.
+names a command, and where something FAILED it is the command that failed rather than a suggestion: `docker
+network ls` when the listing did not answer, `docker network inspect` when the membership could not be read,
+and `docker rm -f` on the probe when a container would not go. The exception is the foreign-leftover warning,
+where nothing failed at all and the `docker network rm` in its fix line is advice for the other host. This
+page said `network rm` for every one of them, and following that on the unreadable and stuck-probe lines is
+the one thing you should not do.
 
 ## The trap that was not one
 

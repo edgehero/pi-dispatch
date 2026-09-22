@@ -149,7 +149,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// egress canary's readings), filled by collectChecks rather than re-probed.
 	const facts = {};
 	// `isAlive` and `pid` ride the SHARED seams since issue #350, not just the `--live` spread below: the egress
-	// canary names its network after the doctor PROCESS and now sweeps what a doctor that did not finish left,
+	// canary names its network after the doctor PROCESS and now sweeps what an earlier doctor run left,
 	// so it needs both, and a test cannot drive that sweep while the names come from `process.pid` directly.
 	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile, observationFs, isAlive, pid };
 
@@ -2464,7 +2464,9 @@ function triggersPath(env, cwd) {
  * output.
  */
 /**
- * Canary networks a doctor run that did not finish left behind (issue #350), for a PID no longer alive.
+ * Canary networks an EARLIER doctor run left behind (issue #350), for a PID no longer alive. Not "a run that
+ * did not finish": a run that finishes normally leaves one whenever its own teardown `network rm` fails, and
+ * #360 item 5 records a second producer. What this sweep knows is that the pid in the name is not alive.
  *
  * UNLIKE `sweepStaleNetworks` in live-probes.mjs, an attached PROBE here is not a run in progress, and that
  * inversion is the whole of this function. There, a live-probe container on a peer network means a read-back
@@ -2579,7 +2581,12 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		}
 		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
 		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
-		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by a doctor run that did not finish` });
+		// "an EARLIER run", not "a run that did not finish", which both of these lines used to say and neither
+		// could support: a doctor run that finishes normally leaves this network behind whenever its own
+		// teardown `network rm` fails, and says so in a warning of its own, and issue #360 item 5 records a
+		// second producer (a `network create` killed by a signal after the daemon had already made it). The
+		// only thing the sweep knows is that the pid in the name is not alive now.
+		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by an EARLIER doctor run` });
 		// THE NETWORK WENT BETWEEN OUR OWN COMMANDS, and the silence that covers is only a silence about the
 		// NETWORK: one the daemon says is not there is not worth a line, which is the rule this sweep shares
 		// with the boot reaper. What this pass DID is a different fact. It existed, we did it, and saying
@@ -2592,8 +2599,10 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		// `${name}` is the OBJECT of the sentence rather than its subject, because it is the one thing here
 		// that is not news.
 		else if (outcome.absent) {
-			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
-			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by a doctor run that did not finish; the network itself was already gone` });
+			// JOINED WITH "and", not a comma: both halves are themselves comma-separated lists, so a comma
+			// between them gave `removed a, b, detached c, d` with nothing marking where one list ended.
+			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(" and ");
+			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by an EARLIER doctor run; the network itself was already gone` });
 		} else checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
 	}
 	return checks;

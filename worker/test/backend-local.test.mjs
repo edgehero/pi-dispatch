@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -463,6 +463,34 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 // The agreement itself, over NAMES rather than over one sweep's log, because the defect #360 item 7 reports is
 // that the two halves answered differently and either half alone looks correct. Every row is asserted through
 // ONE predicate, so a future edit cannot reintroduce a second rule without deleting this table.
+// The four sites that interpolate an endpoint into "resolves ..., which is not shown to be on this host" all
+// funnel through this, so its table is where the shapes live rather than four behavioural tests over the same
+// rule. Each row is a thing a real context store can hold: `docker context create` refuses a blank or a
+// control-carrying host, but `docker context inspect` -- the command doctor actually runs -- does not
+// re-validate what is already stored.
+test("endpointShown never renders a gap, and never a control byte (#360)", () => {
+	const ESC = String.fromCharCode(27);
+	const CR = String.fromCharCode(13);
+	assert.equal(endpointShown({ endpoint: "tcp://h:2375" }), "tcp://h:2375", "an ordinary value is untouched");
+	assert.equal(endpointShown({ endpoint: "" }), "an empty endpoint");
+	// WHITESPACE, which is the row the first version of this helper missed: it tested `=== ""`, so three
+	// spaces rendered "resolves    , which is not shown to be on this host" at three of the four sites.
+	assert.equal(endpointShown({ endpoint: "   " }), "an empty endpoint");
+	assert.equal(endpointShown({ endpoint: "\t\n " }), "an empty endpoint");
+	for (const absent of [{ endpoint: null }, { endpoint: undefined }, {}, null, undefined]) assert.equal(endpointShown(absent), "an empty endpoint", JSON.stringify(absent));
+	// An erase-line and a carriage return wipe the warning and rewrite it from column 0 with whatever
+	// follows, which is how a leftover-network line becomes "TOTALLY FINE" on an operator's terminal. What
+	// survives is inert text, because the ESC that gives `[2K` its meaning is gone.
+	assert.equal(endpointShown({ endpoint: `tcp://real:2376${ESC}[2K${CR}tcp://attacker:2376` }), "tcp://real:2376[2Ktcp://attacker:2376");
+	assert.equal(endpointShown({ endpoint: `${ESC}]8;;https://evil.example${String.fromCharCode(7)}` }), "]8;;https://evil.example");
+	for (const code of [0, 1, 8, 9, 10, 13, 27, 31, 127, 0x80, 0x9f]) {
+		assert.doesNotMatch(endpointShown({ endpoint: `tcp://h${String.fromCharCode(code)}:1` }), /[\u0000-\u001f\u007f-\u009f]/, `U+${code.toString(16)}`);
+	}
+	// NOT a sanitiser beyond that, and the limit is the point: it is the display form's renderer, and the
+	// credential guarantee belongs to `displayEndpoint` upstream, which this neither adds to nor weakens.
+	assert.equal(endpointShown({ endpoint: "tcp://(credentials not shown)" }), "tcp://(credentials not shown)");
+});
+
 test("both halves of the reaper give ONE answer to `what is ours` (#360)", () => {
 	const ours = [
 		jobContainerName("gh-1"),
