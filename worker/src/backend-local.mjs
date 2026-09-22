@@ -180,23 +180,40 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * which is the command doctor actually runs, does NOT re-validate what the context store already holds, so
  * the read path can return one.
  *
- * IT ALSO STRIPS CONTROL BYTES, and that is a property of this function rather than a measurement of some
- * other command. `displayEndpoint` returns a host with no `@` VERBATIM -- it withholds credentials and was
- * never a sanitiser -- so a carriage return or a CSI sequence in a stored endpoint reaches a line an
- * operator is reading, where an erase-line plus a CR wipes the warning and rewrites it from column 0 with
- * whatever follows. An earlier version of this comment claimed docker's own URL parser kept them out, having
- * measured `docker context create` and `DOCKER_HOST`: both are WRITE paths, the read path does not
- * re-validate, so the claim was measured on the wrong command. Stripping here covers all four call sites at
- * once, because every one of them funnels through this.
+ * ANYTHING NOT PLAINLY PRINTABLE IS QUOTED AND ESCAPED, never removed, and the difference is the whole of
+ * this function's second job. `displayEndpoint` returns a host with no `@` VERBATIM -- it withholds
+ * credentials and was never a sanitiser -- so whatever a context store holds reaches a line an operator
+ * reads, and an erase-line plus a carriage return wipes the warning and rewrites it from column 0.
+ *
+ * A first attempt STRIPPED those bytes, and stripping is the wrong rule in both directions, measured on
+ * docker 27.4.0. It FORGES: `docker context create` accepts a C1 byte, so a stored
+ * `tcp://127.0.0.1<U+0085>:2375` is correctly classified NOT local (the parser percent-encodes it into the
+ * hostname) and then printed as a clean loopback address, giving a sentence that contradicts itself and a
+ * value that survives copy, paste and grep as something the operator never configured. And it CORRUPTS: a
+ * unix socket really can live at a path containing one (created, resolved and dialled on this host), and
+ * stripping renames it to a path that does not exist -- while `job-user.mjs`, `sandbox.mjs` and
+ * `runtime-observations.mjs` go on reading the UNSTRIPPED value as a real filesystem path, so doctor would
+ * name one file and the system use another.
+ *
+ * So: printable ASCII passes through untouched, and anything else is rendered as a quoted, fully escaped
+ * string. That is LOSSLESS, which is the property that matters -- an operator can always recover what was
+ * really stored -- and it disarms the whole class at once rather than one codepoint range of it, so a
+ * right-to-left override, a zero-width joiner and a line separator are as visible as an ESC. The earlier
+ * comment here also claimed docker's URL parser kept control bytes out, having measured `context create`
+ * and `DOCKER_HOST`: both are WRITE paths, the read path does not re-validate, and C1 is accepted on the
+ * write path anyway, so the claim was wrong on its own terms as well as measured on the wrong command.
  *
  * RESIDUAL, named rather than closed: a stored endpoint whose value IS the literal text "an empty endpoint"
- * is indistinguishable from the empty case. It cannot be created through the CLI, and it costs one sentence
- * misread, so it does not earn a quoting rule that would move the wording at all four sites.
+ * is indistinguishable from the empty case. `docker context create` refuses it (no scheme), and it costs one
+ * sentence misread.
  */
 export function endpointShown(endpoint) {
-	// C0 and C1, which is exactly the set that must never reach a terminal.
-	const shown = String(endpoint?.endpoint ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-	return shown.trim() === "" ? "an empty endpoint" : shown;
+	const shown = String(endpoint?.endpoint ?? "");
+	if (shown.trim() === "") return "an empty endpoint";
+	if (/^[\x20-\x7e]+$/.test(shown)) return shown;
+	// `JSON.stringify` quotes and escapes C0, the quote and the backslash; the pass after it takes everything
+	// else outside printable ASCII, which JSON leaves as literal characters.
+	return JSON.stringify(shown).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, "0")}`);
 }
 
 /**

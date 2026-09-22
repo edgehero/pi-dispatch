@@ -3996,35 +3996,40 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 // is the page's own job and is not pinned here, and saying so is the point: a green regex over a false
 // sentence is worse than no test.
 //
-// THE NEEDLE TOOK THREE GOES, and the two wrong ones are worth keeping because each failed in its own
-// direction. Counting `` label: `Egress canary: `` alone was a FALSE NEGATIVE: a review pass added a ninth
-// site in four shapes that kept the count at eight (the label in a variable, the prefix in a constant, a
-// plain double-quoted string, and `label:` wrapped onto its own line). Adding a second count over the raw
-// source closed those and bought a FALSE POSITIVE instead, which is the worse failure: this file's house
-// style is to quote its own output in comments, so one comment naming the prefix turned the test red and
-// told its author to rewrite their prose as a label.
+// A COUNT, deliberately, and not a match over the page's prose. `docs/egress.md` described three canary line
+// shapes while doctor produced six, and the page went a whole round without anyone noticing (issue #360,
+// item 2). The obvious repair is a test that reads each label out of the source and requires the page to
+// carry it: that is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and these labels are
+// worse subjects for it than that page's were, since several begin with `${name}` and one nests a template
+// inside itself. What each line SAYS stays the page's own job, unpinned on purpose, because a green regex
+// over a false sentence is worse than no test.
 //
-// So the source is stripped of comments first and the needle is the bare phrase, with no colon and no
-// trailing space. Comments cannot trip it, and a site is counted however it is spelled, including a
-// constant holding the prefix, because the constant's own declaration carries the phrase. WHAT STILL EVADES
-// IT, stated rather than claimed away: splitting the phrase itself across an interpolation
-// (`Egress can${""}ary:`). Nothing else in this file is written that way and no ordinary edit produces it.
+// ONE NEEDLE, AND ITS LIMIT STATED RATHER THAN FOUGHT. This counts sites written the way all eight existing
+// ones are written, and nothing else. Two cleverer versions were tried and both failed in their own
+// direction, which is why the simple one is here: adding a raw-source count caught four more spellings and
+// introduced a FALSE RED, because this file's house style is to quote its own output in comments, so one
+// comment naming the prefix told its author to rewrite their prose as a label; and stripping comments first
+// to fix that introduced a FALSE GREEN at thirty times the scale, because `/\*[\s\S]*?\*\/` treats the `/*`
+// inside `mv ${legacy}/logs/*` and inside a quoted `*.service.d/*.conf` as comment openers and deleted 88
+// lines of live code before counting. A test that silently stops looking at part of the file is worse than
+// one with a limit written on it.
 //
-// What each line SAYS remains the page's own job and is not pinned here, and saying so is the point: this
-// is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and a green regex over a false
-// sentence is worse than no test. The count is the one thing that is both derivable and sufficient, because
-// a new site fails it and sends its author to the page, which is all the page needs.
+// SO: a site spelled any other way is invisible here -- a constant holding the prefix, a plain double-quoted
+// string, `label:` wrapped onto its own line, an interpolation or a `\u` escape inside the phrase, or a
+// label built in another module. The eight that exist are uniform, and the next one is expected to match
+// them; if it does not, this test says nothing and the page goes stale again. That is the accepted cost of
+// not shipping a stripper that eats code.
 test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
-	// Block comments, then whole-line `//` ones. Deliberately NOT trailing `//` comments: `tcp://` inside a
-	// template literal would make a naive stripper eat the rest of a real line, which is a false GREEN.
-	const code = src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
-	const everywhere = code.split("Egress canary").length - 1;
-	const sites = code.split("label: `Egress canary: ").length - 1;
-	assert.equal(everywhere, sites, "a canary line is spelled some way this test cannot see: write it as ``label: `Egress canary: …` `` or widen the needle");
+	const sites = src.split("label: `Egress canary: ").length - 1;
 	const claimed = Number(/<!-- CANARY-LINE-SITES: (\d+) -->/.exec(doc)?.[1]);
 	assert.equal(sites, claimed, `doctor produces ${sites} canary lines; docs/egress.md is written for ${claimed}. Update the page, then the marker.`);
+	// The page must not quote a sentence no site can emit. It did: three code sites were reworded away from
+	// "left by a doctor run that did not finish" and both of the page's own ✓ rows kept it, in a commit that
+	// had one of those rows open for a different edit. One retired phrase, named, because this is the fourth
+	// time on this branch that a correction landed everywhere except the page.
+	assert.ok(!doc.includes("left by a doctor run that did not finish"), "docs/egress.md still quotes a line doctor cannot print");
 	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
 	// is why the page describes seven shapes and this counts eight sites. Stated here rather than derived:
 	// telling two identical template literals apart needs a parser, and a parser over source is the same arms
@@ -4070,7 +4075,7 @@ test("doctor: probes removed off a network that then vanished are still accounte
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242 on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself was already gone/);
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-unlisted-4242 on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself is gone/);
 	assert.doesNotMatch(text(), /⚠ Egress canary: the network pi-dispatch-egress-doctor-4242 could not be removed/, "a network the daemon says is gone is not a failure");
 });
 
@@ -4091,7 +4096,29 @@ test("a stranger DETACHED off a network that then vanished is named, with no pro
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.at(-1) === "their-worker"), "it really was detached");
-	assert.match(text(), /✓ Egress canary: detached their-worker on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself was already gone/);
+	assert.match(text(), /✓ Egress canary: detached their-worker on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself is gone/);
+});
+
+test("both halves of the vanished-network line are joined so the two lists do not run together (#360)", async () => {
+	// The only state the join is visible in, and nothing drove it: one test drives `removed` alone and another
+	// drives `detached` alone, so reverting `" and "` to `", "` survived the whole suite. With both lists
+	// populated a comma gives `removed a, b, detached c, d`, which marks no boundary between them.
+	const { out, text } = capture();
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242": {
+			code: 0,
+			output: '{"a":{"Name":"pi-dispatch-egress-probe-provider-4242"},"b":{"Name":"pi-dispatch-egress-probe-unlisted-4242"},"c":{"Name":"their-worker"},"d":{"Name":"their-db"}}',
+		},
+		"docker rm -f": 0,
+		"docker network rm pi-dispatch-egress-doctor-4242": { code: 1, output: "" },
+		"docker network inspect pi-dispatch-egress-doctor-4242": { code: 1, output: "Error response from daemon: network pi-dispatch-egress-doctor-4242 not found" },
+		...green,
+		"gh auth status": { code: 0, output: ghStatusOutput },
+	};
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-probe-provider-4242, pi-dispatch-egress-probe-unlisted-4242 and detached their-worker, their-db on pi-dispatch-egress-doctor-4242, left by an EARLIER doctor run; the network itself is gone/);
+	assert.doesNotMatch(text(), /pi-dispatch-egress-probe-unlisted-4242, detached/, "a comma between the lists would hide where one ends");
 });
 
 test("a vanished network with NOTHING done to it is still not a line (#360)", async () => {
@@ -4183,7 +4210,10 @@ test("doctor: the dead-pid sweep runs ONLY on a daemon this host owns (#350)", a
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
-	assert.doesNotMatch(text(), /left by a doctor run that did not finish/, "a leftover there belongs to the doctor that owns that daemon");
+	// The needle is the string the code can ACTUALLY emit. It was `left by a doctor run that did not finish`
+	// until three code sites were reworded, at which point both of these assertions passed against any output
+	// at all -- the exact vacuity the comment below warns about, in the file that warns about it.
+	assert.doesNotMatch(text(), /left by an EARLIER doctor run/, "a leftover there belongs to the doctor that owns that daemon");
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "and nothing of it is touched");
 });
 
@@ -4255,7 +4285,7 @@ test("doctor: a REMOTE daemon is named and left, and the line says WHICH daemon 
 	// The needle must be a string the code can actually emit: `are not swept` appears in no doctor output,
 	// so this assertion passed against anything at all until it was proven vacuous.
 	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves tcp:\/\/build\.example\.invalid:2376, which is not shown to be on this host, so a pid that is dead here may be alive there/, "a leftover there is named, not silently skipped");
-	assert.doesNotMatch(text(), /left by a doctor run that did not finish/);
+	assert.doesNotMatch(text(), /left by an EARLIER doctor run/);
 	assert.doesNotMatch(text(), /Egress canary:[^\n]*did not say which daemon it uses/, "a RESOLVED remote endpoint never takes the mute branch");
 });
 

@@ -344,8 +344,9 @@ export async function removeNetworkOrSay(docker, { network, detach = [], stillCl
 	//
 	// It defaults to a no-op, so four of the five callers are byte-identical and the one that opts in does so
 	// by name, and that default is also what makes those four callers SAFE rather than merely unchanged: an
-	// aborted pass returns `command: null`, and every one of them would render that into "could not be
-	// removed: null" if it ever saw the shape. A caller that opts in MUST branch on `aborted` before it reads
+	// aborted pass returns `command: null`, and three of them would render that into "could not be removed:
+	// null" if they ever saw the shape (the boot reaper is the exception: it logs a fixed reason token and
+	// never reads `command` at all). A caller that opts in MUST branch on `aborted` before it reads
 	// `command`. `sandbox.mjs` does; nothing else can reach it.
 	//
 	// WHY THE OTHER FOUR PASS NOTHING: `backend-local.mjs`'s boot reaper and `doctor.mjs`'s two canary calls

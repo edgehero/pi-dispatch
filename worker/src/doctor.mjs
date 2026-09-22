@@ -2490,13 +2490,11 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 	// support thread. If a future resolver ever stores the raw host, this leaks: pinned by a test that hands
 	// the sweep an endpoint with a password in it.
 	//
-	// THAT IS THE ONLY THING `displayEndpoint` GUARANTEES HERE, and the limit is worth stating because this
-	// is terminal output: it returns a host with no `@` VERBATIM, so it strips no control byte, and a `\r` or
-	// a CSI sequence in an endpoint would rewrite the line an operator is reading. What keeps them out is not
-	// this code, it is docker's own URL parser: measured on 27.4.0, both `docker context create --docker
-	// host=` and `DOCKER_HOST` refuse a control character outright (`net/url: invalid control character in
-	// URL`, exit 1), which lands doctor on the `unparseable` branch instead. Measured on one CLI version, so
-	// it is recorded as a measurement and not as a property this project enforces.
+	// THAT IS THE ONLY THING `displayEndpoint` GUARANTEES, and it is not the only thing this line needs: it
+	// returns a host with no `@` VERBATIM, so nothing upstream keeps a carriage return, a CSI sequence or a
+	// right-to-left override out of an operator's terminal. `endpointShown` is what does, by QUOTING rather
+	// than removing, and its own docblock carries the two measurements that rule out stripping. An earlier
+	// comment here credited docker's URL parser instead, having measured the write path while doctor reads.
 	const cliSays = endpoint?.local === false ? `resolves ${endpointShown(endpoint)}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint?.reason ?? "not asked"})`;
 	const listed = await docker(["network", "ls", "--filter", `name=${EGRESS_CANARY_NET_PREFIX}`, "--format", "{{.Name}}"]);
 	// THE LISTING ALWAYS RUNS, on any daemon. The reason the sweep is confined to a daemon this host owns is
@@ -2597,12 +2595,16 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		// stranger force-detached off the network -- which is the act `INT-EGRESS-POLICY-CONTRACT` promises
 		// is always named -- went unreported, and with no probe of ours to remove there was no line at all.
 		// `${name}` is the OBJECT of the sentence rather than its subject, because it is the one thing here
-		// that is not news.
+		// that is not news. "IS gone", not "was ALREADY gone": this pass may be the reason. `liveRunVia`
+		// answers `{ code: null }` when the 10 s bound kills the CLI, which `removeNetworkOrSay` reads as a
+		// removal that did not happen even though the daemon may already have acted, so "already" would
+		// attribute this run's own work to somebody else. And a detach is recorded only on exit 0, so naming
+		// one asserts the network was there while this pass worked on it.
 		else if (outcome.absent) {
 			// JOINED WITH "and", not a comma: both halves are themselves comma-separated lists, so a comma
 			// between them gave `removed a, b, detached c, d` with nothing marking where one list ended.
 			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(" and ");
-			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by an EARLIER doctor run; the network itself was already gone` });
+			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by an EARLIER doctor run; the network itself is gone` });
 		} else checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
 	}
 	return checks;

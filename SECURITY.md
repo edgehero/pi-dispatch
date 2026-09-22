@@ -312,11 +312,22 @@ Stated openly rather than discovered later:
   explicit `container_name:` values never has, and which `docker network inspect` cannot see for a stopped
   or `created` one even when the name does match. So the stack keeps running with its network removed from
   under it.
-  **Recovering it is `docker compose up -d` from the project directory**, and that is the whole of the
-  advice: the network is GONE, not merely detached, so `docker network connect` answers `network not found`,
-  and recreating it by hand loses the compose labels and the `--network-alias` entries, which leaves
-  service-name DNS inside the stack broken (measured on docker 27.4.0). Where the container half did take
-  something, under default compose naming, that is not recoverable at all.
+  The carve-out is narrower still than that, and the decisive reason is not in either of those: under
+  DEFAULT compose naming your services ARE under the prefix, and the container loop `rm -f`'d them one loop
+  earlier, so there is nothing left attached for the carve-out to see. It fires only for a prefix container
+  `docker ps` did not return, which in practice means a race.
+  **What recovery costs, measured on docker 27.4.0 and compose v2.31.0, with no comfortable answer.** The
+  network is GONE, not merely detached, so `docker network connect` answers `network not found`. For a
+  compose stack, `docker compose up -d` from the project directory does restore the network with its labels,
+  the service aliases and working service-name DNS, but it RECREATES the service containers to do it, so
+  anything written inside them since they started is discarded. That is the same loss the container half
+  causes outright, which is the honest reading: the two halves cost about the same, and this widening is
+  not defensible on the ground that its half is cheap. It is defensible because the old rule destroyed
+  a `pi-job-*` project's containers and spared its network, which protected nothing at all.
+  For a network **not** made by compose there is no single command: a hand-made one loses its subnet,
+  gateway, driver options and labels with it, and a compose `external:` network is worse, because
+  `docker compose up -d` then refuses outright (`network ... declared as external, but could not be found`)
+  and leaves the containers running attached to nothing until you recreate it yourself.
   Until issue #360 the two halves disagreed — the container was taken and the network was not — which was
   not a protection so much as an inconsistency that spared half of an object by an accident of suffix.
   Docker labels would be unambiguous and are **not** used: a label cannot be on what a worker that crashed

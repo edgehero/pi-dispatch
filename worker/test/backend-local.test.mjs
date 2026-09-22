@@ -446,8 +446,9 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 	// hazard from the same filter and the same fix.
 	const { exec, calls, state } = fakeDockerExec({
 		containers: ["pi-job-mine", "my-pi-job-notes-runner"],
-		// The third and fourth cover the two anchors separately: one has the prefix in the MIDDLE, the other
-		// has our exact shape plus a SUFFIX, which is what a `-backup` or `-old` copy of a real name looks like.
+		// The third has the prefix in the MIDDLE, which is the other way `--filter name=` returns a stranger.
+		// Our own shape plus a SUFFIX (`pi-job-mine-net-backup`) used to be a row here and is NOT one now: it
+		// moved to the test below, where it is SWEPT, because the widening claims it.
 		nets: { "pi-job-mine-net": ["pi-dispatch-egress-proxy"], "my-pi-job-notes": ["someone-elses-app"], "robtest-staging-pi-job-queue-net": ["their-worker"] },
 	});
 	const { log, lines } = reaperLog();
@@ -465,38 +466,51 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 // ONE predicate, so a future edit cannot reintroduce a second rule without deleting this table.
 // The four sites that interpolate an endpoint into "resolves ..., which is not shown to be on this host" all
 // funnel through this, so its table is where the shapes live rather than four behavioural tests over the same
-// rule. Each row is a thing a real context store can hold: `docker context create` refuses a blank or a
-// control-carrying host, but `docker context inspect` -- the command doctor actually runs -- does not
-// re-validate what is already stored.
-test("endpointShown never renders a gap, and never a control byte (#360)", () => {
-	const ESC = String.fromCharCode(27);
-	const CR = String.fromCharCode(13);
-	assert.equal(endpointShown({ endpoint: "tcp://h:2375" }), "tcp://h:2375", "an ordinary value is untouched");
+// rule. Each row is a thing a real context store can hold: `docker context create` refuses a blank host and a
+// raw ESC, but it ACCEPTS a C1 byte, and `docker context inspect` -- the command doctor actually runs -- does
+// not re-validate what is already stored.
+test("endpointShown never renders a gap, and never a byte that can redraw the line (#360)", () => {
+	const U = (hex) => String.fromCodePoint(parseInt(hex, 16));
+	assert.equal(endpointShown({ endpoint: "tcp://h:2375" }), "tcp://h:2375", "printable ASCII is untouched");
+	assert.equal(endpointShown({ endpoint: "unix:///var/run/docker.sock" }), "unix:///var/run/docker.sock");
+	assert.equal(endpointShown({ endpoint: "tcp://(credentials not shown)" }), "tcp://(credentials not shown)", "and so is the withheld form, which start.mjs's own pin depends on");
 	assert.equal(endpointShown({ endpoint: "" }), "an empty endpoint");
-	// WHITESPACE, which is the row the first version of this helper missed: it tested `=== ""`, so three
-	// spaces rendered "resolves    , which is not shown to be on this host" at three of the four sites.
+	// Whitespace: the first version tested `=== ""`, so three spaces rendered as a gap.
 	assert.equal(endpointShown({ endpoint: "   " }), "an empty endpoint");
 	assert.equal(endpointShown({ endpoint: "\t\n " }), "an empty endpoint");
 	for (const absent of [{ endpoint: null }, { endpoint: undefined }, {}, null, undefined]) assert.equal(endpointShown(absent), "an empty endpoint", JSON.stringify(absent));
-	// An erase-line and a carriage return wipe the warning and rewrite it from column 0 with whatever
-	// follows, which is how a leftover-network line becomes "TOTALLY FINE" on an operator's terminal. What
-	// survives is inert text, because the ESC that gives `[2K` its meaning is gone.
-	assert.equal(endpointShown({ endpoint: `tcp://real:2376${ESC}[2K${CR}tcp://attacker:2376` }), "tcp://real:2376[2Ktcp://attacker:2376");
-	assert.equal(endpointShown({ endpoint: `${ESC}]8;;https://evil.example${String.fromCharCode(7)}` }), "]8;;https://evil.example");
-	for (const code of [0, 1, 8, 9, 10, 13, 27, 31, 127, 0x80, 0x9f]) {
-		assert.doesNotMatch(endpointShown({ endpoint: `tcp://h${String.fromCharCode(code)}:1` }), /[\u0000-\u001f\u007f-\u009f]/, `U+${code.toString(16)}`);
+	// QUOTED AND ESCAPED, NOT REMOVED, and these two rows are why. A second version STRIPPED the control
+	// range, which forged and corrupted in turn: `docker context create` accepts a C1 byte, so a stored
+	// loopback-with-a-C1 is classified NOT local and then printed as a clean loopback, a value the operator
+	// never configured, in a sentence that then contradicts itself; and a unix socket really can live at a
+	// path holding one, which stripping renames to a path that does not exist while every other consumer
+	// reads the unstripped value as a real path.
+	assert.equal(endpointShown({ endpoint: `tcp://127.0.0.1${U("85")}:2375` }), '"tcp://127.0.0.1\\u0085:2375"', "a C1 must not be erased into a valid loopback address");
+	assert.equal(endpointShown({ endpoint: `unix:///tmp/pi${U("85")}probe.sock` }), '"unix:///tmp/pi\\u0085probe.sock"', "nor a socket path into one that does not exist");
+	// A value that is ENTIRELY control bytes, which is the interaction the strip got wrong: check emptiness
+	// before removing anything and this row renders a gap again.
+	assert.equal(endpointShown({ endpoint: U("1") }), '"\\u0001"');
+	// The whole class, not one range of it: an erase-line, a right-to-left override, a zero-width joiner and
+	// a line separator all have to be visible, and only escaping makes them so.
+	for (const [what, value] of [["CSI", `tcp://r:1${U("1b")}[2K${U("0d")}tcp://evil:1`], ["RLO", `tcp://a${U("202E")}b:1`], ["ZWJ", `tcp://a${U("200D")}b:1`], ["LS", `tcp://a${U("2028")}b:1`], ["NBSP", `tcp://a${U("A0")}b:1`]]) {
+		const out = endpointShown({ endpoint: value });
+		assert.match(out, /^"[\x20-\x7e]*"$/, `${what} renders as printable ASCII in quotes`);
+		assert.doesNotMatch(out, /[^\x20-\x7e]/, what);
 	}
-	// NOT a sanitiser beyond that, and the limit is the point: it is the display form's renderer, and the
-	// credential guarantee belongs to `displayEndpoint` upstream, which this neither adds to nor weakens.
-	assert.equal(endpointShown({ endpoint: "tcp://(credentials not shown)" }), "tcp://(credentials not shown)");
+	// LOSSLESS is the property that makes quoting the right answer rather than a prettier strip: what was
+	// stored is always recoverable from what was printed.
+	// The escaped form is itself valid JSON, so the recovery is one `JSON.parse` and needs no unescaper of
+	// its own -- which is the point: an operator can do it, and so can whatever ingests the log.
+	for (const value of [`tcp://127.0.0.1${U("85")}:2375`, `tcp://a${U("202E")}b:1`, `x${U("1b")}y`, `unix:///tmp/pi${U("85")}probe.sock`]) assert.equal(JSON.parse(endpointShown({ endpoint: value })), value, value);
 });
 
 test("both halves of the reaper give ONE answer to `what is ours` (#360)", () => {
 	const ours = [
 		jobContainerName("gh-1"),
 		networkNameFor(jobContainerName("gh-1")),
-		// The shapes `sanitizeJobId` permits, which is why no charset rule can separate an operator's name from
-		// a job's: `_` and `-` are both legal in a real id.
+		// The shapes a REAL job id can take, which is why no charset rule separates an operator's name from a
+		// job's: `jobContainerName` does not sanitise, and BullMQ's ids are already `[A-Za-z0-9._-]`, so `_`
+		// and `-` are both legal. (`sanitizeJobId` governs the SANDBOX namespace and is not in this path.)
 		"pi-job-runner_default",
 		"pi-job-runner-db-1",
 		// WIDENED BY #360, and this is the row that can destroy an operator's object: our exact shape with
