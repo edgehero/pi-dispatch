@@ -229,7 +229,21 @@ export async function runUp(argv = [], deps = {}) {
 	 * NAMED ON `up`'S SIDE rather than given a fourth state in doctor's warning: a doctor state exists to
 	 * carry a DECISION, and this is a wording overlap between two correct sentences. Both readings are
 	 * asked, so a line that is empty only for systemd and set for the wrapper is not called empty.
+	 *
+	 * AND THE CONSEQUENCE IS PER KEY, which the first version of this got wrong in the worst direction. It
+	 * said an empty value is what "every consumer reads as unset", and for two of these keys that is false:
+	 * `config.mjs` reads `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE` with `??`, so an empty string
+	 * survives, and `start.mjs` calls `loadPauseWindows`/`loadScopedLimits` unconditionally at boot, which
+	 * THROW on a path that does not exist. So the worker does not ignore the feature, it refuses to start.
+	 * `PI_LOGS_DIR` and `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET`
+	 * reads as absent. Measured on all five.
 	 */
+	// The two keys `config.mjs` reads with `??`, so an empty string reaches a loader that throws on it.
+	const EMPTY_REFUSES_BOOT = new Set(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
+	const emptyNote = (key) =>
+		EMPTY_REFUSES_BOOT.has(key)
+			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- the worker reads it with \`??\`, so it starts up, tries to load a file at "" and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
+			: `left untouched: the line is there and its value is empty, which reads as unset. up never clobbers a key an operator wrote, so fill it in or delete the line`;
 	const writtenButEmpty = (key) => {
 		let text;
 		try {
@@ -262,8 +276,10 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["WEBHOOK_SECRET", "generated into .env (value not shown; the receiver verifies deliveries with it)"]);
 			} else {
 				const empty = writtenButEmpty("WEBHOOK_SECRET");
-				out(`\n✓ WEBHOOK_SECRET already ${empty ? "has a line in .env, and its value is EMPTY" : "set in .env"} — left untouched\n`);
-				summary.push(["WEBHOOK_SECRET", empty ? "left untouched: the line is there and its value is empty, which every consumer reads as unset. up never clobbers a key an operator wrote, so fill it in by hand" : "already set — left untouched"]);
+				// ⚠ and not ✓ for the empty line: every other ✓ in this block means "this is fine", and an empty
+				// secret is a key the operator has to go and fill in.
+				out(empty ? `\n⚠ WEBHOOK_SECRET has a line in .env and its value is EMPTY — left untouched\n` : "\n✓ WEBHOOK_SECRET already set in .env — left untouched\n");
+				summary.push(["WEBHOOK_SECRET", empty ? emptyNote("WEBHOOK_SECRET") : "already set — left untouched"]);
 			}
 		} catch (err) {
 			out(`\n✗ WEBHOOK_SECRET could not be written: ${err?.message}\n`);
@@ -350,7 +366,7 @@ export async function runUp(argv = [], deps = {}) {
 				out(`✓ ${key}=${value} written into .env\n`);
 				summary.push([key, `written into .env (${value})`]);
 			} else {
-				summary.push([key, writtenButEmpty(key) ? "left untouched: the line is there and its value is empty, which every consumer reads as unset, so a warning below may say this feature is off. up never clobbers a key an operator wrote, so fill it in by hand" : "already set — left untouched"]);
+				summary.push([key, writtenButEmpty(key) ? emptyNote(key) : "already set — left untouched"]);
 			}
 		}
 	} else {

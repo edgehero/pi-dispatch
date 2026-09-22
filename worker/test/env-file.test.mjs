@@ -275,6 +275,16 @@ test("readEnvKeys strips a trailing comment before deciding a quoted value is em
 	assert.deepEqual(readEnvKeys('K=""   # cleared while debugging', ["K"]), {});
 	assert.deepEqual(readEnvKeys("K='/srv/a b.json'   # a note", ["K"]), { K: "/srv/a b.json" });
 	assert.deepEqual(readEnvKeys('K="/srv/x # y"', ["K"]), { K: "/srv/x # y" }, "and a hash INSIDE the quotes is still part of the value");
+	// THE QUOTE CLOSES WHERE IT CLOSES, not where the string ends. `/^(["']).*\1$/` asked only whether the
+	// value starts and ends with the same quote, so a quoted value whose trailing COMMENT also ends in one
+	// read as a single quoted string and kept the comment: `/a.json" # see "notes` -- a value no shell
+	// produces, printed at an operator as the one their service reads. Measured in sh, bash and zsh.
+	assert.deepEqual(readEnvKeys('K="/a.json" # see "notes"', ["K"]), { K: "/a.json" }, "the comment is outside the quotes, wherever its own quotes fall");
+	assert.deepEqual(readEnvKeys(`K='/a.json' # it's fine`, ["K"]), { K: "/a.json" }, "and the same for a single-quoted value");
+	// The two shapes that are NOT a quoted value, left to the unquoted rule rather than guessed at: a quote
+	// that never closes, and one that runs straight on into more text (which the shells CONCATENATE).
+	assert.deepEqual(readEnvKeys('K="unclosed', ["K"]), { K: '"unclosed' }, "an unclosed quote is not a quoted value");
+	assert.deepEqual(readEnvKeys('K="a"b', ["K"]), { K: '"a"b' }, "nor is a closing quote with text running on after it");
 });
 
 test("readEnvKeys reads a value back exactly as the shell does, quotes and comments included", () => {

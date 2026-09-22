@@ -316,7 +316,12 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// it export-only would print a value systemd never sees and advise dropping a prefix, which
 			// would change which file the worker loads.
 			if (!(key in plain) && key in withExport) exported[key] = withExport[key];
-			else if (key in plain && key in withExport && plain[key] !== withExport[key]) alsoExported[key] = withExport[key];
+			// `key in withExport` is NOT the condition, and requiring it made this silent on the sharpest case
+			// (issue #365, gate): `readEnvKeys` DELETES a key whose last assignment is empty, so when the
+			// `export` line is the one that empties it, the second reading has no entry at all -- while the
+			// readings still disagree, systemd loading the file and every wrapper deployment reading it unset.
+			// An absent entry is recorded as the empty string it stands for, and the caller words it.
+			else if (key in plain && plain[key] !== withExport[key]) alsoExported[key] = withExport[key] ?? "";
 		}
 		return { ...plain, exported, alsoExported };
 	} catch {
@@ -1664,9 +1669,9 @@ export async function collectChecks(env, seams) {
 					? {
 							ok: false,
 							warn: true,
-							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported ? `, and again as \`export PI_PAUSE_WINDOWS_FILE=${alsoExported}\`` : ""}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported ? `. Those two disagree, and which one is in force depends on how the worker starts` : ""}`,
-							fix: alsoExported
-								? `two assignments are in force at once: systemd's EnvironmentFile= reads bare lines only and takes ${inFile}, while deploy/worker-env-wrapper.sh and the nssm wrapper source the file and take the LAST assignment, which is ${alsoExported}. Delete whichever line this deployment does not want rather than guessing which one wins`
+							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_PAUSE_WINDOWS_FILE=\`` : `, and again as \`export PI_PAUSE_WINDOWS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
+							fix: alsoExported !== undefined
+								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? "nothing, leaving the feature off" : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_PAUSE_WINDOWS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
 								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {
@@ -1704,9 +1709,9 @@ export async function collectChecks(env, seams) {
 					? {
 							ok: false,
 							warn: true,
-							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported ? `, and again as \`export PI_SCOPED_LIMITS_FILE=${alsoExported}\`` : ""}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported ? `. Those two disagree, and which one is in force depends on how the worker starts` : ""}`,
-							fix: alsoExported
-								? `two assignments are in force at once: systemd's EnvironmentFile= reads bare lines only and takes ${inFile}, while deploy/worker-env-wrapper.sh and the nssm wrapper source the file and take the LAST assignment, which is ${alsoExported}. Delete whichever line this deployment does not want rather than guessing which one wins`
+							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_SCOPED_LIMITS_FILE=\`` : `, and again as \`export PI_SCOPED_LIMITS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
+							fix: alsoExported !== undefined
+								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? "nothing, leaving the feature off" : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_SCOPED_LIMITS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
 								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
 						}
 					: {

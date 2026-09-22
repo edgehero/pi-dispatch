@@ -330,7 +330,19 @@ export function readEnvKeys(text, keys, { acceptExport = false } = {}) {
 		// The comment comes off FIRST when the text does not end in the quote it opened with, or
 		// `KEY="" # cleared` keeps the two quote characters, reads as non-empty, and softens a warning
 		// about a deployment where both the shells and systemd see an empty value.
-		const stripped = /^(["']).*\1$/.test(trimmed) ? trimmed : trimmed.replace(/\s#.*$/, "").trim();
+		// The quote test is where the QUOTE CLOSES, not where the string ends, and that distinction is the
+		// correction (issue #365, gate). `/^(["']).*\1$/` asked only whether the value starts and ends with
+		// the same quote, so `KEY="/a.json" # see "notes"` read as one quoted value and kept the comment,
+		// giving `/a.json" # see "notes` -- a string no shell produces, printed at an operator as the value
+		// their service reads. The shells close at the FIRST matching quote and treat what follows, after
+		// whitespace, as outside it; measured in sh, bash and zsh.
+		const quote = trimmed[0] === '"' || trimmed[0] === "'" ? trimmed[0] : "";
+		const close = quote ? trimmed.indexOf(quote, 1) : -1;
+		// Falls through to the unquoted rule when the quote never closes, or when what follows the closing
+		// quote runs straight on (`"a"b`, which the shells CONCATENATE): neither is a quoted value, and
+		// guessing at either would be a third reading nothing measured.
+		const closes = close !== -1 && (close === trimmed.length - 1 || /^\s/.test(trimmed.slice(close + 1)));
+		const stripped = closes ? trimmed.slice(0, close + 1) : trimmed.replace(/\s#.*$/, "").trim();
 		const unquoted = /^(["'])(.*)\1$/.exec(stripped);
 		const value = unquoted ? unquoted[2] : stripped;
 		// The LAST occurrence wins, and an empty one counts as an occurrence, because that is what every

@@ -232,7 +232,14 @@ test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set
 	await h.run();
 	assert.equal(h.store.get("/deploy/.env").includes('PI_PAUSE_WINDOWS_FILE=""'), true, "and the line itself is STILL untouched, which is the point of saying it rather than fixing it");
 	const text = h.text();
-	assert.match(text, /PI_PAUSE_WINDOWS_FILE[\s\S]*?the line is there and its value is empty/, "the empty value is named");
+	// THE CONSEQUENCE IS THE POINT, and the first version of this said the opposite. `config.mjs` reads this
+	// key with `??`, so an empty string survives, and `start.mjs` calls `loadPauseWindows` unconditionally at
+	// boot, which throws on a path that does not exist (measured: `pause-windows file does not exist: `). So
+	// "every consumer reads as unset" was false and the worker does not ignore the feature: it refuses to
+	// start. Two sentences that read as a contradiction had been replaced by two that agreed with each other
+	// and disagreed with the worker.
+	assert.match(text, /PI_PAUSE_WINDOWS_FILE[\s\S]*?its value is EMPTY[\s\S]*?REFUSES TO BOOT/, "the empty value is named with what it actually does");
+	assert.doesNotMatch(text, /which every consumer reads as unset/, "the false reading is gone");
 	// The key beside it, with a real value, keeps the plain sentence -- so the new wording is about the
 	// value and not about every untouched key.
 	assert.match(text, /PI_SCOPED_LIMITS_FILE[\s\S]*?already set — left untouched/, "a key with a real value reads as before");
@@ -241,7 +248,25 @@ test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set
 	const filled = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=x\nPI_PAUSE_WINDOWS_FILE=\n" } });
 	await filled.run();
 	assert.match(filled.text(), /PI_PAUSE_WINDOWS_FILE=\/deploy\/pause-windows\.json written into \.env/);
-	assert.doesNotMatch(filled.text(), /PI_PAUSE_WINDOWS_FILE[^\n]*the line is there and its value is empty/);
+	assert.doesNotMatch(filled.text(), /PI_PAUSE_WINDOWS_FILE[^\n]*the line is there and its value is/);
+
+	// THE CONSEQUENCE IS PER KEY, and only the two `config.mjs` reads with `??` refuse a boot. `PI_LOGS_DIR`
+	// and `PI_SETTINGS_FILE` use `||` and fall back to the account default; `WEBHOOK_SECRET` reads as absent.
+	// Saying "refuses to boot" for those three would be the same overstatement one key over.
+	const secret = harness({ plan: green, files: { "/deploy/.env": `WEBHOOK_SECRET=""\nPI_PAUSE_WINDOWS_FILE=/deploy/pause-windows.json\nPI_SCOPED_LIMITS_FILE=/deploy/scoped-limits.json\nPI_LOGS_DIR=/home/op/.pi-dispatch/logs\nPI_SETTINGS_FILE=/home/op/.pi-dispatch/settings.json\n` } });
+	await secret.run();
+	const secretText = secret.text();
+	assert.match(secretText, /⚠ WEBHOOK_SECRET has a line in \.env and its value is EMPTY — left untouched/, "a ⚠, because every other ✓ in that block means this is fine");
+	assert.match(secretText, /WEBHOOK_SECRET[\s\S]*?its value is empty, which reads as unset/, "and the plain consequence, not the boot one");
+	assert.doesNotMatch(secretText, /WEBHOOK_SECRET[^\n]*REFUSES TO BOOT/, "WEBHOOK_SECRET does not refuse a boot");
+	assert.equal(secret.store.get("/deploy/.env").includes('WEBHOOK_SECRET=""'), true, "and it is still untouched");
+
+	// The other direction of "both readings are asked": set for systemd, EMPTIED by a later export line. The
+	// key is configured for `EnvironmentFile=` and unset for the wrappers, so calling it empty would be wrong
+	// for the systemd operator. (The mirror of this is pinned above.)
+	const halfEmpty = harness({ plan: green, files: { "/deploy/.env": "WEBHOOK_SECRET=x\nPI_PAUSE_WINDOWS_FILE=/systemd.json\nexport PI_PAUSE_WINDOWS_FILE=\n" } });
+	await halfEmpty.run();
+	assert.doesNotMatch(halfEmpty.text(), /PI_PAUSE_WINDOWS_FILE[^\n]*its value is/, "set for one consumer is not empty, whichever consumer it is");
 
 	// BOTH READINGS ARE ASKED, and this is the case that needs the second one. A bare `PI_X=` with an
 	// `export PI_X=/v.json` below it is empty for systemd's `EnvironmentFile=` and SET for the wrapper

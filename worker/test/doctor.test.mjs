@@ -1328,8 +1328,51 @@ test("doctor: a file carrying BOTH forms names both, and which start wins (#365)
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
 	assert.match(text(), /and again as `export PI_PAUSE_WINDOWS_FILE=\/wrapper-wins\.json`/, "the second assignment is named");
 	assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/);
-	assert.match(text(), /systemd's EnvironmentFile= reads bare lines only and takes .*pause-windows\.json, while deploy\/worker-env-wrapper\.sh and the nssm wrapper source the file and take the LAST assignment, which is \/wrapper-wins\.json/);
+	assert.match(text(), /systemd's EnvironmentFile= reads BARE lines only, so it takes .*pause-windows\.json; deploy\/worker-env-wrapper\.sh SOURCES the file and takes the LAST assignment, so it takes \/wrapper-wins\.json/);
+	// THREE loaders, not two, and the third was named wrongly. `worker-env-wrapper.cmd` splits on the first
+	// `=` with `for /f ... delims==`, so an `export K=v` line sets a variable literally called `export K`:
+	// nssm reads the BARE line, like systemd, and the export value can never be in force there. The first
+	// version of this text said the nssm wrapper sources the file and takes the last assignment, which is
+	// what the POSIX wrapper does and what `requirements.md` warns this loader must never be assumed to do.
+	assert.match(text(), /deploy\/worker-env-wrapper\.cmd splits on the first `=` and would set a variable literally named `export PI_PAUSE_WINDOWS_FILE`, so the bare line is what it reads/);
+	assert.doesNotMatch(text(), /and the nssm wrapper source the file/, "the cmd loader neither sources nor takes the last assignment");
 	assert.doesNotMatch(text(), /which a wrapper script reads and systemd's EnvironmentFile= does not/, "not the export-ONLY line: there is a bare assignment here");
+});
+
+test("doctor: an `export` line that CLEARS the key is the same disagreement, and was silent (#365)", async () => {
+	// The sharpest shape and the one the first version of this signal could not see. `readEnvKeys` deletes a
+	// key whose last assignment is empty, so the second reading had no entry and the `key in withExport`
+	// guard blocked it -- while the readings disagree exactly as much as when the values differ: systemd
+	// loads the file and every wrapper deployment reads it unset, which is the feature silently off on half
+	// the deployment shapes. Measured in sh, bash and zsh: `set -a; . ./.env` leaves the key set to empty.
+	for (const cleared of ["", '""', "   "]) {
+		const cwd = scaffoldedCwd();
+		const bare = join(cwd, "pause-windows.json");
+		writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${bare}\nexport PI_PAUSE_WINDOWS_FILE=${cleared}\n`);
+		const { out, text } = capture();
+		await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+		assert.match(text(), /and CLEARED again by a later `export PI_PAUSE_WINDOWS_FILE=`/, JSON.stringify(cleared));
+		assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/, JSON.stringify(cleared));
+		assert.match(text(), /takes nothing, leaving the feature off/, JSON.stringify(cleared));
+		assert.doesNotMatch(text(), /nothing to fix if the worker runs as a service/, "the old fix asserted the false half out loud");
+	}
+});
+
+test("doctor: the SCOPED_LIMITS twin of the both-forms signal says the same thing (#365)", async () => {
+	// The two consumers of this signal are written out separately, so the second was entirely unpinned:
+	// deleting its `alsoExported` and deleting its label suffix were both green on the full suite. A pane
+	// pinned in one of two copies is the shape this round has now had to fix three times.
+	const cwd = scaffoldedCwd();
+	const bare = join(cwd, "scoped-limits.json");
+	// `scaffoldedCwd` writes only the pause-windows file, and this warning fires only when its OWN scaffold
+	// exists -- which is why the twin was reachable by nothing.
+	writeFileSync(bare, "{}\n");
+	writeFileSync(join(cwd, ".env"), `PI_SCOPED_LIMITS_FILE=${bare}\nexport PI_SCOPED_LIMITS_FILE=/wrapper-wins.json\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /and again as `export PI_SCOPED_LIMITS_FILE=\/wrapper-wins\.json`/);
+	assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/);
+	assert.match(text(), /would set a variable literally named `export PI_SCOPED_LIMITS_FILE`/);
 });
 
 test("doctor: two assignments that AGREE are not a finding (#365)", async () => {

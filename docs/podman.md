@@ -80,8 +80,9 @@ own wording for a missing `anyUid` and for a run whose manifest carries no job u
 fixed comment instead, because a comment's reader may not be the operator, and no refusal text carries a path, an
 endpoint or CLI output.
 
-Which of them is a ✗ and which a ⚠ is one list in the code, `BOOT_REFUSING_JOB_USER_CAUSES`: a cause no job on this
-venue can get past fails doctor, and the rest warn. What each does to a worker and to a job is the job-user rule's
+Which of them is a ✗ and which a ⚠ is one list in the code, `BOOT_REFUSING_JOB_USER_CAUSES`, under the same
+condition as above: a cause no job on this venue can get past fails doctor while `local` is the default venue,
+and the rest warn. What each does to a worker and to a job is the job-user rule's
 and is written down there, not here. Five of the eight
 were seen on a terminal in the lab (`rootless`, `worker-is-root`, `root-group`, `docker-group` and the missing
 `anyUid`); the other three are that same list, not a separate claim.

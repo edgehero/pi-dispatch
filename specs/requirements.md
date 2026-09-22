@@ -1921,8 +1921,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
   HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
   one by one, and it warns when this shell's uid is not the account a system unit's `User=` runs the worker as
-  (an explicit `User=` only; drop-ins are not read), since the answer is then this shell's rather than the
-  service's. `doctor --live` reads that decision back.
+  (an explicit `User=` only; drop-ins are not read), since the answer is then this shell's and MAY NOT BE the
+  service's -- under a host-level refusal (a userns-remapped daemon, Docker Desktop on Linux, an unreadable
+  answer, a rootless daemon) every account on the host gets the identical verdict, so the answer above IS the
+  service's too and re-running as that account changes nothing (issue #370). `doctor --live` reads that decision back.
 - **`doctor` reports a bound that is set and asleep.** A knob an operator sets, doctor stays silent about,
   and nothing enforces is this project's own believed-on-while-off failure by another route, so where a
   feature's control CAN be inert for a reason the operator cannot see from their own configuration,
