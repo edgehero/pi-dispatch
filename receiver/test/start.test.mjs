@@ -366,10 +366,23 @@ test("a config refusal exits 2, so a supervisor stops instead of restart-looping
 	const triggers = join(dir, "triggers.json");
 	writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["x"] }, run: { kind: "gitlab", flow: "f", replicas: 99 } }] }));
 
+	// BOUNDED (issue #373). `spawnSync` blocks this process's event loop, so a child that hangs instead of
+	// refusing would hang the whole file: `npm test` sets no timeout at all, and a runner's own per-file
+	// timeout is a timer on the very loop this call is blocking. The bound is the round's rule, 6x the
+	// worst measured (13.4s once with two suites and test-count-check running beside it, against a usual
+	// 0.2-0.5s), and it only ever costs time on the failure path. SIGKILL rather than the default SIGTERM
+	// because `spawnSync` waits for the child to EXIT: a catchable signal lets a slow or hung shutdown
+	// outlive the bound (measured, a 2s handler held a 300ms bound for 2.3s). It is not about a handler
+	// turning a hang into a clean exit -- this child refuses at config load, before any handler exists.
+	const HANG_BOUND_MS = 80_000;
 	const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/start.mjs", import.meta.url))], {
 		env: { PATH: process.env.PATH, PI_TRIGGERS_FILE: triggers, WEBHOOK_SECRET: "s" },
 		encoding: "utf8",
+		timeout: HANG_BOUND_MS,
+		killSignal: "SIGKILL",
 	});
+
+	assert.equal(r.error?.code, undefined, `the child must exit on its own; killed after ${HANG_BOUND_MS}ms means it hung instead of refusing`);
 	assert.equal(r.status, 2, "a determinate config refusal is EXIT_POLICY, never the retryable 1");
 	const line = JSON.parse(r.stderr.trim().split("\n").at(-1));
 	assert.equal(line.event, "receiver_start_failed");
