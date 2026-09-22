@@ -492,13 +492,17 @@ test("endpointShown never renders a gap, and never a byte that can redraw the li
 	assert.equal(endpointShown({ endpoint: U("1") }), '"\\u0001"');
 	// The whole class, not one range of it: an erase-line, a right-to-left override, a zero-width joiner and
 	// a line separator all have to be visible, and only escaping makes them so.
-	for (const [what, value] of [["CSI", `tcp://r:1${U("1b")}[2K${U("0d")}tcp://evil:1`], ["RLO", `tcp://a${U("202E")}b:1`], ["ZWJ", `tcp://a${U("200D")}b:1`], ["LS", `tcp://a${U("2028")}b:1`], ["NBSP", `tcp://a${U("A0")}b:1`]]) {
+	// U+007F and the C1 block are named explicitly, not left to the shapes below: a one-character widening of
+	// either range to `\x7f` put DEL back on the operator's line with the whole suite green.
+	for (const [what, value] of [["CSI", `tcp://r:1${U("1b")}[2K${U("0d")}tcp://evil:1`], ["DEL", `tcp://a${U("7f")}b:1`], ["C1 low", `tcp://a${U("80")}b:1`], ["C1 NEL", `tcp://a${U("85")}b:1`], ["C1 high", `tcp://a${U("9f")}b:1`], ["RLO", `tcp://a${U("202E")}b:1`], ["ZWJ", `tcp://a${U("200D")}b:1`], ["LS", `tcp://a${U("2028")}b:1`], ["NBSP", `tcp://a${U("A0")}b:1`]]) {
 		const out = endpointShown({ endpoint: value });
 		assert.match(out, /^"[\x20-\x7e]*"$/, `${what} renders as printable ASCII in quotes`);
 		assert.doesNotMatch(out, /[^\x20-\x7e]/, what);
 	}
-	// LOSSLESS is the property that makes quoting the right answer rather than a prettier strip: what was
-	// stored is always recoverable from what was printed.
+	// RECOVERABLE is the property that makes quoting the right answer rather than a prettier strip, and it is
+	// the ESCAPED branch that needs saying so, which is why every row below is an escaped one: the printable
+	// branch returns the stored value itself and needs no recovery. What the mapping is NOT is injective, and
+	// the docblock names that residual rather than this test claiming it away.
 	// The escaped form is itself valid JSON, so the recovery is one `JSON.parse` and needs no unescaper of
 	// its own -- which is the point: an operator can do it, and so can whatever ingests the log.
 	for (const value of [`tcp://127.0.0.1${U("85")}:2375`, `tcp://a${U("202E")}b:1`, `x${U("1b")}y`, `unix:///tmp/pi${U("85")}probe.sock`]) assert.equal(JSON.parse(endpointShown({ endpoint: value })), value, value);

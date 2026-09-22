@@ -92,10 +92,12 @@ export const EGRESS_PROXY_PORT = 3128;
  * second place for that reasoning to live and the copy that missed the next id shape would be the one
  * nobody was looking at.
  *
- * It also inherits the namespace split for free. The boot reaper filters `pi-job-` and docker matches that
- * as a SUBSTRING, so `pi-job-<id>-net` is swept and `pi-sandbox-<id>-net` is not -- which is exactly the
- * rule the container names already follow, and for the same reason: a worker restart must not tear the
- * network out from under a shell an operator is sitting in. A test pins both.
+ * It also inherits the namespace split for free. The boot reaper narrows with `--filter name=pi-job-`, which
+ * docker matches as a SUBSTRING, and then decides on the name itself with `isJobNamespace` -- the filter is
+ * not the namespace, and since issue #357 it never was. Either way `pi-job-<id>-net` is swept and
+ * `pi-sandbox-<id>-net` is not, which is exactly the rule the container names already follow and for the
+ * same reason: a worker restart must not tear the network out from under a shell an operator is sitting in.
+ * A test pins both.
  */
 export const NETWORK_SUFFIX = "-net";
 
@@ -109,9 +111,9 @@ export function networkNameFor(containerName) {
  * three consumers in that module -- the create, the teardown, and the anchored regex of the dead-pid sweep --
  * and one outside it, `INT-EGRESS-POLICY-CONTRACT`'s object table.
  *
- * Both stay OUTSIDE `pi-job-` and `pi-sandbox-`, for the reason `NETWORK_SUFFIX` above already gives: the boot
- * reaper and the sandbox sweep match their namespaces as SUBSTRINGS, so a canary name that fell inside one
- * would be swept by a reaper that knows nothing about doctor.
+ * Both stay OUTSIDE `pi-job-` and `pi-sandbox-`, for the reason `NETWORK_SUFFIX` above already gives: those
+ * sweeps claim a PREFIX (the boot reaper's is `isJobNamespace`), and their `--filter` is wider still, so a
+ * canary name that fell inside either would be swept by a reaper that knows nothing about doctor.
  */
 export const EGRESS_CANARY_NET_PREFIX = "pi-dispatch-egress-doctor-";
 export const EGRESS_CANARY_PROBE_PREFIX = "pi-dispatch-egress-probe-";

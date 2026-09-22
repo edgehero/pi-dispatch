@@ -2502,7 +2502,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 	// this say nothing at all on the overwhelmingly common case of a host with no leftovers, instead of a
 	// warning about a category of object it never looked for. `doctor`'s own doctrine: a check nobody can
 	// silence must never cry wolf, and "could not ask" is not "misconfigured".
-	if (listed?.code !== 0) return [{ ok: false, warn: true, label: `Egress canary: leftovers from an interrupted doctor could not be listed: docker network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`, fix: CANARY_LEFTOVER_FIX }];
+	if (listed?.code !== 0) return [{ ok: false, warn: true, label: `Egress canary: leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`, fix: CANARY_LEFTOVER_FIX }];
 	const shape = new RegExp(`^${EGRESS_CANARY_NET_PREFIX}(\\d+)$`);
 	// The slug is a CLOSED set, not free text: accepting `\\S+` there would `rm -f` any container under this
 	// prefix that happened to end in the dead pid. Escaped into the pattern because the pid reached it as a
@@ -2531,7 +2531,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 			// MAY be left over, not IS: the clause four words later already says the pid may be alive there, so
 			// the sentence used to assert a thing and then walk it back inside itself. This is a network whose
 			// owner this shell cannot ask about at all, which is exactly the case where doctor states less.
-			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} may be left over from an interrupted doctor, and is not swept because this shell's docker CLI ${cliSays}, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
+			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI ${cliSays}, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
 			continue;
 		}
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
@@ -2578,7 +2578,10 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 			continue;
 		}
 		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
-		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(", ");
+		// `" and "` between the two clauses, for the reason given at the vanished-network line below: each half
+		// is itself a comma-separated list, so a comma between them marks no boundary. This is the COMMON
+		// line, and it kept the defect for a round after its rarer sibling was fixed.
+		const after = [removed.length > 0 ? `after removing ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detaching ${outcome.detached.join(", ")}` : null].filter(Boolean).join(" and ");
 		// "an EARLIER run", not "a run that did not finish", which both of these lines used to say and neither
 		// could support: a doctor run that finishes normally leaves this network behind whenever its own
 		// teardown `network rm` fails, and says so in a warning of its own, and issue #360 item 5 records a

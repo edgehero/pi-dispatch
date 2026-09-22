@@ -195,10 +195,19 @@ export function makeStopContainer({ exec = execDocker } = {}) {
  * `runtime-observations.mjs` go on reading the UNSTRIPPED value as a real filesystem path, so doctor would
  * name one file and the system use another.
  *
- * So: printable ASCII passes through untouched, and anything else is rendered as a quoted, fully escaped
- * string. That is LOSSLESS, which is the property that matters -- an operator can always recover what was
- * really stored -- and it disarms the whole class at once rather than one codepoint range of it, so a
- * right-to-left override, a zero-width joiner and a line separator are as visible as an ESC. The earlier
+ * So: printable ASCII (U+0020 to U+007E) passes through untouched, and anything else is rendered as a
+ * quoted, fully escaped string, which one `JSON.parse` turns back into what was stored. Nothing is deleted,
+ * which is the property that matters, and it disarms the whole class at once rather than one codepoint
+ * range of it, so a right-to-left override, a zero-width joiner and a line separator are as visible as an
+ * ESC. U+007F is on the escaped side of the boundary with the C1 block, which is why the range ends at 7E.
+ *
+ * TWO LIMITS, stated because "lossless" on its own would overstate them. The mapping is not INJECTIVE: a
+ * stored value whose printable text happens to be a quoted escape sequence renders byte-identically to the
+ * escaped form of the value it describes, so an operator cannot tell whose quotes they are. Reachable only
+ * through the unvalidated read path, since `context create` refuses a quote-wrapped host. And a value that
+ * is only WHITESPACE, control whitespace such as a lone carriage return or tab included, is reported as
+ * empty rather than escaped: `trim()` decides that, and it is a deliberate simplification rather than an
+ * oversight, because an endpoint of one tab is empty in every way an operator cares about. The earlier
  * comment here also claimed docker's URL parser kept control bytes out, having measured `context create`
  * and `DOCKER_HOST`: both are WRITE paths, the read path does not re-validate, and C1 is accepted on the
  * write path anyway, so the claim was wrong on its own terms as well as measured on the wrong command.

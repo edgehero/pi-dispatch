@@ -1878,8 +1878,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   wrapper kept the quotes: a rendering rule every writer must remember is one that a writer will forget. So is one carrying a single quote on any platform: the shells want `'\''` and systemd does not
   understand it, so no one rendering serves both. **`doctor --live` adds a mutation that is shown rather than consented**
   (issue #278), beside the throwaway network and probe containers plain `doctor`'s egress canary already
-  makes and removes unprompted -- and which, since issue #350, also cover **what an EARLIER canary left when
-  its own run did not finish**, removed on the next run and reported in a line naming what went: still the
+  makes and removes unprompted -- and which, since issue #350, also cover **what an EARLIER canary left
+  behind**, whether or not that run finished (issue #360: a run that finishes leaves one whenever its own
+  teardown `network rm` fails), removed on the next run and reported in a line naming what went: still the
   canary's own objects, named after the doctor PROCESS, touched only for a pid no longer alive and only on a
   daemon this host owns, so it is the same unprompted tier rather than a new one: typing the flag is the
   approval, as it is for `sandbox`; its containers, the peer

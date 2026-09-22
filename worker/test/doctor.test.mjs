@@ -3957,7 +3957,7 @@ test("doctor: a DEAD doctor's canary network is swept, its probe removed and the
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242, detaching pi-dispatch-egress-proxy\), left by an EARLIER doctor run/);
+	assert.match(text(), /✓ Egress canary: removed pi-dispatch-egress-doctor-4242 \(after removing pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy\), left by an EARLIER doctor run/);
 	const touched = calls.map((c) => c.args.join(" "));
 	assert.ok(touched.includes("rm -f pi-dispatch-egress-probe-unlisted-4242"), "the dead run's own probe IS the leak, so it is removed");
 	assert.ok(touched.includes("network disconnect -f pi-dispatch-egress-doctor-4242 pi-dispatch-egress-proxy"), "the shared proxy is detached");
@@ -4015,10 +4015,13 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 // one with a limit written on it.
 //
 // SO: a site spelled any other way is invisible here -- a constant holding the prefix, a plain double-quoted
-// string, `label:` wrapped onto its own line, an interpolation or a `\u` escape inside the phrase, or a
-// label built in another module. The eight that exist are uniform, and the next one is expected to match
-// them; if it does not, this test says nothing and the page goes stale again. That is the accepted cost of
-// not shipping a stripper that eats code.
+// string, `label:` wrapped onto its own line or given two spaces, an interpolation or a `\u` escape inside
+// the phrase, or a label built in another module. The eight that exist are uniform, and the next one is
+// expected to match them; if it does not, this test says nothing and the page goes stale again. That is the
+// accepted cost of not shipping a stripper that eats code. The FALSE RED is narrowed and not gone either:
+// the count reads raw source, so a comment or a string elsewhere in doctor.mjs that spells the needle
+// exactly still trips it. That direction is SAFE -- it fails loudly and a reader can see why -- which is the
+// only reason it is tolerated where the false green was not.
 test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
@@ -4029,7 +4032,9 @@ test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (
 	// "left by a doctor run that did not finish" and both of the page's own ✓ rows kept it, in a commit that
 	// had one of those rows open for a different edit. One retired phrase, named, because this is the fourth
 	// time on this branch that a correction landed everywhere except the page.
-	assert.ok(!doc.includes("left by a doctor run that did not finish"), "docs/egress.md still quotes a line doctor cannot print");
+	for (const retired of ["left by a doctor run that did not finish", "the network itself was already gone", "from an interrupted doctor"]) {
+		assert.ok(!doc.includes(retired), `docs/egress.md still quotes a line doctor cannot print: ${retired}`);
+	}
 	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
 	// is why the page describes seven shapes and this counts eight sites. Stated here rather than derived:
 	// telling two identical template literals apart needs a parser, and a parser over source is the same arms
@@ -4151,7 +4156,7 @@ test("an endpoint that resolves to NOTHING is said as a phrase, not as a gap (#3
 		"gh auth status": { code: 0, output: ghStatusOutput },
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
-	assert.match(text(), /may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves an empty endpoint, which is not shown to be on this host/);
+	assert.match(text(), /may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI resolves an empty endpoint, which is not shown to be on this host/);
 	// The sibling site four lines down, which had the identical gap and is fixed by the same helper.
 	assert.match(text(), /credentialTransit is ASSERTED by the operator, not enforced: this shell's docker CLI resolves context "X" to an empty endpoint, which is not shown to be on this host/);
 	assert.doesNotMatch(text(), /resolves\s*, which is not shown/, "neither site rendered here renders the gap");
@@ -4254,7 +4259,7 @@ test("doctor: an UNKNOWN daemon does not sweep, and says so rather than going qu
 	};
 	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.equal(code, 0, "an unswept leftover warns, it never fails doctor");
-	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an interrupted doctor, and is not swept because this shell's docker CLI did not say which daemon it uses \(unparseable\), so a pid that is dead here may be alive there/);
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI did not say which daemon it uses \(unparseable\), so a pid that is dead here may be alive there/);
 	// MAY be left over. The same sentence says four words later that the pid may be alive there, so asserting
 	// it IS a leftover and then walking that back was the line contradicting itself (issue #360, item 3).
 	assert.doesNotMatch(text(), /pi-dispatch-egress-doctor-4242 is left over/, "doctor does not assert what it just said it cannot know");
@@ -4284,7 +4289,7 @@ test("doctor: a REMOTE daemon is named and left, and the line says WHICH daemon 
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
 	// The needle must be a string the code can actually emit: `are not swept` appears in no doctor output,
 	// so this assertion passed against anything at all until it was proven vacuous.
-	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an interrupted doctor, and is not swept because this shell's docker CLI resolves tcp:\/\/build\.example\.invalid:2376, which is not shown to be on this host, so a pid that is dead here may be alive there/, "a leftover there is named, not silently skipped");
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI resolves tcp:\/\/build\.example\.invalid:2376, which is not shown to be on this host, so a pid that is dead here may be alive there/, "a leftover there is named, not silently skipped");
 	assert.doesNotMatch(text(), /left by an EARLIER doctor run/);
 	assert.doesNotMatch(text(), /Egress canary:[^\n]*did not say which daemon it uses/, "a RESOLVED remote endpoint never takes the mute branch");
 });
@@ -4436,7 +4441,7 @@ test("doctor: a listing that FAILS is said, never taken as 'no leftovers' (#350)
 	};
 	const code = await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, [], { isAlive: () => false, pid: 1 }));
 	assert.equal(code, 0, "it warns, it never fails doctor");
-	assert.match(text(), /⚠ Egress canary: leftovers from an interrupted doctor could not be listed: docker network ls --filter name=pi-dispatch-egress-doctor-/);
+	assert.match(text(), /⚠ Egress canary: leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=pi-dispatch-egress-doctor-/);
 });
 
 test("doctor: `endpoint` defaults to unknown, so a caller that omits it sweeps nothing (#350)", async () => {
