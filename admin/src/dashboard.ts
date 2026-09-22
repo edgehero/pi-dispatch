@@ -123,6 +123,22 @@ function scrubControl(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
+/**
+ * One cell of a pane, scrubbed, with a dash where there is nothing. Every list row and every detail pane
+ * renders through this (issue #367): `runRow` and `renderRunDetail` had written the identical ternary
+ * under two names, and the HELD and FAILED panes had neither, so the same job id was safe in one pane and
+ * raw in the next.
+ *
+ * WHY EVERY CELL AND NOT THE OBVIOUSLY UNSAFE ONES. The comments those panes carried argued their cells
+ * were safe because each is "host-chosen", and host-chosen is not control-byte-free: a job id is derived
+ * from forge data, and a review pass drove a record whose id carried a carriage return and a clear-screen
+ * sequence straight into a row and into an armed cancel question. A rule with an exception is a rule that
+ * has to be re-argued at every new cell, which is how these two panes came to be the exception.
+ */
+function cellOf(v: any): string {
+  return v === null || v === undefined ? "-" : scrubControl(String(v));
+}
+
 /** The hydration ceiling, matching read-model.mjs: past it the count is a floor and the caller says so. */
 const HELD_HYDRATE_MAX = 200;
 
@@ -1290,10 +1306,10 @@ function heldSection(held: any, inner: number, styler: any): any[] {
 function heldListRow(r: any, sel: boolean, inner: number, styler: any): string {
   const cursor = sel ? styler.fg("accent", "›") : " ";
   const bits = [
-    `${cursor} ${styler.fg("accent", r.target ?? r.jobId ?? "-")}`,
-    styler.fg("text", r.label ?? "-"),
+    `${cursor} ${styler.fg("accent", cellOf(r.target ?? r.jobId))}`,
+    styler.fg("text", cellOf(r.label)),
     styler.fg("dim", `waited ${fmtDuration(r.waitedMs)}`),
-    styler.fg("dim", r.jobId ?? "-"),
+    styler.fg("dim", cellOf(r.jobId)),
   ];
   return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
 }
@@ -1304,7 +1320,7 @@ function heldListHints(inner: number, styler: any, pendingCancel: any, actionNot
   if (pendingCancel) {
     // The dialog wording dispatch_wait_cancel already uses: what stops, and that it will never run.
     return fitLine(
-      styler.fg("warning", `cancel held job ${pendingCancel.target ?? pendingCancel.jobId}? it will never run`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")),
+      styler.fg("warning", `cancel held job ${cellOf(pendingCancel.target ?? pendingCancel.jobId)}? it will never run`) + "  " + [k("y", "confirm"), k("n", "cancel")].join(styler.fg("dim", "  ·  ")),
       inner,
       styler,
     );
@@ -1361,24 +1377,28 @@ function failedSection(failed: any, inner: number, styler: any): any[] {
 
 /** One failed row: id, attempt count, queue, and the worker's own scrubbed throw message. */
 function failedRow(r: any, inner: number, styler: any): string {
-  // Every cell is host-chosen (the projection's key-set pin holds it closed): no `.data`, no payload.
+  // Host-chosen, and that is NOT the same as control-byte-free, which is what this comment used to claim
+  // (issue #367): the projection's key-set pin keeps `.data` and the payload out, and a job id is still
+  // derived from forge data. `failedReason` was scrubbed by the projection and `jobId` taken raw on the
+  // very next key, so one field had a belt and the two beside it did not. Every cell goes through `cellOf`.
   const bits = [
-    `${styler.fg("error", "✗")} ${styler.fg("text", r.jobId ?? "-")}`,
+    `${styler.fg("error", "✗")} ${styler.fg("text", cellOf(r.jobId))}`,
     styler.fg("dim", `a${r.attemptsMade ?? 0}`),
-    styler.fg("muted", r.queue ?? "-"),
-    styler.fg("dim", r.failedReason ?? "-"),
+    styler.fg("muted", cellOf(r.queue)),
+    styler.fg("dim", cellOf(r.failedReason)),
   ];
   return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
 }
 
 /** One held row: `○ owner/repo#7  after 2026-09-01T09:00Z + jira  waited 2h14m`. */
 function heldRow(r: any, inner: number, styler: any): string {
-  // Every cell is host-chosen: an id-only target the worker derived, an operator-authored condition label,
-  // and a duration. No `.data` reaches this function, which is why the reader takes the worker's own hashes
-  // rather than a delayed job -- a delayed job's data holds the issue title and body.
+  // No `.data` reaches this function, which is why the reader takes the worker's own hashes rather than a
+  // delayed job -- a delayed job's data holds the issue title and body. That keeps the PAYLOAD out and says
+  // nothing about control bytes, which this comment used to conflate (issue #367): an id-only target is
+  // still derived from forge data, and an operator-authored condition label is whatever the operator typed.
   const bits = [
-    `${styler.fg("dim", "○")} ${styler.fg("accent", r.target ?? r.jobId ?? "-")}`,
-    styler.fg("text", r.label ?? "-"),
+    `${styler.fg("dim", "○")} ${styler.fg("accent", cellOf(r.target ?? r.jobId))}`,
+    styler.fg("text", cellOf(r.label)),
     styler.fg("dim", `waited ${fmtDuration(r.waitedMs)}`),
   ];
   return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
@@ -1761,7 +1781,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   // The LIST pane renders the same stored fields as the drill-in and into the same terminal, so it holds
   // the same property (issue #337). The issue named RUN_DETAIL, but a belt that stops at one pane while
   // the row above it prints the same field raw is a belt the next reader will assume covers both.
-  const cell = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
+  const cell = cellOf; // the shared rule (issue #367); this name is what the rest of the function reads
   const tree = r.chainDepth > 0 ? styler.fg("dim", "└ ") : "";
   // The replica badge sits beside the chain glyph because it answers the same question the glyph does --
   // "is this run one of a set, and which one" -- and a row that is silently one of two racing jobs is the
@@ -2246,7 +2266,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // rather than around the lines it builds: `styler.link(styler.fg("accent", show(r.target)), url)` puts
   // the value inside two layers of escapes the styler owns, and scrubbing the composed string would take
   // the hyperlink and the width math with it.
-  const show = (v: any): string => (v === null || v === undefined ? "-" : scrubControl(String(v)));
+  const show = cellOf; // the shared rule (issue #367); this name is what the rest of the function reads
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
     fitLine(styler.cell(k, 12, { color: "muted" }) + " " + styler.fg(color, v), inner, styler);
@@ -2344,9 +2364,12 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // Windows embeds the operator's account name) and this view is the one that renders beside PII-free
   // record fields, so only the verdict crosses.
   if (sandbox) {
-    const state = sandbox.retained
-      ? `${sandbox.running ? "running" : "retained"}${sandbox.expiresIn ? ` · ${sandbox.expiresIn} left` : ""}`
-      : show(sandbox.reason ?? "swept");
+    // `retained`, never `running`: `readSandboxInfo` deliberately asks docker nothing, so it cannot know
+    // whether a container is up, and the branch that rendered "running" was unreachable from the day it was
+    // written (issue #367). Removed rather than reserved, because the one state it would have shown is the
+    // one that warns an operator BEFORE `openSandbox`'s `already-running` refusal, and a dead branch is a
+    // worse placeholder for that than nothing: it reads as covered.
+    const state = sandbox.retained ? `retained${sandbox.expiresIn ? ` · ${sandbox.expiresIn} left` : ""}` : show(sandbox.reason ?? "swept");
     out.push(kv("sandbox", state, sandbox.retained ? "success" : "dim"));
     // WHAT `b` WOULD GIVE THIS SHELL, and that it is this shell's (#337). The panel resolves PI_EGRESS
     // from its OWN process, because that is what `openSandbox` uses when the key is pressed, and it
@@ -2374,7 +2397,13 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
       // will actually look for, and shown WITHOUT trimming for the same reason: `openSandbox` reads the
       // variable itself and does not trim, so `" myproxy "` is a container called `" myproxy "`.
       const proxy = show(sandbox.egress.proxy);
-      const named = /^\s*$/.test(proxy) ? "a proxy whose name is blank or spaces" : proxy;
+      // QUOTED when an edge is whitespace, and only then (issue #367). The name is shown UNTRIMMED for the
+      // reason above -- it is what `b` will look for -- but a leading space is indistinguishable from the
+      // separator before it and a trailing one is invisible, so the line named a container the eye cannot
+      // read. ASCII quotes, not a curly pair, because `PI_DISPATCH_ASCII` exists to keep this pane
+      // transcribable; they cost 2 of the 39 columns, and a name with no edge whitespace renders
+      // byte-identically to before.
+      const named = /^\s*$/.test(proxy) ? "a proxy whose name is blank or spaces" : proxy === proxy.trim() ? proxy : `"${proxy}"`;
       // "egress off" alone reads as "no network at all", and it is the opposite: `PI_EGRESS=0` omits
       // `--network` entirely, so the shell lands on docker's default bridge with the whole internet.
       const posture = sandbox.egress.malformed ? "egress unreadable" : sandbox.egress.armed ? `egress on via ${named}` : "egress off (docker's default bridge)";

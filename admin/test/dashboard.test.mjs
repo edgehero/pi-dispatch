@@ -982,11 +982,24 @@ test("RUN_DETAIL renders an OFF and an UNREADABLE egress posture differently (#3
 
   // And a name with padding is shown WITH it, because the sentence beneath only means something if the
   // name shown is the name `b` will look for: `openSandbox` reads the variable itself and does not trim,
-  // so `" myproxy "` is a container called `" myproxy "`.
+  // so `" myproxy "` is a container called `" myproxy "`. QUOTED since issue #367: this assertion used to
+  // require the padding bare, and bare padding is exactly what a reader cannot see -- the leading space is
+  // indistinguishable from the separator before it and the trailing one is invisible, so the line named a
+  // container nobody could read off the screen. ASCII quotes, because `PI_DISPATCH_ASCII` exists to keep
+  // this pane transcribable.
   const padded = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: " myproxy ", source: "this shell" } }), launchSandbox: async () => {} });
   const paddedOut = stripAnsi(padded.render(80).join("\n"));
   await padded.dispose();
-  assert.match(paddedOut, /egress on via {2}myproxy/, "the padding is part of the name, so it is part of what is shown");
+  assert.match(paddedOut, /egress on via " myproxy "/, "the padding is part of the name, so it is part of what is shown, and quoted so it can be seen");
+  assert.doesNotMatch(paddedOut, /egress on via {2}myproxy/, "not bare, which is how it read before");
+
+  // The other half of the same rule: a name with no edge whitespace gains nothing, so every ordinary
+  // deployment renders byte-identically to before.
+  const plain = await openRunDetail({ sandboxInfo: () => ({ retained: true, expiresIn: "3h", egress: { armed: true, proxy: "myproxy", source: "this shell" } }), launchSandbox: async () => {} });
+  const plainOut = stripAnsi(plain.render(80).join("\n"));
+  await plain.dispose();
+  assert.match(plainOut, /egress on via myproxy/);
+  assert.doesNotMatch(plainOut, /egress on via "/, "an ordinary name is never quoted");
 
   // `egressArmed` THROWS on a PI_EGRESS it cannot parse, and `openSandbox` refuses rather than opening a
   // shell on the open network. Rendering that as "off" would be the one reading that is wrong in the
@@ -2051,6 +2064,61 @@ test("the HELD section bounds itself and counts the rest, rather than growing wi
   assert.doesNotMatch(text, /acme\/api#4/, "the fourth row is past the section's own bound");
   assert.match(text, /↓ 7 more/, "and the remainder is counted, not lost");
   assert.doesNotMatch(text, /undefined to view/, "no keybinding is claimed by a section entry that has no view");
+});
+
+test("the HELD panes and the FAILED pane scrub control bytes out of every cell (#367)", async () => {
+	// #337 closed RUN_DETAIL and the LIST and stopped there, so the SAME job id was safe in one pane and raw
+	// in the next. What made it look safe was the comment on each row builder: every cell is "host-chosen".
+	// Host-chosen is not control-byte-free -- a job id is derived from forge data -- and a review pass drove
+	// a record whose id carried a carriage return and a clear-screen sequence into the row AND into the armed
+	// cancel question.
+	//
+	// STRIP ONLY THE STYLER'S OWN SGR, never with a general `stripAnsi`: that swallows everything between an
+	// OSC-8 opener and its bell, so an assertion over fully stripped text cannot see a clear-screen hidden in
+	// a hyperlink payload. This checks the raw bytes instead.
+	const ESC = String.fromCharCode(27);
+	const CR = String.fromCharCode(13);
+	const nasty = (base) => `${base}${CR}${ESC}[2J${ESC}]8;;http://evil${String.fromCharCode(7)}${String.fromCharCode(155)}`;
+	const held = [{ jobId: nasty("gh-1"), target: nasty("acme/web#7"), label: nasty("jira"), waitedMs: 1000 }];
+	const failed = [{ jobId: nasty("gh-2"), attemptsMade: 2, queue: nasty("pi-jobs"), failedReason: nasty("boom") }];
+
+	// The dashboard's own HELD and FAILED sections.
+	const board = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: held, more: 0 }, failed: { rows: failed, more: 0 } }) }) });
+	await flush();
+	const boardRaw = board.render(80).join("\n");
+	await board.dispose();
+	assert.match(stripAnsi(boardRaw), /acme\/web#7/, "the row still renders");
+	assert.match(stripAnsi(boardRaw), /gh-2/, "and so does the failed one");
+
+	// The HELD_LIST drill-in and its armed cancel question, which is the second half of item 1: the footer
+	// IS the question there, and it interpolated the target with no scrub at all.
+	const list = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { rows: held, more: 0 } }) }) });
+	await flush();
+	list.handleInput("h");
+	await flush();
+	list.handleInput("x");
+	await flush();
+	const listRaw = list.render(80).join("\n");
+	await list.dispose();
+	// The residue is inert PRINTABLE text: `scrubControl` maps each control byte to a space, so `[2J` and the
+	// OSC-8 payload survive as characters a terminal draws rather than obeys. That is the intended outcome and
+	// is why this asserts the prefix rather than the whole sentence.
+	assert.match(stripAnsi(listRaw), /cancel held job acme\/web#7/, "the question is armed and names the target");
+	// The TAIL of that sentence ("it will never run") is clipped here and is not asserted, because the inert
+	// residue lengthens the line past `fitLine`'s budget. Worth stating rather than quietly narrowing the
+	// needle: scrubbing costs a dirty row some of its own sentence, which is the right trade against a row
+	// that can redraw the panel, and the clean case one test up still pins the whole question.
+
+	// THE BYTES, which is the whole assertion: what survives scrubbing is the printable RESIDUE (`[2J`, the
+	// OSC-8 payload as literal characters), and that is inert -- a terminal draws it. What must not survive is
+	// the ESC that would make `[2J` a clear-screen, the CR that returns the cursor to column 0, the BEL that
+	// terminates a hyperlink, and the single-byte C1 CSI that needs no ESC at all.
+	for (const [what, raw] of [["the dashboard", boardRaw], ["the held list", listRaw]]) {
+		const sgrOnly = raw.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+		for (const code of [27, 13, 155, 7]) assert.ok(!sgrOnly.includes(String.fromCharCode(code)), `char ${code} reached ${what}`);
+		// Newline excluded: these renders are the pane's LINES joined with one.
+		assert.doesNotMatch(sgrOnly, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `some other control byte reached ${what}`);
+	}
 });
 
 test("an unreadable held view degrades that section alone", async () => {

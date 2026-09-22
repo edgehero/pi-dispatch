@@ -417,9 +417,19 @@ export function sandboxVenueRefusal({ jobId, manifest }) {
 
 /**
  * The refusals `resolveSandbox` decides from the MANIFEST ALONE, in the order an operator should read
- * them. Not every manifest-only refusal on the `b` path: `decideSandboxJobUser` can refuse a linux run
- * from `manifest.jobUser` too, and that stays where it is because folding it in would change what the
- * CLI refuses and when.
+ * them. Not every manifest-only refusal on the `b` path: `decideSandboxJobUser` can refuse a run from
+ * `manifest.jobUser` too, and it stays where it is for two MEASURED reasons rather than the vaguer "it
+ * would change what the CLI refuses and when" this comment used to give (issue #367, item 5).
+ *
+ * IT IS NOT MANIFEST-ONLY. It returns `{ user: null, home: null }` on `darwin` and `win32` before it ever
+ * reads the stamp, so the SAME malformed `jobUser` refuses on linux and does not refuse on macOS or
+ * Windows -- measured, one manifest, three platforms. Folding it in would make this function's answer, and
+ * therefore whether the panel advertises `b` at all, depend on the operator's own OS for an identical run.
+ * Every other refusal here is a property of the run.
+ *
+ * AND IT IS NOT SYNCHRONOUS. It is `async` and, past the stamp check, resolves the docker endpoint, reads
+ * daemon facts and asks the image for its capabilities. This function is called on RUN_DETAIL entry and on
+ * every left or right between runs; that is what keeps it a manifest read.
  *
  * Extracted (issue #337) because the admin panel needs the same answer before it advertises `b`, and the
  * alternative is the shape this file's own `openSandbox` docblock warns about: "Two callers assembling
