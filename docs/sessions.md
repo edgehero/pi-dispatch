@@ -142,7 +142,7 @@ be told apart.
 | `conversation-too-old` | the conversation itself started more than `PI_SESSION_MAX_AGE_DAYS` ago. A different clock from `expired`: that one reads the transcript's mtime, which every completed run refreshes, so a lineage that keeps finishing work never ages out however old its first turn is. A header whose timestamp is missing or unreadable lands here too, because a conversation that cannot say how old it is has not been shown to be young enough. The timestamp is written by the agent's own session, so this bounds accumulation, not an adversary |
 | `too-large` | over `PI_SESSION_MAX_BYTES` |
 | `unparseable` | the first line is not a pi session header. Nothing is quarantined: the canonical file stays where it is and is re-read and re-rejected on every run, until the TTL reaper sweeps the key or a completed run promotes a replacement over it |
-| `not-a-regular-file` | the transcript's own name is not a regular file. The check is an `lstat`, so a symlink is never followed, whether the agent planted it in `/session` or something planted it in the store, and the job runs cold |
+| `not-a-regular-file` | the transcript's own name is not a regular file. The check is an `lstat`, so a symlink is never followed. Planted in the store, this job runs cold; planted by the agent in `/session`, the promotion is refused instead and the NEXT run cold-starts |
 | `key-not-a-directory` | the key's own directory in the store is not a directory: a symlink, a regular file, a dangling link. Both edges refuse it and the entry is left alone, so this key stays cold on every run until you remove what is standing there. The store itself may be a symlink; only the key's own name is checked |
 | `venue-changed` | the job runs in a different backend than wrote the transcript (see [`backends.md`](backends.md)). A transcript from before venues were recorded counts as `local`, whatever your default is now. It also covers a stamp this store cannot read, and a promotion that was interrupted, or was still landing from another job on the same key, when this job read it: all three cold-start rather than risk handing one venue's conversation to another |
 | `transcript-replaced` | the transcript this job judged, or the key directory holding it, was replaced while this job was staging it: usually another completed job on this key promoting a new one. The host copies the transcript outside the promotion lock, then re-checks that the file it copied is still the one its gates judged; when it is not, this run cold-starts rather than resuming a conversation no gate has seen. It is the read-side half of the same event `locked` reports from the write side, so the two appearing together on one key means two jobs overlapping on one pull request |
@@ -160,10 +160,13 @@ next completed run rewrites both the transcript and the stamp.
 sharper reason: a transcript written in one venue is never staged into another venue's container, so the
 next job there starts fresh and its first completed run stamps the new venue. Moving back costs one more.
 
-Two further reasons reach `session.reason` without being read-path outcomes at all. Both come from
-`promoteSession`, so both appear only on a **completed** run, and both describe the *write* back to the
-store rather than the read that started the job. A refused promotion outranks everything else on the
-line, because it says why the NEXT run for this key will cold start:
+### When a promotion doesn't happen
+
+Three more reasons reach `session.reason` from `promoteSession` rather than from the read, so they appear
+only on a **completed** run and describe the *write* back to the store. Two of them, `locked` and
+`promote-failed`, can come from nowhere else. The third, `key-not-a-directory`, is the one token both edges
+produce: the same shape refuses the read that starts a job and the write that ends it. A refused promotion
+outranks everything else on the line, because it says why the NEXT run for this key will cold start:
 
 | reason | meaning |
 |---|---|

@@ -128,7 +128,14 @@ export function parseExitTurns(text) {
  * beside the store because this module is where the container's copy is admitted, and an enum that lives
  * anywhere but the admission point is a comment, not a check.
  */
-const SESSION_REASONS = new Set([
+/**
+ * EXPORTED so the enum has ONE home. It is written out in four places -- here, the record shape and the
+ * producer rows in `INT-RUN-HISTORY-FILE-CONTRACT`, and the two tables in `docs/sessions.md` -- and until
+ * issue #375's gate round nothing compared them: an invented token added here survived the whole suite, and
+ * a token removed was caught only because a test restated the list by hand. `session-reasons.test.mjs`
+ * derives the other three from this one.
+ */
+export const SESSION_REASONS = new Set([
 	"resumed",
 	"absent",
 	"expired",
