@@ -56,7 +56,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { envKeyIsBlank, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
+import { envFileHazard, envKeyIsBlank, envValueShown, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -301,15 +301,25 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		const service = readEnvAssignments(text, allowed, { loader: serviceLoader });
 		// The shell reading stays beside it on POSIX, because a `.env` is also sourced by hand
 		// (`set -a; . ./.env`) and because the two disagree about an `export` line, which is the third state
-		// below. On win32 there is no second POSIX loader to compare against.
+		// below. ON WIN32 THERE IS NO SECOND LOADER, and computing one anyway reported a file that assigns the
+		// key ONCE as "assigned twice with different values" -- on the very line `renderEnvValue` writes there,
+		// since every Windows path carries a backslash that no POSIX loader will vouch for.
 		const shell = readEnvAssignments(text, allowed, { loader: serviceLoader === "shell" ? "systemd" : "shell" });
+		// One line elsewhere can take the vouch off every reading in the file, and a key with NO record at all
+		// is the case that needs this most: a BOM'd line, a `K+=` line or a line the shells simply run leaves
+		// this reader silent about a key the loaders do set.
+		const hazard = envFileHazard(text, { loader: serviceLoader });
 		const plain = {};
 		const notPlain = {};
+		const notVouched = {};
 		const exported = {};
 		const alsoExported = {};
 		const blankInFile = {};
 		for (const key of allowed) {
-			const own = service[key];
+			// An empty value UNSETS under the cmd wrapper (`set "K="`), so on win32 such a line leaves the service
+			// WITHOUT the key rather than with a blank one. Treating it as blank failed a Windows deployment that
+			// starts, in a sentence that named the .cmd wrapper as the thing keeping the empty value.
+			const own = serviceLoader === "cmd" && service[key]?.value === "" ? undefined : service[key];
 			const other = shell[key];
 			// WHAT THE SERVICE READS, and only when this file can say so. A shape outside the grammar every
 			// loader agrees on is reported as a LINE, never as a value (issue #384): the reader's own docblock
@@ -317,18 +327,32 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// value the service reads" is a claim this file cannot support.
 			if (own !== undefined && own.plain && own.value !== "") plain[key] = own.value;
 			else if (own !== undefined && !own.plain) notPlain[key] = own.line;
+			// The key's own line is fine and another line took the claim away. A different sentence, because the
+			// fix is on a different line: naming this key's line and telling the operator to rewrite it asked
+			// them to retype a line that was already correct, and changed nothing.
+			if (own !== undefined && own.plain && !own.vouched) notVouched[key] = own.hazardLine;
 			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
 			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling it
 			// export-only would print a value systemd never sees and advise dropping a prefix, which would
 			// change which file the worker loads. The empty case is part of "anywhere": a bare `KEY=` IS an
 			// assignment, and systemd reads it as the empty value that refuses the boot.
 			if (own === undefined && other !== undefined && other.value !== null) exported[key] = other.value;
-			else if (own !== undefined && other !== undefined && own.value !== other.value) alsoExported[key] = other.value ?? "";
-			if (envKeyIsBlank(text, key)) blankInFile[key] = true;
+			// BOTH readings plain, or there is nothing to compare. A reading that is not plain carries no value
+			// at all, and `?? ""` renamed it "an EMPTY value, which refuses the boot" -- the same "is it set"
+			// trap the record shape exists to abolish, reintroduced inside this function.
+			// NOT ON WIN32, where no POSIX shell reads this file at all: comparing the cmd reading against one
+			// reported a file that assigns the key ONCE as "assigned twice with different values", on the very
+			// line `renderEnvValue` writes there. The export-only signal above stays on every platform, because
+			// "only a sourcing shell reads this line" is true and useful wherever the line is.
+			else if (serviceLoader !== "cmd" && own !== undefined && other !== undefined && own.plain && other.plain && own.value !== other.value) alsoExported[key] = other.value;
+			if (own !== undefined && own.blank) blankInFile[key] = true;
 		}
-		return { ...plain, notPlain, exported, alsoExported, blankInFile, serviceLoader };
+		return { ...plain, notPlain, notVouched, exported, alsoExported, blankInFile, serviceLoader, hazard };
 	} catch {
-		return {};
+		// COULD NOT READ is not "this key is unset". Returning the same `{}` for both told an operator whose
+		// `.env` is a directory, or is not readable by this account, that the worker ignores a key -- a positive
+		// claim about a file nobody could open.
+		return { unreadable: true };
 	}
 }
 
@@ -377,16 +401,21 @@ const BOOT_FILES = Object.freeze([
  */
 function loadVerdict(spec, rawPath, cwd, io) {
 	const path = isAbsolute(rawPath) ? rawPath : join(cwd, rawPath);
+	// EVERY reason carries the path, so every reason goes through the renderer. The grammar keeps a control
+	// byte out of a value read from the FILE, and this is the other end: a path out of the environment is
+	// constrained by nothing, and its ESC reached the terminal through this string while the file half was
+	// carefully withholding one. The loader's own message is rendered too, because it is built from the path.
+	const shown = envValueShown(path);
 	try {
-		if (!io.statFile(path).isFile()) return { ok: false, reason: `${path} is not a regular file` };
+		if (!io.statFile(path).isFile()) return { ok: false, reason: `${shown} is not a regular file` };
 	} catch (err) {
-		return { ok: false, reason: err?.code === "ENOENT" ? `${path} does not exist` : `${path} cannot be read: ${err?.message ?? String(err)}` };
+		return { ok: false, reason: err?.code === "ENOENT" ? `${shown} does not exist` : `${shown} cannot be read: ${envValueShown(err?.message ?? String(err))}` };
 	}
 	try {
 		spec.load(path, io.loaderIo);
 		return { ok: true };
 	} catch (err) {
-		return { ok: false, reason: err?.message ?? String(err) };
+		return { ok: false, reason: envValueShown(err?.message ?? String(err)) };
 	}
 }
 
@@ -1736,22 +1765,35 @@ export async function collectChecks(env, seams) {
 		const shellRaw = spec.resolve(env);
 		const fileRaw = envFile[spec.key];
 		const notPlainLine = envFile.notPlain?.[spec.key];
+		const notVouchedLine = envFile.notVouched?.[spec.key];
 		const blankInFile = envFile.blankInFile?.[spec.key] === true;
 		const onlyExported = envFile.exported?.[spec.key];
 		const alsoExported = envFile.alsoExported?.[spec.key];
 		const loaderName = envFile.serviceLoader === "systemd" ? "systemd's EnvironmentFile=" : envFile.serviceLoader === "cmd" ? "the .cmd wrapper" : "the wrapper's `set -a; . ./.env`";
+		// The OTHER POSIX loader, named for what it is rather than as "a shell that sources the file": on darwin
+		// the service IS the sourcing shell, and the reading it disagrees with is systemd's.
+		const otherName = envFile.serviceLoader === "shell" ? "systemd's EnvironmentFile=" : "a shell that sources the file";
 		// A setup script runs AFTER the file on every platform (`service.mjs`, `worker-env-wrapper.sh`,
 		// `.cmd`), so it can supply or replace what the file says. Where one is configured, a refusal this
 		// check would otherwise report is a WARNING naming the script: doctor cannot run it, and failing a
 		// working `--env-setup` deployment is the crying wolf this file refuses elsewhere.
-		const envSetup = typeof env.PI_ENV_SETUP === "string" && env.PI_ENV_SETUP.trim() !== "" ? env.PI_ENV_SETUP : null;
+		//
+		// `!== ""`, not `.trim() !== ""`, because `worker-env-wrapper.sh` tests `[ -n "$env_setup" ]` and then
+		// `[ ! -f "$env_setup" ]`: a value of three spaces is CONFIGURED to the wrapper, which then refuses to
+		// start on the missing file. Reading it as unset here left that deployment with no line anywhere.
+		const envSetupRaw = typeof env.PI_ENV_SETUP === "string" && env.PI_ENV_SETUP !== "" ? env.PI_ENV_SETUP : null;
+		// AND ONLY WHEN IT COULD RUN. A script doctor has already reported as missing cannot replace anything,
+		// so downgrading on it produced two contradicting lines in one run: one saying the unit restart-loops
+		// until the script is back, the next saying a blank key is only a warning because that same script may
+		// replace it.
+		const envSetup = envSetupRaw !== null && fileExists(envSetupRaw) ? envSetupRaw : null;
 
 		// THE SERVICE, judged on what the file gives its loader.
 		if (blankInFile) {
 			checks.push({
 				ok: false,
 				warn: envSetup !== null,
-				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START`,
+				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START${alsoExported === undefined ? "" : `, while ${otherName} would take ${renderEnvValue(alsoExported)}, so two deployments of this one file disagree`}`,
 				fix: envSetup !== null
 					? `${envSetup} runs after that file and may replace it, which is why this is a warning: if it does not, delete the ${spec.key} line, or give it the absolute path (${scaffolded})`
 					: `delete the ${spec.key} line from that .env, or give it a path: ${spec.key}=${renderEnvValue(scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
@@ -1765,30 +1807,49 @@ export async function collectChecks(env, seams) {
 				label: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`,
 				fix: `rewrite it as ${spec.key}=${renderEnvValue(scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
 			});
-		} else if (onlyExported !== undefined) {
+		} else if (notVouchedLine !== undefined) {
+			// A DIFFERENT LINE, so a different sentence. This key's own line is in the form every loader reads
+			// the same way; another line reaches past itself, and under it no reading of this file is safe. The
+			// first version of this named THIS key's line and told the operator to rewrite it, which asked them
+			// to retype a correct line and changed nothing.
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${spec.key} is set in ${join(cwd, ".env")} as \`export ${spec.key}=${onlyExported}\`, which ${envFile.serviceLoader === "systemd" ? "systemd does NOT read" : "this platform's loader reads, though systemd would not"}`,
-				fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through a wrapper that sources the file`,
+				label: `line ${notVouchedLine} of ${join(cwd, ".env")} runs, or reaches into the line below it, so what the service reads for ${spec.key} cannot be read off this file`,
+				fix: `fix line ${notVouchedLine}: a sourcing shell executes anything that is not an assignment, and an unclosed quote, a trailing backslash or a \`$\` swallows or expands what follows, while systemd reads none of it that way`,
+			});
+		} else if (onlyExported !== undefined) {
+			// The loader that reads an `export` line is a SOURCING SHELL, and naming it "this platform's loader"
+			// was false on win32, where the cmd wrapper splits on the first `=` and makes `export KEY` a variable
+			// name -- so neither loader on that platform reads the line the label said it read.
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} is set in ${join(cwd, ".env")} as \`export ${spec.key}=${envValueShown(onlyExported)}\`, which only a shell that SOURCES this file reads${envFile.serviceLoader === "shell" ? "" : `, and ${loaderName} does not`}`,
+				fix: `drop the \`export \` prefix if this deployment runs under systemd or the Windows wrapper (both want a bare KEY=value); keep it if the worker starts through a wrapper that sources the file`,
 			});
 		} else if (alsoExported !== undefined) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${fileRaw === undefined ? "an EMPTY value, which refuses the boot" : renderEnvValue(fileRaw)}, another loader would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : renderEnvValue(alsoExported)}`,
+				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${renderEnvValue(fileRaw)}, ${otherName} would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : renderEnvValue(alsoExported)}`,
 				fix: `keep one assignment. Which one is in force depends on how the worker starts, so two of them means two deployments of the same file disagree`,
 			});
-		} else if (fileRaw !== undefined) {
+		}
+		// WHETHER IT LOADS IS A SECOND QUESTION, asked whenever the service has a value at all. It used to sit
+		// inside the `fileRaw` branch, so a file assigning the key twice got the disagreement warning and exit
+		// 0 even when BOTH values name a file the worker cannot load -- a deployment that cannot boot, reported
+		// as a tidiness problem.
+		if (fileRaw !== undefined && notPlainLine === undefined && notVouchedLine === undefined && !blankInFile) {
 			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad);
 			checks.push(
 				verdict.ok
-					? { ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${fileRaw}) and loads: the service reads that file, this shell does not` }
+					? { ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
 					: {
 							ok: false,
 							warn: envSetup !== null,
-							label: `${spec.key} is set in ${join(cwd, ".env")} (${fileRaw}) to a file the worker cannot load, so a service started from it REFUSES TO START: ${verdict.reason}`,
-							fix: envSetup !== null ? `${envSetup} runs after that file and may replace it; if it does not, fix ${fileRaw} or point the key at a file that loads` : `fix ${fileRaw}, or point ${spec.key} at a file that loads`,
+							label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}) to a file the worker cannot load, so a service started from it REFUSES TO START: ${verdict.reason}`,
+							fix: envSetup !== null ? `${envSetup} runs after that file and may replace it; if it does not, fix ${envValueShown(fileRaw)} or point the key at a file that loads` : `fix ${envValueShown(fileRaw)}, or point ${spec.key} at a file that loads`,
 						},
 			);
 		}
@@ -1806,16 +1867,35 @@ export async function collectChecks(env, seams) {
 				checks.push({
 					ok: false,
 					label: `${spec.key} is set in this shell to a file the worker cannot load, so it REFUSES TO START: ${verdict.reason}`,
-					fix: `fix ${shellRaw}, or point ${spec.key} at a file that loads`,
+					fix: `fix ${envValueShown(shellRaw)}, or point ${spec.key} at a file that loads`,
 				});
 			}
-		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && !blankInFile && fileExists(scaffolded)) {
+		} else if (envFile.unreadable === true) {
+			// COULD NOT READ, said as itself. The alternative -- the "unset" line below -- is a positive claim
+			// about a key in a file nobody could open.
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} is unset in this shell, and ${join(cwd, ".env")} could not be read, so whether the service is configured for ${spec.noun} cannot be answered here`,
+				fix: `make ${join(cwd, ".env")} a readable regular file, or run doctor from the deployment folder`,
+			});
+		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && notVouchedLine === undefined && !blankInFile && envFile.hazard == null && fileExists(scaffolded)) {
 			// The scaffold decides only THIS line, and only this one: a file sitting there that nothing reads.
+			// Guarded on there being no hazard, because "the key is unset" is a claim about a file this reader
+			// could not finish reading -- a BOM'd line, a `K+=` line or a line the shells run all leave no record
+			// for the key while the loaders may well set it.
 			checks.push({
 				ok: false,
 				warn: true,
 				label: `${scaffolded} exists but ${spec.key} is unset -- the worker ignores it, so ${spec.off}`,
-				fix: `set ${spec.key}=${scaffolded} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
+				fix: `set ${spec.key}=${renderEnvValue(scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
+			});
+		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && notVouchedLine === undefined && !blankInFile && envFile.hazard != null) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `whether ${spec.key} is set for the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} runs, or reaches into the line below it`,
+				fix: `fix line ${envFile.hazard.line} of that file, then run doctor again`,
 			});
 		}
 	}
@@ -2417,6 +2497,11 @@ function readScopedLimitFacts(env, fileExists) {
 	if (typeof path !== "string" || path.trim() === "") return none;
 	if (!fileExists(path)) return { limits: [], parseError: `scoped-limits file does not exist: ${path}`, path };
 	try {
+		// A REGULAR FILE or nothing, the same guard `loadVerdict` carries, and this site needs it MORE: it
+		// runs earlier, so a FIFO or a device named by this key hung `pi-dispatch doctor` forever before the
+		// guarded read was ever reached. `readFileSync` is synchronous, so no test timeout can interrupt it
+		// -- the failure mode is a job that never ends rather than one that goes red.
+		if (!statSync(path).isFile()) return { limits: [], parseError: `scoped-limits file is not a regular file: ${path}`, path };
 		return { limits: parseScopedLimits(readFileSync(path, "utf8"), path), parseError: null, path };
 	} catch (e) {
 		return { limits: [], parseError: e?.message ?? String(e), path };
@@ -2431,6 +2516,9 @@ function readTriggerFacts(env, fileExists, cwd) {
 		// the receiver will not boot. An absent file still means "no triggers at all", exactly as before.
 		const path = env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json");
 		if (!fileExists(path)) return none;
+		// The same regular-file guard, for the same reason: this read is unbounded too, and a triggers path
+		// naming a FIFO hangs the command with no output and no timeout that can reach it.
+		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
 		const triggers = parseTriggers(text, path);
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
@@ -3019,8 +3107,12 @@ async function envSetupChecks(env, seams) {
 	// env-internal PI_ENV_SETUP: unit configuration, deliberately never an .env key. The wrappers capture
 	// it BEFORE they source ./.env so that nothing able to write that file can name a script they run
 	// (REQ-DEPLOYMENT-BOOTSTRAP). doctor reads it here only to answer for a host whose unit names none.
-	const fromEnv = (env.PI_ENV_SETUP ?? "").trim();
-	if (sources.size === 0 && fromEnv) sources.set(fromEnv, "PI_ENV_SETUP in this environment");
+	// NOT trimmed, because `worker-env-wrapper.sh` does not trim: it tests `[ -n "$env_setup" ]` and then
+	// `[ ! -f "$env_setup" ]`, so `PI_ENV_SETUP="   "` is a CONFIGURED script that does not exist and the
+	// wrapper refuses to start on it. Trimming here read that as unset, so the one deployment shape where
+	// the worker cannot boot got no line anywhere in the report (issue #384).
+	const fromEnv = env.PI_ENV_SETUP ?? "";
+	if (sources.size === 0 && fromEnv !== "") sources.set(fromEnv, "PI_ENV_SETUP in this environment");
 
 	const checks = [];
 	for (const [setup, source] of sources) {
@@ -3028,7 +3120,7 @@ async function envSetupChecks(env, seams) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `the env-setup script at ${setup} does not exist (named by ${source})`,
+				label: `the env-setup script at ${envValueShown(setup)} does not exist (named by ${source})`,
 				fix: "restore it, or re-render without --env-setup -- the service manager sources it at every boot, so until it is back the unit exits 1 in a restart loop and the worker never starts (docs/secrets.md)",
 			});
 			continue;

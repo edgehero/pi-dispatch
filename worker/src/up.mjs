@@ -407,8 +407,11 @@ export async function runUp(argv = [], deps = {}) {
 	// `start.mjs` before it takes a job. Filling that key from `wrote` handed doctor a path the operator
 	// does not have set, so doctor judged a deployment nobody is running and `up` exited 0 on one that
 	// cannot start. Doctor now names the blank itself, which is the only line that tells the operator what
-	// to do about it. Sound for every other key up writes, too: a blank `PI_LOGS_DIR` or `PI_SETTINGS_FILE`
-	// resolves through `||` to the same default `up` put in the file.
+	// to do about it. For the other two keys `up` writes, this hands doctor the truth rather than a default:
+	// `PI_LOGS_DIR=""` does resolve through `||` to what `up` wrote, but `PI_LOGS_DIR="   "` does NOT -- three
+	// spaces are truthy, so `config.mjs` keeps them and the worker really does use a directory named three
+	// spaces. Filling that key in from `wrote` made doctor judge a deployment the operator is not running,
+	// which is the same defect one key over.
 	const layered = { ...env };
 	for (const [key, value] of Object.entries(wrote)) {
 		if (typeof env[key] !== "string") layered[key] = value;
