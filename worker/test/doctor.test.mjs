@@ -1602,8 +1602,8 @@ test("doctor: a line that reaches past itself names THAT line, not the key's (#3
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\nunset FOO\n`);
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-	assert.match(text(), /cannot be read off .*\.env: line 2 is not blank, a comment, or a NAME=value assignment/, "the line an operator has to open");
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
+	assert.match(text(), /cannot be read off .*\.env: line 2 is not one this command can read/, "the line an operator has to open");
 	assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE on line 1 of/, "and not the line that is already correct");
 });
 
@@ -1614,9 +1614,9 @@ test("doctor: a file this reader cannot finish is never reported as a key that i
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `OTHER=1\n\ufeffPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
 	assert.doesNotMatch(text(), /exists but PI_PAUSE_WINDOWS_FILE is unset/, "no positive claim about a file this reader could not finish");
-	assert.match(text(), /cannot be read off .*\.env: line 2 is not blank, a comment, or a NAME=value assignment/, "and the line that stopped it is named");
+	assert.match(text(), /cannot be read off .*\.env: line 2 is not one this command can read/, "and the line that stopped it is named");
 });
 
 test("doctor: a control byte in a value from THIS SHELL never reaches the terminal (#384)", async () => {
@@ -1753,8 +1753,8 @@ test("doctor: a line swallowed by the one above it points at the line above (#38
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `OTHER="unclosed\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-	assert.match(text(), /cannot be read off .*\.env: line 1 is not blank, a comment, or a NAME=value assignment/, "the line that reaches is the line to fix");
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
+	assert.match(text(), /cannot be read off .*\.env: line 1 is not one this command can read/, "the line that reaches is the line to fix");
 	assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE on line 2 of/, "and the swallowed line is not accused of being malformed");
 });
 
@@ -1763,18 +1763,19 @@ test("doctor: a quote that CLOSES stops swallowing, and the key below it is stil
 	// lines down was reported as malformed AND its file was never opened -- exit 0 on a deployment that
 	// cannot boot. A multi-line value is still a disagreement (systemd 252 does not continue a quote), so
 	// the file gets a warning; the key itself is read, and the load check runs.
-	// THE COST OF THE SIMPLER RULE, stated as a test rather than discovered later. A file with an unclosed
-	// quote in it is one this command cannot read, so doctor names that line and judges NOTHING about the
-	// key -- even though the key's own line, three lines down, looks perfectly ordinary. The alternative was
-	// tried and measured: a reader that decides which lines a shell swallows was wrong in both directions
-	// three review rounds running, hard-failing deployments that boot and passing ones that cannot.
+	// A QUOTE THAT CLOSES IS NOT A QUOTE THAT SWALLOWS THE REST OF THE FILE. Lines 1 and 2 are one value to
+	// a sourcing shell and two ordinary lines to systemd 252, so they disagree about OTHER -- and they agree
+	// EXACTLY about line 3, which every one of them reads as the path (measured in sh, bash, dash, zsh and
+	// on the rig). A version of this branch called the whole file unreadable and returned exit 0 on this
+	// deployment, which cannot start.
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `OTHER='x\ny'\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "gone.json")}\n`);
-	const { out, text } = capture();
-	const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-	assert.match(text(), /cannot be read off .*\.env: line 1/, "the line that stopped it is named");
-	assert.doesNotMatch(text(), /and loads/, "and no verdict is offered about a key in a file only a shell could resolve");
-	assert.notEqual(code, 1, "a question this command cannot answer is not an answer");
+	for (const platform of ["linux", "darwin"]) {
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform });
+		assert.match(text(), /to a file the worker cannot load/, `${platform}: the value is read and the file opened`);
+		assert.equal(code, 1, `${platform}: so a deployment that cannot boot fails`);
+	}
 });
 
 test("doctor: a value it will not vouch for is never printed as what another loader takes (#384)", async () => {
@@ -1785,7 +1786,7 @@ test("doctor: a value it will not vouch for is never printed as what another loa
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\nexport PI_PAUSE_WINDOWS_FILE=/w.json\nunset PI_PAUSE_WINDOWS_FILE\n");
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
 	assert.doesNotMatch(text(), /would take \/w\.json/, "no value is quoted out of a file this reader cannot vouch for");
 	assert.match(text(), /cannot be read off .*\.env: line 3/, "the line that stopped it is named instead");
 });
@@ -1814,7 +1815,7 @@ test("doctor: an export-only key in a file with a hazard is not quoted back (#38
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), "export PI_PAUSE_WINDOWS_FILE=/w.json\nunset PI_PAUSE_WINDOWS_FILE\n");
 	const { out, text } = capture();
-	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
 	assert.doesNotMatch(text(), /as `export PI_PAUSE_WINDOWS_FILE=\/w\.json`/, "no value is quoted out of a file with a hazard in it");
 	assert.match(text(), /cannot be read off .*\.env: line 2/, "the line that reaches is named instead");
 });

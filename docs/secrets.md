@@ -60,8 +60,9 @@ The narrowing is the whole of the licence, and each half is load-bearing:
 - it reads only the keys the message itself names, so it cannot grow into "load `.env`";
 - a file nobody could open is reported as exactly that, rather than as a key that is unset, because a
   deployment told it is fine when nobody could check is the worse failure. The same holds for a file this
-  reader cannot finish: one line that runs, or that reaches into the line below it, takes the claim off the
-  whole file, and doctor names that line instead of guessing past it;
+  reader cannot finish: a line your service manager's loader would RUN, or that reaches into the line below
+  it, takes the claim off the whole file for that loader, and doctor names the line instead of guessing past
+  it. Which lines those are depends on the loader, and systemd refuses far less than a sourcing shell does;
 - **doctor is not the worker**. The sentence at the top of this page is about the process that runs jobs,
   and it is still exactly true: `loadConfig` reads the environment, there is still no dotenv dependency,
   and `PI_ENV_SETUP` inside a `./.env` is still deliberately **not** honoured, which the test suite pins.

@@ -517,10 +517,15 @@ test("E3: what the file says and what systemd says are two different sentences",
 	// the first question ("is this key empty?") and prints the second.
 	// The key's own LINE is exactly what it looks like; what cannot be claimed is where the loader ends up,
 	// because the line above it does not close its quote. One flag for the line, one for the file.
-	const below = readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"], { loader: "shell" }).K;
-	assert.equal(below.plain, true, "the line itself is in the form every loader reads the same way");
-	assert.equal(below.vouched, false, "and the file it sits in is not one this command can read");
-	assert.equal(below.hazardLine, 1, "which is the line an operator has to open");
+	// PER LOADER, because they do different things with the same two lines. `OTHER='a'b'` leaves a quote open
+	// for every shell, so the line below is part of that value and is not a line at all; systemd 252 reads
+	// `ab'` and then reads the next line as an ordinary assignment (measured on the rig).
+	const belowShell = readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"], { loader: "shell" }).K;
+	assert.equal(belowShell.plain, false, "to a sourcing shell this is not a line, it is more of the value above");
+	assert.equal(belowShell.hazardLine, 1, "and the line an operator has to open is the one that opened the quote");
+	const belowSystemd = readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"]).K;
+	assert.equal(belowSystemd.plain, true, "systemd does not continue a quote across lines, so this IS a line");
+	assert.equal(belowSystemd.vouched, true, "and nothing in this file reaches past itself for that loader");
 	const above = readEnvAssignments("K=/srv/a.json\nunset K", ["K"], { loader: "shell" }).K;
 	assert.equal(above.plain, true, "the line itself is in the form every loader reads the same way");
 	assert.equal(above.vouched, false, "but systemd ignores the line below and the shells run it, so where the key ENDS UP is not claimed");
@@ -586,7 +591,6 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 		["a command", "echo hi\nK=/a.json", 1],
 		["a space before the =", "K =/a.json", 1],
 		["an unclosed quote", "OTHER='x\nK=/a.json", 1],
-		["a trailing backslash", "OTHER=x\\\nK=/a.json", 1],
 		["a heredoc", "cat <<EOF\nK=/a.json\nEOF", 1],
 		["an unset below", "K=/a.json\nunset K", 2],
 		["a # that is not a comment", "NOTE=#it's\nK=/a.json", 1],
@@ -596,6 +600,15 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 		assert.notEqual(h, null, `${name}: this file is not one this command can read, and nothing said so`);
 		assert.equal(h.line, line, `${name}: the line an operator has to open`);
 	}
+	// A CONTINUATION THAT IS CONSUMED is not a hazard, it is an absence: `OTHER=x\` swallows the line below
+	// it in systemd 252 AND in all four shells, so both loaders agree the key is never assigned. There is
+	// nothing to warn about and nothing to claim -- doctor says the key is unset, which is true.
+	const eaten = readEnvAssignments("OTHER=x\\\nK=/a.json", ["K"], { loader: "shell" });
+	assert.equal(envFileHazard("OTHER=x\\\nK=/a.json", { loader: "shell" }), null, "the loaders agree, so nothing is unreadable");
+	assert.equal(eaten.K.plain, false, "and the key's line is not a line: it is the tail of the value above it");
+	// A continuation on the LAST line is different: the file ends mid-value, which both loaders notice.
+	assert.deepEqual(envFileHazard("K=/a.json\nOTHER=x\\", { loader: "shell" }), { line: 2 }, "a file that ends inside a continuation");
+
 	// ORDINARY LINES STAY ORDINARY, which is the half a blanket rule got wrong: an expansion that can only
 	// substitute affects its own value and nothing else, and treating it as a file-wide hazard hid an EMPTY
 	// boot key two lines below it.

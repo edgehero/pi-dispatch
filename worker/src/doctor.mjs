@@ -360,12 +360,11 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// reported a file that assigns the key ONCE as "assigned twice with different values", on the very
 			// line `renderEnvValue` writes there. The export-only signal above stays on every platform, because
 			// "only a sourcing shell reads this line" is true and useful wherever the line is.
-			// `vouched` on both, which is EQUIVALENT to `plain` on both today and is written this way anyway:
-			// this branch is only reached when the key has a reading and no earlier branch claimed it, and a
-			// file with a hazard sends every such key to `notVouched` first -- so where this runs, plain and
-			// vouched are the same thing. Written as the question actually being asked ("may I print these
-			// two values"), because the branch above it is NOT equivalent: an export-only key has no reading
-			// of its own, so nothing routes it to `notVouched` and the vouch there is load-bearing.
+			// `vouched` on both, because this PRINTS two values and a file this command cannot read is one
+			// where neither is worth quoting. It is equivalent to `plain` wherever the branch is reachable --
+			// the caller stands the service verdicts down entirely when the file carries a hazard -- and it
+			// is written as the question actually being asked, so that a later caller cannot reach it from
+			// somewhere the equivalence does not hold.
 			else if (serviceLoader !== "cmd" && own !== undefined && other !== undefined && own.vouched && other.vouched && own.value !== other.value) alsoExported[key] = other.value;
 			// BLANK ALONE, because the file being readable is already decided: the caller answers an
 			// unreadable file once and says nothing else about the key, so everything here is about a file
@@ -1852,18 +1851,23 @@ export async function collectChecks(env, seams) {
 		// in the same run, hard-failed deployments that boot (a `KEY=` inside a heredoc body, which no shell
 		// executes), and passed ones that cannot. A reader that will not model a shell cannot hold an opinion
 		// about a file only a shell can resolve, and saying so beats guessing in either direction.
+		// A FILE THIS COMMAND CANNOT READ IS ANSWERED ONCE for the SERVICE, and the two words matter. The
+		// first version of this `continue`d, which jumped past the SHELL block below as well -- so one
+		// unreadable line in a `.env` silently deleted doctor's verdict about a key this shell sets, on a
+		// subject that never reads that file at all. That is the first row of this issue's own defect table,
+		// reinstated behind a condition, and `REQ-DEPLOYMENT-BOOTSTRAP` is normative: a refusal on EITHER
+		// subject fails the command.
 		if (envFile.hazard != null) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `whether ${spec.key} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} is not blank, a comment, or a NAME=value assignment this command can read`,
-				fix: `fix line ${envFile.hazard.line} of that file and run doctor again -- an unclosed quote or a trailing backslash makes the line below it part of that value, and a line that is not an assignment is RUN by the wrappers that source this file, so what any key ends up with depends on what that line does`,
+				label: `whether ${spec.key} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} is not one this command can read`,
+				fix: `fix line ${envFile.hazard.line} of that file and run doctor again -- a line that is not an assignment is RUN by the wrappers that source this file, an unclosed quote or a trailing backslash makes the line below it part of that value, and a value that can run a command or end the shell leaves every key in the file unset`,
 			});
-			continue;
 		}
 
 		// THE SERVICE, judged on what the file gives its loader.
-		if (blankInFile) {
+		if (envFile.hazard == null && blankInFile) {
 			checks.push({
 				ok: false,
 				warn: envSetup !== null,
@@ -1872,7 +1876,7 @@ export async function collectChecks(env, seams) {
 					? `${envSetup} runs after that file and may replace it, which is why this is a warning: if it does not, delete the ${spec.key} line, or give it the absolute path (${scaffolded})`
 					: `delete the ${spec.key} line from that .env, or give it a path: ${fixLineFor(spec.key, scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
 			});
-		} else if (notPlainLine !== undefined) {
+		} else if (envFile.hazard == null && notPlainLine !== undefined) {
 			// NAMED, NEVER QUOTED. The value is outside the grammar every loader reads the same way, so this
 			// file cannot say what the service gets -- and printing a guess is what the previous reader did.
 			checks.push({
@@ -1881,7 +1885,7 @@ export async function collectChecks(env, seams) {
 				label: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`,
 				fix: `rewrite it as ${fixLineFor(spec.key, scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
 			});
-				} else if (onlyExported !== undefined) {
+		} else if (envFile.hazard == null && onlyExported !== undefined) {
 			// The loader that reads an `export` line is a SOURCING SHELL, and naming it "this platform's loader"
 			// was false on win32, where the cmd wrapper splits on the first `=` and makes `export KEY` a variable
 			// name -- so neither loader on that platform reads the line the label said it read.
@@ -1891,7 +1895,7 @@ export async function collectChecks(env, seams) {
 				label: `${spec.key} is set in ${join(cwd, ".env")} as \`export ${spec.key}=${envValueShown(onlyExported)}\`, which only a shell that SOURCES this file reads${envFile.serviceLoader === "shell" ? "" : `, and ${loaderName} does not`}`,
 				fix: `drop the \`export \` prefix if this deployment runs under systemd or the Windows wrapper (both want a bare KEY=value); keep it if the worker starts through a wrapper that sources the file`,
 			});
-		} else if (alsoExported !== undefined) {
+		} else if (envFile.hazard == null && alsoExported !== undefined) {
 			checks.push({
 				ok: false,
 				warn: true,
@@ -1908,7 +1912,7 @@ export async function collectChecks(env, seams) {
 		// boot key was never opened. `fileRaw` is set only for a line this reader vouches for the TEXT of, so
 		// there is always a real path here; whether it loads is a fact about the filesystem, not about the
 		// rest of the file.
-		if (fileRaw !== undefined && !blankInFile) {
+		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
 			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad, platform);
 			checks.push(
 				verdict.ok
@@ -1947,11 +1951,11 @@ export async function collectChecks(env, seams) {
 				label: `${spec.key} is unset in this shell, and ${join(cwd, ".env")} could not be read, so whether the service is configured for ${spec.noun} cannot be answered here`,
 				fix: `make ${join(cwd, ".env")} a readable regular file, or run doctor from the deployment folder`,
 			});
-		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && !blankInFile && fileExists(scaffolded)) {
+		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && !blankInFile && envFile.hazard == null && fileExists(scaffolded)) {
 			// The scaffold decides only THIS line, and only this one: a file sitting there that nothing reads.
 			// Guarded on there being no hazard, because "the key is unset" is a claim about a file this reader
-			// could not finish reading -- a BOM'd line, a `K+=` line or a line the shells run all leave no record
-			// for the key while the loaders may well set it.
+			// could not finish: a line the shells RUN leaves no record for the key while the loaders may well
+			// set it.
 			checks.push({
 				ok: false,
 				warn: true,

@@ -1915,11 +1915,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   each caller's, because a quoted ESC is read IDENTICALLY by every loader and printing it rewrites the
   operator's terminal, and a caller that has to remember to escape is a caller that will forget. An accented
   or CJK path is ordinary and stays plain. THREE ANSWERS, not one: what a LINE assigns, whether it can be
-  shown back, and whether the loader ends up with it are three questions, and one line elsewhere that runs, leaves a quote open or ends in
-  a backslash takes the second away without touching the first -- collapsing them let a stray `unset FOO`
-  hide a key assigned nothing, which is the refused boot this entry is about. A swallowing line is the
-  exception that reaches a specific line: an unclosed quote or a trailing backslash makes the line below it
-  part of its own value in every shell, so under one there is no line to read. Outside that grammar doctor names
+  shown back, and whether the loader ends up with it are three questions; collapsing any two of them produced
+  a wrong verdict under review -- a stray `unset FOO` hid a key assigned nothing, and a value outside the
+  printable grammar hid `KEY=""''`, which is empty to every loader.
+  **WHAT ONE LINE DOES TO ANOTHER IS PER LOADER**, measured on systemd 252 against the four shells rather
+  than assumed. systemd continues a trailing backslash and nothing else: a quote does NOT carry to the next
+  line, and a line it cannot parse -- `unset K`, a heredoc body, a block, `OTHER=${NOPE?boom}`, `OTHER=(` --
+  is IGNORED. A sourcing shell continues both, RUNS every one of those lines, and dies outright on several,
+  taking every key in the file with it. So the reader refuses such a file for the shells and refuses almost
+  nothing for systemd; judging a linux deployment by the shells' rules made an ordinary `unset FOO` hide an
+  empty boot key that systemd reads perfectly well. Where a file IS refused, doctor names that line and makes
+  no claim about the SERVICE -- and still judges this shell, which never reads that file. Outside that grammar doctor names
   the key, the file and the LINE NUMBER, says the service may read something other than what the line
   appears to say, and NEVER PRINTS THE VALUE, which is also what keeps a control byte in a `.env` out of the
   operator's terminal. Nothing read this way reaches a config, an argv, a container env or a fix that

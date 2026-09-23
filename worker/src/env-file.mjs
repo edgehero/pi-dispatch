@@ -373,23 +373,24 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 	// `vouched` adds the rest of the file. A caller deciding what the key IS uses `plain`; a caller about to
 	// print a value uses `vouched`.
 	const bare = lines.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
-	// ONE QUESTION ABOUT THE FILE, and it replaces a taxonomy of hazards, a carry scanner and an expansion
-	// detector that three adversarial passes each found wrong in a different place. The taxonomy was trying
-	// to predict what a shell DOES with an arbitrary file -- which lines run, which are swallowed, which
-	// abort -- and then turning that prediction into a pass or a fail. Every round it was wrong about some
-	// shape, in one direction or the other: an ordinary `PI_LOGS_DIR=$HOME/logs` poisoned a whole file and
-	// hid an empty key below it, while `OTHER=a\ #'` sailed through and produced a confident verdict about a
-	// key no shell sets.
+	// ONE QUESTION ABOUT THE FILE: is every line one this command can read at all? It replaced a taxonomy of
+	// hazard causes and an expansion detector that three adversarial passes each found wrong in a different
+	// place, and a fourth pass then found the first version of THIS wrong in four more. What survived all
+	// four is small, and every refusal is syntactic rather than a guess about what a shell does:
 	//
-	// So this asks something syntactic instead, and answers only about the FILE: is every line one this
-	// command can read at all? A line qualifies when it is blank, a comment, or `NAME=value` whose value
-	// has balanced quotes and no trailing backslash. Nothing else is modelled -- no control flow, no
-	// expansion, no execution -- because a reader that models those is a reader that will be wrong again.
+	//   inside a multi-line quote   the shells read this line as more of the value above it, so it is not a
+	//                               line; when that quote CLOSES, the lines after it are lines again
+	//   an unterminated quote       from the line that opened it, nothing below can be read
+	//   a trailing backslash        the same, by continuation
+	//   not an assignment           the shells RUN it: `unset K`, a heredoc body, a block, a sourced file
+	//   `$(`, a backtick, `${N?}`   it runs, or ENDS the sourcing shell, and then no key is set at all
+	//   an unbalanced `${`          the same: the shells abort on the syntax error
 	//
-	// What it costs is stated rather than hidden: in a file this cannot read, doctor says which line stopped
-	// it and makes NO claim about any key, instead of guessing in either direction.
-	const unreadable = bare.findIndex((l) => !lineIsReadable(l, loader));
-	const hazardLine = unreadable === -1 ? null : unreadable + 1;
+	// A value's ordinary CONTENT is not judged here. `PI_LOGS_DIR=$HOME/logs` changes only its own line's
+	// reading, which is what `plain` is for, and treating it as a file-wide hazard hid an EMPTY boot key two
+	// lines below it. Nor is anything after a `#` that begins a comment.
+	const spans = quoteSpans(bare, loader);
+	const hazardLine = spans.hazard;
 	for (let i = 0; i < lines.length; i++) {
 		const hadCR = lines[i].endsWith("\r");
 		const line = hadCR ? lines[i].slice(0, -1) : lines[i];
@@ -421,7 +422,9 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 		// part of the value. Holding it against systemd made a CRLF deployment on linux unjudgeable -- no
 		// pass, no failure -- on files `up` itself writes that way.
 		const crBreaks = hadCR && loader === "shell";
-		const plain = read.plain && !crBreaks;
+		// A line INSIDE a multi-line quote is part of the value above it in every shell, whatever it looks
+		// like, so it is not this key's line at all.
+		const plain = read.plain && !crBreaks && !spans.inside[i];
 		// The LAST assignment, because every loader takes it: `set -a; . ./.env`, `EnvironmentFile=` and the
 		// cmd wrapper's `set` all overwrite as they go.
 		// `blank` is the LOOSE answer, on purpose: it asks only what this line assigns, so `up` can tell an
@@ -430,7 +433,7 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 		// a hazard can mean the shells never reach this line at all (a heredoc body, an `if false` block) or
 		// that one of them clears the key afterwards (`unset K`), and a hard "REFUSES TO START" is the one
 		// verdict that must never be reached by inference. A swallowed line is not a line in either sense.
-		found[key] = { value: plain ? read.value : null, plain, vouched: plain && hazardLine === null, blank: loader !== "cmd" && assignsNothing(rest), line: i + 1, hazardLine };
+		found[key] = { value: plain ? read.value : null, plain, vouched: plain && hazardLine === null, blank: loader !== "cmd" && !spans.inside[i] && assignsNothing(rest), line: i + 1, hazardLine };
 	}
 	return found;
 }
@@ -449,97 +452,134 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 const ASSIGNMENT = /^[ \t]*(export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=([^\n]*)$/;
 
 /**
- * Is this line one this command can read AT ALL?
+ * Which lines are inside a multi-line quote, and which line (if any) this command cannot read.
  *
- * Blank, a comment, or `NAME=value` whose value has balanced quotes and no trailing backslash. That is the
- * whole rule, and its shortness is the point: the three things it refuses are the three that can change
- * what ANOTHER line means, and they are all syntactic.
+ * ONE PASS, because the two questions share a scanner and answering them separately is how the version
+ * before this managed to disagree with itself: one scanner was fed the VALUE and the other the whole LINE,
+ * and their "a `#` starts a comment" rules differed, so a file could be readable and swallowed at once.
  *
- *   an unclosed quote      every shell reads the next line as more of this value
- *   a trailing backslash   the same, by continuation
- *   not an assignment      the shells RUN it, and it can do anything -- `unset K`, a heredoc body, a
- *                          block, another file sourced in
+ * A quote CLOSES. That is the half the first simplification threw away: in
  *
- * A value's CONTENT is not judged here. `PI_LOGS_DIR=$HOME/logs` is readable: the shells expand it and
- * systemd does not, so that KEY's own reading is not plain, and nothing about it changes what the line
- * below assigns. Treating it as a file-wide hazard is what hid an empty boot key under an ordinary line.
+ *     OTHER='x
+ *     y'
+ *     PI_PAUSE_WINDOWS_FILE=/gone.json
  *
- * A `#` after unescaped whitespace starts a comment, so `K=/a.json # it's fine` is readable -- the
- * apostrophe is inside a comment in every shell. Escaped whitespace does NOT count, which is the case that
- * slipped through the version this replaced: in `OTHER=a\ #'` the space is part of the value, so the `#`
- * is too, and the quote that follows swallows the next line.
- *
- * The cmd wrapper gets one rule of its own and no others: `for /f ... do set "%%A=%%B"` wraps the value in
- * a quoted `set`, so a `"` anywhere in it closes that quote and the rest becomes command. It has no
- * continuation and no multi-line values, so nothing else there can reach across lines.
+ * every loader reads line 3 identically (measured on systemd 252 and in sh, bash, dash and zsh), so calling
+ * the whole file unreadable turned a worker that refuses to start into a clean exit 0. Lines 1 and 2 are the
+ * span; line 3 is a line.
  */
-function lineIsReadable(line, loader) {
-	// The cmd wrapper has exactly one way for a line to reach another, and no other line kind matters to it:
-	// `for /f` sets a variable per line with no continuation, no multi-line value and no execution, so a
-	// heredoc marker or an `unset K` there is just a variable with an odd name.
-	if (loader === "cmd") return !(ASSIGNMENT.exec(line)?.[3] ?? "").includes('"');
-	if (line.startsWith("\ufeff")) return false;
-	const t = line.trim();
-	if (t === "" || t.startsWith("#")) return true;
-	const m = ASSIGNMENT.exec(line);
-	if (m === null) return false;
-	const value = m[3];
-	if (value.replace(/[ \t]+$/, "").endsWith("\\")) return false;
-	return quotesBalanced(value) && !canRunCode(value);
+function quoteSpans(bare, loader) {
+	const inside = bare.map(() => false);
+	if (loader === "cmd") {
+		// `for /f` reads one line at a time: no continuation, no multi-line value, no execution. Its only
+		// cross-line hazard is a `"`, which closes the wrapper's own `set "%%A=%%B"` and makes the rest of
+		// the line command. `renderEnvValue` refuses to WRITE that character for exactly this reason.
+		const at = bare.findIndex((l) => (ASSIGNMENT.exec(l)?.[3] ?? "").includes('"'));
+		return { inside, hazard: at === -1 ? null : at + 1 };
+	}
+	// PER LOADER, because the two POSIX loaders do different things with the same file, and one answer for
+	// both was wrong for whichever one it was not written for. Measured on systemd 252:
+	//
+	//   a quote does NOT continue across lines. `OTHER='a'b'` reads as `ab'` and the NEXT line is read as an
+	//   ordinary assignment, where every shell swallows it.
+	//   a trailing backslash DOES continue, in both.
+	//   a line it cannot parse is IGNORED -- `unset K`, `cat <<EOF`, `if false; then`, `OTHER=${NOPE?boom}`
+	//   and `OTHER=(` are all inert to systemd, and all of them RUN in a sourcing shell.
+	//
+	// So the hazards below belong to the shells, and systemd's only cross-line mechanism is the backslash.
+	// Judging a linux deployment by the shells' rules is what made an `unset FOO` in a `.env` hide an empty
+	// boot key from systemd, which reads that key perfectly well.
+	const runsLines = loader === "shell";
+	let carry = { q: "", cont: false };
+	let openedAt = null;
+	let hazard = null;
+	for (let i = 0; i < bare.length; i++) {
+		const line = bare[i];
+		const within = (runsLines && carry.q !== "") || carry.cont;
+		inside[i] = within;
+		if (!within && hazard === null && runsLines) {
+			const t = line.trim();
+			const m = ASSIGNMENT.exec(line);
+			if (t !== "" && !t.startsWith("#") && (m === null || line.startsWith("\ufeff"))) hazard = i + 1;
+			else if (m !== null && runsOrAborts(m[3])) hazard = i + 1;
+		}
+		const next = scanQuotes(line, runsLines ? carry.q : "");
+		if (carry.q === "" && next.q !== "") openedAt = i + 1;
+		carry = { q: next.q, cont: next.continuation };
+	}
+	// A quote the shells never see closed makes the WHOLE source fail, so from the line that opened it
+	// nothing can be read. A backslash on the last line is the same for both loaders.
+	if (hazard === null && runsLines && carry.q !== "") hazard = openedAt;
+	if (hazard === null && carry.cont) hazard = bare.length;
+	return { inside, hazard };
 }
 
 /**
- * Can this value RUN something, or end the shell that is sourcing the file?
+ * Does this value RUN something, END the shell that is sourcing the file, or fail to parse?
  *
- * Three shapes, and the narrowness is the point: a blanket "any `$` is a hazard" was measured too wide --
- * `PI_LOGS_DIR=$HOME/logs` is an ordinary line, and treating it as one that reaches past itself made a whole
- * file unreadable and hid an EMPTY boot key two lines below. These three are the ones that do more than
- * substitute:
+ * Narrow on purpose, and comment-aware, which the first version was not: it scanned the whole value, so an
+ * inline comment holding a backtick (`NOTE=x # use `openssl rand``) made a file unreadable that all five
+ * loaders read perfectly, and the empty boot key two lines below it went unreported.
  *
  *   `$(...)` and a backtick   command substitution: arbitrary code, arbitrary exit
- *   `${NAME?...}`             the error form -- a non-interactive shell EXITS, so `set -a; . ./.env`
- *                             aborts and the wrapper never launches the worker, leaving EVERY key unset
+ *   `${NAME?...}`             the error form: a non-interactive shell EXITS, so `set -a; . ./.env` aborts
+ *                             and the wrapper never launches the worker, leaving EVERY key unset
+ *   an unbalanced `${`        a syntax error, which aborts the same way. Measured through the real
+ *                             `deploy/worker-env-wrapper.sh`: `unexpected EOF while looking for matching }`
+ *   `( ) ; & | < >` unquoted  the line stops being an assignment: `OTHER=(` is a syntax error that aborts
+ *                             the source, and `OTHER=a; exit 0` ends the wrapper before it launches
+ *                             anything. Both leave EVERY key in the file unset
  *
- * Measured: `OTHER=${NOPE?boom}` above a good assignment leaves the key unset in sh, bash, dash and zsh,
- * while systemd 252 reads both lines literally. `$HOME`, `${HOME}` and `${HOME:-/tmp}` change only their
- * own line's value, which is what `plain` is for.
+ * `$HOME`, `${HOME}` and `${HOME:-/tmp}` change only their own line's value, which is what `plain` is for.
  */
-function canRunCode(value) {
+function runsOrAborts(value) {
 	let q = "";
+	let afterBlank = false;
 	for (let i = 0; i < value.length; i++) {
 		const c = value[i];
 		if (q === "'") {
 			if (c === "'") q = "";
+			afterBlank = false;
 			continue;
 		}
 		if (c === "\\") {
 			i += 1;
+			afterBlank = false;
 			continue;
 		}
-		if (q === "" && c === "'") {
-			q = "'";
-			continue;
-		}
-		if (c === "`") return true;
-		if (c === "$" && value[i + 1] === "(") return true;
-		if (c === "$" && value[i + 1] === "{") {
+		if (q === "" && c === "#" && afterBlank) return false;
+		if (q === "" && (c === "'" || c === '"')) q = c;
+		else if (q === '"' && c === '"') q = "";
+		else if (c === "`" || c === "(" || c === ")" || c === ";" || c === "&" || c === "|" || c === "<" || c === ">") return true;
+		else if (c === "$" && value[i + 1] === "(") return true;
+		else if (c === "$" && value[i + 1] === "{") {
 			const close = value.indexOf("}", i + 2);
-			if (close !== -1 && value.slice(i + 2, close).includes("?")) return true;
+			if (close === -1) return true;
+			if (value.slice(i + 2, close).includes("?")) return true;
 		}
+		afterBlank = c === " " || c === "\t";
 	}
 	return false;
 }
 
-/** Do this value's quotes all close, honouring comments the way every shell does? */
-function quotesBalanced(value) {
-	let q = "";
-	// Whether the PREVIOUS character was unescaped whitespace, which is what lets a `#` start a comment.
-	// FALSE to begin with, because the character before a value is the `=`: `NOTE=#don't edit` is one word
-	// in every shell, so its `#` is literal and the apostrophe after it opens a quote that swallows the line
-	// below. Starting this true called that line a comment and vouched for the key underneath it.
+/**
+ * The quote state at the end of this line, given the state it started in, and whether it ends in the
+ * backslash that makes the next line part of it.
+ *
+ * ONE SCANNER for the whole file, which is the lesson of the round that had two: the other one was fed a
+ * VALUE where this is fed a LINE, and their comment rules drifted apart, so a file could be judged readable
+ * and swallowed at the same time.
+ *
+ * A `#` after UNESCAPED whitespace ends the line for quoting purposes, because every shell does that:
+ * `K=/a.json # it's fine` is an ordinary line and its apostrophe is in a comment. Escaped whitespace does
+ * not count -- in `K=a\ #'` the space is part of the value, so the `#` is too, and the quote after it
+ * swallows the line below. Nor does a `#` at the very start of a value: `NOTE=#don't edit` is one word.
+ */
+function scanQuotes(text, q0) {
+	let q = q0;
 	let afterBlank = false;
-	for (let i = 0; i < value.length; i++) {
-		const c = value[i];
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
 		if (q === "'") {
 			if (c === "'") q = "";
 			afterBlank = false;
@@ -552,17 +592,16 @@ function quotesBalanced(value) {
 			continue;
 		}
 		if (c === "\\") {
-			// The escaped character is a LITERAL, so it cannot be the whitespace a comment needs in front
-			// of it. `OTHER=a\ #'` is one word and the `#` is part of it.
+			if (i === text.length - 1) return { q, continuation: true };
 			i += 1;
 			afterBlank = false;
 			continue;
 		}
-		if (c === "#" && afterBlank) return true;
+		if (c === "#" && afterBlank) return { q, continuation: false };
 		if (c === "'" || c === '"') q = c;
 		afterBlank = c === " " || c === "\t";
 	}
-	return q === "";
+	return { q, continuation: false };
 }
 
 /**
@@ -656,11 +695,9 @@ export function envValueShown(value) {
  * do -- so the one cross-line hazard Windows has was invisible to the caller that needed it.
  */
 export function envFileHazard(text, { loader = "systemd" } = {}) {
-	const lines = String(text ?? "").split("\n");
-	for (let i = 0; i < lines.length; i++) {
-		if (!lineIsReadable(lines[i].endsWith("\r") ? lines[i].slice(0, -1) : lines[i], loader)) return { line: i + 1 };
-	}
-	return null;
+	const lines = String(text ?? "").split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	const at = quoteSpans(lines, loader).hazard;
+	return at === null ? null : { line: at };
 }
 
 function readValue(rest, loader) {
