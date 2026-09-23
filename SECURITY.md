@@ -652,8 +652,10 @@ Stated openly rather than discovered later:
   local clipboard, including over SSH. What crosses is a host-assigned job id or a target URL derived
   from id-only fields, never log bytes or issue text; nothing is ever read back from the clipboard; and
   the sequence is emitted only in direct response to the keypress, through the same injected seam
-  discipline as every other side effect. Run-target hyperlinks (OSC 8) are display-only escapes carrying
-  the same id-derived URLs.
+  discipline as every other side effect. The panel emits no OSC 8 hyperlink at all: it used to link a run
+  target, and that was withdrawn under issue #382, because the gate that keeps a stored field's escapes off
+  the terminal can recognise a SHAPE and not an author, so allowing the panel's own link allowed an
+  identically-shaped one written into a trigger field.
 - Review every PR. Automation opens them; it does not land them.
 - Point local-folder jobs only at folders you can restore.
 - Keep the pinned pi version current, and let the upgrade tests gate the bump.

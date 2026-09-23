@@ -115,9 +115,10 @@ function scrubReason(reason: any): string {
  * about the data, it is a property of the terminal. A byte that moves the cursor, clears the screen or
  * opens a hyperlink must not reach it from a stored field, whoever wrote that field.
  *
- * Must be applied INSIDE the value, before styling. The styler emits its own escapes, including OSC-8
- * hyperlinks for a target, so scrubbing a composed line would destroy the link and the pane's width math
- * with it.
+ * Must be applied INSIDE the value, before styling. The styler emits its own SGR escapes, so scrubbing a
+ * composed line would destroy the colour and the pane's width math with it. (The panel used to emit OSC-8
+ * hyperlinks too; it stopped, because the gate over finished lines can only allowlist a shape and an
+ * attacker's link has the same one.)
  */
 function scrubControl(value: string): string {
   return scrubControls(value);
@@ -1082,7 +1083,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   // the rest -- every pane title, every hint row, and the whole UNFRAMED degrade, which returns bare array
   // elements and never goes near `frame()`. One pass over the finished lines, so a pane added later cannot
   // opt out of it by forgetting a belt. It is a no-op on a line that is already clean, and it never touches
-  // the styler's own SGR or an OSC-8 link.
+  // the styler's own SGR.
   return renderPanelLines(snapshot, width, state, styler).map((l) => scrubKeepingStyle(String(l)));
 }
 
@@ -1839,7 +1840,7 @@ export function targetUrl(record: any): string | null {
   if (record?.kind !== "github" || typeof record?.target !== "string") return null;
   // The repo half excludes control bytes as well as whitespace, and that is the fix for a real hole
   // rather than tidiness (issue #337): JS `\s` does NOT include ESC, BEL or NUL, so `[^#\s]+` admitted
-  // them, and `link` emits the URL into an OSC-8 sequence a BEL terminates early. The DISPLAY half of
+  // them, and the URL used to be emitted into an OSC-8 sequence a BEL terminates early. The DISPLAY half of
   // that same call was scrubbed and the URL half was not, which is exactly the byte the design entry
   // says must never reach a terminal from a stored field.
   const m = record.target.match(/^([^#\s]+)#(\d+)$/);
@@ -1868,10 +1869,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   // one misreading this list can produce. Absent on an unreplicated run, so today's rows are unchanged.
   const rep = r.replica > 0 ? styler.fg("warning", `r${cell(r.replica)}/${cell(r.replicas ?? "?")} `) : "";
   const sep = styler.fg("dim", " · ");
-  // The target cell is an OSC-8 hyperlink when the record yields a URL. PLAIN_THEME's `link` is a
-  // byte-identical passthrough, so the monochrome path and every width test are untouched by
-  // construction; under a real theme, stripAnsi/visibleLen already strip OSC-8, so the linked cell still
-  // measures exactly its text width and fitLine stays honest.
+  // `targetUrl` is still asked, because `y` copies what it answers; the cell itself is plain coloured text.
   const url = targetUrl(r);
   const targetCell = styler.fg("muted", cell(r.target));
   const cells = [
@@ -2411,9 +2409,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   out.push(fitLine(head, inner, styler));
   out.push(styler.cell("", inner));
 
-  // The target is an OSC-8 hyperlink when the record's forge yields one (targetUrl; github only). Only
-  // the target itself is linked, not the flow riding the same line -- and under PLAIN_THEME `link` is a
-  // byte-identical passthrough, so the plain drill-in and its width math are untouched by construction.
+  // `targetUrl` is still asked here too, for the copy seam; nothing on this line is wrapped in a link.
   const url = targetUrl(r);
   const targetPart = styler.fg("accent", show(r.target)); // no OSC-8: see the run row's note on the gate
   out.push(fitLine(styler.cell("target", 12, { color: "muted" }) + " " + targetPart + styler.fg("accent", ` · flow ${show(r.flow)}`), inner, styler));

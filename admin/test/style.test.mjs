@@ -191,11 +191,15 @@ test("styler.lineInput paints the cursor cell inverse at exactly the render widt
   assert.equal(visibleLen(windowed), 6, "a scrolled window keeps the exact width");
 });
 
-test("styler.link is a plain passthrough under PLAIN_THEME and an OSC-8 hyperlink under a real theme", () => {
-  const plain = makeStyler(PLAIN_THEME);
-  assert.equal(plain.link("runs", "https://example.test/runs"), "runs", "no escape bytes in plain output");
-  const linked = makeStyler(spyTheme()).link("runs", "https://example.test/runs");
-  assert.equal(linked, "\x1b]8;;https://example.test/runs\x07runs\x1b]8;;\x07");
-  assert.equal(visibleLen(linked), 4, "the OSC-8 wrapper is invisible to width math");
-  assert.equal(stripAnsi(linked), "runs");
+test("the styler offers NO way to emit a hyperlink (#382)", () => {
+  // It had one, and a run target used it. The gate that keeps a stored field's escapes off the terminal
+  // allowlists a SHAPE and cannot know an author, so allowing this panel's link allowed an identically
+  // shaped one written into a trigger field -- 29 lines, measured. Removed rather than left uncalled: an
+  // uncalled helper is an invitation to a caller who has not read why it should not exist.
+  for (const theme of [PLAIN_THEME, spyTheme()]) {
+    assert.equal(typeof makeStyler(theme).link, "undefined", "no `link` on the styler");
+  }
+  // `stripAnsi` still RECOGNISES the shape, because data can still contain one and the width math has to
+  // agree with what the gate leaves behind.
+  assert.equal(stripAnsi("\x1b]8;;https://example.test/runs\x07runs\x1b]8;;\x07"), "runs");
 });

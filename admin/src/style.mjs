@@ -211,18 +211,13 @@ export function makeStyler(theme, { ascii = false } = {}) {
     return raw.slice(0, i) + inverse + raw.slice(j + 1);
   };
 
-  /**
-   * Wrap `text` in an OSC-8 hyperlink to `url` when a real theme is attached. Under PLAIN_THEME the text
-   * passes through unchanged -- plain output (tests, no-TUI) must carry no escape bytes. `stripAnsi` /
-   * `visibleLen` already strip OSC-8 (the regex above), so a linked cell measures exactly its text width.
-   */
-  const link = (text, url) => {
-    const t = String(text ?? "");
-    if (th === PLAIN_THEME) return t;
-    return `\x1b]8;;${String(url ?? "")}\x07${t}\x1b]8;;\x07`;
-  };
+  // NO `link`. The styler used to wrap a run target in an OSC-8 hyperlink; issue #382 withdrew it, and the
+  // function is gone rather than merely uncalled, so the hazard cannot be reintroduced by a caller who did
+  // not read why. The gate over finished pane lines allowlists a SHAPE, and a hyperlink written into a
+  // trigger field has the same shape as one written here: keeping ours kept theirs, with their URL under
+  // their display text. `stripAnsi` still recognises OSC-8, because data can still contain one.
 
-  return { theme: th, glyphs: G, fg, bold, cell, badge, meter, divider, joinCells, sparkline, fmtCost, lineInput, link, stripAnsi, visibleLen };
+  return { theme: th, glyphs: G, fg, bold, cell, badge, meter, divider, joinCells, sparkline, fmtCost, lineInput, stripAnsi, visibleLen };
 }
 
 /**
