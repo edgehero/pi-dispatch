@@ -57,11 +57,12 @@ row above says so; the warning below is what an `init`-without-`up` deployment s
 while the variable is unset, and says the worker ignores it so scoped pauses are off. It warns rather than
 fails, and offers no `--fix`, because only you know which path was meant.
 
-**An EMPTY value is not an unset one**, and doctor says so separately, because the worker treats them
-differently: the config reads this key with `??`, so `PI_PAUSE_WINDOWS_FILE=""` survives, and the worker
-then tries to load a pause-windows file at that empty path and **refuses to start**. `pi-dispatch up` leaves
-such a line alone (it never clobbers a value you wrote) and names it in its summary. Fill it in, or delete
-the line.
+**An EMPTY value is not an unset one**, and doctor **fails** on it, from your shell or from your `.env`,
+because the worker treats them differently: the config reads this key with `??`, so
+`PI_PAUSE_WINDOWS_FILE=""` survives, and the worker then tries to load a pause-windows file at that empty
+path and **refuses to start**. Doctor judges the two separately, since a valid path in your shell says
+nothing about the service, which reads only the file. `pi-dispatch up` leaves such a line alone (it never
+clobbers a value you wrote) and names it in its summary. Fill it in, or delete the line.
 
 One softening is worth knowing about, because otherwise it reads as the check going quiet. Doctor reads the
 `.env` **in its own working directory** for this one key. If the file sets it while your shell does not, the

@@ -1896,30 +1896,53 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   configures the SERVICE through `EnvironmentFile=` and the wrappers and configures nothing about a shell
   an operator later runs `doctor` in; unqualified, the two warnings would then fire hardest at the
   deployments that had just been converged, and this module's own rule is that a check nobody can silence
-  must never cry wolf. So doctor reads that file for exactly the keys those two checks name, uses it only
-  to reword the line, and still warns: in that shell the feature really is unconfigured. Nothing read this
-  way reaches a config, an argv, a container env or a fix that writes; a missing or unreadable file
-  restores the full warning; and `PI_ENV_SETUP` inside a `./.env` is still deliberately not honoured,
-  which is what keeps `docs/secrets.md`'s opening sentence true. **Doctor is not the worker.** The set of
-  readable keys is FROZEN in the module rather than chosen per call, so a later check that wants the same
-  softening cannot reach a credential by adding one to its own list; and the reader agrees with the
-  CONSUMER rather than with the writer, taking the last assignment as `EnvironmentFile=` and
-  `set -a; . ./.env` both do, and stripping one matched quote pair before deciding a value is empty, since
-  either alone would let doctor soften on a value the service never sees. **Three states, not two**: a key
-  assigned only with an `export ` prefix is read by the wrapper scripts and NOT by systemd's
-  `EnvironmentFile=` (measured on systemd 257.13), so it is neither set nor unset and gets a sentence of
-  its own; collapsing it into either neighbour makes doctor claim the service reads what systemd does not,
-  or tell an operator to write a line already there moments after `up` reported that key as already set.
-  A FOURTH SIGNAL, derived from the same two readings (issue #365): a file carrying BOTH forms is not
-  export-only and the three states said nothing about it, while the two readings can DISAGREE about the
-  value -- `EnvironmentFile=` takes the bare line and the wrappers take the last assignment -- in which
-  case the two deployment shapes load different files and doctor named only one of them. It fires only
-  when they differ, because both forms holding one value is tidiness rather than a fact about the
-  deployment, and it is order-sensitive for the same reason: an `export` line BEFORE the bare one is
-  overridden for both consumers and is not a finding. And `up` NAMES AN EMPTY VALUE: `KEY=""` is SET to
-  the never-clobber rule and UNSET to every consumer, two true sentences three lines apart in one `up`
-  run, so the summary says the line is there and its value is empty rather than only "already set". Not a
-  fourth doctor STATE, deliberately: a state carries a decision, and this is a wording overlap.
+  must never cry wolf. So doctor reads that file for exactly the keys those two checks name, and judges TWO
+  SUBJECTS from it (issue #384). **The SERVICE** is judged whenever `<cwd>/.env` assigns the key, WHATEVER
+  this shell says, because the shell never reaches it: `deploy/worker.service` is `EnvironmentFile=` plus
+  `ExecStart` with no `Environment=`, the launchd plist carries only `PATH` and `PI_ENV_SETUP`, and the
+  wrappers source `.env` inside the child, so the file wins there too. **This SHELL** is judged whenever the
+  shell sets the key. A refusal on EITHER fails the command and the label names which subject it is about;
+  a shell-first rule exits 0 on a deployment whose service cannot start, which is the shape that made this
+  normative. The loader is the PLATFORM's, derived from what `service.mjs` renders: systemd's
+  `EnvironmentFile=` on linux, the sourcing wrapper on darwin, the cmd wrapper on win32. A `{systemd,
+  wrapper}` pair asked on every POSIX host gives wrong verdicts in both directions, since `export KEY=`
+  alone is invisible to systemd and an empty value to the only loader macOS has. Compose's `env_file:` is a
+  fourth parser, named as a limit rather than modelled. **The reader claims only what every loader reads the
+  same way**: an empty value, a single-quoted value, a double-quoted value of printable ASCII without `$`,
+  `\`, backtick or `"`, and a bare value from a conservative unquoted set; one line elsewhere in the file
+  that leaves a quote open, ends in a backslash, or is not an assignment at all takes the claim off the
+  whole file, because the shells read across lines and systemd does not. Outside that grammar doctor names
+  the key, the file and the LINE NUMBER, says the service may read something other than what the line
+  appears to say, and NEVER PRINTS THE VALUE, which is also what keeps a control byte in a `.env` out of the
+  operator's terminal. Nothing read this way reaches a config, an argv, a container env or a fix that
+  writes; a missing or unreadable file restores the full warning; and `PI_ENV_SETUP` inside a `./.env` is
+  still deliberately not honoured, which is what keeps `docs/secrets.md`'s opening sentence true. **Doctor
+  is not the worker.** The set of readable keys is FROZEN in the module rather than chosen per call, so a
+  later check that wants the same softening cannot reach a credential by adding one to its own list; and the
+  reader agrees with the CONSUMER rather than with the writer, taking the last assignment as every loader
+  does. **A `.env` VALUE now reaches read-only file I/O**, which is the one widening of "reads to decide
+  what to SAY": doctor runs the worker's own loader on the path the file names, behind a `statSync().isFile()`
+  guard so a FIFO or a device cannot hang the command, and resolves a relative value against doctor's own
+  working directory. It still configures nothing, writes nothing and runs nothing. **`PI_ENV_SETUP`
+  downgrades a service refusal to a WARNING naming the script**, because on all three platforms that script
+  runs after `.env` and can override the key; without the downgrade doctor and `up` would fail a working
+  `--env-setup` deployment. **Three states, not two**: a key assigned only with an `export ` prefix is read
+  by the wrapper scripts and NOT by systemd's `EnvironmentFile=` (measured on systemd 252 and 257.13), so it
+  is neither set nor unset and gets a sentence of its own; collapsing it into either neighbour makes doctor
+  claim the service reads what systemd does not, or tell an operator to write a line already there moments
+  after `up` reported that key as already set. A FOURTH SIGNAL, derived from the same two readings (issue
+  #365): a file carrying BOTH forms is not export-only and the three states said nothing about it, while the
+  two readings can DISAGREE about the value -- one loader takes the bare line and another takes the last
+  assignment -- in which case the two deployment shapes load different files and doctor named only one of
+  them. It fires only when they differ, because both forms holding one value is tidiness rather than a fact
+  about the deployment, and it is order-sensitive for the same reason: an `export` line BEFORE the bare one
+  is overridden for both consumers and is not a finding. And `up` NAMES AN EMPTY VALUE: `KEY=""` is SET to
+  the never-clobber rule and EMPTY to every consumer that reads the key at all, two true sentences three
+  lines apart in one `up` run, so the summary says the line is there and its value is empty rather than only
+  "already set". **Empty is not unset**, and the correction matters because doctor said it was (issue #384):
+  the config reads these two keys with `??`, so an empty string survives, and the worker then refuses to
+  start on a path that is nothing. Not a fourth doctor STATE, deliberately: a state carries a decision, and
+  this is a wording overlap.
 - **`doctor` says who a local job runs as** (issue #341). From the same facts and the same resolver the worker
   uses, and without starting a container: the image's own user, the `<uid>:<gid>` it passes as `--user` with its
   HOME, or the refusal and its fix. It fails only for what stops the worker booting and warns for what refuses jobs
@@ -2117,6 +2140,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-09-23 | Issue #384, and the boot defect it uncovered (#392). **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, the `.env` bullet rewritten around TWO SUBJECTS and one measured grammar. (1) The service is judged whenever the file assigns the key, whatever this shell says, because the shell never reaches it; this shell is judged whenever it sets the key; a refusal on either fails the command. The shell-first rule it replaces exited 0 on a deployment whose service cannot start, which is the defect. (2) The loader is the PLATFORM's, derived from what `service.mjs` renders, rather than a systemd-plus-wrapper pair asked everywhere: `export KEY=` alone is invisible to systemd and an empty value to the only loader macOS has, so the pair was wrong in both directions. Compose's `env_file:` is named as a fourth parser rather than modelled. (3) The reader now CLAIMS ONLY the shapes every loader reads the same way, measured against systemd 252 in a privileged container and against sh, bash, dash and zsh over a 90-shape corpus; outside that grammar doctor names the key, the file and the LINE NUMBER, says the service may read something else, and never prints the value, which also keeps a control byte in a `.env` out of the operator's terminal. One line elsewhere in the file that leaves a quote open, ends in a backslash or is not an assignment takes the claim off the WHOLE file, in both directions: the shells swallow the next line into an open quote where systemd 252 reads `ab'` and carries on, and the shells honour an `unset K` BELOW an assignment where systemd ignores it. (4) A `.env` value now reaches read-only file I/O, behind a `statSync().isFile()` guard so a FIFO cannot hang doctor, resolved against doctor's own cwd; this is stated because "never configures" is the licence for reading the file at all. (5) `PI_ENV_SETUP` downgrades a service refusal to a warning naming the script, or doctor would fail a working `--env-setup` deployment. **CORRECTION**: the 2026-09-22 row's "`KEY=""` is UNSET to every consumer" is false and was load-bearing. Both POSIX loaders SET the key to an empty string, `config.mjs` keeps it through `??`, and the worker refuses to start, so blank is a deployment that is DOWN rather than a feature that is off. The cmd wrapper is the one loader that genuinely unsets. **`REQ-SCOPED-PAUSE-WINDOWS` and `REQ-SCOPED-SPEND-LIMITS` UNCHANGED, checked**: no key, path or default moves; only what doctor SAYS about them does. **Code evidence**: worker/src/env-file.mjs -> readEnvAssignments; worker/src/doctor.mjs -> BOOT_FILES; worker/src/up.mjs -> runUp. |
 | 2026-09-22 | Issue #375. **`REQ-RESUMABLE-SESSION` AMENDED**, one fail-open clause and one Acceptance clause: a key whose own directory in the store is not a directory is a named cold start (`key-not-a-directory`) rather than a path followed to wherever it points. Measured before the fix, a symlink pre-created at the derived key path made a resolve return `resumed` from a transcript outside the store and a promotion write four files through it. The entry is refused, never removed, because this store creates key directories and nothing else. **`REQ-QUEUE-BURST-NO-DROP` UNCHANGED, checked**: the one-writer rule is about the lock, not about what the name is. **Code evidence**: `worker/src/session-store.mjs` -> `inspectKeyDir`, `ensureKeyDir`, `reapSessions`; `worker/test/session-store.test.mjs` -> the read-edge and write-edge tables. |
 | 2026-09-22 | Issues #365 and #370. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, two clauses on the `.env` reading, neither of which moves a grammar. A FOURTH SIGNAL beside the three states: a file carrying both a bare and an `export` assignment is not export-only, so the three states said nothing about it, and when the two readings disagree about the value the two deployment shapes load different files while doctor named only the bare one. It fires only on disagreement (both forms holding one value is tidiness) and is order-sensitive (an `export` line before the bare one is overridden for both consumers). And `up` now NAMES AN EMPTY VALUE, because `KEY=""` is SET to the never-clobber rule and UNSET to every consumer, which is two true sentences three lines apart in one `up` run; a fourth doctor state was rejected, since a state carries a decision and this is a wording overlap. **`REQ-RESUMABLE-SESSION` and `REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: no key, path or window moves. **Code evidence**: worker/src/doctor.mjs -> envFileKeys; worker/src/up.mjs -> runUp. |
 | 2026-09-22 | Issue #362. **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, one Acceptance clause, and it is a correction rather than an addition: the clause promised that `--publish 3000` makes the port reachable at `127.0.0.1`, which was true only with `PI_EGRESS=0`. An armed policy, the default, puts the sandbox on its own `--internal` network, where docker ACCEPTS `-p`, exits 0 and binds nothing (measured on docker 27.4.0: `docker ps` shows no ports and `docker port` prints nothing), so the one case the flag exists for did not work on a default deployment and the CLI printed `published: ...` as though it had. The flag is now REFUSED on the armed posture, naming `PI_EGRESS=0`, rather than accepted and ignored. Attaching the bridge to a running sandbox was checked as a rescue and the answer is PLATFORM-DEPENDENT, which is why it is recorded rather than asserted: on native Linux docker 27.5.1 it does rescue the port, since the DNAT rule is installed at attach and removed again at detach; on Docker Desktop for macOS 27.4.0 it does not, and `docker port` reports a binding that carries no traffic. The issue named that exact hazard ("Docker Desktop on macOS only. Native Linux docker and Podman are unchecked"), and a first version of this change generalised the macOS reading to both platforms, including into the operator-facing refusal string. The REFUSAL rests only on the half that holds on both daemons: `-p` on an `--internal` network binds nothing. Podman remains unmeasured. |
