@@ -519,18 +519,33 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// silent no-op.
 	//
 	// The rule is narrow on purpose, because a doc test that parses prose is an arms race the page wins: an
-	// assignment is `NAME=` or `# NAME=` at column 0, and its value may hold no whitespace and no `#`. That is
-	// stricter than "no comment" and it is what the file satisfies today, so it needs no judgement about where
-	// a comment starts. A value that genuinely needs a space would need quoting that the three parsers also
-	// disagree about, so the bound is the right one to have.
+	// assignment is `NAME=` or `# NAME=`, INDENTED OR NOT, and its value may hold no whitespace, no `#` and no
+	// trailing backslash. That is stricter than "no comment" and it is what the file satisfies today, so it
+	// needs no judgement about where a comment starts.
+	//
+	// The leading-whitespace half is not hypothetical tidiness. Anchoring this at column 0 left an indented
+	// assignment unscanned AND kept the count below at 95, so both halves of this test went blind together:
+	// `  PI_WEEKLY_CAP=100   # optional weekly ceiling` reproduced the original boot refusal with the suite
+	// green. The `export` assertion below already allowed for leading whitespace, which is how the gap got
+	// past a round of review: the same file knew systemd tolerates it.
+	//
+	// The backslash half: systemd treats a trailing `\` as a line continuation and folds the NEXT line into
+	// the value, which after this round's move is always a comment. Measured, `PI_JOB_IMAGE=pi-job:latest\`
+	// yields `pi-job:latest# where per-job /job inputs live ...`, and `loadConfig` ACCEPTS it -- the quiet
+	// half of this defect, where a job asks docker for an image with a sentence in its name.
+	//
+	// A value that genuinely needs a space is not refused by the three parsers above: systemd, compose and a
+	// sourcing shell all agree on `'a b'` and `"a b"`. The one that does not is
+	// `deploy/worker-env-wrapper.cmd`, which splits on the first `=` and keeps the quotes. So the no-whitespace
+	// bound is about the scaffold staying legible to every reader it has, not about quoting being ambiguous.
 	const txt = readFileSync(join(REPO_ROOT, ".env.example"), "utf8");
 	const offenders = [];
 	let scanned = 0;
 	txt.split("\n").forEach((line, i) => {
-		const m = /^(# )?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+		const m = /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
 		if (!m) return;
 		scanned += 1;
-		if (/[\s#]/.test(m[3])) offenders.push(`${i + 1}: ${m[2]}`);
+		if (/[\s#\\]/.test(m[3])) offenders.push(`${i + 1}: ${m[2]}`);
 	});
 	assert.deepEqual(
 		offenders,
@@ -540,7 +555,7 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// NON-VACUITY, the discipline this file already keeps for its other scans: a regex that matches nothing
 	// passes every assertion above it. 95 is the count both mirrors carry today.
 	assert.equal(scanned, 95, "the scan must actually reach every assignment in the file");
-	assert.match("PI_X=1 # c", /^(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses");
+	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM
 	// takes the first assignment with it. Neither is present; both are cheap to keep out while we are here.
