@@ -109,26 +109,42 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
 /**
  * Does this text carry a line for `key` whose value is EMPTY for every loader of this file?
  *
- * ONE HELPER because `up` and `doctor` answered it separately and disagreed (issue #365). `readEnvKeys`
- * deletes a key whose last assignment is empty, which is right for its own question -- "what value is in
- * force" -- and loses the one thing both callers need here: that a LINE EXISTS and its value is blank.
- * With that lost, doctor fell through to "is unset, so the worker ignores it" for a file that makes the
- * worker refuse to start, while `up`, reading the same file, said the value is empty. One run, both
- * sentences.
+ * ONE HELPER because `up` and `doctor` answered it separately and disagreed (issue #365). The reader this
+ * replaced returned values only, so a key whose last assignment was empty came back identical to a key the
+ * file never mentions, and the one thing both callers need here -- that a LINE EXISTS and its value is
+ * blank -- was gone before either of them saw it. Doctor fell through to "is unset, so the worker ignores
+ * it" for a file that makes the worker refuse to start, while `up`, reading the same file, said the value
+ * is empty. One run, both sentences. `readEnvAssignments` keeps the distinction, and this helper is
+ * derived from it rather than deciding the question a second time.
  *
  * WHY BLANK IS NOT UNSET, measured in sh, bash and zsh: `set -a; . ./.env` on a `KEY=` line SETS and
  * EXPORTS `KEY=""` -- it does not leave the key absent. `deploy/worker-env-wrapper.sh` does exactly that,
  * so a blank line reaches the worker as an empty string, `config.mjs` keeps it (`??`, not `||`) for
  * `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the unconditional loader at `start.mjs` throws.
  *
- * BOTH READINGS ARE ASKED, so a key that is blank for one loader and set for another is not blank: a bare
- * `KEY=` with a later `export KEY=/v.json` is empty under `EnvironmentFile=` and configured under the POSIX
- * wrapper, and calling that "blank" would tell half the operators their configured key is empty.
+ * EVERY LOADER IS ASKED, so a key that is blank for one and set for another is not blank: a bare `KEY=`
+ * with a later `export KEY=/v.json` is empty under `EnvironmentFile=` and configured under the POSIX
+ * wrapper, and calling that "blank" would tell half the operators their configured key is empty. A loader
+ * that does not see the key at all does not vote, which is what keeps a cmd-only or systemd-only shape from
+ * reading as blank because another loader ignored it.
  */
 export function envKeyIsBlank(text, key) {
-	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	if (!new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=`, "m").test(String(text ?? ""))) return false;
-	return readEnvKeys(text, [key])[key] === undefined && readEnvKeys(text, [key], { acceptExport: true })[key] === undefined;
+	// DERIVED from the reader rather than re-deciding it. The regex pre-check this used to carry existed only
+	// because the old reader deleted an empty key, so "no value" and "no line" arrived identical; the reader
+	// now returns a record per assignment and the distinction is in it (issue #384).
+	// THE TWO POSIX LOADERS, and the omission is deliberate. The cmd wrapper splits on the first `=` and
+	// keeps what follows verbatim, so `K=""` is two quote characters to it where systemd and a sourcing shell
+	// both read nothing. The CONSEQUENCE is the same either way -- a path named `""` does not exist and the
+	// boot refuses on it exactly as an empty one does -- but the word "empty" is only true of the POSIX
+	// readings, and this predicate answers a question about emptiness rather than about usability.
+	const readings = ["systemd", "shell"].map((loader) => readEnvAssignments(text, [key], { loader })[key]).filter((r) => r !== undefined);
+	if (readings.length === 0) return false;
+	// `.trim()`, not `=== ""`, and the difference is one loader: `K=   ` is empty to systemd and to a sourcing
+	// shell, which both drop trailing whitespace, and two spaces to the cmd wrapper, which splits on the first
+	// `=` and keeps the rest. Nothing downstream can use two spaces either -- `existsSync("  ")` is false and
+	// the boot refuses the same way -- so the question this answers is "does any loader see something usable",
+	// and a reading this file cannot vouch for (`plain: false`, `value: null`) is never called blank.
+	return readings.every((r) => r.value !== null && r.value.trim() === "");
 }
 
 export function setEnvKeyIfEmpty(text, key, value, opts) {
@@ -137,8 +153,9 @@ export function setEnvKeyIfEmpty(text, key, value, opts) {
 	// pedantry: the wrapper scripts source this file with `set -a; . ./.env`, where `export KEY=value` is an
 	// ordinary assignment the operator made. Without it the key reads as absent, a second assignment is
 	// appended, and the shell takes the LAST one -- so filling four "empty" keys would replace four values
-	// the operator set, in one pass, with no prompt. The reader is deliberately stricter (see `readEnvKeys`):
-	// there, missing a value only costs a fuller warning, where missing one HERE costs the value itself.
+	// the operator set, in one pass, with no prompt. `readEnvAssignments` is deliberately stricter about what
+	// it will VOUCH for: there, declining to claim a value costs a fuller warning, where missing one HERE
+	// costs the value itself.
 	const setRe = new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=(.*)$`);
 	const commentRe = new RegExp(`^\\s*#\\s*(?:export\\s+)?${escaped}\\s*=`);
 
@@ -303,90 +320,182 @@ export function updateEnvFile(path, key, value, deps = {}) {
 }
 
 /**
- * The values of NAMED keys in .env TEXT, as a plain object holding only the keys that are actually set.
+ * What NAMED keys a `.env` TEXT assigns, as seen by ONE loader, with a record per key rather than a value.
  *
  * Deliberately NOT a dotenv loader, and the distinction is the whole reason this is allowed to exist
  * (issue #357). Nothing in this project loads `.env` into a process environment: `docs/secrets.md` opens
  * with "the worker parses no `.env` file", and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP`
  * line inside `./.env` is deliberately NOT honoured. This reader exists so `doctor` can decide WHAT TO SAY
- * about a file, never what to configure, and the caller passes the exact keys its own message names. It
- * returns strings verbatim; no interpolation, no `export ` prefix, no quote stripping, because every one of
- * those is a loader feature and a loader is what this must not become.
+ * about a file, never what to configure.
  *
- * A commented line is not a value, and an empty or whitespace-only one is absent rather than `""`. Two
- * rules differ from the writers above, each on purpose. The LAST occurrence wins and an empty one counts,
- * because that is what `set -a; . ./.env` and `EnvironmentFile=` do, and this must report what the service
- * SEES rather than where a value belongs. And each call models ONE consumer: by default an
- * `export`-prefixed line is skipped, which is systemd's `EnvironmentFile=` grammar, while `acceptExport`
- * takes it as an assignment, which is what the wrapper scripts' `set -a; . ./.env` does. Reading twice is
- * how the caller tells "no assignment anywhere" from "an assignment only a wrapper would read", which is a
- * different sentence to print rather than a different value to trust.
+ * THREE LOADERS READ THIS FILE AND THEY DISAGREE (issue #384). `deploy/worker.service` and
+ * `deploy/receiver.service` hand it to systemd's `EnvironmentFile=`; `deploy/worker-env-wrapper.sh` sources
+ * it with `set -a`; `deploy/worker-env-wrapper.cmd` splits each line on its first `=`. So a reading is only
+ * meaningful beside the loader that produced it, which is what `loader` selects.
+ *
+ * AND THEY DISAGREE ABOUT MORE THAN QUOTING. Measured, systemd 252 against /bin/sh, bash and zsh, the same
+ * line in each:
+ *
+ *   K=a b        systemd "a b"        the shells leave K UNSET (a second word is a command)
+ *   K=$HOME/x    systemd "$HOME/x"    the shells expand it
+ *   K=~/x        systemd "~/x"        the shells expand it
+ *   K=a"b"c      systemd 'a"b"c'      the shells concatenate to "abc"
+ *   K=a #b       systemd "a #b"       the shells stop at the comment
+ *   K==ls        systemd "=ls"        zsh expands to /bin/ls; sh and bash do not
+ *   K=  leading  systemd "leading"    the shells leave K UNSET
+ *
+ * So this reader does NOT claim a value for every line. It reports `plain: true` only for the shapes where
+ * every one of those loaders agrees, and `plain: false` otherwise, with `value: null`. The previous version
+ * claimed a value for all of them and its own docblock listed four shapes where it was wrong; the list was
+ * longer than four. Narrowing what is claimed is the fix, rather than writing the shell parser that would be
+ * needed to claim more, which is a far larger promise than deciding what a warning SAYS.
+ *
+ * `undefined` for a key means no assignment at all. `{ value: "" }` means an assignment to nothing, which is
+ * NOT absence: `config.mjs` reads several keys with `??`, so an empty string survives, and `start.mjs` then
+ * refuses to boot on it. That distinction is why this returns records: the old shape deleted an empty key
+ * and every caller that asked "is it set" got the wrong answer (issue #365, and issue #384's item 4).
  */
-export function readEnvKeys(text, keys, { acceptExport = false } = {}) {
+export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 	const want = new Set(keys);
 	const found = {};
-	for (const raw of String(text ?? "").split("\n")) {
-		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-		const m = /^\s*(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
+	const raw = String(text ?? "");
+	// A BOM belongs to the first line, and systemd then drops that assignment entirely (measured). Nothing
+	// later is affected, so this costs exactly one line rather than the file.
+	const bom = raw.startsWith("\ufeff");
+	const lines = raw.split("\n");
+	// POISON: one line elsewhere in the file can decide what THIS key is worth, so a file carrying one gets no
+	// plain reading at all. The whole file, not "every line after it", which is what this rule said first and
+	// was measured wrong in both directions (systemd 252 against /bin/sh, bash and dash):
+	//
+	//   K=/a.json      the shells swallow the next line into the open quote; systemd 252 reads `ab'` and
+	//   OTHER='a'b'    carries on, so a key BELOW an unbalanced quote is worth two different things
+	//   K=/a.json      the shells clear K; systemd ignores the line as an invalid assignment and keeps the
+	//   unset K        value, so a key ABOVE a stray command is worth two different things too
+	//
+	// A line that is neither blank, a comment, nor an assignment is the same hazard in general form: the
+	// shells RUN it, and this reader cannot know what it does. The cmd wrapper is exempt from all of it -- its
+	// `for /f` takes one line at a time with no quoting, no continuation and no execution, so no line there
+	// can reach across to another.
+	const poisoned = loader === "cmd" ? false : lines.some((l) => lineIsHazard(l.endsWith("\r") ? l.slice(0, -1) : l));
+	for (let i = 0; i < lines.length; i++) {
+		const hadCR = lines[i].endsWith("\r");
+		const line = (hadCR ? lines[i].slice(0, -1) : lines[i]).replace(/^\ufeff/, "");
+		const m = ASSIGNMENT.exec(line);
 		if (!m) continue;
 		const [, exported, key, rest] = m;
+		// One loader per reading, never a blend. systemd's `EnvironmentFile=` grammar is bare `NAME=VALUE`:
+		// an `export` line is not an assignment there and does not cancel one either (measured: the journal
+		// says `Ignoring invalid environment assignment`). The wrapper sources the file, so `export` is
+		// ordinary. The cmd wrapper splits on the first `=`, which makes `export K` a variable NAME.
+		if (exported && loader !== "shell") continue;
 		if (!want.has(key)) continue;
-		// Each reading models ONE consumer, and neither is a compromise between them. By default an
-		// `export`-prefixed line is SKIPPED entirely, which is systemd's `EnvironmentFile=` grammar: bare
-		// `VAR=VALUE`, so such a line neither sets nor cancels. With `acceptExport` it is an ordinary
-		// assignment, which is what `set -a; . ./.env` in the wrapper scripts does.
-		//
-		// A hybrid was written first and was wrong in the direction that matters. Letting an export line
-		// CANCEL a plain one made `KEY=/systemd.json` followed by `export KEY=/wrapper.json` look like a
-		// key systemd does not honour, and the advice that follows from that -- drop the prefix -- would
-		// have changed which file the worker loads. Modelling one consumer per read cannot produce that.
-		if (exported && !acceptExport) continue;
-		// An inline comment comes OFF, or a caller comparing a path would compare it against the path plus a
-		// paragraph. The rule is the shell's, measured in sh, bash and zsh against every shape in this file:
-		// a `#` preceded by whitespace starts a comment, a `#` with nothing in front of it is part of the
-		// value, and inside QUOTES neither is true. That last case is why the quote check is here rather
-		// than left as a rounding error: a quoted value holding ` #` is legal, the shells keep it whole, and
-		// truncating it would report a path this deployment does not use.
-		const trimmed = rest.trim();
-		// One matched surrounding pair comes off, and it has to come off BEFORE the empty test: the shells
-		// and `EnvironmentFile=` both read `KEY=""` as setting the key to nothing, so leaving the two quote
-		// characters in place would make an empty value look set and let a warning soften about a
-		// deployment where the feature really is off.
-		// The comment comes off FIRST when the text does not end in the quote it opened with, or
-		// `KEY="" # cleared` keeps the two quote characters, reads as non-empty, and softens a warning
-		// about a deployment where both the shells and systemd see an empty value.
-		// The quote test is where the QUOTE CLOSES, not where the string ends, and that distinction is the
-		// correction (issue #365, gate). `/^(["']).*\1$/` asked only whether the value starts and ends with
-		// the same quote, so `KEY="/a.json" # see "notes"` read as one quoted value and kept the comment,
-		// giving `/a.json" # see "notes` -- a string no shell produces, printed at an operator as the value
-		// their service reads. The shells close at the FIRST matching quote and treat what follows, after
-		// whitespace, as outside it; measured in sh, bash and zsh.
-		const quote = trimmed[0] === '"' || trimmed[0] === "'" ? trimmed[0] : "";
-		const close = quote ? trimmed.indexOf(quote, 1) : -1;
-		// FOUR SHAPES FALL THROUGH TO THE UNQUOTED RULE, and this reader then differs from the shells on all
-		// of them. Measured against /bin/sh over sixteen shapes; named here rather than left to be found,
-		// because the test below is called "reads a value back exactly as the shell does" and that is true
-		// of what `up` writes and of ordinary hand edits, not of these:
-		//   `K="unclosed`     the shells fail the whole `source` and set nothing; this keeps the raw text.
-		//   `K="a"b`          the shells CONCATENATE to `ab`; this keeps the raw text.
-		//   `K="a" "b"`       the shells fail (a second word is a command); this takes `a`.
-		//   `K='it'\''s'`     the shells read `it's`; this keeps the escape verbatim.
-		// None is a shape `renderEnvValue` can produce, and closing them means writing a shell parser, which
-		// is a much larger promise than deciding what a warning SAYS. Guessing at any of them would be a
-		// third reading nothing measured, which is how this function got its previous bug.
-		const closes = close !== -1 && (close === trimmed.length - 1 || /^\s/.test(trimmed.slice(close + 1)));
-		const stripped = closes ? trimmed.slice(0, close + 1) : trimmed.replace(/\s#.*$/, "").trim();
-		const unquoted = /^(["'])(.*)\1$/.exec(stripped);
-		const value = unquoted ? unquoted[2] : stripped;
-		// The LAST occurrence wins, and an empty one counts as an occurrence, because that is what every
-		// actual consumer of this file does: `set -a; . ./.env` and `EnvironmentFile=` both take the last
-		// assignment. Taking the first instead would let this report a value the service never sees, and on
-		// a file whose earlier line is real and whose later one is empty that turns a warning about a
-		// genuinely unconfigured deployment into "nothing to fix". The writers above deliberately differ:
-		// the first EMPTY line is where a value belongs, which is a question about where to write rather
-		// than about what is in force.
-		if (value === "") delete found[key];
-		else found[key] = value;
+		const read = readValue(rest, loader);
+		const plain = read.plain && !poisoned && !(i === 0 && bom) && !hadCR;
+		// The LAST assignment, because every loader takes it: `set -a; . ./.env`, `EnvironmentFile=` and the
+		// cmd wrapper's `set` all overwrite as they go.
+		found[key] = { value: plain ? read.value : null, plain, line: i + 1 };
 	}
 	return found;
+}
+
+// The name is followed DIRECTLY by `=`, with no space, because that is the only shape that is an
+// assignment at all: `K =/a.json` runs a command named `K` in every shell, and systemd 252 rejects the
+// line. Such a line is therefore a hazard rather than a lax assignment, which is where `setEnvKeyIfEmpty`
+// deliberately differs -- it is looking for a line to REWRITE, and it normalises the spacing when it does.
+const ASSIGNMENT = /^[ \t]*(export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+/** Does this line reach past itself, or do something this reader cannot model? */
+function lineIsHazard(line) {
+	const m = ASSIGNMENT.exec(line.replace(/^\ufeff/, ""));
+	if (!m) {
+		const bare = line.trim();
+		return bare !== "" && !bare.startsWith("#");
+	}
+	return openTail(m[3]) !== "";
+}
+
+/**
+ * Does this value text leave a quote open, or end in the backslash that makes the next line part of it?
+ *
+ * A scan rather than a look at the first character, which is what it was and which missed `K='a'b'`: the
+ * first quote closes at index 2, the THIRD one opens and never closes, and every shell then reads the next
+ * line as more of this value. Comments are honoured because the shells honour them, so the apostrophe in
+ * `K=/a.json # it's fine` is not an open quote, and a `#` that is not preceded by whitespace is not a
+ * comment (`K=a#b` is one word).
+ */
+function openTail(rest) {
+	let q = "";
+	for (let i = 0; i < rest.length; i++) {
+		const c = rest[i];
+		if (q === "'") {
+			if (c === "'") q = "";
+			continue;
+		}
+		if (q === '"') {
+			if (c === "\\") i += 1;
+			else if (c === '"') q = "";
+			continue;
+		}
+		if (c === "\\") {
+			if (i === rest.length - 1) return "continuation";
+			i += 1;
+			continue;
+		}
+		if (c === "'" || c === '"') q = c;
+		else if (c === "#" && (i === 0 || rest[i - 1] === " " || rest[i - 1] === "\t")) return "";
+	}
+	return q === "" ? "" : "open-quote";
+}
+
+/**
+ * The PLAIN grammar: the shapes systemd, the sourcing shells and the cmd wrapper all read the same way.
+ * Measured rather than derived, with the corpus and the readings recorded on `readEnvAssignments` above.
+ *
+ *   empty, `""` and `''`   -> ""
+ *   `'...'`                -> the inner text, any character but `'` (non-ASCII and a TAB included, both
+ *                             measured on systemd 252 and in the three shells)
+ *   `"..."`                -> the inner text, printable ASCII without `"`, `$`, `\` or a backtick
+ *   bare                   -> `[A-Za-z0-9_@+:,./-]*`, not starting `=` and with no `:=`
+ *
+ * The exclusions each have a measurement behind them. `$`, a backtick and `~` are expanded by the shells and
+ * not by systemd. A backslash is an escape to systemd and to the shells, and a literal to the cmd wrapper,
+ * so `C:\pi\x` reads as `C:pix` on two of the three. A leading `=` or an embedded `:=` is expanded by zsh
+ * alone. Whitespace outside quotes ends the value for the shells and does not for systemd. A `#` after
+ * whitespace is a comment to the shells and part of the value to systemd, which is the defect issue #392
+ * shipped in the scaffold.
+ */
+const UNQUOTED_PLAIN = /^(?!=)(?!.*:=)[A-Za-z0-9_@+:,./-]*$/;
+
+/**
+ * A control byte inside quotes is NOT plain, with one exception that is measured rather than tolerated: a
+ * TAB, which systemd 252 and all three shells keep byte for byte inside single quotes. `renderEnvValue`
+ * quotes a tab-bearing path rather than refusing it, so excluding tab here would have made this reader
+ * refuse to vouch for a line `up` itself wrote. CR is excluded because a line ending in one is already not
+ * plain, and a lone CR mid-value is a display hazard with no legitimate source.
+ */
+const QUOTED_CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/;
+
+function readValue(rest, loader) {
+	if (loader === "cmd") {
+		// `for /f "delims=="` takes the rest of the line verbatim, so there is no quoting and no comment.
+		// An empty value UNSETS the variable there (`set "K="`), read from the wrapper's own source rather
+		// than run on Windows.
+		// Verbatim, so this loader's reading is never ambiguous: there is no quoting to strip, no comment
+		// syntax, and no expansion. It can still DISAGREE with the POSIX loaders, which is why a caller asks
+		// the loader its own deployment uses rather than blending them.
+		return { plain: true, value: rest };
+	}
+	const trimmedEnd = rest.replace(/[ \t]+$/, "");
+	if (trimmedEnd === "") return { plain: true, value: "" };
+	if (/^[ \t]/.test(trimmedEnd)) return { plain: false, value: null }; // the shells drop it
+	const q = trimmedEnd[0];
+	if (q === '"' || q === "'") {
+		const close = trimmedEnd.indexOf(q, 1);
+		if (close !== trimmedEnd.length - 1) return { plain: false, value: null };
+		const inner = trimmedEnd.slice(1, -1);
+		const bad = q === '"' ? /["$\\`]/ : /'/;
+		return { plain: !bad.test(inner) && !QUOTED_CONTROL.test(inner), value: inner };
+	}
+	if (trimmedEnd.endsWith("\\")) return { plain: false, value: null };
+	return { plain: UNQUOTED_PLAIN.test(trimmedEnd), value: trimmedEnd };
 }

@@ -69,6 +69,14 @@ export function resolvePaths(env = process.env) {
     // reads), so a deployment folder works without env wiring when pi is launched from it. The old
     // `deploy/…` defaults pointed at the repo's committed EXAMPLE files — right only from a checkout
     // root, and silently wrong (demo triggers) everywhere else.
+    //
+    // NOT derived from the worker's `pauseWindowsFilePath`/`scopedLimitsFilePath`, and the difference is
+    // the point rather than drift (checked for issue #384). Those return `env.X ?? null`, because a WORKER
+    // that has not been pointed at a pause-windows file must not start honouring one, least of all a file
+    // that stops paid work. The PANEL has the opposite duty: it has to show and edit something, and a
+    // deployment folder is where `init` puts these files. Both use `??`, so an EMPTY value survives in
+    // both -- which for the worker is the boot refusal doctor now fails on, and here is a path of `""`
+    // that simply does not load.
     triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json",
     pauseWindowsPath: env.PI_PAUSE_WINDOWS_FILE ?? "./pause-windows.json",
     scopedLimitsPath: env.PI_SCOPED_LIMITS_FILE ?? "./scoped-limits.json",

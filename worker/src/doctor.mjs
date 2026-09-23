@@ -51,13 +51,14 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, release as osRelease, tmpdir } from "node:os";
-import { dirname, join, delimiter } from "node:path";
+import { dirname, isAbsolute, join, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, safeHomeDir, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { envKeyIsBlank, readEnvKeys } from "./env-file.mjs";
-import { canonicalScope, parseScopedLimits } from "./scoped-limits.mjs";
+import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
+import { envKeyIsBlank, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
+import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
+import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
@@ -265,12 +266,13 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  *
  * `docs/secrets.md` opens with "the worker parses no `.env` file" and that stays true: doctor is not the
  * worker, and `worker/test/service.test.mjs` still pins that a `PI_ENV_SETUP` line in `./.env` is not
- * honoured. Parsing is `readEnvKeys`, shared with the writer `up` uses, so a key one can set is a key the
- * other reads back the same way.
+ * honoured. Parsing is `readEnvAssignments`, in the same module as the writer `up` uses, so a key one can
+ * set is a key the other reads back the same way -- and it is asked for THIS PLATFORM's loader, because
+ * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
 export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"]);
 
-export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = statSync }) {
+export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = statSync, platform = process.platform }) {
 	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
 	// A REGULAR file or nothing. Every other host read in this module is bounded one way or another, and a
 	// synchronous read of a FIFO is not: a `.env` that is a named pipe hangs `pi-dispatch doctor` forever,
@@ -290,48 +292,101 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 	if (allowed.length === 0) return {};
 	try {
 		const text = readEnvFile(path);
-		// TWO readings, because there are three states to tell apart and not two. A key can be assigned
-		// plainly (every consumer reads it), assigned only with an `export ` prefix (the wrapper scripts
-		// source this file and honour it; systemd's `EnvironmentFile=` grammar is bare `VAR=VALUE` and does
-		// not, measured on systemd 257.13), or not assigned at all. Collapsing the middle case into either
-		// neighbour makes doctor wrong in one direction or the other: called set, it claims the service
-		// reads something systemd does not; called unset, it tells an operator to write a line already
-		// there, three lines after `up` said the key was already set.
-		const plain = readEnvKeys(text, allowed);
-		const withExport = readEnvKeys(text, allowed, { acceptExport: true });
+		// THE SERVICE'S OWN LOADER FIRST, because this file has three and they disagree (issue #384).
+		// `service.mjs` renders exactly one per platform: systemd's `EnvironmentFile=` on linux,
+		// `worker-env-wrapper.sh` (a sourcing shell) on darwin, `worker-env-wrapper.cmd` on win32. Reporting a
+		// reading from a loader this deployment does not use is how doctor told half its operators the wrong
+		// file under the previous shape, which asked systemd's grammar on every platform.
+		const serviceLoader = platform === "linux" ? "systemd" : platform === "win32" ? "cmd" : "shell";
+		const service = readEnvAssignments(text, allowed, { loader: serviceLoader });
+		// The shell reading stays beside it on POSIX, because a `.env` is also sourced by hand
+		// (`set -a; . ./.env`) and because the two disagree about an `export` line, which is the third state
+		// below. On win32 there is no second POSIX loader to compare against.
+		const shell = readEnvAssignments(text, allowed, { loader: serviceLoader === "shell" ? "systemd" : "shell" });
+		const plain = {};
+		const notPlain = {};
 		const exported = {};
-		// A THIRD SIGNAL, from the same two readings (issue #365, item 2). A file holding BOTH forms is not
-		// export-only and never was, so the label said nothing about it at all -- and when the two readings
-		// disagree about the VALUE, the two deployments disagree about which file the worker loads:
-		// `EnvironmentFile=` takes the bare line, while `set -a; . ./.env` in the wrappers takes the last
-		// assignment, which is the `export` one. Doctor reported the bare value and called it the service's,
-		// which is right for systemd and wrong for launchd and nssm.
-		//
-		// Only when they DIFFER. Both forms carrying the same value is a tidiness question, not a fact about
-		// the deployment, and a warning about it would be the crying wolf this file refuses elsewhere.
 		const alsoExported = {};
-		for (const key of allowed) {
-			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
-			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling
-			// it export-only would print a value systemd never sees and advise dropping a prefix, which
-			// would change which file the worker loads.
-			if (!(key in plain) && key in withExport) exported[key] = withExport[key];
-			// `key in withExport` is NOT the condition, and requiring it made this silent on the sharpest case
-			// (issue #365, gate): `readEnvKeys` DELETES a key whose last assignment is empty, so when the
-			// `export` line is the one that empties it, the second reading has no entry at all -- while the
-			// readings still disagree, systemd loading the file and every wrapper deployment reading it unset.
-			// An absent entry is recorded as the empty string it stands for, and the caller words it.
-			else if (key in plain && plain[key] !== withExport[key]) alsoExported[key] = withExport[key] ?? "";
-		}
-		// A LINE EXISTS AND ITS VALUE IS BLANK, which `readEnvKeys` alone cannot say because it deletes such a
-		// key (issue #365, gate). Doctor needs it for the same reason `up` does: a blank line reaches a
-		// sourcing wrapper as `KEY=""`, which the worker keeps and refuses to boot on -- so falling through
-		// to "is unset, the worker ignores it" reports the opposite of what happens.
 		const blankInFile = {};
-		for (const key of allowed) if (envKeyIsBlank(text, key)) blankInFile[key] = true;
-		return { ...plain, exported, alsoExported, blankInFile };
+		for (const key of allowed) {
+			const own = service[key];
+			const other = shell[key];
+			// WHAT THE SERVICE READS, and only when this file can say so. A shape outside the grammar every
+			// loader agrees on is reported as a LINE, never as a value (issue #384): the reader's own docblock
+			// lists what systemd and the shells do differently, and printing one of those readings as "the
+			// value the service reads" is a claim this file cannot support.
+			if (own !== undefined && own.plain && own.value !== "") plain[key] = own.value;
+			else if (own !== undefined && !own.plain) notPlain[key] = own.line;
+			// Export-only means NO bare assignment anywhere, not "none that survived". A file holding both
+			// `KEY=/systemd.json` and `export KEY=/wrapper.json` is configured under systemd, and calling it
+			// export-only would print a value systemd never sees and advise dropping a prefix, which would
+			// change which file the worker loads. The empty case is part of "anywhere": a bare `KEY=` IS an
+			// assignment, and systemd reads it as the empty value that refuses the boot.
+			if (own === undefined && other !== undefined && other.value !== null) exported[key] = other.value;
+			else if (own !== undefined && other !== undefined && own.value !== other.value) alsoExported[key] = other.value ?? "";
+			if (envKeyIsBlank(text, key)) blankInFile[key] = true;
+		}
+		return { ...plain, notPlain, exported, alsoExported, blankInFile, serviceLoader };
 	} catch {
 		return {};
+	}
+}
+
+/**
+ * The two files a worker LOADS AT BOOT, and the one place that knows what each is and how to ask.
+ *
+ * `load` calls the worker's own loader (issue #384). Doctor used to carry its own parse for scoped limits
+ * and nothing at all for pause windows, so "will the worker start" had two answers and one silence. The
+ * loaders throw a `configError` on a path that does not exist and on content that does not parse, which is
+ * exactly the boot this check is predicting.
+ */
+const BOOT_FILES = Object.freeze([
+	Object.freeze({
+		key: "PI_PAUSE_WINDOWS_FILE",
+		noun: "scoped pauses",
+		scaffold: "pause-windows.json",
+		off: "scoped pauses are OFF",
+		unsetMeans: "the worker loads no windows at all",
+		unit: "window",
+		nothing: "quiet hours",
+		resolve: pauseWindowsFilePath,
+		load: (path, io) => loadPauseWindows({ pauseWindowsFile: path }, io),
+	}),
+	Object.freeze({
+		key: "PI_SCOPED_LIMITS_FILE",
+		noun: "scoped limits",
+		scaffold: "scoped-limits.json",
+		off: "scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)",
+		unsetMeans: "the worker enforces no scoped limits at all",
+		unit: "limit",
+		nothing: "scoped limits",
+		resolve: scopedLimitsFilePath,
+		load: (path, io) => loadScopedLimits({ scopedLimitsFile: path }, io),
+	}),
+]);
+
+/**
+ * Would the worker load this path? The loader answers, with two guards doctor owes it.
+ *
+ * A RELATIVE path resolves against the seam `cwd`, not `process.cwd()`, because that is the directory a
+ * service's `WorkingDirectory=` names and the one every other check in this file measures from.
+ *
+ * A FIFO or a device would hang the loader's `readFileSync` forever, with no output and no check to point
+ * at. `envFileKeys` already carries that guard for `.env` itself; this is the same hazard one file along,
+ * and it arrives here because this check reads a path an operator wrote rather than one doctor chose.
+ */
+function loadVerdict(spec, rawPath, cwd, io) {
+	const path = isAbsolute(rawPath) ? rawPath : join(cwd, rawPath);
+	try {
+		if (!io.statFile(path).isFile()) return { ok: false, reason: `${path} is not a regular file` };
+	} catch (err) {
+		return { ok: false, reason: err?.code === "ENOENT" ? `${path} does not exist` : `${path} cannot be read: ${err?.message ?? String(err)}` };
+	}
+	try {
+		spec.load(path, io.loaderIo);
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, reason: err?.message ?? String(err) };
 	}
 }
 
@@ -343,7 +398,7 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -1655,117 +1710,114 @@ export async function collectChecks(env, seams) {
 	// in `./.env` is deliberately NOT honoured. Both stay true. The softened line is still a warning, still
 	// carries the file it read, and says plainly which process would honour it, because the operator running
 	// this shell genuinely does have the feature off in THIS environment.
-	const envFile = envFileKeys(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists, readEnvFile });
-	{
-		const pauseWindowsFile = env.PI_PAUSE_WINDOWS_FILE;
-		const scaffolded = join(cwd, "pause-windows.json");
-		if ((typeof pauseWindowsFile !== "string" || pauseWindowsFile.trim() === "") && fileExists(scaffolded)) {
-			const inFile = envFile.PI_PAUSE_WINDOWS_FILE;
-			// BLANK IS NOT ABSENT, and this branch treats them alike because for every OTHER purpose they are
-			// alike. They are not alike to the worker: `config.mjs` reads this key with `??`, so an empty
-			// string survives, and `start.mjs` calls `loadPauseWindows` unconditionally at boot, which THROWS on a
-			// path that does not exist. So a blank value is a refused boot, and this check's own text --
-			// "the worker ignores it, so scoped pauses are OFF" -- asserted the opposite of what happens (issue #365,
-			// gate). Reachable exactly as doctor's own fix line advises, by running
-			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
-			// THE SHELL OR THE FILE. A blank line in the `.env` is the same refused boot on any deployment
-			// whose wrapper sources it, and the shell-only test missed it entirely.
-			const blank = typeof pauseWindowsFile === "string" || envFile.blankInFile?.PI_PAUSE_WINDOWS_FILE === true;
-			const onlyExported = envFile.exported?.PI_PAUSE_WINDOWS_FILE;
-			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
-			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
-			// this operator the wrong file (issue #365, item 2).
-			const alsoExported = envFile.alsoExported?.PI_PAUSE_WINDOWS_FILE;
+	const envFile = envFileKeys(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists, readEnvFile, platform });
+	// ONE RULE FOR BOTH BOOT FILES, and it asks the worker's own loader rather than a second opinion
+	// (issue #384). Before this there were two hand-written copies of a shell-shaped check for
+	// `PI_PAUSE_WINDOWS_FILE`, a THIRD rule for a scoped-limits file that does not parse, and no rule at all
+	// for a pause-windows file that does not parse. The shapes they disagreed about were not exotic:
+	//
+	//   - A BLANK value warned where its sibling failed. Both refuse the boot; one was a warn, one a fail.
+	//   - A blank value with no scaffolded file printed NOTHING and exited 0, on a deployment whose worker
+	//     cannot start.
+	//   - The blank branch's fix line still said "unset means the worker loads no windows at all", which is
+	//     advice for a different deployment than the one being described.
+	//
+	// TWO SUBJECTS, judged separately, because a `.env` and a shell are read by different things. The SERVICE
+	// reads the file: `deploy/worker.service` hands it to systemd, the wrappers source it, and the shell this
+	// command runs in never reaches it. A FOREGROUND `pi-dispatch worker` reads this shell and not the file.
+	// Judging only the shell is what let scenario G pass: a good path here, a blank line there, and a service
+	// that cannot start.
+	// The IO the load verdict uses, injected like everything else this file touches: `statFile` for the
+	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
+	// without a real file, which is how the fixtures below stay honest about content.
+	const seamsForLoad = { statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p) => readEnvFile(p) : readFileSync } };
+	for (const spec of BOOT_FILES) {
+		const scaffolded = join(cwd, spec.scaffold);
+		const shellRaw = spec.resolve(env);
+		const fileRaw = envFile[spec.key];
+		const notPlainLine = envFile.notPlain?.[spec.key];
+		const blankInFile = envFile.blankInFile?.[spec.key] === true;
+		const onlyExported = envFile.exported?.[spec.key];
+		const alsoExported = envFile.alsoExported?.[spec.key];
+		const loaderName = envFile.serviceLoader === "systemd" ? "systemd's EnvironmentFile=" : envFile.serviceLoader === "cmd" ? "the .cmd wrapper" : "the wrapper's `set -a; . ./.env`";
+		// A setup script runs AFTER the file on every platform (`service.mjs`, `worker-env-wrapper.sh`,
+		// `.cmd`), so it can supply or replace what the file says. Where one is configured, a refusal this
+		// check would otherwise report is a WARNING naming the script: doctor cannot run it, and failing a
+		// working `--env-setup` deployment is the crying wolf this file refuses elsewhere.
+		const envSetup = typeof env.PI_ENV_SETUP === "string" && env.PI_ENV_SETUP.trim() !== "" ? env.PI_ENV_SETUP : null;
+
+		// THE SERVICE, judged on what the file gives its loader.
+		if (blankInFile) {
+			checks.push({
+				ok: false,
+				warn: envSetup !== null,
+				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START`,
+				fix: envSetup !== null
+					? `${envSetup} runs after that file and may replace it, which is why this is a warning: if it does not, delete the ${spec.key} line, or give it the absolute path (${scaffolded})`
+					: `delete the ${spec.key} line from that .env, or give it a path: ${spec.key}=${renderEnvValue(scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
+			});
+		} else if (notPlainLine !== undefined) {
+			// NAMED, NEVER QUOTED. The value is outside the grammar every loader reads the same way, so this
+			// file cannot say what the service gets -- and printing a guess is what the previous reader did.
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`,
+				fix: `rewrite it as ${spec.key}=${renderEnvValue(scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
+			});
+		} else if (onlyExported !== undefined) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} is set in ${join(cwd, ".env")} as \`export ${spec.key}=${onlyExported}\`, which ${envFile.serviceLoader === "systemd" ? "systemd does NOT read" : "this platform's loader reads, though systemd would not"}`,
+				fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through a wrapper that sources the file`,
+			});
+		} else if (alsoExported !== undefined) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${fileRaw === undefined ? "an EMPTY value, which refuses the boot" : renderEnvValue(fileRaw)}, another loader would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : renderEnvValue(alsoExported)}`,
+				fix: `keep one assignment. Which one is in force depends on how the worker starts, so two of them means two deployments of the same file disagree`,
+			});
+		} else if (fileRaw !== undefined) {
+			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad);
 			checks.push(
-				onlyExported
-					? {
-							ok: false,
-							warn: true,
-							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} as \`export PI_PAUSE_WINDOWS_FILE=${onlyExported}\`, which a wrapper script reads and systemd's EnvironmentFile= does not`,
-							fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through deploy/worker-env-wrapper.sh or the nssm wrapper, which source the file`,
-						}
-					: inFile
-					? {
-							ok: false,
-							warn: true,
-							label: `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_PAUSE_WINDOWS_FILE=\`` : `, and again as \`export PI_PAUSE_WINDOWS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
-							fix: alsoExported !== undefined
-								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? 'an EMPTY value, which the worker keeps and REFUSES TO BOOT on' : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_PAUSE_WINDOWS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
-								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
-						}
+				verdict.ok
+					? { ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${fileRaw}) and loads: the service reads that file, this shell does not` }
 					: {
 							ok: false,
-							warn: true,
-							label: blank
-								? `PI_PAUSE_WINDOWS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a pause-windows file at that empty path, and REFUSES TO START`
-								: `${scaffolded} exists but PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it, so scoped pauses are OFF`,
-							fix: `set PI_PAUSE_WINDOWS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker loads no windows at all, while the admin panel defaults to this same file and reports each window it writes as applied live; delete the file if this deployment has no quiet hours`,
+							warn: envSetup !== null,
+							label: `${spec.key} is set in ${join(cwd, ".env")} (${fileRaw}) to a file the worker cannot load, so a service started from it REFUSES TO START: ${verdict.reason}`,
+							fix: envSetup !== null ? `${envSetup} runs after that file and may replace it; if it does not, fix ${fileRaw} or point the key at a file that loads` : `fix ${fileRaw}, or point ${spec.key} at a file that loads`,
 						},
 			);
 		}
-	}
 
-	// The same trap, scoped-limits edition (issue #242): init scaffolds ./scoped-limits.json, the admin
-	// defaults to it, and the worker reads only PI_SCOPED_LIMITS_FILE. The label's mutex parenthetical is
-	// load-bearing -- the check must not imply local folders run ungated when the file is off.
-	{
-		const scopedLimitsFile = env.PI_SCOPED_LIMITS_FILE;
-		const scaffolded = join(cwd, "scoped-limits.json");
-		if ((typeof scopedLimitsFile !== "string" || scopedLimitsFile.trim() === "") && fileExists(scaffolded)) {
-			const inFile = envFile.PI_SCOPED_LIMITS_FILE;
-			// BLANK IS NOT ABSENT, and this branch treats them alike because for every OTHER purpose they are
-			// alike. They are not alike to the worker: `config.mjs` reads this key with `??`, so an empty
-			// string survives, and `start.mjs` calls `loadScopedLimits` unconditionally at boot, which THROWS on a
-			// path that does not exist. So a blank value is a refused boot, and this check's own text --
-			// "the worker ignores it, so scoped caps and concurrency are OFF" -- asserted the opposite of what happens (issue #365,
-			// gate). Reachable exactly as doctor's own fix line advises, by running
-			// `set -a; . ./.env; set +a; pi-dispatch doctor`.
-			// THE SHELL OR THE FILE. A blank line in the `.env` is the same refused boot on any deployment
-			// whose wrapper sources it, and the shell-only test missed it entirely.
-			const blank = typeof scopedLimitsFile === "string" || envFile.blankInFile?.PI_SCOPED_LIMITS_FILE === true;
-			const onlyExported = envFile.exported?.PI_SCOPED_LIMITS_FILE;
-			// Both forms present and DISAGREEING: the bare line is what the service reads under systemd and
-			// the `export` one is what the wrapper deployments read, so naming only one of them tells half
-			// this operator the wrong file (issue #365, item 2).
-			const alsoExported = envFile.alsoExported?.PI_SCOPED_LIMITS_FILE;
-			checks.push(
-				onlyExported
-					? {
-							ok: false,
-							warn: true,
-							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} as \`export PI_SCOPED_LIMITS_FILE=${onlyExported}\`, which a wrapper script reads and systemd's EnvironmentFile= does not`,
-							fix: `drop the \`export \` prefix if this deployment runs under systemd (EnvironmentFile= wants a bare KEY=value); keep it if the worker starts through deploy/worker-env-wrapper.sh or the nssm wrapper, which source the file`,
-						}
-					: inFile
-					? {
-							ok: false,
-							warn: true,
-							label: `PI_SCOPED_LIMITS_FILE is set in ${join(cwd, ".env")} (${inFile}${alsoExported === undefined ? "" : alsoExported === "" ? `, and CLEARED again by a later \`export PI_SCOPED_LIMITS_FILE=\`` : `, and again as \`export PI_SCOPED_LIMITS_FILE=${alsoExported}\``}) but not in this shell -- the service reads it, this command does not, so what follows describes an unconfigured worker${alsoExported === undefined ? "" : `. Those two disagree, and which one is in force depends on how the worker starts`}`,
-							fix: alsoExported !== undefined
-								? `two assignments are in force at once, and which one depends on how the worker starts. systemd's EnvironmentFile= reads BARE lines only, so it takes ${inFile}; deploy/worker-env-wrapper.sh SOURCES the file and takes the LAST assignment, so it takes ${alsoExported === "" ? 'an EMPTY value, which the worker keeps and REFUSES TO BOOT on' : alsoExported}. The nssm wrapper is a third loader and matches systemd here for a different reason: deploy/worker-env-wrapper.cmd splits on the first \`=\` and would set a variable literally named \`export PI_SCOPED_LIMITS_FILE\`, so the bare line is what it reads. Delete whichever line this deployment does not want rather than guessing`
-								: `nothing to fix if the worker runs as a service: EnvironmentFile= and the wrappers read that .env. To see what the service sees, run doctor with the same environment (\`set -a; . ./.env; set +a; pi-dispatch doctor\`), and check the file really is the one the service loads`,
-						}
-					: {
-							ok: false,
-							warn: true,
-							label: blank
-								? `PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a scoped-limits file at that empty path, and REFUSES TO START`
-								: `${scaffolded} exists but PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it, so scoped caps and concurrency are OFF (the built-in one-job-per-folder mutex stays on)`,
-							fix: `set PI_SCOPED_LIMITS_FILE=${scaffolded} in .env and restart the worker -- unset means the worker enforces no scoped limits at all, while the admin panel defaults to this same file and reports each limit it writes as applied live; delete the file if this deployment has no scoped limits`,
-						},
-			);
+		// THE SHELL, judged on what a foreground `pi-dispatch worker` started from here would get.
+		if (typeof shellRaw === "string" && shellRaw.trim() === "") {
+			checks.push({
+				ok: false,
+				label: `${spec.key} is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START`,
+				fix: `unset ${spec.key} in this shell (that turns ${spec.noun} off), or give it the absolute path: export ${spec.key}=${renderEnvValue(scaffolded)}`,
+			});
+		} else if (typeof shellRaw === "string") {
+			const verdict = loadVerdict(spec, shellRaw, cwd, seamsForLoad);
+			if (!verdict.ok) {
+				checks.push({
+					ok: false,
+					label: `${spec.key} is set in this shell to a file the worker cannot load, so it REFUSES TO START: ${verdict.reason}`,
+					fix: `fix ${shellRaw}, or point ${spec.key} at a file that loads`,
+				});
+			}
+		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && !blankInFile && fileExists(scaffolded)) {
+			// The scaffold decides only THIS line, and only this one: a file sitting there that nothing reads.
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${scaffolded} exists but ${spec.key} is unset -- the worker ignores it, so ${spec.off}`,
+				fix: `set ${spec.key}=${scaffolded} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
+			});
 		}
-	}
-
-	// Issue #242: a CONFIGURED scoped-limits file is boot-load fail-loud, so a file that does not load
-	// refuses the next worker start -- doctor says it before the restart does. Never-tier: doctor never
-	// rewrites limits content (DES-CLI-SURFACE).
-	if (scopedLimitFacts.path !== null && scopedLimitFacts.parseError !== null) {
-		checks.push({
-			ok: false,
-			label: `scoped-limits file does not load -- the worker will refuse to start: ${scopedLimitFacts.parseError}`,
-			fix: `fix ${scopedLimitFacts.path} by hand, or through the dispatch_limit_* tools / the panel's m key once it parses again -- doctor never rewrites limits content`,
-		});
 	}
 
 	// The dead-scope advisory (issue #242), honest about what doctor can actually judge. A forge repo

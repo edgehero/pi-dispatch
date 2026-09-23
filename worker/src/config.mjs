@@ -326,8 +326,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		sandboxPinDays: nonNegativeInt(env, "PI_SANDBOX_PIN_DAYS", 7), // `--pin` extends to now + this, never to forever
 		sandboxIdleMinutes: nonNegativeInt(env, "PI_SANDBOX_IDLE_MINUTES", 30), // bash's own TMOUT inside a sandbox; 0 = no idle logout
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
-		pauseWindowsFile: env.PI_PAUSE_WINDOWS_FILE ?? null, // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
-		scopedLimitsFile: env.PI_SCOPED_LIMITS_FILE ?? null, // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
+		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
+		scopedLimitsFile: scopedLimitsFilePath(env), // issue #242: per-scope run caps + concurrency (INT-SCOPED-LIMITS-FILE-CONTRACT); null = none. The one-job-per-folder mutex for local jobs is code, not configuration, and holds regardless
 		schedulerStallMax: positiveInt(env, "PI_SCHEDULER_STALL_MAX", 2), // CONST-RETRY-INFRA-ONLY: per-scheduler stall backstop; positiveInt rejects <1 so a 0 threshold fails closed
 		logsDir: logsDirPath(env), // || (not ??) inside logsDirPath, so an empty string falls back to the default
 		settingsFile: settingsFilePath(env), // || (not ??) inside settingsFilePath, so an empty string falls back; INT-CONFIG-OVERLAY-CONTRACT
@@ -689,6 +689,22 @@ export function defaultSettingsFile(env = process.env, home = safeHomeDir()) {
  * would answer a different question than the one doctor is asking. Passing `undefined` is what keeps the
  * ordinary caller on `safeHomeDir()`, since an undefined argument activates a default parameter.
  */
+/**
+ * The two boot files' paths, `??` and not `||`, EXPORTED so doctor asks the same question the worker does.
+ *
+ * The distinction is the whole reason these exist (issue #384). `??` keeps an empty string, so a blank
+ * `PI_PAUSE_WINDOWS_FILE=` survives into the config, `start.mjs` loads it unconditionally and the boot
+ * refuses; `logsDirPath` below uses `||` and falls back instead. Doctor had a copy of the `??` rule written
+ * out by hand, which is how it came to warn about a deployment its own sibling check failed.
+ */
+export function pauseWindowsFilePath(env = process.env) {
+	return env.PI_PAUSE_WINDOWS_FILE ?? null;
+}
+
+export function scopedLimitsFilePath(env = process.env) {
+	return env.PI_SCOPED_LIMITS_FILE ?? null;
+}
+
 export function logsDirPath(env = process.env, home) {
 	return env.PI_LOGS_DIR || defaultLogsDir(env, home);
 }

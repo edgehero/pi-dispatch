@@ -12,7 +12,12 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
-const EMPTY_PAUSE_WINDOWS = `${JSON.stringify({ windows: [] }, null, 2)}\n`;
+/**
+ * EXPORTED so a test scaffolds what `init` scaffolds (issue #384). Doctor now asks the worker's own loader
+ * whether a configured file loads, and the fixtures wrote `[]` and `{}`, which those loaders refuse: a test
+ * that scaffolds content the product never writes measures the wrong deployment.
+ */
+export const EMPTY_PAUSE_WINDOWS = `${JSON.stringify({ windows: [] }, null, 2)}\n`;
 // Pinned third-party pi packages staged into the global overlay (issue #58). Empty by default: staging
 // runs third-party code inside jobs, so it is opted into package by package, never scaffolded populated.
 const EMPTY_PACKAGES = `${JSON.stringify({ packages: [] }, null, 2)}\n`;
@@ -23,7 +28,7 @@ const EMPTY_SUBSCRIPTIONS = `${JSON.stringify({ version: 1, subscriptions: [] },
 // one-job-per-folder mutex for local jobs is code, not configuration, so it needs no scaffold line.
 // Versioned for the subscriptions reason, sharpened: this is enforcement config, and a silently
 // down-read newer file would be a silently widened spend limit.
-const EMPTY_SCOPED_LIMITS = `${JSON.stringify({ version: 1, limits: [] }, null, 2)}\n`;
+export const EMPTY_SCOPED_LIMITS = `${JSON.stringify({ version: 1, limits: [] }, null, 2)}\n`;
 /**
  * The egress allowlist (REQ-EGRESS-ALLOWLIST): the hosts a job container may reach, one bare hostname per
  * line. Scaffolded with the three a job cannot work without, and NOT empty -- unlike every other scaffold

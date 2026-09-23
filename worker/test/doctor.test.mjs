@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
@@ -1267,7 +1268,7 @@ test("doctor: a deployment with no command triggers prints no command line at al
  */
 function scaffoldedCwd() {
 	const dir = tempDir("pi-scaffold-");
-	writeFileSync(join(dir, "pause-windows.json"), "[]\n");
+	writeFileSync(join(dir, "pause-windows.json"), EMPTY_PAUSE_WINDOWS);
 	writeFileSync(join(dir, "subscriptions.json"), JSON.stringify({ version: 1, subscriptions: [] }));
 	return dir;
 }
@@ -1301,131 +1302,167 @@ test("doctor: a .env that NAMES the key softens the warning instead of crying wo
 	// EnvironmentFile= and the wrappers and configures nothing about the shell doctor runs in. Unqualified,
 	// the warning would fire on every correctly converged deployment, and this module's own rule is that a
 	// check nobody can silence must never cry wolf.
+	//
+	// It is a PASS rather than a softened warning since issue #384, and the reason is that doctor now asks
+	// the worker's own loader: the file is named, it exists, and it parses, so there is nothing left to warn
+	// about. What used to make this a warning was that doctor could not tell whether the named file would
+	// load; now it can.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.ok(text().includes(`✓ PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) and loads`), "it names the file, and says it loads");
+	assert.doesNotMatch(text(), /scoped pauses are OFF/, "and drops the claim that the feature is off, because for the service it is not");
+});
+
+test("doctor: a .env line carrying an inline comment is NAMED, never quoted back (#384)", async () => {
+	// The shape issue #392 found in the shipped scaffold, from doctor's side. systemd keeps the comment as
+	// part of the value and a sourcing shell strips it, so this file cannot say what the service reads --
+	// and the previous reader answered anyway, by stripping the comment and printing the path. It now names
+	// the LINE and prints no value at all, which is the only honest thing available.
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}   # written by up\n`);
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	assert.ok(text().includes(`PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${join(cwd, "pause-windows.json")}) but not in this shell`), "it says which process would honour the file, and quotes the VALUE");
-	assert.doesNotMatch(text(), /written by up/, "the inline comment .env.example documents each key with is not part of the value");
-	assert.doesNotMatch(text(), /scoped pauses are OFF/, "and drops the claim that the feature is off, because for the service it is not");
-	assert.match(text(), /set -a; \. \.\/\.env; set \+a/, "the fix is how to look with the service's own environment");
-	// Still a warning rather than a pass: in THIS shell the feature really is unconfigured, and a softened
-	// line that pretended otherwise would be the same lie in the other direction.
-	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is set in/);
+	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE on line 1 of .* is not in the form every loader reads the same way/, "the line is named");
+	assert.doesNotMatch(text(), /written by up/, "and the value is never quoted back, because this file cannot vouch for it");
+	assert.match(text(), /rewrite it as PI_PAUSE_WINDOWS_FILE=/, "the fix is the form `up` writes");
 });
 
-test("doctor: a file carrying BOTH forms names both, and which start wins (#365)", async () => {
-	// The gap the three-state reading left: a key with a bare line AND an `export` one is not export-only,
-	// so the label said nothing about it -- while the two readings disagree about the VALUE, which means the
-	// two deployment shapes load different files. `EnvironmentFile=` takes the bare line (systemd does not
-	// strip the prefix, measured on 257.13) and `set -a; . ./.env` in the wrappers takes the LAST
-	// assignment. Doctor reported the bare value and called it the service's, which is right for systemd
-	// and wrong for launchd and nssm.
+test("doctor: a file carrying BOTH forms, disagreeing, names the disagreement (#365, #384)", async () => {
+	// A key with a bare line AND an `export` one is not export-only, and the two readings disagree about the
+	// VALUE, which means two deployments of the same file load different files. `EnvironmentFile=` takes the
+	// bare line (systemd does not strip the prefix, measured on 252) and `set -a; . ./.env` in the wrappers
+	// takes the LAST assignment. Since issue #384 the label leads with the loader THIS platform's service
+	// actually uses, rather than naming systemd's reading on every platform.
 	const cwd = scaffoldedCwd();
-	const bare = join(cwd, "pause-windows.json");
-	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${bare}\nexport PI_PAUSE_WINDOWS_FILE=/wrapper-wins.json\n`);
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\nexport PI_PAUSE_WINDOWS_FILE=/wrapper-wins.json\n`);
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	assert.match(text(), /and again as `export PI_PAUSE_WINDOWS_FILE=\/wrapper-wins\.json`/, "the second assignment is named");
-	assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/);
-	assert.match(text(), /systemd's EnvironmentFile= reads BARE lines only, so it takes .*pause-windows\.json; deploy\/worker-env-wrapper\.sh SOURCES the file and takes the LAST assignment, so it takes \/wrapper-wins\.json/);
-	// THREE loaders, not two, and the third was named wrongly. `worker-env-wrapper.cmd` splits on the first
-	// `=` with `for /f ... delims==`, so an `export K=v` line sets a variable literally called `export K`:
-	// nssm reads the BARE line, like systemd, and the export value can never be in force there. The first
-	// version of this text said the nssm wrapper sources the file and takes the last assignment, which is
-	// what the POSIX wrapper does and what `requirements.md` warns this loader must never be assumed to do.
-	assert.match(text(), /deploy\/worker-env-wrapper\.cmd splits on the first `=` and would set a variable literally named `export PI_PAUSE_WINDOWS_FILE`, so the bare line is what it reads/);
-	assert.doesNotMatch(text(), /and the nssm wrapper source the file/, "the cmd loader neither sources nor takes the last assignment");
-	assert.doesNotMatch(text(), /which a wrapper script reads and systemd's EnvironmentFile= does not/, "not the export-ONLY line: there is a bare assignment here");
+	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is assigned TWICE in .* with different values/, "the disagreement is the finding, not either value");
+	assert.match(text(), /wrapper-wins\.json/, "the second assignment is named");
+	assert.match(text(), /keep one assignment/, "and the fix is to stop having two");
 });
 
-test("doctor: a BLANK line in the .env is the same refused boot as a blank shell value (#365)", async () => {
-	// The shell-only test missed this entirely: `readEnvKeys` deletes a key whose value is empty, so `inFile`
-	// was falsy and doctor fell through to "is unset -- the worker ignores it" for a file that makes the
-	// worker refuse to start. Measured in sh, bash and zsh: `set -a; . ./.env` on `KEY=` SETS and EXPORTS
-	// `KEY=""`, and `deploy/worker-env-wrapper.sh` does exactly that, so the worker gets the empty string.
-	for (const [key, scaff, word] of [
-		["PI_PAUSE_WINDOWS_FILE", "pause-windows", "pause-windows"],
-		["PI_SCOPED_LIMITS_FILE", "scoped-limits", "scoped-limits"],
-	]) {
-		for (const blankLine of [`${key}=`, `${key}=""`, `${key}=   `, `export ${key}=`]) {
-			const cwd = scaffoldedCwd();
-			writeFileSync(join(cwd, `${scaff}.json`), scaff === "scoped-limits" ? "{}\n" : "[]\n");
-			writeFileSync(join(cwd, ".env"), `${blankLine}\n`);
-			const { out, text } = capture();
-			await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-			assert.match(text(), new RegExp(`${key} is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a ${word} file at that empty path, and REFUSES TO START`), `${key} ${JSON.stringify(blankLine)}`);
-			assert.doesNotMatch(text(), new RegExp(`${key} is unset -- the worker ignores it`), `${key} ${JSON.stringify(blankLine)}`);
-		}
-	}
-});
-
-test("doctor: an `export` line that CLEARS the key is the same disagreement, and was silent (#365)", async () => {
-	// The sharpest shape and the one the first version of this signal could not see. `readEnvKeys` deletes a
-	// key whose last assignment is empty, so the second reading had no entry and the `key in withExport`
-	// guard blocked it -- while the readings disagree exactly as much as when the values differ: systemd
-	// loads the file and every wrapper deployment reads it unset, which is the feature silently off on half
-	// the deployment shapes. Measured in sh, bash and zsh: `set -a; . ./.env` leaves the key set to empty.
-	for (const cleared of ["", '""', "   "]) {
-		const cwd = scaffoldedCwd();
-		const bare = join(cwd, "pause-windows.json");
-		writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${bare}\nexport PI_PAUSE_WINDOWS_FILE=${cleared}\n`);
-		const { out, text } = capture();
-		await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-		assert.match(text(), /and CLEARED again by a later `export PI_PAUSE_WINDOWS_FILE=`/, JSON.stringify(cleared));
-		assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/, JSON.stringify(cleared));
-		// NOT "takes nothing": measured in sh, bash and zsh, `set -a; . ./.env` on an empty assignment SETS
-		// and EXPORTS `KEY=""`. The worker keeps it and refuses to boot, which is the opposite of a feature
-		// left off, and was the last surviving copy of the claim this round has been correcting.
-		assert.match(text(), /so it takes an EMPTY value, which the worker keeps and REFUSES TO BOOT on/, JSON.stringify(cleared));
-		assert.doesNotMatch(text(), /takes nothing, leaving the feature off/, "the false half is gone");
-		assert.doesNotMatch(text(), /nothing to fix if the worker runs as a service/, "the old fix asserted the false half out loud");
-	}
-});
-
-test("doctor: the SCOPED_LIMITS twin of the both-forms signal says the same thing (#365)", async () => {
-	// The two consumers of this signal are written out separately, so the second was entirely unpinned:
-	// deleting its `alsoExported` and deleting its label suffix were both green on the full suite. A pane
-	// pinned in one of two copies is the shape this round has now had to fix three times.
+test("doctor: a BLANK line in the .env is a refused boot, and it FAILS (#365, #384)", async () => {
+	// The verdict this issue is named for. A blank value is not unset: the loader keeps it, the worker tries
+	// to load "" and refuses to start, so this is a ✗ and doctor exits 1. It warned before, three rows from
+	// a sibling check that failed the identical deployment.
 	const cwd = scaffoldedCwd();
-	const bare = join(cwd, "scoped-limits.json");
-	// `scaffoldedCwd` writes only the pause-windows file, and this warning fires only when its OWN scaffold
-	// exists -- which is why the twin was reachable by nothing.
-	writeFileSync(bare, "{}\n");
-	writeFileSync(join(cwd, ".env"), `PI_SCOPED_LIMITS_FILE=${bare}\nexport PI_SCOPED_LIMITS_FILE=/wrapper-wins.json\n`);
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\n");
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value in .*\.env, which is not unset/, "the file's blank line is named as the refused boot it is");
+	assert.match(text(), /REFUSES TO START/);
+	assert.match(text(), /delete the PI_PAUSE_WINDOWS_FILE line from that \.env, or give it a path/, "and the fix is about a blank value, not about an unset one");
+	assert.equal(code, 1, "a deployment whose worker cannot boot must not exit 0");
+});
+
+test("doctor: a blank value with NO scaffolded file still fails (#384)", async () => {
+	// The silence this issue found: the old checks only spoke when `./pause-windows.json` existed, so the
+	// commonest shape of all -- a blank key and no scaffold -- printed nothing and exited 0 on a worker that
+	// cannot start. The scaffold now decides only the "a file sits here that nothing reads" line.
+	const cwd = tempDir("pi-noscaffold-");
+	writeFileSync(join(cwd, "subscriptions.json"), JSON.stringify({ version: 1, subscriptions: [] }));
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: "" }), scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell/, "the shell's blank value is judged whether or not a file was scaffolded");
+	assert.equal(code, 1);
+});
+
+test("doctor: an `export` line that CLEARS the key is the same disagreement (#365)", async () => {
+	// The sharpest shape: the `export` line is the one that empties the key, so the two loaders disagree
+	// about whether the feature is configured at all. It was silent before issue #365 and is a single
+	// finding now, never a finding plus an "unset" line about the same key.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\nexport PI_PAUSE_WINDOWS_FILE=\n`);
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	assert.match(text(), /and again as `export PI_SCOPED_LIMITS_FILE=\/wrapper-wins\.json`/);
-	assert.match(text(), /Those two disagree, and which one is in force depends on how the worker starts/);
-	assert.match(text(), /would set a variable literally named `export PI_SCOPED_LIMITS_FILE`/);
+	assert.match(text(), /assigned TWICE in .* with different values/, "the clearing line is a disagreement, not an absence");
+	assert.match(text(), /an EMPTY value, which refuses the boot/, "and the empty side says what it costs");
+	assert.doesNotMatch(text(), /exists but PI_PAUSE_WINDOWS_FILE is unset/, "one key, one finding: the scaffold line must not fire beside it");
+});
+
+test("doctor: the SCOPED_LIMITS twin says the same thing about the same shapes (#365, #384)", async () => {
+	// One rule for both files since issue #384, so this is the twin of the test above rather than a second
+	// hand-written copy of it. The mutex parenthetical is the one thing that differs, and it is load-bearing:
+	// local folders are NOT ungated when the file is off.
+	const cwd = scopedScaffoldCwd();
+	writeFileSync(join(cwd, ".env"), `PI_SCOPED_LIMITS_FILE=${join(cwd, "scoped-limits.json")}\nexport PI_SCOPED_LIMITS_FILE=/wrapper-wins.json\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /⚠ PI_SCOPED_LIMITS_FILE is assigned TWICE in .* with different values/);
+	assert.match(text(), /wrapper-wins\.json/);
 });
 
 test("doctor: two assignments that AGREE are not a finding (#365)", async () => {
-	// Tidiness is not a fact about the deployment, and a warning about it would be the crying wolf this file
-	// refuses elsewhere. Both consumers read the same path, so there is nothing an operator has to decide.
+	// Both forms carrying the same value is a tidiness question rather than a fact about the deployment, and
+	// a warning about it would be the crying wolf this file refuses elsewhere.
 	const cwd = scaffoldedCwd();
-	const same = join(cwd, "pause-windows.json");
-	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${same}\nexport PI_PAUSE_WINDOWS_FILE=${same}\n`);
+	const path = join(cwd, "pause-windows.json");
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${path}\nexport PI_PAUSE_WINDOWS_FILE=${path}\n`);
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	assert.doesNotMatch(text(), /and again as `export/, "agreeing duplicates say nothing");
-	assert.doesNotMatch(text(), /Those two disagree/);
+	assert.doesNotMatch(text(), /assigned TWICE/, "same value twice is not a disagreement");
+	assert.match(text(), /✓ PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "it is simply configured");
 });
 
-test("doctor: an `export`ed key is neither set nor unset, and says which reader honours it (#357)", async () => {
-	// Measured on systemd 257.13: `EnvironmentFile=` parses bare `VAR=VALUE` and does not strip an
-	// `export ` prefix, while `deploy/worker-env-wrapper.sh` sources the file and does. So the same line is
-	// live on launchd and nssm and inert under systemd, and `up` -- which must never clobber it -- reports
-	// that key as already set. Without this third sentence, doctor tells the operator, three lines later in
-	// the same `up` output, to write a line that is already there.
+test("doctor: a file the SERVICE names but cannot load is a failure, not a warning (#384)", async () => {
+	// The half that had no check at all: doctor parsed a configured scoped-limits file and said nothing
+	// about a configured pause-windows one. Both are boot-load fail-loud, so both are ✗ now, and the reason
+	// comes from the worker's own loader rather than from a second parser written here.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, "broken.json"), "not json at all");
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${join(cwd, "broken.json")}\n`);
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is set in .*\.env .* to a file the worker cannot load, so a service started from it REFUSES TO START/);
+	assert.match(text(), /not valid JSON/, "the loader's own words, not doctor's paraphrase");
+	assert.equal(code, 1);
+});
+
+test("doctor: a PI_ENV_SETUP deployment gets a warning where another would fail (#384)", async () => {
+	// The setup script runs AFTER the file on every platform, so it can supply or replace what the file
+	// says. Doctor cannot run it, and failing a working `--env-setup` deployment would be the crying wolf
+	// this file refuses elsewhere -- so the same finding is a ⚠ that names the script.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\n");
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_ENV_SETUP: "/opt/secrets/env.sh" }), scaffoldDeps(out, cwd));
+	assert.match(text(), /⚠ PI_PAUSE_WINDOWS_FILE is assigned an EMPTY value/, "the finding stands");
+	assert.match(text(), /\/opt\/secrets\/env\.sh runs after that file and may replace it/, "and it names what doctor cannot see");
+	assert.notEqual(code, 1, "a deployment doctor cannot judge must not be failed on a guess");
+});
+
+test("doctor: a .env that is a FIFO does not hang the boot-file checks (#384)", async () => {
+	// The loader reads with `readFileSync`, which on a FIFO never returns. `envFileKeys` already guards the
+	// `.env` itself; this is the same hazard one file along, and it arrives because these checks read a path
+	// an OPERATOR wrote rather than one doctor chose.
+	const cwd = scaffoldedCwd();
+	const fifo = join(cwd, "fifo.json");
+	const { spawnSync } = await import("node:child_process");
+	spawnSync("mkfifo", [fifo]);
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: fifo }), scaffoldDeps(out, cwd));
+	assert.match(text(), /is not a regular file/, "the guard names what it refused");
+	assert.equal(code, 1);
+});
+
+test("doctor: an `export`ed key is honoured by the loader this platform's service uses (#357, #384)", async () => {
+	// Three states, not two, and WHICH of them an `export` line is depends on the platform: systemd's
+	// `EnvironmentFile=` does not read it (measured on 252, the journal says so), while the darwin and
+	// win32 wrappers source or split the file and do. Doctor names the loader its own platform renders.
 	const cwd = scaffoldedCwd();
 	writeFileSync(join(cwd, ".env"), `export PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
 	const { out, text } = capture();
 	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	assert.match(text(), /as `export PI_PAUSE_WINDOWS_FILE=.*`, which a wrapper script reads and systemd's EnvironmentFile= does not/);
-	assert.doesNotMatch(text(), /is unset -- the worker ignores it/, "not the unset warning: the line is there and one of the two readers honours it");
-	assert.doesNotMatch(text(), /but not in this shell/, "and not the set one either, because systemd would read nothing");
-	assert.match(text(), /drop the `export ` prefix if this deployment runs under systemd/);
+	const line = text().split("\n").find((l) => l.includes("PI_PAUSE_WINDOWS_FILE"));
+	assert.ok(line, "the key is spoken about either way");
+	assert.match(
+		line,
+		process.platform === "linux" ? /which systemd does NOT read/ : /and loads|which this platform's loader reads/,
+		"the verdict follows the loader this platform's service actually uses",
+	);
 });
 
 test("doctor: a .env that does NOT name the key gets the full warning, unchanged (#357)", async () => {
@@ -1467,52 +1504,52 @@ test("doctor: a .env that is a FIFO does not hang the command, through the DEFAU
 	assert.deepEqual(envFileKeys(cwd, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), {});
 });
 
-test("doctor: the .env reader hands back only the keys it was asked for (#357)", async () => {
+test("doctor: the .env reader answers for ONE loader, and only for the keys it was asked (#357, #384)", () => {
 	// The boundary itself, pinned directly. Widening the doctor call's key LIST alone is an equivalent
 	// mutant today, because nothing consumes a key these two checks do not name, and that is the safety
 	// property rather than an accident: the read is a message decision. What must never drift is the
 	// helper's contract, so it is asserted here rather than inferred from the absence of output.
-	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "PI_JOB_IMAGE=never:read", "PI_ENV_SETUP=/tmp/evil.sh", "export PI_SCOPED_LIMITS_FILE=/l.json", "# PI_SCOPED_LIMITS_FILE=/commented.json", "PI_PAUSE_WINDOWS_FILE=/a-later-duplicate.json"].join("\n");
-	const seams = (readEnvFile) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }) });
-	// The later duplicate wins, because the shell and `EnvironmentFile=` both take the last assignment and
-	// this has to report what the SERVICE sees.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text)), { PI_PAUSE_WINDOWS_FILE: "/a-later-duplicate.json", exported: { PI_SCOPED_LIMITS_FILE: "/l.json" }, alsoExported: {}, blankInFile: {} });
-	// THREE states, not two. A key assigned only with an `export ` prefix is read by the wrapper scripts
-	// and not by systemd's `EnvironmentFile=` (measured on systemd 257.13), so it is neither "set" nor
-	// "unset" and gets a sentence of its own. Collapsing it either way makes doctor wrong: called set, it
-	// claims the service reads what systemd does not; called unset, it tells the operator to write a line
-	// that is already there, moments after `up` reported that key as already set.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/w.json")), { exported: { PI_PAUSE_WINDOWS_FILE: "/w.json" }, alsoExported: {}, blankInFile: {} });
-	// A bare assignment ANYWHERE means the key is not export-only, however many export lines follow it.
-	// systemd's `EnvironmentFile=` reads `/plain.json` and nothing else, so calling this export-only would
-	// print a value systemd never sees and advise dropping a prefix, which would change which file the
-	// worker loads on a wrapper deployment.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/plain.json\nexport PI_PAUSE_WINDOWS_FILE=/later.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: { PI_PAUSE_WINDOWS_FILE: "/later.json" }, blankInFile: {} });
-	// A THIRD SIGNAL for that same file (issue #365, item 2). It is not export-only and never was, so the
-	// label said nothing about it -- while the two readings DISAGREE about the value, which means the two
-	// deployment shapes disagree about which file the worker loads. Only when they differ: both forms
-	// carrying the same value is tidiness, not a fact about the deployment, and warning on it would be the
-	// crying wolf this file refuses elsewhere.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/same.json\nexport PI_PAUSE_WINDOWS_FILE=/same.json")), { PI_PAUSE_WINDOWS_FILE: "/same.json", exported: {}, alsoExported: {}, blankInFile: {} }, "agreeing duplicates are not a finding");
-	// ORDER MATTERS, and the first version of this assertion got it backwards. With the export line FIRST
-	// and the bare one last, the wrappers take the last assignment and so read `/plain.json` too, which is
-	// what `EnvironmentFile=` reads: the two agree, so there is nothing to report. The signal is about the
-	// readings DISAGREEING, not about both forms being present.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "export PI_PAUSE_WINDOWS_FILE=/later.json\nPI_PAUSE_WINDOWS_FILE=/plain.json")), { PI_PAUSE_WINDOWS_FILE: "/plain.json", exported: {}, alsoExported: {}, blankInFile: {} }, "an export line BEFORE the bare one is overridden for both consumers");
-	// And a caller's list can only NARROW: the allowlist is the module's, frozen, so a future check that
-	// wants the same softening cannot reach a secret by adding a key to its own array. That is the whole
-	// licence for reading a `.env`, and a convention would not have held it.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE", "WEBHOOK_SECRET", "PI_ENV_SETUP"], seams(() => text)), {}, "a key outside the frozen set is not readable, however it is asked for");
-	assert.deepEqual([...ENV_FILE_READABLE_KEYS], ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], "adding to this list IS the review");
-	// `export KEY=` is a shell-ism a loader would honour and this deliberately does not, which is the line
-	// between reading a file and loading one.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], seams(() => "export PI_JOB_IMAGE=shell-ism")), {}, "and a key outside the frozen set is not reported as exported either");
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text }), {}, "no file, no evidence");
-	// A named pipe is the one shape that would not fail: a synchronous read of it never returns, and doctor
-	// would hang with no output and no check to point at. A directory throws and lands in the catch below.
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: () => ({ isFile: () => false }) }), {}, "a .env that is not a regular file is not read at all");
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: null }), {}, "and a seam that cannot answer is not evidence either");
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: null }), {}, "no seam, no evidence");
+	//
+	// PLATFORM IS PASSED EXPLICITLY, never taken from the host (issue #384): `service.mjs` renders exactly
+	// one loader per platform, and this helper now answers for that one. A test that read `process.platform`
+	// would assert linux's verdict on linux and darwin's on darwin, which is how a per-platform rule goes
+	// unchecked on every platform but the author's.
+	const seams = (readEnvFile, platform) => ({ fileExists: () => true, readEnvFile, statFile: () => ({ isFile: () => true }), platform });
+	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "PI_JOB_IMAGE=never:read", "PI_ENV_SETUP=/tmp/evil.sh", "export PI_SCOPED_LIMITS_FILE=/l.json", "PI_PAUSE_WINDOWS_FILE=/a-later.json"].join("\n");
+
+	// NOT the keys it was not asked for, whatever else the file holds. `PI_JOB_IMAGE` and `PI_ENV_SETUP` are
+	// both in this fixture and neither may come back: the licence for reading a `.env` at all is that it
+	// decides what two named checks say.
+	const linux = envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text, "linux"));
+	assert.equal(linux.PI_JOB_IMAGE, undefined);
+	assert.equal(linux.PI_ENV_SETUP, undefined);
+	// The later duplicate wins, because every loader takes the last assignment and this reports what the
+	// SERVICE sees.
+	assert.equal(linux.PI_PAUSE_WINDOWS_FILE, "/a-later.json");
+	// systemd does not read an `export` line, so on linux that key is export-only: neither set nor unset,
+	// and a sentence of its own. Collapsing it either way makes doctor wrong -- called set, it claims the
+	// service reads what systemd does not; called unset, it tells the operator to write a line already there.
+	assert.deepEqual(linux.exported, { PI_SCOPED_LIMITS_FILE: "/l.json" });
+
+	// The SAME file on darwin, where the rendered loader is the wrapper and sourcing it honours `export`.
+	const darwin = envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], seams(() => text, "darwin"));
+	assert.equal(darwin.PI_SCOPED_LIMITS_FILE, "/l.json", "the wrapper reads it, so it is simply set");
+	assert.deepEqual(darwin.exported, {}, "and nothing is export-only where the loader reads exports");
+
+	// A value outside the grammar every loader reads the same way is reported as a LINE, never as a value.
+	const fuzzy = envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=/w.json   # written by up", "linux"));
+	assert.equal(fuzzy.PI_PAUSE_WINDOWS_FILE, undefined, "no value is claimed");
+	assert.deepEqual(fuzzy.notPlain, { PI_PAUSE_WINDOWS_FILE: 1 }, "the line number is what an operator is given instead");
+
+	// A blank assignment is an assignment, and the shape the worker refuses to boot on.
+	const blank = envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], seams(() => "PI_PAUSE_WINDOWS_FILE=", "linux"));
+	assert.deepEqual(blank.blankInFile, { PI_PAUSE_WINDOWS_FILE: true });
+
+	// Unreadable, missing or not a regular file is `{}`, which restores the unsoftened warning: the worse
+	// failure is a deployment told it is fine when nobody could check.
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text, statFile: () => ({ isFile: () => true }) }), {});
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: () => ({ isFile: () => false }) }), {});
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], seams(() => text, "linux")), {}, "and a key outside the frozen list is not readable at all");
 });
 
 test("doctor: nothing but the two named keys is ever read out of .env, secrets least of all (#357)", async () => {
@@ -1566,7 +1603,7 @@ test("doctor: an EMPTY PI_PAUSE_WINDOWS_FILE is a REFUSED BOOT, not an unset one
 	for (const blank of ["", "   "]) {
 		const { out, text } = capture();
 		await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: blank }), scaffoldDeps(out, cwd));
-		assert.match(text(), /PI_PAUSE_WINDOWS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a pause-windows file at that empty path, and REFUSES TO START/, JSON.stringify(blank));
+		assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START/, "the verdict is the boot refusal, and it FAILS rather than warns (issue #384)");
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is unset -- the worker ignores it/, "the false sentence is gone");
 	}
 	// And a genuinely ABSENT key still gets the unset warning, which is the sentence that was always true.
@@ -2790,7 +2827,7 @@ test("doctor: with PI_SCOPED_LIMITS_FILE set to the file, no trap line; an EMPTY
 	// path, so blank is a refused boot rather than a feature left off.
 	const empty = capture();
 	await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: "   " }), scaffoldDeps(empty.out, cwd));
-	assert.match(empty.text(), /PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell, which is not the same as unset: the worker keeps it, tries to load a scoped-limits file at that empty path, and REFUSES TO START/);
+	assert.match(empty.text(), /✗ PI_SCOPED_LIMITS_FILE is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START/, "the verdict is the boot refusal, and it FAILS rather than warns (issue #384)");
 	assert.doesNotMatch(empty.text(), /PI_SCOPED_LIMITS_FILE is unset -- the worker ignores it/);
 });
 
@@ -2799,16 +2836,16 @@ test("doctor: a configured scoped-limits file that will not load is a FAILURE na
 	const path = join(dir, "scoped-limits.json");
 	writeFileSync(path, JSON.stringify({ version: 2, limits: [] }));
 	const checks = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: path }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
-	const c = checks.find((x) => /scoped-limits file does not load/.test(x.label));
+	const c = checks.find((x) => /PI_SCOPED_LIMITS_FILE is set in this shell to a file the worker cannot load/.test(x.label));
 	assert.ok(c, "the check is present");
 	assert.equal(c.ok, false);
 	assert.notEqual(c.warn, true, "a boot blocker is a failure, not an advisory");
-	assert.match(c.label, /worker will refuse to start/);
-	assert.match(c.label, /newer pi-dispatch/);
+	assert.match(c.label, /REFUSES TO START/);
+	assert.match(c.label, /newer pi-dispatch/, "and the reason is the loader's own words, not a paraphrase written here");
 	assert.equal(c.fixAction, undefined, "never-tier: doctor never rewrites limits content");
 	// A configured-but-MISSING file is the same class: the worker's loader refuses boot on it.
 	const gone = await collectChecks(imgEnv({ PI_SCOPED_LIMITS_FILE: join(dir, "absent.json") }), collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true }));
-	assert.ok(gone.find((x) => /scoped-limits file does not load/.test(x.label) && /does not exist/.test(x.label)));
+	assert.ok(gone.find((x) => /cannot load/.test(x.label) && /does not exist/.test(x.label)));
 });
 
 test("doctor: the dead-scope advisory flags folder-only shapes not in the canonicalized facts; repo shapes stay silent", async () => {
