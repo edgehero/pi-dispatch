@@ -6,7 +6,7 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, RUN_TIMEOUTS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
@@ -39,7 +39,10 @@ function fakeSpawn(plan, calls = []) {
 		const line = [cmd, ...args].join(" ");
 		const key = Object.keys(plan).find((k) => line.startsWith(k));
 		const outcome = plan[key];
-		calls.push({ cmd, args, opts });
+		// `kill` is RECORDED, not ignored: the bound's contract is that it kills the child with SIGKILL, and
+		// a fake that swallows the call cannot tell a bound that fires from one that merely gives up waiting.
+		const entry = { cmd, args, opts, kills: [] };
+		calls.push(entry);
 		const stream = () => ({
 			handlers: {},
 			on(ev, cb) {
@@ -51,13 +54,18 @@ function fakeSpawn(plan, calls = []) {
 		const child = {
 			stdout: stream(),
 			stderr: stream(),
-			kill() {},
+			kill(sig) {
+				entry.kills.push(sig);
+			},
 			on(ev, cb) {
 				handlers[ev] = cb;
 				return this;
 			},
 		};
 		queueMicrotask(() => {
+			// "hang": a child that NEVER answers, which is what a wedged daemon's `docker info` does (issue
+			// #397). No handler is called at all, so only the caller's own bound can end it.
+			if (outcome === "hang") return;
 			if (outcome === "enoent") {
 				handlers.error?.(new Error(`spawn ${cmd} ENOENT`));
 				return;
@@ -5108,4 +5116,258 @@ test("doctor: `endpoint` defaults to unknown, so a caller that omits it sweeps n
 	// forgets it must not silently inherit the owned-daemon behaviour.
 	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
 	assert.match(src, /endpoint = \{ local: null, reason: "not resolved" \}/, "unknown, which this sweep says out loud rather than acting on");
+});
+
+// --- issue #397: every `runCmd` is bounded, and a bound that fires is not the same fact as a missing binary
+
+/** Milliseconds, so the timeout path is a test and not a coffee break. The product default is 30s. */
+const FAST_TIMEOUTS = Object.freeze({ cmd: 25, pull: 60 });
+
+test("doctor: a daemon that never answers ends the run instead of holding it forever (#397)", async () => {
+	// THE DEFECT ITSELF. `runCmd` had no timeout at all, so `docker info` against a daemon that accepts the
+	// connection and never answers held `pi-dispatch doctor` open at the FIRST docker call, with nothing
+	// printed and no check to point at. Measured on docker 27.4.0; the CLI's own `--tls*` timeouts do not
+	// apply to a socket that is open but silent.
+	//
+	// The assertion that matters is that this test RETURNS. Without the bound it never does, which is the
+	// one failure a suite reports as a job timeout rather than as a red test.
+	const cwd = scaffoldedCwd();
+	const calls = [];
+	const { out, text } = capture();
+	// RACED AGAINST A REAL TIMER, and that is the load-bearing part of this test rather than belt. Without
+	// the bound nothing in the process is pending: the promise never settles, the event loop EMPTIES, node
+	// exits, and the runner reports the file without this test at all -- green. So the failure has to be an
+	// assertion rather than an absence, and the sentinel's own timer is what keeps the loop alive to make it
+	// one. Measured: with the bound removed this returns NEVER-RETURNED.
+	const NEVER = "NEVER-RETURNED";
+	let ticker;
+	const code = await Promise.race([
+		runDoctor(imgEnv(), {
+			out,
+			cwd,
+			spawn: fakeSpawn({ ...green, "docker info": "hang" }, calls),
+			probeValkey: async () => true,
+			nodeVersion: "22.19.0",
+			runTimeouts: FAST_TIMEOUTS,
+		}),
+		new Promise((resolve) => {
+			ticker = setTimeout(() => resolve(NEVER), 2000);
+		}),
+	]);
+	clearTimeout(ticker);
+	assert.notEqual(code, NEVER, "doctor RETURNED: an unbounded runCmd would still be waiting on a daemon that never answers");
+	assert.equal(code, 1, "a daemon that does not answer is a failure, not a warning");
+	assert.match(text(), /Docker daemon reachable \(no answer in 0s\)/, "the label says the daemon did not answer");
+	assert.match(text(), /accepted the connection and did not answer/, "and the fix says what that means");
+	assert.doesNotMatch(text(), /install Docker/, "NEVER the missing-binary advice: the daemon is running, it is wedged");
+	const info = calls.find((c) => [c.cmd, ...c.args].join(" ") === "docker info");
+	assert.deepEqual(info.kills, ["SIGKILL"], "the child is killed, and with SIGKILL -- a catchable signal lets a wedged child outlive the bound");
+});
+
+test("doctor: a docker that is not installed still says so, which is the OTHER null (#397)", async () => {
+	// The two nulls are opposite facts and this is the pin that keeps them apart: `ended` distinguishes a
+	// CLI that never launched from one killed by the bound. Before `ended` existed there was one null and
+	// the label had to guess.
+	const cwd = scaffoldedCwd();
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), {
+		out,
+		cwd,
+		spawn: fakeSpawn({ ...green, "docker info": "enoent" }),
+		probeValkey: async () => true,
+		nodeVersion: "22.19.0",
+		runTimeouts: FAST_TIMEOUTS,
+	});
+	assert.equal(code, 1);
+	assert.match(text(), /install Docker/, "a binary that is not on PATH gets the install advice");
+	assert.doesNotMatch(text(), /no answer in/, "and never the wedged-daemon wording");
+});
+
+test("doctor: a gh that does not answer says it COULD NOT CHECK, not that the branch is unprotected (#397)", async () => {
+	// The one site where reading a timeout as a non-zero exit would have been a WRONG VERDICT rather than a
+	// missing one: this is a network call, and "gh did not finish" is not "the branch is open". Telling an
+	// operator to go and protect an already-protected branch is the kind of advice that teaches people to
+	// scroll past doctor.
+	// The two gh calls per repo are ordered and both start `gh api repos/o/r`, so the plan keys are the FULL
+	// argv line: the branch read must answer for the protection read to be reached at all.
+	const checks = await githubProtectionPreflight(
+		fakeSpawn({
+			"gh auth status": { code: 0, output: "Token scopes: 'repo'" },
+			"gh api repos/o/r --jq .default_branch": { code: 0, output: "main\n" },
+			"gh api repos/o/r/branches/main/protection": "hang",
+		}),
+		["o/r"],
+		FAST_TIMEOUTS,
+	);
+	const line = checks.map((c) => c.label).join("\n");
+	assert.match(line, /could not check branch protection for o\/r/, "it says it could not tell");
+	assert.doesNotMatch(line, /is not protected/, "and never claims the branch is open");
+});
+
+test("doctor: the `--fix` pull runs under the LONG bound, not the default one (#397)", async () => {
+	// One bound for every call is either too short for a cold `docker pull` -- minutes of legitimate work --
+	// or too long to be a bound at all, which is why this file has two and why the pull names its own.
+	//
+	// Pinned by the CLOCK, because the timeout is not visible in the argv: with a pull that never answers,
+	// a fix wired to the default bound gives up at `cmd` and one wired to the pull bound at `pull`. The
+	// assertion is a floor, so a slow machine can only make it pass harder.
+	const cwd = scaffoldedCwd();
+	const { out } = capture();
+	const checks = await collectChecks(imgEnv(), {
+		cwd,
+		spawn: fakeSpawn({ ...green, "docker image inspect pi-job:latest": 1 }),
+		probeValkey: async () => true,
+		fileExists: existsSync,
+		nodeVersion: "22.19.0",
+		platform: "linux",
+		home: tempDir("pi-397-home-"),
+		out,
+		runTimeouts: FAST_TIMEOUTS,
+	});
+	const image = checks.find((c) => String(c.label).startsWith("Job image present"));
+	assert.ok(image?.fixAction, "the job-image check offers the pull");
+
+	const began = Date.now();
+	const res = await image.fixAction.run({ spawn: fakeSpawn({ "docker pull": "hang", docker: 0 }), cwd, env: imgEnv() });
+	const took = Date.now() - began;
+	assert.equal(res.ok, false);
+	assert.match(res.note, /docker pull did not finish within/, "the note says the bound fired, not that the pull failed");
+	assert.ok(took >= FAST_TIMEOUTS.pull - 5, `waited ${took}ms, which is the PULL bound (${FAST_TIMEOUTS.pull}) and not the default (${FAST_TIMEOUTS.cmd})`);
+});
+
+test("doctor: the two bounds are what ship, and the pull one is the larger (#397)", async () => {
+	// The values themselves, because every test above injects its own. `cmd` matches `runCmdCapture`'s, so
+	// the two runners in that file do not disagree about what "too long" means, and `pull` matches the 600s
+	// the same file already gives `import-pi`.
+	assert.equal(RUN_TIMEOUTS.cmd, 30_000);
+	assert.equal(RUN_TIMEOUTS.pull, 600_000);
+	assert.ok(RUN_TIMEOUTS.pull > RUN_TIMEOUTS.cmd, "the override exists to be LONGER; equal values would mean one bound and no reason for two");
+	assert.ok(Object.isFrozen(RUN_TIMEOUTS));
+});
+
+test("doctor: a wedged daemon is TRANSIENT to the backend floor, not a missing CLI (#397)", async () => {
+	// THE CONFLATION THIS ISSUE IS ABOUT, one call site further on than the one that was fixed first. The
+	// floor's daemon read used `dockerCode === null`, which after the bound means BOTH causes, so a wedged
+	// host got `reason: "docker-not-found"` -- and `runtime-observations` treats that as DETERMINATE
+	// (`value: false`, "answered, so a floor refuses"). The two hosts produced a byte-identical refusal
+	// telling an operator whose CLI is fine that no docker CLI was found.
+	//
+	// The transient class has its own sentence already written; this pins that a timeout reaches it.
+	const cwd = scaffoldedCwd();
+	const seams = (info) => ({
+		cwd,
+		spawn: fakeSpawn({ ...green, "docker info": info }),
+		probeValkey: async () => true,
+		fileExists: existsSync,
+		nodeVersion: "22.19.0",
+		platform: "linux",
+		home: tempDir("pi-397-floor-"),
+		out: () => {},
+		runTimeouts: FAST_TIMEOUTS,
+	});
+	const env = { ...imgEnv(), PI_BACKEND_FLOOR: "isolation=enforced" };
+	const wedged = (await collectChecks(env, seams("hang"))).filter((c) => /PI_BACKEND_FLOOR/.test(String(c.label)));
+	const missing = (await collectChecks(env, seams("enoent"))).filter((c) => /PI_BACKEND_FLOOR/.test(String(c.label)));
+	assert.ok(wedged.length > 0 && missing.length > 0, "both hosts produce a floor line");
+	assert.notDeepEqual(
+		wedged.map((c) => [c.label, c.fix]),
+		missing.map((c) => [c.label, c.fix]),
+		"the two hosts must not read identically: one is answered-and-refused, the other unanswered-and-retried",
+	);
+	// The two classes have their own sentences, and this is the difference that matters to an operator: one
+	// is told to fix what stops the daemon answering and that the worker will retry, the other is told the
+	// floor cannot be met on this runtime at all.
+	assert.match(JSON.stringify(wedged), /fix what stops the daemon answering/, "the wedged host gets the TRANSIENT sentence");
+	assert.match(JSON.stringify(wedged), /supervisor retries/, "which says the worker will keep trying");
+	assert.match(JSON.stringify(missing), /Run jobs on a rootful Docker Engine/, "the host with no CLI gets the DETERMINATE refusal");
+	assert.doesNotMatch(JSON.stringify(missing), /fix what stops the daemon answering/, "and never the transient one");
+	// The reason travels as far as the evidence string, which is where the conflation was visible.
+	const isolation = (await collectChecks(env, seams("hang"))).find((c) => /isolation is ASSERTED/.test(String(c.label)));
+	assert.match(String(isolation.label), /docker-no-answer/, "the evidence names the timeout");
+	assert.doesNotMatch(String(isolation.label), /docker-not-found/, "and never the missing-CLI reason");
+});
+
+test("doctor: a daemon that did not answer is not offered a pull to fix it (#397)", async () => {
+	// Changing only the LABEL left `--fix` offering an operator a `docker pull` against the daemon doctor had
+	// just reported as unresponsive: it would hang for the pull bound, ten minutes, and then report a failed
+	// fix. A verdict that says "I could not tell" must not carry an action that assumes the answer.
+	const cwd = scaffoldedCwd();
+	const seams = (info) => ({
+		cwd,
+		// The specific key FIRST: the fake resolves by the first key that PREFIXES the line, so a broader key
+		// from `green` would shadow this one. And `docker info` must ANSWER, because the image check is only
+		// asked when it did -- the hang has to be the image read itself.
+		spawn: fakeSpawn({ "docker image inspect pi-job:latest": info, ...green }),
+		probeValkey: async () => true,
+		fileExists: existsSync,
+		nodeVersion: "22.19.0",
+		platform: "linux",
+		home: tempDir("pi-397-pull-"),
+		out: () => {},
+		runTimeouts: FAST_TIMEOUTS,
+	});
+	const wedged = (await collectChecks(imgEnv(), seams("hang"))).find((c) => String(c.label).startsWith("Job image present"));
+	assert.ok(wedged, "the job-image check ran, which needs `docker info` to have answered");
+	assert.match(wedged.label, /the daemon did not answer/, "the label says which");
+	assert.match(wedged.fix, /restart Docker first/, "and so does the fix, instead of naming a pull");
+	assert.equal(wedged.fixAction, undefined, "no prompt-tier action on a check that could not be answered");
+
+	// The SAME check on a daemon that answered and really has no image keeps the pull, which is the point:
+	// the action is withheld for the unanswered case only.
+	const absent = (await collectChecks(imgEnv(), seams(1))).find((c) => String(c.label).startsWith("Job image present"));
+	assert.equal(absent.ok, false);
+	assert.match(absent.fix, /docker pull/, "an ANSWERED absence still gets the pull");
+	assert.equal(absent.fixAction?.tier, "prompt");
+});
+
+test("doctor: a trigger image whose daemon did not answer says so too (#397)", async () => {
+	// The per-trigger loop is a second site for the same sentence, and the sweep that drives the first does
+	// not reach it: deleting this label leaves every other test green.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: cwd, flow: "f", task: "t", image: "my-python:1.2.0" } }] }));
+	const checks = await collectChecks(
+		{ ...imgEnv(), PI_TRIGGERS_FILE: join(cwd, "triggers.json") },
+		{
+			cwd,
+			spawn: fakeSpawn({ "docker image inspect my-python:1.2.0": "hang", ...green }),
+			probeValkey: async () => true,
+			fileExists: existsSync,
+			nodeVersion: "22.19.0",
+			platform: "linux",
+			home: tempDir("pi-397-trig-"),
+			out: () => {},
+			runTimeouts: FAST_TIMEOUTS,
+		},
+	);
+	const line = checks.find((c) => String(c.label).startsWith("Trigger job image present"));
+	assert.ok(line, "the trigger's image is checked");
+	assert.match(line.label, /my-python:1\.2\.0.*the daemon did not answer/, "and an unanswered read says so rather than reading as absent");
+});
+
+test("doctor: the valkey --fix `docker run` gets the PULL bound, because it may fetch an image (#397)", async () => {
+	// `docker run valkey/valkey:8` on a host that does not have that image PULLS it first, so this is the
+	// second fetching action and it needs the same bound as the job-image pull. Pinned by the clock, as a
+	// floor: on the default bound this would give up at `cmd`.
+	const cwd = scaffoldedCwd();
+	const checks = await collectChecks(
+		{ ...imgEnv(), VALKEY_URL: "redis://127.0.0.1:6379" },
+		{
+			cwd,
+			spawn: fakeSpawn(green),
+			probeValkey: async () => false,
+			fileExists: existsSync,
+			nodeVersion: "22.19.0",
+			platform: "linux",
+			home: tempDir("pi-397-valkey-"),
+			out: () => {},
+			runTimeouts: FAST_TIMEOUTS,
+		},
+	);
+	const valkey = checks.find((c) => c.fixAction?.describe?.startsWith("docker run"));
+	assert.ok(valkey, "the unreachable-valkey check offers the start");
+	const began = Date.now();
+	const res = await valkey.fixAction.run({ spawn: fakeSpawn({ docker: "hang" }), cwd, env: imgEnv() });
+	const took = Date.now() - began;
+	assert.equal(res.ok, false);
+	assert.ok(took >= FAST_TIMEOUTS.pull - 5, `waited ${took}ms, which is the PULL bound (${FAST_TIMEOUTS.pull}) and not the default (${FAST_TIMEOUTS.cmd})`);
 });

@@ -98,6 +98,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		cwd = process.cwd(),
 		out = (s) => process.stdout.write(s),
 		spawn = nodeSpawn,
+		// The bounds every `runCmd` goes through (issue #397). A seam so a test can drive the timeout path
+		// in milliseconds; nothing else passes it.
+		runTimeouts = RUN_TIMEOUTS,
 		probeValkey = defaultProbeValkey,
 		readHosts = defaultReadHosts,
 		fileExists = existsSync,
@@ -153,7 +156,7 @@ export async function runDoctor(env = process.env, deps = {}) {
 	// `isAlive` and `pid` ride the SHARED seams since issue #350, not just the `--live` spread below: the egress
 	// canary names its network after the doctor PROCESS and now sweeps what an earlier doctor run left,
 	// so it needs both, and a test cannot drive that sweep while the names come from `process.pid` directly.
-	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile, observationFs, isAlive, pid };
+	const seams = { cwd, out, spawn, probeValkey, readHosts, fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile, observationFs, isAlive, pid, runTimeouts };
 
 	let checks = await collectChecks(env, seams);
 	let failed = render(checks, out);
@@ -481,7 +484,7 @@ function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
  * a comment.
  */
 export async function collectChecks(env, seams) {
-	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync } = seams;
+	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(env), home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
 
 	const jobImage = env.PI_JOB_IMAGE ?? "pi-job:latest";
 	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379";
@@ -523,11 +526,21 @@ export async function collectChecks(env, seams) {
 	// deployment's environment come from. [] unless a seam is configured (issue #216).
 	checks.push(...(await envSetupChecks(env, seams)));
 
-	const dockerCode = await runCmd(spawn, "docker", ["info"]);
+	// THE FIRST DOCKER CALL OF THE RUN, which is why it was the one that hung (issue #397): a daemon that
+	// accepts the connection and never answers held doctor here, before it had printed anything. Bounded
+	// now, and the three outcomes are three different sentences, because telling someone whose daemon is
+	// WEDGED to install Docker is worse than saying nothing.
+	const dockerRun = await runCmd(spawn, "docker", ["info"], runTimeouts.cmd);
+	const dockerCode = dockerRun.code;
 	checks.push({
 		ok: dockerCode === 0,
-		label: "Docker daemon reachable",
-		fix: dockerCode === null ? "install Docker — `docker` was not found on PATH" : "start Docker (the daemon is not responding)",
+		label: dockerRun.ended === "timeout" ? `Docker daemon reachable (no answer in ${Math.round(runTimeouts.cmd / 1000)}s)` : "Docker daemon reachable",
+		fix:
+			dockerRun.ended === "timeout"
+				? "the daemon accepted the connection and did not answer -- `docker info` hangs too; restart Docker. Every docker check below asked the same daemon, so read them as unanswered rather than as findings"
+				: dockerRun.ended === "error"
+					? "install Docker — `docker` was not found on PATH"
+					: "start Docker (the daemon is not responding)",
 	});
 	// Issue #278: which daemon THIS SHELL's docker CLI resolves, read once and used twice -- by the in-image gh
 	// probe below, which would otherwise send the operator's gh token to it, and by the backend section's
@@ -557,24 +570,38 @@ export async function collectChecks(env, seams) {
 	}
 
 	// Only meaningful if docker itself responds; otherwise the image check is noise on top of a down daemon.
-	const imageCode = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage]) : null;
+	const imageRun = dockerCode === 0 ? await runCmd(spawn, "docker", ["image", "inspect", jobImage], runTimeouts.cmd) : { code: null, ended: "error" };
+	const imageCode = imageRun.code;
 	checks.push({
 		ok: imageCode === 0,
-		label: `Job image present (${jobImage})`,
-		fix: "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)",
+		// A timeout says the DAEMON did not answer, not that the image is absent: the fix for the second is
+		// a pull, and for the first a pull would hang exactly as this did.
+		label: imageRun.ended === "timeout" ? `Job image present (${jobImage}) -- the daemon did not answer` : `Job image present (${jobImage})`,
+		fix:
+			imageRun.ended === "timeout"
+				? "restart Docker first: this asked the same daemon that did not answer above, so whether the image is present is unknown rather than false"
+				: "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)",
 		// Prompt tier, and ONLY for the deployment default: a PI_JOB_IMAGE the operator overrode is a trust
 		// choice this command cannot honestly satisfy (pulling ghcr's pi-job would not make THEIR image
 		// exist), so an overridden name keeps the plain fix line -- the same never-tier reasoning as the
 		// trigger-named run.image checks below. Jobs run with --pull=never and that stays true: the y
 		// keypress IS the operator pulling the repo's own image themselves.
-		...(jobImage === "pi-job:latest"
+		//
+		// AND NOT WHEN THE DAEMON DID NOT ANSWER (issue #397). Changing only the label left `--fix` offering
+		// an operator a `docker pull` against the daemon it had just reported as unresponsive, which would
+		// hang for the pull bound -- ten minutes -- and then report a failed fix. A verdict that says "I
+		// could not tell" must not carry an action that assumes the answer.
+		...(jobImage === "pi-job:latest" && imageRun.ended !== "timeout"
 			? {
 					fixAction: {
 						tier: "prompt",
 						describe: "docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest",
 						run: async ({ spawn }) => {
-							if ((await runCmd(spawn, "docker", ["pull", "ghcr.io/edgehero/pi-job:latest"])) !== 0) return { ok: false, note: "docker pull failed" };
-							if ((await runCmd(spawn, "docker", ["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"])) !== 0) return { ok: false, note: "docker tag failed" };
+							// The PULL bound, not the default one: a cold pull of the job image is minutes of real work,
+							// and bounding it at the default would turn a working fix into a reported failure.
+							const pulled = await runCmd(spawn, "docker", ["pull", "ghcr.io/edgehero/pi-job:latest"], runTimeouts.pull);
+							if (pulled.code !== 0) return { ok: false, note: pulled.ended === "timeout" ? `docker pull did not finish within ${Math.round(runTimeouts.pull / 60000)} minutes` : "docker pull failed" };
+							if ((await runCmd(spawn, "docker", ["tag", "ghcr.io/edgehero/pi-job:latest", "pi-job:latest"], runTimeouts.cmd)).code !== 0) return { ok: false, note: "docker tag failed" };
 							return { ok: true };
 						},
 					},
@@ -723,10 +750,11 @@ export async function collectChecks(env, seams) {
 	//      entrypoint that execs the runner, and a ✗ here is reserved for certainties.
 	// A deployment with no run.image anywhere adds no lines at all, so its output is byte-identical.
 	for (const img of dockerCode === 0 ? images.filter((i) => i !== jobImage) : []) {
-		const code = await runCmd(spawn, "docker", ["image", "inspect", img]);
+		const run = await runCmd(spawn, "docker", ["image", "inspect", img], runTimeouts.cmd);
+		const code = run.code;
 		checks.push({
 			ok: code === 0,
-			label: `Trigger job image present (${img})`,
+			label: run.ended === "timeout" ? `Trigger job image present (${img}) -- the daemon did not answer` : `Trigger job image present (${img})`,
 			fix: `docker pull ${img} (or build it) -- a trigger names it in run.image, and jobs run with --pull=never, so the worker never fetches it at job time`,
 		});
 		if (code !== 0) continue;
@@ -769,7 +797,19 @@ export async function collectChecks(env, seams) {
 	// `mountSet` are observed, so the backend section and the job-user section speak from one read. Printed after them.
 	const jobUser = await jobUserChecks(env, seams, { endpoint, dockerCode, imageCode, jobImage });
 	// No docker binary at all is an ANSWER for the observations, as it is for the worker (exit 2 under a floor, not a retry).
-	const daemon = jobUser.daemon ?? (dockerCode === null ? { answered: false, reason: "docker-not-found", transient: true } : null);
+	// A daemon that did not ANSWER is the opposite class, and telling them apart is the whole point of `ended`
+	// (issue #397): `docker-not-found` is DETERMINATE in `runtime-observations` -- it resolves to `value: false`,
+	// which makes a floor REFUSE and hands the operator "no docker CLI was found on PATH" for a host whose CLI
+	// is fine. A timeout resolves to `value: null` instead, which is the transient class `backendChecks` already
+	// has the right sentence for ("fix what stops the daemon answering"; the worker exits 1 so the supervisor
+	// retries). Before this arm existed both landed on the determinate one, byte-identically.
+	const daemon =
+		jobUser.daemon ??
+		(dockerRun.ended === "timeout"
+			? { answered: false, reason: "docker-no-answer", transient: true }
+			: dockerCode === null
+				? { answered: false, reason: "docker-not-found", transient: true }
+				: null);
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs }));
 	checks.push(...jobUser.checks);
 	if (facts) facts.jobUser = jobUser.forLive;
@@ -924,7 +964,7 @@ export async function collectChecks(env, seams) {
 				label: "github triggers take their repository from each delivery -- branch protection cannot be preflighted per repo here, and is enforced per job before any spend (REQ-BRANCH-PROTECTION-PRECONDITION)",
 			});
 		} else {
-			checks.push(...(await githubProtectionPreflight(spawn, repositories)));
+			checks.push(...(await githubProtectionPreflight(spawn, repositories, runTimeouts)));
 		}
 	}
 
@@ -1062,7 +1102,9 @@ export async function collectChecks(env, seams) {
 			// launched. Every one of those is silence, because a check nobody can silence must never cry
 			// wolf -- the cost of a missed warning here is one operator reading the doc, and the cost of a
 			// false one is every operator learning to scroll past doctor.
-			const ignoreCode = await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(keyPath), "check-ignore", "-q", keyPath]);
+			// A TIMEOUT is silence too, which is the same answer this comment already argues for `null`: exit 1
+			// is the only case that warns, so a git that did not finish cannot cry wolf.
+			const ignoreCode = (await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(keyPath), "check-ignore", "-q", keyPath], runTimeouts.cmd)).code;
 			if (ignoreCode === 1) {
 				checks.push({
 					ok: false,
@@ -1137,7 +1179,8 @@ export async function collectChecks(env, seams) {
 						tier: "prompt",
 						describe: `docker ${VALKEY_RUN.join(" ")}`,
 						run: async ({ spawn }) =>
-							(await runCmd(spawn, "docker", VALKEY_RUN)) === 0
+							// The PULL bound: this `docker run` fetches the valkey image on a host that does not have it.
+							(await runCmd(spawn, "docker", VALKEY_RUN, runTimeouts.pull)).code === 0
 								? { ok: true }
 								: { ok: false, note: "docker run failed (is a container named pi-dispatch-valkey already present? `docker start pi-dispatch-valkey`)" },
 					},
@@ -3232,7 +3275,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * output.
  */
 async function envSetupChecks(env, seams) {
-	const { cwd, spawn, fileExists, platform, home } = seams;
+	const { cwd, spawn, fileExists, platform, home, runTimeouts = RUN_TIMEOUTS } = seams;
 	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins
 
 	if (platform === "win32") {
@@ -3322,7 +3365,7 @@ async function envSetupChecks(env, seams) {
 
 		// The #211 question, asked of a different file. Exit 1 is again the ONLY case that speaks: 0 means
 		// ignored, 128 means no work tree, null means git could not be launched, and all three are silence.
-		const ignoreCode = await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(setup), "check-ignore", "-q", setup]);
+		const ignoreCode = (await runCmd(spawn, "git", [...GIT_READ_FLAGS, "-C", dirname(setup), "check-ignore", "-q", setup], runTimeouts.cmd)).code;
 		if (ignoreCode === 1) {
 			checks.push({
 				ok: false,
@@ -3352,7 +3395,7 @@ async function envSetupChecks(env, seams) {
  * yet -- tests exercise it directly, and the runDoctor wiring is already live for the day the schema
  * grows the field for github. Returns check objects in runDoctor's `{ok, warn, label, fix}` shape.
  */
-export async function githubProtectionPreflight(spawn, repositories) {
+export async function githubProtectionPreflight(spawn, repositories, runTimeouts = RUN_TIMEOUTS) {
 	const checks = [];
 	// gh availability first, mirroring the GITHUB_AUTH_SOURCE=gh handling in runDoctor: one warn covers
 	// every repo, and the loop is skipped rather than producing one confusing failure line per repo.
@@ -3387,33 +3430,77 @@ export async function githubProtectionPreflight(spawn, repositories) {
 			});
 			continue;
 		}
-		const code = await runCmd(spawn, "gh", ["api", `repos/${repo}/branches/${name}/protection`]);
+		// THE ONE SITE WHERE A TIMEOUT WOULD HAVE BEEN A WRONG VERDICT rather than a missing one: this is a
+		// network call, and reading "did not finish" as "non-zero exit" reports a PROTECTED branch as
+		// unprotected and tells the operator to go and protect it. It says it could not tell, instead --
+		// the wording the unresolvable-default-branch arm above already uses for the same situation.
+		const protection = await runCmd(spawn, "gh", ["api", `repos/${repo}/branches/${name}/protection`], runTimeouts.cmd);
 		checks.push(
-			code === 0
+			protection.code === 0
 				? { ok: true, label: `default branch of ${repo} is protected (${name})` }
-				: {
-						ok: false,
-						warn: true,
-						label: `default branch of ${repo} is not protected -- the worker refuses forge jobs on unprotected repos before any spend (REQ-BRANCH-PROTECTION-PRECONDITION)`,
-						fix: `protect ${name} at https://github.com/${repo}/settings/branches (see SECURITY.md) -- a read-only preflight, doctor never changes repo settings`,
-					},
+				: protection.ended === "timeout"
+					? {
+							ok: false,
+							warn: true,
+							label: `could not check branch protection for ${repo} -- gh did not answer in ${Math.round(runTimeouts.cmd / 1000)}s`,
+							fix: "re-run when the forge is reachable; the worker still refuses an unprotected repo at job time, so this is a preflight and not the gate",
+						}
+					: {
+							ok: false,
+							warn: true,
+							label: `default branch of ${repo} is not protected -- the worker refuses forge jobs on unprotected repos before any spend (REQ-BRANCH-PROTECTION-PRECONDITION)`,
+							fix: `protect ${name} at https://github.com/${repo}/settings/branches (see SECURITY.md) -- a read-only preflight, doctor never changes repo settings`,
+						},
 		);
 	}
 	return checks;
 }
 
-/** Resolve a spawned command's exit code; null means it could not be launched (e.g. not on PATH). */
-function runCmd(spawn, cmd, args) {
+/**
+ * Resolve a spawned command's exit code, BOUNDED, and say why it ended (issue #397).
+ *
+ * This had no timeout at all, so a daemon that accepts the connection and never answers held
+ * `pi-dispatch doctor` open at the FIRST docker call with nothing printed and no check to point at.
+ * Measured on docker 27.4.0: `docker info` against such a daemon waits indefinitely, and the CLI's own
+ * `--tls*` timeouts do not apply to a socket that is open but silent.
+ *
+ * ONE BOUND WITH A PER-CALL OVERRIDE, which is why this is not simply a constant. `--fix`'s `docker pull`
+ * can legitimately take minutes on a cold host, so a single bound is either too short for the pull or too
+ * long to be a bound. `runCmdCapture` beside this one already had exactly that shape, and so does
+ * `import-pi`'s 600s override, so this is the file's existing answer rather than a new one.
+ *
+ * AND IT SAYS WHY, in `liveRunVia`'s vocabulary (`"error"`, `"timeout"`, `"close"`), because the two nulls
+ * are opposite facts to an operator: a CLI that never launched means docker is not installed, and one
+ * killed by the bound means the daemon is wedged. Reading a timeout as "not installed" would tell someone
+ * with a running-but-stuck daemon to install Docker, and reading `gh api`'s timeout as a non-zero exit
+ * would report a PROTECTED branch as unprotected. Every caller that can tell those apart now does.
+ */
+function runCmd(spawn, cmd, args, timeoutMs = RUN_TIMEOUTS.cmd) {
 	return new Promise((resolve) => {
 		let child;
 		try {
 			child = spawn(cmd, args, { stdio: "ignore" });
 		} catch {
-			resolve(null);
+			resolve({ code: null, ended: "error" });
 			return;
 		}
-		child.on("error", () => resolve(null)); // ENOENT etc. — the binary is not available
-		child.on("close", (code) => resolve(code));
+		let done = false;
+		const finish = (code, ended) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			resolve({ code, ended });
+		};
+		// SIGKILL, like `liveRunVia`: a catchable signal lets a child that is already wedged outlive the
+		// bound, which is the whole thing this is here to stop.
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+			finish(null, "timeout");
+		}, timeoutMs);
+		child.on("error", () => finish(null, "error")); // ENOENT etc. — the binary is not available
+		child.on("close", (code) => finish(code, "close"));
 	});
 }
 
@@ -4051,6 +4138,18 @@ function defaultIsAlive(pid) {
 		return err?.code === "EPERM";
 	}
 }
+
+/**
+ * The bounds every `runCmd` call runs under (issue #397). `cmd` is the default and matches
+ * `runCmdCapture`'s, so the two runners in this file do not disagree about what "too long" means. `pull`
+ * is the override for the two `--fix` actions that fetch an image, and matches the 600s this file already
+ * gives `import-pi`: a cold `docker pull` of the job image is minutes of legitimate work, and bounding it
+ * at 30s would turn a working fix into a failed one.
+ *
+ * Injected through the `runTimeouts` seam rather than read here, so a test can drive the timeout path in
+ * milliseconds instead of waiting half a minute for it.
+ */
+export const RUN_TIMEOUTS = Object.freeze({ cmd: 30_000, pull: 600_000 });
 
 /** The live probes' `run` seam over doctor's spawn: `{ code, stdout, stderr }`, bounded, `code: null` when it could not run. */
 /**
