@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1274,6 +1274,48 @@ test("doctor: a deployment with no command triggers prints no command line at al
  * exercised against the filesystem it will actually read. Contents are irrelevant -- doctor never parses
  * either file, and must not start.
  */
+/**
+ * `runDoctor` in a BOUNDED CHILD, for the reads that can block (issue #396).
+ *
+ * `readFileSync` on a FIFO never returns, and it is synchronous, so a guard removed from one of doctor's
+ * regular-file checks does not redden the test that covers it -- it HANGS the whole file, `--test-timeout`
+ * cannot reach a blocked event loop, and CI reports a job timeout instead of a failure. The three tests that
+ * plant a named pipe therefore ran the subject where no bound could reach it.
+ *
+ * A child with `timeout` plus `killSignal: "SIGKILL"` turns that into an assertion. SIGKILL because
+ * `spawnSync` waits for the child to exit, so a catchable signal lets a process blocked in a synchronous
+ * read outlive the bound -- the same reasoning, and the same shape, as `receiver/test/start.test.mjs`'s
+ * bounded spawn.
+ */
+function doctorInChild(env, cwd, { timeoutMs = 20000 } = {}) {
+	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
+	const script = `
+		const { runDoctor } = await import(${JSON.stringify(doctorUrl)});
+		let out = "";
+		const code = await runDoctor(${JSON.stringify(env)}, {
+			cwd: ${JSON.stringify(cwd)},
+			out: (s) => { out += s; },
+			spawn: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+			probeValkey: async () => true,
+			nodeVersion: "22.19.0",
+		});
+		process.stdout.write(JSON.stringify({ code, out }));
+	`;
+	const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf8" });
+	// The ERROR, and only the error: a killed child has `status: null`, which would read as an ordinary
+	// non-zero exit, so the bound is detected here and the exit code is left to the caller.
+	assert.equal(r.error?.code, undefined, `doctor did not return within ${timeoutMs}ms -- a regular-file guard is missing, which is the failure this shape exists to name. stderr: ${r.stderr}`);
+	return JSON.parse(String(r.stdout));
+}
+
+/** `doctorInChild`'s sibling for a module-level call: same bound, same reason, arbitrary script body. */
+function inChild(body, { timeoutMs = 20000 } = {}) {
+	const url = JSON.stringify(new URL("../src/doctor.mjs", import.meta.url).href);
+	const r = spawnSync(process.execPath, ["--input-type=module", "-e", `const URL = ${url};\n${body}`], { timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf8" });
+	assert.equal(r.error?.code, undefined, `the call did not return within ${timeoutMs}ms -- a regular-file guard is missing. stderr: ${r.stderr}`);
+	return JSON.parse(String(r.stdout));
+}
+
 function scaffoldedCwd() {
 	const dir = tempDir("pi-scaffold-");
 	writeFileSync(join(dir, "pause-windows.json"), EMPTY_PAUSE_WINDOWS);
@@ -1491,9 +1533,14 @@ test("doctor: a .env that is a FIFO does not hang the boot-file checks (#384)", 
 	const fifo = join(cwd, "fifo.json");
 	const { spawnSync } = await import("node:child_process");
 	spawnSync("mkfifo", [fifo]);
-	const { out, text } = capture();
-	const code = await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: fifo }), scaffoldDeps(out, cwd));
-	assert.match(text(), /is not a regular file/, "the guard names what it refused");
+	// THROUGH A BOUNDED CHILD (issue #396): in-process, a missing guard blocks this file forever instead of
+	// failing it. See `doctorInChild`.
+	const { code, out } = doctorInChild({ PI_JOB_IMAGE: "pi-job:latest", PI_PAUSE_WINDOWS_FILE: fifo }, cwd);
+	assert.match(out, /is not a regular file/, "the guard names what it refused");
+	// A CONTROL, because the exit code alone is not discriminating here: the child's spawn stub refuses every
+	// docker call, so doctor exits 1 whatever this key points at. What separates the two runs is the LINE.
+	const control = doctorInChild({ PI_JOB_IMAGE: "pi-job:latest", PI_PAUSE_WINDOWS_FILE: join(cwd, "pause-windows.json") }, cwd);
+	assert.doesNotMatch(control.out, /is not a regular file/, "and a real file is not refused, so the line above is about the FIFO and not about the harness");
 	assert.equal(code, 1);
 });
 
@@ -1552,12 +1599,38 @@ test("doctor: a .env that is a FIFO does not hang the command, through the DEFAU
 	// The guard that matters is the one `collectChecks` actually gets: every other assertion here injects
 	// its own `statFile`, so the production default was unpinned and a named pipe would have hung
 	// `pi-dispatch doctor` forever, with no output and no check to point at.
+	// IN A BOUNDED CHILD, for the reason `doctorInChild` gives: this reads through the PRODUCTION default
+	// `statFile`, so with that guard deleted `readFileSync` blocks on the FIFO and this whole FILE hangs
+	// rather than failing. A review pass measured exactly that against the first version of this change,
+	// which converted the two `runDoctor` FIFO tests and left this one in-process.
 	const cwd = tempDir("pi-fifo-");
 	const fifo = join(cwd, ".env");
 	execFileSync("mkfifo", [fifo]);
-	assert.deepEqual(envFileKeys(fifo, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), { unreadable: true }, "not a regular file, so not read at all -- and SOMETHING is there, which is not the same as the key being unset");
+	const got = inChild(
+		`const { envFileKeys } = await import(URL);
+		const { existsSync, readFileSync } = await import("node:fs");
+		const read = (p) => readFileSync(p, "utf8");
+		process.stdout.write(JSON.stringify({
+			fifo: envFileKeys(${JSON.stringify(fifo)}, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: read }),
+			dir: envFileKeys(${JSON.stringify(cwd)}, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: read }),
+		}));`,
+	);
+	assert.deepEqual(got.fifo, { unreadable: true }, "not a regular file, so not read at all -- and SOMETHING is there, which is not the same as the key being unset");
 	// A directory is the other shape, and it throws rather than blocking; both must be silent.
-	assert.deepEqual(envFileKeys(cwd, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), { unreadable: true }, "a .env that is a DIRECTORY is unreadable too: statFile answers happily and isFile() is false, so this never threw and the key came back merely absent");
+	assert.deepEqual(got.dir, { unreadable: true }, "a .env that is a DIRECTORY is unreadable too: statFile answers happily and isFile() is false, so this never threw and the key came back merely absent");
+});
+
+test("doctor: a FIFO named by PI_TRIGGERS_FILE does not hang the command either (#396)", async () => {
+	// THE THIRD GUARD, which issue #396 names and which nothing drove: deleting `readTriggerFacts`' own
+	// `isFile()` left the entire suite green in 2.2 seconds, because no fixture in the repo ever planted a
+	// named pipe at the triggers path. Measured with it deleted: doctor blocks until the child's bound
+	// kills it. The guard is as load-bearing as its two siblings and was the only one untested.
+	const cwd = scaffoldedCwd();
+	const fifo = join(cwd, "triggers.json");
+	if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+	const { code, out } = doctorInChild({ PI_JOB_IMAGE: "pi-job:latest", PI_TRIGGERS_FILE: fifo }, cwd);
+	assert.match(out, /triggers file is not a regular file/, "the read is refused rather than attempted");
+	assert.equal(code, 1, "and a triggers path the worker cannot read fails the command");
 });
 
 test("doctor: a good path in THIS SHELL does not excuse a blank line in the .env (#384)", async () => {
@@ -1694,18 +1767,19 @@ test("doctor: a FIFO named by PI_SCOPED_LIMITS_FILE does not hang the command (#
 	// hung `pi-dispatch doctor` forever: no output, no check to point at, and nothing to kill but the
 	// terminal. `readTriggerFacts` had the same shape and is guarded with it.
 	//
-	// STATED LIMIT: remove either guard and this test does not go red, it HANGS. `readFileSync` is
-	// synchronous, so no `--test-timeout` can interrupt it and CI reports a job timeout rather than a
-	// failure. The assertion below is still the right one -- it names the verdict the guard produces -- but
-	// a reader should know that a green run here is also what a missing guard looks like until the clock
-	// runs out.
+	// THE STATED LIMIT IS GONE, and this is what replaced it (issue #396). It used to read: remove either
+	// guard and this test does not go red, it HANGS, because `readFileSync` is synchronous and no
+	// `--test-timeout` can interrupt it, so CI reports a job timeout rather than a failure -- which is
+	// honest, and is not a pin. Through `doctorInChild` the bound is outside the blocked process, so a
+	// missing guard is now an assertion that names itself.
 	const cwd = tempDir("pi-fifo-scoped-");
 	const fifo = join(cwd, "limits.json");
 	execFileSync("mkfifo", [fifo]);
-	const { out, text } = capture();
-	const code = await runDoctor(imgEnv({ PI_SCOPED_LIMITS_FILE: fifo }), scaffoldDeps(out, cwd));
-	assert.match(text(), /is not a regular file/, "the read is refused rather than attempted");
-	assert.equal(code, 1, "and a key pointed at something the worker cannot load fails the command");
+	const { code, out } = doctorInChild({ PI_JOB_IMAGE: "pi-job:latest", PI_SCOPED_LIMITS_FILE: fifo }, cwd);
+	assert.match(out, /is not a regular file/, "the read is refused rather than attempted");
+	// The code is 1 either way under the child's spawn stub (see the control in the `.env` FIFO test above),
+	// so it is asserted as a floor and the LINE carries the claim.
+	assert.equal(code, 1, "and the command fails");
 });
 
 test("doctor: a deployment folder with an apostrophe in its name still gets a report (#384)", async () => {
@@ -5370,4 +5444,75 @@ test("doctor: the valkey --fix `docker run` gets the PULL bound, because it may 
 	const took = Date.now() - began;
 	assert.equal(res.ok, false);
 	assert.ok(took >= FAST_TIMEOUTS.pull - 5, `waited ${took}ms, which is the PULL bound (${FAST_TIMEOUTS.pull}) and not the default (${FAST_TIMEOUTS.cmd})`);
+});
+
+test("doctor: a line the reader cannot model is said ONCE for the file, naming both keys (#396)", async () => {
+	// It was said once per KEY, inside the per-key loop, so one unreadable line produced two near-identical
+	// warnings differing only in which key they named. The fact is about the FILE, and nothing pinned the
+	// count -- hoisting it out left the whole suite green.
+	// PLATFORM DRIVEN EXPLICITLY, and the reason is a fact worth writing down rather than a test detail: a
+	// hazard is a line a SOURCING loader cannot get past, and systemd has none of these -- it ignores what it
+	// cannot parse rather than aborting, measured in #384 for `unset K`, a command substitution, an unclosed
+	// quote and a bare word alike. So this warning can only ever arise where the service SOURCES the file,
+	// which is darwin and the sh wrapper. Left on the default platform, this passed on macOS and reported
+	// zero lines on CI's Linux, which is the platform-dependent-fixture defect this round has hit before.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `unset PI_PAUSE_WINDOWS_FILE\nPI_SCOPED_LIMITS_FILE=${join(cwd, "scoped-limits.json")}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "darwin" });
+	const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
+	assert.equal(lines.length, 1, `exactly one line about the file, got:\n${lines.join("\n")}`);
+	// DERIVED, not spelled: replacing the `BOOT_FILES.map(...).join(" or ")` with the literal string left this
+	// green, so a third boot key would silently keep the line naming two while its own "reads only the two it
+	// names" became false. `ENV_FILE_READABLE_KEYS` is the frozen set the reader is allowed to look at, and
+	// it is what the line has to agree with.
+	for (const key of ENV_FILE_READABLE_KEYS) assert.ok(lines[0].includes(key), `the line names ${key}, which the reader reads`);
+	// AND ON LINUX THERE IS NO SUCH LINE AT ALL, which is the other half of the same fact: systemd reads the
+	// file without aborting, so nothing about it is unreadable to this command.
+	const onLinux = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(onLinux.out, cwd), platform: "linux" });
+	assert.doesNotMatch(onLinux.text(), /cannot be read off/, "systemd ignores the line rather than stopping at it, so there is nothing to warn about");
+	assert.ok(lines[0].includes(` or `), "and joins them, rather than naming one");
+	// The limit sentence rides the FIX line, not the label, so it is matched against the whole report.
+	assert.match(text(), new RegExp(`reads only the ${ENV_FILE_READABLE_KEYS.length === 2 ? "two" : String(ENV_FILE_READABLE_KEYS.length)} it names`), "the count in the limit sentence matches the frozen set");
+	// AND BY SHAPE, because with exactly two keys a frozen literal produces the same string and every
+	// assertion above passes on it -- measured. The risk the derivation exists for is a THIRD boot file, at
+	// which point the literal would keep naming two while the sentence beside it kept saying "the two it
+	// names". This reads the source, so its limit is the usual one: it sees the expression, not the output.
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
+	assert.match(src, /BOOT_FILES\.map\(\(spec\) => spec\.key\)\.join\(/, "the names in that line are derived from BOOT_FILES, not spelled out");
+	// The limit is IN the line, because the same hazard may stop a sourcing shell reaching a key this
+	// command does not read at all -- WEBHOOK_SECRET, which the receiver refuses to start without.
+});
+
+test("doctor: removing a regular-file guard REDDENS this file instead of hanging it (#396)", async () => {
+	// THE ORACLE FOR THE THREE FIFO TESTS ABOVE, and the reason it has to be a child process. Those three
+	// drive `runDoctor` in-process, so with a guard deleted `readFileSync` blocks forever on the FIFO: the
+	// read cannot be interrupted, `--test-timeout` cannot reach a blocked event loop, and CI reports a job
+	// timeout rather than a failure. The tests say so in a comment, which is honest but is not a pin.
+	//
+	// A BOUNDED CHILD turns that into an assertion, using the `spawnSync` + `killSignal: "SIGKILL"` shape
+	// `receiver/test/start.test.mjs` already uses: SIGKILL because `spawnSync` waits for the child to exit,
+	// so a catchable signal lets a process blocked in a synchronous read outlive the bound.
+	const { spawnSync } = await import("node:child_process");
+	const cwd = scaffoldedCwd();
+	const fifo = join(cwd, "fifo.json");
+	if (spawnSync("mkfifo", [fifo]).status !== 0) return; // no mkfifo on this host: nothing to say
+	const doctorUrl = new URL("../src/doctor.mjs", import.meta.url).href;
+	const script = `
+		const { runDoctor } = await import(${JSON.stringify(doctorUrl)});
+		const code = await runDoctor({ PI_JOB_IMAGE: "pi-job:latest", PI_PAUSE_WINDOWS_FILE: ${JSON.stringify(fifo)} }, {
+			cwd: ${JSON.stringify(cwd)},
+			out: () => {},
+			spawn: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+			probeValkey: async () => true,
+			nodeVersion: "22.19.0",
+		});
+		process.stdout.write("EXITED:" + code);
+	`;
+	const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { timeout: 20000, killSignal: "SIGKILL", encoding: "utf8" });
+	// The ERROR is checked before the status, because a killed child has `status: null` and would otherwise
+	// read as an ordinary non-zero exit.
+	assert.equal(r.error?.code, undefined, `doctor RETURNED rather than blocking on the FIFO; if this is ETIMEDOUT a regular-file guard is missing. stderr: ${r.stderr}`);
+	assert.match(String(r.stdout), /EXITED:\d/, `the child ran doctor to completion; stderr: ${r.stderr}`);
 });

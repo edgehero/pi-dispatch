@@ -360,6 +360,12 @@ const ORACLE_CORPUS = [
 	"K=~/x",
 	"K==ls",
 	"K=a:=b",
+	// TWO LINES, because the single-line shapes above are not vouched for and so are never compared: the
+	// hole is a line whose sourcing ZSH ABANDONS sitting ABOVE a key the reader does vouch for (issue #396).
+	// Measured on this host: sh, bash and dash all give `/good.json`; in zsh the `.` returns 126 at line 1
+	// and K is never set, so the child gets nothing.
+	"K2=a:=b\nK=/good.json\n",
+	"K2==x\nK=/good.json\n",
 	"K=$(echo hi)",
 	"K=`echo hi`",
 	"K=${HOME}",
@@ -452,6 +458,11 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 	const file = join(dir, "probe.env");
 	const shells = ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh", "/usr/bin/zsh"].filter((sh) => existsSync(sh));
 	assert.ok(shells.length >= 2, `the oracle needs real shells to be an oracle, found ${shells.join(", ") || "none"}`);
+	// The shapes whose sourcing zsh abandons, named so the exemption is a list a reader can audit rather than
+	// a condition buried in the loop. A SAMPLE of a wider family, deliberately: `K2=x:=y:=z`, `K2=:=b`,
+	// `K2=a:~b` and `K2=~x` behave identically and are not carried, because two is enough to hold the rule
+	// and every extra one costs a shell spawn per run.
+	const ZSH_ABORTS_SOURCING = new Set(["K2=a:=b\nK=/good.json\n", "K2==x\nK=/good.json\n"]);
 	assert.ok(ORACLE_CORPUS.length >= 100, `corpus is ${ORACLE_CORPUS.length} shapes, and a floor well under the real count lets the corpus erode without a test noticing`);
 	// UNIQUE, because a repeated shape looks like coverage and is not -- and one slipped in, a BOM-on-line-2
 	// entry added twice, which the vouched-shape floor then counted twice as well.
@@ -476,6 +487,24 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 			// doctor actually prints -- "the loader ends up with this". Comparing the weaker one made the
 			// oracle demand that `K=/a.json` above an `unset K` still reach the child.
 			if (reading.K === undefined || !reading.K.vouched) continue;
+			// ZSH IS CHECKED BUT NOT PROMISED, and these shapes are where that distinction is spent (issue
+			// #396). MEASURED, because a first version of this comment got the mechanism wrong: zsh does NOT
+			// exit. It reads `a:=b` as a command to find, fails to find it, and its `.` builtin ABORTS THE
+			// SOURCING at that line with 126 -- the shell carries on happily, and every key BELOW the line is
+			// simply never set, while sh, bash and dash read the file through. The null below is `printenv`
+			// reporting no K, which is what `childValue` turns any non-zero status into, as its own comment
+			// above says.
+			//
+			// The grammar is the intersection of what the SERVICE LOADERS read the same way, and zsh is none
+			// of them: the wrapper has a `#!/bin/sh` shebang and the launchd wrapper runs `/bin/sh`. Refusing
+			// the shapes outright was rejected in the reader's own docblock -- it would warn about a line
+			// every loader this project deploys reads correctly. So the exemption is NAMED, per shape, rather
+			// than zsh being quietly dropped from the oracle. The two here are a SAMPLE of a wider family,
+			// not its boundary.
+			if (ZSH_ABORTS_SOURCING.has(text) && /zsh$/.test(sh)) {
+				assert.equal(got, null, `${sh} on ${JSON.stringify(text)}: exempt because zsh's \`.\` aborts the sourcing here, so the key below is never set; if that stopped happening the exemption is the thing that is now wrong`);
+				continue;
+			}
 			compared += 1;
 			assert.equal(got, reading.K.value, `${sh} on ${JSON.stringify(text)}`);
 		}
@@ -484,8 +513,9 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 	// rather than in comparisons, because the comparison count scales with how many shells a host happens to
 	// have -- a floor in comparisons passes on a four-shell mac and fails on a CI runner with three, which
 	// is a test that depends on the machine instead of on the code.
-	assert.ok(vouchedShapes >= 34, `only ${vouchedShapes} of ${ORACLE_CORPUS.length} shapes were vouched for, so this oracle is checking almost nothing`);
-	assert.equal(compared, vouchedShapes * shells.length, "every vouched shape is checked against every shell that exists here");
+	assert.ok(vouchedShapes >= 36, `only ${vouchedShapes} of ${ORACLE_CORPUS.length} shapes were vouched for, so this oracle is checking almost nothing`);
+	const zshCount = shells.filter((sh) => /zsh$/.test(sh)).length;
+	assert.equal(compared, vouchedShapes * shells.length - ZSH_ABORTS_SOURCING.size * zshCount, "every vouched shape is checked against every shell that exists here, less the named zsh exemptions");
 });
 
 test("E3: what the file says and what systemd says are two different sentences", () => {

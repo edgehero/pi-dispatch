@@ -1861,6 +1861,26 @@ export async function collectChecks(env, seams) {
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
 	const seamsForLoad = { statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p) => readEnvFile(p) : readFileSync } };
+	// ONCE PER FILE, not once per key (issue #396). This is a fact about the FILE -- one line the reader
+	// cannot model -- and it was announced inside the per-key loop, so a `.env` with one such line produced
+	// two near-identical warnings differing only in which key they named. The keys it prevents a verdict
+	// about are listed IN the line instead, which is what the reader actually knows.
+	//
+	// ITS LIMIT, stated because the wording would otherwise imply more: this command reads two keys, so the
+	// line says what it cannot answer about THOSE. The same hazard may also stop a sourcing shell reaching
+	// `WEBHOOK_SECRET`, which the receiver refuses to start without, and nothing here says so -- widening
+	// the read is how a narrow reader grows into "load the .env", which `envFileKeys`' own docblock and
+	// `docs/secrets.md` both refuse.
+	if (envFile.hazard != null) {
+		const named = BOOT_FILES.map((spec) => spec.key).join(" or ");
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `whether ${named} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} is not one this command can read`,
+			fix: `fix line ${envFile.hazard.line} of that file and run doctor again -- a line that is not an assignment is RUN by the wrappers that source this file, an unclosed quote or a trailing backslash makes the line below it part of that value, and a value that can run a command or end the shell leaves every key in the file unset. Other keys in the same file are affected too and are not checked here: this command reads only the two it names`,
+		});
+	}
+
 	for (const spec of BOOT_FILES) {
 		const scaffolded = join(cwd, spec.scaffold);
 		const shellRaw = spec.resolve(env);
@@ -1900,15 +1920,6 @@ export async function collectChecks(env, seams) {
 		// subject that never reads that file at all. That is the first row of this issue's own defect table,
 		// reinstated behind a condition, and `REQ-DEPLOYMENT-BOOTSTRAP` is normative: a refusal on EITHER
 		// subject fails the command.
-		if (envFile.hazard != null) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `whether ${spec.key} reaches the service cannot be read off ${join(cwd, ".env")}: line ${envFile.hazard.line} is not one this command can read`,
-				fix: `fix line ${envFile.hazard.line} of that file and run doctor again -- a line that is not an assignment is RUN by the wrappers that source this file, an unclosed quote or a trailing backslash makes the line below it part of that value, and a value that can run a command or end the shell leaves every key in the file unset`,
-			});
-		}
-
 		// THE SERVICE, judged on what the file gives its loader.
 		if (envFile.hazard == null && blankInFile) {
 			checks.push({

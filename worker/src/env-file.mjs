@@ -357,6 +357,22 @@ export function updateEnvFile(path, key, value, deps = {}) {
  *   K==ls        systemd "=ls"        zsh expands to /bin/ls; sh and bash do not
  *   K=  leading  systemd "leading"    the shells leave K UNSET
  *
+ * ZSH IS CHECKED BUT NOT PROMISED, and the distinction is worth stating because the oracle asserts it
+ * (issue #396). The grammar is the intersection of what the SERVICE LOADERS read the same way -- systemd's
+ * `EnvironmentFile=`, the `/bin/sh` the wrappers source with, and the cmd wrapper on Windows. zsh is none
+ * of those: `deploy/worker-env-wrapper.sh` has a `#!/bin/sh` shebang and the launchd wrapper runs `/bin/sh`,
+ * which is bash 3.2 in posix mode on macOS. It is driven anyway because a disagreement there is usually a
+ * hole in the grammar rather than a fact about zsh.
+ *
+ * One FAMILY of shapes is the exception, and it is why this paragraph exists rather than a wider refusal.
+ * `K=a:=b` and `K==x` are two of them: zsh treats the right-hand side as a command to find, and when it
+ * cannot, its `.` builtin ABORTS THE SOURCING at that line and returns 126. The SHELL carries on -- it does
+ * not exit, measured -- but every key below that line is never set, while sh, bash and dash read the file
+ * through and this reader keeps vouching. Refusing the shapes outright was considered and rejected: it would
+ * warn an operator about a line every loader this project actually deploys reads correctly, which is a false
+ * alarm bought with nothing. The oracle names the two it carries; the family is wider (`K2=x:=y:=z`,
+ * `K2=:=b`, `K2=a:~b`, `K2=~x` and more behave the same way), and naming two is a sample, not a boundary.
+ *
  * So this reader does NOT claim a value for every line. It reports `plain: true` only for the shapes where
  * every one of those loaders agrees, and `plain: false` otherwise, with `value: null`. The previous version
  * claimed a value for all of them and its own docblock listed four shapes where it was wrong; the list was
