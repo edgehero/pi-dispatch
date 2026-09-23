@@ -1148,31 +1148,34 @@ test("NO tool exposes a tool-scoping parameter -- excludeTools stays a reviewed 
 });
 
 test("the MODEL-visible channel is gated too, which neither pane gate reaches (#382)", async () => {
-  // `/dispatch triggers`, `settings` and `budget` answer through `sendMessage`, not through the overlay, so
-  // the two gates in the render path never see them -- and `renderTriggers` scrubs nothing of its own. An
-  // adversarial pass drove a trigger whose `on.phrase` and label came from `dispatch_trigger_add` itself
-  // and got raw CSI, OSC-8 and OSC-52 into both the terminal and MODEL CONTEXT, while the overlay showing
-  // the same trigger was clean.
+  // `/dispatch settings`, `triggers` and `budget` answer through `sendMessage`, not through the overlay, so
+  // the two gates in the render path never see them -- and the plain renderers scrub nothing of their own.
+  // An adversarial pass got raw CSI, OSC-8 and OSC-52 into both the terminal and MODEL CONTEXT that way,
+  // while the overlay showing the same values was clean.
+  //
+  // THROUGH `settings` AND NOT `triggers`, deliberately. `triggers` also reads the SCHEDULERS, which opens a
+  // queue client: with no Valkey reachable the client's rejection surfaces as an unhandled rejection and
+  // fails the file, which is exactly what it did on CI's release job while passing locally against a
+  // listener on another port. The claim here is about `send`, the one funnel every one of those
+  // subcommands goes through, so the subcommand that needs no queue is the one that should make it.
   const { calls, def } = await loadRegistered();
-  const dir = tempDir("pi-admin-triggers-");
+  const dir = tempDir("pi-admin-settings-");
   const payload = "\u001b[2J\u001b]52;c;cm0=\u0007\u009b2J";
-  const run = { kind: "github", repo: "o/r", flow: "fix", task: "t", image: `img${payload}` };
-  writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [
-    { on: { type: "comment", phrase: `please ${payload} fix` }, run },
-    { on: { type: "label", any: [`bug${payload}`] }, run },
-  ] }));
-  const had = Object.prototype.hasOwnProperty.call(process.env, "PI_TRIGGERS_FILE");
-  const before = process.env.PI_TRIGGERS_FILE;
-  process.env.PI_TRIGGERS_FILE = join(dir, "triggers.json");
+  // The file IS the overlay -- `readOverlay` validates the parsed object directly, so a `{ overlay: ... }`
+  // wrapper reads as ten unset keys and the assertion below would have nothing to look at.
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ model: `claude-x${payload}`, provider: `anthropic${payload}` }));
+  const had = Object.prototype.hasOwnProperty.call(process.env, "PI_SETTINGS_FILE");
+  const before = process.env.PI_SETTINGS_FILE;
+  process.env.PI_SETTINGS_FILE = join(dir, "settings.json");
   try {
-    await def.handler("triggers", fakeCtx({}).ctx);
+    await def.handler("settings", fakeCtx({}).ctx);
   } finally {
-    if (had) process.env.PI_TRIGGERS_FILE = before;
-    else delete process.env.PI_TRIGGERS_FILE;
+    if (had) process.env.PI_SETTINGS_FILE = before;
+    else delete process.env.PI_SETTINGS_FILE;
   }
   const sent = calls.sendMessage.map(([m]) => String(m?.content ?? "")).join("\n");
   assert.ok(sent.length > 0, "the channel was used");
-  assert.match(sent, /please/, "and it rendered the trigger, so this is not asserting about an empty answer");
+  assert.match(sent, /claude-x/, "and it rendered the file, so this is not asserting about an empty answer");
   for (const line of sent.split("\n")) {
     assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "no control byte reaches model context");
   }
