@@ -2319,3 +2319,116 @@ test("a key directory swapped for another REAL directory before the gates is ref
 	assert.equal(staged.includes("ATTACKER"), false, "and nothing of the replacement is staged");
 	assert.equal(staged, "");
 });
+
+// --- issue #391: three mutations that survived the whole suite
+
+test("every descriptor this store opens is closed, on the refusal paths too (#391)", () => {
+	// Three closes, one count. `if (fd !== null) fs.closeSync(fd)` in `resolveSession`, its twin in the copy,
+	// and the LOCK's close in `promoteSession` -- the third was not in the issue and survived the first
+	// version of this test. That is one leaked descriptor per resume or per promotion in a process designed
+	// to run for weeks, and the store already had the seam to see it: the injected `fs` counts every open
+	// against every close.
+	//
+	// WHICH PHASES ACTUALLY OPEN, because the first version of this comment claimed the wrong one: the happy
+	// resume opens two and the promotion opens three. The pi-version refusal in the middle opens NOTHING --
+	// that gate is decided inside `readCanonical`, before the descriptor block -- so it is here as a refusal
+	// assertion and not as descriptor coverage. The refusal path that DOES open one is the `raced` branch,
+	// which this fixture does not reach; that is the limit of this test rather than a claim it makes.
+	const real = realFs;
+	const opened = [];
+	const closed = [];
+	const counting = {
+		copyFileSync: real.copyFileSync,
+		fstatSync: real.fstatSync,
+		lstatSync: real.lstatSync,
+		mkdirSync: real.mkdirSync,
+		openSync: (...a) => {
+			const fd = real.openSync(...a);
+			opened.push(fd);
+			return fd;
+		},
+		closeSync: (fd) => {
+			closed.push(fd);
+			return real.closeSync(fd);
+		},
+		readSync: real.readSync,
+		readFileSync: real.readFileSync,
+		readdirSync: real.readdirSync,
+		renameSync: real.renameSync,
+		rmSync: real.rmSync,
+		unlinkSync: real.unlinkSync,
+		writeFileSync: real.writeFileSync,
+	};
+
+	// A RESUME that lands, a resume REFUSED by a pi-version change, and a promote: three paths, one count.
+	const { sessionsDir, store, jobDir, root } = fixture({ fs: counting });
+	const key = sessionKeyFor(ghIssue);
+	seed(sessionsDir, key);
+	assert.ok(store.resolveSession(ghIssue, { jobDir, piVersion: PI })?.resume, "the happy path resumes");
+
+	const jobDir2 = mkdtempSync(join(root, "job2-"));
+	const refused = store.resolveSession(ghIssue, { jobDir: jobDir2, piVersion: "9.9.9" });
+	assert.equal(refused.resume, false, "and the version refusal refuses");
+
+	const jobDir3 = mkdtempSync(join(root, "job3-"));
+	const s3 = store.resolveSession(ghIssue, { jobDir: jobDir3, piVersion: PI });
+	writeFileSync(join(s3.hostDir, SESSION_FILE_NAME), HEADER);
+	store.promoteSession(s3, { piVersion: PI });
+
+	// PER-FD COUNTS, not set membership, and that distinction is the whole test. The OS REUSES descriptor
+	// numbers, so `opened.filter((fd) => !closed.includes(fd))` answers "was this number ever closed" -- and a
+	// close removed anywhere is invisible the moment the same number is closed on another path. Measured: with
+	// the lock close below removed, the set check reported no leak while fd 14 was opened three times and
+	// closed twice, and one descriptor was still open when the test ended.
+	const opens = new Map();
+	for (const fd of opened) opens.set(fd, (opens.get(fd) ?? 0) + 1);
+	for (const fd of closed) opens.set(fd, (opens.get(fd) ?? 0) - 1);
+	const leaked = [...opens].filter(([, n]) => n !== 0).map(([fd, n]) => `fd ${fd}: ${n > 0 ? `${n} unclosed` : `${-n} closed twice`}`);
+	assert.ok(opened.length >= 3, `the paths under test really opened descriptors (${opened.length})`);
+	assert.deepEqual(leaked, [], `every descriptor opened was closed exactly once; ${JSON.stringify(leaked)}`);
+});
+
+test("a key directory that cannot be STATTED is a fault, not an absence (#391)", () => {
+	// `ensureKeyDir`'s `if (err?.code !== "ENOENT") throw err` survived `if (false)`. Probably equivalent in
+	// reachable states, since a `mkdir` that follows fails for the same reason -- but the docblock states the
+	// rule as doctrine ("a disk fault is not evidence about the shape of the name"), and doctrine nothing
+	// checks is the kind this repo keeps finding wrong later. An EACCES at the key directory is the shape:
+	// swallowed, it becomes "absent, so make it"; kept, it is a promote-failed with the errno.
+	const real = realFs;
+	let faults = 0;
+	let keyDir = "";
+	const { sessionsDir, store, jobDir } = fixture({
+		fs: {
+			copyFileSync: real.copyFileSync,
+			fstatSync: real.fstatSync,
+			// ONCE, and then the truth. A PERSISTENT fault is an equivalent mutant: swallowed, it falls to the
+			// `mkdir` and the second lstat, which fault identically, so the promotion refuses either way. A
+			// TRANSIENT one is the discriminating shape and the reachable one -- an NFS blip, a permission
+			// change landing between two calls -- and it is exactly what the doctrine names: swallowed, the
+			// fault is read as "absent, so make it" and the promotion PROCEEDS on a key nothing established
+			// the shape of.
+			lstatSync: (p, ...rest) => {
+				if (String(p) === keyDir && faults++ === 0) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+				return real.lstatSync(p, ...rest);
+			},
+			mkdirSync: real.mkdirSync,
+			openSync: real.openSync,
+			closeSync: real.closeSync,
+			readSync: real.readSync,
+			readFileSync: real.readFileSync,
+			readdirSync: real.readdirSync,
+			renameSync: real.renameSync,
+			rmSync: real.rmSync,
+			unlinkSync: real.unlinkSync,
+			writeFileSync: real.writeFileSync,
+		},
+	});
+	// The resolve runs FIRST, as the processor does it, so the promote has the session the store handed out.
+	// The fault is armed only for the PROMOTE's lstat, so the resolve is an ordinary cold start.
+	const s0 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	keyDir = join(sessionsDir, sessionKeyFor(ghIssue));
+	writeFileSync(join(s0.hostDir, SESSION_FILE_NAME), HEADER); // where the agent's transcript lands
+	const res = store.promoteSession(s0, { piVersion: PI });
+	assert.equal(res.promoted, false, "a fault is not a promotion");
+	assert.equal(res.reason, "promote-failed", "and it is reported as a FAULT, not as a shape verdict like key-not-a-directory");
+});

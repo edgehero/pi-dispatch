@@ -733,6 +733,23 @@ export function makeSessionStore({
 	 *
 	 * 64 KiB because it is one buffer per resume and a transcript is usually a few hundred KiB; the loop is
 	 * what keeps an uncapped `PI_SESSION_MAX_BYTES` from becoming a memory bound.
+	 *
+	 * THREE EQUIVALENT MUTANTS LIVE IN THIS FUNCTION, recorded so the next reader does not re-derive them
+	 * (issue #391), because the lines around them ARE pinned and the difference is not visible by reading:
+	 *
+	 *   - the buffer SIZING, `Math.min(64 * 1024, Math.max(1, bytes))` to a bare `64 * 1024`. The per-read
+	 *     clamp in the loop (`Math.min(buf.length, bytes - copied)`) is what bounds the read, so the sizing
+	 *     only decides how much memory a small file allocates.
+	 *   - the LOOP CONDITION, `copied < bytes` to `copied <= bytes`, for the same reason.
+	 *   - `Math.max(1, bytes)` to `bytes`, which is dead defensive code: `inspectFile` refuses a 0-byte
+	 *     transcript as `absent`, so `bytes === 0` never reaches this function at all. That unreachability
+	 *     is the thing a next reader is most likely to re-derive, which is why it is written down.
+	 *
+	 * All three were run against the whole suite and produce byte-identical staged output across transcript
+	 * sizes either side of 64 KiB. What is NOT equivalent, and IS pinned by a descriptor count: the close
+	 * below, the one in `resolveSession` that opened the descriptor this is handed, and the LOCK's close in
+	 * `promoteSession` -- each of which leaks one descriptor per resume or per promotion in a process
+	 * designed to run for weeks.
 	 */
 	function copyFromDescriptor(fd, dest, bytes) {
 		const buf = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, bytes)));
