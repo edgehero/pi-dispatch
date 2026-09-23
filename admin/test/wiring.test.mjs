@@ -87,6 +87,46 @@ test("registers exactly the dispatch command with a handler and completions", as
   assert.equal(typeof def.getArgumentCompletions, "function");
 });
 
+test("the logs viewer gates the file's own bytes, honours its width, and survives a NaN one (#382)", async () => {
+  // THE MOST UNTRUSTED CONTENT THIS EXTENSION RENDERS, and it went to the terminal raw. LIVE_TAIL has gated
+  // the same bytes since issue #367; this viewer is the other half of the same content and was missed: no
+  // control-byte gate, no width clip, and the title interpolating an id that arrives from the COMMAND LINE
+  // (whose `\s+` split keeps an ESC or a BEL) and a `host` read back off a run record.
+  const { calls, def } = await loadRegistered();
+  const dir = tempDir("pi-admin-logs-");
+  const jobId = "job-1";
+  writeFileSync(join(dir, `${jobId}.log`), "line one\u001b[31m red\u0007\nline two\u009bCSI\n" + "x".repeat(200) + "\n");
+  const view = fakeCtx({ withCustom: true });
+  await def.handler(`logs ${jobId}`, { ...view.ctx, env: { PI_LOGS_DIR: dir } });
+  const factory = view.customCalls.at(-1)?.[0];
+  assert.equal(typeof factory, "function", "the viewer was opened");
+  const component = factory({}, {}, {}, () => {});
+  for (const width of [40, 80, NaN, 0, undefined]) {
+    const out = component.render(width);
+    assert.ok(Array.isArray(out) && out.length > 0, `width ${width}: the viewer renders something`);
+    for (const line of out) {
+      assert.doesNotMatch(String(line), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `width ${width}: no control byte reaches the terminal`);
+      // A non-finite or zero width must not blank the pane: `clip(x, NaN)` returns "", so an unguarded
+      // width would render a viewer with nothing in it.
+      if (Number.isFinite(width) && width > 0) assert.ok(String(line).length <= width, `width ${width}: no line is wider than the pane`);
+    }
+    assert.ok(out.some((l) => String(l).trim() !== ""), `width ${width}: and it is not blank`);
+  }
+});
+
+test("a dirty job id from the command line does not reach the viewer's title (#382)", async () => {
+  // The id is split off the argument string with `\s+`, which keeps every control byte that is not
+  // whitespace, and it is interpolated into the title of every branch including the two missing ones.
+  const { def } = await loadRegistered();
+  const view = fakeCtx({ withCustom: true });
+  await def.handler("logs job\u0007-\u001b[31mid", { ...view.ctx, env: { PI_LOGS_DIR: tempDir("pi-admin-logs-none-") } });
+  const factory = view.customCalls.at(-1)?.[0];
+  assert.equal(typeof factory, "function", "a missing log still opens the viewer, which is the branch that says so");
+  for (const line of factory({}, {}, {}, () => {}).render(60)) {
+    assert.doesNotMatch(String(line), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "the title is gated on the missing branch too");
+  }
+});
+
 test("USED_API is exactly the members the extension reaches", async () => {
   const { mod } = await loadRegistered();
   // `on` joins the set: the extension advertises its bundled skill via the `resources_discover` event.

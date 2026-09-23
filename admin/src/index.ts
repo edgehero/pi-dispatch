@@ -121,7 +121,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
-import { setGlyphs } from "./panel.mjs";
+import { clipData, setGlyphs } from "./panel.mjs";
 import { openSandbox, sandboxEgress, sandboxSyncRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
@@ -2374,18 +2374,31 @@ function makeLogViewer(jobId: string, tail: { lines?: string[]; missing?: boolea
 
   return (_tui: any, _theme: any, _keybindings: any, done: (value: void) => void) => {
     const component = {
-      render(_width: number): string[] {
+      render(width: number): string[] {
+        // EVERY LINE THROUGH THE GATE, and the width honoured (issue #382). This view printed the `.log`
+        // file's own bytes RAW and ignored the width it was handed: container output, the most untrusted
+        // content this extension renders, straight to the operator's terminal with CSI, OSC-8 and OSC-52 in
+        // it, on lines measured at 134 columns inside a 40-column pane. LIVE_TAIL gates the same bytes and
+        // has since #367; this viewer was the other half of the same content and was missed.
+        //
+        // The id and `elsewhere` go through it too: the id arrives from the COMMAND LINE, whose `\s+` split
+        // keeps an ESC or a BEL, and `elsewhere` is a `host` field read back off a run record.
+        //
+        // A non-finite width is guarded because `clip(x, NaN)` returns "" -- an unguarded NaN blanks the
+        // whole viewer rather than failing.
+        const w = Number.isFinite(width) && width > 0 ? Math.trunc(width) : 80;
+        const line = (text: string) => clipData(text, w);
         if (missing) {
           // A run that happened on another machine is NOT "no captured log". The bytes exist, on a host this
           // panel deliberately cannot reach, and saying so is the difference between an operator who knows
           // where to look and one who concludes capture is off.
           return tail.elsewhere
-            ? [`logs ${jobId} -- this run happened on ${tail.elsewhere}; its raw log stays on that host. Esc to close.`, ""]
-            : [`logs ${jobId} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found). Esc to close.`, ""];
+            ? [line(`logs ${jobId} -- this run happened on ${tail.elsewhere}; its raw log stays on that host. Esc to close.`), ""]
+            : [line(`logs ${jobId} -- no captured log (PI_CAPTURE_JOB_LOGS off or not found). Esc to close.`), ""];
         }
-        const out = [`logs ${jobId} -- ${lines.length} line(s). Up/Down scroll, PgUp/PgDn page, Esc close.`, ""];
-        for (const line of lines.slice(top, top + VIEWPORT_LINES)) out.push(line);
-        out.push("", `[${Math.min(top + VIEWPORT_LINES, lines.length)}/${lines.length}]`);
+        const out = [line(`logs ${jobId} -- ${lines.length} line(s). Up/Down scroll, PgUp/PgDn page, Esc close.`), ""];
+        for (const l of lines.slice(top, top + VIEWPORT_LINES)) out.push(line(String(l)));
+        out.push("", line(`[${Math.min(top + VIEWPORT_LINES, lines.length)}/${lines.length}]`));
         return out;
       },
       invalidate(): void {
