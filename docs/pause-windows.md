@@ -64,12 +64,17 @@ path and **refuses to start**. Doctor judges the two separately, since a valid p
 nothing about the service, which reads only the file. `pi-dispatch up` leaves such a line alone (it never
 clobbers a value you wrote) and names it in its summary. Fill it in, or delete the line.
 
-One softening is worth knowing about, because otherwise it reads as the check going quiet. Doctor reads the
-`.env` **in its own working directory** for this one key. If the file sets it while your shell does not, the
-line changes to say that the service reads it and this command does not, and points at
-`set -a; . ./.env; set +a` for a look with the environment the service actually gets. It is still a warning:
-in the shell you typed it in, the feature genuinely is off. That read is narrowed to the keys these two
-checks name and decides only what doctor **says**; nothing in this project loads `.env` into a process.
+Doctor reads the `.env` **in its own working directory** for this one key, and judges two things separately:
+the SERVICE, which reads that file and never your shell, and this shell, which is what a foreground
+`pi-dispatch worker` would get. A file that points the key at a pause-windows file which loads is a ✓ saying
+the service reads it and this command does not. A file that assigns the key nothing, or points it at
+something the worker cannot load, is a failure whatever your shell says, because the unit will not start.
+
+Two limits on that read, both deliberate. It covers only the keys these checks name. And it repeats a value
+back to you only when the line is written in the form every loader of a `.env` reads the same way; otherwise
+it names the **line number** and tells you what to write, because systemd, a sourcing shell and the Windows
+wrapper do not agree about quoting, inline comments or spacing, and printing one of their readings as
+"the value the service sees" would be a guess.
 
 ## The window schema
 

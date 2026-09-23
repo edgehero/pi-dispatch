@@ -31,7 +31,7 @@ what something else loads on its behalf:
 | Where it runs | What puts `.env` into the environment |
 |---|---|
 | systemd | `EnvironmentFile=` in `deploy/worker.service` |
-| launchd (macOS), nssm (Windows) | `deploy/worker-env-wrapper.sh` / `.cmd`, which source `./.env` |
+| launchd (macOS), nssm (Windows) | `deploy/worker-env-wrapper.sh`, which SOURCES `./.env`, and `.cmd`, which reads it line by line (`for /f`, splitting on the first `=`) |
 | `docker compose --profile receiver` | `env_file: ../.env` |
 | a terminal | you |
 
@@ -53,11 +53,15 @@ just been set up correctly.
 
 The narrowing is the whole of the licence, and each half is load-bearing:
 
-- it reads to decide **what doctor says about a file**, never to configure anything. No value read this
-  way reaches a config, an argv, a container environment, or any fix that writes;
+- it reads to decide **what doctor says, and whether doctor fails**, never to configure anything. No value
+  read this way reaches a config, an argv, a container environment, or any fix that writes. Since issue #384
+  a value does reach one read-only thing: the worker's own loader, opened behind a regular-file guard, to
+  answer whether a service started from this folder would start at all;
 - it reads only the keys the message itself names, so it cannot grow into "load `.env`";
-- a missing, unreadable or malformed file restores the full warning, because a deployment told it is fine
-  when nobody could check is the worse failure;
+- a file nobody could open is reported as exactly that, rather than as a key that is unset, because a
+  deployment told it is fine when nobody could check is the worse failure. The same holds for a file this
+  reader cannot finish: one line that runs, or that reaches into the line below it, takes the claim off the
+  whole file, and doctor names that line instead of guessing past it;
 - **doctor is not the worker**. The sentence at the top of this page is about the process that runs jobs,
   and it is still exactly true: `loadConfig` reads the environment, there is still no dotenv dependency,
   and `PI_ENV_SETUP` inside a `./.env` is still deliberately **not** honoured, which the test suite pins.

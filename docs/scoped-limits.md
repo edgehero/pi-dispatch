@@ -53,9 +53,10 @@ The same trap quiet hours documents, scoped-limits edition:
 Run `init`, manage limits through the panel, and you are editing a file the worker never reads — the
 panel answers `scoped limit added (live)` while the worker enforces nothing. `pi-dispatch doctor` warns
 about exactly this state, and the wizard's deployment pointer carries the path so a pointed panel and the
-worker agree. `pi-dispatch up` sets the variable for you in a deployment folder, and doctor softens its
-line (rather than going quiet) when the `.env` in its own cwd names the key while the shell does not:
-the same softening `docs/pause-windows.md` describes, for the same reason.
+worker agree. `pi-dispatch up` sets the variable for you in a deployment folder, and doctor reads
+the `.env` in its own cwd for this key: where that file configures the service, the line says so rather than
+reporting the shell's view of it, and where that file would stop the service starting, doctor fails. The same
+rule `docs/pause-windows.md` describes, for the same reason.
 
 ## The limit schema
 
