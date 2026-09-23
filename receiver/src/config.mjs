@@ -294,6 +294,7 @@ function loadTriggers(env, readFile, fileExists) {
 	}
 
 	const parsed = parseTriggers(readFile(path, "utf8"), path); // fail-loud
+	void 0;
 
 	// Every forge gets a group whether or not the file names it, so the filter can read
 	// `cfg.triggers[kind].label` without a presence check and an unconfigured forge simply matches nothing.

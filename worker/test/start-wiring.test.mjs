@@ -2365,3 +2365,102 @@ test("the boot facts bound: the facts read's own 15 s plus 2 only for a floor th
 		assert.equal(bound(floor), 17_000, JSON.stringify(floor));
 	}
 });
+
+// --- issue #386: the boot race, as a rule the four watches share
+
+test("the boot-race rule fires only on a change, only with a live watch, and never on an unreadable read", async () => {
+	// The three watches in the worker and the one in the receiver all read their file at boot and arm
+	// afterwards, so an edit in that gap waits for the NEXT edit or a restart. The repair is one read after
+	// arming compared against one before it, and each of these arms is a way it would otherwise misfire.
+	const mod = await import("../src/watch-closer.mjs");
+	const armed = () => ({ watcher: {}, timer: null, closed: false });
+
+	const changed = armed();
+	mod.readBeforeArming(changed, () => "a");
+	assert.equal(mod.changedWhileArming(changed, () => "b"), true, "a file that moved between the two reads is the race being LOST");
+
+	const quiet = armed();
+	mod.readBeforeArming(quiet, () => "a");
+	assert.equal(mod.changedWhileArming(quiet, () => "a"), false, "an unchanged file costs a read and nothing else -- no reload, no line");
+
+	// NO WATCHER means the arming THREW and the service already logged that it runs without live reload.
+	// Re-reading there would paper over that with one lucky read and no watch behind it.
+	const unarmed = { watcher: null, timer: null, closed: false };
+	mod.readBeforeArming(unarmed, () => "a");
+	assert.equal(mod.changedWhileArming(unarmed, () => "b"), false, "a watch that never armed gets no consolation read");
+
+	// An unreadable file on EITHER side is not a change. Every reload path keeps last-good on a bad read, so
+	// firing one here would spend a reload to arrive at the value already in memory.
+	const boom = () => {
+		throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+	};
+	const goneAfter = armed();
+	mod.readBeforeArming(goneAfter, () => "a");
+	assert.equal(mod.changedWhileArming(goneAfter, boom), false, "unreadable after");
+	const goneBefore = armed();
+	mod.readBeforeArming(goneBefore, boom);
+	assert.equal(mod.changedWhileArming(goneBefore, () => "a"), false, "unreadable before");
+});
+
+test("one debounce, shared: the 150ms literal is written once (issue #386)", async () => {
+	// It was written four times, which is the shape CLAUDE.md warns about: four copies agree until one of
+	// them does not. The value itself is pinned because it is a contract with the panel's atomic writer --
+	// a tmp+rename delivers more than one event for one edit, and the window only has to outlast that burst.
+	const mod = await import("../src/watch-closer.mjs");
+	assert.equal(mod.WATCH_DEBOUNCE_MS, 150);
+	for (const file of ["../src/start.mjs", "../../receiver/src/start.mjs"]) {
+		const src = readFileSync(new URL(file, import.meta.url), "utf8");
+		assert.doesNotMatch(src, /setTimeout\([^)]*,\s*150\)/, `${file} still spells the debounce inline`);
+		assert.match(src, /WATCH_DEBOUNCE_MS/, `${file} uses the shared one`);
+	}
+});
+
+test("all FOUR live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386)", () => {
+	// BY SHAPE, and the limit is the point rather than an apology. The rule itself is pinned behaviourally
+	// above, and the receiver's watch is driven end to end through its read seam. The worker's three are
+	// private functions armed from deep inside `startWorker`, so driving each would mean three full worker
+	// boots with a Valkey behind them to prove one `if`. What is cheap and exact instead is that every watch
+	// in this project reads before arming and compares after it -- which is the thing a fifth watch added
+	// tomorrow would forget.
+	//
+	// It sees a CALL, not an effect: a site that calls both and ignores the answer passes. That is the same
+	// trade `temp-dir-check` makes, and the same reason its oracle exists beside it.
+	const sources = {
+		"worker/src/start.mjs": readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8"),
+		"receiver/src/start.mjs": readFileSync(new URL("../../receiver/src/start.mjs", import.meta.url), "utf8"),
+	};
+	// One watch per `watch(dir, ...)` arming, which is how all four are written.
+	const armings = Object.entries(sources).map(([name, src]) => [name, (src.match(/handles\.watcher = watch\(/g) ?? []).length]);
+	assert.deepEqual(armings, [["worker/src/start.mjs", 3], ["receiver/src/start.mjs", 1]], "four watches, and if that count moves this test must be read again rather than updated");
+	for (const [name, src] of Object.entries(sources)) {
+		const arms = (src.match(/handles\.watcher = watch\(/g) ?? []).length;
+		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
+		assert.equal((src.match(/changedWhileArming\(/g) ?? []).length, arms, `${name}: and compares after`);
+		// THE THIRD ARGUMENT IS THE WHOLE POINT, and its absence is the design error a review pass caught in
+		// the first version of this change: with no boot baseline the helper reads the file where the watch
+		// ARMS, which measures a fraction of a millisecond around the arming while the window the race lives
+		// in -- boot load to arming, holding identity resolution and its retries -- stays open.
+		assert.equal(
+			(src.match(/readBeforeArming\([^)]*,[^)]*,[^)]*\)/g) ?? []).length,
+			arms,
+			`${name}: every watch's baseline is handed in, not taken at the arming`,
+		);
+	}
+
+	// AND AT THE CALLER, which is where it can actually go missing. The check above reads the line INSIDE
+	// the watch function, where the third argument is a parameter name that never changes -- so dropping
+	// `atBoot.triggers` at the `startWorker` call site left it green while reinstating the whole defect,
+	// measured end to end by a review pass. Three of the four sites were unguarded against the very error
+	// under repair. The receiver's caller is covered behaviourally, by an edit made during identity
+	// resolution; the worker's three are armed a thousand lines into `startWorker`, behind a live Valkey,
+	// so they are covered here.
+	const worker = sources["worker/src/start.mjs"];
+	for (const [fn, key] of [["watchTriggersFile", "triggers"], ["watchPauseWindowsFile", "pauseWindows"], ["watchScopedLimitsFile", "scopedLimits"]]) {
+		const call = worker.match(new RegExp(`extraClosers\\.push\\(${fn}\\(([^;]*)\\)\\);`));
+		assert.ok(call, `${fn} is armed from startWorker`);
+		assert.match(call[1], new RegExp(`atBoot\\.${key}\\b`), `${fn} is handed the boot baseline of ITS OWN file, not another's`);
+		// The capture that fills it must name the same file, or the baseline is another file's bytes and
+		// every boot reloads: measured, a mismatched pair logs a reload and a Valkey reconcile on EVERY start.
+		assert.match(worker, new RegExp(`recording\\("${key}", config\\.${key === "triggers" ? "triggersFile" : key + "File"}\\)`), `${key}'s baseline is captured from its own file`);
+	}
+});

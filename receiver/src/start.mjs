@@ -30,7 +30,7 @@
  */
 
 import http from "node:http";
-import { watch } from "node:fs";
+import { readFileSync, watch } from "node:fs";
 import { dirname, basename } from "node:path";
 import { loadReceiverConfig, triggersFilePath, reloadTriggers } from "./config.mjs";
 import { makeReceiver } from "./receiver.mjs";
@@ -46,7 +46,7 @@ import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeForgeRouter } from "./route.mjs";
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
-import { makeWatchCloser } from "@edgehero/pi-dispatch/watch-closer";
+import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "@edgehero/pi-dispatch/watch-closer";
 import { retryIdentity } from "./boot-retry.mjs";
 
 /**
@@ -86,7 +86,24 @@ export async function startReceiver(
 	// Single-object log line: `makeReceiver` calls `log?.({ event, ... })`, so the sink takes ONE object.
 	const log = (obj) => write(`${JSON.stringify(obj)}\n`);
 
-	const cfg = loadReceiverConfig(env);
+	// THE BOOT LOAD'S OWN READ is the baseline for the watch's boot-race check (issue #386), captured here
+	// rather than inside `watchTriggers`. That is the whole correction of a first attempt: a baseline taken
+	// where the watch arms measures the microseconds around the arming, while the window this race lives in
+	// is the one between THIS read and that arming -- which holds identity resolution, retried for up to
+	// `RECEIVER_IDENTITY_RETRY_SECONDS`. Measured on the real boot: a baseline at the watch closed 0.1 to 0.4
+	// milliseconds and left 50 to 300 milliseconds of a slow identity open, seconds under retries.
+	//
+	// Taken from the loader's OWN read, through the seam it already has, so there is no second read that an
+	// edit could land between: what the comparison is against is exactly what the receiver is running.
+	const triggersPath = triggersFilePath(env);
+	let triggersAtBoot = null;
+	const cfg = loadReceiverConfig(env, {
+		readFile: (file, enc) => {
+			const text = readFileSync(file, enc);
+			if (file === triggersPath) triggersAtBoot = text;
+			return text;
+		},
+	});
 
 	// One options bag for the four identity arms below (issue #318): the SAME window, clock and sleep for
 	// every forge, so the bound the operator configured is the bound every arm obeys.
@@ -221,7 +238,7 @@ export async function startReceiver(
 		// ABOVE this line, so a refused boot has armed nothing and there is never a closer with no one left to
 		// drain it. The worker states the same invariant where its watchers arm. A step added BELOW that can
 		// throw reopens issue #301 on the refusal path; the HARD-FAIL test pins the refusals that exist today.
-		closers.push(watchTriggers(env, cfg, log));
+		closers.push(watchTriggers(env, cfg, log, triggersAtBoot));
 
 		// Graceful shutdown only on the real entry (default createServer). Under test injection the fakes are
 		// per-test, so a process-wide SIGNAL HANDLER would still leak across tests -- and unlike the watch it
@@ -296,7 +313,11 @@ export async function startReceiver(
  * even when the watch could not arm: closing a never-armed handle is a no-op by construction, and a
  * caller that has to ask "did I get one" is how a handle goes unregistered.
  */
-function watchTriggers(env, cfg, log) {
+// `triggersAtBoot` has NO DEFAULT on purpose (issue #386). A default of `null` would silently DISABLE the
+// boot-race check for a caller that forgot it, which is the failure this whole change exists to stop; with
+// none, forgetting it is `undefined`, and `readBeforeArming` reads that as "no boot read to hand over" and
+// says so by falling back to its own read rather than to nothing.
+function watchTriggers(env, cfg, log, triggersAtBoot) {
 	const path = triggersFilePath(env);
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -306,21 +327,31 @@ function watchTriggers(env, cfg, log) {
 	// second signature. The reload lines go through `closer.reloadLog` -- the reload's VOICE, gated once
 	// the handle closes; the arming lines keep the real `log`, because they run before any close exists.
 	const closer = makeWatchCloser(handles, (event, fields) => log({ event, ...fields }));
+	const readFile = () => readFileSync(path, "utf8");
+	const reload = () => {
+		const res = reloadTriggers(env, cfg);
+		if (res.ok) closer.reloadLog("triggers_reloaded");
+		else closer.reloadLog("triggers_reload_invalid", { reason: res.invalid, kept: true });
+	};
+	// The baseline is the BOOT LOAD's own read, handed in (issue #386). Comparing against a read taken here
+	// would measure the arming instead of the window: this service arms LAST, behind identity resolution that
+	// retries for up to RECEIVER_IDENTITY_RETRY_SECONDS, and that is the window an edit is lost in.
+	readBeforeArming(handles, readFile, triggersAtBoot);
 	try {
 		handles.watcher = watch(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (null changed name -> reload to be safe)
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => {
-				const res = reloadTriggers(env, cfg);
-				if (res.ok) closer.reloadLog("triggers_reloaded");
-				else closer.reloadLog("triggers_reload_invalid", { reason: res.invalid, kept: true });
-			}, 150);
+			handles.timer = setTimeout(reload, WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log({ event: "triggers_watching", path });
 	} catch (err) {
 		log({ event: "triggers_watch_unavailable", reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log({ event: "triggers_reread_after_arming", path });
+		reload();
 	}
 	return closer;
 }

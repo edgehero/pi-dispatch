@@ -31,7 +31,7 @@ import { makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckWaitSkew, makeDisarmOnce } from "./triggers-file.mjs";
-import { makeWatchCloser } from "./watch-closer.mjs";
+import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
 import { loadScopedLimits, scopeKeyPrefix } from "./scoped-limits.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
@@ -159,23 +159,35 @@ export async function settleWithin(promise, ms, fallback) {
  * schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned closer is what
  * `startWorker` registers so the watch dies with the worker that armed it (issue #295).
  */
-function watchTriggersFile(config, queue, log, ref, registry, tz, fleet) {
+function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
 	const handles = { watcher: null, timer: null, closed: false };
 	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	// The baseline is what the BOOT LOAD read, handed in: the reconcile above and everything between it and
+	// this arm -- the endpoint probe, forge auth, the reaper, Valkey -- is the window an edit is lost in
+	// (issue #386). A baseline taken here would measure the arming instead.
+	readBeforeArming(handles, readFile, atBoot);
 	try {
 		handles.watcher = watch(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }), 150);
+			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("triggers_watching", { path });
 	} catch (err) {
 		log("triggers_watch_unavailable", { reason: err?.message });
+	}
+	// ONLY WHEN THE BYTES MOVED, because this one costs a Valkey round trip and a reconcile: a quiet boot
+	// must not pay for the race it did not lose, and must not log a second `schedules` line saying nothing
+	// changed.
+	if (changedWhileArming(handles, readFile)) {
+		log("triggers_reread_after_arming", { path });
+		void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet });
 	}
 	return closer;
 }
@@ -186,7 +198,7 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet) {
  * effect (OQ-008 live-edit safety) — the pause gate never loses its config to a typo. Best-effort; the
  * FSWatcher is unref'd and the returned closer stops the watch with the worker (issue #295).
  */
-function watchPauseWindowsFile(config, ref, log) {
+function watchPauseWindowsFile(config, ref, log, atBoot) {
 	const path = config.pauseWindowsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -200,17 +212,25 @@ function watchPauseWindowsFile(config, ref, log) {
 			closer.reloadLog("pause_windows_reload_invalid", { reason: err?.message });
 		}
 	};
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot); // the BOOT LOAD's own bytes; see watch-closer (issue #386)
 	try {
 		handles.watcher = watch(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(reload, 150);
+			handles.timer = setTimeout(reload, WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("pause_windows_watching", { path });
 	} catch (err) {
 		log("pause_windows_watch_unavailable", { reason: err?.message });
+	}
+	// SAID, like the triggers watch says it: without a line of its own an operator cannot tell a boot-race
+	// reload from an ordinary one, and this is the only reload that happens with nobody editing.
+	if (changedWhileArming(handles, readFile)) {
+		log("pause_windows_reread_after_arming", { path });
+		reload();
 	}
 	return closer;
 }
@@ -235,23 +255,29 @@ export function reloadScopedLimits(config, ref, log) {
  * for atomic tmp+rename robustness, filtered to the one basename, debounced. Best-effort; the FSWatcher is
  * unref'd and the returned closer stops the watch with the worker (issue #295).
  */
-function watchScopedLimitsFile(config, ref, log) {
+function watchScopedLimitsFile(config, ref, log, atBoot) {
 	const path = config.scopedLimitsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
 	const handles = { watcher: null, timer: null, closed: false };
 	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot); // the BOOT LOAD's own bytes; see watch-closer (issue #386)
 	try {
 		handles.watcher = watch(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog), 150);
+			handles.timer = setTimeout(() => reloadScopedLimits(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("scoped_limits_watching", { path });
 	} catch (err) {
 		log("scoped_limits_watch_unavailable", { reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log("scoped_limits_reread_after_arming", { path });
+		reloadScopedLimits(config, ref, closer.reloadLog);
 	}
 	return closer;
 }
@@ -347,16 +373,29 @@ export async function startWorker(
 	// scheduled, and a `const` frozen at boot would make it publish the pre-edit set forever -- so two
 	// hosts would see each other's fingerprint oscillate on the beat period, refusing or agreeing
 	// depending on which half of a beat a reload happened to land in.
-	const schedules = { current: loadSchedules(config, { fleet: config.workerNameDeclared }) };
+	// THE BOOT LOADS' OWN READS are the baselines for the three watches' boot-race checks (issue #386),
+	// captured through the seam each loader already has rather than re-read where the watch arms. The window
+	// this race lives in is between these lines and the arming a thousand lines below -- the endpoint probe,
+	// forge auth, the reaper, Valkey -- not the microseconds around the arming itself, which is what a first
+	// attempt measured. `null` where a file is not configured, which reads as "nothing to compare".
+	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null };
+	const recording = (into, path) => ({
+		readFileSync: (file, enc) => {
+			const text = readFileSync(file, enc);
+			if (file === path) atBoot[into] = text;
+			return text;
+		},
+	});
+	const schedules = { current: loadSchedules(config, { fleet: config.workerNameDeclared, ...recording("triggers", config.triggersFile) }) };
 
 	// REQ-SCOPED-PAUSE-WINDOWS: load + validate the pause-windows file with the operator present and before any
 	// Valkey contact, so a malformed file refuses startup (configError) rather than silently disabling scoped
 	// pauses. Held in a mutable ref so the live-reload watcher can hot-swap it. [] means no scoped pauses.
-	const pauseWindows = { current: loadPauseWindows(config) };
+	const pauseWindows = { current: loadPauseWindows(config, recording("pauseWindows", config.pauseWindowsFile)) };
 
 	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
 	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
-	const scopedLimits = { current: loadScopedLimits(config) };
+	const scopedLimits = { current: loadScopedLimits(config, recording("scopedLimits", config.scopedLimitsFile)) };
 
 	// Issue #278: WHICH DOCKER DAEMON the job containers' credentials will travel to. Asked of the CLI at boot,
 	// AFTER the free file validations above (a wedged CLI costs up to its bound, and must not delay them) and
@@ -1412,18 +1451,18 @@ export async function startWorker(
 		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
 		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 		if (config.triggersFile) {
-			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared));
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers));
 		}
 
 		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
 		// an operator's add/delete of a pause window takes effect without a worker restart. A bad edit is kept out.
 		if (config.pauseWindowsFile) {
-			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log));
+			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log, atBoot.pauseWindows));
 		}
 
 		// Issue #242 live edit: hot-swap the scoped limits on file change, keeping last-good on a bad edit.
 		if (config.scopedLimitsFile) {
-			extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log));
+			extraClosers.push(watchScopedLimitsFile(config, scopedLimits, log, atBoot.scopedLimits));
 		}
 
 		// issue #292 / OQ-007: re-run the three retention sweeps on a timer, because the supported deployment

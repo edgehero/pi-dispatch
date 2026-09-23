@@ -81,3 +81,78 @@ export function makeWatchCloser(handles, log) {
 		},
 	};
 }
+
+/**
+ * The debounce every live-edit watch in this project uses, in one place (issue #386).
+ *
+ * The literal 150 was written four times -- the receiver's triggers watch and the worker's triggers,
+ * pause-windows and scoped-limits watches -- and four copies of a number is the shape `CLAUDE.md` warns
+ * about: they agree until one of them does not. It rides this module because this module is already what
+ * both composition roots import for the same four watches.
+ *
+ * WHY A DEBOUNCE AT ALL, since the number alone does not say: an atomic tmp+rename delivers more than one
+ * directory event for one edit, and the panel's own writer renames. The window only has to outlast that
+ * burst, which is why it is small enough that an operator never notices it.
+ */
+export const WATCH_DEBOUNCE_MS = 150;
+
+/**
+ * Close the BOOT RACE that every one of those four watches had (issue #386).
+ *
+ * Each service reads its file once at boot and arms the watch afterwards. Nothing re-reads in between, so
+ * an edit landing in that gap is never loaded: it waits for the NEXT edit, or for a restart. The gap is not
+ * instantaneous -- in the receiver the watch is deliberately the last fallible step of the boot, behind
+ * identity resolution, which retries for up to `RECEIVER_IDENTITY_RETRY_SECONDS`.
+ *
+ * ON MACOS THE GAP EXTENDS PAST `watch()` RETURNING, which is what makes this a lost edit rather than a
+ * late one. libuv answers `fs.watch` from `uv__fsevents_init`, which queues the path and signals its
+ * CoreFoundation thread; that thread destroys the process's single FSEvents stream and creates a new one
+ * covering every watched path, starting from "now" (libuv 1.49.2, the version Node 23.5 bundles). An edit
+ * that lands before the new stream is live is not delivered late, it is not delivered at all. Measured
+ * against the real receiver boot, ISSUE #386's own measurement: 24 of 40 trials lost the edit with four
+ * boots in one process, 1 of 40 with one boot beside a loaded machine, 0 of 40 idle. A re-measure on
+ * another machine reproduced the SHAPE and not the rate (1 of 40, 0 of 40, 0 of 40), so read the 24 as one
+ * host's worst case rather than a constant; the loss itself is real on both. Linux's inotify registers
+ * before `fs.watch` returns, so there an edit can be late but not lost.
+ *
+ * The answer is one read AFTER arming, compared against what the boot read, and a reload only when they
+ * differ -- so a quiet boot stays quiet and costs one stat-and-read per watch.
+ *
+ * WHAT IT DOES NOT CLOSE, because a helper that reads as complete is worse than one that states its edge.
+ * The FSEvents window above extends past this read too, so an edit landing between this read and the moment
+ * the stream goes live is still lost: this closes the boot-load-to-arming window and does not make the
+ * other zero, and closing that one needs a watch that reports when it is live, which `fs.watch` does not
+ * offer. And a file DELETED and recreated between the two reads is not seen, because an unreadable read on
+ * either side is treated as no change -- right for a file that went away, since every reload path keeps
+ * last-good, and wrong for one that arrived. All three loaders refuse a configured-but-missing file at
+ * boot, so reaching that means deleting and recreating inside the window.
+ */
+export function readBeforeArming(handles, read, atBoot = undefined) {
+	// `atBoot` is what the BOOT LOADER read, and it is the only baseline that measures the right window. A
+	// baseline read here instead measures the microseconds around the arming: the first version of this
+	// helper did exactly that and closed 0.1 to 0.4 milliseconds while the window the race lives in -- boot
+	// load to arming, which in the receiver holds identity resolution and its retries -- stayed open, proven
+	// end to end on both services. `undefined` means the caller has no boot read to hand over and accepts
+	// the narrower window; every caller in this project hands one over.
+	handles.armedWith = atBoot === undefined ? safeRead(read) : typeof atBoot === "string" ? atBoot : null;
+}
+
+/** True when the file changed between `readBeforeArming` and now, and there is a watch to have missed it. */
+export function changedWhileArming(handles, read) {
+	// No watcher means the arming THREW, and the service logged that it is running without a live reload.
+	// Re-reading there would paper over that with one lucky read.
+	if (!handles.watcher) return false;
+	const now = safeRead(read);
+	// An unreadable file on either side is not a change: the reload paths all keep last-good on a bad read,
+	// and firing one here would only replace a good in-memory value with the same keep-last-good outcome.
+	return now !== null && handles.armedWith !== null && now !== handles.armedWith;
+}
+
+function safeRead(read) {
+	try {
+		const v = read();
+		return typeof v === "string" ? v : null;
+	} catch {
+		return null; // a file that is absent or unreadable at boot is the loaders' business, not this one's
+	}
+}

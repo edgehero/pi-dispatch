@@ -790,3 +790,98 @@ test("every identity arm rides retryIdentity, and no bare identity await remains
 	assert.ok(!/await resolveForgejoSelfIdFn\(/.test(startSrc), "the bare forgejo await must stay gone");
 	assert.ok(!/await resolveAzureSelfIdFn\(/.test(startSrc), "the bare azure await must stay gone");
 });
+
+test("an edit that lands DURING THE BOOT is picked up, not left for the next one (issue #386)", async () => {
+	// THE REAL WINDOW, and the correction of a first attempt that measured the wrong one. This service loads
+	// its triggers at the top of `startReceiver` and arms the watch LAST, behind identity resolution that
+	// retries for up to RECEIVER_IDENTITY_RETRY_SECONDS -- so the race is everything in between, and on
+	// macOS an edit inside it is LOST rather than late: libuv recreates the process's single FSEvents stream
+	// from "now", so an edit before the new stream is live is never delivered.
+	//
+	// The edit is made from INSIDE identity resolution, which is where that window actually is. A baseline
+	// taken where the watch arms passes a test that edits just before arming and fails this one: measured on
+	// the real boot, it closed 0.4ms and left 50 to 300ms of a slow identity open, seconds under retries.
+	const dir = tempDir("receiver-boot-race-");
+	const triggersPath = join(dir, "triggers.json");
+	const before = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:before"] }, run: { kind: "gitlab", flow: "gl-before" } }] });
+	const after = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:after"] }, run: { kind: "gitlab", flow: "gl-after" } }] });
+	writeFileSync(triggersPath, before);
+
+	const chunks = [];
+	const write = (chunk) => (chunks.push(String(chunk)), true);
+	const events = () => chunks.join("").split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+
+	const added = [];
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	await startReceiver(
+		{ PI_TRIGGERS_FILE: triggersPath, GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x" },
+		{
+			write,
+			makeQueueFn: () => ({ add: async (name, data) => added.push({ name, data }), close: async () => {} }),
+			createServer,
+			closers,
+			...gitlabFakes,
+			// The operator edits while the boot is still resolving who it is.
+			resolveGitLabSelfId: async () => {
+				writeFileSync(triggersPath, after);
+				return 4242;
+			},
+		},
+	);
+	for (const c of closers) c.close?.();
+	assert.ok(captured.handler, "booted");
+	const seen = events();
+	assert.ok(seen.some((l) => l.event === "triggers_reread_after_arming"), "the re-read is SAID, so an operator can see the race was lost and repaired");
+	assert.ok(seen.some((l) => l.event === "triggers_reloaded"), "and the file is actually reloaded");
+
+	// THE STATE, NOT THE LINE, and the two are not the same claim: a reload that logs and rebinds nothing
+	// passes every assertion above. A review pass built exactly that mutant -- `reloadTriggers(env, {...cfg})`
+	// writes the new triggers onto a COPY -- and it shipped green against the first version of this test,
+	// whose closing assertion was an alternation that could only ever match the line already asserted.
+	// So: drive a real webhook through the wired handler and require the trigger written DURING THE BOOT to
+	// be the one that enqueues.
+	const raw = JSON.stringify({
+		object_kind: "issue",
+		user: { id: 7, username: "dev" },
+		project: { id: 42, path_with_namespace: "group/sub/proj", default_branch: "main" },
+		object_attributes: { iid: 5, title: "T", description: "B", action: "update", labels: [{ title: "pi:after" }] },
+		changes: { labels: { previous: [], current: [{ title: "pi:after" }] } },
+	});
+	const req = new EventEmitter();
+	req.url = "/gitlab";
+	req.method = "POST";
+	req.headers = { "content-type": "application/json", "x-gitlab-event": "Issue Hook", "webhook-id": "wh-race", "x-gitlab-token": "gl-secret" };
+	req.destroy = () => {};
+	const res = { statusCode: 0, headersSent: false, writeHead(c) { this.statusCode = c; this.headersSent = true; }, end() {} };
+	const done = captured.handler(req, res);
+	req.emit("data", Buffer.from(raw, "utf8"));
+	req.emit("end");
+	await done;
+	assert.equal(res.statusCode, 202, "the label added during the boot is LIVE, not merely logged as reloaded");
+	assert.equal(added.length, 1, "and it enqueued");
+	assert.equal(added[0].data.flow, "gl-after", "with the flow the mid-boot edit named");
+});
+
+test("a boot that did NOT lose the race stays silent and reloads nothing (issue #386)", async () => {
+	// The other half, and the reason the re-read compares bytes instead of simply reloading: a quiet boot
+	// must not pay for a race it did not lose, and must not log a line that would teach an operator to
+	// ignore the one above.
+	const dir = tempDir("receiver-boot-quiet-");
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "gitlab", flow: "gl-f" } }] }));
+
+	const chunks = [];
+	const write = (chunk) => (chunks.push(String(chunk)), true);
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	await startReceiver(
+		{ PI_TRIGGERS_FILE: triggersPath, GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x" },
+		{ write, makeQueueFn: stubQueue, createServer, closers, ...gitlabFakes },
+	);
+	for (const c of closers) c.close?.();
+	assert.ok(captured.handler, "booted");
+	const text = chunks.join("");
+	assert.doesNotMatch(text, /triggers_reread_after_arming/, "an unchanged file says nothing");
+	assert.doesNotMatch(text, /triggers_reloaded/, "and reloads nothing");
+});
