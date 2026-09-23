@@ -262,6 +262,14 @@ test("E1: an assignment to nothing is a RECORD, absence is undefined, and the la
 	// 252 reads all four as "" (measured). This is the distinction the old reader threw away by deleting
 	// the key, and the reason doctor could not tell a scaffolded-but-blank deployment from an unset one.
 	for (const shape of ['K=', 'K=""', "K=''", "K=   "]) assert.deepEqual(readEnvAssignments(shape, ["K"]).K, rec({ value: "", plain: true, vouched: true, blank: true }), shape);
+	// CONCATENATED empty pairs are empty too, measured on systemd 252 and in all four shells -- and they sit
+	// OUTSIDE the grammar `plain` claims, which is why `blank` is its own question. Tying the refusal to
+	// `vouched` let `K=""''` exit 0 on a deployment that cannot start.
+	for (const shape of ["K=\"\"''", "K=''\"\"", "K=\"\"''\"\""]) {
+		const r = readEnvAssignments(shape, ["K"]).K;
+		assert.equal(r.blank, true, `${shape}: assigns nothing`);
+		assert.equal(r.plain, false, `${shape}: and is still outside the grammar this file will repeat back`);
+	}
 	assert.deepEqual(readEnvAssignments(text, []), {}, "an empty ask reads nothing at all");
 	assert.deepEqual(readEnvAssignments("", ["PI_LOGS_DIR"]), {});
 	assert.deepEqual(readEnvAssignments(undefined, ["PI_LOGS_DIR"]), {});
@@ -507,7 +515,12 @@ test("E3: what the file says and what systemd says are two different sentences",
 	// quote -- so its own reading goes too. ABOVE a stray command the line is exactly what it looks like;
 	// what cannot be claimed is where the loader ENDS UP, which is the vouch. Two flags because doctor asks
 	// the first question ("is this key empty?") and prints the second.
-	assert.equal(readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"], { loader: "shell" }).K.plain, false, "a key below an unbalanced quote");
+	// The key's own LINE is exactly what it looks like; what cannot be claimed is where the loader ends up,
+	// because the line above it does not close its quote. One flag for the line, one for the file.
+	const below = readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"], { loader: "shell" }).K;
+	assert.equal(below.plain, true, "the line itself is in the form every loader reads the same way");
+	assert.equal(below.vouched, false, "and the file it sits in is not one this command can read");
+	assert.equal(below.hazardLine, 1, "which is the line an operator has to open");
 	const above = readEnvAssignments("K=/srv/a.json\nunset K", ["K"], { loader: "shell" }).K;
 	assert.equal(above.plain, true, "the line itself is in the form every loader reads the same way");
 	assert.equal(above.vouched, false, "but systemd ignores the line below and the shells run it, so where the key ENDS UP is not claimed");
@@ -547,6 +560,12 @@ test("E3c: envValueShown escapes what a terminal would obey, and nothing else", 
 	assert.equal(envValueShown("/a\u001b[31mb"), String.raw`"/a\u001b[31mb"`, "an escape sequence is quoted and escaped whole");
 	assert.equal(envValueShown("/a\u202enosj.txt"), String.raw`"/a\u202enosj.txt"`, "and so is a right-to-left override");
 	assert.match(envValueShown("/a\u0000b"), /^"/, "a quoted value is always quoted, so the quotes say it was transformed");
+	// A LINE FEED ON ITS OWN, because that is the one a review found still open twice: the class was written
+	// `\x00-\x08\x0b-\x1f`, which steps over `\x0a`, and every test that should have caught it happened to
+	// put an ESC in the same string. An unescaped newline in a value doctor prints lets an environment
+	// variable FORGE doctor's own output, ✓ lines for the other boot key included.
+	assert.equal(envValueShown("a\nb"), String.raw`"a\nb"`, "a newline alone is escaped, with no other control byte to carry it");
+	assert.equal(envValueShown("/srv/a.json\n✓ everything is fine").includes("\n"), false, "so no value can add a line to the report");
 	for (const v of ["/a\u001bb", "/a\u009bb", "/a\u200bb", "/a\u2028b", "/a\u0085b"]) {
 		assert.doesNotMatch(envValueShown(v), /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, `no control byte survives: ${JSON.stringify(v)}`);
 	}
@@ -563,12 +582,31 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 		["a declare", "declare K=/a.json", 1],
 		["a value that ENDS the shell", "OTHER=${NOPE?boom}\nK=/a.json", 1],
 		["a substitution", "OTHER=$(echo hi)\nK=/a.json", 1],
+		["a backtick", "OTHER=`echo hi`\nK=/a.json", 1],
 		["a command", "echo hi\nK=/a.json", 1],
 		["a space before the =", "K =/a.json", 1],
+		["an unclosed quote", "OTHER='x\nK=/a.json", 1],
+		["a trailing backslash", "OTHER=x\\\nK=/a.json", 1],
+		["a heredoc", "cat <<EOF\nK=/a.json\nEOF", 1],
+		["an unset below", "K=/a.json\nunset K", 2],
+		["a # that is not a comment", "NOTE=#it's\nK=/a.json", 1],
+		["an escaped space before a #", "NOTE=a\\ #'\nK=/a.json", 1],
 	]) {
 		const h = envFileHazard(text, { loader: "shell" });
-		assert.notEqual(h, null, `${name}: this file reaches past itself and nothing said so`);
+		assert.notEqual(h, null, `${name}: this file is not one this command can read, and nothing said so`);
 		assert.equal(h.line, line, `${name}: the line an operator has to open`);
+	}
+	// ORDINARY LINES STAY ORDINARY, which is the half a blanket rule got wrong: an expansion that can only
+	// substitute affects its own value and nothing else, and treating it as a file-wide hazard hid an EMPTY
+	// boot key two lines below it.
+	for (const [name, text] of [
+		["a plain expansion", "PI_LOGS_DIR=$HOME/logs\nK=/a.json"],
+		["a braced expansion", "PI_LOGS_DIR=${HOME}/logs\nK=/a.json"],
+		["a default expansion", "PI_LOGS_DIR=${HOME:-/tmp}/logs\nK=/a.json"],
+		["a trailing comment carrying an apostrophe", "OTHER=/a.json # it's fine\nK=/a.json"],
+		["a quoted hash", "OTHER='#not a comment'\nK=/a.json"],
+	]) {
+		assert.equal(envFileHazard(text, { loader: "shell" }), null, `${name}: reaches past nothing`);
 	}
 	// systemd 252 accepts `K =/a.json` and sets the key, measured on the rig -- so the hazard here is the
 	// SHELLS, which run a command named `K`. The two ends of the file disagree about whether the key is
@@ -577,7 +615,11 @@ test("E7: a line this reader cannot model is a HAZARD, never a key that is simpl
 	assert.equal(envFileHazard("# a note\n\nK=/a.json\n"), null, "and comments and blank lines are not hazards");
 	// The cmd wrapper has no hazards at all: `for /f` takes one line at a time, with no quoting, no
 	// continuation and no execution, so no line there can reach another.
-	assert.equal(envFileHazard("unset K\nOTHER='open", { loader: "cmd" }), null);
+	assert.equal(envFileHazard("unset K\nOTHER='open", { loader: "cmd" }), null, "no continuation, no multi-line value, no execution");
+	// ONE EXCEPTION, and the module already knew it: `set "%%A=%%B"` is itself quoted, so a `"` in any value
+	// closes it and the rest of the line becomes command. `renderEnvValue` refuses to WRITE that character
+	// for exactly this reason.
+	assert.deepEqual(envFileHazard('OTHER=x" & set "K=evil\nK=C:/ok.json', { loader: "cmd" }), { line: 1 }, "a double quote breaks out of the wrapper's own quoting");
 });
 
 test("E8: a CR or a line separator inside a value is a value, not an absence", () => {
@@ -664,7 +706,7 @@ test("E6: the cmd wrapper is a third loader, and it is read from its own source"
 	assert.deepEqual(cmd("K="), rec({ value: "", plain: true, vouched: true }));
 	// No line can reach another one: the poison rule is a shell property, and a per-line loader has none.
 	assert.deepEqual(cmd("OTHER='unclosed\nK=/srv/a.json"), rec({ value: "/srv/a.json", plain: true, vouched: true, line: 2 }), "an unbalanced quote above costs nothing here");
-	assert.deepEqual(cmd("K=/srv/a.json\nunset K"), rec({ value: "/srv/a.json", plain: true, vouched: true }), "and neither does a stray line below");
+	assert.deepEqual(cmd("K=/srv/a.json\nunset K"), rec({ value: "/srv/a.json", plain: true, vouched: true }), "and neither does a line that is not an assignment: there is nothing there to run it");
 });
 
 test("renderEnvValue writes what both consumers read back, and refuses what neither can", () => {
