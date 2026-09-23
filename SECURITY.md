@@ -307,15 +307,16 @@ Stated openly rather than discovered later:
   one, is inside the namespace and goes with the rest.
   **The likely way to meet this is `docker compose`**: a project named `pi-job-anything` gets a network
   `pi-job-anything_default`, and its services are named `pi-job-anything-<service>-1` unless you set
-  `container_name:`. The network sweep has one carve-out and it will not save you here: it leaves a network
-  alone only while a **running** container that is itself under the prefix is attached, which a stack with
-  explicit `container_name:` values never has, and which `docker network inspect` cannot see for a stopped
-  or `created` one even when the name does match. So the stack keeps running with its network removed from
-  under it.
-  The carve-out is narrower still than that, and the decisive reason is not in either of those: under
-  DEFAULT compose naming your services ARE under the prefix, and the container loop `rm -f`'d them one loop
-  earlier, so there is nothing left attached for the carve-out to see. It fires only for a prefix container
-  `docker ps` did not return, which in practice means a race.
+  `container_name:`.
+  **A stopped member now keeps its network** (since the #379 round). The sweep asks the daemon twice: which
+  endpoints it lists as attached, and then `docker ps -a --filter network=` for members in ANY state. A
+  member that is `created`, `exited`, `dead` or in a state this project has not measured keeps the network,
+  and the sweep says so. Before that, such a member was invisible to both halves and its network went, after
+  which it could never start again: `docker start` answers `network ... not found`.
+  So a stack whose services you stopped survives. What still does not: a stack whose services are RUNNING
+  and are themselves under the prefix, because the container loop `rm -f`'d them one loop earlier and there
+  is nothing left attached by the time the network loop asks. Under default compose naming that is the
+  normal case, and it is the reason the prefix is worth avoiding rather than working around.
   **What recovery costs, measured on docker 27.4.0 and compose v2.31.0, with no comfortable answer.** The
   network is GONE, not merely detached, so `docker network connect` answers `network not found`. For a
   compose stack, `docker compose up -d` from the project directory does restore the network with its labels,

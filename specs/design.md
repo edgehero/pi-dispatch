@@ -2980,16 +2980,32 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     attached to nothing. So the two halves cost about the same, and this change is taken on coherence rather
     than on cheapness. `SECURITY.md`'s *What is NOT defended* states the whole of it for operators.
 
-    **ONE PREDICATE IS NOT ONE QUESTION, and the limit belongs here rather than in a commit message.** The
-    two halves now ask the same thing OF A NAME, and they still ask different things OF THE DAEMON: the
-    container loop lists with `docker ps`, which is running-only, while the network loop lists every network
-    whatever its state. So a STOPPED or `created` `pi-job-` container survives the container half and loses
-    its network to the network half, and the carve-out cannot save it either, because `docker network
-    inspect`'s `.Containers` lists only running endpoints. That residual is pre-existing, is already recorded
-    at `reapNetwork`'s own docblock for the `created` case, and is untouched here: it was reachable before
-    this change for every `-net` name and is now reachable for the rest of the prefix. Widening the container
-    half to `docker ps -a` would close it and is a separate decision, because a stopped container spends
-    nothing and the reaper exists for the ones that do.
+    **ONE PREDICATE IS NOT ONE QUESTION, and the two questions are now BOTH answered (issue #379, item 1).**
+    The halves ask the same thing OF A NAME and deliberately different things OF THE DAEMON. The container
+    loop lists with `docker ps`, running-only. The network loop asks twice: `network inspect`'s `.Containers`
+    for what the daemon itself guards, and then `ps -a --filter network=` for members in ANY state. Without
+    the second, a `created` or `exited` `pi-job-` container survived the container half and lost its network
+    to the network half -- and could then never start, because it holds a network id the daemon no longer
+    has (`docker start` answers `network <id> not found`, measured on docker 27.4.0 for both states; the
+    carve-out could not save it, since `.Containers` lists only running endpoints).
+
+    **The states are an ALLOWLIST** (`ENDPOINT_LISTED_STATES`, following `sandbox.mjs`): `running` and
+    `paused` are what `.Containers` lists and what makes `network rm` refuse on its own, so for those the
+    existing detach-or-leave logic is the right conversation. Everything else -- `created`, `exited`, `dead`,
+    a Podman state nothing here has measured -- keeps the network and is named in
+    `network_not_reaped {reason: "container-attached-not-running", containers}`. `restarting` is excluded on
+    purpose: whether a flapping container appears in `.Containers` depends on the instant of the ask.
+
+    **The container half is NOT widened to `ps -a`, and that asymmetry is the decision.** This half only
+    DECLINES to remove a network, which costs a leftover network and a line saying so. The container half
+    `rm -f`s what it finds, so listing stopped containers would destroy an operator's own and a crashed job's
+    forensic one. A stopped container also spends nothing, and the reaper exists for the ones that do.
+
+    **Residuals, stated rather than closed.** A stopped proxy keeps its leftover networks and is logged on
+    every boot until it runs; a leftover `created` or `exited` `pi-job-<id>` keeps its network and is named
+    on every boot; Podman is unmeasured. Rejected: a `stillClear` callback, which would add a reconnect path
+    to a sweep with no live owner, and force-detaching stopped members, which silently rewrites an operator
+    container's configuration.
 
     **The alternative, and why it is not taken.** A docker label (`--label dev.pi-dispatch.job=<id>` plus
     `--filter label=`) is unambiguous and would survive an operator choosing the same prefix. It cannot be
@@ -4459,3 +4475,4 @@ a tunnel.
 | 2026-09-22 | Issue #373, the receiver's triggers-watch test. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` AMENDED** with what ARMING cannot do on macOS, measured against libuv 1.49.2's `src/unix/fsevents.c` and against the real receiver boot: `fs.watch` returns before the FSEvents stream that serves it exists, so an edit made in that window CAN be lost rather than delayed, and concurrent arming in the same event LOOP reopens it. The bullet carries the bound the summary cannot: at idle nothing is lost, and the 0-lost reading proves less than it looks. The test answer is to repeat the edit, not to wait longer; the operator-facing half of the same gap (neither service re-reads after arming) is issue #386. No behaviour changed here, and no other entry moved: `DES-CRON-VIA-BULLMQ-SCHEDULER` and `DES-TRIGGERS-UNIFIED-FILE` describe reload CONTENT rather than arming, checked. **Code evidence**: `receiver/test/start.test.mjs` -> the arrival poll and its re-write; `receiver/src/start.mjs` -> `watchTriggers`. |
 | 2026-09-22 | Issue #375. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**, and it is the entry the change depends on rather than one that moved: the key stays a derived hash of (kind, repo, ref), which is exactly what makes the store path precomputable by anyone who knows the repository and the branch, and therefore what the new refusal defends. Nothing here argues for a readable or random name; `INT-SESSION-STORE-CONTRACT` carries the whole of the change. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` UNCHANGED, checked** as well: the session store arms no watch. **Code evidence**: `worker/src/session-store.mjs` -> `inspectKeyDir`; `worker/src/session-key.mjs` -> `sessionKeyFor`. |
 | 2026-09-23 | Issue #384. **`DES-CLI-SURFACE` UNCHANGED, checked**, and it is the entry the change had to be measured against rather than one that moved: doctor stays read-only, the new verdicts carry no `fixAction`, and the one new read (the worker's own loader, on a path the `.env` names) writes nothing, spawns nothing and is guarded by `isFile()` so a FIFO cannot hang the command. What DID move is a verdict, not a surface: a deployment whose service cannot boot now exits 1 where it exited 0, which is the point of the issue. The alternative of leaving doctor advisory and letting the worker fail at start was rejected, because the whole reason doctor exists is to answer "will this start" before the operator finds out from a dead unit. |
+| 2026-09-23 | Issue #379, item 1. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED** where it records the boot reaper's two halves: they ask the same thing of a NAME and deliberately different things of the DAEMON, and both questions are now answered. `network inspect`'s `.Containers` lists running endpoints, which is what the daemon guards; a `created` or `exited` member is invisible to it AND to the container half's `docker ps`, and the `rm` then succeeds, after which that member can never start (`docker start` answers `network <id> not found`, measured on docker 27.4.0 for both states). So the network half asks `ps -a --filter network=` as well, and any member outside `ENDPOINT_LISTED_STATES` -- an allowlist of `running` and `paused`, following `sandbox.mjs` -- keeps the network and is named. `restarting` is excluded because whether it appears depends on the instant of the ask. The container half is NOT widened the same way, and the asymmetry is the decision: it removes what it lists, so `ps -a` there would destroy an operator's stopped container and a crashed job's forensic one, while this half only declines to remove a network. Rejected: a `stillClear` callback (a reconnect path in a sweep with no live owner) and force-detaching stopped members (silently rewriting an operator container's configuration). Residuals stated: a stopped proxy keeps its networks and is logged every boot, a leftover `created` or `exited` job container keeps its network and is named every boot, and Podman is unmeasured. **`DES-CONCURRENCY-3` UNCHANGED, checked**: one worker per daemon is still the assumption both halves rest on. |

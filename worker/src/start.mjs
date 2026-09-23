@@ -38,7 +38,7 @@ import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue } from "./queue.mjs";
-import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer } from "./backend-local.mjs";
+import { endpointShown, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
 import { DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, backendFor, observationRefusalIsTransient, observationRefusals, unobservedFloor } from "./backends.mjs";
 import { observeHost, runtimeObservationKey } from "./runtime-observations.mjs";
@@ -116,22 +116,6 @@ const WORKER_VERSION = (() => {
 	}
 })();
 
-/**
- * Boot-time reaper: clear stray `pi-job-*` containers a previous worker crash left behind, before
- * the new worker starts draining. A leaked container keeps spending, so it must go before any new
- * job launches.
- *
- * It runs `docker ps` / `docker rm -f` ONLY. It never inspects a container's exit code, never touches
- * the queue, and never re-enqueues -- queue and retry state belong to Redis, not to docker
- * (INT-RUNNER-EXIT-CODE-PROTOCOL / CONST-RETRY-INFRA-ONLY). It logs container names only (no PII).
- *
- * It assumes ONE worker per docker daemon: a co-located second worker's boot would remove the first's
- * in-flight `pi-job-*` container. That is the accepted v1 shape (DES-CONCURRENCY-3, single worker per
- * host).
- *
- * `reap()` NEVER throws: a missing docker binary or a down daemon is caught, logged as
- * `reaper_skipped`, and boot continues to the worker.
- */
 // `makeWatchCloser` lives in its own module since issue #301 (the receiver's triggers watch registers
 // the same handle); re-exported here so every existing importer keeps its address.
 export { makeWatchCloser } from "./watch-closer.mjs";
@@ -1536,7 +1520,7 @@ function dockerEndpointState(endpoint) {
  */
 function dockerEndpointEvidence(endpoint) {
 	if (endpoint.local === null) return `the docker CLI did not say which endpoint it resolves (${endpoint.reason})`;
-	return `the docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpointShown(endpoint)}${endpoint.local ? ", on this host" : ", which is not shown to be on this host"}`;
+	return `the docker CLI resolves context ${quotedShown(endpoint.context)} to ${endpointShown(endpoint)}${endpoint.local ? ", on this host" : ", which is not shown to be on this host"}`;
 }
 
 /** Log an endpoint answer that is not plainly local; a return to local is logged only as a change. */

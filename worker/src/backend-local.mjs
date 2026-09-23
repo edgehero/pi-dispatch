@@ -33,7 +33,9 @@ const execDocker = promisify(execFile);
 /**
  * `pi-job-` -- the container-name namespace, and a LOAD-BEARING string rather than a prefix chosen for
  * readability. TWO sweeps match it as a SUBSTRING, both at boot in `start.mjs`: the container reaper's
- * `docker ps` filter and the network reaper's `docker network ls` filter. The sandbox tooling is the
+ * `docker ps` filter and the network reaper's `docker network ls` filter. They share the NAME rule
+ * (`isJobNamespace`) and deliberately not the STATE question -- see `reapNetwork` for why one lists running
+ * containers and the other asks about members in any state. The sandbox tooling is the
  * counterpart rather than a third sweep -- it names itself `pi-sandbox-` precisely to stay OUTSIDE this
  * namespace, so a worker restart cannot tear down the shell an operator is sitting in, and it reaps its own
  * by job id rather than by name.
@@ -44,6 +46,21 @@ const execDocker = promisify(execFile);
  * both test suites green.
  */
 export const JOB_NAME_PREFIX = "pi-job-";
+
+/**
+ * The container states `docker network inspect` lists in `.Containers`, and therefore the ones the daemon
+ * itself guards: with one attached, `network rm` fails "has active endpoints" (measured, docker 27.4.0).
+ *
+ * An ALLOWLIST rather than a denylist, following `sandbox.mjs`: an unknown state -- a Podman rendering
+ * nothing here has measured, or one docker adds later -- keeps the network rather than losing it. The cost
+ * of being wrong that way is a leftover network and a line naming it; the cost of the other way is a
+ * container that can never start again.
+ *
+ * `paused` is here because it is listed and the `rm` refuses while it is there. `restarting` is NOT, even
+ * though it can appear: whether a flapping container is in `.Containers` depends on which instant the sweep
+ * asks in, and a rule that changes answer between two runs is not a rule a sweep can act on.
+ */
+export const ENDPOINT_LISTED_STATES = new Set(["running", "paused"]);
 
 /**
  * `pi-job-<jobId>`. The name a running job answers to, for `docker stop` on the 30-minute timeout, for the
@@ -219,10 +236,83 @@ export function makeStopContainer({ exec = execDocker } = {}) {
 export function endpointShown(endpoint) {
 	const shown = String(endpoint?.endpoint ?? "");
 	if (shown.trim() === "") return "an empty endpoint";
-	if (/^[\x20-\x7e]+$/.test(shown)) return shown;
-	// `JSON.stringify` quotes and escapes C0, the quote and the backslash; the pass after it takes everything
-	// else outside printable ASCII, which JSON leaves as literal characters.
-	return JSON.stringify(shown).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, "0")}`);
+	if (shown.length <= ENDPOINT_SHOWN_MAX && /^[\x20-\x7e]+$/.test(shown)) return shown;
+	return boundedShown(shown);
+}
+
+/**
+ * The same escaping, always quoted, for a value that is not an endpoint: a context NAME.
+ *
+ * `JSON.stringify` was what printed those, and it escapes C0 and stops: a C1 CSI byte, a right-to-left
+ * override and a zero-width joiner all reached the terminal through it. This is the same class the endpoint
+ * itself is held to, so the two halves of `resolves context X to Y` cannot be protected differently.
+ *
+ * It must agree with `JSON.stringify` on the ordinary cases, because existing pins read that shape:
+ * `""` for the empty string, and `null`/`undefined` rendered as themselves.
+ */
+export function quotedShown(value) {
+	if (value === null || value === undefined) return String(value);
+	const shown = String(value);
+	if (shown.length <= ENDPOINT_SHOWN_MAX && /^[\x20-\x7e]*$/.test(shown)) return JSON.stringify(shown);
+	return boundedShown(shown);
+}
+
+/**
+ * 300 characters of RENDERED text, and the number is a literal rather than a computation.
+ *
+ * A DNS name is at most 253 bytes plus a scheme and a port, and a unix socket path is capped at 104 bytes on
+ * macOS and 108 on Linux, so no PRINTABLE endpoint a daemon can actually have reaches this. A 104-byte
+ * socket path made entirely of C1 bytes renders to about 321 characters and IS cut, which is the honest
+ * statement of the bound: it cuts escaped text, not real endpoints.
+ */
+export const ENDPOINT_SHOWN_MAX = 300;
+
+/**
+ * Escape, then cut -- and the ORDER is the opposite of `SCRUBBED_MAX`'s, deliberately.
+ *
+ * Cutting first and escaping after can land the cut inside a `\u00e9` and produce text no `JSON.parse` will
+ * read. Escaping first and cutting after can do the same. So this walks CODE POINTS, escapes each one, and
+ * stops BEFORE the rendered text would pass the cap -- the quoted part is therefore always parseable and
+ * always a PREFIX of the input, which is the property an operator needs when they compare it to what they
+ * configured.
+ *
+ * Per code point, not per UTF-16 unit: iterating units cuts between surrogates and emits a lone one (1,537
+ * of them in a 50k-case fuzz of the version this replaced). And each escape is built from `JSON.stringify`
+ * of the whole code point rather than `codePointAt(0).toString(16)`, which emits `\u1f600`-shaped text for
+ * an astral character -- that parses as `\u1f60` followed by a literal `0`, so the result was not a prefix
+ * of anything (16,916 fuzz failures).
+ */
+function boundedShown(value) {
+	let out = "";
+	let kept = 0;
+	let cut = false;
+	const points = [...value];
+	for (const point of points) {
+		const piece = /^[\x20-\x7e]$/.test(point) ? (point === '"' || point === "\\" ? `\\${point}` : point) : escapedPoint(point);
+		// +2 for the quotes this will be wrapped in. Stop BEFORE passing the cap, never after.
+		if (out.length + piece.length + 2 > ENDPOINT_SHOWN_MAX) {
+			cut = true;
+			break;
+		}
+		out += piece;
+		kept += 1;
+	}
+	// The count outside the quotes, so the quoted part stays exactly what `JSON.parse` will take.
+	return cut ? `"${out}" (first ${kept} of ${points.length} characters)` : `"${out}"`;
+}
+
+function escapedPoint(point) {
+	// PER UTF-16 UNIT, which is what `\uXXXX` means. Escaping the CODE POINT instead emits `\u1f600` for an
+	// astral character -- five hex digits, which `JSON.parse` reads as `\u1f60` followed by a literal `0`, so
+	// the result is not the value and not a prefix of it (16,916 failures in a 50,000-case fuzz). Both halves
+	// of a surrogate pair are always emitted together, because the caller walks whole code points, so this
+	// can never leave a lone surrogate behind.
+	let out = "";
+	for (let i = 0; i < point.length; i++) {
+		const unit = point.charCodeAt(i);
+		out += unit >= 0x20 && unit <= 0x7e ? point[i] : `\\u${unit.toString(16).padStart(4, "0")}`;
+	}
+	return out;
 }
 
 /**
@@ -324,10 +414,17 @@ export function makeReaper({ log, exec = execDocker }) {
 	 * `rm -f`'d every one of them, and a failure there throws to the outer catch -- so the ways in are a
 	 * container started between the `ps` and this inspect, or the two-workers-per-daemon configuration
 	 * `DES-CONCURRENCY-3` already calls catastrophic and unsupported. Where it is seen, it is left alone and
-	 * said. Where it CANNOT be seen it is not protected, and that is worth stating rather than implying: a
-	 * container in `created` state appears in neither `docker ps` nor `.Containers` (measured), so a network
-	 * whose only member is one is removed and that container can no longer start. Pre-existing -- the bare
-	 * `network rm` this replaced also succeeded on a network docker reports as empty.
+	 * said.
+	 *
+	 * WHAT IT CANNOT SEE IS NOW ASKED FOR SEPARATELY (issue #379, item 1). `.Containers` lists RUNNING
+	 * endpoints, so a member that is `created` or `exited` was invisible to it AND to the container half's
+	 * `docker ps` -- and the `rm` succeeded, leaving a container that can never start again (`docker start`
+	 * answers `network <id> not found`, measured on 27.4.0 for both states). A second ask, `ps -a --filter
+	 * network=`, closes that: any member outside `ENDPOINT_LISTED_STATES` keeps the network and is named.
+	 *
+	 * The two halves still ask DIFFERENT questions, deliberately. This one only declines to remove something,
+	 * which costs a leftover network and a line. The container half `rm -f`s what it finds, so widening it
+	 * the same way would destroy an operator's stopped container and a crashed job's forensic one.
 	 */
 	async function reapNetwork(network) {
 		const { ok, names, absent } = await networkEndpoints(step, network);
@@ -336,6 +433,29 @@ export function makeReaper({ log, exec = execDocker }) {
 		if (absent) return;
 		if (!ok) return log("network_not_reaped", { network, reason: "unreadable" });
 		if (names.some(isJobNamespace)) return log("network_not_reaped", { network, reason: "job-container-attached" });
+		// THE OTHER HALF OF THE SAME QUESTION (issue #379, item 1). `.Containers` above lists RUNNING
+		// endpoints, which is what the daemon guards: with one of those attached the `rm` fails by itself.
+		// It lists nothing for a member that is `created` or `exited`, and the `rm` then SUCCEEDS -- after
+		// which that member can never start again, because it holds a network id the daemon no longer has.
+		// Measured on docker 27.4.0 for BOTH states: `docker start` answers `network <id> not found`.
+		//
+		// So this half asks about a member in ANY state, and the container half deliberately does not. The
+		// container half stays `docker ps`, running-only, because widening it to `ps -a` would `rm -f` an
+		// operator's stopped container and a crashed job's forensic one, which `design.md` refuses; this half
+		// only DECLINES to remove something, which costs a leftover network and a line saying so.
+		const members = await step(["ps", "-a", "--filter", `network=${network}`, "--format", "{{.Names}}\t{{.State}}"]);
+		if (members.code !== 0) return log("network_not_reaped", { network, reason: "containers-unreadable" });
+		// AN ALLOWLIST, following `sandbox.mjs`: the states named here are the ones the daemon itself lists in
+		// `.Containers`, so the detach-or-leave logic below already handles them. Anything else -- `created`,
+		// `exited`, `dead`, a Podman state nothing here has measured -- keeps the network. `paused` is on this
+		// side because it IS listed and the `rm` refuses while it is there (measured); `restarting` is not,
+		// because whether it appears is a matter of which instant the sweep asks in.
+		const attached = members.stdout
+			.split("\n")
+			.map((l) => l.split("\t"))
+			.filter(([name, state]) => String(name ?? "").trim() !== "" && !ENDPOINT_LISTED_STATES.has(String(state ?? "").trim()))
+			.map(([name]) => name.trim());
+		if (attached.length > 0) return log("network_not_reaped", { network, reason: "container-attached-not-running", containers: attached });
 		const outcome = await removeNetworkOrSay(step, { network, detach: names });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.

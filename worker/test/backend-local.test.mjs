@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint } from "../src/backend-local.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -275,17 +275,22 @@ test("the bounded runner passes NO env, and settles on its own timer when the CL
 
 // --- makeReaper's network half (issue #357) ----------------------------------------------------------
 //
-// The first direct tests this function has ever had: before #357 it was imported here and never called,
-// so nothing pinned the `docker ps` filter, the `network ls` filter, `reaped_container`, `reaped_network`
-// or the bare `catch {}` the sweep used to hide a leak behind.
+// The first direct tests this function had: before #357 it was imported here and never called, so nothing
+// pinned the `docker ps` filter, the `network ls` filter, `reaped_container`, `reaped_network` or the bare
+// `catch {}` the sweep used to hide a leak behind. Since #379 they also pin the MEMBERSHIP question, which
+// the two halves ask differently on purpose, and the container half's argv whole.
 //
 // The fake MODELS THE DAEMON rather than replaying a script, because the behaviour under test is a
 // conversation with it: `network rm` REJECTS while a network still has endpoints, exactly as docker does
 // (measured on 27.4.0), and `network disconnect` empties one. A replayed script would pass whatever order
 // the code used.
-function fakeDockerExec({ containers = [], nets = {}, fail = {} } = {}) {
+function fakeDockerExec({ containers = [], nets = {}, stopped = {}, fail = {} } = {}) {
 	const calls = [];
 	const state = new Map(Object.entries(nets).map(([n, members]) => [n, [...members]]));
+	// MEMBERS THE DAEMON DOES NOT LIST IN `.Containers`: `{ "<network>": [["name", "exited"], ...] }`. A
+	// `created` or `exited` container is attached to the network and invisible to `network inspect`, which is
+	// why `network rm` succeeds on it and why the sweep has to ask `ps -a` separately (measured, 27.4.0).
+	const parked = new Map(Object.entries(stopped).map(([n, members]) => [n, members.map((m) => [...m])]));
 	// `promisify(execFile)` puts the CLI's stderr on the Error's own MESSAGE, not only on `.stderr`, and that
 	// is the channel issue #339 is about: a fake that carried it only on `.stderr` made every test here blind
 	// to the one line that logs `err.message`.
@@ -295,6 +300,14 @@ function fakeDockerExec({ containers = [], nets = {}, fail = {} } = {}) {
 		const key = args.slice(0, 2).join(" ");
 		if (fail[key]) return reject(1, fail[key]);
 		if (key === "ps --filter") return { stdout: containers.join("\n"), stderr: "" };
+		// `ps -a --filter network=<net>`: every member whatever its state. Running members come from the live
+		// map so the two answers cannot drift apart in a fixture, parked ones from `stopped`.
+		if (key === "ps -a") {
+			const net = (args.find((a) => a.startsWith("network=")) ?? "").slice("network=".length);
+			const live = (state.get(net) ?? []).map((n) => [n, "running"]);
+			const rows = [...live, ...(parked.get(net) ?? [])];
+			return { stdout: rows.map(([n, st]) => `${n}\t${st}`).join("\n"), stderr: "" };
+		}
 		if (key === "rm -f") return { stdout: "", stderr: "" };
 		if (key === "network ls") return { stdout: [...state.keys()].join("\n"), stderr: "" };
 		if (key === "network inspect") {
@@ -316,7 +329,11 @@ function fakeDockerExec({ containers = [], nets = {}, fail = {} } = {}) {
 			state.delete(net);
 			return { stdout: net, stderr: "" };
 		}
-		return { stdout: "", stderr: "" };
+		// NO SILENT DEFAULT. An unmodelled argv used to come back as empty stdout, so changing `ps` to `ps -a`
+		// in the subject left every test here green while the sweep asked a question this fake never answered
+		// -- the reaper then read "no members" for every network. A fake that answers everything is a fake
+		// that cannot notice the subject changing the conversation.
+		throw Object.assign(new Error(`the fake daemon was asked something it does not model: docker ${args.join(" ")}`), { code: "EUNMODELLED" });
 	};
 	return { exec, calls, state };
 }
@@ -403,13 +420,74 @@ test("a docker ps that fails is {reaped:false} and one reaper_skipped (#357)", a
 	assert.deepEqual(lines.map((l) => l[0]), ["reaper_skipped"]);
 });
 
+test("the reaper's two halves ask the daemon the same question about membership (#379)", async () => {
+	// THE DEFECT, measured on docker 27.4.0: `network inspect`'s `.Containers` lists RUNNING endpoints only,
+	// so a `pi-job-` container that is `created` or `exited` is invisible to it AND to the container half's
+	// `docker ps` -- and `network rm` then SUCCEEDS. After that the member can never start again: `docker
+	// start` answers `network <id> not found`, for both states.
+	for (const state of ["created", "exited", "dead"]) {
+		const { exec, calls } = fakeDockerExec({ nets: { "pi-job-a-net": [] }, stopped: { "pi-job-a-net": [["pi-job-a", state]] } });
+		const { log, lines } = reaperLog();
+		await makeReaper({ log, exec })();
+		assert.deepEqual(lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "container-attached-not-running", containers: ["pi-job-a"] }]], state);
+		assert.equal(calls.some((c) => c.startsWith("network rm")), false, `${state}: the network is KEPT, which is the whole point`);
+	}
+	// A FOREIGN stopped container counts too. Under default compose naming an operator's own project can sit
+	// under this prefix, and removing the network of a service they stopped on purpose breaks their project.
+	const { exec, calls } = fakeDockerExec({ nets: { "pi-job-runner_default": [] }, stopped: { "pi-job-runner_default": [["runner-worker-1", "exited"]] } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.deepEqual(lines[0][1].reason, "container-attached-not-running");
+	assert.equal(calls.some((c) => c.startsWith("network rm")), false);
+});
+
+test("the states the daemon itself guards are the ones the reaper proceeds on (#379)", async () => {
+	// An ALLOWLIST, so an unknown state keeps the network. `running` and `paused` are what `.Containers`
+	// lists and what makes `network rm` refuse by itself (measured), so for those the existing detach-or-leave
+	// logic is already the right conversation. `restarting` is deliberately NOT here: whether a flapping
+	// container appears in `.Containers` depends on which instant the sweep asks in, and a sweep cannot act
+	// on a rule that answers differently between two runs.
+	assert.deepEqual([...ENDPOINT_LISTED_STATES].sort(), ["paused", "running"], "the set is closed and small");
+	for (const [state, kept] of [["paused", false], ["restarting", true], ["bogus-podman-state", true]]) {
+		const { exec, calls } = fakeDockerExec({ nets: { "pi-job-s-net": [] }, stopped: { "pi-job-s-net": [["other-thing", state]] } });
+		const { log } = reaperLog();
+		await makeReaper({ log, exec })();
+		assert.equal(calls.some((c) => c.startsWith("network rm")), !kept, `${state}: ${kept ? "kept" : "removed"}`);
+	}
+});
+
+test("a membership question the daemon will not answer keeps the network (#379)", async () => {
+	const { exec, calls } = fakeDockerExec({ nets: { "pi-job-u-net": [] }, fail: { "ps -a": "Cannot connect to the Docker daemon" } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.deepEqual(lines, [["network_not_reaped", { network: "pi-job-u-net", reason: "containers-unreadable" }]], "a failure is not an empty answer");
+	assert.equal(calls.some((c) => c.startsWith("network rm")), false);
+});
+
+test("the CONTAINER half stays running-only, and its argv is pinned whole (#379)", async () => {
+	// The container half must NOT be widened to `ps -a`: it `rm -f`s what it finds, so listing stopped
+	// containers would destroy an operator's own and a crashed job's forensic one. `design.md` records the
+	// reason; this pins the argv, because the mutation that matters is subtle. Measured by driving the real
+	// reaper: `-a` placed at the FRONT turns four tests here red on its own, but `-a` APPENDED, or `--all`
+	// after the filter, survives every one of them -- the fake routes on the first two words, so even a
+	// rejecting default branch cannot see it.
+	const { exec, calls } = fakeDockerExec({ containers: ["pi-job-live"], nets: {} });
+	const { log } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.equal(
+		calls.find((c) => c.startsWith("ps")),
+		"ps --filter name=pi-job- --format {{.Names}}",
+		"the container half lists RUNNING containers, and nothing about this argv may drift",
+	);
+});
+
 test("nothing the reaper logs about a network carries the CLI's own text (#339, #357)", async () => {
 	// A docker error can repeat a DOCKER_HOST with credentials in it. The network lines carry object names and
 	// a token from a closed set, never `err.message`. A guard rail rather than a behaviour pin.
 	const { exec } = fakeDockerExec({ nets: { "pi-job-f-net": ["some-proxy"] }, fail: { "network rm": "Failed to initialize: parse \"ssh://bob:pa?ss@remote\"" } });
 	const { log, lines } = reaperLog();
 	await makeReaper({ log, exec })();
-	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed"]);
+	const reasons = new Set(["unreadable", "job-container-attached", "rm-failed", "containers-unreadable", "container-attached-not-running"]);
 	for (const [event, fields] of lines) {
 		// `reaper_skipped` is exempt from the CLOSED-TOKEN rule and only from that. Its reason is a fault's
 		// own prose, deliberately, because at most of the twelve sites that share this treatment the message
@@ -469,6 +547,55 @@ test("the sweep's namespace is the NAME, not the filter: a foreign network is ne
 // rule. Each row is a thing a real context store can hold: `docker context create` refuses a blank host and a
 // raw ESC, but it ACCEPTS a C1 byte, and `docker context inspect` -- the command doctor actually runs -- does
 // not re-validate what is already stored.
+test("endpointShown is BOUNDED, and what it cuts is still parseable and still a prefix (#379)", () => {
+	// Two hundred non-ASCII bytes expanded roughly sixfold into a 1210-character warning on one unwrapped
+	// line. The cap is 300 RENDERED characters, and the number is chosen so that no printable endpoint a
+	// daemon can have reaches it: a DNS name is at most 253 plus scheme and port, a unix socket path 104 or
+	// 108 bytes. A 104-byte socket path made of C1 bytes renders to about 321 characters and IS cut -- the
+	// bound cuts escaped text, not real endpoints.
+	assert.equal(ENDPOINT_SHOWN_MAX, 300);
+	const printable = "t".repeat(ENDPOINT_SHOWN_MAX);
+	assert.equal(endpointShown({ endpoint: printable }), printable, "at the cap a printable endpoint is still passed through bare");
+	const over = "t".repeat(ENDPOINT_SHOWN_MAX + 1);
+	const cut = endpointShown({ endpoint: over });
+	assert.match(cut, /^"t+" \(first \d+ of 301 characters\)$/, "one character past it, the value is quoted and the count is OUTSIDE the quotes");
+	assert.ok(cut.slice(0, cut.indexOf('" (')).length + 1 <= ENDPOINT_SHOWN_MAX, "and the quoted part itself respects the cap");
+
+	// THE PROPERTY THAT MATTERS, over shapes that straddle the cut: what is quoted must PARSE, and must be a
+	// PREFIX of what was given. Two easy wrong versions both pass a length check and fail this one -- cutting
+	// after escaping can land inside a `\u00e9`, and escaping a code point rather than each UTF-16 unit emits
+	// `\u1f600`, which parses as `\u1f60` followed by a literal `0`.
+	for (const [name, value] of [
+		["astral runs", "\u{1f600}".repeat(200)],
+		["astral straddling the cut", `${"a".repeat(140)}${"\u{1f600}".repeat(40)}`],
+		["C1 bytes", "\u0085".repeat(1000)],
+		["mixed BMP and astral", `${"\u00e9\u{1f4a9}".repeat(100)}`],
+		["a bidi override", `tcp://${"\u202e".repeat(80)}:2375`],
+	]) {
+		const out = endpointShown({ endpoint: value });
+		const quoted = out.endsWith("characters)") ? out.slice(0, out.lastIndexOf('" (') + 1) : out;
+		assert.ok(quoted.length <= ENDPOINT_SHOWN_MAX, `${name}: within the cap`);
+		const parsed = JSON.parse(quoted);
+		assert.ok(value.startsWith(parsed), `${name}: what is shown is a PREFIX of what was given, not merely parseable`);
+		assert.doesNotMatch(parsed, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, `${name}: no lone surrogate`);
+		assert.doesNotMatch(out, /[^\x20-\x7e]/, `${name}: nothing outside printable ASCII reaches the line`);
+	}
+});
+
+test("quotedShown holds the context name to the same class, and to JSON.stringify's shape (#379)", () => {
+	// A context NAME went through `JSON.stringify`, which escapes C0 and stops -- so a C1 CSI byte, a
+	// right-to-left override and a zero-width joiner reached the terminal through the half of
+	// `resolves context X to Y` that was not `endpointShown`.
+	assert.equal(quotedShown("remote"), '"remote"', "an ordinary name is quoted exactly as before");
+	assert.equal(quotedShown(""), '""', "and the empty string keeps the shape existing pins read");
+	assert.equal(quotedShown(null), "null");
+	assert.equal(quotedShown(undefined), "undefined");
+	for (const [name, value] of [["C1", "re\u009bmote"], ["bidi", "re\u202emote"], ["zero width", "re\u200dmote"], ["ESC", "re\u001bmote"]]) {
+		assert.doesNotMatch(quotedShown(value), /[^\x20-\x7e]/, `${name}: escaped, not passed through`);
+	}
+	assert.match(quotedShown("x".repeat(400)), /\(first \d+ of 400 characters\)$/, "and it is bounded too");
+});
+
 test("endpointShown never renders a gap, and never a byte that can redraw the line (#360)", () => {
 	const U = (hex) => String.fromCodePoint(parseInt(hex, 16));
 	assert.equal(endpointShown({ endpoint: "tcp://h:2375" }), "tcp://h:2375", "printable ASCII is untouched");
