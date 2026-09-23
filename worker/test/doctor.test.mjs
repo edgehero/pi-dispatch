@@ -6,9 +6,9 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
+import { CANARY_LINES, CANARY_PROBE_SLUGS, ENV_FILE_READABLE_KEYS, backendChecks, collectChecks, defaultPromptFn, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, runDoctor } from "../src/doctor.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
-import { egressCanaryProbe } from "../src/egress.mjs";
+import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe } from "../src/egress.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -4512,60 +4512,134 @@ test("doctor: the canary's bounds are pinned as NUMBERS, not derived (#350)", as
 	assert.match(src, /const \{ timeoutMs = 30000, stdoutOnly = false \} = opts;/, "runCmdCapture's probe bound");
 });
 
-// A COUNT, deliberately, and not a match over the page's prose. `docs/egress.md` described three canary line
-// shapes while doctor produced six, and the page went a whole round without anyone noticing (issue #360,
-// item 2). The obvious repair is a test that reads each label out of the source and requires the page to
-// carry it; that is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and these labels are
-// worse subjects for it than that page's were -- several begin with `${name}`, and one nests a template
-// inside itself, so there is no honest static text to require. So this pins the ONE thing that is both
-// derivable and sufficient: how many places in doctor produce a line under this prefix. What each line SAYS
-// is the page's own job and is not pinned here, and saying so is the point: a green regex over a false
-// sentence is worse than no test.
+// The scenarios that reach every canary shape, each one the same fixture the shape's own test uses. They
+// are listed here rather than derived, and that is the limit this test states: a shape no plan reaches is a
+// shape the union check will catch, but a second SITE for a shape some other plan already reaches would be
+// invisible. Both `notRemoved` sites are therefore driven on purpose.
+const canaryFixture = (extra) => {
+	const base = { ...green, "gh auth status": { code: 0, output: ghStatusOutput } };
+	for (const key of Object.keys(extra)) delete base[key];
+	return { ...extra, ...base };
+};
+const canaryPlan = (extra, seams = {}) => [
+	ghEnv({ PI_EGRESS: "1" }),
+	// THE SAME DEPS THE SHAPE'S OWN TEST USES, so this drives the real sweep rather than a near neighbour of
+	// it: `collectSeams` does not arm the egress path, and with it every plan below produced no canary line
+	// at all -- a union check that passes over an empty set is the kind of green this test exists to refuse.
+	// THE SPECIFIC KEYS FIRST, AND WINNING ON DUPLICATES. Both halves are needed and neither is obvious:
+	// `fakeSpawn` takes the FIRST key that prefixes the command line, and `green` carries a bare
+	// `"docker network"`, so spreading green ahead answered every `network ls` with an empty success and no
+	// canary line was produced at all. Spreading green AFTER fixes the order and then overwrites any key a
+	// scenario names exactly, which silently restored the local endpoint for the one scenario that needs a
+	// remote one. So green's defaults are stripped of whatever the scenario names.
+	ghDeps(() => {}, canaryFixture(extra), [], { cwd: tempDir("pi-canary-plan-"), isAlive: () => false, pid: 1, ...seams }),
+];
+const NET = "pi-dispatch-egress-doctor-4242";
+const LS = "docker network ls --filter name=pi-dispatch-egress-doctor-";
+const CANARY_PLANS = [
+	// unlisted: the listing itself fails.
+	() => canaryPlan({ [LS]: { code: 1, output: "" } }),
+	// unreadable: the network is there and its membership will not parse.
+	() => canaryPlan({ [LS]: { code: 0, output: `${NET}\n` }, [`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: "not json" } }),
+	// kept: a probe that will not go, so the network is deliberately left standing.
+	() => canaryPlan({
+		[LS]: { code: 0, output: `${NET}\n` },
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: JSON.stringify({ a: { Name: "pi-dispatch-egress-probe-unlisted-4242" } }) },
+		"docker rm -f pi-dispatch-egress-probe-unlisted-4242": { code: 1, output: "" },
+	}),
+	// removed: the ordinary sweep. The probe removal must SUCCEED here, or this is the `kept` path instead.
+	() => canaryPlan({
+		[LS]: { code: 0, output: `${NET}\n` },
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: JSON.stringify({ a: { Name: "pi-dispatch-egress-probe-unlisted-4242" }, b: { Name: "pi-dispatch-egress-proxy" } }) },
+		"docker rm -f": 0,
+	}),
+	// gone: the network vanished between this pass's own commands, but the pass DID something.
+	() => canaryPlan({
+		[LS]: { code: 0, output: `${NET}\n` },
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: JSON.stringify({ a: { Name: "pi-dispatch-egress-probe-unlisted-4242" } }) },
+		// The `rm` fails and the FOLLOW-UP INSPECT gets the daemon's not-found words, which is the shape that
+		// reaches the `absent` branch -- the words are read from the inspect, not from the `rm`.
+		[`docker network rm ${NET}`]: { code: 1, output: "" },
+		[`docker network inspect ${NET}`]: { code: 1, output: `Error response from daemon: network ${NET} not found` },
+		"docker rm -f": 0,
+	}),
+	// notRemoved, from the SWEEP: everything was dealt with and the `rm` still failed for another reason.
+	() => canaryPlan({
+		[LS]: { code: 0, output: `${NET}\n` },
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: "{}" },
+		[`docker network rm ${NET}`]: { code: 1, output: "Error response from daemon: something else entirely" },
+		"docker rm -f": 0,
+	}),
+	// notRemoved, from doctor's OWN TEARDOWN at the end of a run -- a second site for the same shape, which
+	// nothing drove before: the only assertion about it was a `doesNotMatch`.
+	() => canaryPlan({ [`docker network rm pi-dispatch-egress-doctor-1`]: { code: 1, output: "Error response from daemon: has active endpoints" } }, { pid: 1, isAlive: () => true }),
+	// foreign: a leftover on a daemon this shell cannot show is on this host. The endpoint comes from the
+	// plan, because that is where doctor reads it from -- a seam would be a different code path.
+	() => canaryPlan({ [LS]: { code: 0, output: `${NET}\n` }, "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' } }),
+];
+
+// THE PAGE IS GENERATED FROM THE TABLE, and the sweep is driven to prove the table is what it prints.
 //
-// A COUNT, deliberately, and not a match over the page's prose. `docs/egress.md` described three canary line
-// shapes while doctor produced six, and the page went a whole round without anyone noticing (issue #360,
-// item 2). The obvious repair is a test that reads each label out of the source and requires the page to
-// carry it: that is the arms race `podman-doc.test.mjs:14-32` lost four rounds running, and these labels are
-// worse subjects for it than that page's were, since several begin with `${name}` and one nests a template
-// inside itself. What each line SAYS stays the page's own job, unpinned on purpose, because a green regex
-// over a false sentence is worse than no test.
+// What this replaces counted occurrences of ``label: `Egress canary: `` in doctor's SOURCE and required
+// `docs/egress.md` to carry a matching number. Its own comment recorded what it could not see -- a constant
+// holding the prefix, a plain double-quoted string, `label:` on its own line, an interpolation inside the
+// phrase, a label built in another module -- and that it could go false red on a comment quoting the
+// prefix. Two cleverer versions were tried and both failed worse: a raw-source count introduced the false
+// red at scale, and stripping comments to fix that introduced a false GREEN at thirty times the scale,
+// because the block-comment regex treated the `/*` inside `mv ${legacy}/logs/*` as an opener and deleted 88
+// lines of live code before counting.
 //
-// ONE NEEDLE, AND ITS LIMIT STATED RATHER THAN FOUGHT. This counts sites written the way all eight existing
-// ones are written, and nothing else. Two cleverer versions were tried and both failed in their own
-// direction, which is why the simple one is here: adding a raw-source count caught four more spellings and
-// introduced a FALSE RED, because this file's house style is to quote its own output in comments, so one
-// comment naming the prefix told its author to rewrite their prose as a label; and stripping comments first
-// to fix that introduced a FALSE GREEN at thirty times the scale, because `/\*[\s\S]*?\*\/` treats the `/*`
-// inside `mv ${legacy}/logs/*` and inside a quoted `*.service.d/*.conf` as comment openers and deleted 88
-// lines of live code before counting. A test that silently stops looking at part of the file is worse than
-// one with a limit written on it.
-//
-// SO: a site spelled any other way is invisible here -- a constant holding the prefix, a plain double-quoted
-// string, `label:` wrapped onto its own line or given two spaces, an interpolation or a `\u` escape inside
-// the phrase, or a label built in another module. The eight that exist are uniform, and the next one is
-// expected to match them; if it does not, this test says nothing and the page goes stale again. That is the
-// accepted cost of not shipping a stripper that eats code. The FALSE RED is narrowed and not gone either:
-// the count reads raw source, so a comment or a string elsewhere in doctor.mjs that spells the needle
-// exactly still trips it. That direction is SAFE -- it fails loudly and a reader can see why -- which is the
-// only reason it is tolerated where the false green was not.
-test("every `Egress canary:` line in doctor is accounted for on docs/egress.md (#360)", () => {
-	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8");
-	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
-	const sites = src.split("label: `Egress canary: ").length - 1;
-	const claimed = Number(/<!-- CANARY-LINE-SITES: (\d+) -->/.exec(doc)?.[1]);
-	assert.equal(sites, claimed, `doctor produces ${sites} canary lines; docs/egress.md is written for ${claimed}. Update the page, then the marker.`);
-	// The page must not quote a sentence no site can emit. It did: three code sites were reworded away from
-	// "left by a doctor run that did not finish" and both of the page's own ✓ rows kept it, in a commit that
-	// had one of those rows open for a different edit. One retired phrase, named, because this is the fourth
-	// time on this branch that a correction landed everywhere except the page.
-	for (const retired of ["left by a doctor run that did not finish", "the network itself was already gone", "from an interrupted doctor"]) {
-		assert.ok(!doc.includes(retired), `docs/egress.md still quotes a line doctor cannot print: ${retired}`);
+// A doc test that PARSES a page or a source file is an arms race the page wins (CLAUDE.md's own rule). So
+// the page's first column is GENERATED from `CANARY_LINES`, and the sweep is driven over the real scenarios
+// to check that every line it prints came from that table. Neither half reads source text.
+test("every canary line doctor prints comes from the table it is generated from (#379)", async () => {
+	const seen = new Map();
+	for (const plan of CANARY_PLANS) {
+		const checks = await collectChecks(...plan());
+		for (const check of checks.filter((c) => /^Egress canary: /.test(c.label))) {
+			assert.ok(check.canary, `a canary line with no table entry behind it: ${check.label}`);
+			const spec = CANARY_LINES[check.canary.shape];
+			assert.ok(spec, `unknown shape ${check.canary.shape}`);
+			assert.equal(check.label, `Egress canary: ${spec.label(check.canary.params)}`, "the line is exactly what the table builds");
+			assert.equal(check.ok, spec.tier === "ok", "and its tier is the table's");
+			seen.set(check.canary.shape, (seen.get(check.canary.shape) ?? 0) + 1);
+		}
 	}
-	// Two of those sites share one shape (`could not be removed`, from the sweep and from the teardown), which
-	// is why the page describes seven shapes and this counts eight sites. Stated here rather than derived:
-	// telling two identical template literals apart needs a parser, and a parser over source is the same arms
-	// race this test exists to refuse.
-	assert.equal(sites, 8, "a deliberate edit, not a derived number: change it with the page");
+	// EVERY SHAPE, from a scenario that actually reaches it. The union is the check that matters: a shape
+	// nothing drives is a shape the page can describe wrongly forever.
+	assert.deepEqual([...seen.keys()].sort(), Object.keys(CANARY_LINES).sort(), "every shape in the table is produced by a real scenario");
+	// STATED LIMIT: this pins every SHAPE, not every SITE. `notRemoved` is printed from two places -- the
+	// sweep and doctor's own teardown -- and a second site for an existing shape, on a path no scenario
+	// below drives, would be invisible here. Both of its sites are driven, deliberately.
+	assert.ok(seen.get("notRemoved") >= 2, "both notRemoved sites are driven, not just the one the union needs");
+});
+
+test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
+	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
+	const region = /<!-- CANARY-LINES -->\n([\s\S]*?)<!-- \/CANARY-LINES -->/.exec(doc);
+	assert.ok(region, "the generated region is still there");
+	const rows = region[1]
+		.split("\n")
+		.filter((l) => l.startsWith("| `"))
+		.map((l) => l.slice(3, l.indexOf("` |")));
+	// The page's placeholders, which are the only hand-written part: the table builds the sentence, this
+	// decides what stands in for a network name. The `notRemoved` command is DERIVED rather than typed,
+	// because it is the one placeholder that is itself a command the code composes.
+	const placeholders = {
+		unlisted: { prefix: EGRESS_CANARY_NET_PREFIX },
+		foreign: { name: "<net>", cliSays: "<what it resolved>" },
+		unreadable: { name: "<net>" },
+		kept: { name: "<net>", stuck: ["<probe>"] },
+		removed: { name: "<net>", after: "after removing <probes> and detaching <endpoints>" },
+		gone: { name: "<net>", did: "removed <probes> and detached <endpoints>" },
+		notRemoved: { name: "<net>", command: null },
+	};
+	assert.deepEqual(Object.keys(placeholders), Object.keys(CANARY_LINES), "a shape with no placeholder row is a shape the page cannot describe");
+	const expected = Object.entries(CANARY_LINES).map(([shape, spec]) => {
+		const params = shape === "notRemoved" ? { ...placeholders[shape], command: `docker network rm ${placeholders[shape].name}` } : placeholders[shape];
+		return `${spec.tier === "ok" ? "✓" : "⚠"} Egress canary: ${spec.label(params)}`;
+	});
+	assert.deepEqual(rows, expected, "the page's first column is the table, in the table's order, or it is stale");
 });
 
 test("doctor: a canary network that could not be READ names the command that failed (#350, #360)", async () => {
@@ -4746,6 +4820,33 @@ test("doctor: the dead-pid sweep runs ONLY on a daemon this host owns (#350)", a
 	// at all -- the exact vacuity the comment below warns about, in the file that warns about it.
 	assert.doesNotMatch(text(), /left by an EARLIER doctor run/, "a leftover there belongs to the doctor that owns that daemon");
 	assert.ok(!calls.some((c) => c.args.join(" ").includes("4242")), "and nothing of it is touched");
+});
+
+test("a canary create the BOUND killed is treated as created, and a launch failure is not (#379)", async () => {
+	// `liveRunVia` answers `code: null` for two opposite things, and the teardown decision turns on which:
+	// a CLI that never launched did nothing, while one killed by the 10s bound may have landed after the
+	// daemon already made the network. `ended` is what tells them apart -- without it, reading both as "not
+	// created" leaks a network this run will not clean, and reading both as created prints a removal
+	// instruction on every host with no docker installed.
+	const { out, text } = capture();
+	await runDoctor(
+		ghEnv({ PI_EGRESS: "1" }),
+		ghDeps(out, canaryFixture({ "docker network create": { code: null, output: "" }, "docker network rm": 1, "docker network inspect": { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" } }), []),
+	);
+	assert.match(text(), /the create did not finish, so it may exist/, "the operator is told the network may be there");
+	assert.match(text(), /Egress canary: the network .* could not be removed/, "and the teardown runs, because it may have landed");
+});
+
+test("the canary teardown NAMES a probe it could not remove, in the same run (#379)", async () => {
+	// The `finally`'s `rm -f` dropped its result, so a probe that would not go was never reported -- while
+	// `REQ-EGRESS-ALLOWLIST` says every canary object is removed in this run's `finally` or reported in the
+	// same run. It is the same fact the sweep's `kept` line reports one run later, so it uses those words.
+	// Through `canaryFixture`, which strips whatever this scenario names out of `green` first: spreading
+	// green after would OVERWRITE the wedged probe with green's successful one, and the test would pass over
+	// a run where nothing was ever stuck.
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, canaryFixture({ "docker run --rm --name pi-dispatch-egress-probe-provider": { code: null, output: "" }, "docker rm -f": 1 }), []));
+	assert.match(text(), /Egress canary: .* is kept, because the probe pi-dispatch-egress-probe-provider-\d+ could not be removed/, "the probe that would not go is named now, not next run");
 });
 
 test("doctor: a canary network that was never CREATED gets no teardown line (#350)", async () => {

@@ -69,7 +69,7 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
 import { ABSENT, ASSERTED, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, declarationOf, floorShortfall, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor } from "./backends.mjs";
 import { observeHost } from "./runtime-observations.mjs";
-import { endpointShown, makeDockerEndpointResolver } from "./backend-local.mjs";
+import { endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressProxyName, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
 import { installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
@@ -2704,31 +2704,75 @@ function triggersPath(env, cwd) {
 }
 
 /**
- * The `--env-setup` script (issue #216). `pi-dispatch service render|install --env-setup <path>` names a
- * script the service manager SOURCES at every boot, as the service user, with the deployment's
- * environment -- and after that nothing ever looks at it again. resolveEnvSetup checked it existed once,
- * at render time, on a host that may not be this one.
+ * EVERY LINE THIS SWEEP CAN PRINT, in one frozen table, with its tier, its fix and its wording.
  *
- * doctor has to DISCOVER the path before it can check it, because --env-setup is a render-time flag and
- * the rendered unit is the only place it lives. Two sources, in this order:
+ * What this replaces (issue #379, item 3) is a test that COUNTED occurrences of ``label: `Egress canary: ``
+ * in this file's source and required `docs/egress.md` to carry a matching number. Its own comment recorded
+ * why it was written that way and what it could not see: a constant holding the prefix, a plain
+ * double-quoted string, `label:` on its own line, an interpolation inside the phrase, or a label built in
+ * another module -- all invisible. It could also go FALSE RED, because this file's house style quotes its
+ * own output in comments, so a comment naming the prefix told its author to rewrite their prose. Two
+ * cleverer versions were tried and recorded there: a raw-source count introduced the false red at scale, and
+ * stripping comments to fix that introduced a false GREEN at thirty times the scale, because the
+ * block-comment regex treated the `/*` inside `mv ${legacy}/logs/*` as an opener and deleted 88 lines of
+ * live code before counting.
  *
- *   1. The installed units for THIS deployment -- the file that actually boots, and so the honest
- *      answer. A unit whose WorkingDirectory names some other folder belongs to some other deployment on
- *      the same host and is deliberately skipped: doctor is this deployment's preflight, and warning
- *      about a neighbour's unit would fire forever on a host that runs two.
- *   2. PI_ENV_SETUP in doctor's OWN environment, and only when (1) found nothing. That is what launchd
- *      and nssm put in front of the wrapper, so it is the right answer for a doctor run through the same
- *      environment the service gets. It is a different question from (1), which is why every line below
- *      names the source it came from rather than blurring the two.
- *
- * Everything here is warn-tier and nothing carries a `fixAction` -- the never tier
- * (REQ-DEPLOYMENT-BOOTSTRAP): doctor does not chmod an operator's file and does not move it. Nor does it
- * ever OPEN the script. The script holds no secret by design, but what it holds is the commands that
- * fetch them, and a preflight that echoed those would be publishing the map instead of the treasure.
- *
- * Returns [] when no seam is configured, so a deployment that does not use one gets byte-identical
- * output.
+ * A doc test that PARSES a page or a source file is an arms race the page wins. So the page is GENERATED
+ * from this table instead, between markers, exactly as `PODMAN-REFUSAL-TEXTS` already is -- and the checks
+ * themselves carry `canary: { shape, params }`, so a test can drive the real sweep and compare each line to
+ * what this table would have produced for it. Nothing reads source text any more.
  */
+export const CANARY_LINES = Object.freeze({
+	unlisted: {
+		tier: "warn",
+		fix: () => CANARY_LEFTOVER_FIX,
+		label: ({ prefix }) => `leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=${prefix}`,
+	},
+	foreign: {
+		tier: "warn",
+		fix: () => CANARY_FOREIGN_FIX,
+		label: ({ name, cliSays }) => `${name} may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI ${cliSays}, so a pid that is dead here may be alive there`,
+	},
+	unreadable: {
+		tier: "warn",
+		fix: () => CANARY_LEFTOVER_FIX,
+		label: ({ name }) => `the network ${name} could not be read: docker network inspect ${name}`,
+	},
+	kept: {
+		tier: "warn",
+		fix: () => CANARY_LEFTOVER_FIX,
+		label: ({ name, stuck }) => `${name} is kept, because the probe ${stuck.join(", ")} could not be removed and the network is the only way left to find it: docker rm -f ${stuck.join(" ")}`,
+	},
+	removed: {
+		tier: "ok",
+		fix: () => null,
+		label: ({ name, after }) => `removed ${name}${after ? ` (${after})` : ""}, left by an EARLIER doctor run`,
+	},
+	gone: {
+		tier: "ok",
+		fix: () => null,
+		label: ({ name, did }) => `${did} on ${name}, left by an EARLIER doctor run; the network itself is gone`,
+	},
+	notRemoved: {
+		tier: "warn",
+		fix: () => CANARY_LEFTOVER_FIX,
+		label: ({ name, command }) => `the network ${name} could not be removed: ${command}`,
+	},
+});
+
+/**
+ * One canary check, built from the table and CARRYING what it was built from.
+ *
+ * `canary: { shape, params }` is the seam the tests use: they drive the real sweep over the real scenarios
+ * and compare every `Egress canary:` line to `CANARY_LINES[shape].label(params)`, so a line that drifts from
+ * the table is caught by construction rather than by a regex over prose.
+ */
+function canaryCheck(shape, params) {
+	const spec = CANARY_LINES[shape];
+	const fix = spec.fix();
+	return { ok: spec.tier === "ok", ...(spec.tier === "warn" ? { warn: true } : {}), label: `Egress canary: ${spec.label(params)}`, ...(fix ? { fix } : {}), canary: { shape, params } };
+}
+
 /**
  * Canary networks an EARLIER doctor run left behind (issue #350), for a PID no longer alive. Not "a run that
  * did not finish": a run that finishes normally leaves one whenever its own teardown `network rm` fails, and
@@ -2768,7 +2812,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 	// this say nothing at all on the overwhelmingly common case of a host with no leftovers, instead of a
 	// warning about a category of object it never looked for. `doctor`'s own doctrine: a check nobody can
 	// silence must never cry wolf, and "could not ask" is not "misconfigured".
-	if (listed?.code !== 0) return [{ ok: false, warn: true, label: `Egress canary: leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`, fix: CANARY_LEFTOVER_FIX }];
+	if (listed?.code !== 0) return [canaryCheck("unlisted", { prefix: EGRESS_CANARY_NET_PREFIX })];
 	const shape = new RegExp(`^${EGRESS_CANARY_NET_PREFIX}(\\d+)$`);
 	// The slug is a CLOSED set, not free text: accepting `\\S+` there would `rm -f` any container under this
 	// prefix that happened to end in the dead pid. Escaped into the pattern because the pid reached it as a
@@ -2797,7 +2841,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 			// MAY be left over, not IS: the clause four words later already says the pid may be alive there, so
 			// the sentence used to assert a thing and then walk it back inside itself. This is a network whose
 			// owner this shell cannot ask about at all, which is exactly the case where doctor states less.
-			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI ${cliSays}, so a pid that is dead here may be alive there`, fix: CANARY_FOREIGN_FIX });
+			checks.push(canaryCheck("foreign", { name, cliSays }));
 			continue;
 		}
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
@@ -2816,7 +2860,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 			// here: a `network rm` is advice, it never ran, and it is advice about a network whose membership
 			// is by definition unknown -- removing it could strand a probe nothing else can find. The advice
 			// stays in the fix, where advice belongs.
-			checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be read: docker network inspect ${name}`, fix: CANARY_LEFTOVER_FIX });
+			checks.push(canaryCheck("unreadable", { name }));
 			continue;
 		}
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
@@ -2840,7 +2884,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		// did exactly that behind a ✓. Detaching it first is no better: it is still running, and now nothing
 		// points at it. So the network stays, and the line names the container to remove by hand.
 		if (stuck.length > 0) {
-			checks.push({ ok: false, warn: true, label: `Egress canary: ${name} is kept, because the probe ${stuck.join(", ")} could not be removed and the network is the only way left to find it: docker rm -f ${stuck.join(" ")}`, fix: CANARY_LEFTOVER_FIX });
+			checks.push(canaryCheck("kept", { name, stuck }));
 			continue;
 		}
 		const outcome = await removeNetworkOrSay(docker, { network: name, detach: names.filter((n) => !removed.includes(n)) });
@@ -2853,7 +2897,7 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 		// teardown `network rm` fails, and says so in a warning of its own, and issue #360 item 5 records a
 		// second producer (a `network create` killed by a signal after the daemon had already made it). The
 		// only thing the sweep knows is that the pid in the name is not alive now.
-		if (outcome.removed && !outcome.absent) checks.push({ ok: true, label: `Egress canary: removed ${name}${after ? ` (${after})` : ""}, left by an EARLIER doctor run` });
+		if (outcome.removed && !outcome.absent) checks.push(canaryCheck("removed", { name, after }));
 		// THE NETWORK WENT BETWEEN OUR OWN COMMANDS, and the silence that covers is only a silence about the
 		// NETWORK: one the daemon says is not there is not worth a line, which is the rule this sweep shares
 		// with the boot reaper. What this pass DID is a different fact. It existed, we did it, and saying
@@ -2873,8 +2917,8 @@ async function sweepStaleCanaryNetworks({ docker, pid, isAlive, endpoint }) {
 			// JOINED WITH "and", not a comma: both halves are themselves comma-separated lists, so a comma
 			// between them gave `removed a, b, detached c, d` with nothing marking where one list ended.
 			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(" and ");
-			if (did) checks.push({ ok: true, label: `Egress canary: ${did} on ${name}, left by an EARLIER doctor run; the network itself is gone` });
-		} else checks.push({ ok: false, warn: true, label: `Egress canary: the network ${name} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
+			if (did) checks.push(canaryCheck("gone", { name, did }));
+		} else checks.push(canaryCheck("notRemoved", { name, command: outcome.command }));
 	}
 	return checks;
 }
@@ -3031,23 +3075,27 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// teardown also ran for a create that cleanly refused and emitted a `could not be removed` instruction
 		// for a network that never existed.
 		//
-		// Exit 0 ONLY, and the residual is stated rather than implied. `runCmd` resolves `null` for a CLI that
-		// could not be LAUNCHED -- the common case, and nothing was created -- but `close` also reports `null`
-		// for a child killed by a SIGNAL, which could land after the daemon had already made the network. That
-		// one leaks a network this run will not clean. Accepted because the alternative cries wolf on every
-		// unlaunchable docker, and because it is bounded: the leftover carries THIS pid, and the sweep above
-		// reclaims a network carrying our own pid on the next run.
-		
-		const createCode = await runCmd(spawn, "docker", ["network", "create", "--internal", net]);
-		created = createCode === 0;
+		// Both of these go through the BOUNDED runner. `runCmd` has no timeout at all, and a wedged daemon
+		// hanging `docker network create` holds doctor with nothing printed -- the same hazard the probes
+		// were moved off for in issue #350, one call earlier.
+
+		const create = await docker(["network", "create", "--internal", net]);
+		// CREATED, and the rule is `dockerRunVia`'s own distinction rather than "exit 0" (issue #379, item 4).
+		// `liveRunVia` resolves `{ code: null }` for two different things: a CLI that could not be LAUNCHED,
+		// where nothing was created, and a child killed by the TIMEOUT or a signal, which can land after the
+		// daemon has already made the network. Treating both as "not created" leaks a network this run will
+		// not clean; treating both as created cries wolf on every unlaunchable docker and turns
+		// `doctor.test.mjs`'s ENOENT case red, which is a decision recorded right here. So: exit 0, or a
+		// timeout or signal -- never a spawn error.
+		created = create.code === 0 || (create.code === null && create.ended !== "error");
 		// SAID, not returned into silence. Both of these used to leave `doctor` with no egress reading at all
 		// and no line explaining the absence, which is the shape this whole slice exists to remove: a reader
 		// cannot tell "the policy was proved" from "nothing was tried".
-		if (createCode !== 0) {
-			checks.push({ ok: false, warn: true, label: `Egress policy: not proved, because the canary network ${net} could not be created`, fix: CANARY_UNPROVED_FIX });
+		if (create.code !== 0) {
+			checks.push({ ok: false, warn: true, label: `Egress policy: not proved, because the canary network ${net} could not be created${create.code === null && create.ended !== "error" ? " and the create did not finish, so it may exist" : ""}`, fix: CANARY_UNPROVED_FIX });
 			return checks;
 		}
-		if ((await runCmd(spawn, "docker", ["network", "connect", net, proxy])) !== 0) {
+		if ((await docker(["network", "connect", net, proxy])).code !== 0) {
 			checks.push({ ok: false, warn: true, label: `Egress policy: not proved, because ${proxy} could not be attached to the canary network`, fix: CANARY_UNPROVED_FIX });
 			return checks;
 		}
@@ -3127,18 +3175,51 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// saying so, which is not worth a line (measured: exit 0).
 		// Through the BOUNDED runner, not `runCmd`, which has no timeout at all: `unfinished` is non-empty only
 		// when the daemon already wedged a 30 s probe, so this is exactly the call most likely to hang.
-		for (const name of unfinished) await docker(["rm", "-f", name]);
+		//
+		// AND THE RESULT IS READ (issue #379, item 4). It was dropped, so a probe that would not go was never
+		// named -- while `REQ-EGRESS-ALLOWLIST` is about to state that every canary object is removed in this
+		// run's `finally` or reported in the same run. A probe still standing is the same fact the sweep's
+		// `kept` line reports one run later, so it is reported with the same words, now rather than then.
+		const stuck = [];
+		for (const name of unfinished) if ((await docker(["rm", "-f", name])).code !== 0) stuck.push(name);
+		if (stuck.length > 0) checks.push(canaryCheck("kept", { name: net, stuck }));
 		if (created) {
 			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy] });
 			// The COMMAND lives in the label and the generic advice in the fix, which is the shape `--live`'s own
 			// leftover notes already use: `render` prints a fix line only when a check is not ok, and an ok check
 			// never prints one at all.
-			if (!outcome.removed) checks.push({ ok: false, warn: true, label: `Egress canary: the network ${net} could not be removed: ${outcome.command}`, fix: CANARY_LEFTOVER_FIX });
+			if (!outcome.removed) checks.push(canaryCheck("notRemoved", { name: net, command: outcome.command }));
 		}
 	}
 	return checks;
 }
 
+/**
+ * The `--env-setup` script (issue #216). `pi-dispatch service render|install --env-setup <path>` names a
+ * script the service manager SOURCES at every boot, as the service user, with the deployment's
+ * environment -- and after that nothing ever looks at it again. resolveEnvSetup checked it existed once,
+ * at render time, on a host that may not be this one.
+ *
+ * doctor has to DISCOVER the path before it can check it, because --env-setup is a render-time flag and
+ * the rendered unit is the only place it lives. Two sources, in this order:
+ *
+ *   1. The installed units for THIS deployment -- the file that actually boots, and so the honest
+ *      answer. A unit whose WorkingDirectory names some other folder belongs to some other deployment on
+ *      the same host and is deliberately skipped: doctor is this deployment's preflight, and warning
+ *      about a neighbour's unit would fire forever on a host that runs two.
+ *   2. PI_ENV_SETUP in doctor's OWN environment, and only when (1) found nothing. That is what launchd
+ *      and nssm put in front of the wrapper, so it is the right answer for a doctor run through the same
+ *      environment the service gets. It is a different question from (1), which is why every line below
+ *      names the source it came from rather than blurring the two.
+ *
+ * Everything here is warn-tier and nothing carries a `fixAction` -- the never tier
+ * (REQ-DEPLOYMENT-BOOTSTRAP): doctor does not chmod an operator's file and does not move it. Nor does it
+ * ever OPEN the script. The script holds no secret by design, but what it holds is the commands that
+ * fetch them, and a preflight that echoed those would be publishing the map instead of the treasure.
+ *
+ * Returns [] when no seam is configured, so a deployment that does not use one gets byte-identical
+ * output.
+ */
 async function envSetupChecks(env, seams) {
 	const { cwd, spawn, fileExists, platform, home } = seams;
 	const sources = new Map(); // setup path -> how doctor learned it; the first source to name it wins
@@ -3536,7 +3617,7 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 				// degrades to, and who is asserting it, with THIS SHELL named: the service's EnvironmentFile or a
 				// systemd User= can resolve differently, and the worker logs its own answer at boot.
 				const redirected = endpoint?.local === false;
-				const seen = redirected ? `this shell's docker CLI resolves context ${JSON.stringify(endpoint.context)} to ${endpointShown(endpoint)}, which is not shown to be on this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
+				const seen = redirected ? `this shell's docker CLI resolves context ${quotedShown(endpoint.context)} to ${endpointShown(endpoint)}, which is not shown to be on this host` : `this shell's docker CLI did not say which endpoint it resolves (${endpoint?.reason ?? "not asked"})`;
 				checks.push({
 					ok: false,
 					warn: true,
@@ -3961,6 +4042,16 @@ function defaultIsAlive(pid) {
 }
 
 /** The live probes' `run` seam over doctor's spawn: `{ code, stdout, stderr }`, bounded, `code: null` when it could not run. */
+/**
+ * WHY a null happened, not just that it did (issue #379, item 4).
+ *
+ * `code: null` used to mean two opposite things: the CLI never LAUNCHED, so the daemon did nothing, or the
+ * CLI started and was killed by the bound, which can land after the daemon has already acted. A caller
+ * deciding whether to clean up has to tell those apart -- reading both as "nothing happened" leaks the
+ * object, reading both as "it may exist" cries wolf on every host without docker installed and turns this
+ * file's own ENOENT test red. So `ended` says which: `"error"` (never launched), `"timeout"` (killed by the
+ * bound), or `"close"` (the child exited, and `code` is its own).
+ */
 function liveRunVia(spawn) {
 	return (args, { timeoutMs }) =>
 		new Promise((resolve) => {
@@ -3968,27 +4059,27 @@ function liveRunVia(spawn) {
 			try {
 				child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
 			} catch {
-				resolve({ code: null, stdout: "", stderr: "" });
+				resolve({ code: null, stdout: "", stderr: "", ended: "error" });
 				return;
 			}
 			let stdout = "";
 			let stderr = "";
 			let done = false;
-			const finish = (code) => {
+			const finish = (code, ended) => {
 				if (done) return;
 				done = true;
 				clearTimeout(timer);
-				resolve({ code, stdout, stderr });
+				resolve({ code, stdout, stderr, ended });
 			};
 			const timer = setTimeout(() => {
 				try {
 					child.kill("SIGKILL");
 				} catch {}
-				finish(null);
+				finish(null, "timeout");
 			}, timeoutMs);
 			child.stdout?.on("data", (d) => (stdout += d));
 			child.stderr?.on("data", (d) => (stderr += d));
-			child.on("error", () => finish(null));
-			child.on("close", (code) => finish(code));
+			child.on("error", () => finish(null, "error"));
+			child.on("close", (code) => finish(code, "close"));
 		});
 }

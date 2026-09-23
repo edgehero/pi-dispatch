@@ -101,29 +101,30 @@ deployment. `doctor` does it once, when you ask.
 ### Lines about leftovers
 
 You may also see a line about a leftover. Those are the canary's own objects, `pi-dispatch-egress-doctor-<pid>`
-and its two probe containers. Several things leave them behind: a run that was killed, one whose proxy
-accepted a connection and never answered, one that finished normally but whose own teardown `network rm`
-failed (it says so in a warning of its own), and one whose `network create` was killed by a signal after the
-daemon had already made the network. Doctor does not claim to know which; what it knows is that the process
-in the name is no longer alive. The next run sweeps whatever belongs to a process that is no longer alive
+and its two probe containers. The rule is simple enough to rely on: **every one of them is removed at the end
+of the run that made it, or reported in that same run** -- so what a later run finds is what a run that was
+KILLED left behind, and doctor does not have to guess which. What it knows is that the process in the name is
+no longer alive. The next run sweeps whatever belongs to a process that is no longer alive
 **on this host**, and only when your docker CLI resolves a daemon on this host: a leftover on a shared or
 remote daemon belongs to the doctor that made it, and a pid that is dead here may well be alive there.
 
-There are **seven shapes**, and this page used to describe three of them. Every warning names a command,
-in the line itself or in the fix line under it:
+Every warning names a command, in the line itself or in the fix line under it. The first column of this
+table is GENERATED from doctor's own line table (`CANARY_LINES`) and checked against it by a test, so a
+shape doctor can print and this page does not describe is a failure rather than a page nobody re-read.
 
-<!-- CANARY-LINE-SITES: 8 -->
+<!-- CANARY-LINES -->
 
 | Line | What it means | What to do |
 |---|---|---|
-| `✓ removed <net> (after removing <probes> and detaching <endpoints>), left by an EARLIER doctor run` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |
-| `✓ removed <probes> and detached <endpoints> on <net>, left by an EARLIER doctor run; the network itself is gone` | what the pass did land, on a network that the daemon then said was not there. Either half of the list may be absent; if the pass did nothing at all, there is no line, because a network the daemon says is not there is not news | nothing, unless one of the detached names is yours. `<net>` is doctor's OWN canary network and is not worth recreating: reattach your container to the network it belongs to instead |
-| `⚠ leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=...` | the listing itself failed, so doctor does not know whether there are any. The only line here that names no network, because none was ever read | run the command yourself; a daemon that cannot list is usually the real problem |
-| `⚠ <net> may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI ...` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
-| `⚠ the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
-| `⚠ <net> is kept, because the probe <probe> could not be removed and the network is the only way left to find it: docker rm -f <probe>` | a probe container would not go. The network is deliberately **kept**, because nothing in this project searches for probe containers by name, so removing the network would orphan that container permanently | `docker rm -f <probe>`, then re-run doctor |
-| `⚠ the network <net> could not be removed: docker network rm <net>` | the removal failed. Two places produce this line. From the **sweep** it means everything on the network was dealt with first. From doctor's own **teardown** at the end of a run it does not: that path force-removes its probes without reading the result, so a probe the daemon is still wedged on is still attached, and "has active endpoints" is the likeliest reason the removal failed | run the command. If it says the network has active endpoints, `docker network inspect <net>` first and remove what is on it, as in the row above |
+| `⚠ Egress canary: leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=pi-dispatch-egress-doctor-` | the listing itself failed, so doctor does not know whether there are any leftovers. The only line here that names no network, because none was ever read | run the command yourself; a daemon that cannot list is usually the real problem |
+| `⚠ Egress canary: <net> may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI <what it resolved>, so a pid that is dead here may be alive there` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
+| `⚠ Egress canary: the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
+| `⚠ Egress canary: <net> is kept, because the probe <probe> could not be removed and the network is the only way left to find it: docker rm -f <probe>` | a probe container would not go. The network is deliberately **kept**, because nothing in this project searches for probe containers by name, so removing the network would orphan that container permanently | `docker rm -f <probe>`, then re-run doctor |
+| `✓ Egress canary: removed <net> (after removing <probes> and detaching <endpoints>), left by an EARLIER doctor run` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |
+| `✓ Egress canary: removed <probes> and detached <endpoints> on <net>, left by an EARLIER doctor run; the network itself is gone` | what the pass did land, on a network the daemon then said was not there. Either half of the list may be absent; if the pass did nothing at all, there is no line, because a network the daemon says is not there is not news | nothing, unless one of the detached names is yours. `<net>` is doctor's OWN canary network and is not worth recreating: reattach your container to the network it belongs to instead |
+| `⚠ Egress canary: the network <net> could not be removed: docker network rm <net>` | the removal failed. Two places produce this line. From the **sweep** it means everything on the network was dealt with first. From doctor's own **teardown** at the end of a run it does not: that path force-removes its probes without reading the result, so a probe the daemon is still wedged on is still attached, and "has active endpoints" is the likeliest reason the removal failed | run the command. If it says the network has active endpoints, `docker network inspect <net>` first and remove what is on it, as in the row above |
 
+<!-- /CANARY-LINES -->
 
 The two policy lines each run a throwaway container on a throwaway network, using **your job image's own node**, so
 they prove the path your jobs actually take. They cost nothing: `api.anthropic.com` answers `401` to an

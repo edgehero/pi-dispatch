@@ -127,9 +127,11 @@ Two consequences worth internalising before you design anything:
   `INT-TRIGGERS-FILE-CONTRACT`'s forge vocabularies against `PR_ACTIONS` (the two tests that read a spec
   file); the admin's forge, action and settings vocabularies against `worker/src/triggers.mjs` and
   `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
-  filters' action sets as the loader's set minus their own named exclusions; and the git hardening flags,
+  filters' action sets as the loader's set minus their own named exclusions; the git hardening flags,
   which live in `worker/src/git-hardening.mjs` because seven files carried them by hand and one had
-  quietly lost a flag. Add a table, add its bolt. Where the relation is NOT real, say so in the test
+  quietly lost a flag; and `docs/egress.md`'s canary rows, whose first column is GENERATED from
+  `CANARY_LINES` between markers (the count-the-source test it replaced could not see four spellings and
+  could go false red on a comment). Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
 
