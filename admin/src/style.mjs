@@ -17,7 +17,7 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { sparkline as plainSparkline, fmtCost as plainFmtCost, LINE_INPUT_CURSOR } from "./panel.mjs";
+import { sparkline as plainSparkline, fmtCost as plainFmtCost, scrubControls, LINE_INPUT_CURSOR } from "./panel.mjs";
 
 // Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text / column count. Content is
 // ASCII + box-drawing + a handful of width-1 glyphs, so post-strip `.length` is a safe column proxy.
@@ -79,9 +79,27 @@ export function makeStyler(theme, { ascii = false } = {}) {
    * A fixed-width cell: PLAIN text is clipped+padded to exactly `width` visible columns, THEN colored.
    * `align` is "left" | "right". `bold` bolds after coloring. Result's visible width === `width`.
    */
+  /**
+   * A cell of exactly `width` visible columns.
+   *
+   * IT MEASURES WHAT IT WILL PRINT, which it did not (issue #382, item 3). It sliced the RAW string, so
+   * pre-coloured text spent its budget on SGR bytes: `cell(coloured, 16)` came out 6 columns wide, breaking
+   * this module's own stated invariant, and at the widths inside `MIN_WIDTH` the slice landed mid-sequence
+   * and emitted a bare `ESC [ 3` with no terminator -- which makes a terminal swallow the rest of the line
+   * as CSI parameters. `fitLine` in the dashboard already had the fix shape: strip first, then measure.
+   *
+   * COLOUR ALREADY ON THE INPUT IS DROPPED, deliberately. Keeping it needs an ANSI-aware slice, and this
+   * module does not import pi-tui to get one. Nothing loses a hyperlink to this: the two OSC-8 links reach
+   * only `fitLine`, whose overflow path already strips them.
+   *
+   * NOT A DATA GATE, and the distinction matters to a caller. Because it strips escapes BEFORE
+   * substituting, an SGR- or OSC-8-shaped run inside DATA is deleted whole (its URL payload included),
+   * while a lone control byte becomes a space. Data goes through `cellOf`/`scrubControls` first; this makes
+   * a cell, it does not sanitise one.
+   */
   const cell = (text, width, { color = null, align = "left", strong = false } = {}) => {
     const w = Math.max(0, Math.trunc(width) || 0);
-    let plain = String(text ?? "");
+    let plain = scrubControls(stripAnsi(String(text ?? "")));
     if (plain.length > w) plain = w <= G.ellipsis.length ? plain.slice(0, w) : plain.slice(0, w - G.ellipsis.length) + G.ellipsis;
     plain = align === "right" ? plain.padStart(w) : plain.padEnd(w);
     let out = color ? fg(color, plain) : plain;
@@ -126,10 +144,20 @@ export function makeStyler(theme, { ascii = false } = {}) {
    */
   const divider = (label, meta, width) => {
     const w = Math.max(4, Math.trunc(width) || 4);
-    const lab = String(label ?? "").toUpperCase();
-    const met = String(meta ?? "");
-    const ruleLen = Math.max(1, w - lab.length - met.length - (met ? 2 : 1));
-    const labPart = lab ? bold(fg("muted", lab)) + " " : "";
+    // MEASURED THE WAY IT IS PRINTED, like `cell`: an SGR-bearing label spent its budget on bytes nobody
+    // sees. And when the two together do not fit, the META is clipped first and the LABEL after it -- below
+    // about 46 columns the rule length was clamped to 1 and the line ran over its own width, which the
+    // frame then had to paper over.
+    const lab = scrubControls(stripAnsi(String(label ?? ""))).toUpperCase();
+    let met = scrubControls(stripAnsi(String(meta ?? "")));
+    // The rule is at least one column, so the two labels have `w - 3` between them with a meta and `w - 2`
+    // without: clip the META first, and the LABEL only if it alone still does not fit. Getting this wrong by
+    // one is why the clamp existed in the first place -- `Math.max(1, ...)` hid the overflow instead of
+    // preventing it, and the line ran over its own width.
+    met = met.slice(0, Math.max(0, w - lab.length - 3));
+    const labClipped = lab.slice(0, Math.max(0, w - met.length - (met ? 3 : 2)));
+    const ruleLen = Math.max(1, w - labClipped.length - met.length - (met ? 2 : 1));
+    const labPart = labClipped ? bold(fg("muted", labClipped)) + " " : "";
     const rulePart = fg("border", G.h.repeat(ruleLen));
     const metPart = met ? " " + fg("dim", met) : "";
     return labPart + rulePart + metPart;
@@ -236,7 +264,11 @@ export const RULE = Symbol("rule");
 /** Right-pad a possibly-colored line with plain spaces to `width` visible columns (never truncates up-front). */
 function padVisible(styler, line, width) {
   const vis = styler.visibleLen(line);
-  if (vis >= width) return line;
+  // STRICTLY GREATER, then clip: the frame promises every body line is exactly `inner` columns, and an
+  // over-wide one broke the right border instead -- the spend "off" rows at narrow widths never fitted.
+  // `>=` here would strip colour from every line that already fits, which is why the comparison is strict.
+  if (vis > width) return styler.cell(line, width);
+  if (vis === width) return line;
   return line + " ".repeat(width - vis);
 }
 
@@ -253,10 +285,9 @@ function padVisible(styler, line, width) {
  * and a deleting strip would silently change that arithmetic.
  */
 // eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
-const TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 function clipPlain(s, width, ellipsis = "…") {
-  const plain = String(s ?? "").replace(TITLE_CONTROL_CHARS, " ");
+  const plain = scrubControls(s);
   if (plain.length <= width) return plain;
   return width <= ellipsis.length ? plain.slice(0, width) : plain.slice(0, width - ellipsis.length) + ellipsis;
 }

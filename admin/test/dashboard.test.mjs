@@ -295,6 +295,32 @@ test("frames to a sane width and degrades to unframed plain lines at a tiny widt
   assert.doesNotMatch(tiny, /[┌┐└┘│─]/, "below MIN_WIDTH the panel drops the frame rather than emitting a ragged box");
 });
 
+test("the UNFRAMED degrade substitutes a record's control bytes, exactly as the framed pane does (#382)", async () => {
+  // THE DEFECT ITSELF. This pane composed with `clip`, which DELETES the class every other renderer
+  // SUBSTITUTES, so one record rendered "a b . c d" framed and "ab . cd" here -- precisely what render.mjs's
+  // `cell` docblock says must not happen, in the one renderer nobody had checked.
+  // The markers are letter pairs the rest of the pane's chrome cannot spell, because the assertion is about
+  // ADJACENCY: "QZ" means the byte between them was deleted rather than replaced.
+  const run = { ...SNAPSHOT.runs[0], jobId: "Q\u0001Z", target: "X\u0001V" };
+  // The ACTIVE row is its own site, and it is the one the operator sees WHILE a job runs: its id comes from
+  // the same forge-derived place as a run's, and until this test nothing drove it dirty in either mode.
+  const snap = { ...SNAPSHOT, runs: [run], activeJobId: "M\u0001N" };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  const tiny = comp.render(4).join("\n");
+  const framed = comp.render(200).join("\n");
+  await comp.dispose();
+  for (const [name, out] of [["degraded", tiny], ["framed", framed]]) {
+    for (const line of out.split("\n")) {
+      assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${name}: no control byte reaches the terminal`);
+    }
+    for (const [what, spaced, deleted] of [["the run's id", /Q Z/, /QZ/], ["its target", /X V/, /XV/], ["the ACTIVE row's id", /M N/, /MN/]]) {
+      assert.match(out, spaced, `${name}: ${what} -- the byte becomes a SPACE`);
+      assert.doesNotMatch(out, deleted, `${name}: ${what} -- and never nothing, or the two panes clip differently`);
+    }
+  }
+});
+
 test("the spend meter shows a filled bar against a known cap, and (cap unknown) with no bar otherwise", async () => {
   const known = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps() });
   await flush();
@@ -484,6 +510,32 @@ test("the LIST badges a one-shot: [once] armed, [spent] disarmed, absent otherwi
   const standing = { type: "issue", action: ["closed"], number: null, once: false, flow: "announce", forge: "github", packages: false };
   const n = await openTrigger(shotSnap(standing));
   assert.doesNotMatch(n.list, /\[once\]|\[spent\]/, "no one-shot fields, no badge -- the row is byte-identical to before");
+});
+
+test("the two WORKER-written values in a config pane go through the record belt (#382)", async () => {
+  // THE CARVE-OUT IS DRAWN BY PROVENANCE, not by pane. `DES-ADMIN-VIA-PI-EXTENSION` puts TRIGGERS,
+  // TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS outside the record scrub on the ground that
+  // they render what the OPERATOR typed into their own file -- and that was true of everything in them
+  // except `on.disarmed.at` and `on.disarmed.jobId`, which the WORKER writes from the queue job id and
+  // `read-model.mjs` carries through verbatim. Driving all five panes with a hostile config found these two
+  // and nothing else, so either they go through the belt or the justification is a sentence about the pane
+  // rather than about the values in it.
+  //
+  // BOTH ARMS, because the detail renders this twice -- the issue arm and the label/pull_request arm -- and
+  // they were two copies of one interpolation.
+  const dirty = { at: "2026-08-20T09:00:00Z\u0007", jobId: "gh-\u001b[31m77" };
+  for (const trigger of [
+    { type: "issue", action: ["closed"], number: 40, once: true, disarmed: dirty, flow: "deploy", forge: "github", packages: false },
+    { type: "pull_request", action: ["closed"], number: 7, once: true, any: [], all: [], none: [], disarmed: dirty, flow: "archive", forge: "github", packages: false },
+  ]) {
+    const shown = await openTrigger(shotSnap(trigger));
+    for (const pane of [shown.list, shown.detail]) {
+      for (const line of String(pane).split("\n")) {
+        assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${trigger.type}: no worker-written byte reaches a config pane`);
+      }
+    }
+    assert.match(String(shown.detail), /spent 2026-08-20T09:00:00Z /, "substituted, so the value keeps its width");
+  }
 });
 
 test("TRIGGER_DETAIL's trust model names the CLOSER gate and the worker's disarm on close-capable rules", async () => {

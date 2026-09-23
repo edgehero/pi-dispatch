@@ -30,7 +30,7 @@ import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers,
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, meter, clip, makeLineInput } from "./panel.mjs";
+import { box, meter, clip, clipData, hasControls, makeLineInput, scrubControls } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -120,7 +120,7 @@ function scrubReason(reason: any): string {
  * with it.
  */
 function scrubControl(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  return scrubControls(value);
 }
 
 /**
@@ -1134,10 +1134,10 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     // Retention honesty in the header: the two job classes age out differently (31d forge, 7d
     // local/cron), so a uniform claim would be false for half the rows.
     const lines = [
-      styler.cell(styler.fg("dim", "reasons kept 31d (forge) / 7d (local & cron)"), iw),
+      styler.cell("reasons kept 31d (forge) / 7d (local & cron)", iw, { color: "dim" }),
       ...(rows.length === 0 ? [styler.cell("(nothing failed)", iw)] : rows.map((r: any) => failedRow(r, iw, styler))),
     ];
-    if (Number(failed.more) > 0) lines.push(styler.cell(styler.fg("dim", `↓ ${failed.more} more (redis-cli holds the rest)`), iw));
+    if (Number(failed.more) > 0) lines.push(styler.cell(`↓ ${failed.more} more (redis-cli holds the rest)`, iw, { color: "dim" }));
     if (!framed) return [detailTitle, "", ...lines.map((l: string) => styler.stripAnsi(l)), "", "esc back"];
     const boxed = frame(styler, { title: detailTitle, width: dw, lines, footer: fitLine(styler.fg("accent", "esc") + " " + styler.fg("dim", "back"), iw, styler) });
     return centerBlock(boxed, Math.trunc(width), dw);
@@ -1153,7 +1153,7 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
     const lines = rows.length === 0 ? [styler.cell("(nothing held)", iw)] : rows.map((r: any, i: number) => heldListRow(r, i === heldSelected, iw, styler));
-    if (Number(held.more) > 0) lines.push(styler.cell(styler.fg("dim", `↓ ${held.more} more`), iw));
+    if (Number(held.more) > 0) lines.push(styler.cell(`↓ ${held.more} more`, iw, { color: "dim" }));
     if (!framed) {
       // The UNFRAMED twin of `heldListHints`, and it is the literal second half of #367 item 1: the framed
       // question gained `cellOf` and this one did not. A degrade is a width under 8 or one that is not a
@@ -1362,7 +1362,7 @@ function heldSection(held: any, inner: number, styler: any): any[] {
   const shown = rows.slice(0, HELD_ON_DASHBOARD);
   const hidden = rows.length - shown.length + (Number(held.more) || 0);
   const body = shown.map((r: any) => heldRow(r, inner, styler));
-  if (hidden > 0) body.push(styler.cell(styler.fg("dim", `↓ ${hidden} more`), inner));
+  if (hidden > 0) body.push(styler.cell(`↓ ${hidden} more`, inner, { color: "dim" }));
   const total = rows.length + (Number(held.more) || 0);
   // `truncated` means the index was longer than the reader would hydrate, so the count is a FLOOR. Said as
   // "200+" rather than stated flat: a header that names a number it cannot stand behind is the invented
@@ -1438,7 +1438,7 @@ function failedSection(failed: any, inner: number, styler: any): any[] {
   const shown = rows.slice(0, FAILED_ON_DASHBOARD);
   const hidden = rows.length - shown.length + (Number(failed.more) || 0);
   const body = shown.map((r: any) => failedRow(r, inner, styler));
-  if (hidden > 0) body.push(styler.cell(styler.fg("dim", `↓ ${hidden} more`), inner));
+  if (hidden > 0) body.push(styler.cell(`↓ ${hidden} more`, inner, { color: "dim" }));
   const total = rows.length + (Number(failed.more) || 0);
   return [{ key: "failed", priority: 6, viewKey: "f", head: ["failed", `${total} in the queue · f view`], body }];
 }
@@ -1940,7 +1940,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     // A close-only rule's narrowing and one-shot state render here too (issue #231): the list row
     // shows both, and this detail view must not tell less than the row it drills into.
     if (t.type === "pull_request" && Number.isInteger(t.number)) out.push(kv("item", `#${t.number}`, "success"));
-    if (t.once === true) out.push(kv("one-shot", t.disarmed ? `spent ${t.disarmed.at ?? "-"}${t.disarmed.jobId ? ` by ${t.disarmed.jobId}` : ""}` : "armed", t.disarmed ? "dim" : "accent"));
+    if (t.once === true) out.push(kv("one-shot", spentMark(t.disarmed), t.disarmed ? "dim" : "accent"));
     out.push(kv("any of", (t.any ?? []).join(" · ") || "-", "success"));
     out.push(kv("all of", (t.all ?? []).join(" · ") || "-", "success"));
     out.push(kv("none of", (t.none ?? []).join(" · ") || "-", "error"));
@@ -1952,7 +1952,7 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
     // finished its job, not a risk.
     out.push(kv("issue actions", (t.action ?? []).join(", ") || "-"));
     if (Number.isInteger(t.number)) out.push(kv("item", `#${t.number}`, "success"));
-    if (t.once === true) out.push(kv("one-shot", t.disarmed ? `spent ${t.disarmed.at ?? "-"}${t.disarmed.jobId ? ` by ${t.disarmed.jobId}` : ""}` : "armed", t.disarmed ? "dim" : "accent"));
+    if (t.once === true) out.push(kv("one-shot", spentMark(t.disarmed), t.disarmed ? "dim" : "accent"));
   }
 
   // RUNS — what it produces when it fires. One fact per row.
@@ -2045,9 +2045,31 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
 }
 
 /** The staged `name@version` list for the armed trust-model line, or the nothing-staged notice. */
+/**
+ * The one-shot mark, and the ONE value in these panes the worker writes (issue #382, item 2).
+ *
+ * `DES-ADMIN-VIA-PI-EXTENSION` carves TRIGGERS, TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS
+ * out of the record scrub on the ground that they render what the OPERATOR typed into their own file. That
+ * was true of everything in them except `on.disarmed.at` and `on.disarmed.jobId`, which the worker writes
+ * from the queue job id (`worker/src/triggers-file.mjs`) and `read-model.mjs` carries through verbatim. So
+ * the carve-out is drawn by PROVENANCE now, and these two go through the same belt as a run record's.
+ *
+ * Both arms of the trigger detail share this, because they were two copies of the same interpolation and
+ * the first version of this fix corrected one of them.
+ */
+function spentMark(disarmed: any): string {
+  if (!disarmed) return "armed";
+  const by = disarmed.jobId ? ` by ${cellOf(disarmed.jobId)}` : "";
+  return `spent ${cellOf(disarmed.at ?? "-")}${by}`;
+}
+
 function stagedNames(staged: any): string {
+  // READ BACK from the stage manifest, which the worker writes -- so it is not operator prose either, even
+  // though the pane it lands in is a config pane. Defence in depth rather than a live leak: `packages.mjs`
+  // checks every name against `NPM_NAME_RE` at stage time, so through the worker it cannot carry one. What
+  // it defends against is a hand-edited manifest and a future writer that is not the worker.
   const list = Array.isArray(staged?.packages) ? staged.packages : [];
-  return list.length > 0 ? list.join(" · ") : "(none staged in the overlay)";
+  return list.length > 0 ? list.map(cellOf).join(" · ") : "(none staged in the overlay)";
 }
 
 /** The static per-kind trust model (who authorizes it, how it dedups, which service owns it). */
@@ -2229,17 +2251,20 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     if (row.kind === "active") {
       // The plain twin of runRow's selected-row cancel hint: the monochrome panel must not hide a key
       // the colored one advertises.
-      out.push(clip(`${cursor} * ACTIVE ${row.jobId} running${i === selected ? " · x cancel" : ""}`, w));
+      out.push(clipData(`${cursor} * ACTIVE ${cellOf(row.jobId)} running${i === selected ? " · x cancel" : ""}`, w));
       continue;
     }
     const run = row.record;
     // The plain twin of the colored badge in `runRow`. It has to be here too: this is the renderer a
     // non-TTY/no-color panel uses, and "one of two racing runs" must not be a fact only the pretty one tells.
-    const rep = run?.replica > 0 ? `r${run.replica}/${run.replicas ?? "?"} ` : "";
-    const cells = [run?.jobId, run?.target, run?.flow, run?.outcome, run?.turns, run?.tokens?.total]
-      .map((f) => (f === null || f === undefined ? "-" : String(f)))
-      .join(" · ");
-    out.push(clip(`${cursor} ${rep}${cells}`, w));
+    // THROUGH `cellOf`, like every other renderer of this record. This pane composed with `clip`, which
+    // DELETES the control class where `cellOf` and render.mjs's `cell` substitute it -- so one record
+    // rendered "a b" framed and "ab" here, which is precisely what `cell`'s docblock says must not happen
+    // (issue #382, item 1). `clipData` substitutes before clipping, so the line is belt-and-braces: a field
+    // added here without `cellOf` still cannot delete a column's worth of width.
+    const rep = run?.replica > 0 ? cellOf(`r${run.replica}/${run.replicas ?? "?"} `) : "";
+    const cells = [run?.jobId, run?.target, run?.flow, run?.outcome, run?.turns, run?.tokens?.total].map(cellOf).join(" · ");
+    out.push(clipData(`${cursor} ${rep}${cells}`, w));
   }
   const below = rows.length - top - count;
   if (below > 0) out.push(clip(`v ${below} more`, w));
@@ -2298,28 +2323,32 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
     footer += matches.length === 0 ? ` · /${tailQuery} · no match` : ` · /${tailQuery} · ${pos}/${matches.length}`;
   }
   if (!framed) {
-    // The plain header carries the id a SECOND time, beside `boxTitle`, and the framed branch below
-    // passes its copy through `clip`, which strips. This one reached neither, which is the same
-    // two-consumers-one-scrub shape as the titles: every place the id is interpolated holds it.
+    // The plain header carries the id a SECOND time, beside `boxTitle`, and the framed branch below passes
+    // its copy through `clipData`. This one reached neither gate, which is the same two-consumers-one-scrub
+    // shape as the titles: every place the id is interpolated holds it.
     // THE TAIL LINES THEMSELVES, not only the id. These are the file's own bytes -- container output, the
     // most untrusted content this panel renders -- and the framed branch below runs every one through
-    // `clip`, which is the gate this function's docblock calls "the security seam". The degrade spread them
-    // RAW, so the seam existed on one branch of an if (issue #367). Scrubbed rather than clipped, because
-    // an unframed pane has no width to clip to; the class is the same one `clip` applies.
+    // `clipData`, which is the gate this function's docblock calls "the security seam". The degrade spread
+    // them RAW, so the seam existed on one branch of an if (issue #367). Scrubbed rather than clipped,
+    // because an unframed pane has no width to clip to; the class is the one `scrubControls` owns, so both
+    // branches now SUBSTITUTE and the two panes cannot clip differently (issue #382).
     const plain = [`live ${scrubControl(String(tailJobId ?? "-"))} -- ${len} line(s)`, ...all.slice(top, top + TAIL_VIEWPORT).map((l: string) => scrubControl(String(l)))];
     if (ended) plain.push("(run ended -- Esc to go back)");
     if (tailSearchInput) plain.push("/ " + tailSearchInput.value());
     return [boxTitle, "", ...plain, "", footer];
   }
   const inner = Math.trunc(width) - 4;
-  const lines: any[] = [clip(`live ${tailJobId} -- ${len} line(s)`, inner)];
+  // `clipData`, not `clip`: the framed branch DELETED the control class where the degrade above and every
+  // other renderer of this content SUBSTITUTE it, so one `.log` line rendered a column narrower framed than
+  // unframed (issue #382, item 1). Same gate, same class, one operation.
+  const lines: any[] = [clipData(`live ${cellOf(tailJobId)} -- ${len} line(s)`, inner)];
   for (let i = top; i < Math.min(top + TAIL_VIEWPORT, len); i++) {
-    // clip FIRST (the untrusted-byte gate), color the clipped text second -- see the doc comment above.
-    const safe = clip(all[i], inner);
+    // Substitute and clip FIRST (the untrusted-byte gate), color the result second -- see the doc comment above.
+    const safe = clipData(all[i], inner);
     lines.push(tailQuery !== null && i === tailMatchLine ? styler.fg("warning", safe) : safe);
   }
   // The job left the active slot (ended, or a different job now runs): keep showing the last tail.
-  if (ended) lines.push(clip("(run ended -- Esc to go back)", inner));
+  if (ended) lines.push(clipData("(run ended -- Esc to go back)", inner));
   // The search bar is the view's last body line, layered-input style: a 2-col `/ ` sigil plus the focused
   // line input (inverse-video cursor via styler.lineInput) filling the rest.
   if (tailSearchInput) lines.push(styler.fg("accent", "/ ") + styler.lineInput(tailSearchInput, Math.max(1, inner - 2)));

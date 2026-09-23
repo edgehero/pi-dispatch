@@ -67,6 +67,51 @@ function stripControls(s) {
 }
 
 /**
+ * THE CLASS IS WRITTEN ONCE, HERE, and every data path substitutes through this (issue #382, item 1).
+ *
+ * There were five copies of `[\u0000-\u001f\u007f-\u009f]` across three modules, and they did not agree
+ * about what to DO with a match. `cell` in render.mjs and `cellOf` in the dashboard both map it to a SPACE,
+ * deliberately, so a framed pane and a plain one clip identically -- and `cell`'s own docblock says that
+ * deleting instead "would make the panes clip differently". The unframed degrade composed with `clip`,
+ * which DELETES, so it did. One record with a control byte in two fields rendered three ways:
+ *
+ *   FRAMED    "a b . c d"     substituted
+ *   DEGRADED  "ab . cd"       deleted
+ *   PLAIN     "a b     c d"   substituted
+ *
+ * Two mutants flipping `cell` and `cellOf` to deletion were both killed by the suite; nothing noticed that a
+ * third renderer already deleted.
+ *
+ * C1 is in the class as well as C0 and DEL, because U+009B is a CSI introducer that needs no ESC in front.
+ *
+ * This module has no imports and a test pins that it has none, so the class lives here and the callers come
+ * to it rather than the other way round.
+ */
+export function scrubControls(s) {
+  return String(s ?? "").replace(CONTROL_CHARS, " ");
+}
+
+/** Does this string carry one? `search` rather than `.test`, because a `/g` regex carries `lastIndex`. */
+export function hasControls(s) {
+  return String(s ?? "").search(CONTROL_CHARS) !== -1;
+}
+
+/**
+ * Untrusted DATA, clipped for a pane: substitute, then clip. The one call a renderer of `.log` lines or of
+ * a record field should be making.
+ *
+ * `clip` itself still DELETES, and that is not an oversight. `LINE_INPUT_CURSOR` marks the cursor with
+ * `\x01`/`\x02` sentinels -- the same byte class -- and `panel.test.mjs` pins that `clip` removes them, so
+ * a substituting `clip` would widen every focused render by one column per sentinel. No production path
+ * clips a focused render today (`styler.lineInput` replaces the sentinels first, and the degraded tail uses
+ * `.value()`), so the reason to keep `clip` deleting is that pin and the defence it gives, not a live
+ * caller. Said plainly because the first draft of this change claimed a caller that does not exist.
+ */
+export function clipData(line, w) {
+  return clip(scrubControls(line), w);
+}
+
+/**
  * Truncate `line` to `w` display columns, appending an ellipsis glyph when content is cut. Control
  * characters (including escape sequences) are stripped first so untrusted input cannot crash or mis-size:
  * content is ASCII/box-drawing, so post-strip `String.length` is a safe column proxy.

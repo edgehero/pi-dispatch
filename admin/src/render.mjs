@@ -15,7 +15,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 // Pure-to-pure, the same standing as the windowState import above: panel.mjs is the admin's other no-I/O
 // text module (asserted so by panel.test.mjs), and fmtCost is THE single renderer of typed cost values,
 // so the what-if below routes every dollar through it rather than grow a second money formatter here.
-import { fmtCost } from "./panel.mjs";
+import { fmtCost, scrubControls } from "./panel.mjs";
 // The overlay keys, IMPORTED rather than retyped. This was a verbatim copy of the worker's array, in the
 // order the worker declares them, and the worker's side is pinned while this side was not -- so a key
 // added there would have failed a test, been added, and left the settings VIEW silently ten keys wide
@@ -70,7 +70,7 @@ const RUN_COLUMNS = [
  */
 function cell(value) {
   if (value === null || value === undefined) return "-";
-  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  return scrubControls(value);
 }
 
 /**
@@ -369,7 +369,11 @@ function ruleClauses(rule) {
 }
 
 function schedulerLine(s) {
-  const id = s?.key ?? s?.name ?? "-";
+  // THROUGH `cell`, because a scheduler key is read back from Valkey and nothing re-validates it on read
+  // (issue #382, item 2). Defence in depth, not a live leak: the worker restricts a cron `on.id` to
+  // `[A-Za-z0-9._-]+` before the upsert, so a key that arrives here with a control byte in it came from a
+  // writer that is not the worker.
+  const id = cell(s?.key ?? s?.name ?? "-");
   const next = typeof s?.next === "number" ? new Date(s.next).toISOString() : "no next";
   const drift =
     typeof s?.overdueMs === "number" && s.overdueMs > 0 ? `  overdue by ${Math.round(s.overdueMs / 1000)}s` : "";

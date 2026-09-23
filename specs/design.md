@@ -646,6 +646,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `OQ-008`, `CONST-TRIGGER-AUTHOR-GATE`,
   `REQ-DEDUP-BY-DELIVERY-GUID`
 
+- **Rejected: tightening what the worker will accept in `on.disarmed`** (issue #382, item 2). The admin
+  panel renders `disarmed.at` and `disarmed.jobId`, and those two are the only WORKER-written values in a
+  pane the record scrub carves out -- so the obvious fix is a stricter validator at the writer. It was
+  written and withdrawn, because of where a refusal goes: the writer re-runs `parseTriggers`, a refusal
+  returns `{ invalid }`, and `makeDisarmOnce` only LOGS that. So a mark the validator rejected leaves the
+  one-shot **armed**, and the next distinct close starts a SECOND PAID RUN. A hand-written mark would also
+  stop the file loading at boot, and the bundled `writeTriggers` would then refuse every panel edit. That
+  turns a display problem into a spend and availability problem. The two values go through the panel's own
+  belt instead, which is where a terminal-safety rule belongs.
+
 ## DES-PER-TRIGGER-JOB-IMAGE
 
 - **Decision**: The job image is resolved **per job** — `job.image ?? PI_JOB_IMAGE` — from an optional
@@ -1568,7 +1578,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   pressing `b` acts with that process's environment (`OQ-038`); and
   **LIVE_TAIL** — a view that tails a running
   job's `.log` **inside the overlay** through an injected `deps.tailLog` seam whose `fs` read lives in
-  `index.ts` (the log CONTENT stays `clip`-stripped and uncolored — only the chrome is themed), opening
+  `index.ts` (the log CONTENT goes through `clipData`, which SUBSTITUTES the control class rather than
+  deleting it, and stays uncolored — only the chrome is themed), opening
   **pinned to the bottom in follow mode**: scrolling up pauses following, reaching the bottom re-arms it,
   and the footer names the state (`follow`/`paused`) so stale lines cannot pass as live. Analytics
   live on the **insights artifact** (`REQ-INSIGHTS-HTML-EXPORT`, issue #181), the ONE surface for
@@ -1661,10 +1672,33 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     line would destroy the link and the pane's width math). The CLASS is C0, DEL **and C1**, not the
     "C0-plus-DEL" this entry said for a round: U+009B is a CSI introducer that needs no ESC in front of it,
     and `panel.mjs`'s own filter has always covered it. The reach was RUN_DETAIL alone when this was
-    written and grew twice, under #337 to the LIST and under #367 to the rest; the panes that render
-    operator-authored CONFIG rather than a record -- TRIGGERS, TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS,
-    PAUSE WINDOWS -- are still outside it, which is a different surface with a different argument and is
-    named here rather than left to be discovered. The record is PII-free and worker-written, so
+    written and grew twice, under #337 to the LIST and under #367 to the rest.
+
+    **THE LINE IS DRAWN BY WHO WROTE A VALUE, not by which pane shows it** (issue #382, item 2). The earlier
+    wording drew it by pane -- TRIGGERS, TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS outside
+    the belt because they render what the operator typed into their own file -- and that justification was
+    false while a WORKER-written value sat in one of them. Driving all five panes with a hostile config
+    found exactly three values that are not operator prose, and all three now go through the belt:
+
+      - `on.disarmed.at` and `on.disarmed.jobId`, which the worker writes from the queue job id
+        (`worker/src/triggers-file.mjs`) and `read-model.mjs` carries through verbatim. This is the only
+        genuinely worker-written pair in those panes.
+      - the staged package names, read back from the stage manifest.
+      - the scheduler keys, read back from Valkey.
+
+    The last two are DEFENCE IN DEPTH and are not presented as live leaks: through the worker neither can
+    carry a control byte, because a cron `on.id` is restricted to `[A-Za-z0-9._-]+` before the upsert and a
+    staged name is checked against `NPM_NAME_RE` at stage time. They are reachable only through a writer
+    that is not the worker, or a hand-edited file. The list is what driving every input of those five panes
+    with hostile bytes found, and it is limited by that fixture rather than by proof.
+
+    **NO WORKER VALIDATOR CHANGES with it, and that is the interesting half.** Tightening what the worker
+    accepts in `on.disarmed` was written and rejected: the writer re-runs `parseTriggers`, a refusal returns
+    `{invalid}`, and `makeDisarmOnce` only LOGS that -- so a stricter validator would leave the one-shot
+    ARMED, and the next distinct close would start a second paid run. A hand-written mark would also stop
+    the file loading at boot and make the bundled writer refuse every panel edit. A display problem would
+    become a spend and availability problem. Recorded as Rejected in
+    `DES-ONE-SHOT-DISARM-IN-THE-FILE`, which owns `on.disarmed`. The record is PII-free and worker-written, so
     this is not a trust judgement about the data: it is a property of the TERMINAL. A byte that moves the
     cursor, clears the screen or opens a hyperlink must not reach it from a stored field, whoever wrote
     that field. One residual is named and accepted: a prompt injection in the operator's session
@@ -4484,3 +4518,4 @@ a tunnel.
 | 2026-09-22 | Issue #375. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**, and it is the entry the change depends on rather than one that moved: the key stays a derived hash of (kind, repo, ref), which is exactly what makes the store path precomputable by anyone who knows the repository and the branch, and therefore what the new refusal defends. Nothing here argues for a readable or random name; `INT-SESSION-STORE-CONTRACT` carries the whole of the change. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` UNCHANGED, checked** as well: the session store arms no watch. **Code evidence**: `worker/src/session-store.mjs` -> `inspectKeyDir`; `worker/src/session-key.mjs` -> `sessionKeyFor`. |
 | 2026-09-23 | Issue #384. **`DES-CLI-SURFACE` UNCHANGED, checked**, and it is the entry the change had to be measured against rather than one that moved: doctor stays read-only, the new verdicts carry no `fixAction`, and the one new read (the worker's own loader, on a path the `.env` names) writes nothing, spawns nothing and is guarded by `isFile()` so a FIFO cannot hang the command. What DID move is a verdict, not a surface: a deployment whose service cannot boot now exits 1 where it exited 0, which is the point of the issue. The alternative of leaving doctor advisory and letting the worker fail at start was rejected, because the whole reason doctor exists is to answer "will this start" before the operator finds out from a dead unit. |
 | 2026-09-23 | Issue #379, item 1. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED** where it records the boot reaper's two halves: they ask the same thing of a NAME and deliberately different things of the DAEMON, and both questions are now answered. `network inspect`'s `.Containers` lists running endpoints, which is what the daemon guards; a `created` or `exited` member is invisible to it AND to the container half's `docker ps`, and the `rm` then succeeds, after which that member can never start (`docker start` answers `network <id> not found`, measured on docker 27.4.0 for both states). So the network half asks `ps -a --filter network=` as well, and any member outside `ENDPOINT_LISTED_STATES` -- an allowlist of `running` and `paused`, following `sandbox.mjs` -- keeps the network and is named. `restarting` is excluded because whether it appears depends on the instant of the ask. The container half is NOT widened the same way, and the asymmetry is the decision: it removes what it lists, so `ps -a` there would destroy an operator's stopped container and a crashed job's forensic one, while this half only declines to remove a network. Rejected: a `stillClear` callback (a reconnect path in a sweep with no live owner) and force-detaching stopped members (silently rewriting an operator container's configuration). Residuals stated: a stopped proxy keeps its networks and is logged every boot, a leftover `created` or `exited` job container keeps its network and is named every boot, and Podman is unmeasured. **`DES-CONCURRENCY-3` UNCHANGED, checked**: one worker per daemon is still the assumption both halves rest on. |
+| 2026-09-23 | Issue #382, and the logs-viewer defect it uncovered (#399). **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, and the amendment is a CORRECTION of how its own carve-out was justified: the line between the record scrub and the config panes is drawn by WHO WROTE A VALUE, not by which pane shows it. Drawn by pane, the justification was false while `on.disarmed.at` and `on.disarmed.jobId` -- written by the worker from the queue job id -- sat inside TRIGGER_DETAIL. Driving all five config panes with a hostile fixture found exactly three non-operator values, and all three now go through the belt; the staged names and the scheduler keys are labelled DEFENCE IN DEPTH rather than live leaks, because the worker constrains both before they are written. **`DES-ONE-SHOT-DISARM-IN-THE-FILE` gains a Rejected bullet**: tightening the worker's own validator for `on.disarmed` was written and withdrawn, because a refusal there leaves the one-shot ARMED and the next close starts a second paid run -- a display problem turned into a spend one. **CORRECTION, in the LIST decision**: its claim that colour is "applied post-layout so pi's ANSI-aware `visibleWidth` still frames it" was false at five sites, where `styler.cell` was handed pre-coloured text and measured it with `.length` -- 16 columns asked, 6 rendered, and at the widths inside `MIN_WIDTH` a slice landing mid-sequence emitted a bare `ESC [ 3`. It is true by construction now: `cell` strips and substitutes before measuring, `divider` measures the same way and clips its meta before its label, and `frame` clips a line whose visible width EXCEEDS its inner width rather than only padding a short one. The log CONTENT sentence moves from `clip`-stripped to `clipData`, which substitutes. **`DES-PANEL-SEPARATE-FROM-RECEIVER` UNCHANGED, checked**: nothing about where the panel runs or what it binds moves. **Code evidence**: admin/src/panel.mjs -> scrubControls, hasControls, clipData; admin/src/dashboard.ts -> spentMark, renderRunList; admin/src/style.mjs -> cell, divider, padVisible; admin/src/index.ts -> makeLogViewer. |
