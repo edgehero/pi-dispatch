@@ -60,8 +60,10 @@ const RUN_COLUMNS = [
  * attempt added a second helper beside this one and called it from `renderHeldJobs` alone, which left
  * `renderRuns` -- six record fields instead of two, and the `/dispatch runs` surface -- printing raw, and
  * gave this file two rules where the framed panel has one. Every renderer in this file that prints a
- * RECORD field goes through this; the ones that print operator-authored CONFIG deliberately do not, and
- * that carve-out is named in `DES-ADMIN-VIA-PI-EXTENSION`.
+ * RECORD field goes through this, and so does `schedulerLine`, which prints a CONFIG pane's key: the
+ * carve-out that used to excuse the config panes is gone (issue #382), because "the operator typed it into
+ * their own file" turned out not to be a property of the file. `DES-ADMIN-VIA-PI-EXTENSION` now states one
+ * rule with no exceptions.
  *
  * Same class and same SUBSTITUTION as the framed panel's `cellOf` (`dashboard.ts`), so the two renderers
  * of one record cannot disagree about what they will print -- deleting instead of substituting would make

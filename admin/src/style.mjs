@@ -7,7 +7,7 @@
  *     appends its own SGR reset, so post-layout color adds 0 to the measured width and cannot disturb
  *     framing or the `width:"75%"` overlay clamp.
  *   - This module is OVERLAY-ONLY. `render.mjs`/`panel.mjs` deliberately stay plain because they also feed
- *     `pi.sendMessage` (the model-visible channel) and the untrusted `.log` tail's `clip` escape-strip.
+ *     `pi.sendMessage` (the model-visible channel) and the untrusted `.log` tail's `clipData` gate.
  *     Nothing here is imported by those paths; the dependency runs one way (this module imports panel's
  *     pure primitives to color them, never the reverse).
  *

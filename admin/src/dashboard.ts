@@ -176,11 +176,12 @@ function proxyName(raw: any): string {
  * `runRow` and `renderRunDetail` had written the identical ternary under two names, and the HELD and
  * FAILED panes had neither, so the same job id was safe in one pane and raw in the next.
  *
- * NOT every pane in the panel, and the limit is worth stating rather than implied: TRIGGERS,
- * TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS render operator-authored CONFIG and do not
- * come through here. That is a different surface with a different argument (the operator typed it into
- * their own file) and widening to it is not what #367 asked for, but a control byte in a trigger label
- * does reach the screen today.
+ * NOT every value in the panel comes through here, and that is no longer a carve-out: TRIGGERS,
+ * TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS were excused from it on the ground that they
+ * render what the operator typed into their own file, and issue #382 refuted that twice -- two of those
+ * values are worker-written, and `writeTriggers` accepts a label or a phrase verbatim from the
+ * model-callable `dispatch_trigger_add` as well as from a dialog. The boundary is the GATE in
+ * `renderPanel` and in `frame`'s `padVisible`; this function is one of the belts behind it.
  *
  * The dash is for ABSENCE only, `null` or `undefined`. A value made ENTIRELY of control bytes becomes the
  * same number of spaces, so a destructive confirm can name what looks like nothing; that is the cost of
@@ -1842,7 +1843,7 @@ export function targetUrl(record: any): string | null {
   // that same call was scrubbed and the URL half was not, which is exactly the byte the design entry
   // says must never reach a terminal from a stored field.
   const m = record.target.match(/^([^#\s]+)#(\d+)$/);
-  // THROUGH `hasControls`, not a sixth spelling of the class inline: this was the one copy the first draft
+  // THROUGH `hasControls`, not a fifth spelling of the class inline: this was the one copy the first draft
   // of #382 left behind while claiming panel.mjs held the only one.
   if (!m || hasControls(m[1])) return null;
   return `https://github.com/${m[1]}/issues/${m[2]}`;

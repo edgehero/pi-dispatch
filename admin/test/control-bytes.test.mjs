@@ -8,14 +8,14 @@ import { renderRuns, renderTriggers } from "../src/render.mjs";
 
 // ONE CLASS, ONE OPERATION, and this file is where that claim is held (issue #382, item 1).
 //
-// Five copies of `[\u0000-\u001f\u007f-\u009f]` lived across three modules and did not agree about what to
+// Five copies of `[\u0000-\u001f\u007f-\u009f]` lived across four modules and did not agree about what to
 // DO with a match: `cell` (render.mjs) and `cellOf` (dashboard.ts) SUBSTITUTE a space so a framed pane and a
 // plain one clip identically -- and `cell`'s docblock says deleting instead "would make the panes clip
 // differently" -- while the unframed degrade composed with `clip`, which DELETES. So it did. Two mutants
 // flipping `cell` and `cellOf` to deletion were killed by the suite; nothing noticed a third renderer
 // already deleting.
 
-test("the class covers C0, DEL and C1, and nothing else", () => {
+test("the class covers C0, DEL and C1, and nothing else up to U+017F", () => {
 	// A SWEEP rather than a handful of examples, because the boundary is the whole point: U+009B is a CSI
 	// introducer that needs no ESC in front of it, so a class that stops at DEL leaves a working escape.
 	for (let cp = 0; cp <= 0x17f; cp++) {
@@ -102,7 +102,7 @@ test("a frame clips a body line that arrives wider than its inner width (#382)",
 	}
 });
 
-test("a frame's title SUBSTITUTES, and so does the monochrome box's, so the two geometries agree", () => {
+test("a frame's title SUBSTITUTES, and so does the monochrome box's", () => {
 	// `frame` (coloured) and `box` (monochrome) draw the same geometry for the same pane, and their titles
 	// went through different operations: `clipPlain` substituted, `clip` deleted. The same dirty title then
 	// sat one column narrower in one of them. Both live: `box` draws the tail's capability-absent and

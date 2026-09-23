@@ -3,9 +3,11 @@
  * No I/O, no clock, no process.env, no console, no pi API -- every input is a value the caller already
  * has, so these are testable with plain fixtures (asserted pure by panel.test.mjs).
  *
- * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): `clip` is the width gate through which
- * dashboard.ts funnels untrusted, PII-bearing `.log` bytes before framing. It strips control characters
- * so an escape sequence or a stray byte can neither crash the layout nor mis-size a row.
+ * PII discipline (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT): `clipData` is the width gate through
+ * which dashboard.ts funnels untrusted, PII-bearing `.log` bytes before framing -- SUBSTITUTE, then clip,
+ * so an escape sequence or a stray byte can neither crash the layout nor mis-size a row. `clip` itself
+ * DELETES and is not that gate (issue #382); `scrubKeepingStyle` is its twin for a line that already
+ * carries the styler's colour.
  */
 
 // Custom: no box-drawing/meter primitive exists in deps -- ink/blessed/boxen are full TUI frameworks and
@@ -74,7 +76,7 @@ function stripControls(s) {
 /**
  * THE CLASS IS WRITTEN ONCE, HERE, and every data path substitutes through this (issue #382, item 1).
  *
- * There were five copies of `[\u0000-\u001f\u007f-\u009f]` across three modules, and they did not agree
+ * There were five copies of `[\u0000-\u001f\u007f-\u009f]` across four modules, and they did not agree
  * about what to DO with a match. `cell` in render.mjs and `cellOf` in the dashboard both map it to a SPACE,
  * deliberately, so a framed pane and a plain one clip identically -- and `cell`'s own docblock says that
  * deleting instead "would make the panes clip differently". The unframed degrade composed with `clip`,
@@ -345,9 +347,11 @@ export function fmtCost(cost) {
 
 /**
  * Sentinel pair `render` wraps around the cursor cell when focused. Both are C0 control characters on
- * purpose: the monochrome path funnels every line through `clip`, whose control strip drops them to
- * nothing (a plain box simply shows no cursor), while style.mjs replaces the pair with an inverse-video
- * cell. Either path yields exactly the render width in visible columns.
+ * purpose: `clip`'s control strip drops them to nothing, so a plain box that clipped a focused render
+ * would simply show no cursor, while style.mjs replaces the pair with an inverse-video cell. Either way
+ * the result is exactly the render width in visible columns. Stated as a property of `clip` and not as a
+ * live caller: no production path clips a focused render, which is why `clip` keeps DELETING for this
+ * pin's sake rather than for a caller's (issue #382).
  */
 export const LINE_INPUT_CURSOR = ["\x01", "\x02"];
 

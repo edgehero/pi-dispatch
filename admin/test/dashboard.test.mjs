@@ -517,7 +517,7 @@ test("the LIST badges a one-shot: [once] armed, [spent] disarmed, absent otherwi
   assert.doesNotMatch(n.list, /\[once\]|\[spent\]/, "no one-shot fields, no badge -- the row is byte-identical to before");
 });
 
-test("NO pane emits a working escape sequence, whoever wrote the value (#382)", async () => {
+test("neither LIST nor TRIGGER_DETAIL emits a working escape sequence, whoever wrote the value (#382)", async () => {
   // THE RULE, AS ONE TEST, and it replaces a carve-out that was refuted rather than merely incomplete.
   // The first version of this change exempted the config panes because they render "what the operator typed
   // into their own file". But `writeTriggers` -- the single funnel behind every CRUD dialog AND the
@@ -583,7 +583,7 @@ test("the two WORKER-written values in a config pane go through the record belt 
   // they were two copies of one interpolation.
   // The id carries a WHOLE SGR RUN, which is the shape that hid this: `stripAnsi` deletes it, so the
   // stripped render looked clean whether or not the belt ran. The assertions below read the RAW render.
-  const dirty = { at: "2026-08-20T09:00:00Z\u0007", jobId: "gh-\u001b[31m77" };
+  const dirty = { at: "2026-08-20T09:00:00Z\u001b[1m\u0007", jobId: "gh-\u001b[31m77" };
   for (const trigger of [
     { type: "issue", action: ["closed"], number: 40, once: true, disarmed: dirty, flow: "deploy", forge: "github", packages: false },
     { type: "pull_request", action: ["closed"], number: 7, once: true, any: [], all: [], none: [], disarmed: dirty, flow: "archive", forge: "github", packages: false },
@@ -597,7 +597,7 @@ test("the two WORKER-written values in a config pane go through the record belt 
         assert.doesNotMatch(String(line).replace(styleTokens, ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${trigger.type}: no worker-written byte reaches a config pane`);
       }
     }
-    assert.match(String(shown.detail), /spent 2026-08-20T09:00:00Z /, "substituted, so the value keeps its width");
+    assert.match(String(shown.rawDetail), /spent 2026-08-20T09:00:00Z \[1m {2}by gh- \[31m77/, "BOTH fields spaced out: an SGR-shaped run in either one is data, and the gate's allowlist would keep it");
     assert.match(String(shown.detail), /by gh- \[31m77/, "and the id's escape run is spaced out, not deleted and not obeyed");
   }
 });
