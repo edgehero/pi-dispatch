@@ -3150,7 +3150,7 @@ validator rather than a second copy of it.
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
     "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
-                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|key-not-a-directory|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
+                 "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|too-large|unparseable|not-a-regular-file|key-not-a-directory|transcript-diverted|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
     "host":    "<PI_WORKER_NAME, else this machine's sanitized hostname>" | null,   // which machine ran it (#57)
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null }   // the venue it resolved to (#277)
@@ -3214,7 +3214,7 @@ validator rather than a second copy of it.
   |---|---|
   | **resolve path**, host-side, before the container (`readCanonical`) | `resumed`, `absent`, `key-not-a-directory`, `expired`, `conversation-too-old`, `resume-chain-too-long`, `context-too-full`, `too-large`, `unparseable`, `not-a-regular-file`, `venue-changed`, `pi-version-changed`, `transcript-replaced` |
   | **runner**, in the container (`image/runner/src/session.mjs`) | `disabled` (every unarmed job), `resumed`, `absent`, `unparseable` |
-  | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `key-not-a-directory`, `too-large`, `locked`, `promote-failed` |
+  | **promote path**, only on a `completed` exit (`promoteSession`) | `absent`, `not-a-regular-file`, `key-not-a-directory`, `transcript-diverted`, `too-large`, `locked`, `promote-failed` |
 
   Precedence has **two** rules, and for the feature's first year this entry recorded only the first.
   A refused promotion **wins** over the other two (`mergeSession`, `worker/src/processor.mjs`): on a
@@ -3640,13 +3640,27 @@ validator rather than a second copy of it.
   state as a residual the identity re-check could merely shrink.
   **The WRITE path cannot be closed the same way**, because there is no descriptor for a directory Node can
   write through: `promoteSession` re-checks the key directory under the lock and again after the swap, which
-  removes the check-to-lock window and makes a later swap REPORTABLE, but a swap after the last check still takes the transcript and the sidecars to wherever the name points. A swap STILL STANDING when the post-swap check runs reports `key-not-a-directory` instead of `promoted: true`; one reverted before it does not, so the record can still claim a promotion that landed outside the store. That is the write edge's version of the round trip the read edge answers with a descriptor, and it has no answer to it.
-  Two residuals stay, both needing the same precondition (write access to the store): a real directory
+  removes the check-to-lock window and makes a later swap REPORTABLE, but a swap after the last check still takes the transcript and the sidecars to wherever the name points. A swap STILL STANDING when the post-swap check runs reports `key-not-a-directory` instead of `promoted: true`; one REVERTED before it -- the A, B, A -- is caught by a second check that compares the inode `rename` preserved on the transcript against what the canonical name holds afterwards, and reports `transcript-diverted` (issue #390). Both are DETECTION, not prevention: the bytes are already wherever the name pointed and nothing host-side can recall them without `openat`/`renameat`. What they buy is that the RECORD stops claiming a promotion that landed outside the store, which is the difference between a loud refusal and the silent no-op the constitution's own logging rule forbids.
+  Three residuals stay, all needing the same precondition (write access to the store). A real directory
   pre-created by another user passes, since no ownership check is made (a store shared across hosts or worker
-  uids would otherwise cold-start every key, and Windows has no uid); and the promote window from the last
+  uids would otherwise cold-start every key, and Windows has no uid). The promote window from the last
   check to the final sidecar write is unbounded without `*at` syscalls, which Node does not expose -- its
-  cost, stated rather than implied, is the transcript and all four sidecars written outside the store, plus a
-  lock stranded in the real key until the staleness takeover, and it is detected rather than prevented.
+  cost, stated rather than implied, is the SIDECARS written outside the store (the transcript itself is
+  covered by the identity comparison above), plus a lock stranded in the real key until the staleness
+  takeover, and it is detected rather than prevented. And a swap that is put back for the DURATION OF A CHECK
+  and re-applied afterwards defeats any check that resolves the name again: an A, B, A, B around the two
+  post-rename checks reports `promoted: true` with the transcript outside the store, and if that key already
+  held one, the next job RESUMES the old transcript rather than cold-starting, so the lost turn is invisible
+  on both edges. Every path-based check has this shape, and closing it needs `openat`/`renameat` rather than
+  a further check; a 45 second unsynchronised live race over 215,372 promotions against 105,888 swap cycles
+  hit it 0 times, so it is a deterministic-window finding rather than a frequent one.
+
+  One assumption this comparison adds, named because it is the first in this file to rest on it: that a
+  `rename` PRESERVES the inode. It does on every filesystem this project supports, and `identityOf` elsewhere
+  only ever compares one path against itself. On a filesystem that derives inode numbers from the path
+  (SMB/CIFS without `serverino`, some FUSE), every promotion would refuse `transcript-diverted` and resume
+  would stop working with a token that reads as an attack. That is the same class as the `O_EXCL` semantics
+  the lock already assumes.
   `readFileSync` follows a link, which would decide a gate on some other file's contents; `writeFileSync` and `copyFileSync` follow one at the
   destination, which would turn a promotion into a truncating write of any worker-writable file. Writing a
   temp and renaming over the name replaces a link with a regular file and never opens its target. Sidecar
@@ -3733,7 +3747,7 @@ validator rather than a second copy of it.
   a symlink, a regular file or a dangling link when it is checked, both edges refuse it with
   `key-not-a-directory`, leave the entry where it stands, write nothing through it, and the reaper leaves it
   and says so; given a key directory swapped for one AFTER the read path has opened the transcript, the job
-  resumes the transcript it judged and no byte of the replacement reaches the container; given one swapped after the write path's last check AND still in place when that check runs, the promotion reports `key-not-a-directory` rather than `promoted`;
+  resumes the transcript it judged and no byte of the replacement reaches the container; given one swapped after the write path's last check AND still in place when that check runs, the promotion reports `key-not-a-directory` rather than `promoted`; given one swapped in and reverted around the rename, it reports `transcript-diverted`;
   given the STORE itself behind a symlink, resolve and promote both work, because only the key's own name is
   checked.
   Given a non-completed exit,
@@ -4617,3 +4631,4 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 | 2026-09-23 | Issue #384. **`INT-PAUSE-WINDOWS-FILE-CONTRACT` and `INT-SCOPED-LIMITS-FILE-CONTRACT` AMENDED**, one clause each and the same clause: an EMPTY value is NOT an unset one. Both keys are read with `??`, so an empty string survives into the loader, which runs unconditionally and refuses the boot; "unset = feature off" was therefore describing only half of what an operator can write. Doctor now FAILS on a blank value instead of softening it, and judges the service and the invoking shell as separate subjects, because a valid path in a shell says nothing about a service that reads only the file. No shape, no key, no path and no fail-closed default moves. **`INT-DEPLOYMENT-POINTER-CONTRACT` UNCHANGED, checked**: its env allowlist is the same seven keys (the wizard EMITS four of them, which is a different count and was conflated with it here), and nothing in this change moves what `up` writes. **Code evidence**: worker/src/doctor.mjs -> BOOT_FILES, loadVerdict; worker/src/config.mjs -> pauseWindowsFilePath, scopedLimitsFilePath. |
 | 2026-09-23 | Issue #379, items 1-4. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, three clauses. (1) What counts as ATTACHED is two questions for the boot reaper, and it asks both: the daemon's own `.Containers` and then `ps -a --filter network=`, with any member outside `ENDPOINT_LISTED_STATES` keeping the network as `container-attached-not-running`, and a membership question the daemon will not answer keeping it as `containers-unreadable`. (2) Every canary line doctor can print is one frozen table (`CANARY_LINES`), each check carries the shape and params it was built from, and `docs/egress.md`'s first column is GENERATED from it -- replacing a test that counted occurrences of a label prefix in source, which could not see four spellings of the same site and could go false red on a comment. (3) The canary's own `network create` and `network connect` now go through the BOUNDED runner, and `created` is decided by exit 0 or a null the runner attributes to the TIMEOUT rather than to a launch failure, so a create the bound killed is cleaned up while an unlaunchable docker prints no removal instruction for a network that never existed. **`INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked**: its own sweep, names and bounds are untouched; this changes the canary's sibling, not it. **`INT-SANDBOX-CONTRACT` UNCHANGED, checked**: `pi-sandbox-` stays outside the reaped namespace and no session network is asked about. **Code evidence**: worker/src/backend-local.mjs -> reapNetwork, ENDPOINT_LISTED_STATES, endpointShown, quotedShown; worker/src/doctor.mjs -> CANARY_LINES, canaryCheck, liveRunVia. |
 | 2026-09-23 | Issue #388. **No contract changed.** The 2026-09-07 row rendered TRUNCATED, losing about 1,260 characters after `env?.[name] `: the `\|\|` in a code span ended the Change cell. Escaped as `\|\|`, which GitHub renders as a literal `\|\|` inside the span (checked against its markdown API rather than assumed), and the row's claims are untouched. `.github/scripts/revision-row-check.mjs` now fails the build on any revision row that does not render as two cells. |
+| 2026-09-23 | Issue #390. **`INT-SESSION-STORE-CONTRACT` AMENDED**, and a token joins the promote path's closed enum: `transcript-diverted`. The write edge had no answer to an A, B, A on the key directory -- swap a link in, let the copy, the rename and the venue sentinel land in it, swap the real directory back -- because both of its identity re-checks compare the DIRECTORY, and by the time the second one runs the shape is right again. Measured with a deterministic probe: `{"promoted":true,"reason":"promoted","bytes":60}` with the transcript in the attacker's directory and the real key holding only `pi-version`, `resume-chain` and `venue`, so the next job cold-starts as `absent` while the record says the work was promoted. The repair compares the inode `rename` PRESERVED on the transcript against what the canonical name holds after it, which is a fact the directory comparison cannot see. It is DETECTION and not prevention, like its neighbour: the bytes are already gone, and what changes is that the record stops claiming otherwise. The sidecar writes after the rename deliberately get no equivalent check -- the transcript's own identity is what decides whether the promotion landed, and a sidecar written elsewhere is covered by the same refusal. **Precondition unchanged**: write access to `PI_SESSIONS_DIR`, which is what the whole store concedes. **`DES-SESSION-KEY-IS-DERIVED-NOT-INDEXED` UNCHANGED, checked**: the key is still a derived hash, which is exactly what makes the path precomputable and therefore what this defends. **Code evidence**: `worker/src/session-store.mjs` -> `promoteSession`, `readIdentity`. |

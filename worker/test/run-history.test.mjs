@@ -364,7 +364,7 @@ test("parseExitSession refuses a reason outside the CLOSED enum", () => {
 	assert.deepEqual(parseExitSession('{"event":"exit","session":{"resumed":false,"reason":"attacker /path/ string"}}'), { resumed: false, reason: null });
 	assert.deepEqual(parseExitSession('{"event":"exit","session":{"resumed":true,"reason":"resumed"}}'), { resumed: true, reason: "resumed" });
 	// Every token the contract lists must survive, or this check would silently narrow the enum.
-	for (const reason of ["resumed", "absent", "expired", "conversation-too-old", "resume-chain-too-long", "context-too-full", "too-large", "unparseable", "not-a-regular-file", "key-not-a-directory", "venue-changed", "pi-version-changed", "transcript-replaced", "locked", "promote-failed", "disabled"]) {
+	for (const reason of ["resumed", "absent", "expired", "conversation-too-old", "resume-chain-too-long", "context-too-full", "too-large", "unparseable", "not-a-regular-file", "key-not-a-directory", "transcript-diverted", "venue-changed", "pi-version-changed", "transcript-replaced", "locked", "promote-failed", "disabled"]) {
 		assert.equal(parseExitSession(`{"event":"exit","session":{"resumed":false,"reason":${JSON.stringify(reason)}}}`).reason, reason, reason);
 	}
 });

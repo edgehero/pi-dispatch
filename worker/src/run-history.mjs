@@ -148,6 +148,7 @@ export const SESSION_REASONS = new Set([
 	"unparseable",
 	"not-a-regular-file",
 	"key-not-a-directory",
+	"transcript-diverted",
 	"venue-changed",
 	"pi-version-changed",
 	"transcript-replaced",

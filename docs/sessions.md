@@ -162,9 +162,9 @@ next job there starts fresh and its first completed run stamps the new venue. Mo
 
 ### When a promotion doesn't happen
 
-Three more reasons reach `session.reason` from `promoteSession`, describing the *write* back to the store
-rather than the read that started the job. Two of them, `locked` and `promote-failed`, come from nowhere
-else and so appear only on a **completed** run. `key-not-a-directory` is one of several tokens both edges produce, since the same checks guard both, and it
+Four more reasons reach `session.reason` from `promoteSession`, describing the *write* back to the store
+rather than the read that started the job. Three of them, `locked`, `promote-failed` and
+`transcript-diverted`, come from nowhere else and so appear only on a **completed** run. `key-not-a-directory` is one of several tokens both edges produce, since the same checks guard both, and it
 is in the read table above for that reason: the same shape refuses the read that starts a job and the write
 that ends it. `absent`, `too-large` and `not-a-regular-file` are the others. A refused promotion
 outranks everything else on the line, because it says why the NEXT run for this key will cold start:
@@ -172,6 +172,7 @@ outranks everything else on the line, because it says why the NEXT run for this 
 | reason | meaning |
 |---|---|
 | `key-not-a-directory` | the key's own directory in the store is not a directory, or is no longer the one this promotion prepared (see the table above). Caught before the lock, nothing is written at all; caught after the swap, the transcript and the venue sentinel have already been written to whatever the name pointed at, and this is what stops the record claiming otherwise |
+| `transcript-diverted` | the promotion could not establish that the transcript ended up at the key, although the key looks right now. This is the reverted swap: something replaced the key directory for the length of the write and put the real one back afterwards, so the shape check saw nothing wrong while the transcript landed elsewhere. The promotion refuses and the key stays as it was; the bytes that were written cannot be recalled, and this is what stops the record claiming they landed. It needs write access to your sessions directory, which is the precondition the whole store assumes. It also appears, fail-closed, if the store's own identity reads fail mid-promotion (a filesystem going read-only or refusing stats), where the transcript may in fact have landed and the promotion still refuses rather than claim something it could not check |
 | `locked` | the key was already held by another job's exclusive promotion lock. A lock left behind by a killed promotion is taken over by the next promotion once it is older than an hour, so this almost always means a live writer rather than a file somebody has to delete. The exception is a lock whose timestamp is in the FUTURE, from a clock skew on a shared store: that one never ages, and with `PI_SESSIONS_TTL_DAYS=0` nothing else clears it either |
 | `promote-failed` | the write failed before the transcript landed: a full disk, or a permissions change under the store mid-promotion. A sidecar that fails AFTER the swap is logged instead, never reported here, because the transcript did land |
 

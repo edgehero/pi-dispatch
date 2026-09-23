@@ -524,18 +524,41 @@ export function makeSessionStore({
 				// on a venue change, so the decision needs no read of the stamp under the lock and there is no
 				// branch to get wrong.
 				replaceSidecar(dir, VENUE_FILE, VENUE_PENDING);
+				// The temp's identity, read BEFORE the rename, is what makes the A, B, A reportable (issue #390).
+				// `rename` preserves the inode, so after a rename that landed where it was meant to, the canonical
+				// name holds THIS file. If the directory was swapped for the rename and swapped back afterwards,
+				// the canonical name resolves into the real key again and holds its OLD transcript, or nothing --
+				// a different inode either way. That is a fact the shape re-check below cannot see, because by
+				// then the shape is right again.
+				const tmpIdent = readIdentity(tmp);
 				fs.renameSync(tmp, canonicalFile(session.key));
 				// DETECTION for the segment prevention cannot reach (issue #375's gate round). A link swapped in
 				// after the check above takes this rename and every sidecar write with it, and the old code then
 				// reported `promoted: true` for a transcript that landed outside the store: the operator's record
 				// said the next run would resume work that is not there. This cannot undo the write, the bytes
 				// being already wherever the name pointed, and it catches such a swap only while it is STILL
-				// STANDING here. An A, B, A that puts the real directory back before this check still returns
-				// `promoted: true` with the transcript outside the store, which is the write edge's own version
-				// of the round trip the read edge answers with a descriptor, and which nothing here can answer.
+				// STANDING here.
 				if (!sameDir()) {
 					log("session_promote_skipped", { key: session.key, reason: "key-not-a-directory" });
 					return { promoted: false, reason: "key-not-a-directory" };
+				}
+				// AND THE A, B, A, which the check above cannot see because by then the shape is right again
+				// (issue #390). Measured with a deterministic probe before this existed: `{"promoted":true,
+				// "reason":"promoted"}` with the transcript in the attacker's directory and the real key holding
+				// only `pi-version`, `resume-chain` and `venue` -- the next job on that key cold-starts as
+				// `absent` while the record says the work was promoted, which is the silent no-op `CLAUDE.md`
+				// calls the worst outcome available. A 45 second unsynchronised live race did not hit the exact
+				// ordering (16,591 promotions, 3 refusals, 0 lies), so this is a deterministic-window finding
+				// rather than a frequent one, and its precondition is the one the whole store concedes: write
+				// access to `PI_SESSIONS_DIR`.
+				//
+				// DETECTION, NOT PREVENTION, like its neighbour: the bytes are already wherever the name pointed
+				// and nothing here can recall them. What it buys is that the RECORD stops claiming otherwise.
+				// A shape-only comparison would not do it -- the round that added the checks above proved a swap
+				// to another REAL directory passes one -- so this compares the inode the rename preserved.
+				if (tmpIdent === null || readIdentity(canonicalFile(session.key)) !== tmpIdent) {
+					log("session_promote_skipped", { key: session.key, reason: "transcript-diverted" });
+					return { promoted: false, reason: "transcript-diverted" };
 				}
 				// The real stamp FIRST of the post-swap writes, and the ordering is the contract. It is the only one
 				// whose absence MISATTRIBUTES rather than cold-starts: between the rename and this write the key reads

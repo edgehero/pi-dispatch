@@ -2432,3 +2432,194 @@ test("a key directory that cannot be STATTED is a fault, not an absence (#391)",
 	assert.equal(res.promoted, false, "a fault is not a promotion");
 	assert.equal(res.reason, "promote-failed", "and it is reported as a FAULT, not as a shape verdict like key-not-a-directory");
 });
+
+test("an A, B, A on the key directory is REPORTED, not reported as promoted (#390)", () => {
+	// THE LIE. The write path has no descriptor to write through -- Node exposes no `openat`/`renameat` -- so
+	// it re-checks the key directory's identity under the lock and again after the rename. Both catch a swap
+	// that is STILL STANDING. Neither can see one that is put back:
+	//
+	//   promote begins      the key directory is real, its dev:ino recorded
+	//   attacker swaps in   the key is now a link to somewhere else
+	//                       ... the transcript copy, the rename and the venue sentinel all land there ...
+	//   attacker swaps back the key is the real directory again
+	//   post-swap re-check  dev:ino matches, so the promotion reports promoted: true
+	//
+	// Measured before the repair, with this exact fixture: `{"promoted":true,"reason":"promoted","bytes":60}`
+	// with the transcript in the attacker's directory and the real key holding only `pi-version`,
+	// `resume-chain` and `venue`. The next job on that key cold-starts as `absent` while the record says the
+	// work was promoted, which is the silent no-op `CLAUDE.md` calls the worst outcome available.
+	//
+	// Driven by injected fs calls rather than by a sleep: the window is two calls wide, and a timing test
+	// cannot hit that ordering reliably. A 45 second unsynchronised live race did not hit it once.
+	const real = realFs;
+	const root = tempDir("pi-aba-");
+	const sessionsDir = join(root, "sessions");
+	mkdirSync(sessionsDir, { recursive: true });
+	const elsewhere = join(root, "elsewhere");
+	mkdirSync(elsewhere, { recursive: true });
+	const logs = [];
+	const keyDir = join(sessionsDir, sessionKeyFor(ghIssue));
+	let swaps = 0;
+
+	const store = makeSessionStore({
+		sessionsDir,
+		ttlDays: 14,
+		maxBytes: 1_000_000,
+		defaultBackend: "local",
+		now: () => NOW,
+		log: (e, f) => logs.push([e, f]),
+		fs: {
+			...realFs,
+			// B GOES IN BEFORE THE COPY, not before the rename, and getting that wrong is instructive: the
+			// `.incoming` temp is created INSIDE the key directory, so a swap after it exists carries the temp
+			// away with the real directory and the rename fails with ENOENT -- a refusal, but the wrong one,
+			// and not the lie this test is about.
+			copyFileSync: (from, to) => {
+				if (String(to).endsWith(".incoming") && swaps++ === 0) {
+					real.renameSync(keyDir, `${keyDir}.real`);
+					real.symlinkSync(elsewhere, keyDir);
+				}
+				return real.copyFileSync(from, to);
+			},
+			renameSync: (from, to) => {
+				real.renameSync(from, to);
+				// A again, once the transcript has landed in B: the shape is right before anything looks at it.
+				if (String(to).endsWith(SESSION_FILE_NAME) && swaps === 1) {
+					swaps = 2;
+					real.unlinkSync(keyDir);
+					real.renameSync(`${keyDir}.real`, keyDir);
+				}
+			},
+		},
+	});
+
+	const jobDir = mkdtempSync(join(root, "job-"));
+	const s0 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s0.hostDir, SESSION_FILE_NAME), HEADER);
+	const res = store.promoteSession(s0, { piVersion: PI });
+
+	assert.equal(swaps, 2, "the fixture really performed the A, B, A");
+	assert.equal(res.promoted, false, "the promotion must not claim to have landed");
+	assert.equal(res.reason, "transcript-diverted", "and the reason says WHICH failure: the transcript is not at the key");
+	assert.ok(
+		logs.some(([e, f]) => e === "session_promote_skipped" && f.reason === "transcript-diverted"),
+		`the refusal is logged; logs were ${JSON.stringify(logs)}`,
+	);
+	// The bytes really did land elsewhere. Detection cannot recall them, and the test says so rather than
+	// implying the write was prevented.
+	assert.ok(existsSync(join(elsewhere, SESSION_FILE_NAME)), "the transcript is where the swap put it");
+	assert.equal(existsSync(join(keyDir, SESSION_FILE_NAME)), false, "and is NOT at the key, which is the lie the record used to tell");
+});
+
+test("an A, B, A on a key that ALREADY holds a transcript is caught too (#390)", () => {
+	// The other half of "a different inode either way", and the half that matters more. On a FRESH key the
+	// canonical name holds nothing after the revert, so a check reading "is it null" is indistinguishable
+	// from one reading "is it the temp's inode" -- measured: that mutation survives the whole suite against
+	// the fresh-key test alone. On a SEEDED key the name holds the OLD transcript, so only the identity
+	// comparison sees it, and the consequence is worse than a cold start: the record says promoted and the
+	// next job RESUMES the superseded transcript, which makes the lost turn invisible on both edges.
+	const real = realFs;
+	const root = tempDir("pi-aba-seeded-");
+	const sessionsDir = join(root, "sessions");
+	mkdirSync(sessionsDir, { recursive: true });
+	const elsewhere = join(root, "elsewhere");
+	mkdirSync(elsewhere, { recursive: true });
+	const key = sessionKeyFor(ghIssue);
+	const keyDir = join(sessionsDir, key);
+	const canonical = seed(sessionsDir, key); // the key already holds a promoted transcript
+	const before = readFileSync(canonical, "utf8");
+	let swaps = 0;
+
+	const store = makeSessionStore({
+		sessionsDir,
+		ttlDays: 14,
+		maxBytes: 1_000_000,
+		defaultBackend: "local",
+		now: () => NOW,
+		log: () => {},
+		fs: {
+			...realFs,
+			copyFileSync: (from, to) => {
+				if (String(to).endsWith(".incoming") && swaps++ === 0) {
+					real.renameSync(keyDir, `${keyDir}.real`);
+					real.symlinkSync(elsewhere, keyDir);
+				}
+				return real.copyFileSync(from, to);
+			},
+			renameSync: (from, to) => {
+				real.renameSync(from, to);
+				if (String(to).endsWith(SESSION_FILE_NAME) && swaps === 1) {
+					swaps = 2;
+					real.unlinkSync(keyDir);
+					real.renameSync(`${keyDir}.real`, keyDir);
+				}
+			},
+		},
+	});
+
+	const jobDir = mkdtempSync(join(root, "job-"));
+	const s0 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s0.hostDir, SESSION_FILE_NAME), `${HEADER}{"type":"message","text":"the turn that would be lost"}\n`);
+	const res = store.promoteSession(s0, { piVersion: PI });
+
+	assert.equal(swaps, 2, "the fixture really performed the A, B, A");
+	assert.equal(res.reason, "transcript-diverted", "the OLD transcript at the name is a different inode, which is the only thing that can see this");
+	assert.equal(readFileSync(canonical, "utf8"), before, "and the key still holds what it held: nothing was replaced");
+});
+
+test("an ordinary promotion is untouched by the divert check (#390)", () => {
+	// The other half. The check compares the inode `rename` preserved, so a promotion that lands where it was
+	// meant to must pass it -- without this, a check that refused everything would look identical to one that
+	// works, against the test above alone.
+	const { sessionsDir, store, jobDir } = fixture();
+	const s0 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s0.hostDir, SESSION_FILE_NAME), HEADER);
+	const res = store.promoteSession(s0, { piVersion: PI });
+	assert.deepEqual({ promoted: res.promoted, reason: res.reason }, { promoted: true, reason: "promoted" });
+	assert.ok(existsSync(join(sessionsDir, sessionKeyFor(ghIssue), SESSION_FILE_NAME)), "and the transcript is at the key");
+});
+
+test("a promotion whose own identity reads fail REFUSES, rather than passing on two nulls (#390)", () => {
+	// The fail-closed arm of the divert check, and its discriminating input is narrow enough to be worth
+	// stating: `tmpIdent === null ||`. With the temp's identity unreadable AND the canonical name's
+	// unreadable too, a comparison alone is `null !== null`, which is FALSE -- so the promotion would report
+	// `promoted: true` having verified nothing at all. Two failed reads are the one case where "they match"
+	// and "I could not tell" look the same, and this is the arm that keeps them apart.
+	const real = realFs;
+	const root = tempDir("pi-divert-blind-");
+	const sessionsDir = join(root, "sessions");
+	mkdirSync(sessionsDir, { recursive: true });
+	const logs = [];
+	let blind = false;
+	const store = makeSessionStore({
+		sessionsDir,
+		ttlDays: 14,
+		maxBytes: 1_000_000,
+		defaultBackend: "local",
+		now: () => NOW,
+		log: (e, f) => logs.push([e, f]),
+		fs: {
+			...realFs,
+			// Blind from the moment the transcript is copied: every identity read this promotion makes of the
+			// transcript name fails from here, which is the shape a store on a filesystem that started
+			// refusing stats mid-promotion would have.
+			copyFileSync: (from, to) => {
+				const r = real.copyFileSync(from, to);
+				blind = true;
+				return r;
+			},
+			lstatSync: (p2, ...rest) => {
+				if (blind && (String(p2).endsWith(SESSION_FILE_NAME) || String(p2).endsWith(".incoming"))) {
+					throw Object.assign(new Error("EIO"), { code: "EIO" });
+				}
+				return real.lstatSync(p2, ...rest);
+			},
+		},
+	});
+	const jobDir = mkdtempSync(join(root, "job-"));
+	const s0 = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(s0.hostDir, SESSION_FILE_NAME), HEADER);
+	const res = store.promoteSession(s0, { piVersion: PI });
+	assert.equal(res.promoted, false, "it cannot tell, so it must not claim");
+	assert.equal(res.reason, "transcript-diverted");
+});
