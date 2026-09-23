@@ -25,7 +25,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
-import { networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 
 const execDocker = promisify(execFile);
@@ -253,7 +253,11 @@ export function endpointShown(endpoint) {
 export function quotedShown(value) {
 	if (value === null || value === undefined) return String(value);
 	const shown = String(value);
-	if (shown.length <= ENDPOINT_SHOWN_MAX && /^[\x20-\x7e]*$/.test(shown)) return JSON.stringify(shown);
+	// The CAP IS ON THE RENDERED TEXT, quotes included, which the fast path got wrong: 300 printable
+	// characters render as 302, and a value of 300 quote characters as 602. A 300-character context name is
+	// creatable (`docker context create` accepts one, measured), so this was reachable.
+	const quoted = JSON.stringify(shown);
+	if (quoted.length <= ENDPOINT_SHOWN_MAX && /^[\x20-\x7e]*$/.test(shown)) return quoted;
 	return boundedShown(shown);
 }
 
@@ -307,10 +311,14 @@ function escapedPoint(point) {
 	// the result is not the value and not a prefix of it (16,916 failures in a 50,000-case fuzz). Both halves
 	// of a surrogate pair are always emitted together, because the caller walks whole code points, so this
 	// can never leave a lone surrogate behind.
+	// JSON's OWN SHORT ESCAPES for the five it has (`\b \t \n \f \r`), because the claim this renderer makes
+	// is that an under-cap value renders byte-identically to what `JSON.stringify` produced before the bound
+	// existed -- and `\u0009` for a tab is not that. Everything else is escaped per UTF-16 unit below.
+	const SHORT = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" };
 	let out = "";
 	for (let i = 0; i < point.length; i++) {
 		const unit = point.charCodeAt(i);
-		out += unit >= 0x20 && unit <= 0x7e ? point[i] : `\\u${unit.toString(16).padStart(4, "0")}`;
+		out += SHORT[point[i]] ?? (unit >= 0x20 && unit <= 0x7e ? point[i] : `\\u${unit.toString(16).padStart(4, "0")}`);
 	}
 	return out;
 }
@@ -450,13 +458,34 @@ export function makeReaper({ log, exec = execDocker }) {
 		// `exited`, `dead`, a Podman state nothing here has measured -- keeps the network. `paused` is on this
 		// side because it IS listed and the `rm` refuses while it is there (measured); `restarting` is not,
 		// because whether it appears is a matter of which instant the sweep asks in.
-		const attached = members.stdout
+		// A NAME AND A STATE, both of them the daemon's own vocabulary. A line without a tab is not a member --
+		// docker writes warnings and deprecation notices to stdout, and reading one as a container name put
+		// free text into a log field this file's own closed-token rule forbids, and kept the network forever
+		// on the strength of it. A name that is not a docker name is not a member either (docker refuses
+		// anything outside `[a-zA-Z0-9][a-zA-Z0-9_.-]*`).
+		const parked = members.stdout
 			.split("\n")
 			.map((l) => l.split("\t"))
-			.filter(([name, state]) => String(name ?? "").trim() !== "" && !ENDPOINT_LISTED_STATES.has(String(state ?? "").trim()))
+			.filter(([name, state]) => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(String(name ?? "").trim()) && state !== undefined && !ENDPOINT_LISTED_STATES.has(String(state).trim()))
 			.map(([name]) => name.trim());
-		if (attached.length > 0) return log("network_not_reaped", { network, reason: "container-attached-not-running", containers: attached });
-		const outcome = await removeNetworkOrSay(step, { network, detach: names });
+		// THE PROXY IS NOT A REASON TO KEEP THE NETWORK, and leaving it out is what keeps this sweep able to do
+		// its job. `reapNetwork` exists for exactly one shape: the worker died mid-job, its container is reaped
+		// three lines above, and the only thing still holding the network is this worker's OWN long-lived
+		// egress proxy. If that proxy is STOPPED at reap time -- an operator who turned the policy off, a host
+		// that rebooted -- then treating it as a member to protect leaves every leftover job network standing
+		// forever, logged once per boot, with nothing else in the project that would ever remove them.
+		//
+		// Detaching a stopped container is measured to work (`network disconnect -f`, exit 0 on docker 27.4.0),
+		// and it costs that container nothing it can use: the network it is being detached from is a dead job's
+		// network, which is not one the proxy needs to start. What the rule protects is a container that would
+		// be BROKEN by the removal, which is any other member.
+		const attached = parked.filter((name) => name !== DEFAULT_EGRESS_PROXY);
+		// BOUNDED, because this goes into a log line. Five hundred stopped members produced a single
+		// 18,000-character record, in the same change that bounded the endpoint line for the same reason.
+		if (attached.length > 0) return log("network_not_reaped", { network, reason: "container-attached-not-running", containers: attached.slice(0, 5), more: attached.length > 5 ? attached.length - 5 : 0 });
+		// The parked proxy is detached too: it is attached to this network and `.Containers` does not list it,
+		// so without naming it here the `rm` would fail "has active endpoints" on a member nothing detached.
+		const outcome = await removeNetworkOrSay(step, { network, detach: [...names, ...parked.filter((name) => name === DEFAULT_EGRESS_PROXY)] });
 		if (outcome.absent) return;
 		// `detached` is named rather than counted: one of them may be something this worker never attached.
 		if (outcome.removed) return log("reaped_network", { network, detached: outcome.detached });

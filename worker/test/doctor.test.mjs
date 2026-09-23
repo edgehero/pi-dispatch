@@ -4570,8 +4570,10 @@ const CANARY_PLANS = [
 		[`docker network rm ${NET}`]: { code: 1, output: "Error response from daemon: something else entirely" },
 		"docker rm -f": 0,
 	}),
-	// notRemoved, from doctor's OWN TEARDOWN at the end of a run -- a second site for the same shape, which
-	// nothing drove before: the only assertion about it was a `doesNotMatch`.
+	// notRemoved, from doctor's OWN TEARDOWN at the end of a run -- a second site for the same shape. The
+	// SWEEP's site is the one nothing drove before (its only assertion was a `doesNotMatch` on pid 4242);
+	// this one was already reached by the #350 test that uses `process.pid`. Both are driven here so the
+	// shape's two sites cannot drift apart.
 	() => canaryPlan({ [`docker network rm pi-dispatch-egress-doctor-1`]: { code: 1, output: "Error response from daemon: has active endpoints" } }, { pid: 1, isAlive: () => true }),
 	// foreign: a leftover on a daemon this shell cannot show is on this host. The endpoint comes from the
 	// plan, because that is where doctor reads it from -- a seam would be a different code path.
@@ -4608,20 +4610,42 @@ test("every canary line doctor prints comes from the table it is generated from 
 	// EVERY SHAPE, from a scenario that actually reaches it. The union is the check that matters: a shape
 	// nothing drives is a shape the page can describe wrongly forever.
 	assert.deepEqual([...seen.keys()].sort(), Object.keys(CANARY_LINES).sort(), "every shape in the table is produced by a real scenario");
-	// STATED LIMIT: this pins every SHAPE, not every SITE. `notRemoved` is printed from two places -- the
-	// sweep and doctor's own teardown -- and a second site for an existing shape, on a path no scenario
-	// below drives, would be invisible here. Both of its sites are driven, deliberately.
+	// STATED LIMIT, and it is wider than it first looks: this pins every line on a path one of the scenarios
+	// below DRIVES. A line built by hand on a path none of them reaches -- an early return, a branch behind
+	// a daemon answer nothing here models -- carries no `canary` field and is never seen, so it would not
+	// fail this test and the page would not describe it. The union check catches a missing SHAPE, not a
+	// missing SITE: `notRemoved` has two, and both are driven deliberately for that reason.
 	assert.ok(seen.get("notRemoved") >= 2, "both notRemoved sites are driven, not just the one the union needs");
+});
+
+test("a teardown that KEEPS the network does not then remove it (#379)", async () => {
+	// The teardown reuses the sweep's `kept` sentence -- "the network is the only way left to find it" -- and
+	// then fell straight into removing it, so both halves of the sentence were false in the same run and the
+	// probe the page says would be orphaned permanently was orphaned permanently.
+	const calls = [];
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, canaryFixture({ "docker run --rm --name pi-dispatch-egress-probe-provider": { code: null, output: "" }, "docker rm -f": 1 }), calls));
+	assert.match(text(), /Egress canary: .* is kept, because the probe/, "the line still says the network is kept");
+	assert.equal(
+		calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"),
+		false,
+		"and nothing removes it, which is what the line promises",
+	);
 });
 
 test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 	const doc = readFileSync(new URL("../../docs/egress.md", import.meta.url), "utf8");
 	const region = /<!-- CANARY-LINES -->\n([\s\S]*?)<!-- \/CANARY-LINES -->/.exec(doc);
 	assert.ok(region, "the generated region is still there");
-	const rows = region[1]
-		.split("\n")
-		.filter((l) => l.startsWith("| `"))
-		.map((l) => l.slice(3, l.indexOf("` |")));
+	// EVERY TABLE ROW IN THE REGION, not only the ones that look right: filtering to lines starting "| `"
+	// let a fabricated row whose first cell is not backticked sit inside the generated region and be
+	// silently dropped.
+	const all = region[1].split("\n").filter((l) => l.startsWith("|") && !/^\|\s*(Line|-)/.test(l));
+	assert.ok(
+		all.every((l) => l.startsWith("| `")),
+		"every row in the generated region has a backticked first cell, or it is not a generated row",
+	);
+	const rows = all.map((l) => l.slice(3, l.indexOf("` |")));
 	// The page's placeholders, which are the only hand-written part: the table builds the sentence, this
 	// decides what stands in for a network name. The `notRemoved` command is DERIVED rather than typed,
 	// because it is the one placeholder that is itself a command the code composes.
@@ -4640,6 +4664,13 @@ test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 		return `${spec.tier === "ok" ? "✓" : "⚠"} Egress canary: ${spec.label(params)}`;
 	});
 	assert.deepEqual(rows, expected, "the page's first column is the table, in the table's order, or it is stale");
+	// THE RETIRED PHRASES, carried over from the test this replaced. It guarded them with the note that a
+	// correction had landed everywhere except the page four times on that branch, and dropping the guard let
+	// all three back into the columns this test does not otherwise read.
+	const section = doc.slice(doc.indexOf("### Lines about leftovers"), doc.indexOf("The two policy lines each run"));
+	for (const retired of ["left by a doctor run that did not finish", "from an interrupted doctor", "the network itself was already gone"]) {
+		assert.equal(section.includes(retired), false, `the page must not quote a sentence no site can emit: ${retired}`);
+	}
 });
 
 test("doctor: a canary network that could not be READ names the command that failed (#350, #360)", async () => {

@@ -429,7 +429,7 @@ test("the reaper's two halves ask the daemon the same question about membership 
 		const { exec, calls } = fakeDockerExec({ nets: { "pi-job-a-net": [] }, stopped: { "pi-job-a-net": [["pi-job-a", state]] } });
 		const { log, lines } = reaperLog();
 		await makeReaper({ log, exec })();
-		assert.deepEqual(lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "container-attached-not-running", containers: ["pi-job-a"] }]], state);
+		assert.deepEqual(lines, [["network_not_reaped", { network: "pi-job-a-net", reason: "container-attached-not-running", containers: ["pi-job-a"], more: 0 }]], state);
 		assert.equal(calls.some((c) => c.startsWith("network rm")), false, `${state}: the network is KEPT, which is the whole point`);
 	}
 	// A FOREIGN stopped container counts too. Under default compose naming an operator's own project can sit
@@ -439,6 +439,48 @@ test("the reaper's two halves ask the daemon the same question about membership 
 	await makeReaper({ log, exec })();
 	assert.deepEqual(lines[0][1].reason, "container-attached-not-running");
 	assert.equal(calls.some((c) => c.startsWith("network rm")), false);
+});
+
+test("a STOPPED egress proxy is detached, not a reason to keep the network forever (#379)", async () => {
+	// THE SHAPE THIS SWEEP EXISTS FOR, and the first version of the any-state rule broke it: the worker died
+	// mid-job, its container is reaped, and the only thing still holding the network is this worker's OWN
+	// long-lived proxy. If that proxy is stopped -- an operator who turned the policy off, a host that
+	// rebooted -- treating it as a member to protect leaves every leftover job network standing forever,
+	// logged once per boot, with nothing in this project that would ever remove them.
+	const { exec, calls } = fakeDockerExec({ nets: { "pi-job-p-net": [] }, stopped: { "pi-job-p-net": [["pi-dispatch-egress-proxy", "exited"]] } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.deepEqual(lines, [["reaped_network", { network: "pi-job-p-net", detached: ["pi-dispatch-egress-proxy"] }]], "the leftover is cleaned and the detach is named");
+	assert.ok(calls.some((c) => c.startsWith("network disconnect")), "a stopped member is detached first, which the daemon allows");
+	// And it is only the PROXY that is treated this way: anything else stopped still keeps the network.
+	const other = fakeDockerExec({ nets: { "pi-job-q-net": [] }, stopped: { "pi-job-q-net": [["pi-dispatch-egress-proxy", "exited"], ["someone-elses", "exited"]] } });
+	const second = reaperLog();
+	await makeReaper({ log: second.log, exec: other.exec })();
+	assert.equal(second.lines[0][1].reason, "container-attached-not-running");
+	assert.deepEqual(second.lines[0][1].containers, ["someone-elses"], "and the proxy is not listed as a reason");
+});
+
+test("what the daemon prints that is not a member is not read as one (#379)", async () => {
+	// `docker` writes warnings and deprecation notices to stdout. A line without a tab was read as a member
+	// with state `undefined`, so free text went into a log field this file's closed-token rule forbids, and
+	// the network was kept forever on the strength of it.
+	const { exec, calls } = fakeDockerExec({ nets: { "pi-job-w-net": [] }, stopped: { "pi-job-w-net": [["WARNING: bridge networking is deprecated", undefined]] } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.deepEqual(lines.map((l) => l[0]), ["reaped_network"], "a warning is not a container");
+	assert.ok(calls.some((c) => c.startsWith("network rm")));
+});
+
+test("the containers a kept network names are BOUNDED (#379)", async () => {
+	// Five hundred stopped members produced a single 18,000-character log record, in the same change that
+	// bounded the endpoint line for exactly this reason.
+	const many = Array.from({ length: 500 }, (_, i) => [`member-${i}`, "exited"]);
+	const { exec } = fakeDockerExec({ nets: { "pi-job-m-net": [] }, stopped: { "pi-job-m-net": many } });
+	const { log, lines } = reaperLog();
+	await makeReaper({ log, exec })();
+	assert.equal(lines[0][1].containers.length, 5, "five names, not five hundred");
+	assert.equal(lines[0][1].more, 495, "and the count of what is not shown");
+	assert.ok(JSON.stringify(lines[0][1]).length < 300, "so one line stays a line");
 });
 
 test("the states the daemon itself guards are the ones the reaper proceeds on (#379)", async () => {
@@ -468,9 +510,9 @@ test("the CONTAINER half stays running-only, and its argv is pinned whole (#379)
 	// The container half must NOT be widened to `ps -a`: it `rm -f`s what it finds, so listing stopped
 	// containers would destroy an operator's own and a crashed job's forensic one. `design.md` records the
 	// reason; this pins the argv, because the mutation that matters is subtle. Measured by driving the real
-	// reaper: `-a` placed at the FRONT turns four tests here red on its own, but `-a` APPENDED, or `--all`
-	// after the filter, survives every one of them -- the fake routes on the first two words, so even a
-	// rejecting default branch cannot see it.
+	// reaper: `-a` placed at the FRONT turns six tests here red on its own, but `-a` APPENDED, or `--all`
+	// after the filter, is caught by this test and by nothing else -- the fake routes on the first two words,
+	// so even a rejecting default branch cannot see it.
 	const { exec, calls } = fakeDockerExec({ containers: ["pi-job-live"], nets: {} });
 	const { log } = reaperLog();
 	await makeReaper({ log, exec })();
@@ -580,6 +622,55 @@ test("endpointShown is BOUNDED, and what it cuts is still parseable and still a 
 		assert.doesNotMatch(parsed, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, `${name}: no lone surrogate`);
 		assert.doesNotMatch(out, /[^\x20-\x7e]/, `${name}: nothing outside printable ASCII reaches the line`);
 	}
+});
+
+test("the bound's four properties hold over a generated corpus, not five hand-picked values (#379)", () => {
+	// THE FUZZ LIVES IN THE TREE. Two wrong versions of this renderer each passed a length check and a
+	// handful of examples: cutting after escaping lands inside a `\u00e9`, and escaping a CODE POINT emits
+	// `\u1f600`, which `JSON.parse` reads as `\u1f60` plus a literal `0`. Both were found by generating
+	// input, and a claim about 50,000 cases that no reviewer can re-run is not a claim.
+	//
+	// DETERMINISTIC, with a fixed seed, so a failure is reproducible and the suite has no flake in it.
+	let seed = 0x5eed1979;
+	const next = () => {
+		seed = (seed * 1664525 + 1013904223) >>> 0;
+		return seed / 0x100000000;
+	};
+	const pools = ["abcdefghijklmnopqrstuvwxyz0123456789:/.-_", "\u0085\u009b\u00e9\u202e\u200d", "\u{1f600}\u{1f4a9}\u{10000}", '"\\\u0000\u001b'].map((p) => [...p]);
+	for (let i = 0; i < 2000; i++) {
+		let value = "";
+		const len = 1 + Math.floor(next() * 400);
+		for (let j = 0; j < len; j++) {
+			const pool = pools[Math.floor(next() * pools.length)];
+			value += pool[Math.floor(next() * pool.length)];
+		}
+		const out = endpointShown({ endpoint: value });
+		// A short printable value passes through bare -- decided by the VALUE, because such a value can
+		// itself begin with a double quote.
+		if (value.length <= ENDPOINT_SHOWN_MAX && /^[\x20-\x7e]+$/.test(value)) {
+			assert.equal(out, value, "a short printable endpoint is untouched");
+			continue;
+		}
+		const quoted = out.endsWith("characters)") ? out.slice(0, out.lastIndexOf('" (') + 1) : out;
+		assert.ok(quoted.length <= ENDPOINT_SHOWN_MAX, `within the cap: ${quoted.length}`);
+		const parsed = JSON.parse(quoted);
+		assert.ok(value.startsWith(parsed), "what is shown is a PREFIX of what was given");
+		assert.doesNotMatch(parsed, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no lone surrogate");
+		assert.doesNotMatch(out, /[^\x20-\x7e]/, "nothing outside printable ASCII reaches the line");
+	}
+});
+
+test("an under-cap value renders exactly as the unbounded version did (#379)", () => {
+	// The bound's whole safety argument is that it changes nothing an existing pin reads. `JSON.stringify`
+	// has five short escapes (\b \t \n \f \r), and rendering those as `\u0009` would have been a change --
+	// small, unpinned, and exactly the kind this claim exists to rule out.
+	const unbounded = (v) => (/^[\x20-\x7e]+$/.test(v) ? v : JSON.stringify(v).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, "0")}`));
+	for (const cp of [0x08, 0x09, 0x0a, 0x0c, 0x0d, 0x1b, 0x7f, 0x85, 0x9b, 0xe9, 0x202e]) {
+		const value = `tcp://a${String.fromCodePoint(cp)}b:2375`;
+		assert.equal(endpointShown({ endpoint: value }), unbounded(value), `U+${cp.toString(16).padStart(4, "0")}`);
+	}
+	assert.equal(endpointShown({ endpoint: "tcp://h:2375" }), "tcp://h:2375");
+	assert.equal(endpointShown({ endpoint: "" }), "an empty endpoint");
 });
 
 test("quotedShown holds the context name to the same class, and to JSON.stringify's shape (#379)", () => {

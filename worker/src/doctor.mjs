@@ -2717,10 +2717,10 @@ function triggersPath(env, cwd) {
  * block-comment regex treated the `/*` inside `mv ${legacy}/logs/*` as an opener and deleted 88 lines of
  * live code before counting.
  *
- * A doc test that PARSES a page or a source file is an arms race the page wins. So the page is GENERATED
- * from this table instead, between markers, exactly as `PODMAN-REFUSAL-TEXTS` already is -- and the checks
- * themselves carry `canary: { shape, params }`, so a test can drive the real sweep and compare each line to
- * what this table would have produced for it. Nothing reads source text any more.
+ * A doc test that PARSES a page or a source file is an arms race the page wins. So a test rebuilds the
+ * page's rows FROM this table and requires them to match between markers, exactly as `PODMAN-REFUSAL-TEXTS`
+ * is checked -- and the checks themselves carry `canary: { shape, params }`, so another test drives the real
+ * sweep and compares each line to what this table would have produced for it. Neither reads source text.
  */
 export const CANARY_LINES = Object.freeze({
 	unlisted: {
@@ -3139,7 +3139,10 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 			// the CLI never launched. 125 is the OPPOSITE case -- the name is taken by ANOTHER doctor's probe --
 			// and removing that one would kill a live doctor's read. 0, 3, 126 and 127 all mean the container ran,
 			// so `--rm` has already disposed of it.
-			if (probe.code === null) unfinished.push(egressCanaryProbe(slug, pid));
+			// The SAME distinction the create uses: a CLI that never launched started no container, so there is
+			// nothing of ours to remove. Harmless either way today (`docker rm -f <missing>` exits 0, measured),
+			// and written out because the conflation it removes is the one this item is about.
+			if (probe.code === null && probe.ended !== "error") unfinished.push(egressCanaryProbe(slug, pid));
 			if (probe.code !== 0 && probe.code !== 3) {
 				checks.push({
 					ok: false,
@@ -3182,7 +3185,15 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// `kept` line reports one run later, so it is reported with the same words, now rather than then.
 		const stuck = [];
 		for (const name of unfinished) if ((await docker(["rm", "-f", name])).code !== 0) stuck.push(name);
-		if (stuck.length > 0) checks.push(canaryCheck("kept", { name: net, stuck }));
+		// AND THE NETWORK IS THEN KEPT, because that is what the line says. Reusing the sweep's wording while
+		// removing the network anyway printed "the network is the only way left to find it" and then removed
+		// it in the same run -- both halves of the sentence false, and the page's own row for this shape says
+		// removing it would orphan that container permanently. The sweep `continue`s here for exactly this
+		// reason; the teardown now does the same.
+		if (stuck.length > 0) {
+			checks.push(canaryCheck("kept", { name: net, stuck }));
+			return checks;
+		}
 		if (created) {
 			const outcome = await removeNetworkOrSay(docker, { network: net, detach: [proxy] });
 			// The COMMAND lives in the label and the generic advice in the fix, which is the shape `--live`'s own

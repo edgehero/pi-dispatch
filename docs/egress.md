@@ -109,8 +109,10 @@ no longer alive. The next run sweeps whatever belongs to a process that is no lo
 remote daemon belongs to the doctor that made it, and a pid that is dead here may well be alive there.
 
 Every warning names a command, in the line itself or in the fix line under it. The first column of this
-table is GENERATED from doctor's own line table (`CANARY_LINES`) and checked against it by a test, so a
-shape doctor can print and this page does not describe is a failure rather than a page nobody re-read.
+table is the wording of doctor's own line table (`CANARY_LINES`), and a test rebuilds it from that table
+and requires this page to match -- so a shape doctor can print and this page describes differently is a
+failure rather than a page nobody re-read. The rows are maintained by hand and checked, not written by a
+generator.
 
 <!-- CANARY-LINES -->
 

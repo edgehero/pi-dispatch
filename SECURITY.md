@@ -313,6 +313,10 @@ Stated openly rather than discovered later:
   member that is `created`, `exited`, `dead` or in a state this project has not measured keeps the network,
   and the sweep says so. Before that, such a member was invisible to both halves and its network went, after
   which it could never start again: `docker start` answers `network ... not found`.
+  One exception, and it is this deployment's own object rather than yours: a stopped
+  `pi-dispatch-egress-proxy` is detached and the network removed anyway. Protecting it would leave every
+  leftover job network standing forever on a deployment whose proxy is off, and the network it loses is a
+  dead job's.
   So a stack whose services you stopped survives. What still does not: a stack whose services are RUNNING
   and are themselves under the prefix, because the container loop `rm -f`'d them one loop earlier and there
   is nothing left attached by the time the network loop asks. Under default compose naming that is the

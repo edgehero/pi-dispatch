@@ -3001,9 +3001,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `rm -f`s what it finds, so listing stopped containers would destroy an operator's own and a crashed job's
     forensic one. A stopped container also spends nothing, and the reaper exists for the ones that do.
 
-    **Residuals, stated rather than closed.** A stopped proxy keeps its leftover networks and is logged on
-    every boot until it runs; a leftover `created` or `exited` `pi-job-<id>` keeps its network and is named
-    on every boot; Podman is unmeasured. Rejected: a `stillClear` callback, which would add a reconnect path
+    **The egress proxy is the one member this rule steps over, and the sweep would not work otherwise.** This
+    sweep exists for the shape where a worker died mid-job and the only thing still holding the network is
+    that worker's own long-lived proxy. If the proxy is STOPPED at reap time -- an operator who turned the
+    policy off, a host that rebooted -- protecting it would leave every leftover job network standing
+    forever, logged once per boot, with nothing in the project that would ever remove them. A stopped
+    container can be detached (`network disconnect -f`, exit 0, measured), and the network it loses is a dead
+    job's, which is not one the proxy needs in order to start.
+
+    **Residuals, stated rather than closed.** A leftover `created` or `exited` `pi-job-<id>` keeps its
+    network and is named on every boot, which is the intended cost: that container can still be started by
+    hand and would be unstartable without it. Podman is unmeasured. Rejected: a `stillClear` callback, which would add a reconnect path
     to a sweep with no live owner, and force-detaching stopped members, which silently rewrites an operator
     container's configuration.
 
