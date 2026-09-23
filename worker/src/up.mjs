@@ -401,9 +401,17 @@ export async function runUp(argv = [], deps = {}) {
 	// that were empty in the FILE, which is a different question from whether this shell sets them: an
 	// operator exporting `PI_SCOPED_LIMITS_FILE=/etc/pi/limits.json` with the key still commented in `.env`
 	// would otherwise have doctor read back the file `up` chose instead of the one their worker loads.
+	// SETS, not "sets to something usable", and the `.trim()` this dropped was hiding a refused boot from
+	// up's own verdict (issue #384). A shell that exports `PI_PAUSE_WINDOWS_FILE=   ` is a shell whose
+	// foreground worker reads three spaces, keeps them (`config.mjs` uses `??`, not `||`) and throws at
+	// `start.mjs` before it takes a job. Filling that key from `wrote` handed doctor a path the operator
+	// does not have set, so doctor judged a deployment nobody is running and `up` exited 0 on one that
+	// cannot start. Doctor now names the blank itself, which is the only line that tells the operator what
+	// to do about it. Sound for every other key up writes, too: a blank `PI_LOGS_DIR` or `PI_SETTINGS_FILE`
+	// resolves through `||` to the same default `up` put in the file.
 	const layered = { ...env };
 	for (const [key, value] of Object.entries(wrote)) {
-		if (typeof env[key] !== "string" || env[key].trim() === "") layered[key] = value;
+		if (typeof env[key] !== "string") layered[key] = value;
 	}
 	const doctorCode = await runDoctorFn(layered, { out });
 

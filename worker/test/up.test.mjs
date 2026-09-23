@@ -221,10 +221,15 @@ test("up: WEBHOOK_SECRET is generated into an empty .env and the value NEVER rea
 
 test("up: a key whose value is `\"\"` is named as EMPTY, not merely `already set` (#365)", async () => {
 	// `KEY=""` is SET to the never-clobber rule -- an operator who wrote it meant something by it, and `up`
-	// mutating a value they chose is the one thing this command must not do -- and UNSET to every consumer,
-	// because the shells and `EnvironmentFile=` both read an empty value as unset. So `up` said "already
-	// set" three lines above a doctor warning saying the feature is OFF: two true sentences answering
-	// different questions, which an operator had to reconcile themselves.
+	// mutating a value they chose is the one thing this command must not do -- and EMPTY to every consumer
+	// that reads the key at all. NOT unset, which is what this comment said and what doctor acted on until
+	// issue #384: the shells and `EnvironmentFile=` both SET the variable to an empty string (measured in
+	// sh, bash, dash and zsh, and on systemd 252), `config.mjs` keeps it through `??`, and the worker then
+	// refuses to start on a path that is nothing. So `up` said "already set" three lines above a doctor
+	// warning saying the feature is OFF, when the deployment was in fact DOWN.
+	//
+	// The cmd wrapper is the third reading and the one exception: `set "K="` genuinely unsets there, so a
+	// Windows service under nssm sees no key where the POSIX loaders see an empty one.
 	//
 	// NAMED ON `up`'S SIDE. A fourth doctor state was rejected: a state exists to carry a DECISION, and
 	// this is a wording overlap between two correct sentences.
@@ -488,7 +493,12 @@ test("up: the doctor layer never overrides a value THIS SHELL sets (#357)", asyn
 	});
 	await h.run();
 	assert.equal(h.doctorCalls[0].PI_SCOPED_LIMITS_FILE, "/etc/pi/limits.json", "the exported value is what this shell's worker would load");
-	assert.equal(h.doctorCalls[0].PI_PAUSE_WINDOWS_FILE, "/deploy/pause-windows.json", "a blank export is not a value, so the layer fills it");
+	// THE PIN THAT FLIPPED (issue #384). It used to read "a blank export is not a value, so the layer fills
+	// it", and that sentence was the defect: three exported spaces are exactly what this shell's worker gets,
+	// it keeps them through `??`, and `start.mjs` throws on them before the first job. Filling the key handed
+	// doctor a deployment the operator is not running, so `up` exited 0 on a worker that cannot start. What
+	// this shell sets is what doctor judges, and doctor says the value is blank.
+	assert.equal(h.doctorCalls[0].PI_PAUSE_WINDOWS_FILE, "   ", "a blank export is what the worker would load, so it is what doctor is given");
 	assert.match(h.store.get("/deploy/.env"), /^PI_SCOPED_LIMITS_FILE=\/deploy\/scoped-limits\.json$/m, "and the FILE still gets this folder, which is what the service will read");
 });
 
