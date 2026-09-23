@@ -1869,16 +1869,16 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   // one misreading this list can produce. Absent on an unreplicated run, so today's rows are unchanged.
   const rep = r.replica > 0 ? styler.fg("warning", `r${cell(r.replica)}/${cell(r.replicas ?? "?")} `) : "";
   const sep = styler.fg("dim", " · ");
-  // `targetUrl` is still asked, because `y` copies what it answers; the cell itself is plain coloured text.
-  const url = targetUrl(r);
+  // No `targetUrl` call here any more: this row printed the target as a link and now prints it as text, and
+  // the `y` copy seam asks `targetUrl` itself. Leaving the call would have been a dead read with a comment
+  // explaining a caller that does not exist.
   const targetCell = styler.fg("muted", cell(r.target));
   const cells = [
     styler.fg("text", cell(r.jobId)),
-    // NO HYPERLINK, deliberately (issue #382). `targetUrl` still answers, because the trust model of the
-    // URL is worth keeping; what is gone is wrapping the cell in OSC-8. The gate over every pane line can
-    // only allowlist a SHAPE, and an attacker's link in a trigger field has the same shape as ours, so the
-    // panel stopped emitting the shape it cannot tell apart from theirs. The target text prints either
-    // way; what is lost is a click.
+    // NO HYPERLINK, deliberately (issue #382). The gate over every pane line can only allowlist a SHAPE, and
+    // an attacker's link in a trigger field has the same shape as ours, so the panel stopped emitting the
+    // shape it cannot tell apart from theirs. `targetUrl` survives for the `y` copy seam, which asks it
+    // directly. The target text prints either way; what is lost is a click.
     targetCell,
     styler.fg("accent", cell(r.flow)),
     outcomeColored(r.outcome, r.reason, styler),
@@ -2066,8 +2066,9 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
  * `read-model.mjs` carries them through verbatim, so `DES-ADMIN-VIA-PI-EXTENSION`'s old ground for leaving
  * these panes unscrubbed -- that they render what the OPERATOR typed into their own file -- was not true of
  * them. Drawing the line by PROVENANCE instead was the first repair, and an adversarial pass refuted that
- * too: `writeTriggers` accepts `run.image`, `on.phrase` and a label verbatim, and it is also the
- * model-callable `dispatch_trigger_add`, so "the operator typed it" is not a property of the file either.
+ * too: `writeTriggers` accepts `run.image`, `on.phrase` and a label verbatim, and the last two arrive there
+ * from the model-callable `dispatch_trigger_add` as well as from a dialog, so "the operator typed it" is not
+ * a property of the file either.
  * The boundary is now a GATE over every finished pane line (`renderPanel`, and `frame`'s `padVisible`),
  * and these belts are what they should always have been: belt-and-braces behind it, not the boundary.
  *
@@ -2409,8 +2410,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   out.push(fitLine(head, inner, styler));
   out.push(styler.cell("", inner));
 
-  // `targetUrl` is still asked here too, for the copy seam; nothing on this line is wrapped in a link.
-  const url = targetUrl(r);
+  // Nothing on this line is wrapped in a link, and the copy seam asks `targetUrl` for itself.
   const targetPart = styler.fg("accent", show(r.target)); // no OSC-8: see the run row's note on the gate
   out.push(fitLine(styler.cell("target", 12, { color: "muted" }) + " " + targetPart + styler.fg("accent", ` · flow ${show(r.flow)}`), inner, styler));
 

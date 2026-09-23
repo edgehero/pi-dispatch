@@ -1673,7 +1673,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     plain-text twins for a non-TTY panel and the unframed degrade -- goes through one helper per renderer
     (`cellOf` in the panel, `cell` in `render.mjs`), applied to the DERIVED value as well as the raw field
     and inside the value before styling (the styler emits its own SGR escapes, so scrubbing a composed
-    line would destroy the link and the pane's width math). The CLASS is C0, DEL **and C1**, not the
+    line would destroy the colour and the pane's width math). The CLASS is C0, DEL **and C1**, not the
     "C0-plus-DEL" this entry said for a round: U+009B is a CSI introducer that needs no ESC in front of it,
     and `panel.mjs`'s own filter has always covered it. The reach was RUN_DETAIL alone when this was
     written and grew twice, under #337 to the LIST and under #367 to the rest.

@@ -120,9 +120,10 @@ export function scrubControls(s) {
  * WHY A GATE AND NOT ANOTHER BELT. The first version of this change drew the line by PROVENANCE: the record
  * panes were scrubbed and the config panes were not, on the ground that they render what the operator typed.
  * An adversarial pass refuted that. `run.image`, `on.phrase` and `on.any` are accepted verbatim by the
- * project's own `writeTriggers`, which is also the model-callable `dispatch_trigger_add`, and a trigger
- * carrying an erase-display, an OSC-8 link or an OSC-52 clipboard write rendered RAW into the overlay and
- * into `sendMessage`. The design entry's rule has always been "whoever wrote that field", and a carve-out
+ * project's own `writeTriggers` -- its one control-byte refusal covers `run.command` -- and `on.phrase` and
+ * a label arrive there from the model-callable `dispatch_trigger_add` as well as from a dialog (`run.image`
+ * does NOT: an `image` parameter on that tool is a recorded rejection). A trigger carrying an erase-display,
+ * an OSC-8 link or an OSC-52 clipboard write rendered RAW into the overlay and into `sendMessage`. The design entry's rule has always been "whoever wrote that field", and a carve-out
  * with a list of exceptions is the shape that keeps being wrong here. So the rule is now: no exception, and
  * one place enforces it. The per-field scrubs stay, as belt-and-braces rather than as the boundary.
  */

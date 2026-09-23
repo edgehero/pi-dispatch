@@ -85,8 +85,8 @@ export function makeStyler(theme, { ascii = false } = {}) {
    * as CSI parameters. `fitLine` in the dashboard already had the fix shape: strip first, then measure.
    *
    * COLOUR ALREADY ON THE INPUT IS DROPPED, deliberately. Keeping it needs an ANSI-aware slice, and this
-   * module does not import pi-tui to get one. Nothing loses a hyperlink to this: the two OSC-8 links reach
-   * only `fitLine`, whose overflow path already strips them.
+   * module does not import pi-tui to get one. Nothing loses a hyperlink to this, because nothing emits one
+   * any more: the two OSC-8 links this used to have to work around were withdrawn with `styler.link`.
    *
    * NOT A DATA GATE, and the distinction matters to a caller. Because it strips escapes BEFORE
    * substituting, an SGR- or OSC-8-shaped run inside DATA is deleted whole (its URL payload included),
@@ -261,8 +261,10 @@ export const RULE = Symbol("rule");
 function padVisible(styler, line, width) {
   // THE GATE, and the reason it is here rather than at thirty call sites: every framed body line and every
   // footer passes through this one function, whatever pane built it and whoever wrote the values in it.
-  // `scrubKeepingStyle` keeps the styler's own SGR and OSC-8 and substitutes everything else, so it runs
-  // BEFORE the measurement -- a byte that became a space is a column the frame has to account for.
+  // `scrubKeepingStyle` keeps the styler's own SGR and substitutes everything else -- an OSC-8 link
+  // included, which is why this panel no longer writes one. It runs BEFORE the measurement, for two
+  // reasons: a byte that became a space is a column the frame has to account for, and `stripAnsi` still
+  // recognises a link shape the gate does not, so the other order measured 36 where the terminal paints 46.
   line = scrubKeepingStyle(line);
   const vis = styler.visibleLen(line);
   // STRICTLY GREATER, then clip: the frame promises every body line is exactly `inner` columns, and an

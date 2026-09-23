@@ -530,6 +530,9 @@ test("neither LIST nor TRIGGER_DETAIL emits a working escape sequence, whoever w
   // of. AN OSC-8 HYPERLINK IS NOT REMOVED, and the earlier version of this test removing it is why it
   // passed with both gates deleted: the one payload it could not catch was the one shaped like decoration.
   // The panel emits no hyperlink at all now, so any OSC-8 in a pane came from the data.
+  //
+  // BOTH THEMES, because the gate's allowlist half only does anything when there is colour to preserve:
+  // under PLAIN_THEME the styler emits no SGR, so a sweep that ran only there never exercised it.
   const styleTokens = /\u001b\[[0-9;]*m/g;
   const ATTACKS = {
     "CSI erase-display": "\u001b[2J",
@@ -550,8 +553,8 @@ test("neither LIST nor TRIGGER_DETAIL emits a working escape sequence, whoever w
         triggers: { triggers: [trigger] },
         stagedPackages: { stagedAt: null, packages: [`pkg${payload}`] },
       };
-      for (const width of [4, 40, 80, 200]) {
-        const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+      for (const [width, theme] of [[4, undefined], [40, SGR_THEME], [80, undefined], [80, SGR_THEME], [200, SGR_THEME]]) {
+        const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, ...(theme ? { theme } : {}), deps: cannedDeps({ fetchSnapshot: async () => snap }) });
         await flush();
         const list = comp.render(width);
         comp.handleInput("\r");
@@ -1386,6 +1389,18 @@ test("the LIST rows hold the same property as the drill-in (#337)", async () => 
   assert.match(plain, /j1/, "and the row still shows the run");
 });
 
+test("`targetUrl` itself refuses a dirty repo half, which is now its only pin (#382)", () => {
+  // THE TEST BELOW NO LONGER PINS THIS. It was written when the target was rendered as an OSC-8 link, so a
+  // dirty URL reached the terminal inside the payload; nothing emits a link now, and the pane gate cleans
+  // the row whatever `targetUrl` answers -- so removing the control-byte check left the whole suite green.
+  // The check is worth keeping (the `y` copy seam puts this string on the operator's clipboard, and a
+  // clipboard is not a pane), so it is pinned where it lives instead of through a renderer.
+  assert.equal(targetUrl({ kind: "github", target: "o/r#5" }), "https://github.com/o/r/issues/5");
+  for (const target of ["o\u0007evil/r#5", "o\u001b[2Jevil/r#5", "o\u009b2Jevil/r#5", "o\u009d8;;evil/r#5", "o\u0000evil/r#5"]) {
+    assert.equal(targetUrl({ kind: "github", target }), null, `a control byte in the repo half yields no URL: ${JSON.stringify(target)}`);
+  }
+});
+
 test("a control byte cannot reach the terminal through the target's OSC-8 URL either (#337)", async () => {
   // The hole the first version left, on the exact call its own rationale cites: `show(r.target)` scrubbed
   // the DISPLAYED half of `styler.link(styler.fg("accent", show(r.target)), url)` while `targetUrl` built
@@ -1398,9 +1413,9 @@ test("a control byte cannot reach the terminal through the target's OSC-8 URL ei
   const ESC = String.fromCharCode(27);
   const BEL = String.fromCharCode(7);
   for (const target of [`o${BEL}evil/r#5`, `o${ESC}[2Jevil/r#5`, `o${ESC}]8;;http://evil${BEL}/r#5`, `o${String.fromCharCode(155)}2Jevil/r#5`, `o${String.fromCharCode(157)}8;;evil/r#5`]) {
-    // A REAL theme, because PLAIN_THEME's `link` is a byte-identical passthrough that emits no OSC-8 at
-    // all: under it there is nothing to inspect and every assertion here is vacuously true. That is what
-    // made the first version of this test green against the bug it was written for.
+    // A REAL theme, so the styler emits its own escapes and the assertion below has something to
+    // discriminate. Its LIMIT, since #382 removed the hyperlink: this now pins the pane gate rather than
+    // `targetUrl`'s own refusal, which the test above pins directly.
     const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };
     const comp = makeDashboard({
       paths: {},
