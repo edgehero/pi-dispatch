@@ -417,7 +417,6 @@ const ORACLE_CORPUS = [
 	"export\u00a0K=/srv/a.json",
 	"K=/srv/a.json\r",
 	"\ufeffK=/srv/a.json",
-	"\ufeffOTHER=1\nK=/srv/a.json",
 	// Not this key at all.
 	"KK=/other.json",
 	"# K=/commented.json",
@@ -440,6 +439,9 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 	const shells = ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh", "/usr/bin/zsh"].filter((sh) => existsSync(sh));
 	assert.ok(shells.length >= 2, `the oracle needs real shells to be an oracle, found ${shells.join(", ") || "none"}`);
 	assert.ok(ORACLE_CORPUS.length >= 100, `corpus is ${ORACLE_CORPUS.length} shapes, and a floor well under the real count lets the corpus erode without a test noticing`);
+	// UNIQUE, because a repeated shape looks like coverage and is not -- and one slipped in, a BOM-on-line-2
+	// entry added twice, which the vouched-shape floor then counted twice as well.
+	assert.equal(new Set(ORACLE_CORPUS).size, ORACLE_CORPUS.length, "a repeated shape is not a second shape");
 	const childValue = (sh) => {
 		const r = spawnSync(sh, ["-c", `set -a; . ${JSON.stringify(file)} >/dev/null 2>&1; printenv K`], { cwd: dir, encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL" });
 		assert.equal(r.error, undefined, `${sh} did not run`);
@@ -627,11 +629,13 @@ test("E5: envKeyIsBlank is derived from the reader, so it cannot disagree with i
 	// shape where filling it leaves a systemd deployment still without the key, because systemd ignores an
 	// export line before and after the edit. That is the WRITER's rule, pinned at `setEnvKeyIfEmpty`.
 	assert.equal(envKeyIsBlank("export K=", "K"), true, "a loader that cannot see the key does not vote, and the one that can sees nothing in it");
-	// `K= # tbd` IS blank, and tying this to `plain` said otherwise -- which regressed `up` against the
-	// release it shipped from, on any file with a trailing comment, a CRLF ending or one stray line in it.
-	// The loaders can disagree about a value and still agree there is none: the shells read a comment and
-	// leave K empty, systemd reads ` # tbd`, and neither gets anything a path could be made of.
-	assert.equal(envKeyIsBlank("K= # tbd", "K"), true, "a line that assigns nothing is blank however uncertain the rest of it is");
+	// `K= # tbd` is NOT blank, and calling it blank was measured wrong: `#` is a comment to the shells and
+	// ORDINARY TEXT to systemd 252, which hands the service ` # tbd`. So the line assigns nothing to one
+	// loader and a five-character value to another, which is a disagreement rather than an empty value --
+	// and a hard "REFUSES TO START" about it would be false on the linux half of the deployments.
+	assert.equal(envKeyIsBlank("K= # tbd", "K"), false, "no loader of this file treats a trailing # as a comment, so this is not an empty value");
+	assert.equal(envKeyIsBlank('K=""#c', "K"), false, "and neither is this: every loader reads the two characters #c");
+	assert.equal(envKeyIsBlank('K=""\u0027\u0027', "K"), true, "while repeated empty pairs really are nothing, in all five loaders");
 	assert.equal(envKeyIsBlank('K=""\nunset FOO', "K"), true, "one stray line elsewhere does not turn an empty value into a set one");
 	assert.equal(envKeyIsBlank('K=""\r\n', "K"), true, "and neither does a Windows line ending");
 	assert.equal(envKeyIsBlank('K="" x', "K"), false, "while a value that is not empty is never called empty");
@@ -644,7 +648,13 @@ test("E6: the cmd wrapper is a third loader, and it is read from its own source"
 	// below are asserted against the wrapper's grammar rather than against a measurement.
 	const cmd = (text, key = "K") => readEnvAssignments(text, [key], { loader: "cmd" }).K;
 	assert.deepEqual(cmd("K=/srv/a.json"), rec({ value: "/srv/a.json", plain: true, vouched: true }));
-	assert.deepEqual(cmd('K="/srv/a.json"'), rec({ value: '"/srv/a.json"', plain: true, vouched: true }), "the quotes are part of the value there, which is why renderEnvValue never writes any for win32");
+	// The quotes are part of what `for /f` hands `set` -- which is why `renderEnvValue` writes none for
+	// win32 -- but they are NOT safe: the wrapper's `set "%%A=%%B"` is itself quoted, so a `"` in any value
+	// closes it and the rest of the line becomes command. The reading stands and the VOUCH does not, which
+	// is the same distinction the POSIX side draws, and it is the one the writer already enforced by
+	// refusing to emit the character at all.
+	assert.deepEqual(cmd('K="/srv/a.json"'), rec({ value: '"/srv/a.json"', plain: true, vouched: false, hazardLine: 1 }), "a double quote breaks out of the wrapper's quoted `set`");
+	assert.deepEqual(cmd("K=C:/srv/a.json"), rec({ value: "C:/srv/a.json", plain: true, vouched: true }), "while an ordinary Windows path is vouched for");
 	assert.deepEqual(cmd("K=/srv/a.json   # note"), rec({ value: "/srv/a.json   # note", plain: true, vouched: true }), "`eol=#` skips a line that STARTS with one, and does nothing to a trailing comment");
 	assert.deepEqual(cmd("K=C:\\pi\\x"), rec({ value: "C:\\pi\\x", plain: true, vouched: true }), "a backslash is a literal there and an escape everywhere else");
 	assert.deepEqual(cmd("K=/a.json\nK=/b.json"), rec({ value: "/b.json", plain: true, vouched: true, line: 2 }), "the last `set` wins, as everywhere else");

@@ -1547,9 +1547,9 @@ test("doctor: a .env that is a FIFO does not hang the command, through the DEFAU
 	const cwd = tempDir("pi-fifo-");
 	const fifo = join(cwd, ".env");
 	execFileSync("mkfifo", [fifo]);
-	assert.deepEqual(envFileKeys(fifo, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), {}, "not a regular file, so not read at all");
+	assert.deepEqual(envFileKeys(fifo, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), { unreadable: true }, "not a regular file, so not read at all -- and SOMETHING is there, which is not the same as the key being unset");
 	// A directory is the other shape, and it throws rather than blocking; both must be silent.
-	assert.deepEqual(envFileKeys(cwd, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), {});
+	assert.deepEqual(envFileKeys(cwd, ["PI_PAUSE_WINDOWS_FILE"], { fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8") }), { unreadable: true }, "a .env that is a DIRECTORY is unreadable too: statFile answers happily and isFile() is false, so this never threw and the key came back merely absent");
 });
 
 test("doctor: a good path in THIS SHELL does not excuse a blank line in the .env (#384)", async () => {
@@ -1695,6 +1695,119 @@ test("doctor: a FIFO named by PI_SCOPED_LIMITS_FILE does not hang the command (#
 	assert.equal(code, 1, "and a key pointed at something the worker cannot load fails the command");
 });
 
+test("doctor: a deployment folder with an apostrophe in its name still gets a report (#384)", async () => {
+	// THE WORST FAILURE THIS ROUND PRODUCED, and it was a repair's own doing. `renderEnvValue` is a WRITER:
+	// it refuses a value it cannot render, because a single quote has no spelling both systemd and the
+	// shells read back. Doctor started calling it on labels, so in a folder named `rob's deploy` the command
+	// threw `cannot write this value into a .env safely` and printed NOTHING AT ALL -- not one check, on a
+	// deployment `init` alone can produce, where `main` printed a full report.
+	const cwd = tempDir("pi-apos-");
+	const dir = join(cwd, "rob's deploy");
+	mkdirSync(dir);
+	writeFileSync(join(dir, "pause-windows.json"), "[]\n");
+	writeFileSync(join(dir, "scoped-limits.json"), '{"version":1,"limits":[]}\n');
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, dir), platform: "linux" });
+	assert.match(text(), /Node .* 22\.19/, "the report happens at all");
+	assert.match(text(), /PI_PAUSE_WINDOWS_FILE/, "and it still speaks about the key");
+	assert.doesNotMatch(text(), /cannot write this value into a \.env safely/, "the writer's refusal is advice here, never an exception");
+	// The advice says why there is no line to copy, rather than inventing a spelling no loader reads back.
+	assert.match(text(), /cannot be written into a \.env/, "and it says so where the fix line would have been");
+});
+
+test("doctor: a .env that is a DIRECTORY is not a key that is unset (#384)", async () => {
+	// `fileExists` says something is there and `isFile()` says it cannot be read, which is the same sentence
+	// as a mode this account cannot open -- and it returned the SAME `{}` as "no .env at all", so doctor
+	// printed "the worker ignores it" about a file it never opened. The round-1 repair fixed the throwing
+	// case and left this one, because the guard returns before the read that would have thrown.
+	const cwd = scaffoldedCwd();
+	mkdirSync(join(cwd, ".env"));
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.match(text(), /could not be read/, "it says what it actually knows");
+	assert.doesNotMatch(text(), /exists but PI_PAUSE_WINDOWS_FILE is unset/, "and makes no claim about a key in a file nobody opened");
+});
+
+test("doctor: on win32 a bare KEY= is not an `export` line that the file does not contain (#384)", async () => {
+	// The round-1 repair nulled the cmd reading of an empty value so Windows would stop being failed for a
+	// key that is simply unset there -- and that dropped the key into the export-only branch, so doctor
+	// quoted `export PI_PAUSE_WINDOWS_FILE=` at an operator whose file has no such line and told them to
+	// drop a prefix that is not there. The export signal asks the FILE, not the per-platform view.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\n");
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "win32" });
+	assert.doesNotMatch(text(), /as `export PI_PAUSE_WINDOWS_FILE=/, "no line is quoted that the file does not contain");
+	assert.notEqual(code, 1, "and an empty value still just unsets the key there");
+});
+
+test("doctor: a line swallowed by the one above it points at the line above (#384)", async () => {
+	// An unclosed quote makes the NEXT line part of its own value in every shell, so the key's line is
+	// often perfect and "rewrite it as ..." repeated it back byte for byte. Two branches now, chosen by
+	// where the trouble is rather than by which one noticed it.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `OTHER="unclosed\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.match(text(), /line 1 of .*\.env runs, or reaches into the line below it/, "the line that reaches is the line to fix");
+	assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE on line 2 of/, "and the swallowed line is not accused of being malformed");
+});
+
+test("doctor: a quote that CLOSES stops swallowing, and the key below it is still checked (#384)", async () => {
+	// The first version latched on the first swallowing line and voided the rest of the file, so a key three
+	// lines down was reported as malformed AND its file was never opened -- exit 0 on a deployment that
+	// cannot boot. A multi-line value is still a disagreement (systemd 252 does not continue a quote), so
+	// the file gets a warning; the key itself is read, and the load check runs.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), `OTHER='x\ny'\nPI_PAUSE_WINDOWS_FILE=${join(cwd, "gone.json")}\n`);
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.match(text(), /to a file the worker cannot load/, "the value is read and opened");
+	assert.equal(code, 1, "so a deployment that cannot boot fails, whatever else the file is doing");
+});
+
+test("doctor: a value it will not vouch for is never printed as what another loader takes (#384)", async () => {
+	// `alsoExported` prints a value, so it needs the VOUCH and not merely a plain line. With a hazard in the
+	// file, doctor said "a shell that sources the file would take /w.json" about a file where every shell
+	// leaves the key UNSET -- the exact trap the three flags exist to prevent, inside the caller that
+	// introduced them.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=\nexport PI_PAUSE_WINDOWS_FILE=/w.json\nunset PI_PAUSE_WINDOWS_FILE\n");
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.doesNotMatch(text(), /would take \/w\.json/, "no value is quoted out of a file this reader cannot vouch for");
+	assert.match(text(), /line 3 of .*\.env runs, or reaches into the line below it/, "the hazard is named instead");
+});
+
+test("doctor: the win32 comparison guard is exercised by the paths `up` actually writes there (#384)", async () => {
+	// The guard that stops a single assignment being reported as "assigned TWICE" on Windows was unpinned:
+	// the only win32 fixture used a BACKSLASH path, which no POSIX loader vouches for, so the comparison
+	// never ran and deleting the guard left the suite green. `up` writes FORWARD slashes on win32
+	// (`renderEnvValue` quotes nothing there), and those ARE vouched for by both readers.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_PAUSE_WINDOWS_FILE=C:/pi/pause-windows.json\nexport PI_PAUSE_WINDOWS_FILE=C:/pi/other.json\n");
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "win32" });
+	assert.doesNotMatch(text(), /assigned TWICE/, "no POSIX shell reads a .env on Windows, so there is nothing to disagree with");
+	// AND THE PATH IS RESOLVED AS WINDOWS WOULD. `C:/pi/...` is not absolute to a POSIX `isAbsolute`, so the
+	// host's own rule joined it under doctor's cwd and every win32 verdict was computed against a path shape
+	// Windows never produces -- including the ones these tests assert.
+	assert.match(text(), /C:\/pi\/pause-windows\.json/, "the path is reported as the operator wrote it");
+	assert.doesNotMatch(text(), /pi-scaffold-[^/]*\/C:/, "and never joined under this cwd as though it were relative");
+});
+
+test("doctor: an export-only key in a file with a hazard is not quoted back (#384)", async () => {
+	// The export branch is the one place the vouch is load-bearing rather than incidental: a key with NO
+	// reading of its own never reaches the "another line reaches past itself" sentence, so without the vouch
+	// doctor quotes a value out of a file it has just decided it cannot read.
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "export PI_PAUSE_WINDOWS_FILE=/w.json\nunset PI_PAUSE_WINDOWS_FILE\n");
+	const { out, text } = capture();
+	await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
+	assert.doesNotMatch(text(), /as `export PI_PAUSE_WINDOWS_FILE=\/w\.json`/, "no value is quoted out of a file with a hazard in it");
+	assert.match(text(), /cannot be read off .*line 2/, "the line that reaches is named instead");
+});
+
 test("doctor: the .env reader answers for ONE loader, and only for the keys it was asked (#357, #384)", () => {
 	// The boundary itself, pinned directly. Widening the doctor call's key LIST alone is an equivalent
 	// mutant today, because nothing consumes a key these two checks do not name, and that is the safety
@@ -1739,7 +1852,7 @@ test("doctor: the .env reader answers for ONE loader, and only for the keys it w
 	// Unreadable, missing or not a regular file is `{}`, which restores the unsoftened warning: the worse
 	// failure is a deployment told it is fine when nobody could check.
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => false, readEnvFile: () => text, statFile: () => ({ isFile: () => true }) }), {});
-	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: () => ({ isFile: () => false }) }), {});
+	assert.deepEqual(envFileKeys("/d/.env", ["PI_PAUSE_WINDOWS_FILE"], { fileExists: () => true, readEnvFile: () => text, statFile: () => ({ isFile: () => false }) }), { unreadable: true });
 	assert.deepEqual(envFileKeys("/d/.env", ["PI_JOB_IMAGE"], seams(() => text, "linux")), {}, "and a key outside the frozen list is not readable at all");
 });
 

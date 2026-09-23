@@ -122,11 +122,15 @@ export function renderEnvValue(value, { platform = process.platform } = {}) {
  * so a blank line reaches the worker as an empty string, `config.mjs` keeps it (`??`, not `||`) for
  * `PI_PAUSE_WINDOWS_FILE` and `PI_SCOPED_LIMITS_FILE`, and the unconditional loader at `start.mjs` throws.
  *
- * EVERY LOADER IS ASKED, so a key that is blank for one and set for another is not blank: a bare `KEY=`
- * with a later `export KEY=/v.json` is empty under `EnvironmentFile=` and configured under the POSIX
+ * BOTH POSIX LOADERS ARE ASKED, so a key that is blank for one and set for another is not blank: a bare
+ * `KEY=` with a later `export KEY=/v.json` is empty under `EnvironmentFile=` and configured under the POSIX
  * wrapper, and calling that "blank" would tell half the operators their configured key is empty. A loader
- * that does not see the key at all does not vote, which is what keeps a cmd-only or systemd-only shape from
- * reading as blank because another loader ignored it.
+ * that does not see the key at all does not vote, which is what keeps a systemd-only shape from reading as
+ * blank because the other loader ignored it. The cmd wrapper is left out for the reason given at the call
+ * below, and this header said "EVERY LOADER" for a round while the code asked two of three.
+ *
+ * `up` IS THE CALLER, and doctor is not: doctor answers the same question per SUBJECT, with the platform's
+ * own loader and the vouch beside it, because its answer becomes a refusal rather than a sentence.
  */
 export function envKeyIsBlank(text, key) {
 	// DERIVED from the reader rather than re-deciding it. The regex pre-check this used to carry existed only
@@ -368,11 +372,28 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 	// So `plain` is about the line's own text (plus anything ABOVE it that swallows the line whole), and
 	// `vouched` adds the rest of the file. A caller deciding what the key IS uses `plain`; a caller about to
 	// print a value uses `vouched`.
-	const hazards = loader === "cmd" ? [] : lines.map((l, i) => [i, lineHazard(l.endsWith("\r") ? l.slice(0, -1) : l)]).filter(([, h]) => h !== "");
-	// A SWALLOWING hazard reaches forward into the lines below it: an unclosed quote or a trailing backslash
-	// makes the next line part of this value in every shell, so a line under one is not a line at all. Nothing
-	// else reaches a specific line -- a stray command can do anything, but it cannot turn `K=""` into a value.
-	const swallowsFrom = hazards.find(([, h]) => h === "open-quote" || h === "continuation")?.[0] ?? Infinity;
+	const bare = lines.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+	const hazards = loader === "cmd" ? cmdHazards(bare) : bare.map((l, i) => [i, lineHazard(l)]).filter(([, h]) => h !== "");
+	// WHICH LINES ARE NOT LINES. A quote that opens carries into the lines below it -- they are part of that
+	// value in every shell -- and it CLOSES, which the first version of this never noticed: it latched on the
+	// first swallowing line and voided the rest of the file, so in
+	//
+	//     OTHER='x
+	//     y'
+	//     PI_PAUSE_WINDOWS_FILE=/nope.json
+	//
+	// the third line is an ordinary line every loader reads identically, and doctor named IT as malformed,
+	// told the operator to rewrite a correct line, and skipped the check that would have said the file it
+	// names does not load. Carried, not latched.
+	// POSIX ONLY, like every other cross-line rule here: `for /f` hands `set` one line at a time, so nothing
+	// in a `.env` can make the NEXT line part of this one on Windows.
+	const swallowed = [];
+	let carry = { q: "", cont: false };
+	for (const l of bare) {
+		swallowed.push(loader !== "cmd" && (carry.q !== "" || carry.cont));
+		const next = loader === "cmd" ? { q: "", continuation: false } : scanQuotes(l, carry.q);
+		carry = { q: next.q, cont: next.continuation };
+	}
 	// EVERYTHING ELSE takes the vouch off the whole file, in both directions, measured on systemd 252 against
 	// /bin/sh, bash, dash and zsh:
 	//
@@ -411,10 +432,16 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 		// Windows loader disabled every verdict on the platform where CRLF is NATIVE, including for the exact
 		// line `setEnvKeyIfEmpty` writes into such a file, which preserves CRLF by contract.
 		const crBreaks = hadCR && loader !== "cmd";
-		const plain = read.plain && !crBreaks && i <= swallowsFrom;
+		const plain = read.plain && !crBreaks && !swallowed[i];
 		// The LAST assignment, because every loader takes it: `set -a; . ./.env`, `EnvironmentFile=` and the
 		// cmd wrapper's `set` all overwrite as they go.
-		found[key] = { value: plain ? read.value : null, plain, vouched: plain && hazards.length === 0, blank: loader !== "cmd" && assignsNothing(rest), line: i + 1, hazardLine };
+		// `blank` is the LOOSE answer, on purpose: it asks only what this line assigns, so `up` can tell an
+		// operator their `WEBHOOK_SECRET` line is empty even in a file with a stray line somewhere in it.
+		// A caller that turns blankness into a REFUSAL asks for `vouched` beside it -- doctor does -- because
+		// a hazard can mean the shells never reach this line at all (a heredoc body, an `if false` block) or
+		// that one of them clears the key afterwards (`unset K`), and a hard "REFUSES TO START" is the one
+		// verdict that must never be reached by inference. A swallowed line is not a line in either sense.
+		found[key] = { value: plain ? read.value : null, plain, vouched: plain && hazards.length === 0, blank: loader !== "cmd" && !swallowed[i] && assignsNothing(rest), line: i + 1, hazardLine };
 	}
 	return found;
 }
@@ -433,6 +460,25 @@ export function readEnvAssignments(text, keys, { loader = "systemd" } = {}) {
 const ASSIGNMENT = /^[ \t]*(export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=([^\n]*)$/;
 
 /**
+ * The cmd wrapper's own cross-line hazard, and the module had to be caught contradicting itself to find it.
+ *
+ * `for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"` puts the rest of the line
+ * inside a QUOTED `set`, so a `"` in any value closes that quote and what follows is more command:
+ *
+ *     OTHER=x" & set "PI_PAUSE_WINDOWS_FILE=C:\evil\nope.json
+ *
+ * sets the boot key from another key's line. `renderEnvValue` already REFUSES to write a `"` for exactly
+ * this reason ("it would close the quoted `set`"), so the writer knew and the reader vouched anyway.
+ *
+ * Derived from the wrapper's source, not run on Windows -- the same standard the cmd readings are held to.
+ * `%` is deliberately not here: cmd expands percent signs BEFORE substituting the for-variable, so a `%` in
+ * the file's text is not re-expanded.
+ */
+function cmdHazards(bare) {
+	return bare.map((l, i) => [i, ASSIGNMENT.exec(l)?.[3]?.includes('"') ? "runs" : ""]).filter(([, h]) => h !== "");
+}
+
+/**
  * How does this line reach past itself, if it does? `""` means it does not.
  *
  *   "open-quote" / "continuation"  it swallows the line BELOW it, so that line is not a line
@@ -440,8 +486,9 @@ const ASSIGNMENT = /^[ \t]*(export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=([^\n]*)$/;
  */
 function lineHazard(line) {
 	// A BOM'd line is a command to the shells and a dropped assignment to systemd (measured), so it is a
-	// hazard whatever it looks like. Equivalent to falling through today -- `trim()` strips a BOM, so the
-	// line reaches the "runs" branch below anyway -- and kept for the same reason as its twin above.
+	// hazard whatever it looks like. NOT equivalent to falling through, which an earlier version of this
+	// comment claimed: a line that is ONLY a BOM trims to the empty string and would read as a blank line,
+	// so without this the file that opens with a stray BOM vouches for every key in it.
 	if (line.startsWith("\ufeff")) return "runs";
 	const m = ASSIGNMENT.exec(line);
 	if (!m) {
@@ -477,7 +524,7 @@ function lineHazard(line) {
  * deployment that starts.
  */
 function assignsNothing(rest) {
-	return /^(?:''|"")?[ \t]*(?:#[^\n]*)?$/.test(rest.replace(/\r+$/, "").replace(/[ \t]+$/, ""));
+	return /^(?:''|"")*[ \t]*$/.test(rest.replace(/\r+$/, "").replace(/[ \t]+$/, ""));
 }
 
 /** Is there a `$` or a backtick outside SINGLE quotes, where the shells expand and systemd does not? */
@@ -514,6 +561,41 @@ function unquotedExpansion(rest) {
  * comment (`K=a#b` is one word).
  */
 function openTail(rest) {
+	const { q, continuation } = scanQuotes(rest, "");
+	return continuation ? "continuation" : q === "" ? "" : "open-quote";
+}
+
+/**
+ * The quote state at the end of `text`, given the state it started in. One scanner for both questions --
+ * "does this line reach past itself" and "which lines are inside something that started above" -- because
+ * two scanners is how the second one came to think a quote never closes.
+ */
+function scanQuotes(text, q0) {
+	let q = q0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (q === "'") {
+			if (c === "'") q = "";
+			continue;
+		}
+		if (q === '"') {
+			// Double quotes stop word splitting and globbing, and nothing else: `"$x"` and "`x`" both still run.
+			if (c === "\\") i += 1;
+			else if (c === '"') q = "";
+			continue;
+		}
+		if (c === "\\") {
+			if (i === text.length - 1) return { q, continuation: true };
+			i += 1;
+			continue;
+		}
+		if (c === "'" || c === '"') q = c;
+		else if (c === "#" && (i === 0 || text[i - 1] === " " || text[i - 1] === "\t")) return { q, continuation: false };
+	}
+	return { q, continuation: false };
+}
+
+function openTailUnused(rest) {
 	let q = "";
 	for (let i = 0; i < rest.length; i++) {
 		const c = rest[i];

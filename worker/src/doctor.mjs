@@ -51,12 +51,12 @@
  */
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, release as osRelease, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, delimiter } from "node:path";
+import { dirname, isAbsolute, join, delimiter, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirPath, legacyTempStateDir, logsDirPath, pauseWindowsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir } from "./config.mjs";
-import { envFileHazard, envKeyIsBlank, envValueShown, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
+import { envFileHazard, envValueShown, readEnvAssignments, renderEnvValue } from "./env-file.mjs";
 import { canonicalScope, loadScopedLimits, parseScopedLimits } from "./scoped-limits.mjs";
 import { loadPauseWindows } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
@@ -137,8 +137,9 @@ export async function runDoctor(env = process.env, deps = {}) {
 		stat = statSync,
 		passwd = () => readFileSync("/etc/passwd", "utf8"),
 		readUnit = (path) => readFileSync(path, "utf8"),
-		// The deployment's own `.env`, read for exactly the keys two checks below NAME, and for nothing
-		// else (issue #357). See `envFileKeys` for why this is allowed to exist at all.
+		// The deployment's own `.env`, read for exactly the keys two checks below NAME (issue #357), and
+		// since issue #384 also the read behind the two boot-file loaders, which open the path that `.env`
+		// gives them through this same seam. See `envFileKeys` for why any of this is allowed to exist.
 		readEnvFile = (path) => readFileSync(path, "utf8"),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
@@ -261,8 +262,11 @@ export async function defaultPromptFn(question, { input = process.stdin, output 
  *   - it reads to decide WHAT DOCTOR SAYS, never to configure anything. No value from here reaches a
  *     config, an argv, a container env, or a fix that writes;
  *   - the caller passes the exact keys its own message names, so this cannot grow into "load .env";
- *   - it is best effort. A missing, unreadable or malformed file is `{}`, which restores the unsoftened
- *     warning, because the worse failure is a deployment told it is fine when nobody could check.
+ *   - it is best effort, and it says WHICH kind of nothing it has. A file that is not there is `{}` and
+ *     changes no message. Something that is there and cannot be read -- a directory, a pipe, a mode this
+ *     account cannot open -- is `{ unreadable: true }`, which gets a line of its own, because "the key is
+ *     unset, so the worker ignores it" is a positive claim about a file nobody opened. A file that is
+ *     there and malformed comes back as records plus a hazard, naming the line that stopped the read.
  *
  * `docs/secrets.md` opens with "the worker parses no `.env` file" and that stays true: doctor is not the
  * worker, and `worker/test/service.test.mjs` still pins that a `PI_ENV_SETUP` line in `./.env` is not
@@ -276,11 +280,17 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 	if (typeof readEnvFile !== "function" || !fileExists(path)) return {};
 	// A REGULAR file or nothing. Every other host read in this module is bounded one way or another, and a
 	// synchronous read of a FIFO is not: a `.env` that is a named pipe hangs `pi-dispatch doctor` forever,
-	// with no output and no check to point at. A directory throws and is caught below; a pipe does not.
+	// with no output and no check to point at.
+	//
+	// UNREADABLE, not absent, and the distinction is the whole point of the flag. Something IS at this path
+	// -- `fileExists` said so -- and doctor cannot read it, which is a different sentence from "the key is
+	// unset, so the worker ignores it". The earlier comment here claimed "a directory throws and is caught
+	// below"; it does not, `statFile` answers happily and `isFile()` is false, so a `.env` that is a
+	// directory came back as an ordinary absent key and got the unset line. A test even pinned that.
 	try {
-		if (!statFile(path).isFile()) return {};
+		if (!statFile(path).isFile()) return { unreadable: true };
 	} catch {
-		return {};
+		return { unreadable: true };
 	}
 	// The narrowing is STRUCTURAL rather than a convention the caller keeps. A caller's key list can only
 	// narrow this further, never widen it: the licence for reading a `.env` at all is that it decides what
@@ -326,7 +336,14 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// lists what systemd and the shells do differently, and printing one of those readings as "the
 			// value the service reads" is a claim this file cannot support.
 			if (own !== undefined && own.plain && own.value !== "") plain[key] = own.value;
-			else if (own !== undefined && !own.plain) notPlain[key] = own.line;
+			// THE LINE AN OPERATOR HAS TO OPEN. When this key's own line is outside the grammar, that is its
+			// line; when the line above swallowed it -- an unclosed quote, a trailing backslash -- the key's
+			// line is often perfect and the fix "rewrite it as ..." repeated it back byte for byte. Route
+			// those to the sentence that names the line that actually reaches.
+			else if (own !== undefined && !own.plain) {
+				if (own.hazardLine !== null && own.hazardLine < own.line) notVouched[key] = own.hazardLine;
+				else notPlain[key] = own.line;
+			}
 			// The key's own line is fine and another line took the claim away. A different sentence, because the
 			// fix is on a different line: naming this key's line and telling the operator to rewrite it asked
 			// them to retype a line that was already correct, and changed nothing.
@@ -336,7 +353,14 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// export-only would print a value systemd never sees and advise dropping a prefix, which would
 			// change which file the worker loads. The empty case is part of "anywhere": a bare `KEY=` IS an
 			// assignment, and systemd reads it as the empty value that refuses the boot.
-			if (own === undefined && other !== undefined && other.value !== null) exported[key] = other.value;
+			// THE FILE's export line, not "this platform's view happens to be undefined". Nulling the cmd
+			// reading of an empty value (below) dropped a bare `KEY=` straight into this branch, so doctor
+			// quoted `export PI_PAUSE_WINDOWS_FILE=` at a Windows operator whose file contains no such line
+			// and told them to drop a prefix that is not there.
+			//
+			// `other.vouched`, not `other.plain`: this prints the value, and a file with a hazard in it is a
+			// file where that value is a guess.
+			if (service[key] === undefined && other !== undefined && other.vouched) exported[key] = other.value;
 			// BOTH readings plain, or there is nothing to compare. A reading that is not plain carries no value
 			// at all, and `?? ""` renamed it "an EMPTY value, which refuses the boot" -- the same "is it set"
 			// trap the record shape exists to abolish, reintroduced inside this function.
@@ -344,8 +368,20 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 			// reported a file that assigns the key ONCE as "assigned twice with different values", on the very
 			// line `renderEnvValue` writes there. The export-only signal above stays on every platform, because
 			// "only a sourcing shell reads this line" is true and useful wherever the line is.
-			else if (serviceLoader !== "cmd" && own !== undefined && other !== undefined && own.plain && other.plain && own.value !== other.value) alsoExported[key] = other.value;
-			if (own !== undefined && own.blank) blankInFile[key] = true;
+			// `vouched` on both, which is EQUIVALENT to `plain` on both today and is written this way anyway:
+			// this branch is only reached when the key has a reading and no earlier branch claimed it, and a
+			// file with a hazard sends every such key to `notVouched` first -- so where this runs, plain and
+			// vouched are the same thing. Written as the question actually being asked ("may I print these
+			// two values"), because the branch above it is NOT equivalent: an export-only key has no reading
+			// of its own, so nothing routes it to `notVouched` and the vouch there is load-bearing.
+			else if (serviceLoader !== "cmd" && own !== undefined && other !== undefined && own.vouched && other.vouched && own.value !== other.value) alsoExported[key] = other.value;
+			// VOUCHED as well as blank, because this one is a REFUSAL. `blank` alone asks what the line
+			// assigns, which is the right question for `up`'s message and the wrong one for "the worker
+			// REFUSES TO START": a `KEY=` inside a heredoc or under `if false; then` is a line the shells
+			// never execute, and an `unset KEY` below it clears what they did. Both were hard failures on
+			// deployments that boot. Where the file carries a hazard, doctor names the hazard instead --
+			// the operator fixes that line and runs again, and never sees a verdict reached by inference.
+			if (own !== undefined && own.blank && own.vouched) blankInFile[key] = true;
 		}
 		return { ...plain, notPlain, notVouched, exported, alsoExported, blankInFile, serviceLoader, hazard };
 	} catch {
@@ -399,8 +435,35 @@ const BOOT_FILES = Object.freeze([
  * at. `envFileKeys` already carries that guard for `.env` itself; this is the same hazard one file along,
  * and it arrives here because this check reads a path an operator wrote rather than one doctor chose.
  */
-function loadVerdict(spec, rawPath, cwd, io) {
-	const path = isAbsolute(rawPath) ? rawPath : join(cwd, rawPath);
+/**
+ * The line an operator should WRITE, or a sentence saying why there isn't one. Never throws.
+ *
+ * `renderEnvValue` refuses a value it cannot render so that no writer silently produces a `.env` line the
+ * loaders read as something else -- a single quote has no spelling both systemd and the shells read back,
+ * so it is refused rather than escaped. That is right for a writer and fatal for a REPORT: doctor started
+ * calling it on labels, and `pi-dispatch doctor` in a deployment folder whose name contains an apostrophe
+ * died with `cannot write this value into a .env safely` and printed NOTHING ELSE -- not one check. Worse
+ * than the defect this command exists to find, and reached by `init` plus `up` alone, with no `.env`
+ * needed, because the scaffolded PATH carries the quote.
+ *
+ * So the refusal becomes advice. Doctor still never invents a spelling: it says the path cannot be written
+ * into a `.env`, shows it escaped, and leaves the operator to move the folder or set the key another way.
+ */
+function fixLineFor(key, value) {
+	try {
+		return `${key}=${renderEnvValue(value)}`;
+	} catch {
+		return `${key}=<this path cannot be written into a .env: ${envValueShown(value)} contains a character no loader of this file reads back the same way, so move it or set ${key} through the service's own environment>`;
+	}
+}
+
+function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
+	// ABSOLUTE ON THE TARGET PLATFORM, not on this one. `up.mjs` already draws this distinction for the same
+	// kind of value, and without it `C:\pi\pause-windows.json` is "relative" to a POSIX `isAbsolute` and
+	// gets joined under doctor's cwd -- so the win32 verdicts were computed against a path shape Windows
+	// never produces, and the tests asserting them were asserting the same fiction.
+	const isAbsoluteOn = platform === "win32" ? win32.isAbsolute : posix.isAbsolute;
+	const path = isAbsoluteOn(rawPath) ? rawPath : join(cwd, rawPath);
 	// EVERY reason carries the path, so every reason goes through the renderer. The grammar keeps a control
 	// byte out of a value read from the FILE, and this is the other end: a path out of the environment is
 	// constrained by nothing, and its ESC reached the terminal through this string while the file half was
@@ -1733,12 +1796,16 @@ export async function collectChecks(env, seams) {
 	// warning then cries wolf at a correctly configured deployment, and this module's own rule is that a
 	// check nobody can silence must never do that.
 	//
-	// So doctor reads `<cwd>/.env` for EXACTLY the key each check names, and uses it to decide WHAT TO SAY,
-	// never to configure anything. That narrowing is the whole licence: the project's stance is that nothing
-	// parses `.env` (`docs/secrets.md`), and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP` line
-	// in `./.env` is deliberately NOT honoured. Both stay true. The softened line is still a warning, still
-	// carries the file it read, and says plainly which process would honour it, because the operator running
-	// this shell genuinely does have the feature off in THIS environment.
+	// So doctor reads `<cwd>/.env` for EXACTLY the key each check names, and never to configure anything.
+	// That narrowing is the whole licence: the project's stance is that nothing parses `.env`
+	// (`docs/secrets.md`), and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP` line in `./.env` is
+	// deliberately NOT honoured. Both stay true.
+	//
+	// WHAT CHANGED SINCE, and this comment said otherwise for a round: the read no longer only softens a
+	// sentence. Where the file leaves the SERVICE unable to start, doctor fails on it (issue #384), because
+	// a deployment whose unit exits 1 in a restart loop is not a deployment that is merely unconfigured in
+	// this shell. Where the file merely configures what this shell does not, the line still says which
+	// process would honour it, and is still a warning.
 	const envFile = envFileKeys(join(cwd, ".env"), ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE"], { fileExists, readEnvFile, platform });
 	// ONE RULE FOR BOTH BOOT FILES, and it asks the worker's own loader rather than a second opinion
 	// (issue #384). Before this there were two hand-written copies of a shell-shaped check for
@@ -1793,10 +1860,10 @@ export async function collectChecks(env, seams) {
 			checks.push({
 				ok: false,
 				warn: envSetup !== null,
-				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START${alsoExported === undefined ? "" : `, while ${otherName} would take ${renderEnvValue(alsoExported)}, so two deployments of this one file disagree`}`,
+				label: `${spec.key} is assigned an EMPTY value in ${join(cwd, ".env")}, which is not unset: ${loaderName} keeps it, the worker tries to load "" and REFUSES TO START${alsoExported === undefined ? "" : `, while ${otherName} would take ${envValueShown(alsoExported)}, so two deployments of this one file disagree`}`,
 				fix: envSetup !== null
 					? `${envSetup} runs after that file and may replace it, which is why this is a warning: if it does not, delete the ${spec.key} line, or give it the absolute path (${scaffolded})`
-					: `delete the ${spec.key} line from that .env, or give it a path: ${spec.key}=${renderEnvValue(scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
+					: `delete the ${spec.key} line from that .env, or give it a path: ${fixLineFor(spec.key, scaffolded)}. Deleting it turns ${spec.noun} off; an empty value turns the worker off`,
 			});
 		} else if (notPlainLine !== undefined) {
 			// NAMED, NEVER QUOTED. The value is outside the grammar every loader reads the same way, so this
@@ -1805,7 +1872,7 @@ export async function collectChecks(env, seams) {
 				ok: false,
 				warn: true,
 				label: `${spec.key} on line ${notPlainLine} of ${join(cwd, ".env")} is not in the form every loader reads the same way, so the service may read something other than what the line appears to say`,
-				fix: `rewrite it as ${spec.key}=${renderEnvValue(scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
+				fix: `rewrite it as ${fixLineFor(spec.key, scaffolded)} with any comment on its own line above it, which is the form \`pi-dispatch up\` writes`,
 			});
 		} else if (notVouchedLine !== undefined) {
 			// A DIFFERENT LINE, so a different sentence. This key's own line is in the form every loader reads
@@ -1832,7 +1899,7 @@ export async function collectChecks(env, seams) {
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${renderEnvValue(fileRaw)}, ${otherName} would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : renderEnvValue(alsoExported)}`,
+				label: `${spec.key} is assigned TWICE in ${join(cwd, ".env")} with different values: ${loaderName} takes ${envValueShown(fileRaw)}, ${otherName} would take ${alsoExported === "" ? "an EMPTY value, which refuses the boot" : envValueShown(alsoExported)}`,
 				fix: `keep one assignment. Which one is in force depends on how the worker starts, so two of them means two deployments of the same file disagree`,
 			});
 		}
@@ -1840,8 +1907,13 @@ export async function collectChecks(env, seams) {
 		// inside the `fileRaw` branch, so a file assigning the key twice got the disagreement warning and exit
 		// 0 even when BOTH values name a file the worker cannot load -- a deployment that cannot boot, reported
 		// as a tidiness problem.
-		if (fileRaw !== undefined && notPlainLine === undefined && notVouchedLine === undefined && !blankInFile) {
-			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad);
+		// WHENEVER THE SERVICE HAS A VALUE, and the two exclusions this used to carry were how a deployment
+		// that cannot boot came back exit 0: a file with any hazard in it got the ⚠ about the hazard and its
+		// boot key was never opened. `fileRaw` is set only for a line this reader vouches for the TEXT of, so
+		// there is always a real path here; whether it loads is a fact about the filesystem, not about the
+		// rest of the file.
+		if (fileRaw !== undefined && !blankInFile) {
+			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad, platform);
 			checks.push(
 				verdict.ok
 					? { ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
@@ -1859,10 +1931,10 @@ export async function collectChecks(env, seams) {
 			checks.push({
 				ok: false,
 				label: `${spec.key} is set to an EMPTY value in this shell, which is not unset: the worker keeps it, tries to load "" and REFUSES TO START`,
-				fix: `unset ${spec.key} in this shell (that turns ${spec.noun} off), or give it the absolute path: export ${spec.key}=${renderEnvValue(scaffolded)}`,
+				fix: `unset ${spec.key} in this shell (that turns ${spec.noun} off), or give it the absolute path: export ${fixLineFor(spec.key, scaffolded)}`,
 			});
 		} else if (typeof shellRaw === "string") {
-			const verdict = loadVerdict(spec, shellRaw, cwd, seamsForLoad);
+			const verdict = loadVerdict(spec, shellRaw, cwd, seamsForLoad, platform);
 			if (!verdict.ok) {
 				checks.push({
 					ok: false,
@@ -1888,7 +1960,7 @@ export async function collectChecks(env, seams) {
 				ok: false,
 				warn: true,
 				label: `${scaffolded} exists but ${spec.key} is unset -- the worker ignores it, so ${spec.off}`,
-				fix: `set ${spec.key}=${renderEnvValue(scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
+				fix: `set ${fixLineFor(spec.key, scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live; delete the file if this deployment has no ${spec.nothing}`,
 			});
 		} else if (fileRaw === undefined && onlyExported === undefined && alsoExported === undefined && notPlainLine === undefined && notVouchedLine === undefined && !blankInFile && envFile.hazard != null) {
 			checks.push({

@@ -227,8 +227,15 @@ export async function runUp(argv = [], deps = {}) {
 		EMPTY_REFUSES_BOOT.has(key)
 			? `left untouched: the line is there and its value is EMPTY, which is not the same as no line -- a shell that sources this file exports it as "", the worker keeps it and REFUSES TO BOOT. up never clobbers a key an operator wrote, so fill it in or delete the line`
 			: `left untouched: the line is there and its value is empty, which reads as unset. up never clobbers a key an operator wrote, so fill it in or delete the line`;
-	// The blank test is `env-file.mjs`'s, shared with doctor since issue #365: two callers answering it
-	// separately is how `up` and doctor came to print opposite sentences about one file in one run.
+	// The blank test is `env-file.mjs`'s, and the reader underneath it is the one doctor uses -- which is
+	// what issue #365 was actually about: two callers answering "is this key set" with two hand-rolled
+	// regexes is how `up` and doctor came to print opposite sentences about one file in one run.
+	//
+	// NOT the same CALL, since issue #384, and the difference is the consequence rather than the question.
+	// `up` prints a sentence, so it asks the loose per-line answer and prefers "EMPTY" to "already set" on a
+	// file it cannot fully read. Doctor's answer becomes an exit code, so it asks the same reader for the
+	// platform's own loader and requires the vouch beside it: a refusal reached by inference is the one
+	// verdict this project will not print.
 	const writtenButEmpty = (key) => {
 		try {
 			return envKeyIsBlank(String(fs.readFileSync(envPath, "utf8")), key);

@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadPauseWindows } from "../src/pause-windows.mjs";
 import { loadScopedLimits } from "../src/scoped-limits.mjs";
 import { pauseWindowsFilePath, scopedLimitsFilePath } from "../src/config.mjs";
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS } from "../src/init.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+
+// FROM THIS FILE, not from the cwd. `npm test -w worker` runs the suite from `worker/`, where a bare
+// `docs/pause-windows.md` is ENOENT -- so the bolt that exists to stop these pages drifting would have
+// failed for everyone who runs the workspace on its own. The two existing spec-reading tests resolve the
+// same way (`session-reasons`, `triggers`).
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const repoFile = (rel) => readFileSync(join(REPO, rel), "utf8");
 
 // TWO OPERATOR PAGES AND THREE SPEC ENTRIES SAY THE SAME TWO FACTS, and nothing read any of them. Both were
 // inverted during review -- "An EMPTY value IS an unset one", "doctor stays silent", "reads this key with
@@ -69,15 +77,31 @@ test("both operator pages say doctor FAILS on an empty value, in the paragraph t
 	// stays silent, warns only, or that the key reads as unset. Each page is searched near its own key so a
 	// matching sentence about something else cannot satisfy it.
 	for (const { path, key } of PAGES) {
-		const text = readFileSync(path, "utf8");
-		assert.ok(text.includes(key), `${path}: names the key it is about`);
-		const empties = text.split("\n").filter((l) => /EMPTY value/i.test(l));
-		assert.ok(empties.length > 0, `${path}: says something about an EMPTY value`);
-		const said = empties.join(" ");
+		const text = repoFile(path);
+		// THE PARAGRAPH, not the file and not the line. Scoped to lines made this satisfiable three ways:
+		// keep the true sentence and put its inversion on the NEXT line; make the EMPTY-value sentence about
+		// a DIFFERENT key; or append "-- except at boot, where it is". All three passed, and the test's own
+		// comment claimed a proximity it did not implement. A paragraph is the unit a reader takes a claim
+		// from, so it is the unit the claim is checked in.
+		const paras = text.split(/\n\s*\n/).filter((b) => /EMPTY value/i.test(b));
+		assert.equal(paras.length >= 1, true, `${path}: says something about an EMPTY value`);
+		const said = paras.join("\n\n");
+		assert.ok(
+			paras.some((b) => b.includes(key)),
+			`${path}: the EMPTY-value paragraph names THIS key, not another one`,
+		);
 		assert.match(said, /is NOT unset|is not an unset one/i, `${path}: an empty value is not an unset one`);
 		assert.match(said, /doctor fails on it|doctor \*\*fails\*\*/i, `${path}: and doctor fails on it`);
+		// THE CONSEQUENCE, in the same paragraph, and its inversions barred there. The first test in this
+		// file proves an empty value survives the config read and the loader then throws; a page that says
+		// the worker starts anyway is contradicting a behaviour measured two tests above. The `??` itself is
+		// deliberately NOT required: one page carries this in a reference table, where naming an operator
+		// would be pinning prose shape rather than a claim -- but `||` IS barred, because writing it is
+		// asserting the opposite of what `config.mjs` does.
+		assert.match(said, /refuses? to (start|boot)/i, `${path}: says what the worker does about it`);
+		assert.doesNotMatch(said, /\|\|/, `${path}: and never names the operator that would drop it`);
 		assert.doesNotMatch(said, /doctor (stays silent|says nothing)/i, `${path}: the inverted sentence must not survive`);
-		assert.doesNotMatch(said, /starts normally|drops it/i, `${path}: nor the inverted consequence`);
+		assert.doesNotMatch(said, /starts? normally|drops? (it|an empty)|discard|feature off/i, `${path}: nor the inverted consequence`);
 	}
 });
 
@@ -86,7 +110,7 @@ test("the three spec entries carry the same two facts", () => {
 	// ENTRY rather than per file, because each file is thousands of lines and a match anywhere in one proves
 	// nothing about the entry that owns the rule.
 	const entry = (file, heading) => {
-		const text = readFileSync(file, "utf8");
+		const text = repoFile(file);
 		const at = text.indexOf(`## ${heading}`);
 		assert.notEqual(at, -1, `${file}: ${heading} exists`);
 		const next = text.indexOf("\n## ", at + 1);
@@ -96,6 +120,10 @@ test("the three spec entries carry the same two facts", () => {
 		const body = entry("specs/interfaces.md", heading);
 		assert.match(body, /EMPTY value is not an unset one|an EMPTY value is NOT an unset one/i, `${heading}: states it`);
 		assert.match(body, /refuses to start/i, `${heading}: and what it costs`);
+	}
+	for (const heading of ["INT-PAUSE-WINDOWS-FILE-CONTRACT", "INT-SCOPED-LIMITS-FILE-CONTRACT"]) {
+		const body = entry("specs/interfaces.md", heading);
+		assert.doesNotMatch(body, /except at boot|the resolver drops an empty|starts with the feature off/i, `${heading}: and nothing takes it back a clause later`);
 	}
 	const req = entry("specs/requirements.md", "REQ-DEPLOYMENT-BOOTSTRAP");
 	assert.match(req, /Empty is not unset/i, "REQ-DEPLOYMENT-BOOTSTRAP: states it");
