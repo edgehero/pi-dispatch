@@ -129,9 +129,12 @@ Two consequences worth internalising before you design anything:
   `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
   filters' action sets as the loader's set minus their own named exclusions; the git hardening flags,
   which live in `worker/src/git-hardening.mjs` because seven files carried them by hand and one had
-  quietly lost a flag; and `docs/egress.md`'s canary rows, whose first column is rebuilt from
+  quietly lost a flag; `docs/egress.md`'s canary rows, whose first column is rebuilt from
   `CANARY_LINES` by a test and required to match between markers (the count-the-source test it replaced
-  could not see four spellings and could go false red on a comment). Add a table, add its bolt. Where the relation is NOT real, say so in the test
+  could not see four spellings and could go false red on a comment); and every spec revision row, which
+  must split into exactly two cells on unescaped pipes, because such a row is CUT on the rendered page
+  while looking whole in the diff, and four had silently lost between 1,100 and 2,800 characters each.
+  Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
 

@@ -276,6 +276,11 @@ jobs:
       - name: No dated fixture rides a default clock (issue #293)
         run: node .github/scripts/dated-fixture-check.mjs
 
+      # A revision row that renders with the wrong number of cells loses everything after the second one,
+      # and a diff cannot show that: the row looks whole in the source and is cut on the page (issue #388).
+      - name: Every revision row renders as two cells (issue #388)
+        run: node .github/scripts/revision-row-check.mjs
+
       # The other half of issue #351's pair. This one is the fast hint: it sees a CALL SHAPE, so it
       # names the file and the fix in a second. It cannot see a missing cleanup at all -- delete an
       # after() hook and it stays green -- which is what the $TMPDIR count below is for.
