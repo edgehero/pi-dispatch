@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { envKeyIsBlank, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
+import { envFileHazard, envKeyIsBlank, envValueShown, readEnvAssignments, renderEnvValue, setEnvKey, setEnvKeyIfEmpty, updateEnvFile } from "../src/env-file.mjs";
 
 // -- setEnvKeyIfEmpty: pure transform, table-driven over the text shapes it must handle ---------------
 //
@@ -243,18 +243,25 @@ for (const { name, text, key, expected } of overwriteCases) {
 // returned values only, so "no line" and "a line worth nothing" arrived identical and every caller that
 // asked "is it set" got the wrong answer on a deployment that refuses to boot (issues #365 and #384).
 
+// The whole record, every time, with the parts a case is not about spelled by this helper rather than left
+// out. `plain` is the line's own text, `vouched` adds the rest of the file, and `blank` is the third
+// question -- "does this line assign anything at all" -- which `up` asks and which neither of the other two
+// answers. A test that asserted only the field it cared about would not have caught the two of them being
+// collapsed into one, which is what the review found.
+const rec = (o) => ({ value: null, plain: false, vouched: false, blank: false, line: 1, hazardLine: null, ...o });
+
 test("E1: an assignment to nothing is a RECORD, absence is undefined, and the last one wins", () => {
 	const text = ["PI_PAUSE_WINDOWS_FILE=/w.json", "WEBHOOK_SECRET=s3cr3t", "# PI_SCOPED_LIMITS_FILE=/commented.json", "PI_LOGS_DIR=", "PI_SETTINGS_FILE=   ", "PI_PAUSE_WINDOWS_FILE=/a-later-duplicate.json"].join("\n");
 	const r = readEnvAssignments(text, ["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_JOB_IMAGE"]);
-	assert.deepEqual(r.PI_PAUSE_WINDOWS_FILE, { value: "/a-later-duplicate.json", plain: true, line: 6 }, "every loader takes the LAST assignment, and the line number is the one an operator has to open");
+	assert.deepEqual(r.PI_PAUSE_WINDOWS_FILE, rec({ value: "/a-later-duplicate.json", plain: true, vouched: true, line: 6 }), "every loader takes the LAST assignment, and the line number is the one an operator has to open");
 	assert.equal(r.PI_SCOPED_LIMITS_FILE, undefined, "a commented line is not an assignment");
 	assert.equal(r.PI_JOB_IMAGE, undefined, "and neither is a key the file never mentions");
-	assert.deepEqual(r.PI_LOGS_DIR, { value: "", plain: true, line: 4 }, "`KEY=` is an assignment to nothing, which is NOT absence");
-	assert.deepEqual(r.PI_SETTINGS_FILE, { value: "", plain: true, line: 5 }, "and so is `KEY=   `, which every loader here trims");
+	assert.deepEqual(r.PI_LOGS_DIR, rec({ value: "", plain: true, vouched: true, blank: true, line: 4 }), "`KEY=` is an assignment to nothing, which is NOT absence");
+	assert.deepEqual(r.PI_SETTINGS_FILE, rec({ value: "", plain: true, vouched: true, blank: true, line: 5 }), "and so is `KEY=   `, which every loader here trims");
 	// The four empty shapes are one value, because `set -a; . ./.env` exports all four as "" and systemd
 	// 252 reads all four as "" (measured). This is the distinction the old reader threw away by deleting
 	// the key, and the reason doctor could not tell a scaffolded-but-blank deployment from an unset one.
-	for (const shape of ['K=', 'K=""', "K=''", "K=   "]) assert.deepEqual(readEnvAssignments(shape, ["K"]).K, { value: "", plain: true, line: 1 }, shape);
+	for (const shape of ['K=', 'K=""', "K=''", "K=   "]) assert.deepEqual(readEnvAssignments(shape, ["K"]).K, rec({ value: "", plain: true, vouched: true, blank: true }), shape);
 	assert.deepEqual(readEnvAssignments(text, []), {}, "an empty ask reads nothing at all");
 	assert.deepEqual(readEnvAssignments("", ["PI_LOGS_DIR"]), {});
 	assert.deepEqual(readEnvAssignments(undefined, ["PI_LOGS_DIR"]), {});
@@ -270,13 +277,13 @@ test("E1: an export line belongs to the loader that reads one, and never to the 
 	assert.equal(readEnvAssignments(both, ["PI_PAUSE_WINDOWS_FILE"]).PI_PAUSE_WINDOWS_FILE.value, "/systemd.json", "what EnvironmentFile= sees");
 	assert.equal(readEnvAssignments(both, ["PI_PAUSE_WINDOWS_FILE"], { loader: "shell" }).PI_PAUSE_WINDOWS_FILE.value, "/wrapper.json", "what `set -a; . ./.env` sees");
 	const cleared = "PI_PAUSE_WINDOWS_FILE=/a.json\nexport PI_PAUSE_WINDOWS_FILE=";
-	assert.deepEqual(readEnvAssignments(cleared, ["PI_PAUSE_WINDOWS_FILE"]).PI_PAUSE_WINDOWS_FILE, { value: "/a.json", plain: true, line: 1 }, "systemd never saw the export line, so nothing cancelled");
-	assert.deepEqual(readEnvAssignments(cleared, ["PI_PAUSE_WINDOWS_FILE"], { loader: "shell" }).PI_PAUSE_WINDOWS_FILE, { value: "", plain: true, line: 2 }, "the wrapper did, and it is an assignment to nothing");
+	assert.deepEqual(readEnvAssignments(cleared, ["PI_PAUSE_WINDOWS_FILE"]).PI_PAUSE_WINDOWS_FILE, rec({ value: "/a.json", plain: true, vouched: true }), "systemd never saw the export line, so nothing cancelled");
+	assert.deepEqual(readEnvAssignments(cleared, ["PI_PAUSE_WINDOWS_FILE"], { loader: "shell" }).PI_PAUSE_WINDOWS_FILE, rec({ value: "", plain: true, vouched: true, blank: true, line: 2 }), "the wrapper did, and it is an assignment to nothing");
 	// `export K=` alone is a line the shells honour and systemd does not, so the two loaders disagree about
 	// whether the key is assigned AT ALL -- which is the whole reason a reading is only meaningful beside
 	// the loader that produced it.
 	assert.equal(readEnvAssignments("export K=", ["K"]).K, undefined, "systemd: no assignment");
-	assert.deepEqual(readEnvAssignments("export K=", ["K"], { loader: "shell" }).K, { value: "", plain: true, line: 1 }, "the wrapper: an assignment to nothing");
+	assert.deepEqual(readEnvAssignments("export K=", ["K"], { loader: "shell" }).K, rec({ value: "", plain: true, vouched: true, blank: true }), "the wrapper: an assignment to nothing");
 });
 
 // The corpus. Every entry is a whole .env TEXT that mentions `K`, and E2 reads each one with a real shell.
@@ -363,6 +370,23 @@ const ORACLE_CORPUS = [
 	"K=/srv/a.json\nK=",
 	"K=\nK=/srv/a.json",
 	"K=/srv/a.json\nOTHER=b",
+	// Values that END the sourcing shell, so that nothing below them is ever read: `${x?err}` and a
+	// substitution that kills the shell both abort `set -a; . ./.env` before the wrapper launches anything.
+	"OTHER=${NOPE?boom}\nK=/srv/a.json",
+	"OTHER=${NOPE:?boom}\nK=/srv/a.json",
+	"OTHER=$(echo hi)\nK=/srv/a.json",
+	"K=$HOME\nOTHER=1",
+	// Assignment forms the shells take and this reader does not, which must therefore not be vouched past.
+	"K+=/srv/a.json",
+	"declare K=/srv/a.json",
+	"export export K=/srv/a.json",
+	// A BOM anywhere, not only on the first line.
+	"OTHER=1\n\ufeffK=/srv/a.json",
+	"\ufeffOTHER=1\nK=/srv/a.json",
+	// A CR or a line separator INSIDE the value, where JavaScript's `.` stops matching and the key stopped
+	// having a record at all.
+	"K=/srv/a\rb.json",
+	"K='/srv/a\u2028b.json'",
 	// Lines that reach past themselves, above and below.
 	"OTHER=\"unclosed\nK=/srv/a.json",
 	"OTHER=a\\\nK=/srv/a.json",
@@ -372,10 +396,25 @@ const ORACLE_CORPUS = [
 	"if false; then\nK=/srv/a.json\nfi",
 	"unset K\nK=/srv/a.json",
 	"echo hi\nK=/srv/a.json",
-	// Bytes JavaScript's `\s` would trim and no shell does, and the line endings.
+	// Bytes JavaScript's `\s` would trim and no shell does, LEADING and TRAILING. The trailing half was
+	// missing, and its absence let a `/\s+$/` in the value trimmer survive the whole suite: with it, a
+	// value ending in a form feed reads as though the form feed were not there, and `K=<FF>` reads as an
+	// EMPTY value, which is a hard doctor failure on a deployment that starts.
 	"K=\u00a0/srv/a.json",
 	"K=\u000b/srv/a.json",
 	"K=\u000c/srv/a.json",
+	"K=/srv/a.json\u00a0",
+	"K=/srv/a.json\u000b",
+	"K=/srv/a.json\u000c",
+	"K=\u000c",
+	"K=\u00a0",
+	// The same bytes BEFORE the key, where `^[ \t]*` must not become `^\s*`: a line starting with a NBSP or
+	// a vertical tab is a COMMAND to every shell, not an assignment, and a reader that skipped it as
+	// whitespace would vouch for a key none of them sets.
+	"\u00a0K=/srv/a.json",
+	"\u000bK=/srv/a.json",
+	"\u000cK=/srv/a.json",
+	"export\u00a0K=/srv/a.json",
 	"K=/srv/a.json\r",
 	"\ufeffK=/srv/a.json",
 	"\ufeffOTHER=1\nK=/srv/a.json",
@@ -400,7 +439,7 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 	const file = join(dir, "probe.env");
 	const shells = ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh", "/usr/bin/zsh"].filter((sh) => existsSync(sh));
 	assert.ok(shells.length >= 2, `the oracle needs real shells to be an oracle, found ${shells.join(", ") || "none"}`);
-	assert.ok(ORACLE_CORPUS.length >= 68, `corpus is ${ORACLE_CORPUS.length} shapes`);
+	assert.ok(ORACLE_CORPUS.length >= 100, `corpus is ${ORACLE_CORPUS.length} shapes, and a floor well under the real count lets the corpus erode without a test noticing`);
 	const childValue = (sh) => {
 		const r = spawnSync(sh, ["-c", `set -a; . ${JSON.stringify(file)} >/dev/null 2>&1; printenv K`], { cwd: dir, encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL" });
 		assert.equal(r.error, undefined, `${sh} did not run`);
@@ -409,18 +448,28 @@ test("E2: a plain reading is what a real shell hands the child, measured over th
 		return r.status === 0 ? r.stdout.replace(/\n$/, "") : null;
 	};
 	let compared = 0;
+	let vouchedShapes = 0;
 	for (const text of ORACLE_CORPUS) {
 		writeFileSync(file, text);
 		const reading = readEnvAssignments(text, ["K"], { loader: "shell" });
+		if (reading.K !== undefined && reading.K.vouched) vouchedShapes += 1;
 		for (const sh of shells) {
 			const got = childValue(sh);
-			if (reading.K === undefined || !reading.K.plain) continue;
+			// `vouched`, not `plain`, and the difference is the whole point of there being two: `plain` is
+			// this LINE's own text, which a shell cannot confirm in isolation, and `vouched` is the claim
+			// doctor actually prints -- "the loader ends up with this". Comparing the weaker one made the
+			// oracle demand that `K=/a.json` above an `unset K` still reach the child.
+			if (reading.K === undefined || !reading.K.vouched) continue;
 			compared += 1;
 			assert.equal(got, reading.K.value, `${sh} on ${JSON.stringify(text)}`);
 		}
 	}
-	// Not vacuous: a grammar that called nothing plain would pass every assertion above.
-	assert.ok(compared >= 90, `only ${compared} plain readings were checked against a shell`);
+	// Not vacuous: a grammar that vouched for nothing would pass every assertion above. Counted in SHAPES
+	// rather than in comparisons, because the comparison count scales with how many shells a host happens to
+	// have -- a floor in comparisons passes on a four-shell mac and fails on a CI runner with three, which
+	// is a test that depends on the machine instead of on the code.
+	assert.ok(vouchedShapes >= 34, `only ${vouchedShapes} of ${ORACLE_CORPUS.length} shapes were vouched for, so this oracle is checking almost nothing`);
+	assert.equal(compared, vouchedShapes * shells.length, "every vouched shape is checked against every shell that exists here");
 });
 
 test("E3: what the file says and what systemd says are two different sentences", () => {
@@ -452,8 +501,94 @@ test("E3: what the file says and what systemd says are two different sentences",
 	// `'a'b'` is the shape that killed the first poison rule: the first quote closes, the THIRD opens, and
 	// every shell swallows the following line. systemd 252 reads it as `ab'` and carries on, so the two
 	// disagree about the line BELOW it as well.
+	// BELOW an unbalanced quote the line is not a line at all -- every shell swallows it into the open
+	// quote -- so its own reading goes too. ABOVE a stray command the line is exactly what it looks like;
+	// what cannot be claimed is where the loader ENDS UP, which is the vouch. Two flags because doctor asks
+	// the first question ("is this key empty?") and prints the second.
 	assert.equal(readEnvAssignments("OTHER='a'b'\nK=/srv/a.json", ["K"], { loader: "shell" }).K.plain, false, "a key below an unbalanced quote");
-	assert.equal(readEnvAssignments("K=/srv/a.json\nunset K", ["K"], { loader: "shell" }).K.plain, false, "a key above a stray command, which systemd ignores and the shells run");
+	const above = readEnvAssignments("K=/srv/a.json\nunset K", ["K"], { loader: "shell" }).K;
+	assert.equal(above.plain, true, "the line itself is in the form every loader reads the same way");
+	assert.equal(above.vouched, false, "but systemd ignores the line below and the shells run it, so where the key ENDS UP is not claimed");
+	assert.equal(above.hazardLine, 2, "and the line an operator has to fix is the stray one, not this key's");
+});
+
+test("E3b: a value this file cannot SHOW is not plain either, and the renderer is why", () => {
+	// `plain` has two conditions, and this is the second one. A quoted ESC, a C1 byte, a bidi override or a
+	// line separator is read IDENTICALLY by systemd and by all four shells, so loader agreement alone would
+	// vouch for it -- and doctor prints `value` in three places, so vouching for it puts a terminal-rewriting
+	// byte in front of an operator. Narrowing this exclusion to NUL alone leaves the whole suite green while
+	// a raw ESC reaches the output, which is how it was found.
+	for (const [name, line] of [
+		["ESC", "K='/a\u001b[31mb'"],
+		["C1 CSI", "K='/a\u009bb'"],
+		["bidi override", "K='/a\u202enosj.txt'"],
+		["zero width", "K='/a\u200bb'"],
+		["line separator", "K='/a\u2028b'"],
+		["NUL", "K='/a\u0000b'"],
+	]) {
+		assert.equal(readEnvAssignments(line, ["K"]).K.plain, false, name);
+	}
+	// And the two that are NOT control bytes, which must stay plain: escaping an accented or CJK home would
+	// make the commonest non-ASCII path unreadable in the very line telling its owner what to fix.
+	assert.equal(readEnvAssignments("K='/Users/jos\u00e9/x.json'", ["K"]).K.plain, true, "an accented path is ordinary");
+	assert.equal(readEnvAssignments("K='/srv/\u65e5\u672c\u8a9e/x.json'", ["K"]).K.plain, true, "and so is a CJK one");
+	assert.equal(readEnvAssignments("K='/a\tb'", ["K"]).K.plain, true, "and a TAB, measured identical on systemd 252 and all four shells");
+});
+
+test("E3c: envValueShown escapes what a terminal would obey, and nothing else", () => {
+	// The file half is guarded by the grammar; this exists for the SHELL half, where doctor prints a value
+	// no grammar constrains. An environment variable holding a raw ESC reached the terminal through that
+	// branch while the file branch was carefully withholding it.
+	assert.equal(envValueShown("/srv/a.json"), "/srv/a.json");
+	assert.equal(envValueShown("/Users/jos\u00e9/x"), "/Users/jos\u00e9/x", "an accented path is shown as itself");
+	assert.equal(envValueShown("/srv/\u65e5\u672c/x"), "/srv/\u65e5\u672c/x");
+	assert.equal(envValueShown("/a\u001b[31mb"), String.raw`"/a\u001b[31mb"`, "an escape sequence is quoted and escaped whole");
+	assert.equal(envValueShown("/a\u202enosj.txt"), String.raw`"/a\u202enosj.txt"`, "and so is a right-to-left override");
+	assert.match(envValueShown("/a\u0000b"), /^"/, "a quoted value is always quoted, so the quotes say it was transformed");
+	for (const v of ["/a\u001bb", "/a\u009bb", "/a\u200bb", "/a\u2028b", "/a\u0085b"]) {
+		assert.doesNotMatch(envValueShown(v), /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, `no control byte survives: ${JSON.stringify(v)}`);
+	}
+});
+
+test("E7: a line this reader cannot model is a HAZARD, never a key that is simply absent", () => {
+	// The trap this closes: no record and no assignment arrived identical, and doctor printed the second for
+	// the first -- "PI_X is unset, the worker ignores it" about files that DO set the key. Every shape below
+	// leaves this reader with nothing for K, and every one of them is a file whose loaders may disagree.
+	for (const [name, text, line] of [
+		["a BOM on a line of its own", "OTHER=1\n\ufeffK=/a.json", 2],
+		["a BOM on the first line", "\ufeffK=/a.json", 1],
+		["an append assignment", "K+=/a.json", 1],
+		["a declare", "declare K=/a.json", 1],
+		["a value that ENDS the shell", "OTHER=${NOPE?boom}\nK=/a.json", 1],
+		["a substitution", "OTHER=$(echo hi)\nK=/a.json", 1],
+		["a command", "echo hi\nK=/a.json", 1],
+		["a space before the =", "K =/a.json", 1],
+	]) {
+		const h = envFileHazard(text, { loader: "shell" });
+		assert.notEqual(h, null, `${name}: this file reaches past itself and nothing said so`);
+		assert.equal(h.line, line, `${name}: the line an operator has to open`);
+	}
+	// systemd 252 accepts `K =/a.json` and sets the key, measured on the rig -- so the hazard here is the
+	// SHELLS, which run a command named `K`. The two ends of the file disagree about whether the key is
+	// assigned at all, which is exactly what "hazard" means in this reader.
+	assert.equal(envFileHazard("K=/a.json\nOTHER=b"), null, "a file of ordinary assignments reaches past nothing");
+	assert.equal(envFileHazard("# a note\n\nK=/a.json\n"), null, "and comments and blank lines are not hazards");
+	// The cmd wrapper has no hazards at all: `for /f` takes one line at a time, with no quoting, no
+	// continuation and no execution, so no line there can reach another.
+	assert.equal(envFileHazard("unset K\nOTHER='open", { loader: "cmd" }), null);
+});
+
+test("E8: a CR or a line separator inside a value is a value, not an absence", () => {
+	// JavaScript's `.` excludes CR, U+2028 and U+2029, so a value carrying one matched NOTHING and the key
+	// had no record -- while systemd 252 sets it to the text before the CR and all four shells set it whole.
+	// Doctor then called that key unset, on a deployment whose worker refuses to start.
+	const cr = readEnvAssignments("K=/srv/a\rb.json", ["K"]);
+	assert.notEqual(cr.K, undefined, "the line assigns the key, whatever is in it");
+	assert.equal(cr.K.plain, false, "and the loaders disagree about what, so nothing is claimed");
+	assert.equal(cr.K.value, null);
+	const ls = readEnvAssignments("K='/srv/a\u2028b.json'", ["K"]);
+	assert.notEqual(ls.K, undefined);
+	assert.equal(ls.K.plain, false, "a line separator is in the control class, so it is not shown either");
 });
 
 test("E4: everything the writer writes, the reader reads back exactly", () => {
@@ -473,7 +608,7 @@ test("E4: everything the writer writes, the reader reads back exactly", () => {
 	// And the Windows half, whose writer quotes nothing and whose loader takes the line verbatim.
 	for (const v of ["C:/pi/deploy/logs", "C:/Program Files/pi/logs", "C:\\Users\\Bob Smith\\deploy", "C:/pi/a#b/logs"]) {
 		const line = `K=${renderEnvValue(v, { platform: "win32" })}`;
-		assert.deepEqual(readEnvAssignments(line, ["K"], { loader: "cmd" }).K, { value: v, plain: true, line: 1 }, line);
+		assert.deepEqual(readEnvAssignments(line, ["K"], { loader: "cmd" }).K, rec({ value: v, plain: true, vouched: true }), line);
 	}
 });
 
@@ -492,9 +627,14 @@ test("E5: envKeyIsBlank is derived from the reader, so it cannot disagree with i
 	// shape where filling it leaves a systemd deployment still without the key, because systemd ignores an
 	// export line before and after the edit. That is the WRITER's rule, pinned at `setEnvKeyIfEmpty`.
 	assert.equal(envKeyIsBlank("export K=", "K"), true, "a loader that cannot see the key does not vote, and the one that can sees nothing in it");
-	// A value this file will not vouch for is never called blank: `K= # tbd` is a comment to the shells,
-	// leaving K empty, and the five characters ` # tbd` to systemd.
-	assert.equal(envKeyIsBlank("K= # tbd", "K"), false, "not plain is not the same as empty");
+	// `K= # tbd` IS blank, and tying this to `plain` said otherwise -- which regressed `up` against the
+	// release it shipped from, on any file with a trailing comment, a CRLF ending or one stray line in it.
+	// The loaders can disagree about a value and still agree there is none: the shells read a comment and
+	// leave K empty, systemd reads ` # tbd`, and neither gets anything a path could be made of.
+	assert.equal(envKeyIsBlank("K= # tbd", "K"), true, "a line that assigns nothing is blank however uncertain the rest of it is");
+	assert.equal(envKeyIsBlank('K=""\nunset FOO', "K"), true, "one stray line elsewhere does not turn an empty value into a set one");
+	assert.equal(envKeyIsBlank('K=""\r\n', "K"), true, "and neither does a Windows line ending");
+	assert.equal(envKeyIsBlank('K="" x', "K"), false, "while a value that is not empty is never called empty");
 });
 
 test("E6: the cmd wrapper is a third loader, and it is read from its own source", () => {
@@ -503,18 +643,18 @@ test("E6: the cmd wrapper is a third loader, and it is read from its own source"
 	// Read from `deploy/worker-env-wrapper.cmd`, not run on Windows, and that limit is why the readings
 	// below are asserted against the wrapper's grammar rather than against a measurement.
 	const cmd = (text, key = "K") => readEnvAssignments(text, [key], { loader: "cmd" }).K;
-	assert.deepEqual(cmd("K=/srv/a.json"), { value: "/srv/a.json", plain: true, line: 1 });
-	assert.deepEqual(cmd('K="/srv/a.json"'), { value: '"/srv/a.json"', plain: true, line: 1 }, "the quotes are part of the value there, which is why renderEnvValue never writes any for win32");
-	assert.deepEqual(cmd("K=/srv/a.json   # note"), { value: "/srv/a.json   # note", plain: true, line: 1 }, "`eol=#` skips a line that STARTS with one, and does nothing to a trailing comment");
-	assert.deepEqual(cmd("K=C:\\pi\\x"), { value: "C:\\pi\\x", plain: true, line: 1 }, "a backslash is a literal there and an escape everywhere else");
-	assert.deepEqual(cmd("K=/a.json\nK=/b.json"), { value: "/b.json", plain: true, line: 2 }, "the last `set` wins, as everywhere else");
+	assert.deepEqual(cmd("K=/srv/a.json"), rec({ value: "/srv/a.json", plain: true, vouched: true }));
+	assert.deepEqual(cmd('K="/srv/a.json"'), rec({ value: '"/srv/a.json"', plain: true, vouched: true }), "the quotes are part of the value there, which is why renderEnvValue never writes any for win32");
+	assert.deepEqual(cmd("K=/srv/a.json   # note"), rec({ value: "/srv/a.json   # note", plain: true, vouched: true }), "`eol=#` skips a line that STARTS with one, and does nothing to a trailing comment");
+	assert.deepEqual(cmd("K=C:\\pi\\x"), rec({ value: "C:\\pi\\x", plain: true, vouched: true }), "a backslash is a literal there and an escape everywhere else");
+	assert.deepEqual(cmd("K=/a.json\nK=/b.json"), rec({ value: "/b.json", plain: true, vouched: true, line: 2 }), "the last `set` wins, as everywhere else");
 	assert.equal(cmd("export K=/srv/a.json"), undefined, "`delims==` makes the variable NAME `export K`, so this key is never assigned");
 	// An empty value UNSETS the variable there (`set \"K=\"`), where the POSIX loaders set it to "". The
 	// record still reports the assignment, because a caller asking about cmd needs to know the line exists.
-	assert.deepEqual(cmd("K="), { value: "", plain: true, line: 1 });
+	assert.deepEqual(cmd("K="), rec({ value: "", plain: true, vouched: true }));
 	// No line can reach another one: the poison rule is a shell property, and a per-line loader has none.
-	assert.deepEqual(cmd("OTHER='unclosed\nK=/srv/a.json"), { value: "/srv/a.json", plain: true, line: 2 }, "an unbalanced quote above costs nothing here");
-	assert.deepEqual(cmd("K=/srv/a.json\nunset K"), { value: "/srv/a.json", plain: true, line: 1 }, "and neither does a stray line below");
+	assert.deepEqual(cmd("OTHER='unclosed\nK=/srv/a.json"), rec({ value: "/srv/a.json", plain: true, vouched: true, line: 2 }), "an unbalanced quote above costs nothing here");
+	assert.deepEqual(cmd("K=/srv/a.json\nunset K"), rec({ value: "/srv/a.json", plain: true, vouched: true }), "and neither does a stray line below");
 });
 
 test("renderEnvValue writes what both consumers read back, and refuses what neither can", () => {
@@ -555,7 +695,7 @@ test("renderEnvValue never quotes for the Windows loader, and its bare set is cm
 test("a value that needs quoting round-trips through the writer and back out of the reader", () => {
 	const written = setEnvKeyIfEmpty("# PI_PAUSE_WINDOWS_FILE=   # quiet hours\n", "PI_PAUSE_WINDOWS_FILE", "/srv/a b #2/pause-windows.json");
 	assert.equal(written, "# PI_PAUSE_WINDOWS_FILE=   # quiet hours\nPI_PAUSE_WINDOWS_FILE='/srv/a b #2/pause-windows.json'\n");
-	assert.deepEqual(readEnvAssignments(written, ["PI_PAUSE_WINDOWS_FILE"]).PI_PAUSE_WINDOWS_FILE, { value: "/srv/a b #2/pause-windows.json", plain: true, line: 2 });
+	assert.deepEqual(readEnvAssignments(written, ["PI_PAUSE_WINDOWS_FILE"]).PI_PAUSE_WINDOWS_FILE, rec({ value: "/srv/a b #2/pause-windows.json", plain: true, vouched: true, line: 2 }));
 });
 
 test("setEnvKey: the already-exact case returns the same string object (identity, not just equality)", () => {
