@@ -526,9 +526,11 @@ test("neither LIST nor TRIGGER_DETAIL emits a working escape sequence, whoever w
   // Measured at 123 leaking lines across LIST and TRIGGER_DETAIL before the gate; the gate is one pass over
   // the finished lines in `renderPanel` plus one inside `frame`'s `padVisible`.
   //
-  // The question is asked AFTER removing the styler's own two tokens, because those are what a coloured
-  // pane is made of. Anything else still in the class arrived as data.
-  const styleTokens = /\u001b\[[0-9;]*m|\u001b\]8;;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+  // The question is asked after removing the styler's own SGR, because that is what a coloured pane is made
+  // of. AN OSC-8 HYPERLINK IS NOT REMOVED, and the earlier version of this test removing it is why it
+  // passed with both gates deleted: the one payload it could not catch was the one shaped like decoration.
+  // The panel emits no hyperlink at all now, so any OSC-8 in a pane came from the data.
+  const styleTokens = /\u001b\[[0-9;]*m/g;
   const ATTACKS = {
     "CSI erase-display": "\u001b[2J",
     "C1 CSI, which needs no ESC": "\u009b2J",
@@ -558,11 +560,11 @@ test("neither LIST nor TRIGGER_DETAIL emits a working escape sequence, whoever w
         await comp.dispose();
         for (const [pane, out] of [["LIST", list], ["TRIGGER_DETAIL", detail]]) {
           for (const line of out) {
-            assert.doesNotMatch(
-              String(line).replace(styleTokens, ""),
-              /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/,
-              `${name} in ${field}, ${pane} at width ${width}`,
-            );
+            // The INTRODUCER is what matters, not the text after it: once the ESC (or a C1 OSC byte) has
+            // become a space, a leftover `]8;;` is inert characters an operator can read. Both introducers
+            // are in the class this asks about, and the normaliser above no longer removes a link shape,
+            // so an allowlisted OSC-8 fails here.
+            assert.doesNotMatch(String(line).replace(styleTokens, ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${name} in ${field}, ${pane} at width ${width}`);
           }
         }
       }
@@ -591,7 +593,7 @@ test("the two WORKER-written values in a config pane go through the record belt 
     const shown = await openTrigger(shotSnap(trigger));
     // The styler's own SGR and OSC-8 are what a coloured pane is MADE of, so they are removed before the
     // question is asked; everything else that is still a control byte got there from the data.
-    const styleTokens = /\u001b\[[0-9;]*m|\u001b\]8;;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+    const styleTokens = /\u001b\[[0-9;]*m/g;
     for (const pane of [shown.rawList, shown.rawDetail]) {
       for (const line of String(pane).split("\n")) {
         assert.doesNotMatch(String(line).replace(styleTokens, ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${trigger.type}: no worker-written byte reaches a config pane`);
@@ -1841,30 +1843,30 @@ test("targetUrl: a github repo#N target yields the one derivable URL; everything
   assert.equal(targetUrl(null), null);
 });
 
-test("a github run's target is an OSC-8 link under a theme, still width-true; the plain path has no escape bytes", async () => {
-  const themed = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, theme: SGR_THEME, deps: cannedDeps({ fetchSnapshot: async () => githubRunSnap() }) });
-  await flush();
-  const lines = themed.render(80);
-  assert.ok(lines.join("\n").includes("\x1b]8;;https://github.com/o/r/issues/5\x07"), "the LIST run row links its target");
-  // stripAnsi covers OSC-8: asserted once explicitly on a linked row -- the link adds zero visible columns.
-  const linked = lines.find((l) => l.includes("\x1b]8;;"));
-  assert.equal(visibleLen(linked), 80, "the linked row still measures exactly the frame width");
-
-  themed.handleInput("\r"); // the run is row 0 (no triggers, no active row in this snapshot)
-  await flush();
-  const detail = themed.render(80).join("\n");
-  await themed.dispose();
-  assert.ok(detail.includes("\x1b]8;;https://github.com/o/r/issues/5\x07"), "RUN_DETAIL's target line links too");
-
-  const plain = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => githubRunSnap() }) });
-  await flush();
-  const out = plain.render(80).join("\n");
-  plain.handleInput("\r");
-  await flush();
-  const plainDetail = plain.render(80).join("\n");
-  await plain.dispose();
-  assert.ok(!out.includes("\x1b]8;;"), "PLAIN_THEME's link is a byte-identical passthrough on the list");
-  assert.ok(!plainDetail.includes("\x1b]8;;"), "and on the drill-in");
+test("NO pane emits an OSC-8 hyperlink any more, under any theme (#382)", async () => {
+  // THE FEATURE WAS REMOVED, and the reason is the gate: it can only allowlist a SHAPE, and a hyperlink an
+  // attacker wrote into a trigger field is shaped exactly like the one this panel used to write around a
+  // run's target. Keeping the shape kept theirs -- their URL under their display text, which is phishing in
+  // the operator's terminal, and an adversarial pass measured 29 such lines still reaching the screen while
+  // the sweep that was supposed to catch them normalised OSC-8 away before counting. The target TEXT still
+  // prints; what is gone is the click. `targetUrl` itself stays, because `y` copies it.
+  for (const [what, theme] of [["a theme", SGR_THEME], ["the plain path", undefined]]) {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, ...(theme ? { theme } : {}), deps: cannedDeps({ fetchSnapshot: async () => githubRunSnap() }) });
+    await flush();
+    const list = comp.render(80);
+    comp.handleInput("\r"); // the run is row 0 (no triggers, no active row in this snapshot)
+    await flush();
+    const detail = comp.render(80);
+    await comp.dispose();
+    for (const [pane, lines] of [["LIST", list], ["RUN_DETAIL", detail]]) {
+      assert.ok(!lines.join("\n").includes("\u001b]8;;"), `${what}, ${pane}: no hyperlink`);
+      assert.ok(lines.join("\n").includes("o/r#5"), `${what}, ${pane}: the target text is still printed`);
+      // LIST fills the width; RUN_DETAIL is a narrower drill centred in it, so the claim that holds for
+      // both is the bound, and the equality is asserted where it is the promise.
+      for (const l of lines) assert.ok(visibleLen(l) <= 80, `${what}, ${pane}: no row exceeds the width`);
+      if (pane === "LIST") for (const l of lines) assert.equal(visibleLen(l), 80, `${what}: every LIST row measures the frame width`);
+    }
+  }
 });
 
 test("`y`/`Y` copy the job id and target URL through the seam, with a one-input transient note", async () => {

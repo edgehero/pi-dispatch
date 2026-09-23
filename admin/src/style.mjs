@@ -17,7 +17,7 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { LINE_INPUT_CURSOR, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sparkline as plainSparkline } from "./panel.mjs";
+import { LINE_INPUT_CURSOR, dropLoneSurrogate, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sparkline as plainSparkline } from "./panel.mjs";
 
 // Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text / column count. Content is
 // ASCII + box-drawing + a handful of width-1 glyphs, so post-strip `.length` is a safe column proxy.
@@ -96,7 +96,11 @@ export function makeStyler(theme, { ascii = false } = {}) {
   const cell = (text, width, { color = null, align = "left", strong = false } = {}) => {
     const w = Math.max(0, Math.trunc(width) || 0);
     let plain = scrubControls(stripAnsi(String(text ?? "")));
-    if (plain.length > w) plain = w <= G.ellipsis.length ? plain.slice(0, w) : plain.slice(0, w - G.ellipsis.length) + G.ellipsis;
+    // `dropLoneSurrogate` on every cut, like `clip`: slicing UTF-16 units can land between the halves of an
+    // astral character, and half a pair is not a character. Measured at 89 lines of a framed LIST printing
+    // one, from a target field of emoji -- the first repair reached `clip` alone and three other cutters
+    // slice the same way.
+    if (plain.length > w) plain = w <= G.ellipsis.length ? dropLoneSurrogate(plain.slice(0, w)) : dropLoneSurrogate(plain.slice(0, w - G.ellipsis.length)) + G.ellipsis;
     plain = align === "right" ? plain.padStart(w) : plain.padEnd(w);
     let out = color ? fg(color, plain) : plain;
     return strong ? bold(out) : out;
@@ -150,8 +154,8 @@ export function makeStyler(theme, { ascii = false } = {}) {
     // without: clip the META first, and the LABEL only if it alone still does not fit. Getting this wrong by
     // one is why the clamp existed in the first place -- `Math.max(1, ...)` hid the overflow instead of
     // preventing it, and the line ran over its own width.
-    met = met.slice(0, Math.max(0, w - lab.length - 3));
-    const labClipped = lab.slice(0, Math.max(0, w - met.length - (met ? 3 : 2)));
+    met = dropLoneSurrogate(met.slice(0, Math.max(0, w - lab.length - 3)));
+    const labClipped = dropLoneSurrogate(lab.slice(0, Math.max(0, w - met.length - (met ? 3 : 2))));
     const ruleLen = Math.max(1, w - labClipped.length - met.length - (met ? 2 : 1));
     const labPart = labClipped ? bold(fg("muted", labClipped)) + " " : "";
     const rulePart = fg("border", G.h.repeat(ruleLen));
@@ -288,5 +292,5 @@ function padVisible(styler, line, width) {
 function clipPlain(s, width, ellipsis = "…") {
   const plain = scrubControls(s);
   if (plain.length <= width) return plain;
-  return width <= ellipsis.length ? plain.slice(0, width) : plain.slice(0, width - ellipsis.length) + ellipsis;
+  return width <= ellipsis.length ? dropLoneSurrogate(plain.slice(0, width)) : dropLoneSurrogate(plain.slice(0, width - ellipsis.length)) + ellipsis;
 }

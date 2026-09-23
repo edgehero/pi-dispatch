@@ -2331,8 +2331,21 @@ function coerceSettingValue(key: string, raw: string): number | string {
  * The model-visible channel for the PII-free structured views. `display: true` shows the text; the empty
  * options object is deliberate -- NEVER `triggerTurn`, which would spend a paid turn just to observe state.
  */
+/**
+ * THE MODEL-VISIBLE CHANNEL, and the third place the control-byte gate runs (issue #382).
+ *
+ * `renderTriggers`, `renderSettingsView` and `renderScopedLimits` print trigger, settings and limit fields
+ * that nothing re-validates on read -- `on.phrase` and a label arrive from `dispatch_trigger_add` itself --
+ * and they went straight to `sendMessage` without passing either pane gate, because those two sit in the
+ * overlay's own render path and this channel does not go near it. So an escape reached the terminal AND
+ * model context through `/dispatch triggers` while the overlay showing the same trigger was clean.
+ *
+ * `scrubControls` per LINE, not over the whole string: this channel is plain text with no styling to
+ * preserve, and the newlines between rows are this code's own.
+ */
 function send(pi: ExtensionAPI, content: string): void {
-  pi.sendMessage({ customType: CHANNEL, content, display: true }, {});
+  const safe = String(content ?? "").split("\n").map((l) => scrubControls(l)).join("\n");
+  pi.sendMessage({ customType: CHANNEL, content: safe, display: true }, {});
 }
 
 /**

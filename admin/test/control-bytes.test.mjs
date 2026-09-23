@@ -171,13 +171,48 @@ test("a framed line is EXACTLY the frame's width, dirty content included", () =>
 	// WIDTH AND BYTES TOGETHER, because either alone is satisfied by the wrong code: the substitution is
 	// 1:1, so a line scrubbed after being measured still comes out the right width -- it just comes out
 	// carrying a live escape. `frame` is the gate for its own body lines, and this is the claim.
-	const styleTokens = /\u001b\[[0-9;]*m|\u001b\]8;;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+	const styleTokens = /\u001b\[[0-9;]*m/g;
 	const styler = makeStyler(PLAIN_THEME);
 	const dirty = "job \u0007id \u001b[2J and \u009b more";
 	for (const w of [20, 40, 80]) {
 		for (const line of frame(styler, { title: dirty, width: w, lines: [dirty, styler.cell(dirty, w - 4)], footer: dirty })) {
 			assert.equal(visibleLen(line), w, `width ${w}: ${JSON.stringify(line)}`);
 			assert.doesNotMatch(String(line).replace(styleTokens, ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `width ${w}: a live escape survived the frame`);
+		}
+	}
+});
+
+test("a frame measures AFTER it substitutes, which an OSC-8-shaped run is the only way to see", () => {
+	// The two orders differ only for a sequence the MEASURER and the GATE disagree about. `stripAnsi` still
+	// recognises an OSC-8 shape and counts it as zero columns; the gate substitutes it, so it becomes real
+	// columns. Scrub after measuring and the frame believes a line is 36 columns while the terminal paints
+	// 46. Every other dirty fixture is 1:1 under both orders, which is why this mutation survived a sweep
+	// that had no link-shaped payload in it.
+	const styler = makeStyler(PLAIN_THEME);
+	const link = "\u001b]8;;a\u001bZb\u0007";
+	for (const w of [40, 60]) {
+		for (const line of frame(styler, { title: "t", width: w, lines: ["x" + link], footer: "f" })) {
+			assert.equal(visibleLen(line), w, `width ${w}: ${JSON.stringify(line)}`);
+		}
+	}
+});
+
+test("every cutter drops a half surrogate, not just `clip`", () => {
+	// `clip` was repaired first and three other cutters slice the same UTF-16 units: `styler.cell`,
+	// `styler.divider`'s two halves and the frame title's `clipPlain`. Through the real framed LIST that was
+	// 89 lines printing a lone high surrogate from a target of emoji.
+	const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+	const styler = makeStyler(PLAIN_THEME);
+	const text = "aaa" + "\u{1f600}".repeat(20);
+	for (let w = 2; w <= 30; w++) {
+		assert.doesNotMatch(styler.cell(text, w), lone, `cell at ${w}`);
+		// The two halves are cut by different arithmetic and the meta is cut FIRST, so a fixture that makes
+		// both halves long lets the label clip hide whatever the meta clip did. One short, one long, both ways.
+		assert.doesNotMatch(styler.divider("S", text, w), lone, `divider meta at ${w}`);
+		assert.doesNotMatch(styler.divider(text, "m", w), lone, `divider label at ${w}`);
+		assert.doesNotMatch(styler.divider(text, text, w), lone, `divider both at ${w}`);
+		for (const line of frame(styler, { title: text, width: w, lines: ["x"], footer: "f" })) {
+			assert.doesNotMatch(line, lone, `frame title at ${w}`);
 		}
 	}
 });

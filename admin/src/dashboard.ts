@@ -1876,7 +1876,12 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
   const targetCell = styler.fg("muted", cell(r.target));
   const cells = [
     styler.fg("text", cell(r.jobId)),
-    url === null ? targetCell : styler.link(targetCell, url),
+    // NO HYPERLINK, deliberately (issue #382). `targetUrl` still answers, because the trust model of the
+    // URL is worth keeping; what is gone is wrapping the cell in OSC-8. The gate over every pane line can
+    // only allowlist a SHAPE, and an attacker's link in a trigger field has the same shape as ours, so the
+    // panel stopped emitting the shape it cannot tell apart from theirs. The target text prints either
+    // way; what is lost is a click.
+    targetCell,
     styler.fg("accent", cell(r.flow)),
     outcomeColored(r.outcome, r.reason, styler),
     styler.fg("dim", `${cell(r.turns)}t`),
@@ -2382,9 +2387,8 @@ function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tai
 function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[] = [], sandbox: any = null): string[] {
   const r = record ?? {};
   // Every record string this pane prints goes through here, which is why the scrub lives INSIDE `show`
-  // rather than around the lines it builds: `styler.link(styler.fg("accent", show(r.target)), url)` puts
-  // the value inside two layers of escapes the styler owns, and scrubbing the composed string would take
-  // the hyperlink and the width math with it.
+  // rather than around the lines it builds: `styler.fg("accent", show(r.target))` puts the value inside an
+  // escape the styler owns, and scrubbing the composed string would take the width math with it.
   const show = cellOf; // the shared rule (issue #367); this name is what the rest of the function reads
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
@@ -2411,7 +2415,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // the target itself is linked, not the flow riding the same line -- and under PLAIN_THEME `link` is a
   // byte-identical passthrough, so the plain drill-in and its width math are untouched by construction.
   const url = targetUrl(r);
-  const targetPart = url === null ? styler.fg("accent", show(r.target)) : styler.link(styler.fg("accent", show(r.target)), url);
+  const targetPart = styler.fg("accent", show(r.target)); // no OSC-8: see the run row's note on the gate
   out.push(fitLine(styler.cell("target", 12, { color: "muted" }) + " " + targetPart + styler.fg("accent", ` · flow ${show(r.flow)}`), inner, styler));
 
   // timing: start -> end (+ duration when both timestamps resolve; they may be ms or ISO strings).

@@ -63,10 +63,18 @@ const MIN_WIDTH = 8;
 // eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
 const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
 
-// The ONLY escape sequences a styled line may keep: an SGR run and an OSC-8 hyperlink. Anything else that
-// starts with ESC is data that reached a pane, not decoration this project wrote.
+// The ONLY escape sequence a styled line may keep: an SGR run. Anything else that starts with ESC is data
+// that reached a pane, not decoration this project wrote.
+//
+// AN OSC-8 HYPERLINK IS NOT ON THIS LIST, and that is the whole reason the panel no longer writes one. An
+// allowlist can only recognise a SHAPE, and a hyperlink an attacker put in a trigger field has exactly the
+// same shape as one the styler wrote -- so keeping the shape keeps theirs too, with their URL under their
+// display text, which is phishing in the operator's terminal. The first version of this gate allowlisted
+// OSC-8 and measured itself clean with a normaliser that removed OSC-8 before counting; against a counter
+// that did not, 29 lines still carried an attacker's link. A sequence this module cannot attribute is a
+// sequence it substitutes.
 // eslint-disable-next-line no-control-regex -- the allowlist half of the class above
-const STYLE_TOKENS = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const STYLE_TOKENS = /\x1b\[[0-9;]*m/g;
 
 /** Remove C0/C1 control characters (shared by `clip` and `makeLineInput`). */
 function stripControls(s) {
@@ -104,10 +112,10 @@ export function scrubControls(s) {
  * The same class and the same operation, on a line that ALREADY carries the styler's own colour.
  *
  * `scrubControls` cannot be used there: ESC is itself in the class, so it would eat every SGR run and the
- * pane would come out monochrome. The answer is an ALLOWLIST of the two sequences this project's styler
- * emits -- an SGR run and an OSC-8 hyperlink, either terminator -- with every other control character
- * becoming a space, a bare ESC included. So `ESC [ 2 J`, `ESC ] 52 ; c ; ...` and a lone U+009B survive as
- * inert text while `ESC [ 31 m` and a real link pass through untouched.
+ * pane would come out monochrome. The answer is an ALLOWLIST of the one sequence this project's styler
+ * emits -- an SGR run -- with every other control character becoming a space, a bare ESC included. So
+ * `ESC [ 2 J`, `ESC ] 52 ; c ; ...`, an OSC-8 hyperlink and a lone U+009B all survive as inert text, while
+ * `ESC [ 31 m` passes through untouched.
  *
  * WHY A GATE AND NOT ANOTHER BELT. The first version of this change drew the line by PROVENANCE: the record
  * panes were scrubbed and the config panes were not, on the ground that they render what the operator typed.
@@ -170,7 +178,7 @@ export function clip(line, w) {
  * emoji. Dropping the orphan costs one column of content and is the only bounded answer -- widening the cut
  * would break the width promise instead.
  */
-function dropLoneSurrogate(s) {
+export function dropLoneSurrogate(s) {
   const last = s.charCodeAt(s.length - 1);
   return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
 }
