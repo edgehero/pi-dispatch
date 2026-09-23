@@ -496,3 +496,28 @@ test("the hand written stripper agrees with a real parser on every file in the t
 	assert.deepEqual(invented.sort(), [], "the stripper found reads a real parser does not: a comment is leaking");
 	assert.deepEqual(missed.sort(), [], "a real parser found reads the stripper missed");
 });
+
+test("every LIVE line of .env.example is a value systemd hands over unchanged (#392)", () => {
+	// `init` copies this file verbatim, `deploy/worker.service` reads it with `EnvironmentFile=`, and systemd
+	// does NOT treat a trailing `#` as a comment: measured on systemd 252, `K=30        # cap` reaches the
+	// service as the whole string `30        # cap`. Four scaffolded values were then refused by `loadConfig`
+	// and the boot exited 2, which the unit's own `RestartPreventExitStatus=2` leaves stopped; `PI_JOB_IMAGE`
+	// was worse, since nothing refused it and every job asked docker for an image name with prose in it.
+	//
+	// The rule is deliberately narrow, because a doc test that parses prose is an arms race the page wins: a
+	// LIVE line is one starting `NAME=`, and its value may not contain ` #`. Commented lines are not checked
+	// at all -- an operator uncommenting one gets what the line says, which is the point of the convention.
+	// The wrapper deployments are not the reason for this: `set -a; . ./.env` really does strip a comment.
+	// This is about the unit this repo ships.
+	const txt = readFileSync(join(REPO_ROOT, ".env.example"), "utf8");
+	const offenders = [];
+	txt.split("\n").forEach((line, i) => {
+		const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+		if (m && / #/.test(m[2])) offenders.push(`${i + 1}: ${m[1]}`);
+	});
+	assert.deepEqual(
+		offenders,
+		[],
+		"systemd keeps an inline comment as part of the value, so a live line must carry none: put the comment on its own line above it",
+	);
+});
