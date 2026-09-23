@@ -17,7 +17,7 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { sparkline as plainSparkline, fmtCost as plainFmtCost, scrubControls, LINE_INPUT_CURSOR } from "./panel.mjs";
+import { LINE_INPUT_CURSOR, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sparkline as plainSparkline } from "./panel.mjs";
 
 // Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text / column count. Content is
 // ASCII + box-drawing + a handful of width-1 glyphs, so post-strip `.length` is a safe column proxy.
@@ -75,10 +75,6 @@ export function makeStyler(theme, { ascii = false } = {}) {
   const fg = (color, text) => (color ? th.fg(color, String(text)) : String(text));
   const bold = (text) => th.bold(String(text));
 
-  /**
-   * A fixed-width cell: PLAIN text is clipped+padded to exactly `width` visible columns, THEN colored.
-   * `align` is "left" | "right". `bold` bolds after coloring. Result's visible width === `width`.
-   */
   /**
    * A cell of exactly `width` visible columns.
    *
@@ -196,8 +192,9 @@ export function makeStyler(theme, { ascii = false } = {}) {
   /**
    * Render a `makeLineInput` at `width` with the cursor cell in inverse video. panel's focused render
    * marks the cursor by wrapping one cell in the C0 `LINE_INPUT_CURSOR` pair; here that pair becomes an
-   * inverse-video cell (monochrome callers instead funnel the render through `clip`, which strips the
-   * sentinels). Either way the visible width is exactly `width`.
+   * inverse-video cell, and the visible width is exactly `width`. `clip` DELETES that pair, which is the
+   * pin `panel.mjs` keeps it deleting for -- but no production path clips a focused render, so this
+   * docblock no longer claims a monochrome caller that funnels one through it.
    */
   const lineInput = (input, width) => {
     const raw = input.render(width, { focused: true });
@@ -263,6 +260,11 @@ export const RULE = Symbol("rule");
 
 /** Right-pad a possibly-colored line with plain spaces to `width` visible columns (never truncates up-front). */
 function padVisible(styler, line, width) {
+  // THE GATE, and the reason it is here rather than at thirty call sites: every framed body line and every
+  // footer passes through this one function, whatever pane built it and whoever wrote the values in it.
+  // `scrubKeepingStyle` keeps the styler's own SGR and OSC-8 and substitutes everything else, so it runs
+  // BEFORE the measurement -- a byte that became a space is a column the frame has to account for.
+  line = scrubKeepingStyle(line);
   const vis = styler.visibleLen(line);
   // STRICTLY GREATER, then clip: the frame promises every body line is exactly `inner` columns, and an
   // over-wide one broke the right border instead -- the spend "off" rows at narrow widths never fitted.
@@ -278,14 +280,11 @@ function padVisible(styler, line, width) {
  * The title is STRIPPED of control bytes here rather than at each call site (issue #337). Two of the five
  * frame titles are built from a record's job id, this function clips without stripping, and fixing one
  * caller left the other carrying what the lines inside the frame no longer did. `panel.mjs`'s own `box`
- * already titles through `clip`, so the two frame builders now agree on the CLASS: C0 + DEL + C1, which
- * is the project's class for untrusted text on its way to a terminal. They deliberately differ on what
- * they do with a match. `clip` DELETES, which is right where it also measures the result; this
- * SUBSTITUTES a space, because `frame` computes its top rule from the title's length at the call site
+ * already titles through the same operation now, so the two frame builders agree on the CLASS -- which
+ * lives in `panel.mjs` and is imported, not respelled here (issue #382) -- AND on what to do with a match.
+ * Both SUBSTITUTE a space, because `frame` computes its top rule from the title's length at the call site
  * and a deleting strip would silently change that arithmetic.
  */
-// eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
-
 function clipPlain(s, width, ellipsis = "…") {
   const plain = scrubControls(s);
   if (plain.length <= width) return plain;

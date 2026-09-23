@@ -30,7 +30,7 @@ import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers,
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, meter, clip, clipData, hasControls, makeLineInput, scrubControls } from "./panel.mjs";
+import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -1077,6 +1077,15 @@ function budgetMeters(budget: any, settings: any, width: number): string[] {
  * the same content with `box`, its inner column count driving every meter and clip.
  */
 function renderPanel(snapshot: any, width: number, state: any, styler: any): string[] {
+  // THE SECOND HALF OF THE GATE. `frame`'s `padVisible` holds every framed body line and footer; this holds
+  // the rest -- every pane title, every hint row, and the whole UNFRAMED degrade, which returns bare array
+  // elements and never goes near `frame()`. One pass over the finished lines, so a pane added later cannot
+  // opt out of it by forgetting a belt. It is a no-op on a line that is already clean, and it never touches
+  // the styler's own SGR or an OSC-8 link.
+  return renderPanelLines(snapshot, width, state, styler).map((l) => scrubKeepingStyle(String(l)));
+}
+
+function renderPanelLines(snapshot: any, width: number, state: any, styler: any): string[] {
   const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
   const framed = Number.isFinite(width) && Math.trunc(width) >= MIN_WIDTH;
   const inner = Math.trunc(width) - 4;
@@ -1832,8 +1841,10 @@ export function targetUrl(record: any): string | null {
   // them, and `link` emits the URL into an OSC-8 sequence a BEL terminates early. The DISPLAY half of
   // that same call was scrubbed and the URL half was not, which is exactly the byte the design entry
   // says must never reach a terminal from a stored field.
-  const m = record.target.match(/^([^#\s\u0000-\u001f\u007f-\u009f]+)#(\d+)$/);
-  if (!m) return null;
+  const m = record.target.match(/^([^#\s]+)#(\d+)$/);
+  // THROUGH `hasControls`, not a sixth spelling of the class inline: this was the one copy the first draft
+  // of #382 left behind while claiming panel.mjs held the only one.
+  if (!m || hasControls(m[1])) return null;
   return `https://github.com/${m[1]}/issues/${m[2]}`;
 }
 
@@ -2044,15 +2055,17 @@ function renderTriggerDetail(t: any, inner: number, styler: any, sched: any = nu
   return out;
 }
 
-/** The staged `name@version` list for the armed trust-model line, or the nothing-staged notice. */
 /**
- * The one-shot mark, and the ONE value in these panes the worker writes (issue #382, item 2).
+ * The one-shot mark: two values in these panes that the WORKER writes, not the operator (issue #382).
  *
- * `DES-ADMIN-VIA-PI-EXTENSION` carves TRIGGERS, TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS
- * out of the record scrub on the ground that they render what the OPERATOR typed into their own file. That
- * was true of everything in them except `on.disarmed.at` and `on.disarmed.jobId`, which the worker writes
- * from the queue job id (`worker/src/triggers-file.mjs`) and `read-model.mjs` carries through verbatim. So
- * the carve-out is drawn by PROVENANCE now, and these two go through the same belt as a run record's.
+ * `on.disarmed.at` and `on.disarmed.jobId` come from the queue job id (`worker/src/triggers-file.mjs`) and
+ * `read-model.mjs` carries them through verbatim, so `DES-ADMIN-VIA-PI-EXTENSION`'s old ground for leaving
+ * these panes unscrubbed -- that they render what the OPERATOR typed into their own file -- was not true of
+ * them. Drawing the line by PROVENANCE instead was the first repair, and an adversarial pass refuted that
+ * too: `writeTriggers` accepts `run.image`, `on.phrase` and a label verbatim, and it is also the
+ * model-callable `dispatch_trigger_add`, so "the operator typed it" is not a property of the file either.
+ * The boundary is now a GATE over every finished pane line (`renderPanel`, and `frame`'s `padVisible`),
+ * and these belts are what they should always have been: belt-and-braces behind it, not the boundary.
  *
  * Both arms of the trigger detail share this, because they were two copies of the same interpolation and
  * the first version of this fix corrected one of them.
@@ -2063,6 +2076,7 @@ function spentMark(disarmed: any): string {
   return `spent ${cellOf(disarmed.at ?? "-")}${by}`;
 }
 
+/** The staged `name@version` list for the armed trust-model line, or the nothing-staged notice. */
 function stagedNames(staged: any): string {
   // READ BACK from the stage manifest, which the worker writes -- so it is not operator prose either, even
   // though the pane it lands in is a config pane. Defence in depth rather than a live leak: `packages.mjs`
@@ -2235,7 +2249,8 @@ function sortRuns(rows: any[], runSort: string): any[] {
 /**
  * The interactive RUNS list over the rows model: one compact row per entry, cursor-prefixed (`›` on the
  * selected row, space otherwise). The ACTIVE row leads with its id-only job id; run rows lead with `jobId`
- * so a jobId match still hits. Each row is `clip`ped to the inner column count so a long target can neither
+ * so a jobId match still hits. Each row goes through `clipData` -- substitute, then clip to the inner
+ * column count -- so a long target can neither
  * overflow the frame nor mis-size a row. Operates only on the passed rows -- no read, no `.log`, no `.data`.
  */
 function renderRunList(rows: any[], selected: number, w: number): string[] {
@@ -2292,9 +2307,10 @@ function tailMatches(lines: any[], query: string): number[] {
  * The tail state frames through `frame` (not panel's box) because the search bar's cursor and the match
  * highlight are escapes box's own clip would strip; under PLAIN_THEME the two framers are byte-identical
  * for this content, so the plain path is unchanged. The ORDER inside is the security seam: every
- * untrusted tail byte passes through `clip` FIRST -- control-strip plus width -- and the warning color
- * wraps the ALREADY-clipped text, so a stray escape in the log still dies in clip and the highlight can
- * never carry raw bytes past it.
+ * untrusted tail byte passes through `clipData` FIRST -- substitute, then width -- and the warning color
+ * wraps the ALREADY-clipped text, so a stray escape in the log dies there and the highlight can never
+ * carry raw bytes past it. `clipData` and not `clip`, which DELETES: the framed branch used to delete
+ * where the degrade substituted, so the two branches clipped the same log to different widths.
  */
 function renderLiveTail({ snapshot, framed, width, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, styler }: any): string[] {
   const boxTitle = `live ${scrubControl(String(tailJobId ?? "-"))}`;

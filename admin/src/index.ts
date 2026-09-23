@@ -121,7 +121,7 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
-import { clipData, setGlyphs } from "./panel.mjs";
+import { clipData, scrubControls, setGlyphs } from "./panel.mjs";
 import { openSandbox, sandboxEgress, sandboxSyncRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
@@ -1844,7 +1844,15 @@ function sandboxEgressPosture(env: any): any {
  * runner reading the same stream would lose its own result frames to a stray write.
  */
 export async function openSandboxSession(paths: any, jobId: string, io: any = {}): Promise<void> {
-  const write = io.write ?? ((s: string) => process.stdout.write(s));
+  // SCRUBBED AT THE SEAM, like every other terminal write in this extension. These lines run with the TUI
+  // SUSPENDED, so they reach the raw terminal with nothing between them and it, and one of them interpolates
+  // `manifest.image` -- read back by a bare `JSON.parse` from a manifest the WORKER stamped from the
+  // trigger's `run.image`, which the project's own writer accepts verbatim. That is the same value the
+  // panel's gate now holds; this path did not go through a pane at all.
+  const out = io.write ?? ((s: string) => process.stdout.write(s));
+  // Per LINE, because these messages carry deliberate newlines and `scrubControls` would turn each into a
+  // space: the class is about what a terminal INTERPRETS, and the line breaks here are this code's own.
+  const write = (s: string) => out(String(s).split("\n").map((l) => scrubControls(l)).join("\n"));
   const pause = io.pause ?? pauseForMessage;
   const env = io.env ?? process.env;
   let egress;

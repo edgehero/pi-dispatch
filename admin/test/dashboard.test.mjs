@@ -428,12 +428,17 @@ const pkgSnap = (packages, staged = { stagedAt: null, packages: [] }) => ({
 const openTrigger = async (snap) => {
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
   await flush();
-  const list = stripAnsi(comp.render(80).join("\n"));
+  const rawList = comp.render(80).join("\n");
+  const list = stripAnsi(rawList);
   comp.handleInput("\r"); // row 0 is the trigger -- triggers lead the rows list
   await flush();
-  const detail = stripAnsi(comp.render(80).join("\n"));
+  const rawDetail = comp.render(80).join("\n");
+  const detail = stripAnsi(rawDetail);
   await comp.dispose();
-  return { list, detail };
+  // The RAW renders as well as the stripped ones, because `stripAnsi` DELETES an SGR-shaped run whole: a
+  // test that only sees the stripped text cannot tell a belted escape from an unbelted one, and a mutant
+  // that passed `disarmed.jobId` through raw survived the suite for exactly that reason.
+  return { list, detail, rawList, rawDetail };
 };
 
 test("the LIST badges a packages-loading trigger, and leaves a declining one unmarked", async () => {
@@ -512,6 +517,59 @@ test("the LIST badges a one-shot: [once] armed, [spent] disarmed, absent otherwi
   assert.doesNotMatch(n.list, /\[once\]|\[spent\]/, "no one-shot fields, no badge -- the row is byte-identical to before");
 });
 
+test("NO pane emits a working escape sequence, whoever wrote the value (#382)", async () => {
+  // THE RULE, AS ONE TEST, and it replaces a carve-out that was refuted rather than merely incomplete.
+  // The first version of this change exempted the config panes because they render "what the operator typed
+  // into their own file". But `writeTriggers` -- the single funnel behind every CRUD dialog AND the
+  // model-callable `dispatch_trigger_add` -- accepts `run.image`, `on.phrase` and a label verbatim, so an
+  // erase-display, an OSC-8 link or an OSC-52 clipboard write reached the overlay and `sendMessage` raw.
+  // Measured at 123 leaking lines across LIST and TRIGGER_DETAIL before the gate; the gate is one pass over
+  // the finished lines in `renderPanel` plus one inside `frame`'s `padVisible`.
+  //
+  // The question is asked AFTER removing the styler's own two tokens, because those are what a coloured
+  // pane is made of. Anything else still in the class arrived as data.
+  const styleTokens = /\u001b\[[0-9;]*m|\u001b\]8;;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+  const ATTACKS = {
+    "CSI erase-display": "\u001b[2J",
+    "C1 CSI, which needs no ESC": "\u009b2J",
+    "OSC-8 hyperlink": "\u001b]8;;http://evil.example\u0007click\u001b]8;;\u0007",
+    "OSC-52 clipboard write": "\u001b]52;c;cm0gLXJmIH4=\u0007",
+  };
+  for (const [name, payload] of Object.entries(ATTACKS)) {
+    for (const field of ["image", "flow", "phrase", "skillsDir"]) {
+      // `packages: true`, so TRIGGER_DETAIL renders the STAGED NAMES as well: they are read back from a
+      // manifest the worker writes, and nothing re-validates them on read.
+      const trigger = { type: "issue", action: ["closed"], number: 4, flow: "fix", forge: "github", packages: true, image: "img", [field]: payload };
+      const snap = {
+        ...SNAPSHOT,
+        runs: [],
+        settings: { path: `/s${payload}`, overlay: { model: `m${payload}`, dailyCap: 25 } },
+        schedulers: [{ key: `k${payload}`, next: AT }],
+        triggers: { triggers: [trigger] },
+        stagedPackages: { stagedAt: null, packages: [`pkg${payload}`] },
+      };
+      for (const width of [4, 40, 80, 200]) {
+        const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+        await flush();
+        const list = comp.render(width);
+        comp.handleInput("\r");
+        await flush();
+        const detail = comp.render(width);
+        await comp.dispose();
+        for (const [pane, out] of [["LIST", list], ["TRIGGER_DETAIL", detail]]) {
+          for (const line of out) {
+            assert.doesNotMatch(
+              String(line).replace(styleTokens, ""),
+              /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/,
+              `${name} in ${field}, ${pane} at width ${width}`,
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
 test("the two WORKER-written values in a config pane go through the record belt (#382)", async () => {
   // THE CARVE-OUT IS DRAWN BY PROVENANCE, not by pane. `DES-ADMIN-VIA-PI-EXTENSION` puts TRIGGERS,
   // TRIGGER_DETAIL, SETTINGS, SCOPED LIMITS and PAUSE WINDOWS outside the record scrub on the ground that
@@ -523,18 +581,24 @@ test("the two WORKER-written values in a config pane go through the record belt 
   //
   // BOTH ARMS, because the detail renders this twice -- the issue arm and the label/pull_request arm -- and
   // they were two copies of one interpolation.
+  // The id carries a WHOLE SGR RUN, which is the shape that hid this: `stripAnsi` deletes it, so the
+  // stripped render looked clean whether or not the belt ran. The assertions below read the RAW render.
   const dirty = { at: "2026-08-20T09:00:00Z\u0007", jobId: "gh-\u001b[31m77" };
   for (const trigger of [
     { type: "issue", action: ["closed"], number: 40, once: true, disarmed: dirty, flow: "deploy", forge: "github", packages: false },
     { type: "pull_request", action: ["closed"], number: 7, once: true, any: [], all: [], none: [], disarmed: dirty, flow: "archive", forge: "github", packages: false },
   ]) {
     const shown = await openTrigger(shotSnap(trigger));
-    for (const pane of [shown.list, shown.detail]) {
+    // The styler's own SGR and OSC-8 are what a coloured pane is MADE of, so they are removed before the
+    // question is asked; everything else that is still a control byte got there from the data.
+    const styleTokens = /\u001b\[[0-9;]*m|\u001b\]8;;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+    for (const pane of [shown.rawList, shown.rawDetail]) {
       for (const line of String(pane).split("\n")) {
-        assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${trigger.type}: no worker-written byte reaches a config pane`);
+        assert.doesNotMatch(String(line).replace(styleTokens, ""), /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `${trigger.type}: no worker-written byte reaches a config pane`);
       }
     }
     assert.match(String(shown.detail), /spent 2026-08-20T09:00:00Z /, "substituted, so the value keeps its width");
+    assert.match(String(shown.detail), /by gh- \[31m77/, "and the id's escape run is spaced out, not deleted and not obeyed");
   }
 });
 
@@ -2254,6 +2318,35 @@ test("the LIVE_TAIL degrade scrubs the log's own bytes, not just the id (#367)",
     for (const width of [80, 40, NaN, 4]) assert.doesNotMatch(comp.render(width).join("\n"), dirty, `${what} leaked at width ${width}`);
     await comp.dispose();
   }
+});
+
+test("the FRAMED tail substitutes the same bytes the degrade does, title included (#382)", async () => {
+  // The #367 test above asks whether a control byte SURVIVES, and deleting satisfies that as well as
+  // substituting does -- so a framed branch reverted to `clip` passed it while clipping one column narrower
+  // than the degrade for the same log. The operation, not just the class, is the thing to pin: the markers
+  // are letter pairs the chrome cannot spell, and the claim is about ADJACENCY.
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: "jT\u0001B", active: [{ jobId: "jT\u0001B" }] }),
+      tailLog: async () => ({ lines: ["body Q\u0001Z here"] }),
+    }),
+  });
+  await flush();
+  comp.handleInput("l");
+  await flush();
+  const framed = comp.render(200).join("\n");
+  const degraded = comp.render(4).join("\n");
+  await comp.dispose();
+  for (const [name, out] of [["framed", framed], ["degraded", degraded]]) {
+    assert.match(out, /jT B/, `${name}: the tail's own title id is spaced, not deleted`);
+    assert.doesNotMatch(out, /jTB/, `${name}: deleting the id makes the two branches disagree on width`);
+  }
+  assert.match(framed, /body Q Z here/, "framed: the log line is spaced");
+  assert.doesNotMatch(framed, /QZ/, "framed: and never deleted, which is what `clip` would do");
 });
 
 test("the plain renderers put every RECORD field through one cell rule (#367)", async () => {

@@ -61,6 +61,11 @@ const MIN_WIDTH = 8;
 // eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
 const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
 
+// The ONLY escape sequences a styled line may keep: an SGR run and an OSC-8 hyperlink. Anything else that
+// starts with ESC is data that reached a pane, not decoration this project wrote.
+// eslint-disable-next-line no-control-regex -- the allowlist half of the class above
+const STYLE_TOKENS = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
 /** Remove C0/C1 control characters (shared by `clip` and `makeLineInput`). */
 function stripControls(s) {
   return String(s ?? "").replace(CONTROL_CHARS, "");
@@ -84,11 +89,43 @@ function stripControls(s) {
  *
  * C1 is in the class as well as C0 and DEL, because U+009B is a CSI introducer that needs no ESC in front.
  *
- * This module has no imports and a test pins that it has none, so the class lives here and the callers come
- * to it rather than the other way round.
+ * This module has no imports today, which is why the class lives here and the callers come to it rather
+ * than the other way round. Stated as a fact about the file and not as a pin: `panel.test.mjs`'s purity
+ * test bans fs, `console`, `process.env` and the pi package by name, and a plain local import would pass
+ * it. The first version of this comment claimed a pin that does not exist.
  */
 export function scrubControls(s) {
   return String(s ?? "").replace(CONTROL_CHARS, " ");
+}
+
+/**
+ * The same class and the same operation, on a line that ALREADY carries the styler's own colour.
+ *
+ * `scrubControls` cannot be used there: ESC is itself in the class, so it would eat every SGR run and the
+ * pane would come out monochrome. The answer is an ALLOWLIST of the two sequences this project's styler
+ * emits -- an SGR run and an OSC-8 hyperlink, either terminator -- with every other control character
+ * becoming a space, a bare ESC included. So `ESC [ 2 J`, `ESC ] 52 ; c ; ...` and a lone U+009B survive as
+ * inert text while `ESC [ 31 m` and a real link pass through untouched.
+ *
+ * WHY A GATE AND NOT ANOTHER BELT. The first version of this change drew the line by PROVENANCE: the record
+ * panes were scrubbed and the config panes were not, on the ground that they render what the operator typed.
+ * An adversarial pass refuted that. `run.image`, `on.phrase` and `on.any` are accepted verbatim by the
+ * project's own `writeTriggers`, which is also the model-callable `dispatch_trigger_add`, and a trigger
+ * carrying an erase-display, an OSC-8 link or an OSC-52 clipboard write rendered RAW into the overlay and
+ * into `sendMessage`. The design entry's rule has always been "whoever wrote that field", and a carve-out
+ * with a list of exceptions is the shape that keeps being wrong here. So the rule is now: no exception, and
+ * one place enforces it. The per-field scrubs stay, as belt-and-braces rather than as the boundary.
+ */
+export function scrubKeepingStyle(s) {
+  const text = String(s ?? "");
+  let out = "";
+  let at = 0;
+  STYLE_TOKENS.lastIndex = 0;
+  for (let m = STYLE_TOKENS.exec(text); m !== null; m = STYLE_TOKENS.exec(text)) {
+    out += scrubControls(text.slice(at, m.index)) + m[0];
+    at = m.index + m[0].length;
+  }
+  return out + scrubControls(text.slice(at));
 }
 
 /** Does this string carry one? `search` rather than `.test`, because a `/g` regex carries `lastIndex`. */
@@ -122,7 +159,18 @@ export function clip(line, w) {
   if (clean.length <= width) return clean;
   const ell = active.ellipsis;
   if (width <= ell.length) return ell.slice(0, width);
-  return clean.slice(0, width - ell.length) + ell;
+  return dropLoneSurrogate(clean.slice(0, width - ell.length)) + ell;
+}
+
+/**
+ * A cut lands between the two halves of an astral character, and half a surrogate pair is not a character:
+ * it reaches the terminal as U+FFFD at best. Measured through the real `/dispatch logs` viewer on a log of
+ * emoji. Dropping the orphan costs one column of content and is the only bounded answer -- widening the cut
+ * would break the width promise instead.
+ */
+function dropLoneSurrogate(s) {
+  const last = s.charCodeAt(s.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
 }
 
 /** `clip` to `w`, then right-pad with spaces to exactly `w` columns. */
@@ -143,7 +191,9 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
   const lines = [];
 
   // Top border: `+- title -...-+`, title clipped so the border never overflows `w`.
-  const titleText = title ? ` ${clip(title, Math.max(0, inner - 2))} ` : "";
+  // `clipData`, not `clip`: `frame` substitutes in its own title (`clipPlain`), and a title that DELETES
+  // here clipped one column narrower than the coloured twin for the same string.
+  const titleText = title ? ` ${clipData(title, Math.max(0, inner - 2))} ` : "";
   const topFill = Math.max(0, w - 2 - 1 - titleText.length); // corners + one leading `h`
   lines.push(active.tl + active.h + titleText + active.h.repeat(topFill) + active.tr);
 

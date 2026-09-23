@@ -97,10 +97,29 @@ test("the logs viewer gates the file's own bytes, honours its width, and survive
   const jobId = "job-1";
   writeFileSync(join(dir, `${jobId}.log`), "line one\u001b[31m red\u0007\nline two\u009bCSI\n" + "x".repeat(200) + "\n");
   const view = fakeCtx({ withCustom: true });
-  await def.handler(`logs ${jobId}`, { ...view.ctx, env: { PI_LOGS_DIR: dir } });
+  // THROUGH `process.env`, and this is the repair of a test that proved nothing. `dispatch` resolves its
+  // paths with `resolvePaths(process.env)` (index.ts) and never reads `ctx.env`, so the first version of
+  // this test -- which passed only `ctx.env` -- landed on the NO-LOG branch every time: the `.log` written
+  // above was never opened, and every per-line assertion below ran against a missing-file title and an
+  // empty string. Two mutants that push the file's own lines raw survived the whole suite because of it.
+  const had = Object.prototype.hasOwnProperty.call(process.env, "PI_LOGS_DIR");
+  const before = process.env.PI_LOGS_DIR;
+  process.env.PI_LOGS_DIR = dir;
+  try {
+    await def.handler(`logs ${jobId}`, view.ctx);
+  } finally {
+    if (had) process.env.PI_LOGS_DIR = before;
+    else delete process.env.PI_LOGS_DIR;
+  }
   const factory = view.customCalls.at(-1)?.[0];
   assert.equal(typeof factory, "function", "the viewer was opened");
   const component = factory({}, {}, {}, () => {});
+  // THE ANTI-VACUITY CLAIM, asserted rather than assumed: the lines below are the FILE's, so this test can
+  // never again pass by rendering a missing-log title. The escape run is substituted, not deleted, so its
+  // bracket text survives as inert characters.
+  const wide = component.render(400).join("\n");
+  assert.match(wide, /line one \[31m red/, "the viewer opened the .log and gated its first line");
+  assert.match(wide, /line two CSI/, "and its second, whose C1 introducer became a space rather than a CSI");
   for (const width of [40, 80, NaN, 0, undefined]) {
     const out = component.render(width);
     assert.ok(Array.isArray(out) && out.length > 0, `width ${width}: the viewer renders something`);

@@ -259,3 +259,19 @@ test("a detached panel session says so, and leaves the network (#277)", async ()
   assert.match(detached.written.join(""), /detached: the sandbox is still running with its egress network, which is left in place after it exits/);
   assert.ok(!detached.docker.includes("network rm pi-sandbox-gh-1-net"));
 });
+
+test("the sandbox session's own terminal writes are scrubbed, manifest image included (#382)", async () => {
+	// These five lines run with the TUI SUSPENDED, so they reach the raw terminal with nothing between them
+	// and it -- and one interpolates `manifest.image`, read back by a bare `JSON.parse` from a file the
+	// WORKER stamps from the trigger's `run.image`, which the project's own writer accepts verbatim. Every
+	// pane in the panel now holds that byte; this path never went through a pane at all.
+	const paths = { sandboxDir: retainedRoot({ backend: "local", image: "pi-job\u001b]52;c;cm0=\u0007:latest" }), sandboxRetentionHours: 24, sandboxIdleMinutes: 30 };
+	const io = panelIo();
+	await mod.openSandboxSession(paths, "gh-1", io.io);
+	const all = io.written.join("");
+	assert.ok(all.length > 0, "the session wrote something");
+	assert.doesNotMatch(all, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "no control byte reaches the suspended terminal");
+	// PER LINE and not by deleting them: the messages carry deliberate newlines, and turning those into
+	// spaces would run five separate notices together.
+	assert.ok(all.split("\n").length > 1, "and the writer's own line breaks survive the scrub");
+});
