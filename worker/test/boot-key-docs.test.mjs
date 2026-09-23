@@ -85,23 +85,31 @@ test("both operator pages say doctor FAILS on an empty value, in the paragraph t
 		// from, so it is the unit the claim is checked in.
 		const paras = text.split(/\n\s*\n/).filter((b) => /EMPTY value/i.test(b));
 		assert.equal(paras.length >= 1, true, `${path}: says something about an EMPTY value`);
-		const said = paras.join("\n\n");
-		assert.ok(
-			paras.some((b) => b.includes(key)),
-			`${path}: the EMPTY-value paragraph names THIS key, not another one`,
-		);
-		assert.match(said, /is NOT unset|is not an unset one/i, `${path}: an empty value is not an unset one`);
-		assert.match(said, /doctor fails on it|doctor \*\*fails\*\*/i, `${path}: and doctor fails on it`);
+		// THE PARAGRAPH ABOUT THIS KEY, singular. Splitting into paragraphs and then joining them back put
+		// the claims and their inversions into one blob again: a decoy paragraph about a DIFFERENT key
+		// satisfied every positive assertion while the page's own paragraph said the opposite. Each
+		// paragraph that mentions this key is now held to the claims on its own.
+		const mine = paras.filter((b) => b.includes(key));
+		assert.ok(mine.length >= 1, `${path}: an EMPTY-value paragraph names THIS key`);
+		for (const said of mine) {
+			assert.match(said, /is NOT unset|is not an unset one/i, `${path}: an empty value is not an unset one`);
+			assert.match(said, /doctor fails on it|doctor \*\*fails\*\*/i, `${path}: and doctor fails on it`);
 		// THE CONSEQUENCE, in the same paragraph, and its inversions barred there. The first test in this
 		// file proves an empty value survives the config read and the loader then throws; a page that says
 		// the worker starts anyway is contradicting a behaviour measured two tests above. The `??` itself is
 		// deliberately NOT required: one page carries this in a reference table, where naming an operator
 		// would be pinning prose shape rather than a claim -- but `||` IS barred, because writing it is
 		// asserting the opposite of what `config.mjs` does.
-		assert.match(said, /refuses? to (start|boot)/i, `${path}: says what the worker does about it`);
-		assert.doesNotMatch(said, /\|\|/, `${path}: and never names the operator that would drop it`);
-		assert.doesNotMatch(said, /doctor (stays silent|says nothing)/i, `${path}: the inverted sentence must not survive`);
-		assert.doesNotMatch(said, /starts? normally|drops? (it|an empty)|discard|feature off/i, `${path}: nor the inverted consequence`);
+			assert.match(said, /refuses? to (start|boot)/i, `${path}: says what the worker does about it`);
+			assert.doesNotMatch(said, /\|\|/, `${path}: and never names the operator that would drop it`);
+			assert.doesNotMatch(said, /doctor (stays silent|says nothing|prints no line)/i, `${path}: the inverted sentence must not survive`);
+			assert.doesNotMatch(said, /starts? (normally|cleanly)|boots? (normally|cleanly)|drops? (it|an empty)|discard|resolves to nothing|feature off|nothing you have to fill/i, `${path}: nor the inverted consequence`);
+		}
+		// AND NO OTHER paragraph on the page may contradict them. A decoy that never names the key was the
+		// third way this test was defeated.
+		for (const other of paras.filter((b) => !b.includes(key))) {
+			assert.doesNotMatch(other, /behaves exactly as leaving the line out|boots? (normally|cleanly)|prints no line about it/i, `${path}: a paragraph about another key still may not say the opposite of this one`);
+		}
 	}
 });
 
