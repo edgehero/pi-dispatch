@@ -566,3 +566,22 @@ test("no assignment in .env.example carries an inline comment, live or commented
 		"systemd reads no `export` line: it logs `Ignoring invalid environment assignment` and the key is unset",
 	);
 });
+
+test("the header states the `$` disagreement, because no reader covers every key (#394)", () => {
+	// PINNED, and the reason is that this paragraph is the WHOLE fix for one half of issue #394. The reader
+	// declines to vouch for a `$` value on both POSIX loaders, so doctor names the line -- but only for the
+	// two boot keys it reads. Every other key in this file (the jobs dir, the sandbox dir, a folder path) is
+	// covered by nothing but these lines, and a mutation deleting them left the whole suite green.
+	//
+	// The claim, not the wording: it must name the variable expansion, say systemd reads it literally, and
+	// tell the operator what to do instead. Asserted on the mirror as well, because they are byte-identical
+	// by a separate pin and this one would otherwise pass on a file nobody ships.
+	for (const rel of ["../../.env.example", "../.env.example"]) {
+		const text = readFileSync(new URL(rel, import.meta.url), "utf8");
+		const header = text.slice(0, text.indexOf("# --- "));
+		assert.match(header, /\$HOME/, `${rel}: the header names the shape an operator would write`);
+		assert.match(header, /literal/i, `${rel}: and says systemd reads it literally`);
+		assert.match(header, /systemd/, `${rel}: naming the loader that differs`);
+		assert.match(header, /Write the path out in full/, `${rel}: and what to do instead`);
+	}
+});

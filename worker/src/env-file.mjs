@@ -34,12 +34,19 @@ import { chmodSync, readFileSync, realpathSync, renameSync, statSync, writeFileS
  * wrongly overwriting one.
  */
 /**
- * Replace a commented line with `KEY=value` while KEEPING the original line, as a comment, above it.
+ * Replace a commented line with `KEY=value`, KEEPING the original line above it as a comment when it said
+ * anything, and dropping it when it did not.
  *
- * `.env.example` documents most keys INLINE (`# PI_LOGS_DIR=   # where per-job status records land`) with
- * indented continuation comments below, and both transforms replace a line whole, so without this an `up`
- * that fills four commented keys silently deletes four lines of the operator's own reference and leaves
- * those continuations dangling under a now-set key.
+ * WHAT THE KEEPING IS FOR, restated after issue #392 moved the shipped file's documentation (issue #394):
+ * a line being replaced may carry the operator's own note -- `# PI_LOGS_DIR=/old   # the NFS one` -- and
+ * both transforms replace a line whole, so without this an `up` that fills four commented keys silently
+ * deletes four lines of somebody's reference. That is still true of a hand-written `.env`.
+ *
+ * It is no longer true of `.env.example`, which now documents each key in comment lines ABOVE it and
+ * leaves the key's own line bare (`# PI_LOGS_DIR=`). Keeping THAT line preserved nothing and left every
+ * `up` deployment carrying four stubs whose only purpose was to carry text they no longer carry. So a bare
+ * commented key -- nothing after the `=` but whitespace -- is dropped, and anything else is kept. The
+ * documentation above the key is untouched either way: only the key's own line is ever replaced.
  *
  * The obvious alternative, carrying the inline `# ...` onto the new line, was written first and then
  * REJECTED: `deploy/worker.service` feeds this file to systemd through `EnvironmentFile=`, whose parser
@@ -53,9 +60,13 @@ import { chmodSync, readFileSync, realpathSync, renameSync, statSync, writeFileS
  * copying the old one up as a comment would leave a fragment of what was replaced behind, on the path
  * whose own docblock warns it will happily overwrite a live credential.
  */
+/** A commented key that says nothing: `# KEY=`, with only whitespace after the `=` and no inline note. */
+const BARE_COMMENTED_KEY = /^[ \t]*#[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=[ \t]*$/;
+
 function replacementLines(key, value, bare, wasComment, opts) {
 	const rendered = renderEnvValue(value, opts);
-	return wasComment ? [bare, `${key}=${rendered}`] : [`${key}=${rendered}`];
+	const keep = wasComment && !BARE_COMMENTED_KEY.test(bare);
+	return keep ? [bare, `${key}=${rendered}`] : [`${key}=${rendered}`];
 }
 
 /**

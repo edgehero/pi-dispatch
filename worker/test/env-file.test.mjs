@@ -28,9 +28,14 @@ const cases = [
 		// lines of the operator's own reference. Carrying the inline `# ...` onto the new line instead was
 		// written and rejected: systemd's `EnvironmentFile=` parser only recognises a comment at the start
 		// of a line, so it would have set the variable to the value PLUS the sentence.
-		name: "a commented line is uncommented BELOW itself, so its documentation survives",
+		// A BARE commented key is DROPPED, not kept (issue #394). Keeping it was for the inline documentation
+		// `.env.example` used to carry on the key's own line; issue #392 moved that ABOVE the key, where this
+		// transform never touches it, so the kept line became a stub whose only purpose was to carry text it
+		// no longer carries -- four of them in every `up` deployment. The two cases below show what keeping is
+		// still for: a line that actually says something.
+		name: "a BARE commented key is replaced outright, leaving no stub behind",
 		text: "A=1\n# WEBHOOK_SECRET=\nB=2\n",
-		expected: "A=1\n# WEBHOOK_SECRET=\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
+		expected: "A=1\nWEBHOOK_SECRET=s3cr3t\nB=2\n",
 	},
 	{
 		name: "a commented line without the space after # also counts",
@@ -152,7 +157,8 @@ const overwriteCases = [
 		// lost. A SET line is not, and that asymmetry is deliberate on this path -- copying a replaced
 		// value up as a comment would leave a fragment of a live credential behind, on the one transform
 		// whose docblock warns it will happily replace one.
-		name: "a commented line is uncommented BELOW itself when no set line exists",
+		// KEPT, because `gh` after the `=` is a value an operator may want back.
+		name: "a commented line CARRYING A VALUE is uncommented below itself when no set line exists",
 		text: "A=1\n# GITHUB_AUTH_SOURCE=gh\nB=2\n",
 		key: "GITHUB_AUTH_SOURCE",
 		expected: "A=1\n# GITHUB_AUTH_SOURCE=gh\nGITHUB_AUTH_SOURCE=app\nB=2\n",
@@ -966,4 +972,25 @@ test("updateEnvFile: overwrite:true onto an already-exact line writes NOTHING (i
 	assert.deepEqual(result, { changed: false });
 	assert.equal(files.get("/deploy/.env"), "GITHUB_AUTH_SOURCE=app\n");
 	assert.deepEqual(ops, [["read", "/deploy/.env"]], "the file is read once and never touched");
+});
+
+test("a `$HOME` value is not vouched for on either POSIX loader, which is the disagreement the file warns about (#394)", () => {
+	// THREE CONSUMERS, TWO ANSWERS, measured for issue #392: systemd 252 reads `$HOME/x` as those literal
+	// characters, while a sourcing shell and compose's `env_file` expand it. So the same file puts the jobs
+	// in two different places on the two deployments this repo ships, and nothing refuses it.
+	//
+	// The reader already declines to vouch, because `$` is outside `UNQUOTED_PLAIN`, the READER's bare-value
+	// set -- not `UNQUOTED_SAFE`, which is the WRITER's and belongs to `renderEnvValue`. So for the two keys
+	// doctor reads, an operator already gets the line named. What the reader cannot do is cover a key it
+	// does not read, which is why `.env.example`'s header states the rule for the rest.
+	for (const loader of ["systemd", "shell"]) {
+		const r = readEnvAssignments("PI_JOBS_DIR=$HOME/jobs\n", ["PI_JOBS_DIR"], { loader });
+		assert.equal(r.PI_JOBS_DIR.plain, false, `${loader}: no claim is made about a value the loaders read differently`);
+		assert.equal(r.PI_JOBS_DIR.value, null, `${loader}: and no value is offered`);
+	}
+	// cmd is the odd one out and is right to be: `worker-env-wrapper.cmd` has no expansion here at all, so
+	// the literal IS what that loader reads.
+	const win = readEnvAssignments("PI_JOBS_DIR=$HOME/jobs\n", ["PI_JOBS_DIR"], { loader: "cmd" });
+	assert.equal(win.PI_JOBS_DIR.value, "$HOME/jobs");
+	assert.equal(win.PI_JOBS_DIR.plain, true);
 });
