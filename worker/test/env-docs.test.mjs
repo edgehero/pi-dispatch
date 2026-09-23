@@ -497,27 +497,57 @@ test("the hand written stripper agrees with a real parser on every file in the t
 	assert.deepEqual(missed.sort(), [], "a real parser found reads the stripper missed");
 });
 
-test("every LIVE line of .env.example is a value systemd hands over unchanged (#392)", () => {
-	// `init` copies this file verbatim, `deploy/worker.service` reads it with `EnvironmentFile=`, and systemd
-	// does NOT treat a trailing `#` as a comment: measured on systemd 252, `K=30        # cap` reaches the
-	// service as the whole string `30        # cap`. Four scaffolded values were then refused by `loadConfig`
-	// and the boot exited 2, which the unit's own `RestartPreventExitStatus=2` leaves stopped; `PI_JOB_IMAGE`
-	// was worse, since nothing refused it and every job asked docker for an image name with prose in it.
+test("no assignment in .env.example carries an inline comment, live or commented out (#392)", () => {
+	// `init` copies this file verbatim, `deploy/worker.service` and `deploy/receiver.service` read it with
+	// `EnvironmentFile=`, and `deploy/docker-compose.yml` hands it to compose's `env_file`. THREE parsers,
+	// and they disagree. Measured on systemd 252 and compose v2.31.0:
 	//
-	// The rule is deliberately narrow, because a doc test that parses prose is an arms race the page wins: a
-	// LIVE line is one starting `NAME=`, and its value may not contain ` #`. Commented lines are not checked
-	// at all -- an operator uncommenting one gets what the line says, which is the point of the convention.
-	// The wrapper deployments are not the reason for this: `set -a; . ./.env` really does strip a comment.
-	// This is about the unit this repo ships.
+	//   K=30        # comment      systemd "30        # comment"   compose "30"
+	//   K=30<TAB>   # comment      systemd "30\t# comment"          compose "30\t# comment"
+	//   K=30# comment              systemd "30# comment"            compose "30# comment"
+	//
+	// Only a shell sourcing the file (`deploy/worker-env-wrapper.sh`) reads `#` as a comment everywhere. So
+	// five live values reached the worker with prose in them, four were refused by `loadConfig`, and the boot
+	// exited 2 -- the code `RestartPreventExitStatus=2` deliberately leaves stopped.
+	//
+	// COMMENTED LINES ARE CHECKED TOO, and that is the half the first version of this rule got wrong. This
+	// file is a scaffold an operator edits by uncommenting: eight commented keys shipped a ready-to-use value
+	// with prose after it, seven of which refused the same boot, and `PI_AUTH_FROM_PI=0   # uncomment to force
+	// env-only` silently kept the credential fallback the operator had just been told to turn off. The repo
+	// already ruled on this shape once, at `REQ-DEPLOYMENT-BOOTSTRAP`: `PI_ENV_SETUP` deliberately ships NO
+	// commented key, because a scaffold copied verbatim puts every commented line one keystroke from a
+	// silent no-op.
+	//
+	// The rule is narrow on purpose, because a doc test that parses prose is an arms race the page wins: an
+	// assignment is `NAME=` or `# NAME=` at column 0, and its value may hold no whitespace and no `#`. That is
+	// stricter than "no comment" and it is what the file satisfies today, so it needs no judgement about where
+	// a comment starts. A value that genuinely needs a space would need quoting that the three parsers also
+	// disagree about, so the bound is the right one to have.
 	const txt = readFileSync(join(REPO_ROOT, ".env.example"), "utf8");
 	const offenders = [];
+	let scanned = 0;
 	txt.split("\n").forEach((line, i) => {
-		const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-		if (m && / #/.test(m[2])) offenders.push(`${i + 1}: ${m[1]}`);
+		const m = /^(# )?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+		if (!m) return;
+		scanned += 1;
+		if (/[\s#]/.test(m[3])) offenders.push(`${i + 1}: ${m[2]}`);
 	});
 	assert.deepEqual(
 		offenders,
 		[],
-		"systemd keeps an inline comment as part of the value, so a live line must carry none: put the comment on its own line above it",
+		"an inline comment is part of the value to systemd and to compose: put the comment on its own line above the key",
+	);
+	// NON-VACUITY, the discipline this file already keeps for its other scans: a regex that matches nothing
+	// passes every assertion above it. 95 is the count both mirrors carry today.
+	assert.equal(scanned, 95, "the scan must actually reach every assignment in the file");
+	assert.match("PI_X=1 # c", /^(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses");
+
+	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM
+	// takes the first assignment with it. Neither is present; both are cheap to keep out while we are here.
+	assert.equal(txt.startsWith("\ufeff"), false, "a BOM makes systemd drop the first assignment in the file");
+	assert.deepEqual(
+		txt.split("\n").filter((l) => /^\s*(# )?export\s/.test(l)),
+		[],
+		"systemd reads no `export` line: it logs `Ignoring invalid environment assignment` and the key is unset",
 	);
 });
