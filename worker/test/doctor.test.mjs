@@ -1493,17 +1493,24 @@ test("doctor: an `export`ed key is honoured by the loader this platform's servic
 	// Three states, not two, and WHICH of them an `export` line is depends on the platform: systemd's
 	// `EnvironmentFile=` does not read it (measured on 252, the journal says so), while the darwin and
 	// win32 wrappers source or split the file and do. Doctor names the loader its own platform renders.
+	// ALL THREE PLATFORMS, driven explicitly. This test used to branch on `process.platform` and assert one
+	// of two shapes, which meant it checked darwin's answer on a mac and linux's in CI and NEVER checked
+	// win32 at all -- and win32 is where the label was wrong: the cmd wrapper splits on the first `=`, so
+	// `export PI_X` is a variable NAME there and that loader does not read the key either.
 	const cwd = scaffoldedCwd();
-	writeFileSync(join(cwd, ".env"), `export PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`);
-	const { out, text } = capture();
-	await runDoctor(imgEnv(), scaffoldDeps(out, cwd));
-	const line = text().split("\n").find((l) => l.includes("PI_PAUSE_WINDOWS_FILE"));
-	assert.ok(line, "the key is spoken about either way");
-	assert.match(
-		line,
-		process.platform === "linux" ? /which systemd does NOT read/ : /and loads|which this platform's loader reads/,
-		"the verdict follows the loader this platform's service actually uses",
-	);
+	const path = join(cwd, "pause-windows.json");
+	writeFileSync(join(cwd, ".env"), `export PI_PAUSE_WINDOWS_FILE=${path}\n`);
+	for (const [platform, expected, why] of [
+		["linux", /only a shell that SOURCES this file reads, and systemd's EnvironmentFile= does not/, "systemd's grammar is bare NAME=VALUE (measured on 252: the journal says `Ignoring invalid environment assignment`)"],
+		["darwin", /and loads: the service reads that file/, "the launchd wrapper SOURCES the file, so the export line is an ordinary assignment to it"],
+		["win32", /only a shell that SOURCES this file reads, and the \.cmd wrapper does not/, "`for /f ... delims==` makes `export PI_PAUSE_WINDOWS_FILE` the variable NAME"],
+	]) {
+		const { out, text } = capture();
+		await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform });
+		const line = text().split("\n").find((l) => l.includes("PI_PAUSE_WINDOWS_FILE"));
+		assert.ok(line, `${platform}: the key is spoken about either way`);
+		assert.match(line, expected, `${platform}: ${why}`);
+	}
 });
 
 test("doctor: a .env that does NOT name the key gets the full warning, unchanged (#357)", async () => {
