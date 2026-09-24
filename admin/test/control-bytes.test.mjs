@@ -23,7 +23,24 @@ async function tsLoader() {
 // flipping `cell` and `cellOf` to deletion were killed by the suite; nothing noticed a third renderer
 // already deleting.
 
-test("the class IS its rule, swept over every code point there is (#402)", () => {
+/**
+ * The pinned renderer's own width, as the oracle for what "draws as nothing" means.
+ *
+ * Loaded the way `width.test.mjs` loads it, with the VERSION asserted rather than assumed: pi depends on
+ * pi-tui by a range, and a class checked against the wrong renderer is not checked.
+ */
+async function loadVisibleWidth() {
+	const { createRequire } = await import("node:module");
+	const { pathToFileURL } = await import("node:url");
+	const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	assert.equal(pi("@earendil-works/pi-tui/package.json").version, "0.80.7", "the oracle must be the pinned renderer");
+	const { visibleWidth } = await import(pathToFileURL(pi.resolve("@earendil-works/pi-tui")).href);
+	assert.equal(typeof visibleWidth, "function", "and it must actually load");
+	return visibleWidth;
+}
+
+test("the class IS its rule, swept over every code point there is (#402)", async () => {
+	const visibleWidth = await loadVisibleWidth();
 	// A SWEEP BY THE RULE, and the rule is stated in terms of what the module says it DRAWS rather than by
 	// restating the class's own expression. That distinction is the correction a review pass forced twice.
 	// The first version was a hand-written list of 98, where this holds 4,024. The second stated the
@@ -49,11 +66,11 @@ test("the class IS its rule, swept over every code point there is (#402)", () =>
 		// A TAG is settled by its SEQUENCE rather than by its code point, and is swept in its own test.
 		if (cp >= 0xe0020 && cp <= 0xe007f) continue;
 		const ch = String.fromCodePoint(cp);
-		// Where the width table GUESSES. It answers one column for an unassigned code point, deliberately and
-		// safely for a width, and that guess is a MISS for membership: the renderer draws U+2065 and the
-		// special-purpose plane as nothing. Stated here as its own clause so the rule and the code agree
-		// about why, not just about which.
-		const invisibleUnassigned = cp === 0x2065 || (cp >= 0xe0000 && cp <= 0xe0fff);
+		// THE RENDERER ITSELF is the oracle for this arm, not a second copy of the implementation's range.
+		// A review pass pointed out that restating `INVISIBLE_UNASSIGNED` here is the shape this test's own
+		// comment forbids: it catches a typo and never a wrong bound. `visibleWidth` is the pinned renderer,
+		// which is the thing the class is trying to agree with, so it is asked directly.
+		const invisibleUnassigned = visibleWidth(ch) === 0;
 		let inClass = executes(cp);
 		if (!inClass && ch !== " " && !composes(ch)) {
 			// A break is read as a break whatever it draws, which is why it is not a width question.
@@ -354,7 +371,7 @@ test("the class draws its line at INTERPRETED against COMPOSING (#402)", () => {
 		["U+2028 line separator", " "],
 		["U+2029 paragraph separator", " "],
 		["U+FFF9 interlinear annotation anchor", "￹"],
-		["U+FFF0 noncharacter, which this file's own width table calls invisible", "￰"],
+		["U+FFF0, reserved and drawn as nothing", "￰"],
 		["U+2800 braille blank, which draws a blank cell", "⠀"],
 		["U+00A0 no-break space", " "],
 		["U+2007 figure space", " "],
@@ -429,4 +446,22 @@ test("the tail search finds the line the pane draws (#402)", async () => {
 	pasted.insert("repo​-prod");
 	assert.deepEqual(tailMatches(lines, pasted.value()), [0], "pasting the original finds it too");
 	assert.deepEqual(tailMatches(lines, "nothing here"), [], "and a miss is still a miss");
+});
+
+test("a flag needs at least one tag, and the search window is what keeps this linear (#402)", () => {
+	// TWO GUARDS THE SUITE DID NOT HOLD, both found by mutating them rather than by reading.
+	//
+	// THE LOWER BOUND: a base followed only by the cancel tag is not a subdivision flag, and `{0,6}` kept
+	// its cancel tag instead of substituting it.
+	assert.notEqual(scrubControls("\u{1f3f4}\u{e007f}"), "\u{1f3f4}\u{e007f}", "a base and a cancel tag alone is not a flag");
+	// THE WINDOW: the matcher looks at a bounded slice because a valid sequence is at most 16 code units.
+	// Widening it to the rest of the string is output-identical and QUADRATIC, which is the same shape as
+	// the lookbehind this replaced: 100,000 bare flag bases went from 30 ms to over five seconds. A timing
+	// assertion would be flaky, so what is pinned is the behaviour that makes the bound safe, which is that
+	// a sequence longer than the window is not recognised and a valid one at the window's edge still is.
+	const hide = (msg) => [...msg].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join("");
+	const longest = `\u{1f3f4}${hide("abcdef")}\u{e007f}`;
+	assert.equal([...longest].length, 8, "the longest valid sequence is eight code points");
+	assert.equal(scrubControls(longest), longest, "and it is recognised whole");
+	assert.equal(scrubControls(`x${longest}y`), `x${longest}y`, "including when it is not at the start");
 });

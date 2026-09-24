@@ -1408,9 +1408,9 @@ adversarial passes did.
   itself threw. The known payload-bearing sources were fixed at their sites in the same slice
   (`branch.mjs` answers with a type instead of the forge-payload value; `prepare-local.mjs` basenames
   its path), and the display path wears a belt (control bytes REPLACED WITH SPACES -- one column each for
-  the C0/DEL/C1 members this said when it was written, and NOT for the ones issue #402 added, most of which
-  draw as nothing, so a substituted line is now wider than the raw one and every measurement site scrubs
-  BEFORE it measures rather than relying on the counts matching; so
+  the C0/DEL/C1 members this said when it was written, and NOT for every one issue #402 added: the renderer
+  draws all but 19 of that class as nothing, so a substituted line is wider than the raw one and every
+  measurement site scrubs BEFORE it measures rather than relying on the counts matching; so
   a belted pane and a plain one clip identically -- a 120-char cap, and the `job_failed`
   line's own bound). But the channel itself stays free-form: `InfraRetry` messages and any future
   untagged throw's `error.message` become `failedReason` verbatim, so the no-payload property is held by

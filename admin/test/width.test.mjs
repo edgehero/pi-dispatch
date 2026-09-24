@@ -532,7 +532,7 @@ test("a keycap is consumed whole, and never duplicates its own enclosing mark (#
 
 test("the editor's value never admits half a character, through any door (#401)", () => {
   // `backspace` and `del` were fixed to step by character; a review pass found the three doors left open.
-  // `stripControls` removes C0 and C1, not half a character, and `insert` takes a whole PASTE. The argument
+  // `stripControls` removes the whole class, and it removes half a character too, and `insert` takes a whole PASTE. The argument
   // that made the edit-side fix necessary is that `value()` is the string that gets SAVED, and it applies
   // here unchanged.
   const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;

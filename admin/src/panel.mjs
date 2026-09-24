@@ -79,11 +79,11 @@ const MIN_WIDTH = 8;
  * hand-written list of the shapes someone thought of covered 98 code points; this covers 4,024, and the
  * old list is a strict SUBSET of it -- nothing it held has been let go. Missing were
  * the fillers (one of which this project's own `env-file.mjs` already calls a deception character), the
- * tag block, the Arabic and Egyptian format controls, the musical controls, the noncharacters and every
+ * tag block, the Arabic and Egyptian format controls, the musical controls, the reserved code points and every
  * blank a reader cannot tell from a space.
  *
  * A SECOND VERSION derived it from `\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}`, which is a different rule wearing this
- * one's clothes: it still left U+FFF0-U+FFF8, which THIS FILE's width table already calls noncharacters
+ * one's clothes: it still left U+FFF0-U+FFF8, which THIS FILE's width table already treats as characters
  * the renderer draws as nothing, and U+2800, which draws a blank cell. A list is what the carve-out in
  * issue #382 was and it was wrong twice; four categories standing in for "what does this draw" is the same
  * shape a third time. So membership asks what a code point DRAWS, through `columnsOf` and through the one
@@ -95,11 +95,12 @@ const MIN_WIDTH = 8;
  * property here reaches it anyway). Substituting those changes a CHARACTER where substituting the rest
  * reveals a CONTROL, and a gate that cannot tell them apart corrupts the text it was added to protect.
  *
- * ISSUE #401 ANSWERED THE OTHER HALF of that issue's argument, and saying it precisely took two goes. None
- * of these corrupts the geometry, because every measurement site scrubs BEFORE it measures. "They measure
- * zero columns now" was false of 83 of them: 65 are what a terminal executes and 16 are blanks, and all of
- * those measure one. What was left was the reading, which is why the class moves and the width table does
- * not.
+ * ISSUE #401 ANSWERED THE OTHER HALF of that issue's argument, and saying it precisely took three goes.
+ * None of these corrupts the geometry, because every measurement site scrubs BEFORE it measures. "They
+ * measure zero columns now" was the claim, and by this module's own table it is false of 3,843 of the
+ * 4,024: only 181 measure zero. The renderer reads it the other way round, drawing all but 19 of them as
+ * nothing, and the gap between those two readings is the whole subject of the predicate below. What was
+ * left was the reading, which is why the class moves and the width table does not.
  *
  * SUBSTITUTION IS THEREFORE NO LONGER COLUMN-PRESERVING, and it used to be free: every member of the old
  * class measured one column, so replacing it with a space changed no geometry. Most members of this one
@@ -107,7 +108,7 @@ const MIN_WIDTH = 8;
  * measurement site scrubs BEFORE it measures -- but that is an ordering those sites keep now, rather than
  * an identity the counts used to give for nothing.
  *
- * THE TAG BLOCK IS BOTH, which is why it carries the one lookbehind. A tag after U+1F3F4 composes a
+ * THE TAG BLOCK IS BOTH, which is why it is the one thing settled by SEQUENCE. A tag after U+1F3F4 composes a
  * subdivision flag, and a tag anywhere else is invisible text: a whole ASCII message at zero columns. So a
  * tag is kept inside a flag sequence and substituted outside one. Measured both ways.
  *
@@ -122,6 +123,14 @@ const MIN_WIDTH = 8;
  *   - The gate closes the EXPLICIT deception only. The bidi algorithm reorders neutrals beside a strong
  *     RTL character with no control present at all, so `acme/repo` + a Hebrew letter + `gnp.txt` still
  *     reads differently from how it is stored. Substituting cannot reach that without refusing Hebrew.
+ *   - THE COMPOSING CARVE-OUT IS ALSO A CHANNEL, and it is the one this file argues hardest for keeping:
+ *     265 default-ignorable code points stay out because they compose, and the renderer draws every one of
+ *     them as nothing. `deploy` plus U+E0100 plus `-prod` is eleven columns either way after the gate,
+ *     which is the same collision the tag block gets a sequence matcher for, at about 2.8 times its size.
+ *     Closing it would need the same sequence-awareness the flag has, per script rather than per block.
+ *   - THE FAST PATH ONLY RESCUES ASCII. A tail of 200 lines of 100 KB costs about 200 ms a render at 0%
+ *     non-ASCII and about 4 seconds at 100% CJK. That is not a regression, the branch only ever saves
+ *     work, but this panel's own argument is that it renders CJK as a matter of course.
  *
  * THIS PROJECT NOW HAS THREE CLASSES FOR ONE QUESTION, and the differences are deliberate rather than
  * drift. `triggers.mjs`'s VALIDATOR is C0 + DEL and decides whether an operator's file is acceptable.
@@ -161,7 +170,7 @@ const INVISIBLE_UNASSIGNED = /[\u2065]|[\u{e0000}-\u{e0fff}]/u;
  *
  * A first version derived it from `\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}` and a review pass showed that is a
  * different rule wearing this one's clothes: it left U+FFF0-U+FFF8, which THIS FILE's own width table
- * already calls "the noncharacters the renderer also draws as nothing", and U+2800, which draws a blank
+ * already treats as code points the renderer draws as nothing, and U+2800, which draws a blank
  * cell. A test that restates the implementation's own expression cannot catch a wrong rule, which is what
  * the round before that got wrong. So membership is asked of the renderer's own answer -- what does this
  * DRAW -- and the categories are gone.
@@ -386,7 +395,7 @@ export function clipData(line, w) {
  * WHAT IT COUNTS:
  *
  *   - zero for a mark (`\p{M}`) and for a format character (`\p{Cf}`), plus the fillers and
- *     noncharacters the renderer also draws as nothing;
+ *     reserved code points the renderer also draws as nothing;
  *   - two for every code point in `WIDE`, which is that renderer's own double-width set;
  *   - two for a narrow character followed by U+FE0F, which asks for its emoji form, and two for a keycap,
  *     which is one of twelve bases plus U+FE0F plus U+20E3 drawn as a single key;
@@ -496,7 +505,7 @@ const VS16 = "\ufe0f";
 // of this comment said the opposite, that Mc is excluded because it occupies a column, and both were false
 // when written. The argument for excluding it came from Unicode; the renderer that draws this pane gives Mc
 // zero, and between a standard and the thing painting the characters the painter wins. Cf covers the
-// zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the noncharacters
+// zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the reserved code points
 // the renderer also draws as nothing.
 const ZERO_WIDTH = /\p{M}|\p{Cf}|[ᅟᅠ᠎ㅤﾠ￰-￻]/u;
 
@@ -819,7 +828,7 @@ function charAfter(s, at) {
 export function makeLineInput(initial = "") {
   // THE SAME RULE AT THE VALUE'S OWN DOORS. `backspace` and `del` were fixed to step by character, and a
   // review pass pointed out that the constructor, `insert` (which takes a whole PASTE) and `setValue` were
-  // left open: `stripControls` removes C0 and C1, not half a character. The argument that made the edit-side
+  // left open: `stripControls` removes the whole class, and it removes half a character too. The argument that made the edit-side
   // fix necessary applies unchanged here, because `value()` is what gets SAVED, and it also keeps `render`
   // honest -- `cursor` is an index into this string, so a value with no orphans in it means the window's
   // offsets and the cursor cannot disagree about what they are counting.
