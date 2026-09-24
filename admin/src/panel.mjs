@@ -60,8 +60,38 @@ export function setGlyphs(ascii) {
 
 const MIN_WIDTH = 8;
 
-// eslint-disable-next-line no-control-regex -- defensive strip of C0/C1 control chars from untrusted input
-const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
+/**
+ * THE CLASS, and the line it draws is INTERPRETED against COMPOSING (issue #402).
+ *
+ * It used to stop at what a terminal EXECUTES: C0, DEL and C1, with U+009B in it because a CSI introducer
+ * needs no ESC in front. That left every code point which changes what a reader SEES without executing
+ * anything, and two of those are worth naming:
+ *
+ *   - a bidi override or isolate REORDERS the text after it, so `repo/safe` plus U+202E plus `gnp.txt`
+ *     is drawn as a name ending in `.png`. The job id, the target and the branch are all attacker- or
+ *     model-writable, and a run record is what an operator reads before deciding what to do about it.
+ *   - an invisible break character makes two DIFFERENT strings draw identically: `deploy-prod` and
+ *     `deploy` plus U+200B plus `-prod` are 11 columns each and are not the same trigger. The panel's
+ *     pickers select by the string, so the operator can edit or delete the row they did not mean.
+ *
+ * Issue #401 answered the OTHER half of that issue's argument: these code points are zero columns now,
+ * which is what the renderer draws, so they no longer corrupt the geometry. What was left was the reading,
+ * which is why the class moves rather than the width table.
+ *
+ * WHAT IS DELIBERATELY NOT IN IT: a code point that COMPOSES the character beside it. U+200D joins an
+ * emoji sequence into one glyph, U+200C is orthography in Persian and the Indic scripts, and a variation
+ * selector chooses a character's form and carries a column with it under #401. Substituting those changes
+ * a CHARACTER, where substituting the rest reveals a CONTROL, and a gate that cannot tell those apart is
+ * one that corrupts the text it was added to protect.
+ *
+ * THE WORKER ANSWERS THE SAME QUESTION DIFFERENTLY, and the difference is not an inconsistency to fix.
+ * `endpointShown` ESCAPES rather than substitutes, because its gate is an allowlist of printable ASCII: an
+ * endpoint is a DNS name or a socket path, so anything else is suspect there. This panel renders a CJK
+ * repository name as a matter of course, and #401 was largely about drawing it correctly, so the same
+ * allowlist here would escape the content it just learned to measure.
+ */
+// eslint-disable-next-line no-control-regex -- the C0/C1 half of the class above
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2028\u2029\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
 
 // The ONLY escape sequence a styled line may keep: an SGR run. Anything else that starts with ESC is data
 // that reached a pane, not decoration this project wrote.

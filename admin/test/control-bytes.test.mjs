@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { box, clip, clipData, hasControls, scrubControls } from "../src/panel.mjs";
+import { box, clip, clipData, columnsOf, hasControls, scrubControls } from "../src/panel.mjs";
 import { frame, makeStyler, PLAIN_THEME, stripAnsi, visibleLen } from "../src/style.mjs";
 import { renderRuns, renderTriggers } from "../src/render.mjs";
 
@@ -15,12 +15,17 @@ import { renderRuns, renderTriggers } from "../src/render.mjs";
 // flipping `cell` and `cellOf` to deletion were killed by the suite; nothing noticed a third renderer
 // already deleting.
 
-test("the class covers C0, DEL and C1, and nothing else up to U+017F", () => {
+test("the class covers C0, DEL, C1 and the soft hyphen, and nothing else up to U+017F", () => {
 	// A SWEEP rather than a handful of examples, because the boundary is the whole point: U+009B is a CSI
 	// introducer that needs no ESC in front of it, so a class that stops at DEL leaves a working escape.
+	//
+	// U+00AD joined it under issue #402. It is the only code point in this range that a terminal draws as
+	// nothing, and an invisible character inside an identifier lets two DIFFERENT strings render the same,
+	// which is what that issue is about. The rest of that widening lives above U+017F and is swept in
+	// `width.test.mjs`; this range is the one where C0, C1 and the Latin supplement meet.
 	for (let cp = 0; cp <= 0x17f; cp++) {
 		const ch = String.fromCodePoint(cp);
-		const control = cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f);
+		const control = cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) || cp === 0xad;
 		assert.equal(hasControls(`a${ch}b`), control, `U+${cp.toString(16).padStart(4, "0")}: hasControls`);
 		assert.equal(scrubControls(`a${ch}b`), control ? "a b" : `a${ch}b`, `U+${cp.toString(16).padStart(4, "0")}: scrubControls`);
 		assert.equal(clip(`a${ch}b`, 10), control ? "ab" : `a${ch}b`, `U+${cp.toString(16).padStart(4, "0")}: clip still DELETES`);
@@ -215,4 +220,74 @@ test("every cutter drops a half surrogate, not just `clip`", () => {
 			assert.doesNotMatch(line, lone, `frame title at ${w}`);
 		}
 	}
+});
+
+test("the class draws its line at INTERPRETED against COMPOSING (#402)", () => {
+	// THE RULE, not the list, because a list is what the carve-out in #382 was and it was wrong twice. A code
+	// point is in the class when a terminal or a reader INTERPRETS it -- as an escape, a reordering, or a
+	// break -- and out of it when it COMPOSES the character beside it.
+	const INTERPRETED = [
+		["U+202E right-to-left override", "‮"],
+		["U+202D left-to-right override", "‭"],
+		["U+2066 left-to-right isolate", "⁦"],
+		["U+2069 pop directional isolate", "⁩"],
+		["U+061C arabic letter mark", "؜"],
+		["U+200E left-to-right mark", "‎"],
+		["U+200F right-to-left mark", "‏"],
+		["U+200B zero width space", "​"],
+		["U+2060 word joiner", "⁠"],
+		["U+FEFF byte order mark", "﻿"],
+		["U+00AD soft hyphen", "­"],
+		["U+180E mongolian vowel separator", "᠎"],
+		["U+2028 line separator", " "],
+		["U+2029 paragraph separator", " "],
+		["U+FFF9 interlinear annotation anchor", "￹"],
+	];
+	const COMPOSING = [
+		["U+200D zero width joiner", "‍"],
+		["U+200C zero width non-joiner", "‌"],
+		["U+FE0F variation selector-16", "️"],
+		["U+FE0E variation selector-15", "︎"],
+		["U+0301 combining acute", "́"],
+	];
+	for (const [name, ch] of INTERPRETED) {
+		assert.equal(hasControls(`a${ch}b`), true, `${name} is interpreted, so it is in the class`);
+		assert.equal(scrubControls(`a${ch}b`), "a b", `${name} becomes one space`);
+	}
+	for (const [name, ch] of COMPOSING) {
+		assert.equal(hasControls(`a${ch}b`), false, `${name} composes, so it is not in the class`);
+		assert.equal(scrubControls(`a${ch}b`), `a${ch}b`, `${name} passes through untouched`);
+	}
+});
+
+test("widening the class does not break a glyph it was not meant to touch (#402)", () => {
+	// THE COST OF GETTING THE BOUNDARY WRONG, asserted from the other side. A class that swept up every
+	// zero-width code point would split a family emoji into three and drop the emoji form of a heart, which
+	// is changing a CHARACTER rather than revealing a CONTROL.
+	const family = "\u{1f468}‍\u{1f469}‍\u{1f466}";
+	assert.equal(scrubControls(family), family, "a family emoji survives whole");
+	assert.equal(scrubControls("❤️"), "❤️", "and so does the emoji form of a heart");
+	assert.equal(columnsOf(scrubControls("❤️")), 2, "which still measures as the glyph it is");
+	// Persian orthography, where the non-joiner is the spelling rather than a control.
+	assert.equal(scrubControls("می‌خواهم"), "می‌خواهم", "a non-joiner inside a word is content");
+});
+
+test("a bidi override cannot make a record read as something else (#402)", () => {
+	// THE REPRODUCTION FROM THE ISSUE. A target ending in an override plus `gnp.txt` is drawn as a name
+	// ending in `.png`, and a run record is what an operator reads before deciding what to do about it.
+	const target = "acme/repo‮gnp.txt";
+	assert.equal(scrubControls(target), "acme/repo gnp.txt", "the override becomes a space and the tail reads forwards");
+	assert.doesNotMatch(clipData(target, 40), /[‪-‮⁦-⁩]/u, "and no reordering control reaches the pane");
+});
+
+test("two identifiers that draw alike cannot stay distinct through the gate (#402)", () => {
+	// THE SELECTION HAZARD. `deploy-prod` and `deploy` + U+200B + `-prod` are eleven columns each and are
+	// not the same string, so a picker that selects by the string can act on the row the operator did not
+	// mean. Substituting makes the difference visible, which is the only honest answer available: the panel
+	// cannot know which of the two was intended.
+	const plain = "deploy-prod";
+	const hidden = "deploy​-prod";
+	assert.notEqual(plain, hidden, "the fixture is two different strings");
+	assert.equal(columnsOf(plain), columnsOf(hidden), "which today draw the same width");
+	assert.notEqual(scrubControls(plain), scrubControls(hidden), "and after the gate they no longer look alike");
 });
