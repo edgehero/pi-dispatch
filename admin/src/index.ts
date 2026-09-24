@@ -121,7 +121,8 @@ import { COSTS_WINDOWS, costsSinceMs, foldCosts, foldTriggerCosts, repoOfTarget,
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
 // injection happens here.
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
-import { clipData, scrubControls, setGlyphs } from "./panel.mjs";
+import { clipData, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
+import { gateDialogs } from "./dialog-gate.mjs";
 import { openSandbox, sandboxEgress, sandboxSyncRefusal } from "@edgehero/pi-dispatch/sandbox";
 import { readManifest } from "@edgehero/pi-dispatch/sandbox-store";
 import { renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderWhatIf } from "./render.mjs";
@@ -941,10 +942,15 @@ function registerTools(pi: ExtensionAPI): void {
  * (`{ applied:false }`) -- the caller must not loop-retry it.
  */
 async function confirmedWrite(
-  ctx: any,
+  rawCtx: any,
   prompt: { title: string; message: string },
   doWrite: () => any,
 ): Promise<any> {
+  // THE TOOL DOOR (issue #404). A tool's `execute` gets its own `ctx` straight from pi and never passes
+  // through the command handler, so the gate there does not reach it -- and this confirm body interpolates
+  // the MODEL's own parameters: `dispatch_trigger_edit`'s `flow` put an erase-display and an OSC-52 write
+  // into it, measured. Every tool that confirms does it through this one function.
+  const ctx = gateDialogs(rawCtx);
   if (!ctx?.hasUI || typeof ctx?.ui?.confirm !== "function") {
     throw new Error(
       "refused: this change needs an interactive operator to confirm it, and no confirm-capable UI is available (e.g. print/headless mode).",
@@ -1180,7 +1186,8 @@ function optInt(x: any): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-async function dispatch(pi: ExtensionAPI, args: string, ctx: any): Promise<void> {
+async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<void> {
+  const ctx = gateDialogs(rawCtx);
   const notify = ctx?.ui?.notify?.bind(ctx.ui);
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   const sub = tokens[0] ?? "";
@@ -1852,7 +1859,7 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
   const out = io.write ?? ((s: string) => process.stdout.write(s));
   // Per LINE, because these messages carry deliberate newlines and `scrubControls` would turn each into a
   // space: the class is about what a terminal INTERPRETS, and the line breaks here are this code's own.
-  const write = (s: string) => out(String(s).split("\n").map((l) => scrubControls(l)).join("\n"));
+  const write = (s: string) => out(scrubControlsPerLine(s));
   const pause = io.pause ?? pauseForMessage;
   const env = io.env ?? process.env;
   let egress;
@@ -1960,7 +1967,12 @@ function splitWords(s: string | undefined): string[] {
  * the live-reload watchers apply it without a restart. A build without the dialog primitives degrades to a
  * notice rather than a crash. `undefined` from any dialog is a cancel.
  */
-export async function handleDashboardAction(result: any, paths: any, ctx: any): Promise<void> {
+export async function handleDashboardAction(result: any, paths: any, rawCtx: any): Promise<void> {
+  // GATED HERE TOO, not only at `dispatch` (issue #404). This is an EXPORTED entry: the dashboard reaches it
+  // through `dispatch`, which already wraps, but a caller that has its own `ctx` -- every test in
+  // `crud.test.mjs` does -- would otherwise drive the dialogs ungated, which is the same "covered on one
+  // path" shape the render gates were refuted for. Wrapping twice is harmless: the scrub is idempotent.
+  const ctx = gateDialogs(rawCtx);
   const ui = ctx?.ui;
   const notify: Notify = ui?.notify?.bind(ui);
   // The `i` key (issue #181): write and open the insights page between overlays, then the caller's
@@ -2344,7 +2356,7 @@ function coerceSettingValue(key: string, raw: string): number | string {
  * preserve, and the newlines between rows are this code's own.
  */
 function send(pi: ExtensionAPI, content: string): void {
-  const safe = String(content ?? "").split("\n").map((l) => scrubControls(l)).join("\n");
+  const safe = scrubControlsPerLine(content);
   pi.sendMessage({ customType: CHANNEL, content: safe, display: true }, {});
 }
 

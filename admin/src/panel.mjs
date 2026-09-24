@@ -139,6 +139,20 @@ export function scrubKeepingStyle(s) {
   return out + scrubControls(text.slice(at));
 }
 
+/**
+ * The same class and the same operation, but PER LINE: a message written with newlines keeps them.
+ *
+ * Written once here because it is now the third caller of the same idiom (issue #404) -- the sandbox
+ * session's suspended-terminal writes, the model-visible `send`, and pi's dialogs -- and #382's whole
+ * lesson was five copies of one class across four modules that had quietly stopped agreeing. A composed
+ * operation duplicated three times is the same shape one level up, and the copy that went untested was
+ * where a mutation survived: scrubbing only the first line left every multi-line confirm body unguarded
+ * below it.
+ */
+export function scrubControlsPerLine(s) {
+  return String(s ?? "").split("\n").map((line) => scrubControls(line)).join("\n");
+}
+
 /** Does this string carry one? `search` rather than `.test`, because a `/g` regex carries `lastIndex`. */
 export function hasControls(s) {
   return String(s ?? "").search(CONTROL_CHARS) !== -1;

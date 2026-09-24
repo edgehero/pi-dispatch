@@ -20,6 +20,7 @@
  */
 
 import { readSettingsView, writeSettings } from "./read-model.mjs";
+import { gateDialogs } from "./dialog-gate.mjs";
 
 const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
 
@@ -32,7 +33,10 @@ function renderProfiles(profiles: Record<string, string>): string {
 
 // `fs` is injected for the repo's usual reason: these tests must never touch a real settings file, and a
 // dialog flow that writes on the way to being asserted is a test that lies about what it proved.
-export async function runSecretsCommand(paths: any, ctx: any, notify: any, tokens: string[], deps: any = {}): Promise<void> {
+export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, tokens: string[], deps: any = {}): Promise<void> {
+  // An EXPORTED door with its own `ctx` (issue #404): reached through the command handler in production and
+  // driven directly by tests, so it gates for itself rather than trusting its caller.
+  const ctx = gateDialogs(rawCtx);
   const ui = ctx?.ui;
   const fsSeam = deps.fs ? { fs: deps.fs } : {};
   const view = readSettingsView({ settingsFile: paths.settingsFile, ...fsSeam });

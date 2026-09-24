@@ -21,6 +21,7 @@
  */
 
 import * as nodeFs from "node:fs";
+import { gateDialogs } from "./dialog-gate.mjs";
 import { execFileSync, spawn as nodeSpawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -430,7 +431,11 @@ const CRON_ID_RE = /^[A-Za-z0-9._-]+$/;
  * (receiver unit / receiver container / polling command), (11) first cron trigger for ctx.cwd, (12)
  * re-detect + open the panel.
  */
-export async function runSetupWizard(paths: any, ctx: any, notify: Notify, deps: any = {}): Promise<void> {
+export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, deps: any = {}): Promise<void> {
+  // An EXPORTED door with its own `ctx` (issue #404), driven directly by this file's own tests about thirty
+  // times. It gates for itself rather than trusting its caller, which is the same reason
+  // `handleDashboardAction` does.
+  const ctx = gateDialogs(rawCtx);
   const {
     fs = nodeFs,
     env = process.env,
@@ -904,7 +909,12 @@ async function offerFirstTrigger(
  */
 export function registerNudge(pi: any, deps: any = {}): void {
   const { fs = nodeFs, env = process.env, homedirFn = homedir } = deps;
-  pi.on("session_start", (event: any, ctx: any) => {
+  pi.on("session_start", (event: any, rawCtx: any) => {
+    // THE SIXTH DOOR (issue #404). A `ctx` arrives here straight from pi and never passes the command
+    // handler, so the gates there do not reach it. Its one notify is a CONSTANT today, which is why this is
+    // completeness rather than a leak -- but "a door is anywhere a ctx enters from pi" is the rule, and a
+    // door left out because its current message happens to be safe is how the render gates were refuted.
+    const ctx = gateDialogs(rawCtx);
     try {
       // Only a real interactive startup: reload/resume/fork repeat within a configured workflow, and
       // without a UI there is nobody to nudge (and no notify to carry it).

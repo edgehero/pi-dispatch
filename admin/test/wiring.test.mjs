@@ -1180,3 +1180,138 @@ test("the MODEL-visible channel is gated too, which neither pane gate reaches (#
     assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "no control byte reaches model context");
   }
 });
+
+test("the TOOL door is gated too, and it is the model-reachable one (#404)", async () => {
+  // A tool's `execute` gets its own `ctx` STRAIGHT FROM PI and never passes through the command handler, so
+  // the gate there does not reach it. A first version of this change called the whole class "not
+  // model-reachable" in three places including a spec row; `dispatch_trigger_edit`'s confirm body
+  // interpolates the MODEL's own `flow` parameter, and this one interpolates a stored `scope`. Every tool
+  // that confirms does it through `confirmedWrite`, which is the door.
+  const { calls } = await loadRegistered();
+  const tool = calls.registerTool.map((entry) => (Array.isArray(entry) ? entry[0] : entry)).find((t) => t?.name === "dispatch_pause_delete");
+  assert.ok(tool, "the tool is registered");
+  const payload = "\u001b[2J\u001b]52;c;cm0=\u0007";
+  const dir = tempDir("pi-tool-gate-");
+  const pauseWindowsPath = join(dir, "pause-windows.json");
+  writeFileSync(pauseWindowsPath, JSON.stringify({ windows: [{ scope: `acme/web${payload}`, from: "22:00", to: "06:00", tz: "UTC" }] }));
+  const seen = [];
+  const ctx = {
+    hasUI: true,
+    ui: {
+      confirm: async (title, message) => {
+        seen.push(String(title), String(message));
+        return false; // refuse: the strings are already built, and nothing should be written
+      },
+    },
+  };
+  const had = Object.prototype.hasOwnProperty.call(process.env, "PI_PAUSE_WINDOWS_FILE");
+  const before = process.env.PI_PAUSE_WINDOWS_FILE;
+  process.env.PI_PAUSE_WINDOWS_FILE = pauseWindowsPath;
+  try {
+    await tool.execute("id", { index: 0 }, undefined, () => {}, ctx);
+  } catch {
+    // a refused confirm throws, which is the tool's own contract and not what this test is about
+  } finally {
+    if (had) process.env.PI_PAUSE_WINDOWS_FILE = before;
+    else delete process.env.PI_PAUSE_WINDOWS_FILE;
+  }
+  assert.ok(seen.some((t) => t.includes("acme/web")), "the stored scope reached the confirm, so this is not asserting about an empty dialog");
+  for (const text of seen) {
+    assert.doesNotMatch(text, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `a confirm string carried a control byte: ${JSON.stringify(text)}`);
+  }
+});
+
+test("every door that takes a pi `ctx` gates it (#404)", async () => {
+  // BY SHAPE, and the limit is stated: this sees a CALL, not an effect. What it catches is the thing that
+  // actually went wrong twice in this round -- a door that exists and was not wrapped. The command handler,
+  // the exported dashboard action, the tool funnel, the secrets command and the setup wizard are five
+  // separate places a `ctx` enters this extension from pi, and a gate on some of them is the
+  // covered-on-one-path shape #382's render gates were refuted for.
+  const sources = {
+    "index.ts": readFileSync(new URL("../src/index.ts", import.meta.url), "utf8"),
+    "secrets-command.ts": readFileSync(new URL("../src/secrets-command.ts", import.meta.url), "utf8"),
+    "setup-wizard.ts": readFileSync(new URL("../src/setup-wizard.ts", import.meta.url), "utf8"),
+  };
+  // NOT A HEAD COUNT, which is how the first version of this got it wrong: it asserted index.ts had exactly
+  // three, so adding a sixth door and GATING it turned the test red -- a pin that punishes the fix. The rule
+  // is the convention instead: a door names its parameter `rawCtx`, and every `rawCtx` must be gated.
+  for (const door of ["dispatch", "handleDashboardAction", "confirmedWrite", "runSecretsCommand", "runSetupWizard", "session_start"]) {
+    assert.ok(Object.values(sources).some((src) => src.includes(door)), `${door} is still a door`);
+  }
+  // THE RULE ITSELF: a door names its parameter `rawCtx`, so every one of them must be matched by a
+  // `gateDialogs(rawCtx)`. Counting rather than locating, because several signatures span lines and a
+  // window-based match measures the comment above the call rather than the call.
+  //
+  // ITS LIMIT, stated because it is the way a seventh door would slip past: a handler that names its
+  // parameter `ctx` and reads `.ui` off it is invisible here. That is why the convention is the pin -- the
+  // naming is what makes a missing gate visible when reading the function head -- and it is also why the
+  // second assertion below exists, which refuses a `.ui` read off a rawCtx.
+  for (const [file, src] of Object.entries(sources)) {
+    const params = (src.match(/\brawCtx\b\s*:/g) ?? []).length;
+    const gated = (src.match(/gateDialogs\(rawCtx\)/g) ?? []).length;
+    assert.equal(gated, params, `${file}: ${params} door(s) take a rawCtx and ${gated} gate it`);
+    // And none of them reaches the dialogs directly: a `rawCtx.ui` anywhere means a door gated its ctx and
+    // then used the ungated one, which reads as covered and is not.
+    assert.doesNotMatch(src, /rawCtx\??\.ui/, `${file}: a door reads .ui off its RAW ctx`);
+  }
+});
+
+test("a dirty subcommand cannot reach `notify` raw either (#404)", async () => {
+  // `notify` is the fourth dialog and the one with no round-trip, so it is easy to leave unwrapped: three
+  // mutations removing its wrapper survived the first version of this change. The reachable input is the
+  // COMMAND LINE -- the `\s+` split keeps every control byte that is not whitespace -- and the unknown
+  // subcommand notice quotes it back.
+  const { def } = await loadRegistered();
+  const view = fakeCtx({});
+  await def.handler("\u001b[2Jbogus\u0007", view.ctx);
+  const said = view.notes.map((n) => String(n.message ?? n.m ?? n)).join("\n");
+  assert.match(said, /unknown subcommand/, "the notice fired, so this is not asserting about silence");
+  assert.match(said, /bogus/, "and it quotes the subcommand back, which is why the bytes matter");
+  for (const line of said.split("\n")) {
+    assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `notify carried a control byte: ${JSON.stringify(line)}`);
+  }
+});
+
+test("the gate scrubs EVERY line of a dialog body, and keeps the context lazy (#404)", async () => {
+  // TWO MUTATIONS THAT SURVIVED the first repair, both on its own headline decisions.
+  //
+  // (1) PER LINE means every line. Scrubbing only the first left every multi-line confirm body unguarded
+  // below it, and that is production-reachable: the secrets command's "declare a resolver" body
+  // interpolates a stored resolver path on its eighth line.
+  //
+  // (2) THE CONTEXT IS COPIED BY DESCRIPTOR, not spread. pi builds its command context from guarded
+  // getters and its own source forbids the spread, because it reads them once and freezes the values --
+  // which also bypasses the stale-instance check those getters carry. Every test ctx is a plain object, so
+  // nothing noticed; this one is pi-shaped.
+  const { gateDialogs } = await import("../src/dialog-gate.mjs");
+
+  const bodies = [];
+  let reads = 0;
+  const raw = {
+    hasUI: true,
+    get ui() {
+      reads += 1;
+      return { confirm: async (_t, message) => (bodies.push(String(message)), true) };
+    },
+  };
+  const gated = gateDialogs(raw);
+  assert.equal(reads, 1, "wrapping reads `ui` once");
+  const before = reads;
+  void gated.ui;
+  void gated.ui;
+  assert.equal(reads, before, "and reading the gated ctx does not re-read the original, so the wrapper is stable");
+  // The ORIGINAL's getter is still lazy and still fires: the copy did not freeze it.
+  void raw.ui;
+  assert.equal(reads, before + 1, "the underlying getter is untouched");
+  // A GETTER, not a frozen value: `ui` is the one property this wrapper replaces, so defining it as a value
+  // would undo on that property exactly what the descriptor copy protects on every other -- pi's own `ui`
+  // getter throws once its context is stale, and a frozen one would keep answering.
+  assert.equal(typeof Object.getOwnPropertyDescriptor(gated, "ui")?.get, "function", "the gated `ui` is a getter");
+
+  await gated.ui.confirm("t", `clean first line\nsecond line carries \u001b[2J\nthird \u0007`);
+  assert.equal(bodies.length, 1);
+  for (const [i, line] of bodies[0].split("\n").entries()) {
+    assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `line ${i + 1} of the body still carries a control byte`);
+  }
+  assert.equal(bodies[0].split("\n").length, 3, "and the newlines survive, so the body is still three lines");
+});

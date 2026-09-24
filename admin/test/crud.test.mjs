@@ -599,3 +599,102 @@ test("manageLimits: Edit blank-keeps-current; Delete removes on confirm; a decli
   await handleDashboardAction({ action: "manageLimits" }, { scopedLimitsPath: path }, { ui: deleteUi });
   assert.deepEqual(read(path).limits, []);
 });
+
+test("a stored field cannot reach pi's dialogs raw, on EVERY dialog (#404)", async () => {
+  // THE FOURTH FUNNEL. #382 gated the three that RENDER -- pane lines, the frame, and the model-visible
+  // `send`. pi's dialogs are none of those: `select`, `input`, `confirm` and `notify` take strings this
+  // extension builds from stored fields, and `pause-windows.mjs` checks only `isNonEmptyString(w.scope)`,
+  // so the FILE is the whole validator.
+  //
+  // EVERY dialog, because a first version of this test backed out at the second select and left `input`,
+  // `confirm` and `notify` unwrapped-and-unnoticed: three mutations removing those wrappers survived the
+  // whole suite. This one answers every prompt so the edit runs to its notify.
+  const payload = "\u001b[2J\u001b]52;c;cm0=\u0007\u001b]8;;http://evil.example\u0007click\u001b]8;;\u0007";
+  const dir = tempDir("pi-dialog-gate-");
+  const pauseWindowsPath = join(dir, "pause-windows.json");
+  writeFileSync(pauseWindowsPath, JSON.stringify({ windows: [{ scope: `acme/web${payload}`, from: "22:00", to: "06:00", tz: "UTC" }] }));
+
+  const seen = [];
+  const record = (...args) => {
+    for (const a of args) {
+      if (typeof a === "string") seen.push(a);
+      else if (Array.isArray(a)) for (const o of a) seen.push(typeof o === "string" ? o : JSON.stringify(o));
+    }
+  };
+  let selects = 0;
+  const calls = { select: 0, input: 0, confirm: 0, notify: 0, round: 0 };
+  const ui = {
+    // pi's selector returns THE EXACT STRING IT WAS HANDED (`options[selectedIndex]`), which is what makes
+    // the round-trip below load-bearing rather than cosmetic.
+    async select(_title, options) {
+      record(_title, options);
+      calls.select += 1;
+      return selects++ === 0 ? (calls.round === 0 ? "Edit a pause window" : "Delete a pause window") : options[0];
+    },
+    async input(...a) {
+      record(...a);
+      calls.input += 1;
+      return ""; // BLANK is keep(); `undefined` CANCELS, which is how the first version of this test
+      // backed out at the third prompt and never reached `confirm` or `notify` at all.
+    },
+    async confirm(...a) {
+      record(...a);
+      calls.confirm += 1;
+      return true;
+    },
+    notify: (...a) => {
+      record(...a);
+      calls.notify += 1;
+    },
+  };
+  // BOTH ARMS, because the edit path has no confirm at all and the delete path is where it lives. Run edit
+  // first, then delete, on the same dirty window.
+  await handleDashboardAction({ action: "managePauses" }, { pauseWindowsPath }, { ui });
+  calls.round = 1;
+  selects = 0;
+  await handleDashboardAction({ action: "managePauses" }, { pauseWindowsPath }, { ui });
+
+  assert.ok(seen.some((t) => t.includes("acme/web")), "the window's own scope reached a dialog, so this is not asserting about an empty one");
+  // COUNTED, not inferred from a length: `seen.length >= 4` was satisfied by the first select alone (a
+  // title plus three options), so it said nothing about the prompts it was named for.
+  for (const kind of ["select", "input", "confirm", "notify"]) {
+    assert.ok(calls[kind] > 0, `every dialog kind ran; ${kind} did not (${JSON.stringify(calls)})`);
+  }
+  for (const text of seen) {
+    assert.doesNotMatch(text, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `a dialog string carried a control byte: ${JSON.stringify(text)}`);
+  }
+});
+
+test("the gate returns the CALLER's option, so a dirty row can still be edited (#404)", async () => {
+  // THE REGRESSION THE FIRST VERSION OF THIS GATE SHIPPED, caught by a review pass. pi returns the option
+  // string it was handed; the gate hands it a SCRUBBED copy, so `labels.indexOf(picked)` came back -1
+  // against the caller's own unscrubbed array and `editPauseWindowViaDialogs` returned silently -- the
+  // operator picks a window and nothing happens, with no notify and no error. Measured on all four of the
+  // edit/delete pause and scoped-limit actions.
+  const payload = "\u001b[2J";
+  const dir = tempDir("pi-dialog-roundtrip-");
+  const pauseWindowsPath = join(dir, "pause-windows.json");
+  writeFileSync(pauseWindowsPath, JSON.stringify({ windows: [{ scope: `acme/web${payload}`, from: "22:00", to: "06:00", tz: "UTC" }] }));
+  const before = readFileSync(pauseWindowsPath, "utf8");
+
+  const notes = [];
+  let selects = 0;
+  const ui = {
+    async select(_t, options) {
+      return selects++ === 0 ? "Edit a pause window" : options[0];
+    },
+    async input(_t, dflt) {
+      // BLANK keeps the field (the edit path's own `keep()`); `undefined` would CANCEL the dialog, which
+      // would make this test pass for the wrong reason.
+      return dflt === "22:00" ? "23:30" : "";
+    },
+    async confirm() {
+      return true;
+    },
+    notify: (m) => notes.push(String(m)),
+  };
+  await handleDashboardAction({ action: "managePauses" }, { pauseWindowsPath }, { ui });
+
+  assert.ok(notes.some((m) => /updated \(live\)/.test(m)), `the edit LANDED rather than returning silently; notes were ${JSON.stringify(notes)}`);
+  assert.notEqual(readFileSync(pauseWindowsPath, "utf8"), before, "and the file changed");
+});
