@@ -152,6 +152,8 @@ test("the table is held to the renderer on every code point there is (#401)", as
   // line comes out short and the border holds. Under-counting cuts LATE: the line runs past the border,
   // which is the defect this issue names.
   const OVER = [];
+  let swept = 0;
+  let wide = 0;
   for (let cp = 0; cp <= 0x10ffff; cp++) {
     // A surrogate on its own is not a character and neither side promises anything about it.
     if (cp >= 0xd800 && cp <= 0xdfff) continue;
@@ -163,6 +165,8 @@ test("the table is held to the renderer on every code point there is (#401)", as
     const ch = String.fromCodePoint(cp);
     const ours = columnsOf(ch);
     const theirs = visibleWidth(ch);
+    swept += 1;
+    if (theirs === 2) wide += 1;
     assert.ok(ours >= theirs, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: we say ${ours}, the renderer draws ${theirs}`);
     if (ours !== theirs) OVER.push(cp);
   }
@@ -176,6 +180,61 @@ test("the table is held to the renderer on every code point there is (#401)", as
     );
   }
   assert.ok(OVER.length > 0, "the unassigned departure is real, not a dead clause");
+
+  // THE SWEEP'S OWN SCOPE IS PINNED, because a sweep is only a bolt while it actually sweeps. A review pass
+  // showed that narrowing the loop bound to `0xffff` -- dropping the whole astral plane, which is exactly
+  // where the 139,820-code-point hole was -- left the suite green, as did widening the control skip and
+  // weakening the assertion above. These two counts fail on any of those.
+  assert.equal(swept, 1111999, "the sweep covers every code point outside the surrogates and the control class");
+  assert.equal(wide, 182889, "and the renderer's double-width set is transcribed whole");
+
+  // WHAT THESE TWO COUNTS ARE FOR, and what they cannot do. They pin the sweep's SCOPE: narrowing the loop
+  // bound to the BMP -- which is exactly where the 139,820-code-point hole was -- or widening the control
+  // skip now fails here, where before it left the suite green. They do NOT make the two assertions above
+  // mutation-detectable, and nothing can: weakening a guard is unobservable while the thing it guards
+  // against is absent, so on a correct table `ours >= theirs` and `ours >= 0` pass the same inputs. Those
+  // assertions are shown to be live the only way a guard can be, by mutating the SOURCE: reverting one
+  // range of `WIDE` fails the first, and making the zero rule stop zeroing format characters fails the
+  // second.
+
+});
+
+test("every character-with-U+FE0F pair, and every keycap, agrees with the renderer (#401)", async () => {
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function");
+
+  // THE SWEEP THE FIRST REPAIR SAID IT DID AND DID NOT. Its commit, its docblock and its spec row all
+  // claimed "every code point, plus every character-with-U+FE0F pair"; the pair half was a six-entry list.
+  // A review pass found the hole one selector further along: a KEYCAP is a base, U+FE0F and U+20E3 drawn
+  // as one two-column glyph, and it measured 1 against the renderer's 2 -- an UNDER-count, the direction
+  // that runs a line past its pane. So both sequence shapes are swept, and the keycap one is why.
+  let pairs = 0;
+  let keycaps = 0;
+  for (let cp = 0x20; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) continue;
+    const base = String.fromCodePoint(cp);
+    for (const seq of [base + "\ufe0f", base + "\ufe0f\u20e3"]) {
+      const ours = columnsOf(seq);
+      const theirs = visibleWidth(seq);
+      assert.ok(ours >= theirs, `${JSON.stringify(seq)}: we say ${ours}, the renderer draws ${theirs}`);
+      // THE TWO STATED DEPARTURES, and nothing else. An unassigned base is the table's declared guess of
+      // one column. The other is a keycap applied to a base that HAS no keycap form -- a heart in a key --
+      // which the renderer collapses to one column and we count as the promoted base plus an enclosing
+      // mark. It is an over-count, so it draws short rather than overflowing, and it is a sequence no
+      // writer produces: the twelve real keycap bases are asserted exactly, just below.
+      const degenerateKeycap = seq.endsWith("\u20e3") && !/[#*0-9]/.test(base);
+      if (ours !== theirs) {
+        assert.ok(!/\p{Assigned}/u.test(base) || degenerateKeycap, `${JSON.stringify(seq)} over-counts an assigned base for no stated reason`);
+      }
+    }
+    pairs += 1;
+    // The keycap RULE, isolated: a base the selector alone leaves narrow and the enclosing key widens. A
+    // looser count would also catch the 201 the selector promotes on its own and prove nothing about it.
+    if (columnsOf(base) === 1 && columnsOf(base + "\ufe0f") === 1 && columnsOf(base + "\ufe0f\u20e3") === 2) keycaps += 1;
+  }
+  assert.equal(pairs, 1111999, "the pair sweep covers every base there is");
+  assert.equal(keycaps, 12, "and exactly the twelve keycap bases are promoted, which is what the renderer does");
 });
 
 test("U+FE0F asks for the emoji form, and the table follows the renderer there too (#401)", () => {
@@ -283,8 +342,12 @@ test("a cut drops a lone surrogate rather than passing it on (#401)", () => {
   // which is not the same as dropping one that was already in the input: a review pass measured `clip`
   // passing a lone high surrogate on where the old slice-then-`dropLoneSurrogate` had removed it.
   const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-  for (const s of ["\ud83dabcdef", "ab\ud83dcd\u{1f600}ef", "\udc00abcdef"]) {
+  // THE FIXTURES MUST ACTUALLY BE CUT. `clip` returns early when the string fits, and an orphan measures 0
+  // columns (which is what the renderer draws), so a fixture that fits keeps its orphan and this test would
+  // be asserting the #402 case instead of the #401 one. Each of these is far wider than any budget below.
+  for (const s of ["\ud83dabcdefghijkl", "ab\ud83dcd\u{1f600}efghijkl", "\udc00abcdefghijkl"]) {
     for (let w = 1; w <= 6; w++) {
+      assert.ok(columnsOf(s) > w, `the fixture has to be cut at ${w} or this proves nothing`);
       assert.doesNotMatch(clip(s, w), lone, `clip(${JSON.stringify(s)}, ${w})`);
     }
   }
@@ -351,5 +414,83 @@ test("the graph's hostile-string caps never leave half a character (#401)", asyn
     for (const s of strings) {
       assert.doesNotMatch(s, lone, `a flow name with a ${n}-character prefix left half a pair in ${JSON.stringify(s.slice(0, 40))}`);
     }
+  }
+});
+
+test("the divider clips the meta before the label, measured in columns (#401)", () => {
+  // TOTAL WIDTH IS NOT ENOUGH, which is why this asserts the CONTENT. `divider` has four column measures
+  // and two of them survived a revert to `.length` while the suite was green: `Math.max(1, ...)` absorbs
+  // the error into the rule length, so the line stays exactly its width and only the PRIORITY changes.
+  // That priority is the documented behaviour ("clip the META first, and the LABEL only if it alone still
+  // does not fit"), so it is what gets asserted.
+  const styler = makeStyler(PLAIN_THEME);
+  const wide = styler.divider("ジョブ番号", "会社/製品", 20);
+  assert.equal(visibleLen(wide), 20, "still exactly the width");
+  assert.ok(wide.includes("ジョブ番号"), "the label is kept whole while the meta still has room to give");
+  // A meta measured by `.length` is under-sized, so the label gets clipped in its place.
+  const marks = styler.divider("operator label here", "jób́márks", 28);
+  assert.equal(visibleLen(marks), 28, "still exactly the width");
+  assert.ok(marks.includes("OPERATOR LABEL HERE"), "a combining-mark meta does not cost the label its tail");
+});
+
+test("the line editor keeps the cursor on the step the caller moved it to (#401)", () => {
+  // THE SNAP THE REPAIR ADDED, pinned. Every earlier case built a fresh editor, so the cursor always sat
+  // past the end and the snap was never exercised: a mutation using the code-unit index as a step index
+  // survived the whole suite. These move the cursor with the object's own methods.
+  const li = makeLineInput("\u{1f600}\u{1f600}\u{1f600}");
+  li.home();
+  li.right();
+  const out = li.render(10);
+  const before = out.slice(0, out.indexOf(LINE_INPUT_CURSOR[0]));
+  // ONE `right` IS ONE CHARACTER, so the cursor sits on the second emoji. Reading `cursor` as a step index
+  // would put it on the third, because an astral character is two code units.
+  assert.equal(columnsOf(before), 2, "the cursor sits on the second emoji, not the third");
+  // And the promise still holds from every position the caller can reach.
+  for (const value of ["\u{1f600}\u{1f600}\u{1f600}", "会社/製品", "❤️❤️ab", "1️⃣1️⃣"]) {
+    const ed = makeLineInput(value);
+    ed.home();
+    for (let i = 0; i <= value.length; i++) {
+      for (const w of [1, 2, 4, 8, 16]) {
+        const r = ed.render(w);
+        const plain = r.split(LINE_INPUT_CURSOR[0]).join("").split(LINE_INPUT_CURSOR[1]).join("");
+        assert.equal(columnsOf(plain), w, `${JSON.stringify(value)} cursor ${i} width ${w}`);
+      }
+      ed.right();
+    }
+  }
+});
+
+test("an edit never leaves half a character in the value itself (#401)", () => {
+  // THE STATE MACHINE, not the render. `cursor` moves one CODE UNIT at a time, so a backspace with the
+  // cursor between the halves of an astral pair used to delete one half and leave the other IN THE STORED
+  // VALUE -- which `value()` hands back to whatever saves it, so the half-character outlives the session.
+  // The render-side repair cannot reach that; this is the edit-side half of the same promise.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  for (const value of ["ab\u{1f600}cd", "\u{1f600}\u{1f600}", "a\u{1f600}"]) {
+    for (let steps = 0; steps <= value.length; steps++) {
+      const back = makeLineInput(value);
+      back.end();
+      for (let i = 0; i < steps; i++) back.left();
+      back.backspace();
+      assert.doesNotMatch(back.value(), lone, `backspace after ${steps} lefts on ${JSON.stringify(value)}`);
+      const fwd = makeLineInput(value);
+      fwd.home();
+      for (let i = 0; i < steps; i++) fwd.right();
+      fwd.del();
+      assert.doesNotMatch(fwd.value(), lone, `delete after ${steps} rights on ${JSON.stringify(value)}`);
+    }
+  }
+});
+
+test("the skill frontmatter cap never leaves half a character either (#401)", async () => {
+  // THE SECOND of the two graph caps. `clipName` is pinned above; this one was repaired in the same commit
+  // and nothing drove it, so a revert survived. The prefix is odd for the same reason as there: a cut
+  // through a run of astral characters at an even offset splits nothing.
+  const { parseSkillMeta } = await import("../src/graph-model.mjs");
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  for (const n of [1, 3, 5]) {
+    const description = "x".repeat(n) + "\u{1f600}".repeat(120);
+    const meta = parseSkillMeta(`---\nname: s\ndescription: ${description}\n---\n`);
+    assert.doesNotMatch(String(meta?.description ?? ""), lone, `a description with a ${n}-character prefix left half a pair`);
   }
 });

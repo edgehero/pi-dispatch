@@ -209,13 +209,16 @@ export function clipData(line, w) {
  *   - zero for a mark (`\p{M}`) and for a format character (`\p{Cf}`), plus the fillers and
  *     noncharacters the renderer also draws as nothing;
  *   - two for every code point in `WIDE`, which is that renderer's own double-width set;
- *   - one more when U+FE0F follows a character that draws narrow on its own and wide in its emoji form;
+ *   - two for a narrow character followed by U+FE0F, which asks for its emoji form, and two for a keycap,
+ *     which is one of twelve bases plus U+FE0F plus U+20E3 drawn as a single key;
  *   - one for everything else, including an unassigned code point, because guessing wider on an unknown is
  *     how a rule starts breaking the panes it was added to fix.
  *
- * WHAT IT IS HELD TO, in `width.test.mjs`: a sweep of every code point there is, plus every
- * character-with-U+FE0F pair, asserting that this never measures NARROWER than the renderer and that every
- * place it measures wider is an unassigned code point.
+ * WHAT IT IS HELD TO, in `width.test.mjs`: two sweeps, one of every code point there is and one of every
+ * character followed by U+FE0F and by a keycap, asserting that this never measures NARROWER than the
+ * renderer and that every place it measures wider is a declared departure. The pair sweep is there because
+ * a first version CLAIMED it and shipped a six-entry list instead, and the hole was one selector further
+ * along: a keycap measured 1 against the renderer's 2.
  *
  * THE DIRECTION IS THE WHOLE POINT, and stating it as "over-counting is harmless" would be too kind: BOTH
  * directions rag a frame, and they rag it differently. An over-count pads a body line as though it were
@@ -225,40 +228,77 @@ export function clipData(line, w) {
  * sweep is one-sided on purpose, and the residual below is the safer of two bad shapes, not a harmless
  * one.
  *
- * ITS LIMIT, stated rather than implied: this sums CODE POINTS, so an emoji ZWJ sequence -- a family, a
- * profession, a skin tone -- counts every member and comes out wider than the single glyph a terminal
- * draws. Measured on a family: 6 here against the renderer's 2. Terminals disagree with each other there
- * too, which is why no width table in this project will settle it. A grapheme-aware count needs
- * `Intl.Segmenter` and a terminal that agrees; the residual is one over-wide line, in the safe direction.
+ * WHAT IS LEFT, and it is a CLASS rather than one shape: this sums steps, and the renderer collapses some
+ * runs of them into a single glyph. An emoji ZWJ sequence counts every member (6 here against 2 there), and
+ * so do a skin-tone modifier, a regional-indicator flag pair, a Hangul jamo cluster and a Devanagari
+ * cluster. A first version of this paragraph named the ZWJ sequence as the ONLY case; a review pass
+ * measured four more, and found the one case that went the other way -- a keycap, at 1 against 2 -- which
+ * is fixed above rather than listed here, because an under-count is the direction that overflows a pane.
+ *
+ * Every remaining case over-counts, so every one draws SHORT inside its border rather than through it.
+ * Terminals disagree with each other on all of them, which is why no width table in this project will
+ * settle them; a grapheme-aware count needs `Intl.Segmenter` and a terminal that agrees.
  */
 export function columnsOf(s) {
   let n = 0;
-  // The ONE piece of state, and the one thing a per-character table cannot do without: U+FE0F asks for the
-  // emoji form of the character BEFORE it, and the renderer then draws that character two columns wide.
-  let promotable = false;
-  for (const ch of String(s ?? "")) {
-    if (ch === VS16 && promotable) {
-      n += 1;
-      promotable = false;
-      continue;
-    }
-    promotable = false;
-    if (ZERO_WIDTH.test(ch)) continue;
-    if (WIDE.test(ch)) {
-      n += 2;
-      continue;
-    }
-    n += 1;
-    // ONLY A NARROW BASE IS PROMOTABLE, and it is narrow by having reached this line at all: a code point
-    // the renderer already draws wide took the `WIDE` branch above and never gets here. A first version
-    // also tested `\p{Emoji_Presentation}` here; measured against the pin, every code point with that
-    // property is in `WIDE`, so the test was dead and a mutation removing it survived the whole suite.
-    // The ASCII exclusion is NOT dead: `#`, `*` and the digits carry `\p{Emoji}` and stay one column,
-    // because their emoji form is a keycap and needs U+20E3 rather than U+FE0F alone.
-    promotable = ch.codePointAt(0) > 0x7f && TEXT_EMOJI.test(ch);
-  }
+  for (const step of widthSteps(s)) n += step.cols;
   return n;
 }
+
+/**
+ * THE STRING AS `{ text, cols }` STEPS, and the reason it exists rather than a per-character width call.
+ *
+ * Two shapes are WIDER THAN THEIR PARTS, so no function that asks "how wide is this character" can size
+ * them: U+FE0F asks for the emoji form of the character before it, and a keycap is a base, U+FE0F and
+ * U+20E3 drawn as one two-column glyph. A first repair put that state inside `columnsOf` alone, and a
+ * review pass found what that leaves: `sliceColumns` and the line editor call `columnsOf` ONE CHARACTER AT
+ * A TIME, where the base is 1 and the selector is 0, so the cut spent a budget of 2 on a glyph the terminal
+ * draws 3 wide and the pane overflowed. Counting and cutting now walk the same steps, so they cannot
+ * disagree: the count sums `cols`, and the cut takes whole `text` chunks or none of them, which is also why
+ * it can no longer strand a selector without its base.
+ */
+function* widthSteps(s) {
+  const chars = [...String(s ?? "")];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    // HALF A PAIR IS NOT A CHARACTER. It is a step of its own so a cut can drop it by name.
+    if (ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff) {
+      yield { text: ch, cols: 0, orphan: true };
+      continue;
+    }
+    if (ZERO_WIDTH.test(ch)) {
+      yield { text: ch, cols: 0 };
+      continue;
+    }
+    if (WIDE.test(ch)) {
+      yield { text: ch, cols: 2 };
+      continue;
+    }
+    // A NARROW BASE, which is narrow by having reached this line: a code point the renderer already draws
+    // wide took the branch above. Only here can a following selector change anything.
+    if (chars[i + 1] === VS16) {
+      // THE KEYCAP IS THE CASE A FIRST REPAIR GOT BACKWARDS. It excluded ASCII from promotion, correctly,
+      // because `#`, `*` and the digits stay one column under U+FE0F alone -- and then said so in a comment
+      // that named the keycap as the reason, while the keycap itself went on measuring 1 against the
+      // renderer's 2. It takes all three code points, and only these twelve bases.
+      if (KEYCAP_BASE.test(ch) && chars[i + 2] === KEYCAP) {
+        yield { text: ch + VS16 + KEYCAP, cols: 2 };
+        i += 2;
+        continue;
+      }
+      if (ch.codePointAt(0) > 0x7f && TEXT_EMOJI.test(ch)) {
+        yield { text: ch + VS16, cols: 2 };
+        i += 1;
+        continue;
+      }
+    }
+    yield { text: ch, cols: 1 };
+  }
+}
+
+/** VARIATION SELECTOR-16 asks for the emoji form; U+20E3 encloses the keycap bases below in a key. */
+const KEYCAP = "\u20e3";
+const KEYCAP_BASE = /[#*0-9]/;
 
 /** VARIATION SELECTOR-16, which asks for the emoji form of the character before it. */
 const VS16 = "\ufe0f";
@@ -331,31 +371,26 @@ export function clip(line, w) {
  */
 export function sliceColumns(s, w) {
   const budget = Math.max(0, Math.trunc(w) || 0);
-  // NO BUDGET, NO CONTENT. Without this a zero-column character passes the test below and a cut to zero
+  // NO BUDGET, NO CONTENT. Without this a zero-column step passes the test below and a cut to zero
   // returned a floating accent with nothing to attach to.
   if (budget === 0) return "";
   let out = "";
   let used = 0;
-  for (const ch of String(s ?? "")) {
-    // HALF A PAIR IS NOT A CHARACTER, so it is not carried into a cut. Walking code points means this cut
-    // cannot CREATE one, which is not the same as dropping one the INPUT already held: a review pass
-    // measured `clip` passing a lone high surrogate on where the old slice-then-repair had removed it, and
-    // the old repair only ever looked at the last code unit, so a leading or interior one survived it too.
-    if (ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff) continue;
-    const cols = columnsOf(ch);
-    if (used + cols > budget) break;
-    out += ch;
-    used += cols;
+  for (const step of widthSteps(s)) {
+    // A lone surrogate the INPUT already held is dropped rather than carried: the old code-unit repair only
+    // ever looked at the last unit, so a leading or interior one survived it. An input that holds one and
+    // needs no cut at all still carries it, because `clip` returns early when the string fits: that is
+    // issue #402's ground rather than this one's.
+    if (step.orphan) continue;
+    if (used + step.cols > budget) break;
+    out += step.text;
+    used += step.cols;
   }
   // A TRAILING JOINER IS DANGLING: it joins this character to the next one, and the next one is what was
   // just cut away. Left in place it reaches the terminal ahead of the ellipsis and asks it to join a glyph
-  // to a horizontal bar. The same is true of a variation selector whose base was cut, which cannot happen
-  // here (a selector is only ever appended after its base) but costs nothing to drop with it.
-  //
-  //
-  // An input that already holds a lone surrogate and needs no cut at all still carries it: `clip` returns
-  // early when the string fits. That is issue #402's ground rather than this one's.
-  return out.replace(/[\u200d\ufe0e\ufe0f]+$/u, "");
+  // to a horizontal bar. A selector cannot be stranded here any more, because a promoted base carries its
+  // selector inside one step, but a ZWJ is a step of its own and is exactly what this strips.
+  return out.replace(/\u200d+$/u, "");
 }
 
 /**
@@ -559,6 +594,26 @@ export function fmtCost(cost) {
  */
 export const LINE_INPUT_CURSOR = ["\x01", "\x02"];
 
+/** Code units in the character ending at `at`, so a cursor move never lands between the halves of a pair. */
+function charBefore(s, at) {
+  const lo = s.charCodeAt(at - 1);
+  if (lo >= 0xdc00 && lo <= 0xdfff && at >= 2) {
+    const hi = s.charCodeAt(at - 2);
+    if (hi >= 0xd800 && hi <= 0xdbff) return 2;
+  }
+  return 1;
+}
+
+/** Code units in the character starting at `at`, the forward twin of `charBefore`. */
+function charAfter(s, at) {
+  const hi = s.charCodeAt(at);
+  if (hi >= 0xd800 && hi <= 0xdbff && at + 1 < s.length) {
+    const lo = s.charCodeAt(at + 1);
+    if (lo >= 0xdc00 && lo <= 0xdfff) return 2;
+  }
+  return 1;
+}
+
 /**
  * A pure single-line text-input state machine. No key decoding lives here -- the caller decodes raw
  * input (keys.mjs) and calls the edit methods, which keeps this module free of the pi-tui resolver and
@@ -581,19 +636,25 @@ export function makeLineInput(initial = "") {
       value = value.slice(0, cursor) + clean + value.slice(cursor);
       cursor += clean.length;
     },
+    // ONE CHARACTER, NOT ONE CODE UNIT, in all four (issue #401). These moved and deleted by code unit, so
+    // two `left`s put the cursor between the halves of an astral pair and the next `backspace` deleted ONE
+    // HALF: the surviving half stayed in `value`, which is what `value()` hands to whatever saves it, so
+    // the broken character outlived the session. Rendering cannot repair that -- the damage is in the
+    // stored string, not in the view -- which is why the fix is here rather than in `render`.
     backspace() {
       if (cursor === 0) return;
-      value = value.slice(0, cursor - 1) + value.slice(cursor);
-      cursor -= 1;
+      const step = charBefore(value, cursor);
+      value = value.slice(0, cursor - step) + value.slice(cursor);
+      cursor -= step;
     },
     del() {
-      if (cursor < value.length) value = value.slice(0, cursor) + value.slice(cursor + 1);
+      if (cursor < value.length) value = value.slice(0, cursor) + value.slice(cursor + charAfter(value, cursor));
     },
     left() {
-      if (cursor > 0) cursor -= 1;
+      if (cursor > 0) cursor -= charBefore(value, cursor);
     },
     right() {
-      if (cursor < value.length) cursor += 1;
+      if (cursor < value.length) cursor += charAfter(value, cursor);
     },
     home() {
       cursor = 0;
@@ -607,46 +668,47 @@ export function makeLineInput(initial = "") {
     },
     render(width, { focused = true } = {}) {
       const w = Math.max(1, Math.trunc(width) || 1);
-      // THE WINDOW IS CHOSEN IN COLUMNS AND ITS EDGES ARE WHOLE CHARACTERS (issue #401). This was
+      // THE WINDOW IS CHOSEN IN COLUMNS AND ITS EDGES ARE WHOLE STEPS (issue #401). This was
       // `value.slice(start, start + w).padEnd(w)` on UTF-16 indices, so it measured a CJK value at half
       // what the terminal draws, and a window edge landing between the halves of an astral pair emitted a
-      // BARE LOW SURROGATE into the live trigger editor -- the exact hazard the rest of this module cuts
-      // around. `cursor` is still a code-unit index, because every edit method moves it by one unit, so it
-      // is snapped to a character boundary here rather than trusted.
-      const chars = [...value];
+      // BARE LOW SURROGATE into the live trigger editor. It walks `widthSteps` rather than characters for
+      // the reason that function exists: a per-character measure is one column short on an emoji-form
+      // sequence, so a window built from one overflowed its own pane.
+      const steps = [...widthSteps(value)].filter((step) => !step.orphan);
       const offs = [];
       let at = 0;
-      for (const c of chars) {
+      for (const step of steps) {
         offs.push(at);
-        at += c.length;
+        at += step.text.length;
       }
       offs.push(at);
+      // `cursor` is a code-unit index and the edit methods keep it on a character boundary, but a step can
+      // span three of them, so it is snapped to the step it falls inside rather than trusted to name one.
       let ci = offs.findIndex((o) => o >= cursor);
-      if (ci < 0) ci = chars.length;
+      if (ci < 0) ci = steps.length;
       // THE RESERVED CELL MOVES THE WINDOW'S START, not its length: the window is `w` columns wide, and
       // the cursor is kept at most `w - 1` columns past the start so its own cell is always inside it.
       let start = ci;
       let back = 0;
-      while (start > 0 && back + columnsOf(chars[start - 1]) <= w - 1) {
+      while (start > 0 && back + steps[start - 1].cols <= w - 1) {
         start -= 1;
-        back += columnsOf(chars[start]);
+        back += steps[start].cols;
       }
       let end = start;
       let used = 0;
-      while (end < chars.length && used + columnsOf(chars[end]) <= w) {
-        used += columnsOf(chars[end]);
+      while (end < steps.length && used + steps[end].cols <= w) {
+        used += steps[end].cols;
         end += 1;
       }
-      const head = chars.slice(start, Math.min(ci, end)).join("");
-      const text = chars.slice(start, end).join("");
-      if (!focused) return pad(text, w);
-      // The cursor wraps a WHOLE character, never one half of a pair, and sits on a space once it is past
-      // the last character the window shows.
-      const onChar = ci < end;
-      const under = onChar ? chars[ci] : " ";
-      const tail = onChar ? chars.slice(ci + 1, end).join("") : "";
-      const shown = head + (onChar ? under : "") + tail;
-      const fill = Math.max(0, w - columnsOf(shown) - (onChar ? 0 : 1));
+      const textOf = (a, b) => steps.slice(a, b).map((step) => step.text).join("");
+      const head = textOf(start, Math.min(ci, end));
+      if (!focused) return pad(textOf(start, end), w);
+      // The cursor wraps a WHOLE step, never one half of a pair and never half a keycap, and sits on a
+      // space once it is past the last step the window shows.
+      const onStep = ci < end;
+      const under = onStep ? steps[ci].text : " ";
+      const tail = onStep ? textOf(ci + 1, end) : "";
+      const fill = Math.max(0, w - columnsOf(head + (onStep ? under : "") + tail) - (onStep ? 0 : 1));
       return head + LINE_INPUT_CURSOR[0] + under + LINE_INPUT_CURSOR[1] + tail + " ".repeat(fill);
     },
   };
