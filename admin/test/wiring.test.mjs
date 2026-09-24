@@ -1295,17 +1295,13 @@ test("the gate scrubs EVERY line of a dialog body, and keeps the context lazy (#
     },
   };
   const gated = gateDialogs(raw);
-  assert.equal(reads, 1, "wrapping reads `ui` once");
+  // IT READS THROUGH, every time. A first version closed over the wrapper it built at construction, so it
+  // never consulted `ctx.ui` again -- behaving exactly like the frozen value its own comment said it fixed,
+  // and its test asserted the reads did NOT happen, which pinned the defect rather than the rule.
   const before = reads;
   void gated.ui;
   void gated.ui;
-  assert.equal(reads, before, "and reading the gated ctx does not re-read the original, so the wrapper is stable");
-  // The ORIGINAL's getter is still lazy and still fires: the copy did not freeze it.
-  void raw.ui;
-  assert.equal(reads, before + 1, "the underlying getter is untouched");
-  // A GETTER, not a frozen value: `ui` is the one property this wrapper replaces, so defining it as a value
-  // would undo on that property exactly what the descriptor copy protects on every other -- pi's own `ui`
-  // getter throws once its context is stale, and a frozen one would keep answering.
+  assert.equal(reads, before + 2, "each read of the gated ctx reaches pi's own getter");
   assert.equal(typeof Object.getOwnPropertyDescriptor(gated, "ui")?.get, "function", "the gated `ui` is a getter");
 
   await gated.ui.confirm("t", `clean first line\nsecond line carries \u001b[2J\nthird \u0007`);
@@ -1314,4 +1310,30 @@ test("the gate scrubs EVERY line of a dialog body, and keeps the context lazy (#
     assert.doesNotMatch(line, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, `line ${i + 1} of the body still carries a control byte`);
   }
   assert.equal(bodies[0].split("\n").length, 3, "and the newlines survive, so the body is still three lines");
+});
+
+test("the gated context follows pi when it swaps or invalidates its ui (#404)", async () => {
+  // WHY READING THROUGH MATTERS, as behaviour rather than as a property descriptor. pi's command context
+  // exposes `ui` as a GUARDED getter: it throws once the context is stale, and pi can rebind the ui context
+  // mid-session. A wrapper that captured the ui once would keep answering for a context pi has abandoned --
+  // which is the failure `runner.js`'s own anti-spread comment describes, one property along.
+  const { gateDialogs } = await import("../src/dialog-gate.mjs");
+  let stale = false;
+  let current = { notify: () => "first" };
+  const raw = {
+    get ui() {
+      if (stale) throw new Error("this context is no longer active");
+      return current;
+    },
+  };
+  const gated = gateDialogs(raw);
+  assert.equal(gated.ui.notify(), "first");
+
+  // A REBIND is followed, not remembered.
+  current = { notify: () => "second" };
+  assert.equal(gated.ui.notify(), "second", "the gate follows pi's new ui context");
+
+  // And a STALE context throws through the gate, exactly as it does on the original.
+  stale = true;
+  assert.throws(() => gated.ui, /no longer active/, "the guard is preserved, not swallowed");
 });

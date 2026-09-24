@@ -71,9 +71,9 @@ export function gateDialogs(ctx) {
    * `SKILL_NAME_RE`, which admits no control byte at all. A future picker whose options can differ only in
    * control bytes would need its own index prefix.
    */
-  const gatedSelect = async (...args) => {
+  const gatedSelect = async (live, args) => {
     const cleaned = args.map(clean);
-    const picked = await ui.select(...cleaned);
+    const picked = await live.select(...cleaned);
     const shown = cleaned[1];
     const original = args[1];
     if (!Array.isArray(shown) || !Array.isArray(original)) return picked;
@@ -81,17 +81,41 @@ export function gateDialogs(ctx) {
     return at >= 0 ? original[at] : picked;
   };
 
-  const wrap = (name) => (typeof ui[name] === "function" ? (...args) => ui[name](...args.map(clean)) : ui[name]);
-  const gatedUi = { ...ui, select: typeof ui.select === "function" ? gatedSelect : ui.select, input: wrap("input"), confirm: wrap("confirm"), notify: wrap("notify") };
+  const wrapOne = (live, name) => (typeof live[name] === "function" ? (...args) => live[name](...args.map(clean)) : live[name]);
+  const gateUi = (live) => ({
+    ...live,
+    select: typeof live.select === "function" ? (...args) => gatedSelect(live, args) : live.select,
+    input: wrapOne(live, "input"),
+    confirm: wrapOne(live, "confirm"),
+    notify: wrapOne(live, "notify"),
+  });
 
   // THE CONTEXT'S OWN SHAPE IS PRESERVED, not spread. pi builds its command context with guarded GETTERS and
   // its own source carries the comment forbidding exactly this: "a spread would eagerly read them once and
   // freeze the old values, bypassing stale-instance checks". Copying the descriptors keeps them lazy, and
   // only `ui` is replaced.
   const out = Object.defineProperties(Object.create(Object.getPrototypeOf(ctx) ?? Object.prototype), Object.getOwnPropertyDescriptors(ctx));
-  // A GETTER, not a value, and for the reason the descriptor copy exists: `ui` is the one property this
-  // wrapper replaces, so freezing it would undo on that property exactly what the copy protects on every
-  // other. pi's own `ui` getter throws once its context is stale; reading through this one keeps that.
-  Object.defineProperty(out, "ui", { get: () => gatedUi, enumerable: true, configurable: true });
+  // A GETTER THAT ACTUALLY READS THROUGH, which is the correction of a first version that closed over the
+  // wrapper and never consulted `ctx.ui` again -- behaving exactly like the frozen value its own comment
+  // said it fixed. `ui` is the one property this wrapper replaces, so it has to preserve on that property
+  // what the descriptor copy preserves on every other: pi's `ui` getter THROWS once its context is stale,
+  // and pi can swap the ui context mid-session, so the read must reach the original every time.
+  //
+  // The wrapper is rebuilt only when the underlying `ui` is a different object, so a hot path that reads
+  // `ctx.ui` repeatedly pays one identity comparison rather than a rebuild.
+  let lastUi = null;
+  let lastGated = null;
+  Object.defineProperty(out, "ui", {
+    get() {
+      const live = ctx.ui; // throws if pi's own getter does, which is the point
+      if (live !== lastUi) {
+        lastUi = live;
+        lastGated = live ? gateUi(live) : live;
+      }
+      return lastGated;
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return out;
 }
