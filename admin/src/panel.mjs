@@ -75,13 +75,18 @@ const MIN_WIDTH = 8;
  *     Hangul filler or a no-break space. Eleven columns each, and not the same trigger. The pickers select
  *     by the string, so the operator can edit or delete the row they did not mean.
  *
- * DERIVED FROM PROPERTIES, NOT LISTED, and that is the correction a review pass forced. A hand-written
- * list of the shapes someone thought of covered 98 code points and left 167: the Hangul and halfwidth
- * FILLERS (one of which this project's own `env-file.mjs` already calls a deception character), the TAG
- * block, the Arabic and Egyptian format controls, the musical controls, and every blank that is not
- * U+0020. A list is what the carve-out in issue #382 was, and it was wrong twice; this is the same shape
- * once more. So the class is now every `\p{Cf}`, `\p{Zl}`, `\p{Zp}` and `\p{Zs}`, plus C0, DEL, C1 and
- * the four fillers, which are `Lo` and so reachable by no property here.
+ * ASKED OF THE RENDERER, NOT LISTED AND NOT CATEGORISED, and it took two review rounds to get there. A
+ * hand-written list of the shapes someone thought of covered 98 code points; this covers 264. Missing were
+ * the fillers (one of which this project's own `env-file.mjs` already calls a deception character), the
+ * tag block, the Arabic and Egyptian format controls, the musical controls, the noncharacters and every
+ * blank a reader cannot tell from a space.
+ *
+ * A SECOND VERSION derived it from `\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}`, which is a different rule wearing this
+ * one's clothes: it still left U+FFF0-U+FFF8, which THIS FILE's width table already calls noncharacters
+ * the renderer draws as nothing, and U+2800, which draws a blank cell. A list is what the carve-out in
+ * issue #382 was and it was wrong twice; four categories standing in for "what does this draw" is the same
+ * shape a third time. So membership asks `columnsOf`, which issue #401 bolts to the pinned renderer over
+ * every code point there is.
  *
  * WHAT IS DELIBERATELY NOT IN IT: U+0020, which is the space this substitutes TO; and a code point that
  * COMPOSES the character beside it. U+200D joins an emoji sequence into one glyph, U+200C is orthography
@@ -128,8 +133,85 @@ const MIN_WIDTH = 8;
  * and would escape the content issue #401 had just taught this module to measure.
  */
 // eslint-disable-next-line no-control-regex -- the C0/C1 half of the class above
-const CONTROL_CHARS =
-  /(?<!\u{1f3f4}[\u{e0020}-\u{e007f}]*)[\u{e0020}-\u{e007f}]|(?![\u0020\u200c\u200d\u{e0020}-\u{e007f}])(?:[\x00-\x1f\x7f-\x9f\u115f\u1160\u3164\uffa0]|\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs})/gu;
+const FLAG_BASE = "\u{1f3f4}";
+// A SUBDIVISION FLAG, matched as a WHOLE VALID SEQUENCE rather than guessed at from one end: the base,
+// one to six tag letters, and the cancel tag that closes it. A first version exempted "a tag preceded by
+// the base and any number of tags", which is not the same claim and is not a validity check at all -- it
+// exempted every tag FOREVER AFTER a flag, cancel tag included, so one legitimate flag emoji anywhere in
+// a model-writable field restored the entire hidden-message hazard this class exists to close. It was
+// also a variable-length lookbehind, which rescans backwards at every position: 200 KB of tags in one
+// `.log` line took 2.3 seconds, and `readLogTail` bounds the number of lines but not their length.
+const FLAG_SEQUENCE = /\u{1f3f4}[\u{e0020}-\u{e007e}]{1,6}\u{e007f}/u;
+
+// Composing, so never substituted: EVERY mark, spacing marks included. `\p{Mn}|\p{Me}` was the first
+// spelling and it was wrong in a way only this class could expose: issue #401 made a spacing mark measure
+// ZERO columns, agreeing with the renderer, so once membership started asking "does it draw nothing" the
+// Mc vowel signs of the Indic scripts fell straight into it. `\u0915\u093f` would have been substituted
+// to `\u0915 `, which is not revealing a control, it is deleting a vowel.
+const COMPOSES = /\p{M}/u;
+// A blank that is not U+0020 and draws in ONE column, so a reader cannot tell it from a space.
+const BLANK_LIKE = /\p{Zs}|\u2800/u;
+// A line or paragraph separator: it is read as a BREAK, whatever width it happens to draw.
+const BREAKS = /\p{Zl}|\p{Zp}/u;
+
+/**
+ * IS THIS CODE POINT ONE THE PANEL SUBSTITUTES? The rule, as a predicate, rather than a category list.
+ *
+ * A first version derived it from `\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}` and a review pass showed that is a
+ * different rule wearing this one's clothes: it left U+FFF0-U+FFF8, which THIS FILE's own width table
+ * already calls "the noncharacters the renderer also draws as nothing", and U+2800, which draws a blank
+ * cell. A test that restates the implementation's own expression cannot catch a wrong rule, which is what
+ * the round before that got wrong. So membership is asked of the renderer's own answer -- what does this
+ * DRAW -- and the categories are gone.
+ */
+function interpreted(ch) {
+  const cp = ch.codePointAt(0);
+  // What a terminal EXECUTES. U+009B is a CSI introducer needing no ESC, which is why C1 is here.
+  if (cp <= 0x1f || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) return true;
+  // The space this substitutes TO, and the two joiners, which compose rather than hide.
+  if (ch === " " || ch === "\u200c" || ch === "\u200d") return false;
+  if (COMPOSES.test(ch)) return false;
+  // BREAKS A LINE, which is an interpretation rather than a drawing, and the one arm that is not about
+  // what a code point looks like: U+2028 and U+2029 draw ONE column, so neither test below reaches them.
+  if (BREAKS.test(ch)) return true;
+  // Draws as NOTHING: the format characters, the bidi controls, the fillers, the noncharacters.
+  if (columnsOf(ch) === 0) return true;
+  // Or draws as a blank a reader cannot tell from a space. U+3000 is deliberately excluded: it draws TWO
+  // columns, it is an ordinary full-width space in Japanese text, and substituting it would narrow the
+  // line as well as rewrite the content. The collision it can still make is a stated residual.
+  return BLANK_LIKE.test(ch) && columnsOf(ch) === 1;
+}
+
+/**
+ * Walk `s`, hand every substituted code point to `replace`, and keep everything else.
+ *
+ * A whole valid flag sequence is taken in one step, which is how a tag can be kept inside one and
+ * substituted outside one without a lookbehind and without rescanning.
+ */
+function mapInterpreted(s, replace) {
+  const text = String(s ?? "");
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text.codePointAt(i) === 0x1f3f4) {
+      const m = FLAG_SEQUENCE.exec(text.slice(i, i + 32));
+      if (m && m.index === 0) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+    }
+    const ch = String.fromCodePoint(text.codePointAt(i));
+    out += interpreted(ch) ? replace : ch;
+    i += ch.length;
+  }
+  return out;
+}
+
+/** Does `s` hold anything this panel would substitute? */
+function anyInterpreted(s) {
+  return mapInterpreted(s, "\u0000").indexOf("\u0000") !== -1;
+}
 
 // The ONLY escape sequence a styled line may keep: an SGR run. Anything else that starts with ESC is data
 // that reached a pane, not decoration this project wrote.
@@ -152,7 +234,7 @@ const STYLE_TOKENS = /\x1b\[[0-9;]*m/g;
  * and a review pass measured.
  */
 export function stripControls(s) {
-  return String(s ?? "").replace(CONTROL_CHARS, "");
+  return mapInterpreted(s, "");
 }
 
 /**
@@ -179,7 +261,7 @@ export function stripControls(s) {
  * it. The first version of this comment claimed a pin that does not exist.
  */
 export function scrubControls(s) {
-  return String(s ?? "").replace(CONTROL_CHARS, " ");
+  return mapInterpreted(s, " ");
 }
 
 /**
@@ -229,7 +311,7 @@ export function scrubControlsPerLine(s) {
 
 /** Does this string carry one? `search` rather than `.test`, because a `/g` regex carries `lastIndex`. */
 export function hasControls(s) {
-  return String(s ?? "").search(CONTROL_CHARS) !== -1;
+  return anyInterpreted(s);
 }
 
 /**
@@ -718,7 +800,12 @@ export function makeLineInput(initial = "") {
   // fix necessary applies unchanged here, because `value()` is what gets SAVED, and it also keeps `render`
   // honest -- `cursor` is an index into this string, so a value with no orphans in it means the window's
   // offsets and the cursor cannot disagree about what they are counting.
-  const enter = (text) => dropOrphans([...stripControls(text)]).join("");
+  // SUBSTITUTE, NOT DELETE, so this value reads like the pane (issue #402). This box is the LIVE_TAIL
+  // search, and the pane substitutes the class: deleting here meant an operator who pasted a log line's
+  // own bytes produced a query matching NEITHER what is drawn nor what is stored. It is safe to substitute
+  // because the cursor sentinels are added at RENDER, not held in the value, so nothing here depends on
+  // them vanishing.
+  const enter = (text) => dropOrphans([...scrubControls(text)]).join("");
   let value = enter(initial);
   let cursor = value.length;
   return {

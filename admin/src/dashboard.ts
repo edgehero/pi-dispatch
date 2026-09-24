@@ -30,7 +30,7 @@ import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers,
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, stripControls } from "./panel.mjs";
+import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -2346,18 +2346,17 @@ export function tailMatches(lines: any[], query: string): number[] {
   // found by any query at all: typing what is on screen missed the raw byte, and pasting the original
   // missed because the box had dropped it. Scrubbing both sides is the only arrangement where what an
   // operator reads is what they can search for.
-  // BOTH READINGS, because the two sides of this comparison disagree about the operation and neither is
-  // wrong to. The pane SUBSTITUTES the class, so what the operator reads is `repo -prod`. The search box is
-  // a `makeLineInput`, which DELETES it -- pinned, because the cursor sentinels are themselves in the
-  // class -- so an operator who pastes the original bytes produces `repo-prod`. Matching the drawn form
-  // alone loses the paste; matching the deleted form alone loses what is on screen. A line is a hit when
-  // EITHER reading contains the query, so both ways of asking find it.
+  // ONE READING, THE DRAWN ONE, on both sides. The pane substitutes the class and the search box now
+  // substitutes it too, so typing what is on screen and pasting the original bytes produce the same query
+  // and both find the line. A first repair compared the drawn reading OR the deleted one, and a review pass
+  // showed what that costs: the deleted reading RE-MERGES the collision this class was widened to expose,
+  // so a search for `deploy-prod` matched both it and `deploy` plus a zero-width space plus `-prod`. The
+  // pane tells those two rows apart; the search must not put them back together.
   const drawn = (v: string) => scrubControls(v).toLowerCase();
-  const bare = (v: string) => stripControls(v).toLowerCase();
+  const q = drawn(query);
   const out: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = String(lines[i]);
-    if (drawn(line).includes(drawn(query)) || bare(line).includes(bare(query))) out.push(i);
+    if (drawn(String(lines[i])).includes(q)) out.push(i);
   }
   return out;
 }

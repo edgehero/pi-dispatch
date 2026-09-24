@@ -24,28 +24,56 @@ async function tsLoader() {
 // already deleting.
 
 test("the class IS its rule, swept over every code point there is (#402)", () => {
-	// A SWEEP BY THE RULE, not a list of the shapes someone thought of. A review pass is why: the first
-	// version of this widening was a hand-written list, it covered 98 code points and left 167 behind --
-	// the Hangul and halfwidth fillers, the tag block, the Arabic and Egyptian format controls, the musical
-	// controls and every blank that is not U+0020 -- and every one of them reproduced the issue's own
-	// selection hazard verbatim through the real panes. A list is what the #382 carve-out was, and this file
-	// already says that was wrong twice.
+	// A SWEEP BY THE RULE, and the rule is stated in terms of what the module says it DRAWS rather than by
+	// restating the class's own expression. That distinction is the correction a review pass forced twice.
+	// The first version was a hand-written list, which left 158 code points behind. The second stated the
+	// rule as the same four Unicode categories the implementation used, which a reviewer pointed out can
+	// only catch a typo, never a wrong rule -- and it was still wrong, leaving U+FFF0-U+FFF8 (which this
+	// project's own width table calls "the noncharacters the renderer also draws as nothing") and U+2800,
+	// which draws a blank cell.
 	//
-	// So the rule is stated here independently of the regex, and the two are required to agree everywhere.
-	const composes = (ch) => ch === "\u200c" || ch === "\u200d" || /\p{Mn}|\p{Me}/u.test(ch);
-	const blankOrInvisible = (ch) => /\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}/u.test(ch) || /[\u115f\u1160\u3164\uffa0]/u.test(ch);
+	// `columnsOf` is the oracle here, and using it is not circular: issue #401 bolts it to the pinned
+	// renderer over every code point there is, so it is an independently held answer to "what does this
+	// draw", which is the only question this class actually asks.
+	// EVERY mark, spacing marks included: issue #401 made those zero columns, so a narrower spelling here
+	// would put the Indic vowel signs in the class.
+	const composes = (ch) => ch === "\u200c" || ch === "\u200d" || /\p{M}/u.test(ch);
+	const blankLike = (ch) => /\p{Zs}|\u2800/u.test(ch);
+	const breaks = (ch) => /\p{Zl}|\p{Zp}/u.test(ch);
 	const executes = (cp) => cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f);
+	let drawsNothing = 0;
+	let blanks = 0;
 	for (let cp = 0; cp <= 0x10ffff; cp++) {
 		if (cp >= 0xd800 && cp <= 0xdfff) continue;
-		const ch = String.fromCodePoint(cp);
-		// A TAG is both, and is settled by its sequence rather than by its code point, so it is swept below.
+		// A TAG is settled by its SEQUENCE rather than by its code point, and is swept in its own test.
 		if (cp >= 0xe0020 && cp <= 0xe007f) continue;
-		const inClass = executes(cp) || (blankOrInvisible(ch) && ch !== "\u0020" && !composes(ch));
+		const ch = String.fromCodePoint(cp);
+		let inClass = executes(cp);
+		if (!inClass && ch !== " " && !composes(ch)) {
+			// A break is read as a break whatever it draws, which is why it is not a width question.
+			if (breaks(ch)) {
+				inClass = true;
+			} else if (columnsOf(ch) === 0) {
+				inClass = true;
+				drawsNothing += 1;
+			} else if (blankLike(ch) && columnsOf(ch) === 1) {
+				inClass = true;
+				blanks += 1;
+			}
+		}
 		assert.equal(hasControls(`a${ch}b`), inClass, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: membership`);
 		assert.equal(scrubControls(`a${ch}b`), inClass ? "a b" : `a${ch}b`, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: what is done with it`);
 	}
-	// `hasControls` uses `search`, not `.test`: a `/g` regex carries `lastIndex` between calls, so the same
-	// string would answer differently on the second ask.
+	// Both non-executing arms are real, so neither clause is quietly dead.
+	// Both counts are pinned rather than merely non-zero, so the class cannot quietly grow or shrink: 85
+	// code points draw as nothing (the format characters, the bidi controls, the fillers, the
+	// noncharacters) and 16 are blanks a reader cannot tell from a space. With the 65 a terminal executes
+	// and the two line breaks that is 168, and the tag block adds 96 more, settled by sequence below.
+	assert.equal(drawsNothing, 85, `the draws-nothing arm covers ${drawsNothing} code points`);
+	assert.equal(blanks, 16, `the blank-like arm covers ${blanks}`);
+	// U+3000 is the stated exclusion: a full-width space is TWO columns and ordinary Japanese text.
+	assert.equal(hasControls("a\u3000b"), false, "an ideographic space is content, not a control");
+	// `hasControls` must answer the same twice: the old implementation was a `/g` regex carrying lastIndex.
 	const dirty = "a\u0007b";
 	assert.equal(hasControls(dirty), true);
 	assert.equal(hasControls(dirty), true, "and it answers the same the second time");
@@ -64,6 +92,19 @@ test("a tag composes a subdivision flag and deceives anywhere else (#402)", () =
 		const ch = String.fromCodePoint(cp);
 		assert.equal(hasControls(`a${ch}b`), true, `U+${cp.toString(16).toUpperCase()} outside a flag`);
 	}
+
+	// THE EXEMPTION IS A VALIDITY CHECK, NOT A PREFIX, and this is the assertion that says so. A first
+	// version exempted "a tag preceded by the base and any number of tags", which exempts every tag FOREVER
+	// AFTER a flag -- cancel tag included -- so one legitimate flag emoji anywhere in a model-writable field
+	// restored the whole hazard. A review pass recovered `rm -rf /` verbatim from a drawn line that way.
+	const hide = (msg) => [...msg].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join("");
+	const payload = hide("rm -rf /");
+	assert.notEqual(scrubControls(`\u{1f3f4}${payload}`), `\u{1f3f4}${payload}`, "a base plus a tag run is not a flag, so the run is substituted");
+	assert.notEqual(scrubControls(`${flag}${payload}`), `${flag}${payload}`, "and a COMPLETE flag does not exempt the run after it");
+	assert.ok(scrubControls(`${flag}${payload}`).startsWith(flag), "while the flag itself still survives");
+	// A run longer than any real subdivision is not a flag either.
+	const tooLong = `\u{1f3f4}${hide("abcdefgh")}\u{e007f}`;
+	assert.notEqual(scrubControls(tooLong), tooLong, "a tag run longer than a subdivision code is not a flag");
 });
 
 test("clipData substitutes and then clips, so width is what the operator sees", () => {
@@ -271,6 +312,10 @@ test("the class draws its line at INTERPRETED against COMPOSING (#402)", () => {
 		["U+2028 line separator", " "],
 		["U+2029 paragraph separator", " "],
 		["U+FFF9 interlinear annotation anchor", "￹"],
+		["U+FFF0 noncharacter, which this file's own width table calls invisible", "￰"],
+		["U+2800 braille blank, which draws a blank cell", "⠀"],
+		["U+00A0 no-break space", " "],
+		["U+2007 figure space", " "],
 	];
 	const COMPOSING = [
 		["U+200D zero width joiner", "‍"],
@@ -278,6 +323,7 @@ test("the class draws its line at INTERPRETED against COMPOSING (#402)", () => {
 		["U+FE0F variation selector-16", "️"],
 		["U+FE0E variation selector-15", "︎"],
 		["U+0301 combining acute", "́"],
+		["U+3000 ideographic space, two columns and ordinary Japanese text", "　"],
 	];
 	for (const [name, ch] of INTERPRETED) {
 		assert.equal(hasControls(`a${ch}b`), true, `${name} is interpreted, so it is in the class`);

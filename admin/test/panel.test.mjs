@@ -263,15 +263,19 @@ test("makeLineInput edits round-trip: insert, cursor moves, backspace, del, setV
   assert.equal(li.cursor(), 5, "setValue parks the cursor at the end");
 });
 
-test("makeLineInput strips control characters on the way in, typed or pasted", () => {
+test("makeLineInput substitutes control characters on the way in, typed or pasted", () => {
+  // SUBSTITUTES, where it used to delete (issue #402). This box is the LIVE_TAIL search, the pane
+  // substitutes the class, and deleting here produced a query matching neither what is drawn nor what is
+  // stored. What has NOT changed is the invariant this test was written for: a sentinel can never enter
+  // the value, because `render` adds them rather than the value holding them.
   const li = makeLineInput("a\x00b");
-  assert.equal(li.value(), "ab", "the initial value is stripped too");
+  assert.equal(li.value(), "a b", "the initial value is scrubbed too");
   li.insert("\x07");
-  assert.equal(li.value(), "ab", "a lone control char inserts nothing");
+  assert.equal(li.value(), "a b ", "a lone control char becomes a space");
   li.insert("cd\x1bef");
-  assert.equal(li.value(), "abcdef", "a pasted string is stripped, then inserted whole");
+  assert.equal(li.value(), "a b cd ef", "a pasted string is scrubbed, then inserted whole");
   li.insert(LINE_INPUT_CURSOR[0] + "x" + LINE_INPUT_CURSOR[1]);
-  assert.equal(li.value(), "abcdefx", "the cursor sentinels are C0 controls and can never enter the value");
+  assert.doesNotMatch(li.value(), /[\x01\x02]/, "the cursor sentinels are in the class and can never enter the value");
 });
 
 test("makeLineInput render is exactly width columns and windows around the cursor", () => {
