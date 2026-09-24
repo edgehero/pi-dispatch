@@ -307,7 +307,10 @@ test("the UNFRAMED degrade substitutes a record's control bytes, exactly as the 
   const snap = { ...SNAPSHOT, runs: [run], activeJobId: "M\u0001N" };
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
   await flush();
-  const tiny = comp.render(4).join("\n");
+  // THROUGH THE UNCLIPPED DEGRADE (a non-finite width), not `render(4)`: since issue #403 a degrade with a
+  // real width honours it, so at 4 columns the markers below are legitimately cut and this test would be
+  // asserting about the clip rather than about the substitution it is named for.
+  const tiny = comp.render(NaN).join("\n");
   const framed = comp.render(200).join("\n");
   await comp.dispose();
   for (const [name, out] of [["degraded", tiny], ["framed", framed]]) {
@@ -2356,7 +2359,7 @@ test("the FRAMED tail substitutes the same bytes the degrade does, title include
   comp.handleInput("l");
   await flush();
   const framed = comp.render(200).join("\n");
-  const degraded = comp.render(4).join("\n");
+  const degraded = comp.render(NaN).join("\n"); // unclipped degrade: see the note in the record test above
   await comp.dispose();
   for (const [name, out] of [["framed", framed], ["degraded", degraded]]) {
     assert.match(out, /jT B/, `${name}: the tail's own title id is spaced, not deleted`);
@@ -3067,4 +3070,64 @@ test("an unreachable held read folds its jobs honestly into `other` on the break
   await comp.dispose();
   assert.match(text, /└ delayed: 1 cron-next · 3 other/, "an unreadable part is not NAMED -- its jobs stay in the undifferentiated remainder");
   assert.doesNotMatch(text, /held on waitFor/, "never an invented held count");
+});
+
+test("the unframed degrade honours a width it was given, and leaves one it was not (#403)", async () => {
+  // A LAYOUT PROMISE THAT HELD ON ONE BRANCH OF AN IF. Below MIN_WIDTH the frame is dropped and the lines
+  // came back as they were built -- except the run rows, bounded to their own fixed 24-column pane. So one
+  // render held rows cut to THAT pane beside section headers, settings lines and hints running past the
+  // width the caller asked for:
+  // measured, 28 of 59 lines over the width at `render(4)`, the widest at 52 columns. Same shape as the
+  // logs viewer's (#399).
+  const snap = { ...SNAPSHOT, settings: { path: "/some/quite/long/path/to/settings.json", overlay: { model: "claude-sonnet-4-5-20250929", dailyCap: 25 } } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+  await flush();
+  for (const w of [4, 6, 7]) {
+    const out = comp.render(w).map((l) => String(l));
+    for (const line of out) {
+      assert.ok(line.length <= w, `width ${w}: a degraded line ran to ${line.length} columns: ${JSON.stringify(line)}`);
+    }
+    // A LOWER BOUND TOO, and it is the half that matters: an upper bound alone is satisfied by the empty
+    // string, so clipping every line to 0 -- blanking the whole pane, the failure this change exists to
+    // avoid -- passed the first version of this loop across every admin test file. Same for clipping to
+    // `w - 1`, to 1, or to half.
+    assert.ok(out.some((l) => l.length === w), `width ${w}: something USES the full width, so the pane is not blanked or over-clipped`);
+  }
+  // AND THE TRUNCATION IS THE FRAMING DECISION'S OWN. A fractional width is where rounding and truncating
+  // disagree: `Math.round(7.9)` would frame nothing and then clip to 8, leaving every line one column over
+  // the width the mode was chosen by.
+  for (const line of comp.render(7.9)) assert.ok(String(line).length <= 7, `7.9 clips to 7, not 8: ${JSON.stringify(String(line))}`);
+  assert.ok(comp.render(0.5).some((l) => String(l).length > 1), "0.5 truncates to 0, which is not a width, so nothing is clipped to a lone ellipsis");
+  // AND NOT WHEN THERE IS NO WIDTH. The degrade is also what a missing or non-finite width gets, where the
+  // right answer is to leave the lines alone rather than invent a number: `clip(x, NaN)` returns the empty
+  // string, which would blank the pane -- the trap the logs viewer hit.
+  for (const w of [NaN, undefined, 0, -3]) {
+    const out = comp.render(w);
+    assert.ok(out.some((l) => String(l).trim() !== ""), `width ${w}: the pane is not blanked`);
+    assert.ok(out.some((l) => String(l).length > 8), `width ${w}: and nothing was clipped to an invented number`);
+  }
+  // THE BOUNDARY ITSELF, at exactly MIN_WIDTH, which nothing drove: moving it by one silently changes which
+  // mode a caller gets, and both modes look plausible on their own.
+  assert.match(comp.render(8).join("\n"), /[\u250c\u2510\u2514\u2518\u2502\u2500]/, "width 8 IS the frame: the comparison is >=, not >");
+  assert.doesNotMatch(comp.render(7).join("\n"), /[\u250c\u2510\u2514\u2518\u2502\u2500]/, "and 7 is the degrade");
+  await comp.dispose();
+});
+
+test("the degrade is a MONOCHROME path, which is what lets it clip by length (#403)", async () => {
+  // THE ASSUMPTION THE CLIP RESTS ON, pinned rather than assumed. `clipData` deletes escape sequences, so
+  // clipping this path by length is only safe while nothing here is coloured -- measured under a real
+  // theme, zero of its lines carry an SGR sequence, because the degrade's own branches strip colour before
+  // returning. The day that stops being true this clip starts deleting colour instead of cutting width, and
+  // the fix is an ANSI-aware cut rather than this one.
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, theme: SGR_THEME, deps: cannedDeps() });
+  await flush();
+  for (const w of [4, 7, NaN]) {
+    for (const line of comp.render(w)) {
+      assert.doesNotMatch(String(line), /\u001b\[/, `width ${w}: the degrade emitted an escape, so the length-based clip is no longer safe`);
+    }
+  }
+  // The framed path DOES colour, which is what makes the assertion above about the degrade rather than
+  // about the theme being inert.
+  assert.ok(comp.render(80).some((l) => /\u001b\[/.test(String(l))), "the same theme colours the framed pane");
+  await comp.dispose();
 });

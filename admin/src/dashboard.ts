@@ -1084,12 +1084,55 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   // elements and never goes near `frame()`. One pass over the finished lines, so a pane added later cannot
   // opt out of it by forgetting a belt. It is a no-op on a line that is already clean, and it never touches
   // the styler's own SGR.
-  return renderPanelLines(snapshot, width, state, styler).map((l) => scrubKeepingStyle(String(l)));
+  const lines = renderPanelLines(snapshot, width, state, styler).map((l) => scrubKeepingStyle(String(l)));
+  // AND THE DEGRADE HONOURS ITS WIDTH (issue #403). Below MIN_WIDTH the frame is dropped and the lines were
+  // returned as they were built -- except the run rows, which are bounded to their own fixed 24-column pane.
+  // So one render held rows cut to that pane beside section headers, settings lines and hints running past
+  // the width the caller asked for: 28 of 59 lines over it at `render(4)`, the widest at 52 columns. A
+  // layout promise that holds on one branch of an `if` is the same shape as the logs viewer's (#399), which
+  // this file already fixed. (The live tail's unframed branch had no clip at all, and its own comment said
+  // so: "an unframed pane has no width to clip to". It has one now.)
+  //
+  // ONLY WHEN THERE IS A WIDTH TO HONOUR. The degrade is also what a MISSING or non-finite width gets, and
+  // there the right answer is to leave the lines alone rather than invent a number -- `clip(x, NaN)` would
+  // return the empty string and blank the pane, which is the trap the logs viewer hit.
+  //
+  // `clipData` is safe here because this path is MONOCHROME: measured under a real theme, zero of its 59
+  // lines carry an SGR sequence, because the degrade's own branches strip colour before returning. A test
+  // pins that. What would happen otherwise is worse than losing colour, which is how a first version of
+  // this comment put it: `clipData` substitutes the ESC and leaves the rest of the sequence VISIBLE, so a
+  // coloured degrade would print `[31m` as text AND charge four phantom columns against the width. The
+  // answer then is an ANSI-aware cut, not this one.
+  //
+  // The width is still a UTF-16 count, which is wrong for CJK and combining marks exactly as it is
+  // everywhere else in this module. That is #401 and is not made worse here.
+  const w = degradeWidth(width);
+  return w === null ? lines : lines.map((l) => clipData(l, w));
+}
+
+/** The one place the framed/unframed decision is spelled, so the gate above and `renderPanelLines` agree. */
+function framedAt(width: number): boolean {
+  return Number.isFinite(width) && Math.trunc(width) >= MIN_WIDTH;
+}
+
+/**
+ * The width a DEGRADED render must fit, or `null` when there is none to fit.
+ *
+ * The truncation lives here rather than at the call site, which is the other half of what `framedAt` is
+ * for: centralising only the COMPARISON left `Math.trunc` spelled twice, and a review pass showed that
+ * splitting them is invisible -- `Math.round(7.9)` frames nothing and clips to 8, so 25 lines sit one
+ * column over the width the framing decision used, and `Math.round(0.5)` clips every line to a single
+ * ellipsis where the rule says leave them alone.
+ */
+function degradeWidth(width: number): number | null {
+  if (framedAt(width) || !Number.isFinite(width)) return null;
+  const w = Math.trunc(width);
+  return w > 0 ? w : null;
 }
 
 function renderPanelLines(snapshot: any, width: number, state: any, styler: any): string[] {
   const { view, selected, detailRun, detailTrigger, tailJobId, tail, tailTop, tailFollow, tailAvailable, tailSearchInput, tailQuery, tailMatchLine, detailSandbox, sandboxAvailable, pendingDelete, pendingCancel, actionNote, heldSelected, runSort, copiedNote, copyAvailable, terminalRows } = state;
-  const framed = Number.isFinite(width) && Math.trunc(width) >= MIN_WIDTH;
+  const framed = framedAt(width);
   const inner = Math.trunc(width) - 4;
   const title = "pi-dispatch";
 
