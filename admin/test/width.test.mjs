@@ -551,3 +551,27 @@ test("the editor's value never admits half a character, through any door (#401)"
   const ed = makeLineInput("ab\ud800cd");
   for (const w of [1, 3, 6, 10]) assert.doesNotMatch(ed.render(w), lone, `render at ${w}`);
 });
+
+test("a lone surrogate cannot reach the drawn line and break a cluster (#401)", async () => {
+  // THE LAST VARIANT, and it is the same mechanism as #417 with a different leader. The renderer treats a
+  // lone surrogate as a cluster BREAK, then computes the next cluster's base after skipping it and counts
+  // that base twice. So an orphan the count had already removed was still in the text handed to the
+  // renderer, and it made the renderer measure a line wider than we did: measured at 12 columns here and
+  // 24 there, with a 24-column pane drawing at 36.
+  //
+  // `clip` used to return its input unchanged when it fitted. It steps the fitted line too now, which makes
+  // the rule this module states -- half a character is removed where text ENTERS -- true of the text rather
+  // than only of the count.
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function");
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const leader = "\ud800ﾟ".repeat(12);
+  assert.equal(columnsOf(clip(leader, 80)), visibleWidth(clip(leader, 80)), "a fitted line measures the same on both sides");
+  assert.doesNotMatch(clip(leader, 80), lone, "and carries no half character");
+  for (const w of [12, 24, 40, 80]) {
+    for (const line of box({ title: "t", sections: [{ lines: [leader] }], width: w })) {
+      assert.equal(columnsOf(line), w, `box at ${w}, our measure`);
+      assert.equal(visibleWidth(line), w, `box at ${w}, the renderer's`);
+    }
+  }
+});

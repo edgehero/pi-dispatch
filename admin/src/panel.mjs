@@ -363,7 +363,13 @@ const WIDE = new RegExp(
  */
 export function clip(line, w) {
   const width = Math.max(0, Math.trunc(w) || 0);
-  const clean = stripControls(line);
+  // THE TEXT, NOT THE INPUT, on both paths. Returning the input unchanged when it fits left a lone
+  // surrogate in the DRAWN line, and the renderer treats one as a cluster break: it then computes the next
+  // cluster's base after skipping it and counts that base twice, so `\ud800\uff9f` repeated twelve times
+  // measured 12 here and 24 there, and a 24-column pane drew at 36. Stepping the fitted line too makes the
+  // rule this module already states -- half a character is removed where text ENTERS -- true of the text
+  // rather than only of the count.
+  const clean = sliceColumns(stripControls(line), Number.MAX_SAFE_INTEGER);
   if (columnsOf(clean) <= width) return clean;
   const ell = active.ellipsis;
   if (width <= columnsOf(ell)) return sliceColumns(ell, width);
@@ -387,9 +393,9 @@ export function sliceColumns(s, w) {
   let out = "";
   let used = 0;
   for (const step of widthSteps(s)) {
-    // Orphans are already gone: `widthSteps` removes them before it steps, so this loop cannot drop a step
-    // and splice its neighbours together. An input that holds one and needs no cut at all still carries it,
-    // because `clip` returns early when the string fits: that is issue #402's ground rather than this one's.
+      // Orphans are already gone: `widthSteps` removes them before it steps, so this loop cannot drop a step
+    // and splice its neighbours together. `clip` steps its fitted line through here too, so a cut is no
+    // longer the only path that removes one.
     if (used + step.cols > budget) break;
     out += step.text;
     used += step.cols;
