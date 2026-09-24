@@ -17,19 +17,27 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { LINE_INPUT_CURSOR, dropLoneSurrogate, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sparkline as plainSparkline } from "./panel.mjs";
+import { LINE_INPUT_CURSOR, columnsOf, dropLoneSurrogate, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sliceColumns, sparkline as plainSparkline } from "./panel.mjs";
 
-// Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text / column count. Content is
-// ASCII + box-drawing + a handful of width-1 glyphs, so post-strip `.length` is a safe column proxy.
+// Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text, which is then measured in COLUMNS.
+// This comment used to end "so post-strip `.length` is a safe column proxy", and issue #401 is what that
+// sentence cost: content is not ASCII, a repository name or a job id carries whatever the forge allows, and
+// a CJK one measured 80 here while the terminal drew 90.
 const ANSI = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x07]*\x07/g;
 
 export function stripAnsi(s) {
   return String(s ?? "").replace(ANSI, "");
 }
 
-/** Visible column count of a (possibly colored) string. */
+/**
+ * Visible COLUMN count of a (possibly colored) string -- not its code-unit length (issue #401).
+ *
+ * Through `panel.mjs`'s table, so the framed pane and the monochrome one measure the same string the same
+ * way. They draw the same geometry, and a width rule that holds in one and not the other is how a frame
+ * ends up ten columns wider than the line above it.
+ */
 export function visibleLen(s) {
-  return stripAnsi(s).length;
+  return columnsOf(stripAnsi(s));
 }
 
 /** A no-op theme: `fg`/`bg`/`bold`/… return the text unchanged. Used in tests and when no TUI theme exists. */
@@ -100,8 +108,19 @@ export function makeStyler(theme, { ascii = false } = {}) {
     // astral character, and half a pair is not a character. Measured at 89 lines of a framed LIST printing
     // one, from a target field of emoji -- the first repair reached `clip` alone and three other cutters
     // slice the same way.
-    if (plain.length > w) plain = w <= G.ellipsis.length ? dropLoneSurrogate(plain.slice(0, w)) : dropLoneSurrogate(plain.slice(0, w - G.ellipsis.length)) + G.ellipsis;
-    plain = align === "right" ? plain.padStart(w) : plain.padEnd(w);
+    // BY COLUMNS, not by code units (issue #401), and through `sliceColumns` so a cut never lands inside a
+    // two-column character -- which a terminal draws as one blank column plus one of overflow.
+    if (columnsOf(plain) > w) {
+      const ell = G.ellipsis;
+      // The narrow branch slices the CONTENT, not the ellipsis, which is what this line did before #401 and
+      // what `clipPlain` below still does. `panel.mjs`'s `clip` shows the ellipsis instead at such a width.
+      // That disagreement is pre-existing and left alone here: the three cutters differ only where the
+      // budget is narrower than the ellipsis glyph itself, and changing which one is right is a question
+      // about what to show, not about how wide it is.
+      plain = w <= columnsOf(ell) ? sliceColumns(plain, w) : sliceColumns(plain, w - columnsOf(ell)) + ell;
+    }
+    const gap = " ".repeat(Math.max(0, w - columnsOf(plain)));
+    plain = align === "right" ? gap + plain : plain + gap;
     let out = color ? fg(color, plain) : plain;
     return strong ? bold(out) : out;
   };
@@ -154,9 +173,9 @@ export function makeStyler(theme, { ascii = false } = {}) {
     // without: clip the META first, and the LABEL only if it alone still does not fit. Getting this wrong by
     // one is why the clamp existed in the first place -- `Math.max(1, ...)` hid the overflow instead of
     // preventing it, and the line ran over its own width.
-    met = dropLoneSurrogate(met.slice(0, Math.max(0, w - lab.length - 3)));
-    const labClipped = dropLoneSurrogate(lab.slice(0, Math.max(0, w - met.length - (met ? 3 : 2))));
-    const ruleLen = Math.max(1, w - labClipped.length - met.length - (met ? 2 : 1));
+    met = sliceColumns(met, Math.max(0, w - columnsOf(lab) - 3));
+    const labClipped = sliceColumns(lab, Math.max(0, w - columnsOf(met) - (met ? 3 : 2)));
+    const ruleLen = Math.max(1, w - columnsOf(labClipped) - columnsOf(met) - (met ? 2 : 1));
     const labPart = labClipped ? bold(fg("muted", labClipped)) + " " : "";
     const rulePart = fg("border", G.h.repeat(ruleLen));
     const metPart = met ? " " + fg("dim", met) : "";
@@ -234,7 +253,12 @@ export function frame(styler, { title = "", width = 40, lines = [], footer = nul
   const out = [];
 
   const titleText = title ? ` ${clipPlain(title, Math.max(0, inner - 2), G.ellipsis)} ` : "";
-  const topFill = Math.max(0, w - 2 - 1 - titleText.length);
+  // THE TOP RULE IS FILLED IN COLUMNS, not code units (issue #401). A CJK title is half as many code units
+  // as the terminal draws columns, so `.length` here over-filled the rule by the title's own width: a
+  // 20-column pane came out 23 wide on its FIRST line only, with every body line correct, which is the
+  // shape that hides such a bug. `titleText` is plain by construction (`clipPlain` strips), so the plain
+  // column count is the whole measurement and no ANSI-aware pass is needed.
+  const topFill = Math.max(0, w - 2 - 1 - styler.visibleLen(titleText));
   out.push(B(G.tl + G.h) + styler.bold(styler.fg("accent", titleText)) + B(G.h.repeat(topFill) + G.tr));
 
   const side = (content) => B(G.v) + " " + content + " " + B(G.v);
@@ -283,11 +307,11 @@ function padVisible(styler, line, width) {
  * caller left the other carrying what the lines inside the frame no longer did. `panel.mjs`'s own `box`
  * already titles through the same operation now, so the two frame builders agree on the CLASS -- which
  * lives in `panel.mjs` and is imported, not respelled here (issue #382) -- AND on what to do with a match.
- * Both SUBSTITUTE a space, because `frame` computes its top rule from the title's length at the call site
- * and a deleting strip would silently change that arithmetic.
+ * Both SUBSTITUTE a space, because `frame` computes its top rule from the title's own width at the call
+ * site and a deleting strip would silently change that arithmetic.
  */
 function clipPlain(s, width, ellipsis = "…") {
   const plain = scrubControls(s);
-  if (plain.length <= width) return plain;
-  return width <= ellipsis.length ? dropLoneSurrogate(plain.slice(0, width)) : dropLoneSurrogate(plain.slice(0, width - ellipsis.length)) + ellipsis;
+  if (columnsOf(plain) <= width) return plain;
+  return width <= columnsOf(ellipsis) ? sliceColumns(plain, width) : sliceColumns(plain, width - columnsOf(ellipsis)) + ellipsis;
 }

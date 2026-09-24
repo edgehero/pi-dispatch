@@ -174,17 +174,99 @@ export function clipData(line, w) {
 }
 
 /**
+ * THE COLUMN COUNT OF A STRING, which is not its `.length` (issue #401).
+ *
+ * Every width promise in this panel was a UTF-16 code-unit count: `clip`, `pad`, `styler.cell`, `divider`
+ * and `frame` all sized themselves by `.length`. Measured against pi-tui 0.80.7's own `visibleWidth` on a
+ * framed render this module reported as exactly 80 columns:
+ *
+ *   CJK job id `ジョブ番号`   80 by .length   90 in the terminal
+ *   fullwidth `ＪＯＢ`        80              86
+ *   Hangul                    3               6
+ *   combining marks `jób́`     80              78
+ *
+ * So a run whose target is a CJK repository name drew a frame whose right border sat ten columns past the
+ * one above it, and a combining mark left it ragged the other way.
+ *
+ * ONE RULE, NOT TWO. The obvious alternative was to import pi-tui's `visibleWidth` in `style.mjs`, which is
+ * overlay-only and already depends on pi. It was rejected: `panel.mjs` owns `clip` and the monochrome
+ * renderer, it is pinned to have NO imports, and the two renderers draw the same geometry -- a width rule
+ * that holds in the framed pane and not in the plain one is the "holds on one branch of an if" shape three
+ * issues in this round have now been about. So the table lives here and the styler comes to it.
+ *
+ * WHAT IT COUNTS, and each line is the smallest thing that gets the measured cases right:
+ *
+ *   - a combining mark (Mn/Me) is ZERO, because it draws on the character before it;
+ *   - a zero-width or formatting character is ZERO (ZWSP, ZWNJ, ZWJ, the bidi marks, BOM, word joiner);
+ *   - an East Asian Wide or Fullwidth character is TWO;
+ *   - everything else is ONE, including an unassigned code point, because guessing wider on an unknown is
+ *     how a rule starts breaking the panes it was added to fix.
+ *
+ * ITS LIMIT, stated rather than implied: this sums CODE POINTS, so an emoji ZWJ sequence -- a family, a
+ * flag, a skin tone -- counts every member and comes out wider than the single glyph a terminal draws.
+ * pi-tui disagrees with us there too (it reports 2 where we report 8), and terminals disagree with each
+ * other, which is why no width table in this project will settle it. A grapheme-aware count needs
+ * `Intl.Segmenter` and a terminal that agrees; the residual is one over-wide line, never a broken border,
+ * because over-counting cuts early rather than late.
+ */
+export function columnsOf(s) {
+  let n = 0;
+  for (const ch of String(s ?? "")) {
+    const cp = ch.codePointAt(0);
+    if (ZERO_WIDTH.test(ch) || COMBINING.test(ch)) continue;
+    n += WIDE.test(ch) || (cp >= 0x1f300 && cp <= 0x1f9ff) ? 2 : 1;
+  }
+  return n;
+}
+
+// Mn and Me: a mark that draws on the character before it. `\p{M}` would also take Mc (spacing marks), which
+// DO occupy a column in the Indic scripts that use them.
+const COMBINING = /\p{Mn}|\p{Me}/u;
+// Format and zero-width characters, which occupy none: ZWSP/ZWNJ/ZWJ, the bidi marks and isolates, the word
+// joiner and invisible operators, the BOM, and the variation selectors.
+const ZERO_WIDTH = /[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufe00-\ufe0f]/u;
+// East Asian Wide and Fullwidth, from UAX #11: CJK and its punctuation, Hangul, Kana, the fullwidth forms.
+const WIDE =
+  /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u;
+
+/**
  * Truncate `line` to `w` display columns, appending an ellipsis glyph when content is cut. Control
- * characters (including escape sequences) are stripped first so untrusted input cannot crash or mis-size:
- * content is ASCII/box-drawing, so post-strip `String.length` is a safe column proxy.
+ * characters (including escape sequences) are stripped first so untrusted input cannot crash or mis-size.
+ *
+ * The cut is by COLUMNS, through `sliceColumns`, and this docblock used to claim instead that "content is
+ * ASCII/box-drawing, so post-strip `String.length` is a safe column proxy". It is not (issue #401): the
+ * content includes repository names, job ids and branch names, and a forge accepts whatever the forge
+ * accepts.
  */
 export function clip(line, w) {
   const width = Math.max(0, Math.trunc(w) || 0);
   const clean = stripControls(line);
-  if (clean.length <= width) return clean;
+  if (columnsOf(clean) <= width) return clean;
   const ell = active.ellipsis;
-  if (width <= ell.length) return ell.slice(0, width);
-  return dropLoneSurrogate(clean.slice(0, width - ell.length)) + ell;
+  if (width <= columnsOf(ell)) return sliceColumns(ell, width);
+  return sliceColumns(clean, width - columnsOf(ell)) + ell;
+}
+
+/**
+ * The first `w` COLUMNS of a string, never half of a wide character.
+ *
+ * A cut by code units splits an astral pair (`dropLoneSurrogate`'s problem) and, once widths are counted,
+ * can also stop in the middle of a two-column character -- which a terminal renders as one column of
+ * nothing and one column of overflow, so the line is both wrong and ragged. Walking code points and
+ * stopping BEFORE the budget is passed means the result is always at most `w` columns and always a whole
+ * character, and it makes `dropLoneSurrogate` unnecessary on this path: a surrogate pair is one step here.
+ */
+export function sliceColumns(s, w) {
+  const budget = Math.max(0, Math.trunc(w) || 0);
+  let out = "";
+  let used = 0;
+  for (const ch of String(s ?? "")) {
+    const cols = columnsOf(ch);
+    if (used + cols > budget) break;
+    out += ch;
+    used += cols;
+  }
+  return out;
 }
 
 /**
@@ -198,10 +280,11 @@ export function dropLoneSurrogate(s) {
   return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s;
 }
 
-/** `clip` to `w`, then right-pad with spaces to exactly `w` columns. */
+/** `clip` to `w`, then right-pad with spaces to exactly `w` COLUMNS (issue #401: not `.length`). */
 export function pad(line, w) {
   const width = Math.max(0, Math.trunc(w) || 0);
-  return clip(line, width).padEnd(width);
+  const cut = clip(line, width);
+  return cut + " ".repeat(Math.max(0, width - columnsOf(cut)));
 }
 
 /**
@@ -219,7 +302,11 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
   // `clipData`, not `clip`: `frame` substitutes in its own title (`clipPlain`), and a title that DELETES
   // here clipped one column narrower than the coloured twin for the same string.
   const titleText = title ? ` ${clipData(title, Math.max(0, inner - 2))} ` : "";
-  const topFill = Math.max(0, w - 2 - 1 - titleText.length); // corners + one leading `h`
+  // COLUMNS, not code units (issue #401), the same repair as `frame`'s top rule and for the same reason: a
+  // CJK title made this rule over-fill by the title's own width, so the pane's FIRST line was wider than
+  // every line under it. `clipData` has already substituted, so `titleText` is plain and `columnsOf` is the
+  // whole measurement.
+  const topFill = Math.max(0, w - 2 - 1 - columnsOf(titleText)); // corners + one leading `h`
   lines.push(active.tl + active.h + titleText + active.h.repeat(topFill) + active.tr);
 
   const framed = (text) => `${active.v} ${pad(text, inner)} ${active.v}`;
@@ -247,7 +334,12 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
  *
  * `state` ("ok" | "soft-hold" | "over") appends a textual marker to the label: the panel is monochrome and
  * `clip` strips ANSI, so the amber/red of a soft-hold or over-budget window is carried as a word, not a
- * color. "ok" (the default) adds nothing, so a plain call renders exactly as before.
+ * color.
+ *
+ * ITS LABEL IS MEASURED BY `.length` AND THAT IS CORRECT HERE, which is worth saying in a file whose whole
+ * subject is that `.length` is not a column count (issue #401). Every character of the label comes from two
+ * integers and a word out of a closed set, so it is digits and ASCII by construction and no caller can put
+ * anything else in it. `styler.meter`'s label is built the same way and is exempt for the same reason. "ok" (the default) adds nothing, so a plain call renders exactly as before.
  */
 export function meter(reserved, cap, width = 24, state = "ok") {
   const r = Number.isFinite(reserved) ? Math.max(0, Math.trunc(reserved)) : 0;
