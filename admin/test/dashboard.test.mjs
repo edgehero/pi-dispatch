@@ -3043,7 +3043,7 @@ test("the deps layer projects a failed Job to five host-chosen fields -- .data n
   const line = JSON.stringify(snap.failed);
   assert.ok(!line.includes("SECRET TITLE") && !line.includes("SECRET BODY") && !line.includes("secret-login") && !line.includes("secretFrame"), "payload and stacktrace stay out of the snapshot");
   // C1 is in the class too since issue #337, because `scrubReason` shares `scrubControl` with the
-  // renderer and that moved to `panel.mjs`'s wider `CONTROL_CHARS`. Nothing this project produces puts a
+  // renderer and that moved to `panel.mjs`'s wider class, now its `interpreted` predicate. Nothing this project produces puts a
   // C1 code point in a worker throw's message, so this pins a contract rather than a behaviour.
   for (const code of [0x1b, 0x07, 0x9b, 0x80]) {
     assert.ok(!row.failedReason.includes(String.fromCharCode(code)), `control byte ${code} is scrubbed`);

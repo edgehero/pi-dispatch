@@ -95,9 +95,10 @@ function scrubReason(reason: any): string {
  *
  * WHICH CLASS, because the project has two and the first version of this picked the wrong one. The
  * narrow one is `triggers.mjs`'s VALIDATOR, C0 + DEL, which decides whether an operator-authored file
- * is acceptable. The wider one is `panel.mjs`'s `CONTROL_CHARS`, which since issue #402 is derived from
- * properties rather than listed -- what a terminal EXECUTES, plus what it draws as nothing or as a blank
- * that is not a space, minus what COMPOSES a neighbouring glyph -- and which already backs `clip`,
+ * is acceptable. The wider one is `panel.mjs`'s `interpreted`, which since issue #402 asks what a code
+ * point DRAWS rather than listing shapes -- what a terminal executes, plus what breaks a line, draws
+ * nothing or draws a blank a reader cannot tell from a space, minus what COMPOSES a neighbouring glyph --
+ * and which already backs `clip`,
  * so the PLAIN and ASCII render paths have stripped C1 out of these same rows all along. A themed row
  * and a plain row of the same record going through two different classes is the drift this must not be,
  * and the wider one is the right one for the job: this is text on its way to a terminal, not a file

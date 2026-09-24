@@ -26,11 +26,12 @@ async function tsLoader() {
 test("the class IS its rule, swept over every code point there is (#402)", () => {
 	// A SWEEP BY THE RULE, and the rule is stated in terms of what the module says it DRAWS rather than by
 	// restating the class's own expression. That distinction is the correction a review pass forced twice.
-	// The first version was a hand-written list, which left 158 code points behind. The second stated the
+	// The first version was a hand-written list of 98, where this holds 4,024. The second stated the
 	// rule as the same four Unicode categories the implementation used, which a reviewer pointed out can
-	// only catch a typo, never a wrong rule -- and it was still wrong, leaving U+FFF0-U+FFF8 (which this
-	// project's own width table calls "the noncharacters the renderer also draws as nothing") and U+2800,
-	// which draws a blank cell.
+	// only catch a typo, never a wrong rule -- and it was still wrong, leaving U+FFF0-U+FFF8 and U+2800,
+	// which draws a blank cell. A third round found the largest miss of all, 3,760 code points, by noticing
+	// that asking the width table alone is not asking the renderer: that table GUESSES one column for an
+	// unassigned code point, which is the safe direction for a width and a miss for membership.
 	//
 	// `columnsOf` is the oracle here, and using it is not circular: issue #401 bolts it to the pinned
 	// renderer over every code point there is, so it is an independently held answer to "what does this
@@ -48,12 +49,17 @@ test("the class IS its rule, swept over every code point there is (#402)", () =>
 		// A TAG is settled by its SEQUENCE rather than by its code point, and is swept in its own test.
 		if (cp >= 0xe0020 && cp <= 0xe007f) continue;
 		const ch = String.fromCodePoint(cp);
+		// Where the width table GUESSES. It answers one column for an unassigned code point, deliberately and
+		// safely for a width, and that guess is a MISS for membership: the renderer draws U+2065 and the
+		// special-purpose plane as nothing. Stated here as its own clause so the rule and the code agree
+		// about why, not just about which.
+		const invisibleUnassigned = cp === 0x2065 || (cp >= 0xe0000 && cp <= 0xe0fff);
 		let inClass = executes(cp);
 		if (!inClass && ch !== " " && !composes(ch)) {
 			// A break is read as a break whatever it draws, which is why it is not a width question.
 			if (breaks(ch)) {
 				inClass = true;
-			} else if (columnsOf(ch) === 0) {
+			} else if (columnsOf(ch) === 0 || invisibleUnassigned) {
 				inClass = true;
 				drawsNothing += 1;
 			} else if (blankLike(ch) && columnsOf(ch) === 1) {
@@ -66,10 +72,11 @@ test("the class IS its rule, swept over every code point there is (#402)", () =>
 	}
 	// Both non-executing arms are real, so neither clause is quietly dead.
 	// Both counts are pinned rather than merely non-zero, so the class cannot quietly grow or shrink: 85
-	// code points draw as nothing (the format characters, the bidi controls, the fillers, the
-	// noncharacters) and 16 are blanks a reader cannot tell from a space. With the 65 a terminal executes
-	// and the two line breaks that is 168, and the tag block adds 96 more, settled by sequence below.
-	assert.equal(drawsNothing, 85, `the draws-nothing arm covers ${drawsNothing} code points`);
+	// code points draw as nothing: the format characters, the bidi controls, the fillers, and the two
+	// unassigned regions the renderer draws as nothing where the width table guesses one column. 16 are
+	// blanks a reader cannot tell from a space. With the 65 a terminal executes and the two line breaks
+	// that is 3,928, and the tag block adds 96 more, settled by sequence below.
+	assert.equal(drawsNothing, 3845, `the draws-nothing arm covers ${drawsNothing} code points`);
 	assert.equal(blanks, 16, `the blank-like arm covers ${blanks}`);
 	// U+3000 is the stated exclusion: a full-width space is TWO columns and ordinary Japanese text.
 	assert.equal(hasControls("a\u3000b"), false, "an ideographic space is content, not a control");
@@ -105,6 +112,41 @@ test("a tag composes a subdivision flag and deceives anywhere else (#402)", () =
 	// A run longer than any real subdivision is not a flag either.
 	const tooLong = `\u{1f3f4}${hide("abcdefgh")}\u{e007f}`;
 	assert.notEqual(scrubControls(tooLong), tooLong, "a tag run longer than a subdivision code is not a flag");
+
+	// EVERY TAG OUTSIDE A COMPLETE SEQUENCE GOES, asserted rather than "the result differs". A review pass
+	// showed what `notEqual` alone buys: making the cancel tag optional left a SIX-character hidden message
+	// whole, and the assertion above was satisfied by the eight-character one being partly substituted.
+	for (const around of [`\u{1f3f4}${payload}`, `${flag}${payload}`, `${payload}${flag}`, `a${payload}b`]) {
+		const scrubbed = scrubControls(around);
+		const tags = [...scrubbed].filter((c) => c.codePointAt(0) >= 0xe0020 && c.codePointAt(0) <= 0xe007f);
+		const kept = around.includes(flag) ? 6 : 0; // the six a complete flag is allowed to keep
+		assert.equal(tags.length, kept, `tags surviving in ${JSON.stringify(around)}`);
+	}
+	// AND A FLAG IS NOT DUPLICATED OR ALLOWED TO EAT WHAT SITS BETWEEN TWO OF THEM, which is what dropping
+	// the match-at-this-position guard did: `base tagA tagB base tagC cancel` came back as the second flag
+	// twice, with the bytes between them gone.
+	const twoBases = `\u{1f3f4}${hide("ab")}\u{1f3f4}${hide("gbeng")}\u{e007f}`;
+	const out = scrubControls(twoBases);
+	assert.equal([...out].filter((c) => c.codePointAt(0) === 0x1f3f4).length, 2, "both bases survive as themselves");
+	assert.ok(out.endsWith(`\u{1f3f4}${hide("gbeng")}\u{e007f}`), "the valid flag is kept whole at the end");
+	assert.equal([...out].filter((c) => c.codePointAt(0) >= 0xe0020 && c.codePointAt(0) <= 0xe007f).length, 6, "and only its own tags survive");
+});
+
+test("the width table's guess is not the class's answer (#402)", () => {
+	// THE THIRD ROUND'S BLOCKER. Asking `columnsOf` alone reads like "ask the renderer" and is not: issue
+	// #401 pins that table as never NARROWER than the renderer and it deliberately answers ONE for an
+	// unassigned code point, which is the safe direction for a width and a MISS for membership. 3,760 code
+	// points the renderer draws as nothing were outside the class, a hidden-ASCII channel 39 times the size
+	// of the tag block this file builds a sequence matcher for.
+	const hidden = [...("rm -rf /")].map((c) => String.fromCodePoint(0xe0080 + c.charCodeAt(0) - 32)).join("");
+	assert.equal(columnsOf(hidden), 8, "the width table guesses one column each, which is why it cannot decide this");
+	assert.equal(scrubControls(`job${hidden}id`), `job${"        "}id`, "and every one of them is substituted anyway");
+	for (const cp of [0x2065, 0xe0000, 0xe0002, 0xe001f, 0xe0080, 0xe00ff, 0xe01f0, 0xe0fff]) {
+		const ch = String.fromCodePoint(cp);
+		assert.equal(hasControls(`a${ch}b`), true, `U+${cp.toString(16).toUpperCase()} is invisible at the renderer`);
+	}
+	// The variation selectors inside the same plane are MARKS, and stay out for the composing reason.
+	assert.equal(hasControls("a\u{e0100}b"), false, "a variation selector composes, even in that plane");
 });
 
 test("clipData substitutes and then clips, so width is what the operator sees", () => {

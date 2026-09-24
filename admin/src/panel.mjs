@@ -76,7 +76,8 @@ const MIN_WIDTH = 8;
  *     by the string, so the operator can edit or delete the row they did not mean.
  *
  * ASKED OF THE RENDERER, NOT LISTED AND NOT CATEGORISED, and it took two review rounds to get there. A
- * hand-written list of the shapes someone thought of covered 98 code points; this covers 264. Missing were
+ * hand-written list of the shapes someone thought of covered 98 code points; this covers 4,024, and the
+ * old list is a strict SUBSET of it -- nothing it held has been let go. Missing were
  * the fillers (one of which this project's own `env-file.mjs` already calls a deception character), the
  * tag block, the Arabic and Egyptian format controls, the musical controls, the noncharacters and every
  * blank a reader cannot tell from a space.
@@ -85,8 +86,8 @@ const MIN_WIDTH = 8;
  * one's clothes: it still left U+FFF0-U+FFF8, which THIS FILE's width table already calls noncharacters
  * the renderer draws as nothing, and U+2800, which draws a blank cell. A list is what the carve-out in
  * issue #382 was and it was wrong twice; four categories standing in for "what does this draw" is the same
- * shape a third time. So membership asks `columnsOf`, which issue #401 bolts to the pinned renderer over
- * every code point there is.
+ * shape a third time. So membership asks what a code point DRAWS, through `columnsOf` and through the one
+ * place that table deliberately guesses, which the clause below the predicate explains.
  *
  * WHAT IS DELIBERATELY NOT IN IT: U+0020, which is the space this substitutes TO; and a code point that
  * COMPOSES the character beside it. U+200D joins an emoji sequence into one glyph, U+200C is orthography
@@ -94,11 +95,11 @@ const MIN_WIDTH = 8;
  * property here reaches it anyway). Substituting those changes a CHARACTER where substituting the rest
  * reveals a CONTROL, and a gate that cannot tell them apart corrupts the text it was added to protect.
  *
- * ISSUE #401 ANSWERED THE OTHER HALF of that issue's argument, and it is worth saying precisely because a
- * first version of this said it loosely: the width table and the renderer AGREE on every one of these, so
- * none corrupts the geometry any more. Most measure zero; U+2028 and U+2029 measure ONE on both sides,
- * which is what "they are zero columns now" got wrong. What was left was the reading, which is why the
- * class moves and the width table does not.
+ * ISSUE #401 ANSWERED THE OTHER HALF of that issue's argument, and saying it precisely took two goes. None
+ * of these corrupts the geometry, because every measurement site scrubs BEFORE it measures. "They measure
+ * zero columns now" was false of 83 of them: 65 are what a terminal executes and 16 are blanks, and all of
+ * those measure one. What was left was the reading, which is why the class moves and the width table does
+ * not.
  *
  * SUBSTITUTION IS THEREFORE NO LONGER COLUMN-PRESERVING, and it used to be free: every member of the old
  * class measured one column, so replacing it with a space changed no geometry. Most members of this one
@@ -132,8 +133,6 @@ const MIN_WIDTH = 8;
  * than substituting, on an allowlist of printable ASCII, which is right for a DNS name or a socket path
  * and would escape the content issue #401 had just taught this module to measure.
  */
-// eslint-disable-next-line no-control-regex -- the C0/C1 half of the class above
-const FLAG_BASE = "\u{1f3f4}";
 // A SUBDIVISION FLAG, matched as a WHOLE VALID SEQUENCE rather than guessed at from one end: the base,
 // one to six tag letters, and the cancel tag that closes it. A first version exempted "a tag preceded by
 // the base and any number of tags", which is not the same claim and is not a validity check at all -- it
@@ -153,6 +152,9 @@ const COMPOSES = /\p{M}/u;
 const BLANK_LIKE = /\p{Zs}|\u2800/u;
 // A line or paragraph separator: it is read as a BREAK, whatever width it happens to draw.
 const BREAKS = /\p{Zl}|\p{Zp}/u;
+// The two places the pinned renderer draws an UNASSIGNED code point as nothing, where the width table
+// guesses one column. Measured against the pin rather than reasoned from the standard.
+const INVISIBLE_UNASSIGNED = /[\u2065]|[\u{e0000}-\u{e0fff}]/u;
 
 /**
  * IS THIS CODE POINT ONE THE PANEL SUBSTITUTES? The rule, as a predicate, rather than a category list.
@@ -168,14 +170,35 @@ function interpreted(ch) {
   const cp = ch.codePointAt(0);
   // What a terminal EXECUTES. U+009B is a CSI introducer needing no ESC, which is why C1 is here.
   if (cp <= 0x1f || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) return true;
+  // PRINTABLE ASCII IS THE ANSWER FOR ALMOST EVERY CHARACTER A PANE EVER HOLDS, and saying so here rather
+  // than reaching `columnsOf` below is what keeps this affordable: every caller runs it per character over
+  // whole `.log` lines, and a review pass measured a search over a 200-line tail of 100 KB lines at 2.1
+  // SECONDS per render without it. None of U+0021-U+007E is a mark, a blank or a separator.
+  if (cp < 0x80) return false;
   // The space this substitutes TO, and the two joiners, which compose rather than hide.
+  //
+  // THE SPACE IS ALREADY COVERED by the ASCII line above, and both are kept on purpose: each makes the
+  // other's mutation equivalent, which is worth saying so the next reader does not chase either as a gap.
+  // The fast path exists for cost and the named check for legibility, and deleting the fast path alone
+  // would silently put U+0020 into the class if this line ever went with it.
   if (ch === " " || ch === "\u200c" || ch === "\u200d") return false;
   if (COMPOSES.test(ch)) return false;
   // BREAKS A LINE, which is an interpretation rather than a drawing, and the one arm that is not about
   // what a code point looks like: U+2028 and U+2029 draw ONE column, so neither test below reaches them.
   if (BREAKS.test(ch)) return true;
-  // Draws as NOTHING: the format characters, the bidi controls, the fillers, the noncharacters.
-  if (columnsOf(ch) === 0) return true;
+  // Draws as NOTHING: the format characters, the bidi controls, the fillers, and the unassigned code
+  // points the renderer blanks (U+FFF0-U+FFF8 among them, which are RESERVED rather than noncharacters --
+  // the real noncharacters, U+FDD0-U+FDEF and the plane-enders, are not in this class and draw a glyph).
+  //
+  // THE SECOND TEST IS NOT REDUNDANT, and leaving it out is the defect a third review round found. Asking
+  // `columnsOf` alone looked like "ask the renderer", and it is not: issue #401's sweep pins that table as
+  // never NARROWER than the renderer, and its docblock says it deliberately answers ONE for an unassigned
+  // code point, because guessing wider is the safe direction for a WIDTH. For MEMBERSHIP the safe
+  // direction is the other one, so that guess is a MISS -- 3,760 of them, measured against the pin: U+2065
+  // and the special-purpose plane, which is a hidden-ASCII channel 39 times the size of the tag block this
+  // file builds a whole sequence matcher for. The variation selectors inside that plane are marks and have
+  // already been kept above; the tags are settled by sequence.
+  if (columnsOf(ch) === 0 || INVISIBLE_UNASSIGNED.test(ch)) return true;
   // Or draws as a blank a reader cannot tell from a space. U+3000 is deliberately excluded: it draws TWO
   // columns, it is an ordinary full-width space in Japanese text, and substituting it would narrow the
   // line as well as rewrite the content. The collision it can still make is a stated residual.
@@ -805,6 +828,11 @@ export function makeLineInput(initial = "") {
   // own bytes produced a query matching NEITHER what is drawn nor what is stored. It is safe to substitute
   // because the cursor sentinels are added at RENDER, not held in the value, so nothing here depends on
   // them vanishing.
+  //
+  // `dropOrphans` is belt rather than braces on this path: `scrubControls` does not remove half a pair, it
+  // substitutes the class, and a lone surrogate is not in the class -- it is removed by `widthSteps` when
+  // anything measures or cuts this value. Keeping it here means the VALUE never holds one either, which is
+  // what issue #401 needed of the string that gets saved.
   const enter = (text) => dropOrphans([...scrubControls(text)]).join("");
   let value = enter(initial);
   let cursor = value.length;
