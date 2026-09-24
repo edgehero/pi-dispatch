@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { box, clip, columnsOf, pad, sliceColumns } from "../src/panel.mjs";
+import { LINE_INPUT_CURSOR, box, clip, columnsOf, makeLineInput, pad, sliceColumns } from "../src/panel.mjs";
 import { frame, makeStyler, PLAIN_THEME, visibleLen } from "../src/style.mjs";
+import { renderRuns } from "../src/render.mjs";
 
 // EVERY WIDTH PROMISE IN THIS PANEL WAS A UTF-16 COUNT (issue #401), and this file is where the repair is
 // held against the only authority available: pi's own renderer, which is what actually draws these lines.
@@ -33,12 +34,22 @@ import { frame, makeStyler, PLAIN_THEME, visibleLen } from "../src/style.mjs";
 async function loadVisibleWidth() {
   try {
     const pi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-    const { visibleWidth } = await import(pathToFileURL(pi.resolve("@earendil-works/pi-tui")).href);
+    const entry = pi.resolve("@earendil-works/pi-tui");
+    // WHICH COPY, asserted rather than assumed. pi depends on pi-tui by a RANGE, so a resolve that is not
+    // the lockfile's would answer any 0.80.x, and a hoisted layout could put a different copy above this
+    // one. `CONST-PI-VERSION-PINNED` says to verify against the pinned artifact rather than a range, and
+    // an oracle measured against the wrong artifact is a table pinned to the wrong renderer.
+    const version = pi("@earendil-works/pi-tui/package.json").version;
+    if (version !== PI_TUI_VERSION) return null;
+    const { visibleWidth } = await import(pathToFileURL(entry).href);
     return typeof visibleWidth === "function" ? visibleWidth : null;
   } catch {
     return null;
   }
 }
+
+/** The pin, from `package-lock.json`. A mismatch fails the tests below rather than measuring silently. */
+const PI_TUI_VERSION = "0.80.7";
 
 /** `[name, string, what pi and we must agree it is]` -- the cases a review pass measured as broken. */
 const AGREE = [
@@ -47,14 +58,14 @@ const AGREE = [
   ["a CJK repo target", "会社/製品#5", 11],
   ["fullwidth latin", "ＪＯＢ", 6],
   ["hangul", "한글테스트", 10],
-  ["combining marks", "jób́", 3],
-  ["a zero-width space", "a​b​c", 3],
-  ["a bidi override", "a‮b", 2],
+  ["combining marks", "jo\u0301b\u0301", 3],
+  ["a zero-width space", "a\u200bb\u200bc", 3],
+  ["a bidi override", "a\u202eb", 2],
   ["box drawing", "┌─┐", 3],
   ["one emoji", "\u{1f600}", 2],
 ];
 
-test("the column count agrees with pi's own renderer on everything but a ZWJ sequence (#401)", async () => {
+test("the measured cases agree with the renderer, and the ZWJ disagreement is pinned as one (#401)", async () => {
   const visibleWidth = await loadVisibleWidth();
   // NOT SKIPPED SILENTLY: an oracle that quietly vanishes is an oracle that stops being one, and this
   // module's sibling pin (`keys.mjs`) made exactly that mistake once.
@@ -69,7 +80,7 @@ test("the column count agrees with pi's own renderer on everything but a ZWJ seq
   // sequence counts every member; pi collapses it to one glyph. Terminals disagree with each other here
   // too, which is why no table in this project settles it. Over-counting cuts EARLY, so the cost is a short
   // line rather than a broken border -- which is the direction to be wrong in.
-  const family = "\u{1f468}‍\u{1f469}‍\u{1f466}";
+  const family = "\u{1f468}\u200d\u{1f469}\u200d\u{1f466}";
   assert.equal(columnsOf(family), 6, "we count each member of the family");
   assert.equal(visibleWidth(family), 2, "pi counts the glyph -- recorded, not fixed");
 });
@@ -106,7 +117,7 @@ test("the monochrome pane measures exactly its width too, title row included (#4
   // rule reverted to `.length`. `box` and `frame` draw the same geometry from two different files, and this
   // round keeps finding the shape where a rule holds on one branch and not the other. The overshoot lands on
   // the FIRST line only, with every body row correct, which is what made it easy to miss by eye.
-  const sections = [{ title: "ジョブ", lines: ["会社/製品#5 のジョブ", "plain ascii row", "jób́ marks"] }];
+  const sections = [{ title: "ジョブ", lines: ["会社/製品#5 のジョブ", "plain ascii row", "jób\u0301 marks"] }];
   for (const w of [24, 40, 80]) {
     for (const line of box({ title: "ジョブ番号", sections, footer: "Ｆ", width: w })) {
       assert.equal(columnsOf(line), w, `width ${w}: ${JSON.stringify(line)}`);
@@ -118,11 +129,227 @@ test("a frame holding CJK still measures exactly its width, in our terms and pi'
   const visibleWidth = await loadVisibleWidth();
   assert.equal(typeof visibleWidth, "function");
   const styler = makeStyler(PLAIN_THEME);
-  const lines = ["会社/製品#5 のジョブ", "plain ascii row", "jób́ with combining marks"];
+  const lines = ["会社/製品#5 のジョブ", "plain ascii row", "jo\u0301b\u0301 with combining marks"];
   for (const w of [20, 40, 80]) {
     for (const line of frame(styler, { title: "ジョブ", width: w, lines: lines.map((l) => styler.cell(l, w - 4)), footer: "Ｆ" })) {
       assert.equal(visibleLen(line), w, `width ${w}: our own measure`);
       assert.equal(visibleWidth(line), w, `width ${w}: and pi's, which is the one the terminal uses`);
+    }
+  }
+});
+
+test("the table is held to the renderer on every code point there is (#401)", async () => {
+  const visibleWidth = await loadVisibleWidth();
+  assert.equal(typeof visibleWidth, "function", "pi-tui's visibleWidth must load, or this test is checking nothing");
+
+  // THE BOLT A HAND-WRITTEN TABLE NEEDS, and the reason it sweeps rather than lists examples. The first
+  // version of this table was written out of UAX #11 by hand and checked against ten strings. It passed,
+  // and it UNDER-counted 139,820 code points: CJK Extension B through H, Tangut, the Kana supplement, the
+  // Hangul Jamo extensions and every emoji block added since Unicode 13. Ten examples cannot see that.
+  // CLAUDE.md already says a hand-written table restating a derivable source is either derived or pinned.
+  //
+  // THE DIRECTION IS THE WHOLE POINT, so the hard assertion is one-sided. Over-counting cuts EARLY: the
+  // line comes out short and the border holds. Under-counting cuts LATE: the line runs past the border,
+  // which is the defect this issue names.
+  const OVER = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    // A surrogate on its own is not a character and neither side promises anything about it.
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    // THE CONTROL CLASS IS OUTSIDE THE TABLE'S PROMISE, for a reason no per-character table can fix: a
+    // TAB's width depends on the cursor's column, not on the character (the renderer answers 3 for one at
+    // column 0). Every renderer here substitutes the whole class before measuring, which is what issue
+    // #382 put in front of every path, so the table is never asked.
+    if (cp < 0x20 || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) continue;
+    const ch = String.fromCodePoint(cp);
+    const ours = columnsOf(ch);
+    const theirs = visibleWidth(ch);
+    assert.ok(ours >= theirs, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: we say ${ours}, the renderer draws ${theirs}`);
+    if (ours !== theirs) OVER.push(cp);
+  }
+
+  // Every over-count is the one departure the table declares, and nothing else. Without this half the
+  // assertion above is satisfied by a table that answers 2 for everything.
+  for (const cp of OVER) {
+    assert.ok(
+      !/\p{Assigned}/u.test(String.fromCodePoint(cp)),
+      `U+${cp.toString(16).toUpperCase().padStart(4, "0")} is assigned, so the table over-counts a real character for no stated reason`,
+    );
+  }
+  assert.ok(OVER.length > 0, "the unassigned departure is real, not a dead clause");
+});
+
+test("U+FE0F asks for the emoji form, and the table follows the renderer there too (#401)", () => {
+  // A PER-CHARACTER TABLE CANNOT DO THIS, which is why `columnsOf` carries one piece of state. U+FE0F
+  // makes the character BEFORE it draw in its emoji form, two columns wide, for the 201 code points that
+  // have a text form and an emoji form. Reverting that clause is the mutation that matters: it restores a
+  // count the code-unit `.length` had right by accident, since such a sequence is two code units.
+  for (const [name, s, expected] of [
+    ["a heart", "❤\ufe0f", 2],
+    ["a warning sign", "⚠\ufe0f", 2],
+    ["a bare heart", "❤", 1],
+    ["an already-wide emoji", "\u{1f600}\ufe0f", 2],
+    ["a letter, which VS16 does not promote", "A\ufe0f", 1],
+    ["a digit, whose emoji form is a keycap", "1\ufe0f", 1],
+  ]) {
+    assert.equal(columnsOf(s), expected, name);
+  }
+});
+
+test("a cut leaves no dangling joiner and no content at all at zero (#401)", () => {
+  const family = "\u{1f468}\u200d\u{1f469}\u200d\u{1f466}";
+  for (let w = 0; w <= 8; w++) {
+    assert.doesNotMatch(sliceColumns(family, w), /[\u200d\ufe0e\ufe0f]$/u, `width ${w}: a joiner survived the cut it was joining across`);
+  }
+  // A zero-column character passes a `used + cols > budget` test, so a cut to nothing used to return a
+  // combining mark with nothing left to attach to.
+  assert.equal(sliceColumns("\u0301abc", 0), "", "no budget, no content");
+});
+
+test("the line editor's window is columns and whole characters (#401)", () => {
+  // THE CUTTER THE FIRST REPAIR MISSED. `render` windowed with `value.slice(start, start + w).padEnd(w)`,
+  // so a CJK value measured half what the terminal drew and an edge landing between the halves of an
+  // astral pair put a BARE LOW SURROGATE into the live trigger editor.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  for (const [name, value] of [
+    ["ascii", "hello world"],
+    ["a CJK target", "会社/製品#5"],
+    ["fullwidth", "ＪＯＢＡＢ"],
+    ["emoji", "\u{1f600}\u{1f600}\u{1f600}\u{1f600}"],
+    ["combining marks", "jo\u0301b\u0301marks"],
+    ["mixed", "a会b\u{1f600}c"],
+  ]) {
+    for (const w of [1, 2, 3, 5, 8, 12, 20]) {
+      for (const focused of [true, false]) {
+        const out = makeLineInput(value).render(w, { focused });
+        const plain = out.split(LINE_INPUT_CURSOR[0]).join("").split(LINE_INPUT_CURSOR[1]).join("");
+        assert.equal(columnsOf(plain), w, `${name} at ${w}${focused ? " focused" : ""}`);
+        assert.doesNotMatch(out, lone, `${name} at ${w}${focused ? " focused" : ""}: half a surrogate pair`);
+      }
+    }
+  }
+});
+
+test("divider and clipPlain measure in columns, which only a wide title can show (#401)", () => {
+  // BOTH OF THESE SURVIVED a mutation back to `.length` while the suite was green, because every fixture
+  // that reached them was ASCII. `frame` clips an over-wide line now, so a reverted `divider` is invisible
+  // in a framed render: it has to be measured on its own.
+  const styler = makeStyler(PLAIN_THEME);
+  for (const w of [20, 40, 80]) {
+    assert.equal(visibleLen(styler.divider("ジョブ番号", "会社/製品", w)), w, `divider at ${w}`);
+    assert.equal(visibleLen(styler.divider("ascii label", "ＭＥＴＡ", w)), w, `divider with a wide meta at ${w}`);
+  }
+  // `clipPlain` is reached only through a frame title, so this drives it there and measures the rule it
+  // computes: the top line is exactly the frame's width.
+  for (const w of [12, 20, 40]) {
+    const top = frame(styler, { title: "ジョブ番号のタイトル", width: w, lines: [] })[0];
+    assert.equal(visibleLen(top), w, `a title clipped to ${w}`);
+  }
+});
+
+test("a fitted body line keeps its colour, and only an over-wide one is clipped (#401)", () => {
+  // THE STRICT COMPARISON IN `padVisible`, pinned where it is observable. Under the PLAIN theme `>=` and
+  // `>` render identically, so every existing fixture missed it: an adversarial pass showed the mutant is
+  // only visible under a REAL theme, where the loosened comparison sends a line that already fits through
+  // `styler.cell` and `cell` strips the styler's own SGR before measuring. The line then still measures
+  // right and has silently lost its colour, which is the shape this whole round keeps finding.
+  const ESC = String.fromCharCode(27);
+  // THE ACCENT AND THE BORDER GET DIFFERENT CODES ON PURPOSE. A first version of this test asked whether
+  // the line contained any ESC at all, and `frame` draws its own `│` through `fg("border", ...)`, so the
+  // assertion was true however much colour the body had lost. The mutant survived it.
+  const ACCENT = `${ESC}[38;5;42m`;
+  const styler = makeStyler({
+    fg: (c, t) => (c === "border" ? `${ESC}[38;5;99m${t}${ESC}[39m` : `${ACCENT}${t}${ESC}[39m`),
+    bold: (t) => `${ESC}[1m${t}${ESC}[22m`,
+    bg: (_c, t) => t,
+  });
+  // THE LINE MUST FIT EXACTLY, or the mutant is not even reached: `>=` and `>` differ only on a line whose
+  // visible width EQUALS the pane's inner width, and a shorter line takes neither branch. A first version
+  // of this test used a 20-column line inside a 36-column pane and the mutant survived it.
+  const inner = 40 - 4;
+  const plain = sliceColumns("\u4f1a\u793e/\u88fd\u54c1 ".repeat(6), inner);
+  const body = styler.fg("accent", plain + " ".repeat(inner - columnsOf(plain)));
+  assert.equal(visibleLen(body), inner, "the fixture is exactly the inner width, which is what makes it a test");
+  const [top, line] = frame(styler, { title: "ジョブ", width: 40, lines: [body] });
+  assert.ok(line.includes(ACCENT), "a line that fits keeps the colour it arrived with, not just the border's");
+  assert.equal(visibleLen(line), 40, "and is still exactly the width");
+  assert.equal(visibleLen(top), 40, "as is the rule above it");
+  // The other half of the same comparison: one that does NOT fit is cut to the pane rather than breaking it.
+  const tooWide = styler.fg("accent", "会社/製品#5 のジョブ".repeat(6));
+  assert.equal(visibleLen(frame(styler, { title: "t", width: 40, lines: [tooWide] })[1]), 40, "an over-wide line is clipped");
+});
+
+test("a cut drops a lone surrogate rather than passing it on (#401)", () => {
+  // PARITY WITH WHAT THE CODE-UNIT CUT DID. Walking characters means the cut cannot CREATE half a pair,
+  // which is not the same as dropping one that was already in the input: a review pass measured `clip`
+  // passing a lone high surrogate on where the old slice-then-`dropLoneSurrogate` had removed it.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  for (const s of ["\ud83dabcdef", "ab\ud83dcd\u{1f600}ef", "\udc00abcdef"]) {
+    for (let w = 1; w <= 6; w++) {
+      assert.doesNotMatch(clip(s, w), lone, `clip(${JSON.stringify(s)}, ${w})`);
+    }
+  }
+});
+
+test("the model-visible runs table lines its columns up in columns (#401)", () => {
+  // THE CHANNEL THE PANE GATES DO NOT REACH. `renderRuns` answers `/dispatch runs`, so its output goes to
+  // the model and to the operator's scrollback rather than through a frame, and it sized its columns with
+  // `.length`. A `target` is `local:<basename>` for a local run, so an operator's own folder name lands in
+  // it, and one CJK character there shifted every later column of that row against the rows around it.
+  const at = "2026-07-21T00:00:00.000Z";
+  const base = { flow: "review", outcome: "completed", turns: 3, tokens: { total: 10 }, endedAt: at };
+  const rows = renderRuns([
+    { ...base, jobId: "gh-aaaa1", target: "local:プロジェクト" },
+    { ...base, jobId: "gh-aaaa2", target: "local:project" },
+    { ...base, jobId: "gh-aaaa3", target: "local:한글" },
+  ]).split("\n");
+  // Every row starts its FLOW cell at the same column, which is the only thing a reader of this table
+  // needs and the only thing `.length` got wrong.
+  const flowAt = rows.slice(1).map((r) => columnsOf(r.slice(0, r.indexOf("review"))));
+  assert.equal(new Set(flowAt).size, 1, `the flow column starts at ${[...new Set(flowAt)].join(", ")}`);
+  // AND THE CELL IS NOT CUT TO REACH THAT, which alignment alone does not say. A width computed by
+  // `.length` is too SMALL for a wide cell, and `pad` then clips every target to it: the columns line up
+  // beautifully and the operator's folder name has lost its tail. Both halves are needed or the mutant
+  // satisfies the test by truncating.
+  assert.match(rows[1], /local:プロジェクト/u, "the CJK target survives whole");
+  assert.match(rows[3], /local:한글/u, "and so does the Hangul one");
+});
+
+test("the graph's hostile-string caps never leave half a character (#401)", async () => {
+  // A CHARACTER CAP, NOT A WIDTH, and that is why it is here rather than left alone: the cut is still a
+  // cut, and `clipName`'s own comment calls its input "arbitrary (possibly hostile)". A code-unit slice at
+  // 64 lands between the halves of an astral pair whenever the 64th unit is a high surrogate, and the
+  // repair that used to catch that downstream now has no caller on this path.
+  const { buildGraphModel } = await import("../src/graph-model.mjs");
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  // THE PREFIX HAS TO BE ODD, which is the whole trick and the reason a first version of this test passed
+  // against the unfixed code: an astral character is two code units, so a cut at 64 through a run of them
+  // lands BETWEEN pairs and splits nothing. An odd number of ASCII characters in front moves the boundary
+  // into the middle of a pair, which is the only arrangement that breaks.
+  for (const n of [1, 3, 5]) {
+    const flow = "x".repeat(n) + "\u{1f600}".repeat(40);
+    // THE SHAPE IS THE LOADER'S FLAT ONE, taken from the canned input the graph tests already use, and it
+    // is worth a line because getting it wrong is silent: `triggers` must be the FILE shape
+    // `{ triggers: [...] }` and each row is flat (`type`, `flow`, `folder`), not the `{on, run}` pair the
+    // file itself carries. A wrong shape reads as zero triggers, and every assertion below then holds
+    // vacuously against an empty model.
+    const model = buildGraphModel({
+      triggers: { triggers: [{ type: "cron", index: 0, id: "nightly", pattern: "0 3 * * *", folder: "/srv/site", flow, packages: true }] },
+      folderSkills: { "/srv/site": { head: "abc123", truncated: false, unreachable: null, skills: [] } },
+      overlaySkills: { skills: [], truncated: false, unreachable: null },
+      stagedSkills: { skills: [], unenumerable: [], truncated: false },
+    });
+    // EVERY STRING IN THE MODEL, walked rather than `JSON.stringify`d: that escapes a lone surrogate to the
+    // TEXT `\\ud83d`, so a test reading the serialised form cannot see the defect at all. A first version of
+    // this test did exactly that and the mutation survived it.
+    const strings = [];
+    const walk = (v) => {
+      if (typeof v === "string") strings.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(model);
+    for (const s of strings) {
+      assert.doesNotMatch(s, lone, `a flow name with a ${n}-character prefix left half a pair in ${JSON.stringify(s.slice(0, 40))}`);
     }
   }
 });

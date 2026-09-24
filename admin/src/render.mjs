@@ -15,7 +15,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 // Pure-to-pure, the same standing as the windowState import above: panel.mjs is the admin's other no-I/O
 // text module (asserted so by panel.test.mjs), and fmtCost is THE single renderer of typed cost values,
 // so the what-if below routes every dollar through it rather than grow a second money formatter here.
-import { fmtCost, scrubControls } from "./panel.mjs";
+import { columnsOf, fmtCost, pad, scrubControls } from "./panel.mjs";
 // The overlay keys, IMPORTED rather than retyped. This was a verbatim copy of the worker's array, in the
 // order the worker declares them, and the worker's side is pinned while this side was not -- so a key
 // added there would have failed a test, been added, and left the settings VIEW silently ten keys wide
@@ -125,8 +125,11 @@ export function renderRuns(runs) {
   // instead of each derive means a column added later cannot reintroduce this, and it costs nothing on
   // the `-` and `r1/2` shapes a derive normally produces.
   const rows = list.map((r) => RUN_COLUMNS.map((c) => cell(c.derive ? c.derive(r) : r?.[c.key])));
-  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i].length)));
-  const fmt = (cells) => cells.map((v, i) => v.padEnd(widths[i])).join("  ").trimEnd();
+  // COLUMNS, not code units (issue #401), and this table is the MODEL-visible channel rather than a pane.
+  // `target` is `local:<basename>` for a local run, so an operator's own folder name reaches it, and one
+  // CJK character there shifted every later column of that row against the rows around it.
+  const widths = headers.map((h, i) => Math.max(columnsOf(h), ...rows.map((row) => columnsOf(row[i]))));
+  const fmt = (cells) => cells.map((v, i) => pad(v, widths[i])).join("  ").trimEnd();
   return [fmt(headers), ...rows.map(fmt)].join("\n");
 }
 

@@ -8,6 +8,9 @@
 // SKILL_NAME_RE is a plain frozen RegExp; importing it keeps the charset single-sourced (the
 // issue #92 lesson) without breaking this module's purity -- nothing here spawns or reads anything.
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
+// Pure-to-pure: `panel.mjs` is the admin's no-I/O module and owns the one answer to "how do you cut a
+// string without leaving half a character behind" (issue #401).
+import { dropLoneSurrogate } from "./panel.mjs";
 
 // One frontmatter value line: `key: value`, an optional surrounding double quote, single-line only.
 // The same block-isolation discipline as flow-gate.mjs's aiTriggerAllows, and deliberately NOT a YAML
@@ -41,7 +44,9 @@ function frontmatterValue(block, key) {
   let value = m[1].trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
   if (value === "") return null;
-  return value.length > META_VALUE_MAX_CHARS ? `${value.slice(0, META_VALUE_MAX_CHARS)}…` : value;
+  // The cap is a CHARACTER cap, not a width, so a code-unit slice is the right shape here -- but it can
+  // still land between the halves of an astral pair, and half a pair is not a character (issue #401).
+  return value.length > META_VALUE_MAX_CHARS ? `${dropLoneSurrogate(value.slice(0, META_VALUE_MAX_CHARS))}…` : value;
 }
 
 // A mention is "strong" when it sits near chaining vocabulary -- the outbox protocol's own words.
@@ -667,5 +672,5 @@ function basenameOf(path) {
 /** Clip an arbitrary (possibly hostile) flow string for node display; the honest badge needs the name. */
 function clipName(name) {
   const s = String(name);
-  return s.length > 64 ? `${s.slice(0, 64)}…` : s;
+  return s.length > 64 ? `${dropLoneSurrogate(s.slice(0, 64))}…` : s;
 }

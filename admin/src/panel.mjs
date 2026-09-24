@@ -176,58 +176,131 @@ export function clipData(line, w) {
 /**
  * THE COLUMN COUNT OF A STRING, which is not its `.length` (issue #401).
  *
- * Every width promise in this panel was a UTF-16 code-unit count: `clip`, `pad`, `styler.cell`, `divider`
- * and `frame` all sized themselves by `.length`. Measured against pi-tui 0.80.7's own `visibleWidth` on a
- * framed render this module reported as exactly 80 columns:
+ * Every width promise in this panel was a UTF-16 code-unit count: `clip`, `pad`, `styler.cell`, `divider`,
+ * `clipPlain`, `visibleLen`, both frame builders' top rules and the line editor's window all sized
+ * themselves by `.length`. Measured against the pinned renderer's own `visibleWidth`:
  *
- *   CJK job id `ジョブ番号`   80 by .length   90 in the terminal
- *   fullwidth `ＪＯＢ`        80              86
- *   Hangul                    3               6
- *   combining marks `jób́`     80              78
+ *   a CJK job id `ジョブ番号`   .length 5    drawn 10
+ *   fullwidth `ＪＯＢ`          .length 3    drawn 6
+ *   Hangul `한글테스트`         .length 5    drawn 10
+ *   combining marks `jób́`      .length 5    drawn 3
  *
- * So a run whose target is a CJK repository name drew a frame whose right border sat ten columns past the
- * one above it, and a combining mark left it ragged the other way.
+ * So a run whose target is a CJK repository name drew a frame whose right border sat past the one above
+ * it, and a combining mark left it ragged the other way.
  *
- * ONE RULE, NOT TWO. The obvious alternative was to import pi-tui's `visibleWidth` in `style.mjs`, which is
- * overlay-only and already depends on pi. It was rejected: `panel.mjs` owns `clip` and the monochrome
- * renderer, it is pinned to have NO imports, and the two renderers draw the same geometry -- a width rule
- * that holds in the framed pane and not in the plain one is the "holds on one branch of an if" shape three
- * issues in this round have now been about. So the table lives here and the styler comes to it.
+ * ONE RULE, NOT TWO. The obvious alternative was to import pi-tui's `visibleWidth` in `style.mjs`, which
+ * is overlay-only and already depends on pi. It was rejected: `panel.mjs` owns `clip` and the monochrome
+ * renderer, its purity pin forbids it reaching the world at all (that pin names the renderer's own scope
+ * among the things this file may not mention), and the two renderers draw the same geometry -- a width rule that holds in the framed pane
+ * and not in the plain one is the "holds on one branch of an if" shape three issues in this round have now
+ * been about. So the table lives here and the styler comes to it.
  *
- * WHAT IT COUNTS, and each line is the smallest thing that gets the measured cases right:
+ * THE TABLE IS TRANSCRIBED FROM THE RENDERER, NOT FROM UAX #11, and that is the correction that matters.
+ * A first version of this was written out of the standard by hand and checked against ten strings. It
+ * passed, and it UNDER-counted 139,820 code points: all of CJK Extension B through H, Tangut, the Kana
+ * supplement, the Hangul Jamo extensions and every emoji block added since Unicode 13. CJK Extension B is
+ * exactly the "CJK repository name" this issue is about, so the fix carried the defect it was fixing, and
+ * in two classes (astral characters, and an emoji-presentation sequence) it was WORSE than the `.length`
+ * it replaced -- an astral character is two code units and two columns, so `.length` had been right there
+ * by accident. The renderer draws these panes, so the renderer, not the standard, is the authority.
  *
- *   - a combining mark (Mn/Me) is ZERO, because it draws on the character before it;
- *   - a zero-width or formatting character is ZERO (ZWSP, ZWNJ, ZWJ, the bidi marks, BOM, word joiner);
- *   - an East Asian Wide or Fullwidth character is TWO;
- *   - everything else is ONE, including an unassigned code point, because guessing wider on an unknown is
+ * WHAT IT COUNTS:
+ *
+ *   - zero for a mark (`\p{M}`) and for a format character (`\p{Cf}`), plus the fillers and
+ *     noncharacters the renderer also draws as nothing;
+ *   - two for every code point in `WIDE`, which is that renderer's own double-width set;
+ *   - one more when U+FE0F follows a character that draws narrow on its own and wide in its emoji form;
+ *   - one for everything else, including an unassigned code point, because guessing wider on an unknown is
  *     how a rule starts breaking the panes it was added to fix.
  *
+ * WHAT IT IS HELD TO, in `width.test.mjs`: a sweep of every code point there is, plus every
+ * character-with-U+FE0F pair, asserting that this never measures NARROWER than the renderer and that every
+ * place it measures wider is an unassigned code point.
+ *
+ * THE DIRECTION IS THE WHOLE POINT, and stating it as "over-counting is harmless" would be too kind: BOTH
+ * directions rag a frame, and they rag it differently. An over-count pads a body line as though it were
+ * wider than it is, so the line comes out SHORT and the right border sits left of the one above it --
+ * ugly, bounded, and contained by the pane. An under-count runs the line PAST the pane and past the
+ * terminal, where it wraps and takes the border with it, which is the defect this issue names. So the
+ * sweep is one-sided on purpose, and the residual below is the safer of two bad shapes, not a harmless
+ * one.
+ *
  * ITS LIMIT, stated rather than implied: this sums CODE POINTS, so an emoji ZWJ sequence -- a family, a
- * flag, a skin tone -- counts every member and comes out wider than the single glyph a terminal draws.
- * pi-tui disagrees with us there too (it reports 2 where we report 8), and terminals disagree with each
- * other, which is why no width table in this project will settle it. A grapheme-aware count needs
- * `Intl.Segmenter` and a terminal that agrees; the residual is one over-wide line, never a broken border,
- * because over-counting cuts early rather than late.
+ * profession, a skin tone -- counts every member and comes out wider than the single glyph a terminal
+ * draws. Measured on a family: 6 here against the renderer's 2. Terminals disagree with each other there
+ * too, which is why no width table in this project will settle it. A grapheme-aware count needs
+ * `Intl.Segmenter` and a terminal that agrees; the residual is one over-wide line, in the safe direction.
  */
 export function columnsOf(s) {
   let n = 0;
+  // The ONE piece of state, and the one thing a per-character table cannot do without: U+FE0F asks for the
+  // emoji form of the character BEFORE it, and the renderer then draws that character two columns wide.
+  let promotable = false;
   for (const ch of String(s ?? "")) {
-    const cp = ch.codePointAt(0);
-    if (ZERO_WIDTH.test(ch) || COMBINING.test(ch)) continue;
-    n += WIDE.test(ch) || (cp >= 0x1f300 && cp <= 0x1f9ff) ? 2 : 1;
+    if (ch === VS16 && promotable) {
+      n += 1;
+      promotable = false;
+      continue;
+    }
+    promotable = false;
+    if (ZERO_WIDTH.test(ch)) continue;
+    if (WIDE.test(ch)) {
+      n += 2;
+      continue;
+    }
+    n += 1;
+    // ONLY A NARROW BASE IS PROMOTABLE, and it is narrow by having reached this line at all: a code point
+    // the renderer already draws wide took the `WIDE` branch above and never gets here. A first version
+    // also tested `\p{Emoji_Presentation}` here; measured against the pin, every code point with that
+    // property is in `WIDE`, so the test was dead and a mutation removing it survived the whole suite.
+    // The ASCII exclusion is NOT dead: `#`, `*` and the digits carry `\p{Emoji}` and stay one column,
+    // because their emoji form is a keycap and needs U+20E3 rather than U+FE0F alone.
+    promotable = ch.codePointAt(0) > 0x7f && TEXT_EMOJI.test(ch);
   }
   return n;
 }
 
+/** VARIATION SELECTOR-16, which asks for the emoji form of the character before it. */
+const VS16 = "\ufe0f";
+
 // Mn and Me: a mark that draws on the character before it. `\p{M}` would also take Mc (spacing marks), which
 // DO occupy a column in the Indic scripts that use them.
-const COMBINING = /\p{Mn}|\p{Me}/u;
-// Format and zero-width characters, which occupy none: ZWSP/ZWNJ/ZWJ, the bidi marks and isolates, the word
-// joiner and invisible operators, the BOM, and the variation selectors.
-const ZERO_WIDTH = /[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufe00-\ufe0f]/u;
-// East Asian Wide and Fullwidth, from UAX #11: CJK and its punctuation, Hangul, Kana, the fullwidth forms.
-const WIDE =
-  /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u;
+// ZERO COLUMNS. Mn and Me draw on the character before them; Mc (a SPACING mark) is deliberately NOT here,
+// because it does occupy a column -- the one place this table knowingly departs from the renderer below.
+// Cf covers the zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the
+// noncharacters the renderer also draws as nothing.
+const ZERO_WIDTH = /\p{M}|\p{Cf}|[ᅟᅠ᠎ㅤﾠ￰-￻]/u;
+
+// A TEXT-PRESENTATION EMOJI: one that draws narrow on its own and WIDE once U+FE0F asks for the emoji
+// form. There are 201 of them and they are the reason this table cannot be purely per-character.
+const TEXT_EMOJI = /\p{Emoji}/u;
+
+// TWO COLUMNS: every code point the PINNED renderer draws double-width, transcribed FROM that renderer
+// rather than written out of UAX #11 by hand, and held to it by an exhaustive sweep in `width.test.mjs`.
+// Regenerate it from the pin, never edit a range by hand.
+const WIDE = new RegExp(
+  "[" +
+    "\\u1100-\\u115e\\u231a-\\u231b\\u2329-\\u232a\\u23e9-\\u23ec\\u23f0\\u23f3\\u25fd-\\u25fe\\u2614-\\u2615\\u2630-\\u2637" +
+    "\\u2648-\\u2653\\u267f\\u268a-\\u268f\\u2693\\u26a1\\u26aa-\\u26ab\\u26bd-\\u26be\\u26c4-\\u26c5\\u26ce\\u26d4\\u26ea" +
+    "\\u26f2-\\u26f3\\u26f5\\u26fa\\u26fd\\u2705\\u270a-\\u270b\\u2728\\u274c\\u274e\\u2753-\\u2755\\u2757\\u2795-\\u2797\\u27b0" +
+    "\\u27bf\\u2b1b-\\u2b1c\\u2b50\\u2b55\\u2e80-\\u2e99\\u2e9b-\\u2ef3\\u2f00-\\u2fd5\\u2ff0-\\u3029\\u3030-\\u303e" +
+    "\\u3041-\\u3096\\u309b-\\u30ff\\u3105-\\u312f\\u3131-\\u3163\\u3165-\\u318e\\u3190-\\u31e5\\u31ef-\\u321e\\u3220-\\u3247" +
+    "\\u3250-\\ua48c\\ua490-\\ua4c6\\ua960-\\ua97c\\uac00-\\ud7a3\\uf900-\\ufaff\\ufe10-\\ufe19\\ufe30-\\ufe52\\ufe54-\\ufe66" +
+    "\\ufe68-\\ufe6b\\uff01-\\uff60\\uffe0-\\uffe6\\u{16fe0}-\\u{16fe3}\\u{16ff2}-\\u{16ff6}\\u{17000}-\\u{18cd5}" +
+    "\\u{18cff}-\\u{18d1e}\\u{18d80}-\\u{18df2}\\u{1aff0}-\\u{1aff3}\\u{1aff5}-\\u{1affb}\\u{1affd}-\\u{1affe}" +
+    "\\u{1b000}-\\u{1b122}\\u{1b132}\\u{1b150}-\\u{1b152}\\u{1b155}\\u{1b164}-\\u{1b167}\\u{1b170}-\\u{1b2fb}" +
+    "\\u{1d300}-\\u{1d356}\\u{1d360}-\\u{1d376}\\u{1f004}\\u{1f0cf}\\u{1f18e}\\u{1f191}-\\u{1f19a}\\u{1f1e6}-\\u{1f202}" +
+    "\\u{1f210}-\\u{1f23b}\\u{1f240}-\\u{1f248}\\u{1f250}-\\u{1f251}\\u{1f260}-\\u{1f265}\\u{1f300}-\\u{1f320}" +
+    "\\u{1f32d}-\\u{1f335}\\u{1f337}-\\u{1f37c}\\u{1f37e}-\\u{1f393}\\u{1f3a0}-\\u{1f3ca}\\u{1f3cf}-\\u{1f3d3}" +
+    "\\u{1f3e0}-\\u{1f3f0}\\u{1f3f4}\\u{1f3f8}-\\u{1f43e}\\u{1f440}\\u{1f442}-\\u{1f4fc}\\u{1f4ff}-\\u{1f53d}" +
+    "\\u{1f54b}-\\u{1f54e}\\u{1f550}-\\u{1f567}\\u{1f57a}\\u{1f595}-\\u{1f596}\\u{1f5a4}\\u{1f5fb}-\\u{1f64f}" +
+    "\\u{1f680}-\\u{1f6c5}\\u{1f6cc}\\u{1f6d0}-\\u{1f6d2}\\u{1f6d5}-\\u{1f6d8}\\u{1f6dc}-\\u{1f6df}\\u{1f6eb}-\\u{1f6ec}" +
+    "\\u{1f6f4}-\\u{1f6fc}\\u{1f7e0}-\\u{1f7eb}\\u{1f7f0}\\u{1f90c}-\\u{1f93a}\\u{1f93c}-\\u{1f945}\\u{1f947}-\\u{1f9ff}" +
+    "\\u{1fa70}-\\u{1fa7c}\\u{1fa80}-\\u{1fa8a}\\u{1fa8e}-\\u{1fac6}\\u{1fac8}\\u{1facd}-\\u{1fadc}\\u{1fadf}-\\u{1faea}" +
+    "\\u{1faef}-\\u{1faf8}\\u{20000}-\\u{2fffd}\\u{30000}-\\u{3fffd}" +
+    "]",
+  "u",
+);
 
 /**
  * Truncate `line` to `w` display columns, appending an ellipsis glyph when content is cut. Control
@@ -258,15 +331,31 @@ export function clip(line, w) {
  */
 export function sliceColumns(s, w) {
   const budget = Math.max(0, Math.trunc(w) || 0);
+  // NO BUDGET, NO CONTENT. Without this a zero-column character passes the test below and a cut to zero
+  // returned a floating accent with nothing to attach to.
+  if (budget === 0) return "";
   let out = "";
   let used = 0;
   for (const ch of String(s ?? "")) {
+    // HALF A PAIR IS NOT A CHARACTER, so it is not carried into a cut. Walking code points means this cut
+    // cannot CREATE one, which is not the same as dropping one the INPUT already held: a review pass
+    // measured `clip` passing a lone high surrogate on where the old slice-then-repair had removed it, and
+    // the old repair only ever looked at the last code unit, so a leading or interior one survived it too.
+    if (ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff) continue;
     const cols = columnsOf(ch);
     if (used + cols > budget) break;
     out += ch;
     used += cols;
   }
-  return out;
+  // A TRAILING JOINER IS DANGLING: it joins this character to the next one, and the next one is what was
+  // just cut away. Left in place it reaches the terminal ahead of the ellipsis and asks it to join a glyph
+  // to a horizontal bar. The same is true of a variation selector whose base was cut, which cannot happen
+  // here (a selector is only ever appended after its base) but costs nothing to drop with it.
+  //
+  //
+  // An input that already holds a lone surrogate and needs no cut at all still carries it: `clip` returns
+  // early when the string fits. That is issue #402's ground rather than this one's.
+  return out.replace(/[\u200d\ufe0e\ufe0f]+$/u, "");
 }
 
 /**
@@ -334,12 +423,12 @@ export function box({ title = "", sections = [], footer, width = 40 } = {}) {
  *
  * `state` ("ok" | "soft-hold" | "over") appends a textual marker to the label: the panel is monochrome and
  * `clip` strips ANSI, so the amber/red of a soft-hold or over-budget window is carried as a word, not a
- * color.
+ * color. "ok" (the default) adds nothing, so a plain call renders exactly as before.
  *
  * ITS LABEL IS MEASURED BY `.length` AND THAT IS CORRECT HERE, which is worth saying in a file whose whole
  * subject is that `.length` is not a column count (issue #401). Every character of the label comes from two
  * integers and a word out of a closed set, so it is digits and ASCII by construction and no caller can put
- * anything else in it. `styler.meter`'s label is built the same way and is exempt for the same reason. "ok" (the default) adds nothing, so a plain call renders exactly as before.
+ * anything else in it. `styler.meter`'s label is built the same way and is exempt for the same reason.
  */
 export function meter(reserved, cap, width = 24, state = "ok") {
   const r = Number.isFinite(reserved) ? Math.max(0, Math.trunc(reserved)) : 0;
@@ -518,11 +607,47 @@ export function makeLineInput(initial = "") {
     },
     render(width, { focused = true } = {}) {
       const w = Math.max(1, Math.trunc(width) || 1);
-      const start = value.length > w - 1 ? Math.max(0, cursor - (w - 1)) : 0;
-      const text = value.slice(start, start + w).padEnd(w);
-      if (!focused) return text;
-      const rel = cursor - start; // 0..w-1 by construction: the window never scrolls past the cursor
-      return text.slice(0, rel) + LINE_INPUT_CURSOR[0] + text[rel] + LINE_INPUT_CURSOR[1] + text.slice(rel + 1);
+      // THE WINDOW IS CHOSEN IN COLUMNS AND ITS EDGES ARE WHOLE CHARACTERS (issue #401). This was
+      // `value.slice(start, start + w).padEnd(w)` on UTF-16 indices, so it measured a CJK value at half
+      // what the terminal draws, and a window edge landing between the halves of an astral pair emitted a
+      // BARE LOW SURROGATE into the live trigger editor -- the exact hazard the rest of this module cuts
+      // around. `cursor` is still a code-unit index, because every edit method moves it by one unit, so it
+      // is snapped to a character boundary here rather than trusted.
+      const chars = [...value];
+      const offs = [];
+      let at = 0;
+      for (const c of chars) {
+        offs.push(at);
+        at += c.length;
+      }
+      offs.push(at);
+      let ci = offs.findIndex((o) => o >= cursor);
+      if (ci < 0) ci = chars.length;
+      // THE RESERVED CELL MOVES THE WINDOW'S START, not its length: the window is `w` columns wide, and
+      // the cursor is kept at most `w - 1` columns past the start so its own cell is always inside it.
+      let start = ci;
+      let back = 0;
+      while (start > 0 && back + columnsOf(chars[start - 1]) <= w - 1) {
+        start -= 1;
+        back += columnsOf(chars[start]);
+      }
+      let end = start;
+      let used = 0;
+      while (end < chars.length && used + columnsOf(chars[end]) <= w) {
+        used += columnsOf(chars[end]);
+        end += 1;
+      }
+      const head = chars.slice(start, Math.min(ci, end)).join("");
+      const text = chars.slice(start, end).join("");
+      if (!focused) return pad(text, w);
+      // The cursor wraps a WHOLE character, never one half of a pair, and sits on a space once it is past
+      // the last character the window shows.
+      const onChar = ci < end;
+      const under = onChar ? chars[ci] : " ";
+      const tail = onChar ? chars.slice(ci + 1, end).join("") : "";
+      const shown = head + (onChar ? under : "") + tail;
+      const fill = Math.max(0, w - columnsOf(shown) - (onChar ? 0 : 1));
+      return head + LINE_INPUT_CURSOR[0] + under + LINE_INPUT_CURSOR[1] + tail + " ".repeat(fill);
     },
   };
 }

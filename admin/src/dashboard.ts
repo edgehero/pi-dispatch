@@ -1104,8 +1104,8 @@ function renderPanel(snapshot: any, width: number, state: any, styler: any): str
   // coloured degrade would print `[31m` as text AND charge four phantom columns against the width. The
   // answer then is an ANSI-aware cut, not this one.
   //
-  // The width is still a UTF-16 count, which is wrong for CJK and combining marks exactly as it is
-  // everywhere else in this module. That is #401 and is not made worse here.
+  // The width is a COLUMN count under issue #401: `clipData` cuts through the one table in `panel.mjs`, so
+  // this branch is right about CJK, fullwidth and combining content for the same reason the framed pane is.
   const w = degradeWidth(width);
   return w === null ? lines : lines.map((l) => clipData(l, w));
 }

@@ -17,7 +17,7 @@
  * can assert both the plain content and the width math without a real terminal.
  */
 
-import { LINE_INPUT_CURSOR, columnsOf, dropLoneSurrogate, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sliceColumns, sparkline as plainSparkline } from "./panel.mjs";
+import { LINE_INPUT_CURSOR, columnsOf, fmtCost as plainFmtCost, scrubControls, scrubKeepingStyle, sliceColumns, sparkline as plainSparkline } from "./panel.mjs";
 
 // Strip SGR (and OSC-8 hyperlink) escapes to recover the visible text, which is then measured in COLUMNS.
 // This comment used to end "so post-strip `.length` is a safe column proxy", and issue #401 is what that
@@ -104,12 +104,11 @@ export function makeStyler(theme, { ascii = false } = {}) {
   const cell = (text, width, { color = null, align = "left", strong = false } = {}) => {
     const w = Math.max(0, Math.trunc(width) || 0);
     let plain = scrubControls(stripAnsi(String(text ?? "")));
-    // `dropLoneSurrogate` on every cut, like `clip`: slicing UTF-16 units can land between the halves of an
-    // astral character, and half a pair is not a character. Measured at 89 lines of a framed LIST printing
-    // one, from a target field of emoji -- the first repair reached `clip` alone and three other cutters
-    // slice the same way.
-    // BY COLUMNS, not by code units (issue #401), and through `sliceColumns` so a cut never lands inside a
-    // two-column character -- which a terminal draws as one blank column plus one of overflow.
+    // BY COLUMNS, not by code units (issue #401), and through `sliceColumns`, which walks whole characters.
+    // This used to call `dropLoneSurrogate` after a UTF-16 slice, a repair measured at 89 lines of a framed
+    // LIST printing half a surrogate pair from a target field of emoji. Cutting by character makes that
+    // repair unnecessary rather than merely correct: the cut also never lands inside a TWO-COLUMN
+    // character, which a terminal draws as one blank column plus one of overflow.
     if (columnsOf(plain) > w) {
       const ell = G.ellipsis;
       // The narrow branch slices the CONTENT, not the ellipsis, which is what this line did before #401 and
@@ -125,7 +124,7 @@ export function makeStyler(theme, { ascii = false } = {}) {
     return strong ? bold(out) : out;
   };
 
-  /** A small colored token (no padding). Visible width === label.length (+ padding if `pad`). */
+  /** A small colored token (no padding). Visible width is `columnsOf(label)`, plus 2 if `pad`. */
   const badge = (label, color, { pad = false } = {}) => {
     const text = pad ? ` ${label} ` : String(label);
     return fg(color, text);
