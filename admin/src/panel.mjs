@@ -258,14 +258,19 @@ export function columnsOf(s) {
  * it can no longer strand a selector without its base.
  */
 function* widthSteps(s) {
-  const chars = [...String(s ?? "")];
+  // HALF A PAIR IS NOT A CHARACTER, and it is removed HERE, once, before anything is measured. A first
+  // version made it a step of its own and let each consumer drop it, which a review pass showed is the same
+  // defect one level down: dropping it SPLICES ITS NEIGHBOURS TOGETHER, so a base and the selector on the
+  // other side of it become one emoji-form sequence, and the cut emitted two columns for a budget of one.
+  // Measured through the real pane: a 24-column box drew at 43, by this module's own count.
+  //
+  // Normalising first also makes the count describe WHAT WILL BE DRAWN rather than what arrived, which is
+  // the property every consumer actually needs. It costs an over-count of one against the renderer on the
+  // raw input, in the safe direction, because the renderer measures the orphan as a sequence break and we
+  // measure the text we are about to hand it.
+  const chars = dropOrphans([...String(s ?? "")]);
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
-    // HALF A PAIR IS NOT A CHARACTER. It is a step of its own so a cut can drop it by name.
-    if (ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff) {
-      yield { text: ch, cols: 0, orphan: true };
-      continue;
-    }
     if (ZERO_WIDTH.test(ch)) {
       yield { text: ch, cols: 0 };
       continue;
@@ -296,6 +301,11 @@ function* widthSteps(s) {
   }
 }
 
+/** Drop every unpaired surrogate from a character array. Half a pair reaches a terminal as U+FFFD at best. */
+function dropOrphans(chars) {
+  return chars.filter((c) => !(c.length === 1 && c.charCodeAt(0) >= 0xd800 && c.charCodeAt(0) <= 0xdfff));
+}
+
 /** VARIATION SELECTOR-16 asks for the emoji form; U+20E3 encloses the keycap bases below in a key. */
 const KEYCAP = "\u20e3";
 const KEYCAP_BASE = /[#*0-9]/;
@@ -303,12 +313,12 @@ const KEYCAP_BASE = /[#*0-9]/;
 /** VARIATION SELECTOR-16, which asks for the emoji form of the character before it. */
 const VS16 = "\ufe0f";
 
-// Mn and Me: a mark that draws on the character before it. `\p{M}` would also take Mc (spacing marks), which
-// DO occupy a column in the Indic scripts that use them.
-// ZERO COLUMNS. Mn and Me draw on the character before them; Mc (a SPACING mark) is deliberately NOT here,
-// because it does occupy a column -- the one place this table knowingly departs from the renderer below.
-// Cf covers the zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the
-// noncharacters the renderer also draws as nothing.
+// ZERO COLUMNS. `\p{M}` is every mark, SPACING MARKS INCLUDED, and that is deliberate: two earlier versions
+// of this comment said the opposite, that Mc is excluded because it occupies a column, and both were false
+// when written. The argument for excluding it came from Unicode; the renderer that draws this pane gives Mc
+// zero, and between a standard and the thing painting the characters the painter wins. Cf covers the
+// zero-width and bidi format characters, and the bracketed tail is the Hangul fillers and the noncharacters
+// the renderer also draws as nothing.
 const ZERO_WIDTH = /\p{M}|\p{Cf}|[ᅟᅠ᠎ㅤﾠ￰-￻]/u;
 
 // A TEXT-PRESENTATION EMOJI: one that draws narrow on its own and WIDE once U+FE0F asks for the emoji
@@ -377,11 +387,9 @@ export function sliceColumns(s, w) {
   let out = "";
   let used = 0;
   for (const step of widthSteps(s)) {
-    // A lone surrogate the INPUT already held is dropped rather than carried: the old code-unit repair only
-    // ever looked at the last unit, so a leading or interior one survived it. An input that holds one and
-    // needs no cut at all still carries it, because `clip` returns early when the string fits: that is
-    // issue #402's ground rather than this one's.
-    if (step.orphan) continue;
+    // Orphans are already gone: `widthSteps` removes them before it steps, so this loop cannot drop a step
+    // and splice its neighbours together. An input that holds one and needs no cut at all still carries it,
+    // because `clip` returns early when the string fits: that is issue #402's ground rather than this one's.
     if (used + step.cols > budget) break;
     out += step.text;
     used += step.cols;
@@ -624,14 +632,21 @@ function charAfter(s, at) {
  * when focused, the cursor cell is wrapped in `LINE_INPUT_CURSOR` (see above).
  */
 export function makeLineInput(initial = "") {
-  let value = stripControls(initial);
+  // THE SAME RULE AT THE VALUE'S OWN DOORS. `backspace` and `del` were fixed to step by character, and a
+  // review pass pointed out that the constructor, `insert` (which takes a whole PASTE) and `setValue` were
+  // left open: `stripControls` removes C0 and C1, not half a character. The argument that made the edit-side
+  // fix necessary applies unchanged here, because `value()` is what gets SAVED, and it also keeps `render`
+  // honest -- `cursor` is an index into this string, so a value with no orphans in it means the window's
+  // offsets and the cursor cannot disagree about what they are counting.
+  const enter = (text) => dropOrphans([...stripControls(text)]).join("");
+  let value = enter(initial);
   let cursor = value.length;
   return {
     value: () => value,
     cursor: () => cursor,
     /** Insert a printable char -- or a whole pasted string -- at the cursor; control chars are stripped first. */
     insert(ch) {
-      const clean = stripControls(ch);
+      const clean = enter(ch);
       if (clean.length === 0) return;
       value = value.slice(0, cursor) + clean + value.slice(cursor);
       cursor += clean.length;
@@ -663,7 +678,7 @@ export function makeLineInput(initial = "") {
       cursor = value.length;
     },
     setValue(s) {
-      value = stripControls(s);
+      value = enter(s);
       cursor = value.length;
     },
     render(width, { focused = true } = {}) {
@@ -674,7 +689,7 @@ export function makeLineInput(initial = "") {
       // BARE LOW SURROGATE into the live trigger editor. It walks `widthSteps` rather than characters for
       // the reason that function exists: a per-character measure is one column short on an emoji-form
       // sequence, so a window built from one overflowed its own pane.
-      const steps = [...widthSteps(value)].filter((step) => !step.orphan);
+      const steps = [...widthSteps(value)];
       const offs = [];
       let at = 0;
       for (const step of steps) {
@@ -683,7 +698,8 @@ export function makeLineInput(initial = "") {
       }
       offs.push(at);
       // `cursor` is a code-unit index and the edit methods keep it on a character boundary, but a step can
-      // span three of them, so it is snapped to the step it falls inside rather than trusted to name one.
+      // span three of them, so it is resolved to a step rather than trusted to name one. It rounds FORWARD:
+      // a cursor inside a keycap names the step after it, never a position inside a glyph.
       let ci = offs.findIndex((o) => o >= cursor);
       if (ci < 0) ci = steps.length;
       // THE RESERVED CELL MOVES THE WINDOW'S START, not its length: the window is `w` columns wide, and

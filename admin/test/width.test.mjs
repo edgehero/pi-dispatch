@@ -494,3 +494,60 @@ test("the skill frontmatter cap never leaves half a character either (#401)", as
     assert.doesNotMatch(String(meta?.description ?? ""), lone, `a description with a ${n}-character prefix left half a pair`);
   }
 });
+
+test("a cut cannot splice its input into something wider than the budget (#401)", () => {
+  // THE DEFECT CLASS, ONE LEVEL DOWN, and the reason `widthSteps` normalises before it steps rather than
+  // letting each consumer drop an orphan. A lone surrogate BREAKS a sequence: the renderer measures
+  // `heart + orphan + selector` as one column, because the selector no longer follows its base. Dropping
+  // the orphan and re-joining puts them back together as a two-column glyph, so the cut emitted two columns
+  // for a budget of one and a 24-column pane drew at 43 by this module's own count.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const SPLICERS = ["❤\udc00️", "1\udc00️⃣", "❤️\udc00❤️", "a\ud800\u{1f600}b"];
+  for (const s of SPLICERS) {
+    for (let w = 0; w <= 8; w++) {
+      const cut = sliceColumns(s, w);
+      assert.ok(columnsOf(cut) <= w, `sliceColumns(${JSON.stringify(s)}, ${w}) came to ${columnsOf(cut)} columns`);
+      assert.doesNotMatch(cut, lone, `width ${w}: an orphan survived the cut`);
+    }
+  }
+  // And through the real panes, which is where it was measured.
+  for (const w of [12, 24, 40]) {
+    for (const line of box({ title: "runs", sections: [{ lines: ["❤\udc00️".repeat(40)] }], width: w })) {
+      assert.equal(columnsOf(line), w, `box at ${w}: ${JSON.stringify(line)}`);
+    }
+  }
+});
+
+test("a keycap is consumed whole, and never duplicates its own enclosing mark (#401)", () => {
+  // THE ADVANCE, which is the half of the keycap rule no width assertion can see: the enclosing mark is
+  // zero columns, so a step that yields the keycap and then advances by one instead of two emits U+20E3
+  // AGAIN as its own step. The count is unchanged and the glyph is corrupt, which is exactly the shape that
+  // survived a suite pinning only the count.
+  const cut = sliceColumns("1️⃣ab", 4);
+  assert.equal([...cut].filter((c) => c === "⃣").length, 1, "one enclosing mark, not two");
+  assert.equal(cut, "1️⃣ab", "and the keycap is followed by what followed it");
+  assert.equal(columnsOf(clip("1️⃣abcdef", 5)), 5, "the clipped form is still exactly the budget");
+  assert.equal([...clip("1️⃣abcdef", 5)].filter((c) => c === "⃣").length, 1, "and still one mark");
+});
+
+test("the editor's value never admits half a character, through any door (#401)", () => {
+  // `backspace` and `del` were fixed to step by character; a review pass found the three doors left open.
+  // `stripControls` removes C0 and C1, not half a character, and `insert` takes a whole PASTE. The argument
+  // that made the edit-side fix necessary is that `value()` is the string that gets SAVED, and it applies
+  // here unchanged.
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const pasted = makeLineInput("ok");
+  pasted.insert("\ud83dbroken\udc00");
+  assert.doesNotMatch(pasted.value(), lone, "a paste");
+  const set = makeLineInput("");
+  set.setValue("x\udc00y");
+  assert.doesNotMatch(set.value(), lone, "setValue");
+  assert.doesNotMatch(makeLineInput("a\ud800b").value(), lone, "the constructor");
+  // A whole pair still survives all three: this drops half a character, not every astral one.
+  const kept = makeLineInput("");
+  kept.insert("a\u{1f600}b");
+  assert.equal(kept.value(), "a\u{1f600}b", "a whole pair is content, not damage");
+  // And the render can no longer emit one either, because the value cannot hold one.
+  const ed = makeLineInput("ab\ud800cd");
+  for (const w of [1, 3, 6, 10]) assert.doesNotMatch(ed.render(w), lone, `render at ${w}`);
+});
