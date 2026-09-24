@@ -1385,7 +1385,7 @@ adversarial passes did.
   should not depend on every future write site holding the enum, when one scrub inside one `show()` holds
   it structurally. The `failedReason` cap is unchanged; its CLASS is not, and that is recorded here rather
   than left in a diff: `scrubReason` shares `scrubControl`, so widening the renderer's class widened this
-  belt's too, from C0 + DEL to C0 + DEL + C1. No `failedReason` this project can produce contains a C1
+  belt's too, from C0 + DEL to C0 + DEL + C1 (and again under issue #402). No `failedReason` this project can produce contains a C1
   code point (it is a worker throw's message, decoded as UTF-8), so nothing observable moved -- but a
   contract that moved without a row is the gap this project's own rule exists to close.
   **Issue #337 asked whether the class needs C1, and the answer turned out to be already written down.**
@@ -1393,7 +1393,7 @@ adversarial passes did.
   whether an operator-authored file is acceptable, while `panel.mjs`'s `CONTROL_CHARS` is C0 + DEL + C1
   (WIDER SINCE, under issue #402: it also holds the bidi controls, the invisible break characters and the
   line and paragraph separators, and it excludes what composes a neighbouring glyph),
-  calls itself "a defensive strip of C0/C1 control chars from untrusted input", and already backs `clip`
+  is derived from properties since issue #402, and already backs `clip`
   -- so the PLAIN and ASCII render paths have been stripping C1 out of these same rows all along. The
   renderer's own scrub was therefore the outlier rather than the convention, and a themed row and a plain
   row of the same record went through different classes depending on which file the pane used. It is now
@@ -1405,7 +1405,10 @@ adversarial passes did.
 - **Position**: the FAILED panel section renders `failedReason` -- the message of the error the WORKER
   itself threw. The known payload-bearing sources were fixed at their sites in the same slice
   (`branch.mjs` answers with a type instead of the forge-payload value; `prepare-local.mjs` basenames
-  its path), and the display path wears a belt (control bytes REPLACED WITH SPACES -- one column each, so
+  its path), and the display path wears a belt (control bytes REPLACED WITH SPACES -- one column each for
+  the C0/DEL/C1 members this said when it was written, and NOT for the ones issue #402 added, most of which
+  draw as nothing, so a substituted line is now wider than the raw one and every measurement site scrubs
+  BEFORE it measures rather than relying on the counts matching; so
   a belted pane and a plain one clip identically -- a 120-char cap, and the `job_failed`
   line's own bound). But the channel itself stays free-form: `InfraRetry` messages and any future
   untagged throw's `error.message` become `failedReason` verbatim, so the no-payload property is held by

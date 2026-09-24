@@ -6,6 +6,14 @@ import { box, clip, clipData, columnsOf, hasControls, scrubControls } from "../s
 import { frame, makeStyler, PLAIN_THEME, stripAnsi, visibleLen } from "../src/style.mjs";
 import { renderRuns, renderTriggers } from "../src/render.mjs";
 
+/** The TypeScript dashboard, through the loader the other suites use: `dashboard.ts` is not plain ESM. */
+async function tsLoader() {
+	const { createRequire } = await import("node:module");
+	const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const { createJiti } = piRequire("jiti");
+	return createJiti(import.meta.url);
+}
+
 // ONE CLASS, ONE OPERATION, and this file is where that claim is held (issue #382, item 1).
 //
 // Five copies of `[\u0000-\u001f\u007f-\u009f]` lived across four modules and did not agree about what to
@@ -15,26 +23,47 @@ import { renderRuns, renderTriggers } from "../src/render.mjs";
 // flipping `cell` and `cellOf` to deletion were killed by the suite; nothing noticed a third renderer
 // already deleting.
 
-test("the class covers C0, DEL, C1 and the soft hyphen, and nothing else up to U+017F", () => {
-	// A SWEEP rather than a handful of examples, because the boundary is the whole point: U+009B is a CSI
-	// introducer that needs no ESC in front of it, so a class that stops at DEL leaves a working escape.
+test("the class IS its rule, swept over every code point there is (#402)", () => {
+	// A SWEEP BY THE RULE, not a list of the shapes someone thought of. A review pass is why: the first
+	// version of this widening was a hand-written list, it covered 98 code points and left 167 behind --
+	// the Hangul and halfwidth fillers, the tag block, the Arabic and Egyptian format controls, the musical
+	// controls and every blank that is not U+0020 -- and every one of them reproduced the issue's own
+	// selection hazard verbatim through the real panes. A list is what the #382 carve-out was, and this file
+	// already says that was wrong twice.
 	//
-	// U+00AD joined it under issue #402. It is the only code point in this range that a terminal draws as
-	// nothing, and an invisible character inside an identifier lets two DIFFERENT strings render the same,
-	// which is what that issue is about. The rest of that widening lives above U+017F and is swept in
-	// `width.test.mjs`; this range is the one where C0, C1 and the Latin supplement meet.
-	for (let cp = 0; cp <= 0x17f; cp++) {
+	// So the rule is stated here independently of the regex, and the two are required to agree everywhere.
+	const composes = (ch) => ch === "\u200c" || ch === "\u200d" || /\p{Mn}|\p{Me}/u.test(ch);
+	const blankOrInvisible = (ch) => /\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs}/u.test(ch) || /[\u115f\u1160\u3164\uffa0]/u.test(ch);
+	const executes = (cp) => cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f);
+	for (let cp = 0; cp <= 0x10ffff; cp++) {
+		if (cp >= 0xd800 && cp <= 0xdfff) continue;
 		const ch = String.fromCodePoint(cp);
-		const control = cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) || cp === 0xad;
-		assert.equal(hasControls(`a${ch}b`), control, `U+${cp.toString(16).padStart(4, "0")}: hasControls`);
-		assert.equal(scrubControls(`a${ch}b`), control ? "a b" : `a${ch}b`, `U+${cp.toString(16).padStart(4, "0")}: scrubControls`);
-		assert.equal(clip(`a${ch}b`, 10), control ? "ab" : `a${ch}b`, `U+${cp.toString(16).padStart(4, "0")}: clip still DELETES`);
+		// A TAG is both, and is settled by its sequence rather than by its code point, so it is swept below.
+		if (cp >= 0xe0020 && cp <= 0xe007f) continue;
+		const inClass = executes(cp) || (blankOrInvisible(ch) && ch !== "\u0020" && !composes(ch));
+		assert.equal(hasControls(`a${ch}b`), inClass, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: membership`);
+		assert.equal(scrubControls(`a${ch}b`), inClass ? "a b" : `a${ch}b`, `U+${cp.toString(16).toUpperCase().padStart(4, "0")}: what is done with it`);
 	}
 	// `hasControls` uses `search`, not `.test`: a `/g` regex carries `lastIndex` between calls, so the same
 	// string would answer differently on the second ask.
 	const dirty = "a\u0007b";
 	assert.equal(hasControls(dirty), true);
 	assert.equal(hasControls(dirty), true, "and it answers the same the second time");
+});
+
+test("a tag composes a subdivision flag and deceives anywhere else (#402)", () => {
+	// THE ONE CODE POINT CLASS THAT IS BOTH, so it is the one the class settles by SEQUENCE. After U+1F3F4
+	// a tag builds a flag; anywhere else it is invisible text, and a run of them is a whole ASCII message
+	// at zero columns.
+	const flag = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+	assert.equal(scrubControls(flag), flag, "a flag sequence survives whole");
+	assert.equal(scrubControls(`job${flag}id`), `job${flag}id`, "including inside other text");
+	assert.equal(scrubControls("job\u{e0041}\u{e0042}id"), "job  id", "and a bare tag run is substituted");
+	assert.equal(scrubControls(`${flag}\u200b`), `${flag} `, "a flag does not exempt what follows it");
+	for (let cp = 0xe0020; cp <= 0xe007f; cp++) {
+		const ch = String.fromCodePoint(cp);
+		assert.equal(hasControls(`a${ch}b`), true, `U+${cp.toString(16).toUpperCase()} outside a flag`);
+	}
 });
 
 test("clipData substitutes and then clips, so width is what the operator sees", () => {
@@ -290,4 +319,26 @@ test("two identifiers that draw alike cannot stay distinct through the gate (#40
 	assert.notEqual(plain, hidden, "the fixture is two different strings");
 	assert.equal(columnsOf(plain), columnsOf(hidden), "which today draw the same width");
 	assert.notEqual(scrubControls(plain), scrubControls(hidden), "and after the gate they no longer look alike");
+});
+
+test("the tail search finds the line the pane draws (#402)", async () => {
+	// A REGRESSION THIS CHANGE INTRODUCED AND A REVIEW PASS MEASURED. The pane substitutes the class, the
+	// search box DELETES it from what the operator types, and the haystack used to be the raw bytes. Once
+	// the class held the invisible characters that real log output carries, a line drawn as `repo -prod`
+	// could be found by NO query: what is on screen missed the raw byte, and the original missed because
+	// the box had dropped it. Both sides are scrubbed now, so what is read is what can be searched.
+	const { makeLineInput } = await import("../src/panel.mjs");
+	const jiti = await tsLoader();
+	const { tailMatches } = await jiti.import("../src/dashboard.ts");
+	const lines = ["pulled:acme/repo​-prod:ok", "unrelated line", "pulled:acme/other:ok"];
+	// What the operator sees, typed back in. The editor drops the invisible byte from the query, exactly as
+	// it does for anything an operator pastes.
+	const typed = makeLineInput("");
+	typed.insert("repo -prod");
+	assert.deepEqual(tailMatches(lines, typed.value()), [0], "typing what is drawn finds it");
+	// And the original bytes, pasted, still find it: the haystack is scrubbed, so both spellings land.
+	const pasted = makeLineInput("");
+	pasted.insert("repo​-prod");
+	assert.deepEqual(tailMatches(lines, pasted.value()), [0], "pasting the original finds it too");
+	assert.deepEqual(tailMatches(lines, "nothing here"), [], "and a miss is still a miss");
 });

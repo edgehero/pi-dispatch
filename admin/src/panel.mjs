@@ -67,31 +67,69 @@ const MIN_WIDTH = 8;
  * needs no ESC in front. That left every code point which changes what a reader SEES without executing
  * anything, and two of those are worth naming:
  *
- *   - a bidi override or isolate REORDERS the text after it, so `repo/safe` plus U+202E plus `gnp.txt`
- *     is drawn as a name ending in `.png`. The job id, the target and the branch are all attacker- or
+ *   - a bidi override or isolate REORDERS the text after it, so `repo/safe` plus U+202E plus `gnp.txt` is
+ *     drawn as a name ending in `.png`. The job id, the target and the branch are all attacker- or
  *     model-writable, and a run record is what an operator reads before deciding what to do about it.
- *   - an invisible break character makes two DIFFERENT strings draw identically: `deploy-prod` and
- *     `deploy` plus U+200B plus `-prod` are 11 columns each and are not the same trigger. The panel's
- *     pickers select by the string, so the operator can edit or delete the row they did not mean.
+ *   - a character that draws as NOTHING, or as a blank that is not a space, makes two DIFFERENT strings
+ *     draw identically: `deploy-prod` against `deploy` plus U+200B plus `-prod`, and equally against a
+ *     Hangul filler or a no-break space. Eleven columns each, and not the same trigger. The pickers select
+ *     by the string, so the operator can edit or delete the row they did not mean.
  *
- * Issue #401 answered the OTHER half of that issue's argument: these code points are zero columns now,
- * which is what the renderer draws, so they no longer corrupt the geometry. What was left was the reading,
- * which is why the class moves rather than the width table.
+ * DERIVED FROM PROPERTIES, NOT LISTED, and that is the correction a review pass forced. A hand-written
+ * list of the shapes someone thought of covered 98 code points and left 167: the Hangul and halfwidth
+ * FILLERS (one of which this project's own `env-file.mjs` already calls a deception character), the TAG
+ * block, the Arabic and Egyptian format controls, the musical controls, and every blank that is not
+ * U+0020. A list is what the carve-out in issue #382 was, and it was wrong twice; this is the same shape
+ * once more. So the class is now every `\p{Cf}`, `\p{Zl}`, `\p{Zp}` and `\p{Zs}`, plus C0, DEL, C1 and
+ * the four fillers, which are `Lo` and so reachable by no property here.
  *
- * WHAT IS DELIBERATELY NOT IN IT: a code point that COMPOSES the character beside it. U+200D joins an
- * emoji sequence into one glyph, U+200C is orthography in Persian and the Indic scripts, and a variation
- * selector chooses a character's form and carries a column with it under #401. Substituting those changes
- * a CHARACTER, where substituting the rest reveals a CONTROL, and a gate that cannot tell those apart is
- * one that corrupts the text it was added to protect.
+ * WHAT IS DELIBERATELY NOT IN IT: U+0020, which is the space this substitutes TO; and a code point that
+ * COMPOSES the character beside it. U+200D joins an emoji sequence into one glyph, U+200C is orthography
+ * in Persian and the Indic scripts, and a variation selector chooses a character's form (`Mn`, so no
+ * property here reaches it anyway). Substituting those changes a CHARACTER where substituting the rest
+ * reveals a CONTROL, and a gate that cannot tell them apart corrupts the text it was added to protect.
  *
- * THE WORKER ANSWERS THE SAME QUESTION DIFFERENTLY, and the difference is not an inconsistency to fix.
- * `endpointShown` ESCAPES rather than substitutes, because its gate is an allowlist of printable ASCII: an
- * endpoint is a DNS name or a socket path, so anything else is suspect there. This panel renders a CJK
- * repository name as a matter of course, and #401 was largely about drawing it correctly, so the same
- * allowlist here would escape the content it just learned to measure.
+ * ISSUE #401 ANSWERED THE OTHER HALF of that issue's argument, and it is worth saying precisely because a
+ * first version of this said it loosely: the width table and the renderer AGREE on every one of these, so
+ * none corrupts the geometry any more. Most measure zero; U+2028 and U+2029 measure ONE on both sides,
+ * which is what "they are zero columns now" got wrong. What was left was the reading, which is why the
+ * class moves and the width table does not.
+ *
+ * SUBSTITUTION IS THEREFORE NO LONGER COLUMN-PRESERVING, and it used to be free: every member of the old
+ * class measured one column, so replacing it with a space changed no geometry. Most members of this one
+ * measure zero, so a substituted line is WIDER than the line that arrived. Nothing breaks, because every
+ * measurement site scrubs BEFORE it measures -- but that is an ordering those sites keep now, rather than
+ * an identity the counts used to give for nothing.
+ *
+ * THE TAG BLOCK IS BOTH, which is why it carries the one lookbehind. A tag after U+1F3F4 composes a
+ * subdivision flag, and a tag anywhere else is invisible text: a whole ASCII message at zero columns. So a
+ * tag is kept inside a flag sequence and substituted outside one. Measured both ways.
+ *
+ * WHAT IT COSTS, measured rather than waved at, because this is a trade and not a free win:
+ *
+ *   - A CORRECTLY ISOLATED RTL NAME NOW DISPLAYS WORSE. `\u2067` + a Hebrew project name + `\u2069` +
+ *     `/main` was isolating that name so it read correctly beside the LTR path, and it comes out as the
+ *     name between two spaces with the isolation gone. The panel cannot tell that isolate from the one an
+ *     attacker used, because they are the same code point doing the same thing, so this is the price of
+ *     closing the deception rather than an oversight.
+ *   - A soft-hyphenated word and a BOM-led log line each gain a space.
+ *   - The gate closes the EXPLICIT deception only. The bidi algorithm reorders neutrals beside a strong
+ *     RTL character with no control present at all, so `acme/repo` + a Hebrew letter + `gnp.txt` still
+ *     reads differently from how it is stored. Substituting cannot reach that without refusing Hebrew.
+ *
+ * THIS PROJECT NOW HAS THREE CLASSES FOR ONE QUESTION, and the differences are deliberate rather than
+ * drift. `triggers.mjs`'s VALIDATOR is C0 + DEL and decides whether an operator's file is acceptable.
+ * `env-file.mjs`'s `QUOTED_CONTROL` is this rule almost exactly -- its own docblock says "the bidi
+ * controls and isolates, the zero-width characters, and the line and paragraph separators" -- and it also
+ * holds U+200C, U+200D and the variation selectors, because a `.env` VALUE has no legitimate emoji
+ * sequence in it and any invisible byte there is suspect. This panel renders a CJK repository name and a
+ * container's log output as a matter of course, so it keeps what composes. `endpointShown` ESCAPES rather
+ * than substituting, on an allowlist of printable ASCII, which is right for a DNS name or a socket path
+ * and would escape the content issue #401 had just taught this module to measure.
  */
 // eslint-disable-next-line no-control-regex -- the C0/C1 half of the class above
-const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2028\u2029\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
+const CONTROL_CHARS =
+  /(?<!\u{1f3f4}[\u{e0020}-\u{e007f}]*)[\u{e0020}-\u{e007f}]|(?![\u0020\u200c\u200d\u{e0020}-\u{e007f}])(?:[\x00-\x1f\x7f-\x9f\u115f\u1160\u3164\uffa0]|\p{Cf}|\p{Zl}|\p{Zp}|\p{Zs})/gu;
 
 // The ONLY escape sequence a styled line may keep: an SGR run. Anything else that starts with ESC is data
 // that reached a pane, not decoration this project wrote.
@@ -106,8 +144,14 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b\u200e\u200f\u
 // eslint-disable-next-line no-control-regex -- the allowlist half of the class above
 const STYLE_TOKENS = /\x1b\[[0-9;]*m/g;
 
-/** Remove C0/C1 control characters (shared by `clip` and `makeLineInput`). */
-function stripControls(s) {
+/**
+ * DELETE the class, where `scrubControls` substitutes (shared by `clip` and `makeLineInput`).
+ *
+ * Exported for the tail search, which has to compare against BOTH readings: the pane substitutes, the
+ * search box deletes, and a query that finds nothing either way is the regression issue #402 introduced
+ * and a review pass measured.
+ */
+export function stripControls(s) {
   return String(s ?? "").replace(CONTROL_CHARS, "");
 }
 

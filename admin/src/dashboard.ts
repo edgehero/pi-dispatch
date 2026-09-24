@@ -30,7 +30,7 @@ import { cancelHeldJob, listRuns, mergedRunsOn, readSettingsView, mapSchedulers,
 import { scopeKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 import { renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
-import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle } from "./panel.mjs";
+import { box, clip, clipData, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, stripControls } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
 
 const KEY_HINTS = "[p]ause  [r]esume  [q]uit";
@@ -91,12 +91,13 @@ function scrubReason(reason: any): string {
 }
 
 /**
- * The control-byte class for text this pane renders, C0 + DEL + C1 (issue #337).
+ * The control-byte class for text this pane renders (issue #337, widened under #402).
  *
  * WHICH CLASS, because the project has two and the first version of this picked the wrong one. The
  * narrow one is `triggers.mjs`'s VALIDATOR, C0 + DEL, which decides whether an operator-authored file
- * is acceptable. The wider one is `panel.mjs`'s `CONTROL_CHARS`, C0 + DEL + C1, whose own comment calls
- * it a "defensive strip of C0/C1 control chars from untrusted input" and which already backs `clip`,
+ * is acceptable. The wider one is `panel.mjs`'s `CONTROL_CHARS`, which since issue #402 is derived from
+ * properties rather than listed -- what a terminal EXECUTES, plus what it draws as nothing or as a blank
+ * that is not a space, minus what COMPOSES a neighbouring glyph -- and which already backs `clip`,
  * so the PLAIN and ASCII render paths have stripped C1 out of these same rows all along. A themed row
  * and a plain row of the same record going through two different classes is the drift this must not be,
  * and the wider one is the right one for the job: this is text on its way to a terminal, not a file
@@ -2336,11 +2337,27 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
 
 /** The indices of tail lines containing `query` (case-insensitive substring) -- the LIVE_TAIL search
  * model, computed over the held tail bytes alone, so search reads nothing the view does not already. */
-function tailMatches(lines: any[], query: string): number[] {
-  const q = String(query).toLowerCase();
+// Exported for its own pin, as `targetUrl` is: what an operator can SEARCH FOR has to stay tied to what
+// the pane DRAWS, and that relation is not visible from a rendered frame.
+export function tailMatches(lines: any[], query: string): number[] {
+  // SEARCH WHAT THE PANE DRAWS, not the raw bytes behind it (issue #402). The pane substitutes the whole
+  // control class, and the search box DELETES it from what the operator types, so once the class grew to
+  // hold the invisible characters that real log output carries, a line drawn as `repo -prod` could not be
+  // found by any query at all: typing what is on screen missed the raw byte, and pasting the original
+  // missed because the box had dropped it. Scrubbing both sides is the only arrangement where what an
+  // operator reads is what they can search for.
+  // BOTH READINGS, because the two sides of this comparison disagree about the operation and neither is
+  // wrong to. The pane SUBSTITUTES the class, so what the operator reads is `repo -prod`. The search box is
+  // a `makeLineInput`, which DELETES it -- pinned, because the cursor sentinels are themselves in the
+  // class -- so an operator who pastes the original bytes produces `repo-prod`. Matching the drawn form
+  // alone loses the paste; matching the deleted form alone loses what is on screen. A line is a hit when
+  // EITHER reading contains the query, so both ways of asking find it.
+  const drawn = (v: string) => scrubControls(v).toLowerCase();
+  const bare = (v: string) => stripControls(v).toLowerCase();
   const out: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (String(lines[i]).toLowerCase().includes(q)) out.push(i);
+    const line = String(lines[i]);
+    if (drawn(line).includes(drawn(query)) || bare(line).includes(bare(query))) out.push(i);
   }
   return out;
 }

@@ -1703,9 +1703,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     plain-text twins for a non-TTY panel and the unframed degrade -- goes through one helper per renderer
     (`cellOf` in the panel, `cell` in `render.mjs`), applied to the DERIVED value as well as the raw field
     and inside the value before styling (the styler emits its own SGR escapes, so scrubbing a composed
-    line would destroy the colour and the pane's width math). The CLASS is C0, DEL **and C1**, not the
+    line would destroy the colour and the pane's width math). The CLASS was C0, DEL **and C1**, not the
     "C0-plus-DEL" this entry said for a round: U+009B is a CSI introducer that needs no ESC in front of it,
-    and `panel.mjs`'s own filter has always covered it. The reach was RUN_DETAIL alone when this was
+    and `panel.mjs`'s own filter has always covered it. It is WIDER SINCE issue #402, and derived from
+    properties rather than listed: what a terminal executes, plus what it draws as nothing or as a blank
+    that is not a space, minus what composes a neighbouring glyph. The reach was RUN_DETAIL alone when this was
     written and grew twice, under #337 to the LIST and under #367 to the rest.
 
     **THERE IS NO CARVE-OUT LEFT: A GATE HOLDS EVERY PANE** (issue #382, item 2). The rule reached this
@@ -1835,8 +1837,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     socket path, and this panel renders a CJK repository name as a matter of course. The same allowlist
     here would escape the content #401 had just taught it to measure.
 
+    **What it COSTS, measured rather than waved at.** A correctly ISOLATED right-to-left name now displays
+    worse: an isolate around a Hebrew project name was making it read correctly beside an LTR path, and it
+    comes out as the name between two spaces. The panel cannot tell that isolate from an attacker's,
+    because they are the same code point doing the same thing, so this is the price of closing the
+    deception rather than an oversight. A soft-hyphenated word and a BOM-led log line each gain a space.
+
     **What this does NOT answer**: the substitution makes a difference visible, it does not say which of
-    two look-alike strings was intended, because the panel cannot know. And issue #401's half of the
+    two look-alike strings was intended, because the panel cannot know. And it closes the EXPLICIT
+    deception only: the bidi algorithm reorders neutrals beside a strong RTL character with no control
+    present at all, which substituting cannot reach without refusing Hebrew and Arabic outright. And issue #401's half of the
     argument is already answered rather than pending: every one of these code points measures zero columns
     now, so they no longer corrupt the geometry, only the reading.
 
@@ -1923,7 +1933,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   (`{ jobId, attemptsMade, failedReason, queue, endedAt }`, key-set pinned; `.data` never crosses).
   `failedReason` is the worker's OWN throw message, de-payloaded at its sources in the same slice
   (branch.mjs answers with a type, prepare-local basenames its path) and belt-scrubbed in the deps
-  layer (control bytes replaced with spaces, C0 + DEL + C1 since issue #337, 120-char cap, the
+  layer (control bytes replaced with spaces, C0 + DEL + C1 since issue #337 and wider since #402, 120-char cap, the
   `job_failed` line's own bound); `OQ-035` records
   that the belt is a bound, not a classification. The view states the retention split (31d forge, 7d
   local/cron) because a uniform claim would be false for half the rows. REJECTED here: a
