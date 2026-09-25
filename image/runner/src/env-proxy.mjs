@@ -22,8 +22,10 @@ import { createRequire } from "node:module";
  *     bundled fetch mishandles compressed bodies through npm undici's dispatcher; the image runs Node 22, and without
  *     it the provider was reached through the proxy all the same (measured, with and without).
  *
- * Only when `NODE_USE_ENV_PROXY` is "1", which is exactly what the worker emits: with no policy armed nothing is
- * installed, and the job keeps whatever dispatcher pi gave it, as it always has.
+ * Only when `NODE_USE_ENV_PROXY` is "1", which is exactly what the worker emits with egress armed. Without it nothing is
+ * installed and the job keeps whatever dispatcher pi gave it, as it always has. An operator who turned the policy off
+ * (`PI_EGRESS=0`) and forwards the four variables for a proxy of their own gets the same restore, which is what they
+ * asked for: without it pi's load would silently drop their proxy too.
  */
 
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -38,8 +40,8 @@ export function loadPiUndici(resolve = (specifier) => import.meta.resolve(specif
  * before the first provider call; `EnvHttpProxyAgent` reads the proxy variables itself, at construction.
  */
 export function restoreEnvProxyDispatcher({ env = process.env, loadUndici = loadPiUndici } = {}) {
-	// env-internal NODE_USE_ENV_PROXY: set on the container by the worker whenever egress is armed (egressEnv), never by
-	// an operator, and refused in PI_FORWARD_ENV while the policy is armed.
+	// env-internal NODE_USE_ENV_PROXY: set on the container by the worker whenever egress is armed (egressEnv), and refused
+	// in PI_FORWARD_ENV while it is; forwarded only by an operator who turned the policy off for a proxy of their own.
 	if (env.NODE_USE_ENV_PROXY !== "1") return false;
 	const undici = loadUndici();
 	undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent());

@@ -85,7 +85,7 @@ async function main() {
 	enforceOfflineMode(process.env);
 	// And before anything can reach the network: loading pi (the static import above) replaced the env-proxy dispatcher
 	// NODE_USE_ENV_PROXY installed, so with egress armed the provider call went direct and died on the job's
-	// `--internal` network (issue #427). Free, and a no-op when no policy is armed.
+	// `--internal` network (issue #427). Free, and a no-op unless NODE_USE_ENV_PROXY=1 reached the container.
 	restoreEnvProxyDispatcher();
 	// Same moment as the mount asserts above, same exit code, and the same silent-skip hazard behind it
 	// (issue #291): pi consults excludeTools only through a Set filter, so an unknown name is a no-op

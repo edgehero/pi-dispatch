@@ -3012,7 +3012,7 @@ export const CANARY_PROBE_SLUGS = Object.freeze(["provider", "unlisted"]);
 
 /** Where the job image's runner keeps the module its own provider call goes through (issue #427). */
 export const EGRESS_CANARY_RUNNER_MODULE = "/app/image/runner/src/env-proxy.mjs";
-/** The canary's exit code for an image whose runner predates that module. */
+/** The canary's exit code for an image with no such module: a runner from before issue #427, or not this project's. */
 export const EGRESS_CANARY_STALE_RUNNER = 4;
 
 /**
@@ -3020,13 +3020,16 @@ export const EGRESS_CANARY_STALE_RUNNER = 4;
  * proved the operator's image honours NODE_USE_ENV_PROXY and nothing about the runner: loading pi takes that proxy
  * away again, and a plain `fetch` never loads pi, so this line read "reaches the provider" while every egress-armed job
  * went direct and died at its first turn (issue #427). Now it loads pi exactly as the runner does and lets the runner's
- * own module restore the proxy. Exit 0 reached, 3 blocked, 4 a runner without that module (it cannot use the proxy at
- * all, so neither direction is a reading of the policy), anything else not run. The URL rides argv, not the spawn env,
+ * own module restore the proxy. Exit 0 reached, 3 blocked, 4 an image with no such module (neither direction is then a
+ * reading of the policy), anything else not run: a module that is there but fails to load is 5, never 4, so a broken
+ * image is not told it is merely old. What this proves is that the runner's module and pi together route a request
+ * through the proxy, not that `run-job.mjs` calls it, or calls it early enough: the job image contract job runs the real
+ * entrypoint for that, and `image/runner/test/env-proxy.test.mjs` pins where the call sits. The URL rides argv, not the spawn env,
  * and the difference from the in-image `gh` probe is deliberate: that one carries a TOKEN, which must never be visible
  * in `ps`. This carries a public hostname, so argv is the honest place for it.
  */
 export function egressCanaryScript(url) {
-	return `import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore(),()=>process.exit(${EGRESS_CANARY_STALE_RUNNER})).then(()=>fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)}),e=>{console.log("error",e.message);process.exit(5)})`;
+	return `import(${JSON.stringify(EGRESS_CANARY_RUNNER_MODULE)}).then(m=>m.loadPiThenRestore(),e=>{console.log("error",e.code??e.message);process.exit(e.code==="ERR_MODULE_NOT_FOUND"?${EGRESS_CANARY_STALE_RUNNER}:5)}).then(()=>fetch(${JSON.stringify(url)},{method:"POST"}).then(r=>{console.log("reached",r.status);process.exit(0)},e=>{console.log("blocked",e.cause?.code??e.message);process.exit(3)}),e=>{console.log("error",e.message);process.exit(5)})`;
 }
 
 /**
@@ -3151,9 +3154,10 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 
 	// The end-to-end probe, and the only place in this codebase that proves the policy rather than
 	// inspecting it. Two containers, on a throwaway network built exactly like a job's, gated on the image
-	// being present because it uses the job image's own node and runner -- which is the point: it proves the
-	// operator's OWN image's runner sends its provider call through the proxy, the property a stale image would
-	// silently lack and the one whose absence turns the whole policy into an outage (`egressCanaryScript`, #427).
+	// being present because it uses the job image's own node and runner module -- which is the point: it proves the
+	// operator's OWN image routes a request through the proxy the way its runner does (pi loaded, then the runner's
+	// restore), the property a stale image would silently lack and the one whose absence turns the whole policy into an
+	// outage (`egressCanaryScript`, #427).
 	//
 	// Credential-free by construction: `api.anthropic.com` answers 401 to an unauthenticated request, so
 	// reaching the provider and being refused for the key proves the entire path and costs nothing. That is
@@ -3248,7 +3252,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `Egress policy: not proved, because the job image's runner predates issue #427 and sends its provider call around the proxy, so with egress armed every job fails at its first turn`,
+					label: `Egress policy: not proved, because the job image has no ${EGRESS_CANARY_RUNNER_MODULE}: its runner predates issue #427, whose provider call goes around the proxy so that with egress armed every job fails at its first turn, or the image is not built from this project's`,
 					fix: `use a job image built after issue #427 (ghcr.io/edgehero/pi-job:latest, or rebuild yours FROM it), or set PI_EGRESS=0 until you can`,
 					readBack: { property: "egress", want, reached: null },
 				});

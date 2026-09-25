@@ -515,17 +515,25 @@ jobs:
           JOB=$(mktemp -d)
           echo "Reply with the single word ok." > "$JOB/prompt.md"
           chmod -R a+rX "$JOB"
+          # Bounded, and it must reach the runner's own exit line: a container that never started (125, a name
+          # clash, the image) or a runner that stopped before its first turn would otherwise read as "no CONNECT",
+          # which the control below would take for success.
           run_runner() {
-            docker run --rm --network "$NET" -v "$JOB:/job:ro" \
+            out=$(timeout 300 docker run --rm --network "$NET" -v "$JOB:/job:ro" \
               -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
               -e ANTHROPIC_API_KEY=sk-ant-not-a-real-key \
               -e HTTPS_PROXY="http://$PROXY:3128" -e HTTP_PROXY="http://$PROXY:3128" -e NO_PROXY=localhost,127.0.0.1 "$@" \
-              "$IMAGE_REF" >/dev/null 2>&1 || true
+              "$IMAGE_REF" 2>&1) || true
+            echo "$out" | grep -q '"event":"exit"' \
+              || { echo "$out" | tail -20; echo "::error::the runner did not run to its exit line ($*), so this run proves nothing either way."; exit 1; }
           }
           run_runner -e NODE_USE_ENV_PROXY=1
           armed=$(docker logs "$PROXY" 2>&1)
           run_runner
           control=$(docker logs "$PROXY" 2>&1)
+          # And the stub was still listening through the control, or its silence is a dead proxy's.
+          [ "$(docker inspect -f '{{.State.Running}}' "$PROXY")" = "true" ] \
+            || { echo "::error::the stub proxy stopped during the check, so the control run's silence proves nothing."; exit 1; }
           docker rm -f "$PROXY" >/dev/null
           docker network rm "$NET" >/dev/null
           echo "$armed"

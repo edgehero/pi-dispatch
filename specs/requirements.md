@@ -1510,8 +1510,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   **Honest gap**: an allowlist missing a host the flows need is not pre-spend detectable, and that job pays
   the two slots. `doctor` proves the whole path once, when a human asks, using the job image's own node and
   its runner's own route to the network (pi loaded, then the runner's restore; issue #427) -- which also proves
-  that image's runner sends its provider call through the proxy, the property a stale one would silently lack.
-  A plain `fetch` proved only the flag, and stayed green while every job failed.
+  that image's runner module routes a request through the proxy, the property a stale one would silently lack.
+  A plain `fetch` proved only the flag, and stayed green while every job failed. That the entrypoint actually
+  calls the module, early enough, is proved in CI instead (the job image contract job runs it).
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `INT-EGRESS-POLICY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`,
   `INT-SANDBOX-CONTRACT`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,

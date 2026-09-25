@@ -4040,7 +4040,7 @@ test("a job image whose runner predates issue #427 is named once, and neither di
 	const calls = [];
 	const plan = { ...green, "docker run --rm --name pi-dispatch-egress-probe-provider": EGRESS_CANARY_STALE_RUNNER };
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" }, collectSeams(plan, { spawn: fakeSpawn(plan, calls) }));
-	const stale = checks.filter((c) => /runner predates issue #427/.test(c.label));
+	const stale = checks.filter((c) => /runner predates issue #427/.test(c.label) && c.label.includes(EGRESS_CANARY_RUNNER_MODULE));
 	assert.equal(stale.length, 1);
 	assert.equal(stale[0].warn, true);
 	assert.match(stale[0].fix, /built after issue #427/);
@@ -4051,7 +4051,7 @@ test("a job image whose runner predates issue #427 is named once, and neither di
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"), "and the canary network is still removed");
 });
 
-test("the canary script's exits are real: 4 for a runner without the module, 3 for a blocked request, 5 for a failed load", () => {
+test("the canary script's exits are real: 4 only for a missing module, 3 for a blocked request, 5 for any load that fails", () => {
 	const dir = tempDir("pi-canary-script-");
 	const run = (modulePath) => spawnSync(process.execPath, ["-e", egressCanaryScript("http://pi-dispatch-427.invalid/").replace(JSON.stringify(EGRESS_CANARY_RUNNER_MODULE), JSON.stringify(modulePath))], { encoding: "utf8", timeout: 30_000 });
 	assert.equal(run(join(dir, "absent.mjs")).status, EGRESS_CANARY_STALE_RUNNER);
@@ -4063,6 +4063,11 @@ test("the canary script's exits are real: 4 for a runner without the module, 3 f
 	const broken = run(join(dir, "throws.mjs"));
 	assert.equal(broken.status, 5, "a runner that cannot load pi is no reading, never a block");
 	assert.match(broken.stdout, /^error no pi/);
+	// A module that IS there but fails to load is a broken image, not an old one: 5, never 4.
+	writeFileSync(join(dir, "throwsOnImport.mjs"), "throw new Error(\"broken\");\n");
+	assert.equal(run(join(dir, "throwsOnImport.mjs")).status, 5);
+	writeFileSync(join(dir, "syntax.mjs"), "export const = ;\n");
+	assert.equal(run(join(dir, "syntax.mjs")).status, 5);
 });
 
 test("the egress canary's deny probe asks for a host that RESOLVES, under a per-process name", async () => {
