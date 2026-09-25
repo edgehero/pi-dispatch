@@ -5544,7 +5544,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	assert.deepEqual([checks[0].ok, checks[0].label], [true, "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are"]);
 	const home = byDir("/home/op/repo");
 	assert.deepEqual([home.ok, home.warn], [false, true], "a per-job refusal, never a boot one");
-	assert.match(home.label, /the local folder \/home\/op\/repo is labelled user_home_t, which a job container is denied -- every job in it is refused before it spends/);
+	assert.match(home.label, /the local folder \/home\/op\/repo is labelled user_home_t, not a container type, so a job container may be denied it \(measured: user_home_t, user_tmp_t, var_lib_t and var_t are\) -- a job in it that is denied is refused before it spends/);
 	assert.ok(home.fix.includes("semanage fcontext -a -t container_file_t '/home/op/repo(/.*)?' && restorecon -R /home/op/repo"), home.fix);
 	assert.deepEqual([byDir("/srv/labelled").ok, byDir("/srv/labelled").warn], [true, undefined]);
 	assert.match(byDir("/srv/labelled").label, /is labelled container_file_t, which a container can read/);
@@ -5559,7 +5559,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	}
 	const overlay = checks.find((c) => c.label.includes("global overlay /srv/pi's overlay"));
 	assert.deepEqual([overlay.ok, overlay.warn], [false, true]);
-	assert.match(overlay.label, /labelled var_t, which a job container is denied -- every job is refused before it spends/);
+	assert.match(overlay.label, /labelled var_t, not a container type, so a job container may be denied it \(measured: user_home_t, user_tmp_t, var_lib_t and var_t are\) -- a job that is denied it is refused before it spends/);
 	// A space in the rule is a hex escape (semanage refuses one written plainly or backslashed, measured); restorecon takes
 	// the path as it is.
 	assert.ok(overlay.fix.includes(`semanage fcontext -a -t container_file_t '/srv/pi'\\''s\\x20overlay(/.*)?' && restorecon -R '/srv/pi'\\''s overlay'`), overlay.fix);
@@ -5606,6 +5606,8 @@ test("the SELinux label check names the directory restorecon meets: through ever
 	assert.match(of("/home/op/plink/repo").label, /resolved to \/srv\/pl\/repo/);
 	// The longest alias wins, on a separator boundary.
 	assert.ok(of("/home/op/aliased").fix.includes("/opt/tool(/.*)?"), of("/home/op/aliased").fix);
+	// ...but restorecon is handed the directory that exists: /opt/tool does not, and restorecon failed on it (measured).
+	assert.ok(of("/home/op/aliased").fix.includes("&& restorecon -R /var/opt/tool`"), of("/home/op/aliased").fix);
 	const plain = of("/home/op/plain");
 	assert.ok(!plain.label.includes("resolved to"), "a folder that resolves to itself says nothing more");
 	assert.ok(of("/home/op/sp ace").fix.includes("'/home/op/sp\\x20ace(/.*)?' && restorecon -R '/home/op/sp ace'"), of("/home/op/sp ace").fix);
@@ -5641,7 +5643,7 @@ test("doctor runs the label check only where relabelling applies: local Podman w
 		if (applies) {
 			assert.match(text(), /✓ SELinux: jobs' own directories are relabelled for SELinux \(:Z\)/, label);
 			assert.match(text(), new RegExp(`⚠ SELinux: the global overlay ${overlay.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is labelled user_tmp_t`), label);
-			assert.match(text(), /⚠ SELinux: the local folder \/srv\/repo is labelled var_t, which a job container is denied/, `${label}: every local trigger's folder`);
+			assert.match(text(), /⚠ SELinux: the local folder \/srv\/repo is labelled var_t, not a container type/, `${label}: every local trigger's folder`);
 			assert.match(text(), /semanage fcontext -a -t container_file_t '\/srv\/repo\(\/\.\*\)\?' && restorecon -R \/srv\/repo/, label);
 			assert.equal(stats.length, 2, label);
 		} else {

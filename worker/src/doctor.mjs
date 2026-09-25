@@ -3990,7 +3990,7 @@ const CONTAINER_READABLE_TYPES = new Set(["container_file_t", "container_ro_file
 export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, realpath = realpathSync, readFile = readFileSync }) {
 	const aliases = fcontextAliases(readFile);
 	const checks = [{ ok: true, label: "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are" }];
-	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "every job in it is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "every job is refused before it spends" }] : [])];
+	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "a job in it that is denied is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "a job that is denied it is refused before it spends" }] : [])];
 	for (const { dir, what, refused } of targets) {
 		const answer = await runCmdCapture(spawn, "stat", ["-L", "--format=%C", "--", dir], { stdoutOnly: true });
 		const context = answer.code === 0 ? parseSelinuxContext(answer.output) : null;
@@ -4014,8 +4014,12 @@ export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, 
 		checks.push({
 			ok: false,
 			warn: true,
-			label: `SELinux: the ${what} ${dir}${via} is labelled ${context.type}${context.categories ? " with a private category pair (another container's :Z)" : ""}, which a job container is denied -- ${refused}`,
-			fix: `label it for containers once: \`semanage fcontext -a -t container_file_t ${shellQuote(`${escapeFcontextPath(real)}(/.*)?`)} && restorecon -R ${shellQuote(real)}\` (as root). pi-dispatch never relabels this directory itself, because a private label would lock every other container out of it. On an NFS, CIFS or FUSE mount, or one mounted with \`context=\`, the label comes from the mount instead and restorecon cannot change it: there the container's access is the virt_use_nfs, virt_use_samba or virt_use_fusefs boolean, or the mount's own context`,
+			// Not "denied" outright: the policy grants containers some types it does not relabel (a container reads usr_t, which
+			// /var/opt defaults to, measured), so only the measured types are named as denied.
+			label: context.categories
+				? `SELinux: the ${what} ${dir}${via} is labelled ${context.type} with a private category pair (another container's :Z), which locks every other container out of it (measured) -- ${refused}`
+				: `SELinux: the ${what} ${dir}${via} is labelled ${context.type}, not a container type, so a job container may be denied it (measured: user_home_t, user_tmp_t, var_lib_t and var_t are) -- ${refused}`,
+			fix: `label it for containers once: \`semanage fcontext -a -t container_file_t ${shellQuote(`${escapeFcontextPath(real)}(/.*)?`)} && restorecon -R ${shellQuote(resolved)}\` (as root). pi-dispatch never relabels this directory itself, because a private label would lock every other container out of it. On an NFS, CIFS or FUSE mount, or one mounted with \`context=\`, the label comes from the mount instead and restorecon cannot change it: there the container's access is the virt_use_nfs, virt_use_samba or virt_use_fusefs boolean, or the mount's own context`,
 		});
 	}
 	return checks;
