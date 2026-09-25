@@ -1120,7 +1120,11 @@ export function makeLineInput(initial = "") {
       // away cannot narrow anything, and re-measuring after each one made a pasted run of marks behind the
       // cursor QUADRATIC (16,000 of them took ten seconds to render).
       while (start < end && drawn(start, end) > w) {
-        if (end - 1 > ci) {
+        // Only while something past the cursor still DRAWS: when all that is left there is the cursor
+        // letter's own marks, giving them up narrows nothing and strips the letter, so the front goes.
+        let tailDraws = false;
+        for (let k = ci + 1; k < end && !tailDraws; k++) tailDraws = steps[k].cols > 0;
+        if (end - 1 > ci && tailDraws) {
           // A mark goes WITH the character in front of it: the trailing ones leave first, then their base.
           while (end - 2 > ci && steps[end - 1].cols === 0) end -= 1;
           end -= 1;

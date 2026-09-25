@@ -720,6 +720,8 @@ test("a cut never separates a leader from the base it doubles (#417)", async () 
   // column when it draws two. RAW input for `sliceColumns`: `clip` deletes the format characters first,
   // so it would test nothing for them.
   for (const z of zeroWidthCodePoints()) {
+    // A leader that doubles a base is never left behind on its own: a one-column cut of one takes nothing.
+    if (columnsOf(z + "\uff9e") === 2) assert.equal(sliceColumns(z + "\uff9ebc", 1), "", `a cut of ${JSON.stringify(z + "\uff9e")}`);
     for (const s of [z + "\uff9e\uff9fbc", "a" + z + "\u0e33x", z + "\uff01z"]) {
       for (let w = 0; w <= 6; w++) {
         const cut = sliceColumns(s, w);
@@ -772,9 +774,10 @@ test("the line editor's window draws exactly its width after the prompt, whole a
   // larger is exactly the width. The third value is the one whole-value step sums get wrong (U+0D4E is a
   // prepended letter, so windowing it away makes the Myanmar mark lead a cluster of its own), and the fifth
   // is ordinary Thai, whose tail after a cursor on its first letter begins with a tone mark.
-  // The sixth is a leader run several characters long, where a cursor rounding forward was drawn in one
-  // place for every position inside it, and the last is a mark after its base that trimming must not drop.
-  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh", "\u0e19\u0e49\u0e33abc", "x\u0301\u102c\u102c\u102c\u102c\u0e33y", "a\u0301\uff9e"];
+  // The sixth has a cursor inside a bundle, which rounding forward drew on the step after it; the seventh
+  // is a mark after its base that trimming must not drop; the last is Thai whose final letter carries a
+  // tone mark, which trimming took away when the cursor sat on that letter and only its mark followed.
+  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh", "\u0e19\u0e49\u0e33abc", "x\u0301\u102c\u102c\u102c\u102c\u0e33y", "a\u0301\uff9e", "\u0e19\u0e49\u0e33\u0e01\u0e48".repeat(3)];
   const [open, close] = LINE_INPUT_CURSOR;
   for (const v of values) {
     const ed = makeLineInput(v);
@@ -933,6 +936,16 @@ test("the line editor stays linear on a pasted run of marks on either side of th
     const ms = performance.now() - t0;
     assert.ok(ms < 500, `marks ${name} the cursor: rendered in ${Math.round(ms)} ms`);
   }
+});
+
+test("a narrow window keeps the cursor on its own character, not on a blank (#417)", () => {
+  // Trimming the end one step too far gave up the cursor's own cell: with the cursor on `x`, a two-column
+  // window drew the cursor as a blank after the halfwidth mark.
+  const ed = makeLineInput("\u0d4e\u102c\uff9ex\u0301\u0301yz");
+  ed.home();
+  for (let k = 0; k < 3; k++) ed.right();
+  const out = ed.render(2);
+  assert.equal(out.slice(out.indexOf(LINE_INPUT_CURSOR[0]) + 1, out.indexOf(LINE_INPUT_CURSOR[1]))[0], "x", JSON.stringify(out));
 });
 
 test("a null body line is a blank line, in both frame builders (#417)", () => {
