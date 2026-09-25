@@ -772,7 +772,9 @@ test("the line editor's window draws exactly its width after the prompt, whole a
   // larger is exactly the width. The third value is the one whole-value step sums get wrong (U+0D4E is a
   // prepended letter, so windowing it away makes the Myanmar mark lead a cluster of its own), and the fifth
   // is ordinary Thai, whose tail after a cursor on its first letter begins with a tone mark.
-  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh", "\u0e19\u0e49\u0e33abc"];
+  // The sixth is a leader run several characters long, where a cursor rounding forward was drawn in one
+  // place for every position inside it, and the last is a mark after its base that trimming must not drop.
+  const values = ["ab\u0301\uff9ecd\u102c\uffe0ef", "\u102c\uff9e".repeat(6), "\u0d4e\u102c\uff9exy", "\u0301\uff9e\u0e48\u0e33gh", "\u0e19\u0e49\u0e33abc", "x\u0301\u102c\u102c\u102c\u102c\u0e33y", "a\u0301\uff9e"];
   const [open, close] = LINE_INPUT_CURSOR;
   for (const v of values) {
     const ed = makeLineInput(v);
@@ -789,15 +791,20 @@ test("the line editor's window draws exactly its width after the prompt, whole a
             : visibleWidth(plain);
           assert.ok(whole <= w && pieces <= w, `${where} draws ${whole} whole and ${pieces} in pieces`);
           assert.equal(Math.max(whole, pieces), w, where);
-          // AND THE CURSOR CELL IS THE CURSOR'S CHARACTER: trimming gives up the tail first and the head
-          // second, never the cell the caller moved the cursor to. A cursor inside a step names the step
-          // after it (a step is at most three code units), which is the editor's own rounding rule.
-          if (focused && ed.cursor() < ed.value().length && w >= 2) {
+          // A NONSPACING MARK GOES WITH ITS BASE: trimming the window from the end took a Thai tone mark
+          // away and kept the letter it sits on, a character that is not in the value.
+          const shown = plain.replace(/ +$/u, "");
+          const from = ed.value().indexOf(shown);
+          if (shown !== "" && from >= 0) assert.doesNotMatch(ed.value().slice(from + shown.length, from + shown.length + 1), /\p{Mn}/u, `${where}: a mark was cut from its base`);
+          // AND THE CURSOR CELL HOLDS THE CURSOR'S CHARACTER: trimming gives up the tail first and the
+          // head second, never the cell the caller moved the cursor to. A cursor inside a step names that
+          // step. Four columns is the widest step here (a prepended character doubling a wide base).
+          if (focused && ed.cursor() < ed.value().length && w >= 4) {
             const under = out.slice(out.indexOf(open) + 1, out.indexOf(close));
-            // Inside the LAST step it rounds to the end of the value, where the cursor is a blank cell.
-            const rest = ed.value().slice(ed.cursor());
-            const ok = under === " " ? rest.length <= 2 : rest.indexOf(under) >= 0 && rest.indexOf(under) < 3;
-            assert.ok(ok, `${where}: the cursor sits on ${JSON.stringify(under)}`);
+            const c = ed.cursor();
+            let holds = false;
+            for (let k = 0; k < under.length && !holds; k++) holds = c - k >= 0 && ed.value().startsWith(under, c - k);
+            assert.ok(under !== " " && holds, `${where}: the cursor sits on ${JSON.stringify(under)}`);
           }
         }
       }
@@ -859,8 +866,22 @@ test("an adversarial line of leader clusters is still cheap to count and cut (#4
   const hostile = "\u102c\uff9e".repeat(50000);
   const plain = "a\uff9e".repeat(50000);
   assert.equal(columnsOf(hostile), 100000, "every pair is a doubled cluster");
-  const ratio = best(() => { columnsOf(hostile); clip(hostile, 80); }) / best(() => { columnsOf(plain); clip(plain, 80); });
-  assert.ok(ratio < 6, `the hostile line costs ${ratio.toFixed(1)} times a plain one`);
+  // AND WITH THE CHARACTER IN FRONT OF EACH RUN VARIED, which defeated a memo keyed on that character:
+  // CJK ideographs, every Hangul syllable, which a first cut of the stand-in kept as themselves, and
+  // private-use characters, which it did not stand in at all.
+  let cjk = "";
+  let hangul = "";
+  let pua = "";
+  for (let k = 0; k < 33000; k++) {
+    cjk += String.fromCodePoint(0x4e00 + k) + "\u102c\uff9e";
+    hangul += String.fromCodePoint(0xac00 + (k % 11172)) + "\u102c\uff9e";
+    pua += String.fromCodePoint(0xe000 + (k % 6400)) + "\u102c\uff9e";
+  }
+  const base = best(() => { columnsOf(plain); clip(plain, 80); });
+  for (const [name, line] of [["repeated", hostile], ["varied CJK", cjk], ["varied Hangul", hangul], ["varied private-use", pua]]) {
+    const ratio = best(() => { columnsOf(line); clip(line, 80); }) / base;
+    assert.ok(ratio < 6, `the ${name} hostile line costs ${ratio.toFixed(1)} times a plain one`);
+  }
 });
 
 test("the leader memo answers each context for itself, whichever is measured first (#417)", async () => {
@@ -896,15 +917,29 @@ test("a styled line measures the larger of its whole and its pieces, never the s
   }
 });
 
-test("the line editor stays linear on a pasted run of marks behind the cursor (#417)", () => {
+test("the line editor stays linear on a pasted run of marks on either side of the cursor (#417)", () => {
   // THE TRIM LOOP RE-MEASURED THE WINDOW ONCE PER STEP IT GAVE UP, and a mark gives up no width, so a
-  // run of them behind the cursor made each render quadratic: 16,000 marks took ten seconds, measured.
-  // Now about 5 ms; a ceiling of half a second cannot flake and still catches the quadratic shape.
-  const ed = makeLineInput("\u0d4e\u102c\uff9ebb" + "\u0301".repeat(16000));
-  ed.home();
-  for (let k = 0; k < 4; k++) ed.right();
-  const t0 = performance.now();
-  ed.render(3);
-  const ms = performance.now() - t0;
-  assert.ok(ms < 500, `rendered in ${Math.round(ms)} ms`);
+  // run of them past the cursor made each render quadratic: 16,000 marks took ten seconds, measured, and
+  // the same run IN FRONT of the cursor took twenty-six once the other end was fixed. Now a few ms each;
+  // a ceiling of half a second cannot flake and still catches the quadratic shape.
+  const after = makeLineInput("\u0d4e\u102c\uff9ebb" + "\u0301".repeat(16000));
+  after.home();
+  for (let k = 0; k < 4; k++) after.right();
+  const before = makeLineInput("a" + "\u0301".repeat(16000) + "\uff9e");
+  before.end();
+  for (const [name, ed, w] of [["after", after, 3], ["before", before, 2]]) {
+    const t0 = performance.now();
+    ed.render(w);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 500, `marks ${name} the cursor: rendered in ${Math.round(ms)} ms`);
+  }
+});
+
+test("a null body line is a blank line, in both frame builders (#417)", () => {
+  // The frames now pad `" " + line`, and a null or undefined line would have drawn as the word.
+  const styler = makeStyler(PLAIN_THEME);
+  for (const line of [null, undefined]) {
+    assert.equal(box({ sections: [{ lines: [line] }], width: 12 })[1], `${"|"} ${" ".repeat(8)} ${"|"}`.replace(/\|/g, box({ sections: [{ lines: [""] }], width: 12 })[1][0]));
+    assert.equal(frame(styler, { width: 12, lines: [line] })[1], frame(styler, { width: 12, lines: [""] })[1]);
+  }
 });

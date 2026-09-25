@@ -36,8 +36,8 @@ export function stripAnsi(s) {
  *
  * Through `panel.mjs`'s table, so the framed pane and the monochrome one measure the same TEXT the same
  * way. They draw the same geometry, and a width rule that holds in one and not the other is how a frame
- * ends up ten columns wider than the line above it. A styled line can measure one column wider than its
- * plain text, and only where a colour code stands in front of a mark (issue #417, below).
+ * ends up ten columns wider than the line above it. A styled line can measure wider than its plain text,
+ * by up to one column for each colour code standing in front of a mark (issue #417, below).
  */
 export function visibleLen(s) {
   const plain = columnsOf(stripAnsi(s));

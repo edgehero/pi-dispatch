@@ -474,6 +474,8 @@ function* widthSteps(s) {
     if (ZERO_WIDTH.test(ch)) {
       const lead = inRun ? null : leaderStep(chars, i);
       if (lead) {
+        // The part of the run that joins the character in front stays with it, as zero-width steps.
+        for (const c of lead.before) yield { text: c, cols: 0 };
         yield lead.step;
         i = lead.next - 1;
         inRun = false;
@@ -532,7 +534,8 @@ function* widthSteps(s) {
  * cluster is asked of `Intl.Segmenter`, with the renderer's own arguments, rather than of a list: the same
  * runtime segments both, so the two cannot disagree about where a cluster starts.
  *
- * Returns the whole run and its base as ONE step, so no cut can separate them, or null when nothing is
+ * Returns the part of the run inside the base's cluster and the base as ONE step, so no cut can separate
+ * them, with the rest of the run (which joins the character in front) as `before`; or null when nothing is
  * doubled and the run steps as zero-width code points as before.
  */
 function leaderStep(chars, i) {
@@ -554,8 +557,9 @@ function leaderStep(chars, i) {
   if (prev !== "" && JOINS.test(run) && !interpreted(prev)) return null;
   // ONE CODE POINT OF CONTEXT IS ENOUGH, and only its CLASS. Whether a break falls before the run depends on
   // the code point in front of it (no base here is a pictographic, a regional indicator or a conjunct
-  // consonant, the rules that look further back), and among printing characters only a control, a
-  // prepended letter and the Hangul jamo and syllables change the answer. Every other one is segmented as
+  // consonant, the rules that look further back). Controls keep their own class, and among printing
+  // characters only a prepended letter, a Hangul leading or vowel jamo or LV syllable, and the Kirat Rai
+  // vowel signs change the answer (see `contextOf`). Every other one is segmented as
   // `a`, which is what makes the memo below a memo: keyed on the character itself, a line that varied the
   // character in front of each run defeated it, 94 ms to count 100 KB against 6.5 ms before this step.
   const ctx = contextOf(prev);
@@ -565,13 +569,17 @@ function leaderStep(chars, i) {
   // was measured first answered for both, an under-count by one after the other order.
   const key = (ctx === "" ? "^" : "~" + ctx) + run + base;
   let doubled = key.length <= LEADER_MEMO_KEY ? leaderMemo.get(key) : undefined;
+  // `null` is a remembered "not doubled"; `undefined` is "not asked yet".
   if (doubled === undefined) {
     const probe = ctx + run + base;
     let last = "";
     for (const { segment } of GRAPHEMES.segment(probe)) last = segment;
     // Doubled when the base's cluster holds something IN FRONT of the base and does not reach back to
-    // the context: the last segment is always a suffix of the probe, so both are length comparisons.
-    doubled = last.length > base.length && last.length <= probe.length - ctx.length ? countLater(last) : -1;
+    // the context: the last segment is always a suffix of the probe, so both are length comparisons. The
+    // memo holds the extra columns and HOW MUCH OF THE RUN is in the base's cluster, because only that part
+    // is bundled with the base: a mark earlier in the run can still join the character in front (U+0301
+    // before a Myanmar vowel sign does), and bundling it let a cut take it away from its own letter.
+    doubled = last.length > base.length && last.length <= probe.length - ctx.length ? [countLater(last), last.length - base.length] : null;
     if (key.length <= LEADER_MEMO_KEY) {
       // A BOUNDED MEMO, because an adversarial line defeats the fast path above with a run per character:
       // `"\u102c\uff9e".repeat(50000)` took 101 ms to count without it and 16 ms with it (7 ms before this
@@ -580,8 +588,10 @@ function leaderStep(chars, i) {
       leaderMemo.set(key, doubled);
     }
   }
-  if (doubled < 0) return null;
-  return { step: { text: run + base, cols: 2 * (WIDE.test(base) ? 2 : 1) + doubled }, next: k + 1 };
+  if (doubled === null) return null;
+  const [extra, inCluster] = doubled;
+  const joined = run.slice(0, run.length - inCluster);
+  return { before: [...joined], step: { text: run.slice(run.length - inCluster) + base, cols: 2 * (WIDE.test(base) ? 2 : 1) + extra }, next: k + 1 };
 }
 
 /**
@@ -593,18 +603,30 @@ function leaderStep(chars, i) {
  * make a cluster START here that did not, and a start is what doubles a base. That is an over-count. The
  * characters that break MORE often than `a` (the controls and the line and paragraph separators) are kept
  * as themselves, and so are the ones that JOIN more often: the fifteen prepended letters, which take the
- * next character into their cluster whatever it is, Hangul, whose fillers are zero-width jamo, and the five
+ * next character into their cluster whatever it is, the Hangul leading and vowel jamo and LV syllables,
+ * which take the zero-width jamo fillers, and the five
  * Kirat Rai vowel signs Unicode 16 made vowel jamo for the same rule (the sweep found those). The
- * predecessor sweep in `width.test.mjs` runs every character there is through three leader shapes, so a
+ * predecessor sweep in `width.test.mjs` runs every character there is through four leader shapes, so a
  * missing entry fails there as an over-count with a name.
  */
 function contextOf(prev) {
-  if (prev === "" || KEEPS_CONTEXT.test(prev) || !PRINTS.test(prev)) return prev;
+  if (prev === "" || KEEPS_CONTEXT.test(prev) || isLvSyllable(prev) || !PRINTS.test(prev)) return prev;
   return "a";
 }
-const PRINTS = /^[\p{L}\p{N}\p{P}\p{S}\p{Zs}]$/u;
+
+// A Hangul LV syllable (every 28th from U+AC00) takes a vowel filler into its cluster; an LVT one does
+// not, so the 10,773 of those are stood in for like any other letter. Keeping the whole syllable block
+// kept the memo from working on a line of varied LVT syllables, measured at eleven times a plain line.
+function isLvSyllable(ch) {
+  const cp = ch.codePointAt(0);
+  return cp >= 0xac00 && cp <= 0xd7a3 && (cp - 0xac00) % 28 === 0;
+}
+// What `a` may stand in for: every printing class, and the private-use and unassigned code points that are
+// not default-ignorable (the segmenter treats those as plain characters too; the default-ignorable ones it
+// treats as controls, which break more often than `a`, so they keep their own class).
+const PRINTS = /^(?:[\p{L}\p{N}\p{P}\p{S}\p{Zs}\p{Co}]|(?!\p{Default_Ignorable_Code_Point})\p{Cn})$/u;
 const KEEPS_CONTEXT = new RegExp(
-  "^[\\u1100-\\u11ff\\ua960-\\ua97f\\ud7b0-\\ud7ff\\uac00-\\ud7a3\\u0d4e\\u{111c2}\\u{111c3}\\u{113d1}" +
+  "^[\\u1100-\\u11a7\\ua960-\\ua97c\\ud7b0-\\ud7c6\\u0d4e\\u{111c2}\\u{111c3}\\u{113d1}" +
     "\\u{1193f}\\u{11941}\\u{11a3a}\\u{11a84}-\\u{11a89}\\u{11d46}\\u{11f02}\\u{16d63}\\u{16d67}-\\u{16d6a}]$",
   "u",
 );
@@ -1051,9 +1073,11 @@ export function makeLineInput(initial = "") {
       }
       offs.push(at);
       // `cursor` is a code-unit index and the edit methods keep it on a character boundary, but a step can
-      // span three of them, so it is resolved to a step rather than trusted to name one. It rounds FORWARD:
-      // a cursor inside a keycap names the step after it, never a position inside a glyph.
-      let ci = offs.findIndex((o) => o >= cursor);
+      // span many of them, so it is resolved to a step rather than trusted to name one. A cursor INSIDE a
+      // step names that step, never a position inside a glyph. It used to round forward, which was harmless
+      // while a step was at most a keycap; a leader run and its base are one step of any length since
+      // issue #417, and rounding forward drew the cursor in one place for every position inside the run.
+      let ci = offs.findIndex((o) => o > cursor) - 1;
       if (ci < 0) ci = steps.length;
       // THE RESERVED CELL MOVES THE WINDOW'S START, not its length: the window is `w` columns wide, and
       // the cursor is kept far enough from its start that its own cell is always inside it. The cell is as
@@ -1097,8 +1121,9 @@ export function makeLineInput(initial = "") {
       // cursor QUADRATIC (16,000 of them took ten seconds to render).
       while (start < end && drawn(start, end) > w) {
         if (end - 1 > ci) {
+          // A mark goes WITH the character in front of it: the trailing ones leave first, then their base.
+          while (end - 2 > ci && steps[end - 1].cols === 0) end -= 1;
           end -= 1;
-          while (end - 1 > ci && steps[end - 1].cols === 0) end -= 1;
         } else {
           start += 1;
           while (start < ci && steps[start].cols === 0) start += 1;
