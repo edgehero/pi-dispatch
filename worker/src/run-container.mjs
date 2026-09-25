@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_HOME } from "./container-spec.mjs";
-import { buildDockerRunArgs, CONTAINER_SESSION_FILE } from "./docker-run.mjs";
+import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { createJobNetwork, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
@@ -156,7 +156,9 @@ export function makeRunContainer({
 			// private label would take from every other container and from the operator's own labelling. Decided by kind, the
 			// same fact the preparers branch on, rather than by where the path happens to sit.
 			relabel: relabel === true,
-			workspaceOwned: job?.kind !== "local",
+			// Relabelled only when it is the worker's own clone: not a local job's (the operator's folder), and inside this
+			// job's own directory, so a kind added later that works on a folder in place fails closed rather than relabelling it.
+			workspaceOwned: job?.kind !== "local" && insideDir(prepared.jobDir, prepared.workspace),
 		});
 
 		// REQ-EGRESS-ALLOWLIST. This job's own --internal network, created here rather than at boot because

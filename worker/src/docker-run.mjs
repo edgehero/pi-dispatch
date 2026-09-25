@@ -20,6 +20,7 @@
 // `buildDockerRunArgs`, which never moved; the entry that names `containerSpec` is design.md's 2026-08-31
 // row, and this move is recorded in its own row rather than by leaving that pointer to rot.
 export { containerSpec, CONTAINER_GLOBAL_PI_DIR, CONTAINER_SESSION_DIR, CONTAINER_SESSION_FILE } from "./container-spec.mjs";
+import { isAbsolute, relative } from "node:path";
 import { assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
@@ -237,4 +238,15 @@ export function dockerArgsFromSpec(spec) {
  */
 export function buildDockerRunArgs(opts) {
 	return dockerArgsFromSpec(containerSpec(opts));
+}
+
+/**
+ * Whether `inner` is strictly inside `outer` (issue #355). The one containment rule that decides a workspace is the
+ * worker's own and may carry a private SELinux label: the job path (run-container) and a reopened sandbox both ask it, here beside the builder that renders the label,
+ * and it fails CLOSED, on an empty or non-string path, on `outer` itself and on anything that climbs out of it.
+ */
+export function insideDir(outer, inner) {
+	if (typeof outer !== "string" || typeof inner !== "string" || outer === "" || inner === "") return false;
+	const rel = relative(outer, inner);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }

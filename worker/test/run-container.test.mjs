@@ -366,6 +366,13 @@ test("relabel reaches the argv: a local job's own dirs carry :Z and its folder n
 	const githubJob = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
 	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(forge) })({ job: githubJob, token: "ghs_x", prepared: { workspace: "/host/jobs/j2/workspace", jobDir: "/host/jobs/j2" }, name: "j2", signal: new AbortController().signal, relabel: true });
 	assert.deepEqual(mounts(forge.args), ["/host/jobs/j2:/job:ro,Z", "/host/jobs/j2/workspace:/workspace:Z"], "workspaceOwned true for a forge job: its workspace is the worker's own clone");
+	// Fails closed: a non-local job whose workspace is NOT inside its own job dir keeps that folder's label, whatever its
+	// kind says, and so does one whose workspace is its job dir itself.
+	for (const workspace of ["/host/elsewhere/workspace", "/host/jobs/j2-other/workspace", "/host/jobs/j2"]) {
+		const outside = { args: null };
+		await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(outside) })({ job: githubJob, token: "ghs_x", prepared: { workspace, jobDir: "/host/jobs/j2" }, name: "j3", signal: new AbortController().signal, relabel: true });
+		assert.ok(mounts(outside.args).includes(`${workspace}:/workspace`), `${workspace}: not the job's own, so never relabelled`);
+	}
 });
 
 test("no relabel, or anything but true, builds the argv it always did (issue #355)", { skip }, async () => {

@@ -267,9 +267,13 @@ let mounts = [];
 try {
 	mounts = JSON.parse(await inspect(proxy, "{{json .Mounts}}"));
 } catch {}
-const squidConf = mounts.find((m) => m.Destination === "/etc/squid/squid.conf")?.Source;
-const squidLabel = squidConf ? await labelOf(squidConf) : "";
-record("C-compose", SHARED.test(squidLabel), `${squidConf ?? "no squid.conf mount"} -> ${squidLabel || "no label"}`);
+// Both of the proxy's sources; the receiver's triggers.json carries the same option but is not started here.
+const composeSources = [];
+for (const destination of ["/etc/squid/squid.conf", "/etc/pi-dispatch/allowlist.conf"]) {
+	const source = mounts.find((m) => m.Destination === destination)?.Source;
+	composeSources.push({ source: source ?? `no ${destination} mount`, label: source ? await labelOf(source) : "" });
+}
+record("C-compose", composeSources.every((c) => SHARED.test(c.label)), composeSources.map((c) => `${c.source} -> ${c.label || "no label"}`).join("; "));
 
 // --- 8. doctor --live, where it already answers -----------------------------------------------------------------------
 const doctor = await run(process.execPath, [join(root, "worker/src/cli.mjs"), "doctor", "--live"], { timeoutMs: 10 * 60_000 });
@@ -286,7 +290,10 @@ fromDoctor("EG2", /^Egress policy denies an unlisted host/, "an unlisted host");
 fromDoctor("D-egress", /^read back on local: egress holds/, "egress");
 fromDoctor("EG6", /^read back on local: jobToJobIsolation holds/, "jobToJobIsolation");
 fromDoctor("D-localFolders", /^read back on local: localFolders holds/, "localFolders");
-fromDoctor("D-relabel", /relabelled for SELinux/, "the SELinux relabel");
+// Not one line of doctor's may be a failure: a check this script does not name (mountSet, ephemeral, isolation, a label
+// line) failing is as much a failure of the host as one it does.
+const doctorFailures = doctorLines.filter((line) => line[0] === FAIL_MARK);
+record("D-clean", doctor.code !== null && doctorFailures.length === 0, doctorFailures.length === 0 ? "doctor --live printed no failing line" : doctorFailures.join(" | "));
 
 // --- 9. egress rows doctor does not cover, on a job-shaped network ----------------------------------------------------
 const network = `${tag}-net`;
@@ -341,15 +348,18 @@ const liveAnswer = await makeEgressPreflight({ proxy, armed: true })();
 await docker(["rm", "-f", stopped]);
 record("EG7", stoppedAnswer.proxyStopped === stopped && missingAnswer.proxyMissing === `${tag}-absent` && liveAnswer.ok === true, `stopped -> ${JSON.stringify(stoppedAnswer)}, absent -> ${JSON.stringify(missingAnswer)}, the proxy -> ${JSON.stringify(liveAnswer)}`);
 
-// --- 10. setup step 2: the worker reaches the socket through its group, and the override survives a reboot -----------
+// --- 10. setup step 2: the worker reaches the socket through its group, and the override that re-creates it is in place
+// (a reboot rebuilds /run/podman from it; this script does not reboot) -----------------------------------------------
 const runPodman = statSync("/run/podman");
 const override = existsSync("/etc/tmpfiles.d/podman.conf") ? readFileSync("/etc/tmpfiles.d/podman.conf", "utf8") : "";
 const overrideLine = /^D! \/run\/podman 0710 root \S+$/m.exec(override)?.[0];
-record("SOCK", Boolean(overrideLine) && (runPodman.mode & 0o777) === 0o710 && daemon.answered, `/run/podman ${(runPodman.mode & 0o777).toString(8)} gid ${runPodman.gid}, ${overrideLine ? `override "${overrideLine}"` : "no /etc/tmpfiles.d/podman.conf override"}, this account reached the daemon`);
+// Through the GROUP: this account is not root and not the directory's owner, so reaching the daemon means the group did it.
+const viaGroup = uid !== 0 && runPodman.uid !== uid && process.getgroups().includes(runPodman.gid);
+record("SOCK", Boolean(overrideLine) && (runPodman.mode & 0o777) === 0o710 && viaGroup && daemon.answered, `/run/podman ${(runPodman.mode & 0o777).toString(8)} gid ${runPodman.gid}${viaGroup ? " (one of this account's groups)" : " (NOT reached through a group of this account)"}, ${overrideLine ? `override "${overrideLine}"` : "no /etc/tmpfiles.d/podman.conf override"}, this account reached the daemon`);
 
 // --- the table rows -------------------------------------------------------------------------------------------------
 const ROWS = [
-	{ row: "SELinux: the worker's own per-job mounts", result: "argv: :Z", needs: /^(S-|E2E-|D-relabel$|D-localFolders$|R-control$)/ },
+	{ row: "SELinux: the worker's own per-job mounts", result: "argv: :Z", needs: /^(S-|E2E-|D-clean$|D-localFolders$|R-control$)/ },
 	{ row: "SELinux: an operator's local folder, unlabelled", result: "refused: job-inputs-unreadable", needs: /^(S-\w+:(none|ro)$|R-local$|R-control$)/ },
 	{ row: "SELinux: the global overlay, unlabelled", result: "refused: job-inputs-unreadable", needs: /^(R-overlay|R-control)$/ },
 	{ row: "SELinux: SecurityOptions carries name=selinux", result: "measured", needs: /^SECOPT$/ },

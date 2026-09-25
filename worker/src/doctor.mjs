@@ -3973,17 +3973,20 @@ const CONTAINER_READABLE_TYPES = new Set(["container_file_t", "container_ro_file
  * before it spends (`job-inputs-unreadable`), not a worker that cannot boot, which is why the line is ⚠. The fix is the
  * one measured to make a directory readable to every container: a `container_file_t` rule plus `restorecon`.
  *
- * READ, never inferred: `stat --format=%C` through doctor's bounded runner. A `stat` that did not answer (not GNU
+ * READ, never inferred: `stat -L --format=%C` through doctor's bounded runner. `-L` because a local folder may be a
+ * symlink (prepare-local treats one as ordinary) and a container reads what the link points at, whose label is the one
+ * that matters; the fix names that resolved directory too, since a rule on the link's own path changes nothing a
+ * container reads. The rule's path is escaped as the regular expression `semanage fcontext` reads it as. A `stat` that did not answer (not GNU
  * coreutils, a directory this shell cannot reach, no label at all) is a quiet "not checked" line, never a warning:
  * the runner's own refusal names the path if a job meets it, and a false alarm here would send an operator to relabel
  * a folder that was fine. A readable type with MCS categories is a directory some container relabelled PRIVATE, which
  * locks every other container out (measured), so it is treated like an unlabelled one.
  */
-export async function selinuxLabelChecks({ folders = [], overlay = null, spawn }) {
+export async function selinuxLabelChecks({ folders = [], overlay = null, spawn, realpath = realpathSync }) {
 	const checks = [{ ok: true, label: "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are" }];
 	const targets = [...folders.map((dir) => ({ dir, what: "local folder", refused: "every job in it is refused before it spends" })), ...(overlay ? [{ dir: overlay, what: "global overlay", refused: "every job is refused before it spends" }] : [])];
 	for (const { dir, what, refused } of targets) {
-		const answer = await runCmdCapture(spawn, "stat", ["--format=%C", "--", dir], { stdoutOnly: true });
+		const answer = await runCmdCapture(spawn, "stat", ["-L", "--format=%C", "--", dir], { stdoutOnly: true });
 		const context = answer.code === 0 ? parseSelinuxContext(answer.output) : null;
 		if (!context) {
 			checks.push({ ok: true, label: `SELinux: the label of the ${what} ${dir} was not checked (stat did not answer with one)` });
@@ -3993,11 +3996,18 @@ export async function selinuxLabelChecks({ folders = [], overlay = null, spawn }
 			checks.push({ ok: true, label: `SELinux: the ${what} ${dir} is labelled ${context.type}, which a container can read` });
 			continue;
 		}
+		let real = dir;
+		try {
+			real = realpath(dir);
+		} catch {
+			// unresolvable here: the configured path is the best name there is
+		}
+		const via = real !== dir ? ` (a link to ${real})` : "";
 		checks.push({
 			ok: false,
 			warn: true,
-			label: `SELinux: the ${what} ${dir} is labelled ${context.type}${context.categories ? " with a private category pair (another container's :Z)" : ""}, which a job container is denied -- ${refused}`,
-			fix: `label it for containers once: \`semanage fcontext -a -t container_file_t ${shellQuote(`${dir}(/.*)?`)} && restorecon -R ${shellQuote(dir)}\` (as root). pi-dispatch never relabels this directory itself, because a private label would lock every other container out of it`,
+			label: `SELinux: the ${what} ${dir}${via} is labelled ${context.type}${context.categories ? " with a private category pair (another container's :Z)" : ""}, which a job container is denied -- ${refused}`,
+			fix: `label it for containers once: \`semanage fcontext -a -t container_file_t ${shellQuote(`${escapeFcontextPath(real)}(/.*)?`)} && restorecon -R ${shellQuote(real)}\` (as root). pi-dispatch never relabels this directory itself, because a private label would lock every other container out of it. On an NFS, CIFS or FUSE mount, or one mounted with \`context=\`, the label comes from the mount instead and restorecon cannot change it: there the container's access is the virt_use_nfs, virt_use_samba or virt_use_fusefs boolean, or the mount's own context`,
 		});
 	}
 	return checks;
@@ -4011,6 +4021,11 @@ function parseSelinuxContext(output) {
 	if (parts.length < 4 || !/^[a-z0-9_]+$/.test(parts[2])) return null;
 	// The level is everything after the type (`s0`, or `s0:c123,c456` for a private one), so it is re-joined.
 	return { type: parts[2], categories: /c\d/.test(parts.slice(3).join(":")) };
+}
+
+/** A path as the regular expression `semanage fcontext` matches it as: every metacharacter escaped, `/` left alone. */
+function escapeFcontextPath(path) {
+	return path.replace(/[.*+?^$()[\]{}|\\]/g, "\\$&");
 }
 
 /** A path as one POSIX shell word: bare when it is plain, else single-quoted with an embedded quote closed and reopened. */
@@ -4100,6 +4115,9 @@ export async function liveChecks(env, seams, facts) {
 	if (jobUser.run === false) {
 		return [{ ok: false, warn: true, label: `read back on local: not run -- ${jobUser.reason}`, fix: "fix the job-user line above first, then re-run `pi-dispatch doctor --live`" }];
 	}
+	// Issue #355: `:Z` on the probe's own mounts exactly where a job's would carry it, from the same daemon answer and
+	// endpoint the job-user line was decided from. The fixture's global directory is never relabelled, like a job's.
+	const relabel = relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform);
 	const result = await runLiveProbes({
 		image: facts.jobImage ?? env.PI_JOB_IMAGE ?? "pi-job:latest",
 		endpoint: facts.endpoint,
@@ -4118,9 +4136,7 @@ export async function liveChecks(env, seams, facts) {
 		isAlive,
 		announce: (line) => out(`\nread back on local: ${line}\n`),
 		user: jobUser.user ?? null,
-		// Issue #355: `:Z` on the probe's own mounts exactly where a job's would carry it, from the same daemon answer and
-		// endpoint the job-user line was decided from. The fixture's global directory is never relabelled, like a job's.
-		relabel: relabelsPrivateMounts(facts.daemon?.answered ? facts.daemon.facts : null, facts.endpoint, ids.platform ?? seams.platform),
+		relabel,
 		// root can remove whatever a job leaves, and a sudo'd doctor is not the worker, so there is no owner to compare.
 		euid: ids.euid === 0 ? undefined : ids.euid,
 		// The removal wait's clock (issue #344), seamed so a test never waits out a real deadline.
@@ -4167,6 +4183,9 @@ export async function liveChecks(env, seams, facts) {
 		"every probe container runs a constant program (`sleep`, `sh` or `node`) in place of the job image's entrypoint",
 		`it ran as ${jobUser.user ? `the job user ${jobUser.user}` : "the image's own user"}, decided for this shell${typeof ids.euid === "number" ? ` (uid ${ids.euid})` : ""}, and the worker service may run as another account`,
 		"it wrote to a fixture folder, not to any folder of yours",
+		// The fixture's workspace is doctor's own directory and carries :Z like a forge clone's; an operator's local folder
+		// never does, so localFolders holding here says nothing about yours, which the SELinux label lines read instead.
+		...(relabel ? ["on this SELinux host the fixture's workspace was relabelled (:Z), which a local folder of yours never is: the SELinux label lines above read those"] : []),
 		`it read back PI_JOB_IMAGE only${facts.triggerImages?.length ? `, not the ${facts.triggerImages.length} image(s) your triggers name` : ""}`,
 		// Only a HELD ephemeral read ran both runs: a first run that survived, or a name held against the second, ran one.
 		...(verdictOf("ephemeral")?.ok === true ? ["ephemeral ran two short-lived containers under one name, not two real jobs"] : []),

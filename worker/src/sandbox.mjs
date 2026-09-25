@@ -1,13 +1,12 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { release as osRelease } from "node:os";
-import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import { execDockerBounded, makeDockerEndpointResolver } from "./backend-local.mjs";
 import { DEFAULT_BACKEND, UNATTRIBUTED_BACKEND } from "./backends.mjs";
 import { configError } from "./config.mjs";
 import { assertJobUser, CONTAINER_HOME, SHIPPED_IMAGE_UID } from "./container-spec.mjs";
-import { buildDockerRunArgs } from "./docker-run.mjs";
+import { buildDockerRunArgs, insideDir } from "./docker-run.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { decideJobUser, JOB_USER_FIX, makeDaemonFactsReader, relabelsPrivateMounts, resolveImageUser, socketFacts } from "./job-user.mjs";
 import { NETWORK_SUFFIX, createJobNetwork, egressArmed, egressEnv, egressProxyName, networkEndpoints, networkExists, networkNameFor, removeJobNetwork, removeNetworkOrSay } from "./egress.mjs";
@@ -618,7 +617,7 @@ export async function openSandbox({
 		// By containment, the rule `rebaseWorkspace` already moves the retained clone by: a workspace inside the retained
 		// job dir is the worker's own clone, one outside it is the operator's folder. Not by the manifest's `kind`, so a run
 		// retained before a preparer moved its clone is still judged by where the files actually are.
-		workspaceOwned: isInsideDir(resolved.manifest.dir, resolved.manifest.workspace),
+		workspaceOwned: insideDir(resolved.manifest.dir, resolved.manifest.workspace),
 	});
 	await beforeLaunch({ resolved, args, network });
 
@@ -737,13 +736,6 @@ export async function decideSandboxJobUser({
 	}
 	if (chosen.refused) return { refused: chosen.refused, message: `${JOB_USER_FIX[chosen.cause] ?? "the job user could not be decided"} (issue #341)` };
 	return { user: chosen.user, home: chosen.home, ...relabel };
-}
-
-/** Is `inner` a path strictly beneath `outer`? Both host paths from the manifest; `relative` so a separator is never assumed. */
-function isInsideDir(outer, inner) {
-	if (typeof outer !== "string" || typeof inner !== "string" || outer === "" || inner === "") return false;
-	const rel = relative(outer, inner);
-	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 /**

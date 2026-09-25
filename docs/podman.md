@@ -108,10 +108,11 @@ Degraded, never refused unless a `PI_BACKEND_FLOOR` asks for the word:
 ## Setup (rootful Podman, the supported route)
 
 Steps 1 to 3 are the documented route on a systemd host, which the nested lab could not exercise (its Podman ran as
-a bare `podman system service` with a hand-made socket group, because a container has no systemd). They were
-followed literally on a Fedora 44 host on 2026-09-25: step 1 works as written, step 2 did not give the worker the
-socket until the `tmpfiles.d` override it now carries, and step 3 was measured with Fedora's own packages. Steps 4
-to 8 were measured in the lab, and steps 5 to 8 again on that host.
+a bare `podman system service` with a hand-made socket group, because a container has no systemd). On a Fedora 44
+host on 2026-09-25 steps 1 and 2 were followed literally: step 1 works as written, and step 2 did not give the worker
+the socket until the `tmpfiles.d` override it now carries. Step 3 was done with Fedora's own packages in place of
+Docker's. Steps 4 to 8 were measured in the lab; on that host steps 4, 5 and 7 were followed as written, the image
+was pulled with root's `podman pull` in place of step 6's `docker pull`, and step 8 was not run.
 
 1. **Start Podman's socket as root:** `sudo systemctl enable --now podman.socket`. It listens on
    `/run/podman/podman.sock`, owned by root.
@@ -234,16 +235,23 @@ other than `container_file_t` or `container_ro_file_t`, or one carrying a privat
 job that meets such a folder anyway is refused before it spends: the runner checks that it can read `/job`,
 `/opt/pi-global` and `/workspace`, and exits 2 as `job-inputs-unreadable`, naming the path. A `/workspace` the job
 can read but not write still runs, with the advisory `workspace_not_writable`, because a read-only review of such a
-folder is a legitimate job.
+folder is a legitimate job. The run record of such a refusal says `runner-policy`, as every reason the runner gives does;
+the worker's log carries its exit line, where `job-inputs-unreadable` and the path are named.
 
-The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `triggers.json`), and the two the
-proxy `pi-dispatch up` starts gets, carry `:ro,z`:
+`:Z` relabels a directory recursively on every run, so a forge job whose clone is large pays for relabelling it
+before the container starts. That cost was not measured.
+
+The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `triggers.json`), and the two mounts of
+the proxy that `pi-dispatch up` starts, carry `:ro,z`:
 shared, because they are single files the services read, not a job's directory. Measured: without it squid
 crash-looped with `FATAL: Unable to open configuration file: /etc/squid/squid.conf: (13) Permission denied`; with it
-the proxy reached `healthy`.
+the proxy reached `healthy`. The receiver's `triggers.json` and `pi-dispatch up`'s proxy carry it for the same reason
+and were not started on that host.
 
 Docker Engine with `selinux-enabled` is out of scope. It reports the same `name=selinux`, but the worker adds `:Z`
-on Podman only, so the argv there is what it always was, and nothing about that route was measured.
+on Podman only, so the argv there is what it always was, and nothing about that route was measured. Expect the same
+denials there: a job on such a daemon stops at the runner's `/job` check before it spends, exactly as every job on
+Podman did before this release.
 
 ## Property table
 

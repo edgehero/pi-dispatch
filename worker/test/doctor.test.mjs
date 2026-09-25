@@ -5521,7 +5521,7 @@ test("doctor: removing a regular-file guard REDDENS this file instead of hanging
 
 // Measured through rootful Podman 5.8.1's compat API on an enforcing Fedora 44 host (SecurityOptions verbatim).
 const PODMAN_SELINUX_INFO = JSON.stringify({ ServerVersion: "5.8.1", OperatingSystem: "fedora", SecurityOptions: ["name=seccomp,profile=default", "name=selinux"], PidsLimit: true, MemoryLimit: true, CpuCfsQuota: false, ProductLicense: "Apache-2.0" });
-const statPlan = (answers) => Object.fromEntries(Object.entries(answers).map(([dir, answer]) => [`stat --format=%C -- ${dir}`, answer]));
+const statPlan = (answers) => Object.fromEntries(Object.entries(answers).map(([dir, answer]) => [`stat -L --format=%C -- ${dir}`, answer]));
 
 test("the SELinux label check: user_home_t warns with the semanage fix, container_file_t passes, an unanswered stat is quiet (#355)", async () => {
 	const { selinuxLabelChecks } = await import("../src/doctor.mjs");
@@ -5530,6 +5530,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 		statPlan({
 			"/home/op/repo": { code: 0, output: "unconfined_u:object_r:user_home_t:s0\n" },
 			"/srv/labelled": { code: 0, output: "system_u:object_r:container_file_t:s0\n" },
+			"/srv/readonly": { code: 0, output: "system_u:object_r:container_ro_file_t:s0\n" },
 			"/srv/private": { code: 0, output: "system_u:object_r:container_file_t:s0:c12,c345\n" },
 			"/srv/unreadable": { code: 1, output: "stat: cannot statx '/srv/unreadable': Permission denied\n" },
 			"/srv/nolabel": { code: 0, output: "?\n" },
@@ -5538,7 +5539,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 		}),
 		calls,
 	);
-	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn });
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/repo", "/srv/labelled", "/srv/readonly", "/srv/private", "/srv/unreadable", "/srv/nolabel", "/srv/failed"], overlay: "/srv/pi's overlay", spawn, realpath: (dir) => dir });
 	const byDir = (dir) => checks.find((c) => c.label.includes(` ${dir} `));
 	assert.deepEqual([checks[0].ok, checks[0].label], [true, "SELinux: jobs' own directories are relabelled for SELinux (:Z); a local folder and the global overlay never are"]);
 	const home = byDir("/home/op/repo");
@@ -5547,6 +5548,7 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	assert.ok(home.fix.includes("semanage fcontext -a -t container_file_t '/home/op/repo(/.*)?' && restorecon -R /home/op/repo"), home.fix);
 	assert.deepEqual([byDir("/srv/labelled").ok, byDir("/srv/labelled").warn], [true, undefined]);
 	assert.match(byDir("/srv/labelled").label, /is labelled container_file_t, which a container can read/);
+	assert.deepEqual([byDir("/srv/readonly").ok, byDir("/srv/readonly").warn], [true, undefined], "container_ro_file_t is readable too");
 	const priv = byDir("/srv/private");
 	assert.deepEqual([priv.ok, priv.warn], [false, true], "another container's :Z locks every other one out");
 	assert.match(priv.label, /with a private category pair/);
@@ -5559,12 +5561,25 @@ test("the SELinux label check: user_home_t warns with the semanage fix, containe
 	assert.deepEqual([overlay.ok, overlay.warn], [false, true]);
 	assert.match(overlay.label, /labelled var_t, which a job container is denied -- every job is refused before it spends/);
 	assert.ok(overlay.fix.includes(`semanage fcontext -a -t container_file_t '/srv/pi'\\''s overlay(/.*)?' && restorecon -R '/srv/pi'\\''s overlay'`), overlay.fix);
-	assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]).at(0), ["stat", "--format=%C", "--", "/home/op/repo"], "one stat per directory, the path after --");
-	assert.equal(calls.length, 7);
+	assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]).at(0), ["stat", "-L", "--format=%C", "--", "/home/op/repo"], "one stat per directory, through a link, the path after --");
+	assert.equal(calls.length, 8);
+});
+
+test("the SELinux label check reads through a symlinked folder and names the directory it points at, escaped for semanage (#355)", async () => {
+	const { selinuxLabelChecks } = await import("../src/doctor.mjs");
+	const calls = [];
+	const spawn = fakeSpawn(statPlan({ "/home/op/proj": { code: 0, output: "unconfined_u:object_r:var_t:s0\n" } }), calls);
+	const checks = await selinuxLabelChecks({ folders: ["/home/op/proj"], spawn, realpath: () => "/srv/my.proj+1" });
+	const warned = checks.find((c) => c.warn);
+	assert.match(warned.label, /the local folder \/home\/op\/proj \(a link to \/srv\/my\.proj\+1\) is labelled var_t/);
+	assert.ok(warned.fix.includes("semanage fcontext -a -t container_file_t '/srv/my\\.proj\\+1(/.*)?' && restorecon -R '/srv/my.proj+1'"), warned.fix);
+	assert.match(warned.fix, /virt_use_nfs/, "names the mounts restorecon cannot relabel");
+	assert.deepEqual(calls[0].args, ["-L", "--format=%C", "--", "/home/op/proj"]);
 });
 
 test("doctor runs the label check only where relabelling applies: local Podman with SELinux on Linux, nothing at all elsewhere (#355)", async () => {
-	const overlay = tempDir("pi-selinux-overlay-");
+	// Resolved, because on macOS the temp root is itself a link (/var -> /private/var) and the check names a link.
+	const overlay = realpathSync(tempDir("pi-selinux-overlay-"));
 	for (const [label, body, ids, applies] of [
 		["podman with selinux", PODMAN_SELINUX_INFO, LINUX_ID(1001), true],
 		["docker with selinux, out of scope", JSON.stringify({ ...JSON.parse(ROOTFUL_INFO), SecurityOptions: ["name=seccomp,profile=builtin", "name=selinux"] }), LINUX_ID(1001), false],
@@ -5593,12 +5608,17 @@ test("doctor --live relabels its probes' own mounts from the same daemon answer,
 	const env = liveEnv();
 	const base = { endpoint: { local: true }, dockerCode: 0, imageCode: 0, jobImage: "pi-job:latest", triggerImages: [], egress: { armed: false, results: [] }, jobUser: { run: true, user: null } };
 	const podman = { answered: true, facts: parseDaemonFacts(PODMAN_SELINUX_INFO).facts };
+	let lastChecks = [];
 	const runsOf = async (facts, ids = LINUX_1001) => {
 		const calls = [];
-		await liveChecks(env, { spawn: fakeSpawn({ ...liveOk(), ...green }, calls), liveFs, isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: ids, ...instantClock() }, facts);
+		lastChecks = await liveChecks(env, { spawn: fakeSpawn({ ...liveOk(), ...green }, calls), liveFs, isAlive: () => false, pid: 1, nonce: "n", jobUserIdentity: ids, ...instantClock() }, facts);
 		return calls.filter((c) => c.cmd === "docker" && c.args[0] === "run").map((c) => c.args.filter((_a, i) => c.args[i - 1] === "-v"));
 	};
+	const limits = () => lastChecks.find((c) => /limits of this read-back/.test(c.label)).label;
 	const relabelled = await runsOf({ ...base, daemon: podman });
+	// The fixture's workspace is relabelled like a forge clone's, which an operator's folder never is: the limits line
+	// says so, or a held localFolders would read as covering folders it never touched.
+	assert.match(limits(), /on this SELinux host the fixture's workspace was relabelled \(:Z\), which a local folder of yours never is/);
 	assert.ok(relabelled.length >= 3, "the probe, the pin and the ephemeral runs");
 	for (const v of relabelled) {
 		assert.deepEqual(v.map((m) => m.slice(m.indexOf(":") + 1)), ["/job:ro,Z", "/workspace:Z", "/outbox:Z", "/session:Z", "/opt/pi-global:ro"]);
@@ -5611,6 +5631,7 @@ test("doctor --live relabels its probes' own mounts from the same daemon answer,
 		const runs = await runsOf(facts, ids);
 		assert.ok(runs.length >= 3, `${label}: the probes ran`);
 		for (const v of runs) assert.ok(!v.some((m) => /Z$/.test(m)), label);
+		assert.doesNotMatch(limits(), /SELinux/, `${label}: no relabel, no such sentence`);
 	}
 });
 
