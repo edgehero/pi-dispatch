@@ -209,8 +209,9 @@ function wholeUnits(s, n) {
  * nothing, so the panel's width table cannot be reached; it is not the right measure anyway, because an
  * SVG draws glyphs, not terminal cells. Three for an emoji (a pictographic or emoji-presentation code
  * point past ASCII, which a browser draws wider than two columns), two for U+20E3, the code units it
- * takes for a mark, a format character, anything else before U+1100 and U+2026 (the ellipsis every cut
- * appends), and two for everything else: never less than the code-unit count chips were sized by.
+ * takes for a mark, a format character, anything else before U+1100 and the narrow General Punctuation
+ * (the ellipsis every cut appends among it), and two for everything else: never less than the code-unit
+ * count chips were sized by.
  * Held to the panel's table by a sweep in `graph-html.test.mjs`, the parity wire that a `from` clause
  * would otherwise be: on every code point and every pair with U+FE0F, never narrower than the terminal
  * width the panel measures. Measured in a browser at 14px: a CJK glyph is 13.9px, inside two columns,
@@ -236,9 +237,15 @@ function charColumns(ch) {
   // were sized by code units overflow once sized by this. So no code point ever counts below the code
   // units it takes, which is the old sizing, and a label can only get a WIDER chip than it had.
   if (/\p{M}|\p{Cf}/u.test(ch)) return ch.length;
-  if (cp < 0x1100 || cp === 0x2026) return ch.length;
+  if (cp < 0x1100 || NARROW_PUNCTUATION.test(ch)) return ch.length;
   return 2;
 }
+
+// The General Punctuation a browser draws narrow: the spaces, the hyphens and short dashes, the quotation
+// marks, the bullet and the ellipsis. Counting them as two made a label with a curly quote or a thin space
+// cut where a code-unit count had left it whole (issue #418's review). The em and horizontal-bar dashes
+// and the per-mille and per-ten-thousand signs draw wide and keep two.
+const NARROW_PUNCTUATION = /[\u2000-\u2013\u2016-\u202f\u2032-\u206f]/u;
 
 /**
  * The columns a label DRAWS once it has been through `clipColumns`: that cut spends two columns on its

@@ -128,10 +128,15 @@ export function findLoopHints(text) {
     // which the page carried into the embedded JSON as the escaped text of one, or inside a flag or a
     // family (issue #418). So the match is re-cut at the last cluster boundary, asking the text that
     // follows it where its last cluster ends, and trimmed after that, or a cut after a space kept it.
+    // A repeat is skipped before it is cut: a body of thousands of identical phrases paid a segmenter
+    // pass for each one only to throw it away.
+    const raw = match[0].trim().toLowerCase();
+    if (seen.has(raw)) continue;
+    seen.add(raw);
     const tail = body.slice(match.index, match.index + match[0].length + 32);
     const hint = cutUnits(tail, match[0].length).trim();
     const key = hint.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key) && key !== raw) continue;
     seen.add(key);
     hints.push({ hint });
   }
@@ -474,7 +479,9 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
         // gate answers deny, not no-skill -- a distinct, currently-invisible defect class.
         const target = group ? missingNode(group, clipName(t.flow)) : null;
         if (target) model.edges.push({ from: id, to: target.id, kind: "config" });
-        model.flags.push({ nodeId: id, flag: "charset-invalid", detail: `run.flow ${JSON.stringify(clipName(t.flow))} fails the skill charset and can never materialise` });
+        // Well-formed BEFORE the quoting: `JSON.stringify` writes half a pair as the six characters of its
+        // escape, which no sink downstream can recognise as one (issue #418).
+        model.flags.push({ nodeId: id, flag: "charset-invalid", detail: `run.flow ${JSON.stringify(clipName(t.flow).toWellFormed())} fails the skill charset and can never materialise` });
         continue;
       }
       if (isCron && group && group.unreachable === null) {

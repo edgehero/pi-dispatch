@@ -582,7 +582,7 @@ test("the chip width estimate is never narrower than the panel's table, on every
   assert.equal(swept, 1112064, "every code point outside the surrogates");
   assert.equal(pairs, 2224128, "and each with U+FE0F and as a keycap");
   // EXACT where the two agree, pinned, because "answer 2 for everything" also satisfies the sweep.
-  assert.equal(equal, 185239, "code points estimated at exactly the panel's width");
+  assert.equal(equal, 185319, "code points estimated at exactly the panel's width");
   // None: U+FE0F counts the code unit it takes here and nothing in the panel's table, on purpose (a mark
   // is never free in this estimate), so every pair is estimated wider than the terminal draws it.
   assert.equal(pairsEqual, 0, "pairs estimated at exactly the panel's width");
@@ -739,4 +739,20 @@ test("the width a chip is sized by, the HEAD it names and the frontmatter it quo
   // fifteenth that ends in a joiner and half a pair.
   const meta = parseSkillMeta(`---\nname: x\ndescription: d${"\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(20)}\n---\nbody`);
   assert.equal(meta.description, "d" + "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}".repeat(14) + "\u2026");
+});
+
+test("narrow punctuation costs what it did, and a flow name's half pair is not quoted into a tooltip (#418)", () => {
+  // A curly quote or a thin space is one column, as its code unit was: counting it as two cut labels a
+  // code-unit count had left whole, and a few that fitted on the old page overflowed.
+  assert.equal(clipColumns("MMMMMMMMM\u2019\u2019\u2019", 14), "MMMMMMMMM\u2019\u2019\u2019");
+  assert.equal(clipColumns("AAAAAAAAAAAAAAAAAAA\u2019", 20), "AAAAAAAAAAAAAAAAAAA\u2019");
+  assert.equal(labelColumns("\u2018\u201c\u2013\u2022\u2009\u202f\u2026"), 7);
+  // The wide ones keep two: the em dash and the per-mille sign.
+  assert.equal(labelColumns("\u2014\u2030"), 4);
+  // A charset-invalid flow is QUOTED into its flag's detail, and `JSON.stringify` writes half a pair as
+  // the six characters of its escape, which no sink after it can recognise.
+  const model = buildGraphModel({ ...CANNED(), triggers: { triggers: [{ ...CANNED().triggers.triggers[0], flow: "build-report\ud800" }] } });
+  const page = pageOf(model);
+  assert.doesNotMatch(page, /\\\\ud[89ab][0-9a-f]{2}/i, "no escaped half pair in the tooltip text");
+  assert.doesNotMatch(page, /\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i, "nor in the embedded JSON");
 });
